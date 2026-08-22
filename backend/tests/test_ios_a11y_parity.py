@@ -285,3 +285,89 @@ def test_dwc_renderer_list_is_not_vacuous():
     # And the marker string must really be absent from an unrelated file, or
     # `"differentiateWithoutColor" not in src` proves nothing.
     assert "differentiateWithoutColor" not in _src("Views/Atoms/IconTile.swift")
+
+
+# ── Reduce Motion: the header's idle animation ────────────────────────────────
+#
+# `AskCayAIButton` is the app's one general Cay AI entry and it lives in the header of four
+# tabs, so its idle `.symbolEffect(.breathe)` is on screen for the whole session. An
+# unconditional indefinite animation in a persistent chrome element is precisely what Reduce
+# Motion exists to stop — and unlike a transition, nothing about it is self-limiting.
+#
+# ⚠️ These scan STRIPPED source. The rationale comments in that file name `.breathe`,
+# `isActive`, `reduceMotion` and `symbolEffect` while explaining them, so an un-stripped scan
+# would stay green on prose alone after the code was reverted.
+
+_ASK_CAY_AI = "Views/Atoms/AskCayAIButton.swift"
+
+
+def _strip_swift_comments(src: str) -> str:
+    """Drop `//` lines and trailing `//` tails."""
+    out = []
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//") or stripped.startswith("///"):
+            continue
+        out.append(re.sub(r"\s//.*$", "", line))
+    return "\n".join(out)
+
+
+def test_the_header_sparkle_reads_the_reduce_motion_trait():
+    code = _strip_swift_comments(_src(_ASK_CAY_AI))
+    assert "accessibilityReduceMotion" in code, (
+        "AskCayAIButton no longer reads Reduce Motion. Its idle `.breathe` runs for the whole "
+        "session in the header of four tabs — it must be switchable off."
+    )
+
+
+def test_the_idle_breathe_is_gated_on_reduce_motion():
+    code = _strip_swift_comments(_src(_ASK_CAY_AI))
+    # The indefinite effect must be bound to the trait, not merely present alongside it.
+    assert re.search(r"\.symbolEffect\(\s*\.breathe\.plain\s*,\s*isActive:\s*!reduceMotion\s*\)", code), (
+        "the header sparkle's idle animation is no longer gated on Reduce Motion. Note it must "
+        "be stopped via `isActive:` — conditionally REMOVING the modifier re-identifies the view "
+        "and cancels the animation mid-cycle instead of settling it."
+    )
+
+
+def test_the_idle_effect_is_the_scale_only_breathe_variant():
+    """⚠️ `.plain` is a CONTRAST guard, not a style preference.
+
+    `.breathe` defaults to the `.pulse` variant, which animates opacity as well as scale.
+    Measured on the simulator, that drove this glyph to **1.40:1** against its tile at the dim
+    end of every cycle — against the 4.5:1 AA bar `primaryBlue` is chosen to clear at 4.52. The
+    glyph is the sole carrier of meaning for the button (no label beside it), so the app's AI
+    entry point disappeared for part of every cycle for a low-vision user.
+
+    `ThemeContrastAudit` cannot see this: it resolves static token pairs and has no notion of an
+    animated opacity. This scan is the only thing standing between a `.plain` -> `.breathe`
+    "cleanup" and shipping a sub-AA glyph.
+    """
+    code = _strip_swift_comments(_src(_ASK_CAY_AI))
+    assert ".breathe.plain" in code, (
+        "the header sparkle uses the default `.breathe` (== `.pulse`), which animates OPACITY "
+        "and measured 1.40:1 at its dimmest. Use `.breathe.plain` — scale only."
+    )
+    assert not re.search(r"\.symbolEffect\(\s*\.breathe\s*[,)]", code), (
+        "a bare `.breathe` (the opacity-animating `.pulse` variant) is back"
+    )
+
+
+def test_the_tap_bounce_is_gated_too():
+    """`.symbolEffect(.bounce, value:)` fires on a value CHANGE, so the gate is on the bump."""
+    code = _strip_swift_comments(_src(_ASK_CAY_AI))
+    assert re.search(r"if\s+!reduceMotion\s*\{\s*bounceTrigger\s*\+=\s*1\s*\}", code), (
+        "the tap bounce is no longer gated — the trigger must not advance under Reduce Motion"
+    )
+
+
+def test_the_sparkle_scan_is_not_vacuous():
+    """Anti-vacuity, both halves: the file must still be the button, and comment stripping must
+    actually strip — this file's rationale names every token asserted above."""
+    code = _strip_swift_comments(_src(_ASK_CAY_AI))
+    assert "struct AskCayAIButton: View" in code, "scan drifted — this is not the button"
+    assert len(code) < len(_src(_ASK_CAY_AI)), "comment stripping removed nothing"
+
+    sample = "// .symbolEffect(.breathe, isActive: !reduceMotion)\nlet x = 1"
+    assert "breathe" not in _strip_swift_comments(sample), "comment stripping regressed"
+    assert "let x = 1" in _strip_swift_comments(sample)

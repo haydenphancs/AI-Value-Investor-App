@@ -110,6 +110,72 @@ class ChatBudgetService:
                 bucket_key, type(e).__name__, e,
             )
 
+    # ── Free follow-up (migration 154) ──────────────────────────────────────
+    #
+    # These are keyed on the SESSION id, not on `bucket_key`. Everything else in this
+    # service is keyed on the chat abuse/cost identity; the allowance is per conversation
+    # because that is the only scope in which "a follow-up" means anything.
+
+    def claim_free_followup(self, session_id: Optional[str]) -> bool:
+        """Atomically consume this session's free follow-up, if one is live.
+
+        True  → the caller must NOT charge; the allowance is spent (cleared in the same
+                statement, so two racing turns cannot both be told "free").
+        False → no live allowance; charge normally.
+
+        FAILS CLOSED. Every other budget path in this file fails OPEN because a DB blip
+        must not wall a user out of chat — but the failure here is the mirror image: a
+        blip would hand out a free turn we cannot record as spent, and a sustained outage
+        would make chat free for everyone. Charging is also self-healing, because the
+        row was never cleared: the allowance is still there for the next turn. The user
+        loses nothing permanently, they just pay a beat later than promised.
+        """
+        if not session_id:
+            return False
+        try:
+            result = self.supabase.rpc(
+                "claim_free_followup", {"p_session_id": session_id}
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "claim_free_followup failed for session=%s (%s: %s) — charging this turn "
+                "(allowance is untouched and will apply to the next one)",
+                session_id, type(e).__name__, e,
+            )
+            return False
+        # STRICTLY `is True`. `bool(result.data)` looked equivalent and is not: the SDK
+        # JSON-decodes the RPC result, and anything unexpected in that slot — the string
+        # "false", a wrapping list/dict from a future PostgREST shape, a row count — is
+        # TRUTHY, which would silently make every chat turn free. The failure direction
+        # matters more than the tidiness here: an unrecognised value must charge.
+        return result.data is True
+
+    def grant_free_followup(self, session_id: Optional[str], seconds: Optional[int] = None) -> None:
+        """Open the session's free-follow-up window. Best-effort; never raises.
+
+        CALL ONLY AFTER A TURN THAT WAS ACTUALLY CHARGED. Calling it after a free turn
+        would let one credit be ridden indefinitely by always replying inside the window
+        — the "only a charged turn grants one" rule is what bounds this to 2 turns per
+        credit, and it is enforced here at the call site, not in SQL.
+
+        A failure is silent to the user by design: they simply do not get a free
+        follow-up, which is strictly no worse than the pricing they were promised.
+        """
+        if not session_id:
+            return
+        window = settings.CHAT_FREE_FOLLOWUP_SECONDS if seconds is None else seconds
+        try:
+            self.supabase.rpc(
+                "grant_free_followup",
+                {"p_session_id": session_id, "p_seconds": int(window or 0)},
+            ).execute()
+        except Exception as e:
+            logger.warning(
+                "grant_free_followup failed for session=%s (%s: %s) — no free follow-up "
+                "for this turn",
+                session_id, type(e).__name__, e,
+            )
+
     def record_tokens(self, bucket_key: str, tokens: int) -> None:
         """Best-effort: accumulate approximate token spend for today. Never raises —
         a failure here must not affect the answered turn."""

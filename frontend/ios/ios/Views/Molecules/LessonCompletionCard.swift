@@ -2,7 +2,7 @@
 //  LessonCompletionCard.swift
 //  ios
 //
-//  Molecule: Completion card for lesson story - displays checkmark, success message, and CTA
+//  Molecule: Completion card for lesson story — checkmark, success message, Ask Cay AI.
 //
 
 import SwiftUI
@@ -10,12 +10,12 @@ import SwiftUI
 struct LessonCompletionCard: View {
     let title: String
     let subtitle: String
-    let lessonNumber: Int
-    let totalLessons: Int
-    let estimatedMinutes: Int
-    let ctaButtonTitle: String
     var imageName: String? = nil
-    var onCTATapped: (() -> Void)?
+    /// The card's primary action. "Ask Cay AI about this" used to float as a separate capsule
+    /// BELOW the card while "Analyze a Stock" held this slot; the lesson-just-finished moment is
+    /// the one where a follow-up question is worth asking, so it takes the primary slot instead.
+    /// Optional so a caller with nothing to ask (previews) renders just the Close action.
+    var onAskAITapped: (() -> Void)?
     var onCloseTapped: (() -> Void)?
 
     // Animation state
@@ -54,22 +54,25 @@ struct LessonCompletionCard: View {
                     .lineSpacing(4)
                     .padding(.horizontal, AppSpacing.lg)
 
-                // Lesson info badge
-                lessonInfoBadge
-
-                // CTA Button
-                Button(action: {
-                    onCTATapped?()
-                }) {
-                    Text(ctaButtonTitle)
+                // Primary action: ask Cay AI about the lesson just finished.
+                if let onAskAITapped {
+                    Button(action: onAskAITapped) {
+                        HStack(spacing: AppSpacing.sm) {
+                            // `sparkles.2` — the app's Cay AI mark, the same glyph the header
+                            // button and every chat surface use. This was `sparkles` (the
+                            // three-star variant), the only place it appeared.
+                            Image(systemName: "sparkles.2")
+                            Text("Ask Cay AI about this")
+                        }
                         .font(AppTypography.headingSmall)
                         .foregroundColor(AppColors.textOnAccent)
                         .frame(maxWidth: .infinity)
                         .frame(height: 52)
                         .background(AppColors.primaryFill)
                         .cornerRadius(26)
+                    }
+                    .padding(.top, AppSpacing.md)
                 }
-                .padding(.top, AppSpacing.md)
 
                 // Close button
                 Button(action: {
@@ -119,35 +122,6 @@ struct LessonCompletionCard: View {
         }
     }
 
-    private var lessonInfoBadge: some View {
-        HStack(spacing: AppSpacing.sm) {
-            // Blue dot
-            Circle()
-                .fill(AppColors.primaryBlue)
-                .frame(width: 8, height: 8)
-
-            Text("Lesson \(lessonNumber) of \(totalLessons)")
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textSecondary)
-
-            // Separator dot
-            Circle()
-                .fill(AppColors.textMuted)
-                .frame(width: 4, height: 4)
-
-            // Clock icon and duration
-            HStack(spacing: 4) {
-                Image(systemName: "clock")
-                    .font(AppTypography.iconXS)
-                    .foregroundColor(AppColors.textMuted)
-
-                Text("\(estimatedMinutes) min")
-                    .font(AppTypography.iconSmall).fontWeight(.medium)
-                    .foregroundColor(AppColors.textSecondary)
-            }
-        }
-    }
-
     // MARK: - Animations
 
     private func animateAppearance() {
@@ -171,10 +145,7 @@ struct LessonCompletionCard: View {
         LessonCompletionCard(
             title: "You're ready.",
             subtitle: "You've learned the core idea. Practice with a real stock to reinforce it.",
-            lessonNumber: 1,
-            totalLessons: 5,
-            estimatedMinutes: 2,
-            ctaButtonTitle: "Analyze a Stock"
+            onAskAITapped: {}
         )
     }
 }

@@ -14,7 +14,11 @@ struct TrackingHeader: View {
     var onProfileTapped: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        // `md`, not `lg`: this is the gap between the header row and the segmented control.
+        // The row already contributes its own `.padding(.vertical, .sm)` underneath, so `lg`
+        // here read as ~24pt of dead space above the toggle. Kept identical in ResearchHeader
+        // and TrackingHeader — they sit at the same height and must stay in step.
+        VStack(spacing: AppSpacing.md) {
             // Standardized global header row
             GlobalHeaderView(
                 searchPlaceholder: "Add tickers",

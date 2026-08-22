@@ -19,10 +19,26 @@ struct AIMessageContent: View {
     /// Only the LATEST answer shows follow-up chips (so every historical answer doesn't).
     var showFollowUps: Bool = false
     var onFollowUpTap: ((String) -> Void)? = nil
+    /// What this turn cost — rendered ONLY when it cost less than usual (a free follow-up,
+    /// or a refunded credit). nil on every normally-charged turn and every legacy message,
+    /// which is the common case: stamping a price on every answer turns the chat into a
+    /// meter, and the asking is the product.
+    var credit: ChatTurnCostDTO? = nil
 
     /// True while the thinking card is still "working" (reasoning/answer streaming, not yet done).
     private var thinkingActive: Bool {
         thinking?.isActive ?? false
+    }
+
+    /// `gain` / `accentCyan` are TEXT-role tokens (4.5:1 in both appearances) — required,
+    /// because `TintedTagBadge` draws the label IN this colour over a 12% tint of it. A
+    /// `*Graphic` token here would be legible in dark and fail AA in light.
+    private func creditTint(_ credit: ChatTurnCostDTO) -> Color {
+        credit.outcome == "refunded" ? AppColors.gain : AppColors.accentCyan
+    }
+
+    private func creditIcon(_ credit: ChatTurnCostDTO) -> String {
+        credit.outcome == "refunded" ? "arrow.uturn.backward.circle.fill" : "gift.fill"
     }
 
     var body: some View {
@@ -53,9 +69,23 @@ struct AIMessageContent: View {
                 followUpChips(suggestions)
             }
 
-            // Timestamp hidden while working (streaming OR thinking).
+            // Timestamp hidden while working (streaming OR thinking). The cost chip rides
+            // the same metadata line — it is a footnote about the turn, not a second status
+            // pill (mirrors the report card's "Refunded N credits" placement).
             if !isStreaming && !thinkingActive {
-                MessageTimestamp(time: timestamp, alignment: .leading)
+                HStack(spacing: AppSpacing.sm) {
+                    MessageTimestamp(time: timestamp, alignment: .leading)
+                    if let credit, credit.isWorthShowing, let label = credit.label {
+                        TintedTagBadge(
+                            text: label,
+                            color: creditTint(credit),
+                            systemImage: creditIcon(credit),
+                            // A genuine short SENTENCE, not a word — 1 line would truncate
+                            // "1 credit refunded — this answer…" to exactly the useless half.
+                            textLineLimit: 2
+                        )
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

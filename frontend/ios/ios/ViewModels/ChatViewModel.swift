@@ -31,6 +31,63 @@ class ChatViewModel: ObservableObject {
     /// fallback, so flipping this to false disables streaming app-wide instantly.
     static var streamingEnabled = true
 
+    /// Global state, injected by `AIChatScreen` on appear.
+    ///
+    /// `weak` and optional because the ViewModel is owned by whichever screen presented the
+    /// chat (that ownership is what makes "resume last conversation" work), and it outlives
+    /// any single presentation. Chat is the one metered surface that never told AppState a
+    /// credit had moved, so its balance went stale the moment a user sent a message.
+    weak var appState: AppState?
+
+    /// Backend refusals that happen BEFORE any generation starts, and cannot be retried
+    /// into a different answer.
+    ///
+    /// The distinction matters because every other stream failure is recoverable by the
+    /// non-streaming fallback — but these three re-fail identically, and re-POSTing one is
+    /// at best a wasted round trip and at worst a second charge.
+    ///
+    /// Matched on the backend's `ErrorCode` values (see `error_response.py`), not on the
+    /// HTTP status: 402/403/409 all carry codes, and the code is the contract.
+    private static let terminalPreflightCodes: Set<String> = [
+        "INSUFFICIENT_CREDITS",       // 402 — no credits; the user must top up
+        "CHAT_DAILY_LIMIT_REACHED",   // 409 — the guest daily-turn budget
+        "SYSTEM_BUSY",                // 409 — admission gate; retrying now re-fails
+        "CHAT_MESSAGE_TOO_LONG",      // 400 — the message itself is the problem
+    ]
+
+    static func isTerminalPreflightRefusal(_ error: Error) -> Bool {
+        if case APIError.businessError(let code, _) = error {
+            return terminalPreflightCodes.contains(code)
+        }
+        return false
+    }
+
+    /// Surface a failed turn BOTH in the chat's own banner and through the global error
+    /// host, and always log it.
+    ///
+    /// Two surfaces on purpose: the banner keeps the explanation next to the conversation
+    /// it belongs to, while `handleError` is what attaches the ACTION — `.insufficientCredits`
+    /// carries `.upgrade`, which is what opens Buy Credits. Setting only `errorMessage`, as
+    /// this used to, produced a dead-end red banner with an ✕ and no way to fix the problem.
+    private func reportTurnFailure(_ error: Error) {
+        let appError = AppError.from(error)
+        guard !appError.isCancellation else { return }
+        print("⚠️ [ChatVM] Turn failed: \(appError.analyticsCode) — \(appError.message)")
+        errorMessage = appError.message
+        appState?.handleError(error)
+    }
+
+    /// Pull a fresh balance after a turn that MOVED credits.
+    ///
+    /// Skipped when nothing moved (a free follow-up, a guest turn) so the answer path does
+    /// not pay for a request that cannot change anything. `refreshCredits` single-flights
+    /// internally, and this is deliberately fire-and-forget: a balance refresh must never
+    /// delay the answer the user is reading.
+    private func refreshCreditsIfMoved(_ cost: ChatTurnCostDTO?) {
+        guard cost?.movedCredits ?? true else { return }
+        Task { [weak appState] in await appState?.refreshCredits() }
+    }
+
     // MARK: - Published State
 
     /// Messages in the current conversation (UI-facing)
@@ -641,6 +698,9 @@ class ChatViewModel: ObservableObject {
 
             let hasWidget = response.widget != nil
             print("✅ [ChatVM] AI response received in \(elapsed)s (widget: \(hasWidget), tokens: \(response.tokensUsed ?? 0))")
+            // The non-streaming response carries the PERSISTED cost (no `balance`), so this
+            // always refreshes rather than trusting a number that isn't there.
+            refreshCreditsIfMoved(response.credit)
 
         } catch {
             let elapsed = String(format: "%.2f", CFAbsoluteTimeGetCurrent() - startTime)
@@ -653,7 +713,17 @@ class ChatViewModel: ObservableObject {
             // instead of a generic string. Without this the typed AppError branches added for
             // chat are dead — this catch is also the terminus of the stream→non-stream fallback,
             // so it's where those backend messages actually reach the user.
-            errorMessage = AppError.from(error).message
+            //
+            // `reportTurnFailure` also publishes to the GLOBAL error host, which is what
+            // attaches the action: `.insufficientCredits` carries `.upgrade`, i.e. the route
+            // to Buy Credits. Setting only `errorMessage`, as this did, left a user who had
+            // run out of credits staring at a red banner with an ✕ and no way to fix it.
+            reportTurnFailure(error)
+            // A 402 means our local balance was already stale — that is exactly what the
+            // server just corrected us on.
+            if Self.isTerminalPreflightRefusal(error) {
+                Task { [weak appState] in await appState?.refreshCredits() }
+            }
         }
     }
 
@@ -681,6 +751,9 @@ class ChatViewModel: ObservableObject {
         /// frame. Used instead of the raw typed text when reconciling a failed stream —
         /// see the `case "meta"` handler below.
         var serverNormalizedMessage: String?
+        /// This turn's cost, from the `credits` frame. Held until `done` so the chip and
+        /// the answer appear together rather than the chip flashing in a beat early.
+        var turnCost: ChatTurnCostDTO?
 
         // Fresh reveal buffer for this turn.
         cancelReveal()
@@ -808,12 +881,18 @@ class ChatViewModel: ObservableObject {
                         // Same id → the row updates in place (no ForEach tear-down/flicker).
                         messages[idx] = RichChatMessage(
                             id: id, role: base.role, content: base.content, timestamp: base.timestamp,
-                            thinking: base.thinking, sources: base.sources, suggestions: base.suggestions
+                            thinking: base.thinking, sources: base.sources, suggestions: base.suggestions,
+                            // Prefer the live frame: the `done` message carries the PERSISTED
+                            // copy, which deliberately omits `balance`.
+                            credit: turnCost ?? base.credit
                         )
                     } else {
                         messages.append(base)
                     }
                     finishStreaming()
+                    // After the answer is on screen, never before — a balance refresh must
+                    // not delay what the user is reading.
+                    refreshCreditsIfMoved(turnCost)
                     return
 
                 case "error":
@@ -836,6 +915,15 @@ class ChatViewModel: ObservableObject {
                     }
                     continue
 
+                case "credits":
+                    // What this turn cost + the balance it left behind. Arrives immediately
+                    // before `done` on the delivered path only. Held here and attached to the
+                    // message in the `done` arm, so the chip and the answer land together.
+                    if let data = event.data.data(using: .utf8) {
+                        turnCost = try? JSONDecoder().decode(ChatTurnCostDTO.self, from: data)
+                    }
+                    continue
+
                 default:
                     continue  // "suggestions" and any unknown frames — final state lands on `done`
                 }
@@ -849,11 +937,24 @@ class ChatViewModel: ObservableObject {
             // CancellationError) — do NOT touch any shared reveal/typing state: it belongs to the
             // now-active session. Just stop; the active session owns its own lifecycle.
             guard sessionId == currentSessionId, !Task.isCancelled else { return }
-            print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
             cancelReveal()
             if let id = liveId { messages.removeAll { $0.id == id } }  // drop the partial bubble
             streamingMessageId = nil
             isStreaming = false
+
+            // A PRE-FLIGHT refusal is terminal: the server rejected the turn before starting
+            // generation, so nothing was persisted and nothing is recoverable. Reconciling
+            // would spend a history GET and then re-POST to the non-streaming endpoint, which
+            // fails identically — and on any code where it did NOT, it would charge a second
+            // time. This is the path a user out of credits actually takes, and until the SSE
+            // reader learned to decode 402 it ended as a bare red banner with no way out.
+            if Self.isTerminalPreflightRefusal(error) {
+                isAITyping = false
+                reportTurnFailure(error)
+                return
+            }
+
+            print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
             // Show the thinking indicator again while we reconcile / regenerate.
             isAITyping = true
             // Prefer the server's normalized copy when the meta frame arrived; fall back

@@ -13,8 +13,13 @@ struct ReadingHighlightText: View {
     let currentWordRange: NSRange
     let isReading: Bool
     var baseColor: Color = AppColors.textSecondary
+    /// The AUTHOR's emphasis — the `**word**` spans in the lesson markup.
     var highlightColor: Color = AppColors.accentCyan
-    var spokenColor: Color = AppColors.textPrimary
+    /// The word the narrator is on RIGHT NOW. Must not be `highlightColor`: painting both in
+    /// `accentCyan` made a second cyan word roam the paragraph during playback, indistinguishable
+    /// from the author's emphasis — which reads as a word being highlighted at random. Brightness
+    /// (secondary -> primary) carries the karaoke position without competing with the emphasis.
+    var readingColor: Color = AppColors.textPrimary
     var font: Font = .system(size: 20, weight: .regular)
 
     var body: some View {
@@ -59,7 +64,7 @@ struct ReadingHighlightText: View {
         let endOfCurrentWord = min(currentWordRange.location + currentWordRange.length, totalLength)
         let currentWord = nsText.substring(with: NSRange(location: currentWordRange.location, length: endOfCurrentWord - currentWordRange.location))
         var currentPortion = AttributedString(currentWord)
-        currentPortion.foregroundColor = highlightColor
+        currentPortion.foregroundColor = readingColor
         attributedString.append(currentPortion)
 
         // Remaining text (not yet spoken) - base color
@@ -81,8 +86,13 @@ struct ReadingHighlightSegmentedText: View {
     let currentWordRange: NSRange
     let isReading: Bool
     var baseColor: Color = AppColors.textSecondary
+    /// The AUTHOR's emphasis — the `**word**` spans in the lesson markup.
     var highlightColor: Color = AppColors.accentCyan
-    var spokenColor: Color = AppColors.textPrimary
+    /// The word the narrator is on RIGHT NOW. Must not be `highlightColor`: painting both in
+    /// `accentCyan` made a second cyan word roam the paragraph during playback, indistinguishable
+    /// from the author's emphasis — which reads as a word being highlighted at random. Brightness
+    /// (secondary -> primary) carries the karaoke position without competing with the emphasis.
+    var readingColor: Color = AppColors.textPrimary
     var font: Font = .system(size: 20, weight: .regular)
 
     // Computed full text for range calculations
@@ -169,11 +179,15 @@ struct ReadingHighlightSegmentedText: View {
                     attributedString.append(portion)
                 }
 
-                // Part 2: Current word being spoken (highlight color)
+                // Part 2: the word being spoken right now — `readingColor`, NOT `highlightColor`.
+                // These are two different meanings sharing one paragraph: `**real**` is the
+                // author saying "this matters", the karaoke word is the narrator saying "I am
+                // here". They were the same cyan, so every card showed an extra emphasised-looking
+                // word that moved with the audio.
                 if relativeCurrentWordEnd > relativeCurrentWordStart {
                     let currentPortion = nsSegment.substring(with: NSRange(location: relativeCurrentWordStart, length: relativeCurrentWordEnd - relativeCurrentWordStart))
                     var portion = AttributedString(currentPortion)
-                    portion.foregroundColor = highlightColor
+                    portion.foregroundColor = readingColor
                     attributedString.append(portion)
                 }
 

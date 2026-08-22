@@ -24,6 +24,7 @@ Endpoints:
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, Header, Query
@@ -464,10 +465,19 @@ async def chat_with_ticker_report(
     # account-only, which also removes the need for the per-install daily-turn budget this
     # surface never had.
     credit_service = CreditService()
+    # One ref per DEBIT, not per (user, ticker). The literal `f"report_chat:{ticker}"` was
+    # identical for every report-chat turn this user ever sent about this ticker, so the
+    # ledger held a run of indistinguishable `(ref_id, -CHAT_CREDIT_COST)` rows and
+    # `refund_credits` — which pairs to the NEWEST un-reversed match — could reverse a
+    # different turn's debit and adopt its recorded granted/purchased split. Same defect
+    # migration 124 documents for chat.py, and the same fix. Bound once and reused below:
+    # it was previously written out twice, so the charge and its refund could drift apart,
+    # and a mismatched ref is silent (`no_matching_debit` — the user is simply never repaid).
+    turn_ref = f"report_chat:{ticker}:{uuid.uuid4().hex}"
     try:
         remaining = credit_service.precharge(
             user["id"], settings.CHAT_CREDIT_COST,
-            reason="chat_charge", ref_id=f"report_chat:{ticker}",
+            reason="chat_charge", ref_id=turn_ref,
         )
     except CreditServiceUnavailable:
         return make_error_response(
@@ -507,5 +517,5 @@ async def chat_with_ticker_report(
         if not delivered:
             credit_service.refund_ledgered(
                 user["id"], settings.CHAT_CREDIT_COST,
-                reason="chat_refund", ref_id=f"report_chat:{ticker}",
+                reason="chat_refund", ref_id=turn_ref,
             )

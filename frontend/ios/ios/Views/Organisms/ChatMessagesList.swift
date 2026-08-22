@@ -93,7 +93,8 @@ struct ChatMessageRow: View {
             sources: message.sources,
             suggestions: message.suggestions,
             showFollowUps: isLast,
-            onFollowUpTap: onFollowUpTap
+            onFollowUpTap: onFollowUpTap,
+            credit: message.credit
         )
     }
 }

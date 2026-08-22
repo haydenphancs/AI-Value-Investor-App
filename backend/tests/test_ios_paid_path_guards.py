@@ -1,4 +1,9 @@
-"""Source-level guards for three iOS defects that cost users money or strand the app.
+"""Source-level guards for iOS defects that cost users money or strand the app.
+
+Four groups: **C2** (report double-charge), **C4** (stranded chat), **C13** (indicator trap),
+and the **chat money path** (a 402 that was illegible, non-terminal and invisible). Keep this
+count in sync when adding a group — a guard file whose header undercounts its own contents is
+how you end up believing a defect is uncovered.
 
 There is no XCTest target in this project, so — exactly like `test_ios_auth_policy_parity.py`
 and `test_ios_theme_parity.py` — these invariants are pinned from Python by reading the Swift
@@ -15,9 +20,8 @@ All three were found in the 2026-08-07 deep check and are documented in
     trapping at runtime on a series of exactly 14 points
     (`TechnicalIndicatorCalculator.swift`).
 
-(This header previously said "two defects … C2 and C4"; the C13 section was appended without
-updating it. Keep it in sync — a guard file whose header undercounts its own contents is how
-you end up believing a defect is uncovered.)
+(This header has already drifted twice — it said "two defects" when C13 landed, and "three"
+when the chat money path did. That is the recurrence this note exists to stop.)
 
 Note what these can and cannot prove. They pin the SHAPE of the source, not runtime behaviour:
 a semantically-equivalent rewrite passes without the guard actually running, and a rename
@@ -376,4 +380,161 @@ def test_the_dead_duplicate_research_screen_is_gone():
     assert not (_REPO / "frontend/ios/ios/Views/Screens/ResearchView.swift").exists(), (
         "ResearchView.swift is back. The live Research screen is "
         "`ResearchViewWithBinding` in ContentView.swift — do not re-create a second copy."
+    )
+
+
+# ── The chat money path: 402 must be legible, terminal, and visible ──────────
+#
+# Chat charges CHAT_CREDIT_COST per turn but, unlike the report path, showed the user
+# nothing and gave them nowhere to go when the wallet ran out. Three separate defects had
+# to line up for that; fixing any one alone is invisible, which is exactly why all three
+# are pinned here.
+#
+# Each guard below is brace-bounded to the declaration it is about and reads
+# comment-stripped source: this file's own prose quotes every token these assert on, so an
+# un-stripped whole-file scan would pass on the explanation after the code was reverted.
+
+_API_CLIENT = _REPO / "frontend/ios/ios/Core/Services/APIClient.swift"
+_CHAT_SCREEN = _REPO / "frontend/ios/ios/Views/Screens/AIChatScreen.swift"
+
+
+def _decl_body(src: str, prefix: str, open_ch: str = "{") -> str:
+    """The delimiter-matched body of the declaration starting at `prefix`.
+
+    Asserting against a whole file passes when the token lives in a DIFFERENT declaration —
+    which is how a fix to a preview-only duplicate screen once looked like a fix to the live
+    one. Bound the scan to the declaration you actually mean.
+
+    `prefix` need only be enough to identify the declaration; the scan starts at the first
+    `open_ch` after it, so a signature that spans lines or gains a parameter still matches.
+    `open_ch="["` bounds a collection literal instead of a body.
+    """
+    close_ch = {"{": "}", "[": "]", "(": ")"}[open_ch]
+    at = src.index(prefix)
+    start = src.index(open_ch, at)
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == open_ch:
+            depth += 1
+        elif src[i] == close_ch:
+            depth -= 1
+            if depth == 0:
+                return src[start:i + 1]
+    raise AssertionError(f"unbalanced {open_ch}{close_ch} after {prefix!r}")
+
+
+def _code(path: Path) -> str:
+    return _strip_swift_comments(_src(path))
+
+
+def test_the_sse_reader_decodes_payment_and_admission_refusals():
+    """A streamed 402 must become a `businessError`, not a bare `serverError`.
+
+    The SSE reader's status switch handled 401/404/429 and swept EVERYTHING else into
+    `default: throw APIError.serverError(statusCode:)`. Streaming is the path users are
+    actually on, so running out of credits mid-chat produced a generic "server error" —
+    `AppError.from` had no code to map, so `.insufficientCredits` (and with it the `.upgrade`
+    action that opens Buy Credits) could never be reached. The non-streaming path decoded the
+    same body correctly, which is why this looked fixed and was not.
+    """
+    body = _decl_body(_code(_API_CLIENT), "private func openStreamOnce(")
+    # Anchored, not a substring: `"case 402" in body` also matches `case 4020`, which is how
+    # this guard passed a mutation test it should have failed. Require the status as a whole
+    # number — a real `case` arm is followed by a separator, never another digit.
+    assert re.search(r"\bcase\b[^\n]*\b402\b(?!\d)", body), (
+        "the SSE reader no longer decodes 402 — an out-of-credits chat turn falls back to a "
+        "generic serverError and the user gets no Upgrade route"
+    )
+    assert re.search(r"\b409\b(?!\d)", body), (
+        "the SSE reader no longer decodes 409 SYSTEM_BUSY — a transient admission refusal "
+        "becomes an indistinguishable generic server error"
+    )
+    assert "APIError.businessError" in body, (
+        "402/409 must carry the backend error_code through as a businessError; without it "
+        "AppError.mapAPIError has nothing to switch on"
+    )
+    # The code, not the status, is the contract — the body has to actually be read.
+    assert "APIErrorResponse.self" in body
+
+
+def test_chat_does_not_re_post_a_turn_the_server_refused_before_generating():
+    """A 402/409 must NOT fall into the stream-failure reconcile.
+
+    Every other stream failure is recoverable by the non-streaming fallback, so the catch
+    unconditionally ran a history GET and then re-POSTed. For a pre-flight refusal the server
+    never started generating and persisted nothing, so that reconcile spends a round trip to
+    fail identically — and on any code where it did NOT fail, it would charge a second time.
+    """
+    body = _decl_body(_code(_CHAT_VM), "private func streamMessageToSession(")
+    assert "isTerminalPreflightRefusal" in body, (
+        "the stream catch no longer short-circuits terminal refusals — a 402 will spend a "
+        "history GET and then re-POST to the non-streaming endpoint"
+    )
+    # The short-circuit has to come BEFORE the reconcile, or it proves nothing.
+    assert body.index("isTerminalPreflightRefusal") < body.index("reconcileAfterStreamFailure"), (
+        "the terminal-refusal check must precede reconcileAfterStreamFailure"
+    )
+
+
+def test_insufficient_credits_is_classified_as_terminal():
+    """The set is matched on backend ErrorCode values, so it must actually contain them."""
+    body = _decl_body(_code(_CHAT_VM), "private static let terminalPreflightCodes", open_ch="[")
+    for code in ("INSUFFICIENT_CREDITS", "SYSTEM_BUSY", "CHAT_DAILY_LIMIT_REACHED"):
+        assert code in body, f"{code} is no longer treated as a terminal pre-flight refusal"
+
+
+def test_a_failed_chat_turn_reaches_the_global_error_host():
+    """Setting `errorMessage` alone is a dead end.
+
+    The in-chat banner is a string with an ✕. The ACTION — `.insufficientCredits` carrying
+    `.upgrade`, i.e. the route to Buy Credits — is attached by `AppState.handleError`, and
+    `ChatViewModel` did not have an `AppState` reference at all. Without this the user is told
+    they are out of credits and given no way to buy any.
+    """
+    src = _code(_CHAT_VM)
+    body = _decl_body(src, "private func reportTurnFailure(")
+    assert "appState?.handleError(error)" in body, (
+        "a failed chat turn no longer reaches the global error host — the Upgrade action is "
+        "unreachable and the banner is a dead end"
+    )
+    assert "weak var appState: AppState?" in src, "ChatViewModel lost its AppState reference"
+
+
+def test_the_chat_cover_hosts_the_global_error_surfaces():
+    """`.errorPresentationHost()` must be applied INSIDE the chat's fullScreenCover.
+
+    A fullScreenCover is its own presentation: the root's error toast and its Buy Credits
+    sheet render BEHIND it and are never seen. So decoding the 402 correctly and routing it
+    correctly still leaves the user with nothing on screen. Its removal is silent by
+    construction — nothing crashes, the sheet simply never appears — so a guard is the only
+    thing that catches it.
+    """
+    body = _decl_body(_code(_CHAT_SCREEN), "private struct AIChatCoverModifier: ViewModifier")
+    assert ".errorPresentationHost()" in body, (
+        "the AI chat cover no longer hosts the error surfaces — a 402 inside chat shows an "
+        "invisible toast and opens an invisible Buy Credits sheet"
+    )
+    # `EnvironmentValues.appState` defaults to a throwaway AppState(), so a broken chain
+    # fails SILENTLY. The explicit re-injection is the defence.
+    assert "environment(\\.appState" in body or ".appState, appState)" in body, (
+        "the cover no longer re-injects appState explicitly; a broken inheritance chain would "
+        "silently bind a throwaway AppState and nothing would ever update"
+    )
+
+
+def test_the_chat_screen_hands_its_view_model_the_app_state():
+    """One injection point covers all 15 hosts that present the chat."""
+    body = _decl_body(_code(_CHAT_SCREEN), "struct AIChatScreen: View")
+    assert "viewModel.appState = appState" in body, (
+        "AIChatScreen no longer injects AppState — the chat balance goes stale and 402s "
+        "cannot reach the Upgrade route"
+    )
+
+
+def test_the_chat_balance_is_refreshed_only_when_credits_actually_moved():
+    """A free follow-up moves nothing, so it must not spend a request proving that."""
+    body = _decl_body(_code(_CHAT_VM), "private func refreshCreditsIfMoved(")
+    assert "movedCredits" in body, (
+        "the refresh no longer gates on whether the turn moved credits — a free follow-up "
+        "will spend a request on the answer path for no reason"
     )

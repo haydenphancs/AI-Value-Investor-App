@@ -164,31 +164,161 @@ class _ChatQuota:
     `refund_once` hands the quota back on non-delivery and is safe to call from every
     failure site + the finally backstop: a single-coroutine `_settled` flag fires the
     (non-idempotent) refund AT MOST ONCE.
+
+    `ref_id` is PER-TURN (`"{session_id}:{uuid4}"`), not per-session. It used to be the
+    bare session id, which made every turn in a conversation write an identical
+    `(ref_id, delta = -CHAT_CREDIT_COST)` ledger row — and `refund_credits` pairs a refund
+    to the NEWEST un-reversed match, so a refund could adopt a SIBLING turn's recorded pool
+    split and hand a granted credit back into the purchased pool (or destroy a paid one).
+    Migration 124 names this file as the reason its `reverses_id` anti-join exists; a unique
+    ref per debit is what actually makes the pairing exact. The session id is kept as the
+    prefix purely so a ledger row is still greppable back to its conversation.
     """
 
-    def __init__(self, user: dict, x_guest_id, *, is_guest: bool, ref_id: Optional[str]):
+    def __init__(
+        self,
+        user: dict,
+        x_guest_id,
+        *,
+        is_guest: bool,
+        ref_id: Optional[str],
+        session_id: Optional[str] = None,
+        free: bool = False,
+        balance_after: Optional[int] = None,
+    ):
         self._user = user
         self._x_guest_id = x_guest_id
         self._is_guest = is_guest
         self._ref_id = ref_id
+        self._session_id = session_id
+        self._free = free
         self._settled = False
+        self._refunded = False
+        self._refund_reason: Optional[str] = None
+        self._balance_after: Optional[int] = balance_after
+
+    @property
+    def outcome(self) -> str:
+        """What this turn cost, for the `credits` SSE frame. Reflects the CLAIM, and is
+        re-read after settlement — `refund_once` flips it to "refunded"."""
+        if self._refunded:
+            return "refunded"
+        if self._free:
+            return "free_followup"
+        if self._is_guest:
+            return "guest"
+        return "charged"
+
+    @property
+    def charged(self) -> int:
+        """Credits actually retained for this turn (0 for guests, free turns, refunds)."""
+        if self._is_guest or self._free or self._refunded:
+            return 0
+        return settings.CHAT_CREDIT_COST
 
     def refund_once(self, reason: str) -> None:
         if self._settled:
             return
         self._settled = True
+        self._refund_reason = reason
+        if self._free:
+            # ⚠️ MUST return before `refund_ledgered`. A free turn wrote NO debit, so a
+            # refund against its ref_id finds no matching row, falls through to
+            # `refund_credits`' granted-first fallback and pays out
+            # `LEAST(amount, used)` — MINTING a credit the user never spent, on every
+            # failed free turn. `_free` is checked first for exactly this reason.
+            #
+            # Deliberately does NOT set `_refunded`: nothing was refunded, so the turn's
+            # reported outcome stays "free_followup" rather than claiming a credit came
+            # back. What is restored is the ALLOWANCE — consumed by the claim for a turn
+            # that never arrived. Bounded: this hands back what they already held, it
+            # cannot mint a second one.
+            get_chat_budget_service().grant_free_followup(self._session_id)
+            return
+        self._refunded = True
         if self._is_guest:
             _refund_chat_turn(self._user, self._x_guest_id)
         else:
-            CreditService().refund_ledgered(
+            payload = CreditService().refund_ledgered(
                 self._user["id"],
                 settings.CHAT_CREDIT_COST,
                 reason=reason,
                 ref_id=self._ref_id,
             )
+            # `None` is strictly a transport fault, never a business outcome — leave the
+            # balance as-is so the client refreshes rather than being shown a wrong number.
+            if isinstance(payload, dict) and isinstance(payload.get("spendable"), int):
+                self._balance_after = payload["spendable"]
+
+    def _label(self) -> Optional[str]:
+        """The server-authored string iOS renders, or None when there is nothing to say.
+
+        Server-authored on purpose (the same principle as `user_message` on errors): the
+        wording can be changed without an App Store release, and the client never has to
+        know how to pluralise a credit count it did not compute.
+        """
+        n = settings.CHAT_CREDIT_COST
+        unit = "credit" if n == 1 else "credits"
+        if self._refunded:
+            # Kept SHORT. This renders in a capsule badge on the message's metadata line,
+            # beside the timestamp — a long string wraps the capsule toward a square, which
+            # `Capsule()` draws as a circle with the text clipped inside it.
+            if self._refund_reason == "chat_cache_hit":
+                return f"{n} {unit} refunded — no AI cost"
+            if (self._refund_reason or "").startswith("chat_degraded_"):
+                return f"{n} {unit} refunded — incomplete answer"
+            return f"{n} {unit} refunded"
+        if self._free:
+            return "Free follow-up"
+        return None
+
+    def cost_payload(self) -> Optional[dict]:
+        """The PERSISTED shape (`rich_content["credit"]`), or None when nothing is worth
+        showing. A normal charge returns None deliberately — putting a price on every
+        answer turns chat into a meter, and the asking is the product.
+
+        Carries no balance: a spendable balance is an ACCOUNT fact, and this dict is
+        replayed verbatim on every history reload, where it would be stale.
+        """
+        if self._label() is None:
+            return None
+        return {
+            "outcome": self.outcome,
+            "credits": self.charged,
+            "reason": self._refund_reason if self._refunded else None,
+            "label": self._label(),
+        }
+
+    def cost_frame(self) -> dict:
+        """The LIVE shape (the `credits` SSE frame). Always emitted on a delivered turn,
+        even for a plain charge — the client needs `balance` to keep its own copy honest,
+        and decides for itself that a `charged` outcome renders no chip.
+        """
+        return {
+            "outcome": self.outcome,
+            "credits": self.charged,
+            "reason": self._refund_reason if self._refunded else None,
+            "label": self._label(),
+            "balance": self._balance_after,
+        }
+
+    def on_delivered(self) -> None:
+        """Called once the turn is durably persisted — grants the session's free follow-up.
+
+        ONLY a turn that was actually charged grants one. That single rule is what bounds
+        the whole feature to 2 turns per credit: a free turn earning another would let one
+        credit be ridden indefinitely by always replying inside the window.
+
+        Guarded on `_settled` because it runs AFTER the cache-hit refund check in both
+        endpoints — a turn we handed the credit back for was not paid for either, so it
+        must not earn an allowance on the way out.
+        """
+        if self._settled or self._free or self._is_guest:
+            return
+        get_chat_budget_service().grant_free_followup(self._session_id)
 
 
-def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None):
+def _claim_chat_quota(user: dict, x_guest_id, *, session_id: Optional[str], req=None):
     """Reserve one chat turn's quota BEFORE any Gemini spend (pre-flight).
 
     Guests → daily-turn budget (fails open on DB blip). Authenticated users →
@@ -196,8 +326,17 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None
     (no generation), transient RPC failure → retryable 409 SYSTEM_BUSY (never 402 —
     a DB blip must not tell a paying user they're broke).
 
+    Takes the SESSION id and mints the credit `ref_id` itself (see `_ChatQuota`): the
+    ledger needs one unique ref per debit, and callers must not be able to pass the bare
+    session id by accident. `ref_id` is also an overloaded name in this module — the
+    streaming handler binds it to the chat CONTEXT reference (a ticker, a book id) a few
+    lines after claiming quota — so the credit ref never travels as a caller argument.
+
     Returns `(quota, None)` to proceed, or `(None, JSONResponse)` to short-circuit.
     """
+    # One ref per DEBIT. Prefixed with the session so a ledger row stays greppable back to
+    # its conversation; the uuid is what makes the refund pairing exact.
+    turn_ref = f"{session_id}:{uuid.uuid4().hex}"
     # `user.get("is_guest")`, NOT `user["id"] == GUEST_USER_ID`. Under migration 111 a guest
     # resolves to a per-INSTALL uuid5 that never equals the shared sentinel, so the old
     # comparison would have sent every guest into the credit precharge below — against a
@@ -208,11 +347,24 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None
         err = _claim_chat_turn_or_error(user, x_guest_id, req)
         if err is not None:
             return None, err
-        return _ChatQuota(user, x_guest_id, is_guest=True, ref_id=ref_id), None
+        return _ChatQuota(
+            user, x_guest_id, is_guest=True, ref_id=turn_ref, session_id=session_id,
+        ), None
+
+    # An earned free follow-up is claimed BEFORE the wallet is touched, and deliberately
+    # bypasses the insufficient-credits gate: it was paid for by the previous turn, so a
+    # user who has since hit 0 still gets the answer they are already owed. The claim is
+    # atomic (UPDATE ... RETURNING) so two racing turns cannot both go free, and it fails
+    # CLOSED — a DB blip charges normally and leaves the allowance for the next turn.
+    if get_chat_budget_service().claim_free_followup(session_id):
+        return _ChatQuota(
+            user, x_guest_id, is_guest=False, ref_id=turn_ref,
+            session_id=session_id, free=True,
+        ), None
 
     try:
         remaining = CreditService().precharge(
-            user["id"], settings.CHAT_CREDIT_COST, reason="chat_charge", ref_id=ref_id
+            user["id"], settings.CHAT_CREDIT_COST, reason="chat_charge", ref_id=turn_ref
         )
     except CreditServiceUnavailable:
         return None, make_error_response(
@@ -227,7 +379,10 @@ def _claim_chat_quota(user: dict, x_guest_id, *, ref_id: Optional[str], req=None
             message="insufficient credits for chat turn",
             details={"user_id": user["id"], "required": settings.CHAT_CREDIT_COST},
         )
-    return _ChatQuota(user, x_guest_id, is_guest=False, ref_id=ref_id), None
+    return _ChatQuota(
+        user, x_guest_id, is_guest=False, ref_id=turn_ref, session_id=session_id,
+        balance_after=remaining,
+    ), None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -523,6 +678,45 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict] = None):
+    """Record what this turn cost into the assistant row's `rich_content`, best-effort.
+
+    Returns the merged rich_content dict (or `rich` unchanged when there is nothing to
+    record) so the streaming path can rebind its local copy — the suggestions step later
+    writes that same local dict back, and would otherwise clobber the key we just added.
+
+    Writes nothing for a normally-charged turn: `cost_payload()` returns None there, by
+    design. Only a free or refunded turn has anything worth telling the user.
+
+    A failure here is deliberately silent to the user beyond a warning: the live `credits`
+    frame has already shown the chip, so the only thing lost is its replay on a history
+    reload. Never let it touch the answer, which is already durably persisted.
+    """
+    payload = quota.cost_payload()
+    if payload is None:
+        return rich
+
+    if isinstance(rich, dict):
+        merged = dict(rich)
+    elif isinstance(assistant_row.get("rich_content"), dict):
+        merged = dict(assistant_row["rich_content"])
+    else:
+        merged = {}
+    merged["credit"] = payload
+    assistant_row["rich_content"] = merged
+
+    try:
+        supabase.table("chat_messages").update(
+            {"rich_content": merged}
+        ).eq("id", assistant_row["id"]).execute()
+    except Exception as e:
+        logger.warning(
+            "Chat turn-cost persist failed for message=%s (%s: %s) — chip shown live only",
+            assistant_row.get("id"), type(e).__name__, e,
+        )
+    return merged
+
+
 def _row_to_message(row: dict) -> ChatMessageResponse:
     """Map a Supabase chat_messages row to the response schema."""
     rc = row.get("rich_content") if isinstance(row.get("rich_content"), dict) else None
@@ -537,6 +731,9 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
     sources = rc.get("sources") if rc else None
     suggestions = rc.get("suggestions") if rc else None
     thinking = rc.get("thinking") if rc else None
+    # Present only on a turn that was free or refunded, so a history reload re-shows the
+    # chip. Absent on every legacy row and every normally-charged turn → None → no chip.
+    credit = rc.get("credit") if rc else None
 
     return ChatMessageResponse(
         id=row["id"],
@@ -551,6 +748,7 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
         sources=sources,
         suggestions=suggestions,
         thinking=thinking,
+        credit=credit,
         created_at=row["created_at"],
     )
 
@@ -690,7 +888,7 @@ async def send_chat_message(
     # Reserve this turn's quota BEFORE spending Gemini tokens: authenticated users are
     # charged CHAT_CREDIT_COST credits (pre-flight + atomic deduction → 402 if broke);
     # guests use the durable per-install daily-turn budget.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id, req=req)
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req)
     if quota_err is not None:
         return quota_err
 
@@ -803,6 +1001,11 @@ async def send_chat_message(
         # real generation reporting None/unknown usage is never wrongly refunded.
         if ai_result.get("tokens_used") == 0:
             quota.refund_once("chat_cache_hit")
+        # A charged turn earns this session one free follow-up (no-op after a refund).
+        quota.on_delivered()
+        # Settlement is final now → record it on the row so the response (and a later
+        # history reload) can show the user they were not charged.
+        _attach_turn_cost(supabase, assistant_row, quota)
 
         # Update session metadata. message_count + last_message_at are maintained atomically by the
         # trg_chat_message_count AFTER-INSERT trigger (one +1 per inserted row), so we do NOT set them
@@ -910,7 +1113,7 @@ async def stream_chat_message(
     # are charged CHAT_CREDIT_COST credits (→ 402 if broke), guests use the daily-turn
     # budget. Returning a clean JSON error here (not an SSE frame) mirrors the 404s above;
     # iOS surfaces INSUFFICIENT_CREDITS via its non-stream fallback decode.
-    quota, quota_err = _claim_chat_quota(user, x_guest_id, ref_id=session_id, req=req)
+    quota, quota_err = _claim_chat_quota(user, x_guest_id, session_id=session_id, req=req)
     if quota_err is not None:
         return quota_err
 
@@ -974,6 +1177,9 @@ async def stream_chat_message(
         suggestions = None
         streamed_any = False
         used_fallback = False   # set when the full-generation fallback replaces the stream
+        # Sink `stream_synthesis` writes a degradation reason into (an async generator
+        # cannot return a value alongside yield). Read once the turn is persisted.
+        stream_signals: dict = {}
 
         # The model streams REAL reasoning: stream_text tags each chunk as ("thought"|"answer", text).
         # Thoughts → the thinking card (`reasoning` frames), answer → the bubble (`token` frames).
@@ -1060,7 +1266,9 @@ async def stream_chat_message(
             # specialists run in parallel + a merged answer streams (their widgets arrive as
             # ("widget", …) events since the specialist runs aren't streamed to the client directly).
             if route["mode"] == "synthesize":
-                answer_stream = chat_service.stream_synthesis(prep, user_message, route, tools, handlers)
+                answer_stream = chat_service.stream_synthesis(
+                    prep, user_message, route, tools, handlers, signals=stream_signals,
+                )
             else:
                 system_instruction = apply_specialist(prep["system_instruction"], route["specialists"][0])
                 # Free cost lever: the classification above is already paid for. A
@@ -1264,6 +1472,25 @@ async def stream_chat_message(
             # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
             if tokens_used == 0:
                 quota.refund_once("chat_cache_hit")
+            elif stream_signals.get("degraded"):
+                # Delivered, but materially less than we said on screen we would deliver
+                # (the `routing` frame already named the lenses). Both shapes require a
+                # mid-turn Gemini failure, so this is rare — and it is exactly the turn a
+                # user would be right to feel shortchanged by.
+                #
+                # NOT applied to the stream→non-stream fallback at `used_fallback`: that
+                # path answers from the SAME prompt via `generate_response` and costs us
+                # MORE, not less. The user lost latency and the thinking card, not the
+                # answer — refunding it would hand back a credit on a large share of turns
+                # every time the network is flaky.
+                quota.refund_once(f"chat_degraded_{stream_signals['degraded']}")
+            # A charged turn earns this session one free follow-up (no-op after a refund).
+            quota.on_delivered()
+            # Settlement is final → fold it into the SAME local `rich_content` the
+            # suggestions step writes back below, or that write would clobber the key.
+            rich_content = _attach_turn_cost(
+                supabase, assistant_row, quota, rich_content,
+            ) or rich_content
         except Exception as e:
             logger.error("Chat stream persist failed: %s", e, exc_info=True)
             # ONLY the delivery-critical insert is in this try, so a failure here means the turn
@@ -1339,6 +1566,14 @@ async def stream_chat_message(
             logger.warning("Chat suggestions step failed (%s: %s) — skipping", type(e).__name__, e)
             suggestions = None
 
+        # What this turn cost, and the balance it left behind. Emitted on the DELIVERED
+        # path only, once, immediately before `done`. Shipped iOS builds ignore an unknown
+        # frame (`default: continue`), so this is additive in both directions.
+        #
+        # Always sent, even for a plain charge: the chip is the client's decision, but the
+        # BALANCE is what stops its local copy going stale — chat is the one metered
+        # surface that never refreshed it.
+        yield _sse("credits", quota.cost_frame())
         yield _sse("done", {"message": _row_to_message(assistant_row).model_dump()})
 
     async def _metered_stream():

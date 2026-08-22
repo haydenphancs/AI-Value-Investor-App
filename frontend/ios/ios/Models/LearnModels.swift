@@ -9,11 +9,6 @@ import Foundation
 import SwiftUI
 
 // MARK: - Learn Tab
-enum LearnTab: String, CaseIterable {
-    case learn = "Learn"
-    case chat = "Chat"
-}
-
 // MARK: - Investor Level
 enum InvestorLevel: String, CaseIterable {
     case foundation = "Foundation"

@@ -570,6 +570,26 @@ class ChatViewModel: ObservableObject {
         cancelReveal()
     }
 
+    /// Clear EVERYTHING this view model holds for the ended session — the thread *and* the
+    /// history list.
+    ///
+    /// `resetConversation()` alone is not enough: it leaves `historySessions` / `historyGroups`
+    /// populated, so the next account to open the history panel sees the previous user's
+    /// conversation titles until `loadHistory()` returns. That is the auth.md §7 leak class
+    /// (`AppState.discardDataForEndedSession`) — a device-global store outliving its session —
+    /// and a fetch landing later does not excuse showing it in the meantime.
+    ///
+    /// Called from `ContentView` on a real identity change. It matters more since the chat view
+    /// model was hoisted there: it is a `@StateObject` on a permanently opacity-mounted view, so
+    /// nothing tears it down between accounts.
+    func resetForIdentityChange() {
+        resetConversation()
+        historySessions = []
+        historyGroups = []
+        historyLoadFailed = false
+        historyActionError = nil
+    }
+
     /// Drop a session from the local history list + regroup, resetting the conversation if it was active.
     private func removeSessionLocally(_ sessionId: String) {
         historySessions.removeAll { $0.id == sessionId }

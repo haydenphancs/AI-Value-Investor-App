@@ -68,13 +68,6 @@ final class SearchHistoryStore: ObservableObject {
         )
     }
 
-    /// Record a question sent to Cay AI from the search screen.
-    func record(question: String) {
-        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        insert(SearchHistoryEntry(kind: .question, text: text))
-    }
-
     /// Newest-first insert with de-duplication.
     ///
     /// Re-searching AAPL MOVES it to the head rather than stacking a second row — otherwise the
@@ -133,7 +126,13 @@ final class SearchHistoryStore: ObservableObject {
     private static func load(from defaults: UserDefaults) -> [SearchHistoryEntry] {
         guard let data = defaults.data(forKey: defaultsKey) else { return [] }
         do {
+            // Tickers only. Search can no longer ask Cay AI, so a stored `.question` row has
+            // nothing to reopen — tapping one would be a dead row that looks alive. Filtered on
+            // READ rather than migrated on write, because the decode has to tolerate those rows
+            // anyway (see `SearchHistoryEntry.Kind.question`) and a rewrite pass would be one
+            // more thing that can fail between versions.
             return Array(try JSONDecoder().decode([SearchHistoryEntry].self, from: data)
+                .filter { $0.kind == .ticker }
                 .prefix(maxEntries))
         } catch {
             // A blob written by an older shape. Drop it rather than fail the screen: history is

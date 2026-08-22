@@ -14,12 +14,10 @@ struct LearnContentView: View {
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
-    /// Owns the Wiser chat conversation for the app session so the Chat tab RESUMES the last
-    /// conversation each time it's reopened (the Chat tab now opens AIChatScreen as a cover).
-    @StateObject private var chatViewModel = ChatViewModel()
-    @State private var showAIChat = false
-    /// Separate, ephemeral VM for the "Ask the Author Agent" book chat so seeding it never clobbers
-    /// the resumable Wiser Chat-tab thread above.
+    /// Separate, ephemeral VM for the "Ask the Author Agent" book chat, so seeding it with a book
+    /// never clobbers the general conversation. That general one is owned by `ContentView` now and
+    /// raised from the header bar's sparkle — this screen no longer holds a chat view model of its
+    /// own, which is what let the `Learn | Chat` control go.
     @StateObject private var bookChatViewModel = ChatViewModel()
     @State private var showBookChat = false
     @State private var showingInvestorJourney = false
@@ -46,16 +44,13 @@ struct LearnContentView: View {
 
             // Main Content
             VStack(spacing: 0) {
-                // Header with search and tabs
+                // Header — the global row. Its trailing sparkle raises the shared Cay AI chat
+                // via AppState; this screen owns no part of that presentation any more.
                 LearnHeader(
-                    selectedTab: $viewModel.selectedTab,
                     onSearchTapped: handleSearchTapped,
-                    onProfileTapped: handleProfileTapped,
-                    onChatTapped: { showAIChat = true }
+                    onProfileTapped: handleProfileTapped
                 )
 
-                // Tab content — the "Chat" tab opens the full-screen AIChatScreen cover (see
-                // onChatTapped above); only the Learn content renders inline here.
                 learnTabContent
             }
 
@@ -110,12 +105,8 @@ struct LearnContentView: View {
             await MoneyMovesProgressStore.shared.hydrate()
             await bookmarks.hydrate()
         }
-        // The Wiser "Chat" tab opens the unified full-screen chat (AIChatScreen) as a cover, which
-        // owns its own audio compact via .globalAudioOverlay — so the Wiser screen no longer manages
-        // chat-tab audio here.
-        .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
-        // "Ask the Author Agent" book chat uses its own VM so it never overwrites the resumable
-        // Chat-tab thread.
+        // "Ask the Author Agent" book chat keeps its own VM + cover so a book-grounded session
+        // never overwrites the general conversation `ContentView` owns.
         .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
         }
         // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for

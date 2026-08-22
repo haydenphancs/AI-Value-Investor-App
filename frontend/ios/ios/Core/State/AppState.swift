@@ -84,6 +84,14 @@ final class AppState {
     /// presentation state or a path back to the navigation tree.
     var signInPrompt: SignInPrompt?
 
+    /// Whether the global Cay AI chat cover is up, presented once by `ContentView`.
+    ///
+    /// Here for the same reason as `signInPrompt` above: the chat door now lives in
+    /// `GlobalHeaderView`, which four different tab headers embed, and none of them owns the
+    /// presentation state or a path to the tab shell that does. A flag on AppState lets any of
+    /// them ask without threading a binding through four header organisms.
+    var isAIChatPresented: Bool = false
+
     /// Ticker a notification tap wants opened, consumed by the Home tab.
     ///
     /// A tapped push used to land wherever the user happened to be — the alert said
@@ -1224,6 +1232,15 @@ final class AppState {
             return
         }
         signInPrompt = SignInPrompt(feature: feature)
+    }
+
+    /// Raise the global Cay AI chat, from the header bar of any tab.
+    ///
+    /// Deliberately NOT gated on sign-in: chat is `.guestAllowed` (a per-install identity, see
+    /// auth.md §1a), so demanding an account here would delete a working feature for guests.
+    /// The credit precharge on send is where a real account requirement, if any, belongs.
+    func requestAIChat() {
+        isAIChatPresented = true
     }
 
     func clearError() {

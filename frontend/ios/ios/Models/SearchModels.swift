@@ -50,17 +50,6 @@ struct SearchResultItem: Identifiable {
     }
 }
 
-// MARK: - Search Query Suggestion
-struct SearchQuerySuggestion: Identifiable {
-    let id = UUID()
-    let text: String
-    let iconName: String?
-
-    var hasIcon: Bool {
-        iconName != nil
-    }
-}
-
 // MARK: - Search History Entry
 
 /// One row of the user's own search history: a ticker they opened, or a question they asked
@@ -74,6 +63,15 @@ struct SearchQuerySuggestion: Identifiable {
 struct SearchHistoryEntry: Identifiable, Codable, Equatable {
     enum Kind: String, Codable {
         case ticker
+        /// ⚠️ **Do not delete this case, even though nothing writes it any more.**
+        ///
+        /// Search stopped being able to ask Cay AI, so `record(question:)` is gone and
+        /// `SearchHistoryStore.load` filters these out — but installs upgrading from an earlier
+        /// build still have `"kind":"question"` rows sitting in `UserDefaults`. `load` decodes
+        /// the array in ONE shot and its `catch` deletes the entire blob, so removing this case
+        /// would throw on those rows and wipe the user's TICKER history along with them.
+        ///
+        /// Pinned by `tests/test_ios_search_history_guards.py`.
         case question
     }
 
@@ -136,16 +134,6 @@ struct SearchBookItem: Identifiable {
     var formattedPublished: String {
         "Published \(publishedYear)"
     }
-}
-
-// MARK: - Sample Data Extensions
-extension SearchQuerySuggestion {
-    static let sampleData: [SearchQuerySuggestion] = [
-        SearchQuerySuggestion(text: "What is P/E ratio?", iconName: nil),
-        SearchQuerySuggestion(text: "Best tech stocks", iconName: nil),
-        SearchQuerySuggestion(text: "Market trends", iconName: nil),
-        SearchQuerySuggestion(text: "Why APPLE moved today?", iconName: nil)
-    ]
 }
 
 extension SearchResultItem {

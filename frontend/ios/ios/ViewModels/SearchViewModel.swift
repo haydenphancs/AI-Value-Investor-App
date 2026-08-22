@@ -20,7 +20,6 @@ import OSLog
 final class SearchViewModel: ObservableObject {
     // MARK: - Published Properties
     @Published var searchText: String = ""
-    @Published var querySuggestions: [SearchQuerySuggestion] = []
     /// Live results for the CURRENT query. Empty whenever the field is empty.
     @Published var results: [SearchResultItem] = []
     @Published var isLoading: Bool = false
@@ -47,7 +46,6 @@ final class SearchViewModel: ObservableObject {
         // Starter questions shown as chips in the empty state → tapped, they seed a Cay AI
         // conversation (handled in SearchView), turning the empty search into a lightweight
         // AI discovery hub.
-        querySuggestions = SearchQuerySuggestion.sampleData
 
         // Live debounced search as the user types.
         $searchText

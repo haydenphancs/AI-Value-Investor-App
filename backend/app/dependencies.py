@@ -824,3 +824,14 @@ AnalyticsRateLimit = Depends(IdentityOnlyRateLimitChecker("analytics", 30, 60))
 #: to 503 a first-run onboarding save because a `public.users` read blipped.
 #: 20/min is far above the UI's ceiling — onboarding writes once, the editor once per Save.
 ProfileRateLimit = Depends(IdentityOnlyRateLimitChecker("investor_profile", 20, 60))
+
+#: Profile-picture upload. The one route in the app that accepts a payload measured in
+#: hundreds of KB and writes an object to Storage, so it is the one place an authenticated
+#: caller can consume real bandwidth and disk on repeat.
+#:
+#: 6/hour is generous against the UI (a user changes their picture rarely) and tight against
+#: a loop. Identity-ONLY because the route's own `get_current_user` has already done the
+#: strict `public.users` read — a second one here would only add a way to 503.
+#:
+#: ⚠️ The bucket string must stay unique across limiters or two features share a counter.
+AvatarRateLimit = Depends(IdentityOnlyRateLimitChecker("avatar", 6, 3600))

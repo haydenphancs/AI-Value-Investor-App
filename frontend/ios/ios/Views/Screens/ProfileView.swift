@@ -155,11 +155,26 @@ struct ProfileView: View {
             VStack(spacing: AppSpacing.md) {
                 // `.circle`, unlike the two headers: the squircle exists to rhyme with
                 // `CaydexLogoMark` across a nav bar, and there is no logo opposite this hero.
-                ProfileAvatarView(
-                    avatarUrl: viewModel.avatarUrl,
-                    size: 80,
-                    shape: .circle
-                )
+                // Tappable ONLY when signed in. A guest has no `public.users` row to own an
+                // avatar, and the endpoint is `.signInRequired` — offering the picker would
+                // open the system photo sheet and then fail at the network boundary.
+                if viewModel.isAuthenticated {
+                    AvatarPickerButton(
+                        avatarUrl: viewModel.avatarUrl,
+                        size: 80,
+                        isUploading: viewModel.isUploadingAvatar,
+                        hasAvatar: (viewModel.avatarUrl?.isEmpty == false),
+                        onPicked: { viewModel.saveAvatar($0) },
+                        onRemove: { viewModel.removeAvatar() },
+                        onFailed: { viewModel.reportAvatarPickFailed() }
+                    )
+                } else {
+                    ProfileAvatarView(
+                        avatarUrl: viewModel.avatarUrl,
+                        size: 80,
+                        shape: .circle
+                    )
+                }
 
                 if viewModel.isAuthenticated {
                     // Signed in: real name / email / tier / member-since.

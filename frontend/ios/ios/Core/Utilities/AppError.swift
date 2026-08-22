@@ -505,6 +505,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 // endpoint, the client refreshed and REPLAYED the request — spending two of the
                 // five per-user attempts on one typo.
                 return .validationFailed(message: message)
+            case "AVATAR_TOO_LARGE", "AVATAR_INVALID_IMAGE":
+                // The photo they chose is the problem, and the server's message names it.
+                // `.validationFailed` keeps the backend wording, stays out of `isAuthError`
+                // (nothing touches the Keychain), and points at the input rather than offering
+                // a retry that would fail identically on the same bytes.
+                return .validationFailed(message: message)
+            // AVATAR_UPLOAD_FAILED is deliberately NOT mapped here. It is ours and transient
+            // (Storage or the profile write was unavailable), and the SAME photo will work on
+            // the next attempt — which is exactly `.apiError`'s behaviour: it surfaces the
+            // backend `user_message` verbatim and offers `.retry`. A typed case would only
+            // duplicate that. The two above are mapped because they need `.fixInput` instead:
+            // retrying identical bytes fails identically.
             case "AUTH_PASSWORD_REJECTED":
                 // The NEW password the user chose was refused by the identity provider —
                 // too weak for the project's rules, or found in a breach corpus once leaked-

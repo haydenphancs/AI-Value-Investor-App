@@ -38,7 +38,11 @@ from app.schemas.auth import (
 
 _USER_ID = "11112222-3333-4444-8555-666677778888"
 _EMAIL = "new.user@example.com"
-_PASSWORD = "a-long-enough-password"
+_PASSWORD = "A-long-enough-password1!"
+# Compliant with `_validate_password_strength` (8+, upper, lower, digit, symbol),
+# which mirrors the Supabase Email-provider setting. A weak literal here fails at
+# SCHEMA construction, so every test in the file dies before reaching what it asserts.
+
 
 
 @pytest.fixture(autouse=True)

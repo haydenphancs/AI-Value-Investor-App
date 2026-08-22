@@ -170,11 +170,29 @@ def test_every_placeholder_card_in_swift_has_a_generated_plate():
     It also pins the slugs themselves. A placeholder's slug is the one its article will take
     when written, so a mismatch here means the future row and the already-published plate end
     up at different paths.
+
+    ⚠️ The mechanism is RETIRED as of 2026-08-21 — all seven teasers were authored and
+    promoted into ARTICLES, so `PLACEHOLDER_TOPICS` is empty and Swift carries no
+    `placeholderArt(...)` calls. This test must NOT become a skip: an empty generator table
+    with live Swift teasers (or the reverse) is exactly the drift it exists to catch, so the
+    retired state is asserted in BOTH directions instead. Delete the branch, not the test,
+    if teasers ever come back.
     """
     swift = _strip_swift_comments(
         (REPO / "frontend/ios/ios/Models/LearnModels.swift").read_text())
     sample = swift.split("static let sampleData: [MoneyMove]", 1)[1].split("\n    ]", 1)[0]
     used = set(re.findall(r'placeholderArt\("([^"]+)"\)', sample))
+
+    if not art.PLACEHOLDER_TOPICS:
+        assert not used, (
+            "PLACEHOLDER_TOPICS is empty but MoneyMove.sampleData still compiles in teaser "
+            f"artwork for {sorted(used)} — those cards have no article and no generator "
+            "entry, so they render the fabricated filler article")
+        assert "func placeholderArt" not in swift, (
+            "placeholderArt() survives with no teaser using it — remove it, or the next "
+            "person will wire a card to it without a generator entry")
+        return
+
     assert used, "no placeholder cards reference artwork at all"
 
     assert used == set(art.PLACEHOLDER_TOPICS), (
@@ -190,7 +208,15 @@ def test_every_placeholder_card_in_swift_has_a_generated_plate():
 
 
 def test_placeholder_art_url_points_at_the_public_bucket():
+    """Retired with the teaser mechanism (2026-08-21). Guarded, not skipped: if
+    `placeholderArt` ever returns it must still point at the PUBLIC bucket, and the
+    disjointness test above is what pins the empty-table state itself."""
     swift = (REPO / "frontend/ios/ios/Models/LearnModels.swift").read_text()
+    if "private static func placeholderArt" not in swift:
+        assert not art.PLACEHOLDER_TOPICS, (
+            f"the generator still lists teasers {sorted(art.PLACEHOLDER_TOPICS)} but Swift "
+            "has no placeholderArt() to render them")
+        return
     fn = swift.split("private static func placeholderArt", 1)[1].split("\n    }", 1)[0]
     assert "/storage/v1/object/public" in fn, "teaser art must use the PUBLIC path"
     assert BUCKET in fn

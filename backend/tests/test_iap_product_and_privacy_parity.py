@@ -477,3 +477,50 @@ def test_payment_info_is_never_declared():
         e.get("NSPrivacyCollectedDataType") for e in plist.get("NSPrivacyCollectedDataTypes", [])
     }
     assert "NSPrivacyCollectedDataTypePaymentInfo" not in declared
+
+
+# ---------------------------------------------------------------------------
+# The App Review notes must not contradict the Terms on credit expiry.
+#
+# app-privacy-answers.md §7 is pasted VERBATIM into App Review Information, and it said
+# credits "expire per the Terms" while terms.html §5, all four ASC pack descriptions
+# ("Never expire."), three iOS surfaces and the entire two-pool design (migrations 117/118)
+# say purchased credits do NOT expire. That is a written contradiction on a payments
+# guideline, handed to a reviewer, in the one document no other test read.
+#
+# Guideline 3.1.1 is the reason the two-pool design exists at all: consumables bought with
+# real money must not be revoked by the monthly reset, which is why the three tier RPCs are
+# forbidden from touching `purchased_total`.
+# ---------------------------------------------------------------------------
+_TERMS_HTML = _REPO / "documents/legal/terms.html"
+
+
+def _answers_review_notes() -> str:
+    """§7 only — the blockquote that actually gets pasted into ASC."""
+    text = _ANSWERS.read_text(encoding="utf-8")
+    start = text.index("## 7.")
+    return text[start:]
+
+
+def test_the_review_notes_do_not_claim_purchased_credits_expire():
+    notes = _answers_review_notes()
+    assert "expire per the Terms" not in notes, (
+        "app-privacy-answers.md §7 tells the reviewer credits 'expire per the Terms', but "
+        "terms.html §5 says credit packs 'do not expire' and every ASC pack description "
+        "reads 'Never expire.' This text is pasted verbatim into App Review Information."
+    )
+    assert re.search(r"do not expire|never expire", notes, re.I), (
+        "§7 must state affirmatively that purchased credits do not expire — Guideline 3.1.1 "
+        "is the whole reason for the separate purchased pool (migrations 117/118)."
+    )
+
+
+def test_the_terms_still_say_credit_packs_do_not_expire():
+    """The other half of the pair. If the Terms are ever softened, the review notes above
+    become the lie instead — so pin both, or the guard only points one way."""
+    terms = re.sub(r"<[^>]+>", " ", _TERMS_HTML.read_text(encoding="utf-8"))
+    terms = re.sub(r"\s+", " ", terms)
+    assert re.search(r"credit pack[^.]*do not expire", terms, re.I), (
+        "terms.html no longer states that one-time credit packs do not expire; the App "
+        "Review notes and the four ASC pack descriptions both promise exactly that."
+    )

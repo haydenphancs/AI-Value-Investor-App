@@ -593,20 +593,6 @@ extension NextLesson {
 }
 
 extension MoneyMove {
-    /// Cover plate for a catalog topic that has no article row yet.
-    ///
-    /// Every other surface gets its artwork URL from the served `content` JSONB, which is why
-    /// new art reaches installed apps with no App Store release. These teasers have no row to
-    /// carry one, so the URL is compiled in — the same trade `gen_book_covers_swift.py` makes
-    /// for book covers, and it is safe for the same reason: the path is a pure function of
-    /// (bucket, slug), and the slug here is the one the article WILL have once written. When
-    /// that happens the DB row supersedes this entirely and the plate is already in place.
-    ///
-    /// Public bucket, so no token and no expiry — see migration 137.
-    private static func placeholderArt(_ slug: String) -> String {
-        "https://gutlnhsjxrkxvrbqbbqq.supabase.co/storage/v1/object/public"
-            + "/money-moves-images/articles/\(slug).card.jpg"
-    }
 
     static let sampleData: [MoneyMove] = [
         // Mix of categories for visual variety
@@ -668,75 +654,6 @@ extension MoneyMove {
             category: .battles,
             estimatedMinutes: 15,
             learnerCount: ""
-        ),
-        
-        // New Blueprints from brainstorm
-        MoneyMove(
-            slug: "the-rise-of-lvmh",
-            title: "The Rise of LVMH",
-            subtitle: "The art of acquiring and cultivating timeless brands.",
-            category: .blueprints,
-            estimatedMinutes: 10,
-            learnerCount: "",
-            imageUrl: placeholderArt("the-rise-of-lvmh")
-        ),
-        MoneyMove(
-            slug: "microsofts-cloud-metamorphosis",
-            title: "Microsoft's Cloud Metamorphosis",
-            subtitle: "How Satya Nadella saved a giant from irrelevance.",
-            category: .blueprints,
-            estimatedMinutes: 11,
-            learnerCount: "",
-            imageUrl: placeholderArt("microsofts-cloud-metamorphosis")
-        ),
-        MoneyMove(
-            slug: "tsmc-the-foundry-that-runs-the-world",
-            title: "TSMC: The Foundry That Runs the World",
-            subtitle: "The story of the most important company you've never heard of.",
-            category: .blueprints,
-            estimatedMinutes: 13,
-            learnerCount: "",
-            imageUrl: placeholderArt("tsmc-the-foundry-that-runs-the-world")
-        ),
-
-        // New Battles from brainstorm
-        MoneyMove(
-            slug: "the-home-depot-vs-lowes",
-            title: "The Home Depot vs. Lowe's",
-            subtitle: "A fight for the loyalty of contractors and DIY enthusiasts.",
-            category: .battles,
-            estimatedMinutes: 10,
-            learnerCount: "",
-            imageUrl: placeholderArt("the-home-depot-vs-lowes")
-        ),
-        MoneyMove(
-            slug: "boeing-vs-airbus-the-aerospace-duopoly",
-            title: "Boeing vs. Airbus: The Aerospace Duopoly",
-            subtitle: "A global battle for the skies, defined by engineering and politics.",
-            category: .battles,
-            estimatedMinutes: 16,
-            learnerCount: "",
-            imageUrl: placeholderArt("boeing-vs-airbus-the-aerospace-duopoly")
-        ),
-        MoneyMove(
-            slug: "the-rise-of-tiktok-vs-instagram-reels",
-            title: "The Rise of TikTok vs. Instagram Reels",
-            subtitle: "The war for short-form video and the future of attention.",
-            category: .battles,
-            estimatedMinutes: 12,
-            learnerCount: "",
-            imageUrl: placeholderArt("the-rise-of-tiktok-vs-instagram-reels")
-        ),
-
-        // Value Traps
-        MoneyMove(
-            slug: "metas-metaverse-pivot",
-            title: "Meta's Metaverse Pivot",
-            subtitle: "Betting the kingdom on a virtual dream.",
-            category: .valueTraps,
-            estimatedMinutes: 14,
-            learnerCount: "",
-            imageUrl: placeholderArt("metas-metaverse-pivot")
         ),
     ]
 }

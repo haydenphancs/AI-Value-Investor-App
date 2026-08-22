@@ -383,22 +383,12 @@ ARTICLES = {
         "two identical square computer processor chips lying flat side by side, their "
         "polished metal heat spreaders and the dense grid of gold contact pads around the "
         "edge of each clearly readable, both completely blank and unmarked"),
-}
 
-# =============================================================================
-# PLACEHOLDER TOPICS — cards that exist in the iOS catalog but have no article yet.
-#
-# `MoneyMove.sampleData` carries a few "coming soon" teasers that are NOT in
-# money_moves.json, so they have no row, no slug and no artwork, and they sat as blank
-# tiles beside thirteen illustrated ones. These get the same treatment system and the same
-# bucket; the only difference is that their URL is compiled into the Swift static (the
-# `gen_book_covers_swift.py` precedent) because there is no `content` blob to bake it into.
-#
-# The slug is the one the article WILL have when it is authored — kebab-case of the title,
-# matching every existing entry. So when the content lands, its row takes over by slug and
-# the already-published plate is already at the right path. Nothing has to be re-uploaded.
-# =============================================================================
-PLACEHOLDER_TOPICS = {
+    # ---- PROMOTED 2026-08-21 ------------------------------------------------
+    # All seven moved verbatim out of PLACEHOLDER_TOPICS when their articles were
+    # authored. The subject strings are UNCHANGED, byte for byte — they feed
+    # art_prompt_sha1, and every plate is already approved, published and recorded in
+    # its manifest, so an edit here re-rolls paid artwork at full cost.
     "the-rise-of-lvmh": ("blueprints", "colour_field",
         "two rigid leather travel trunks stacked one on the other, their brass corner caps, "
         "riveted edging and unmarked latches clearly readable, the leather grain visible"),
@@ -430,6 +420,21 @@ PLACEHOLDER_TOPICS = {
         "seal and slack head strap all clearly readable, the whole thing completely blank "
         "and unmarked"),
 }
+
+# =============================================================================
+# PLACEHOLDER TOPICS — cards that exist in the iOS catalog but have no article yet.
+#
+# `MoneyMove.sampleData` carries a few "coming soon" teasers that are NOT in
+# money_moves.json, so they have no row, no slug and no artwork, and they sat as blank
+# tiles beside thirteen illustrated ones. These get the same treatment system and the same
+# bucket; the only difference is that their URL is compiled into the Swift static (the
+# `gen_book_covers_swift.py` precedent) because there is no `content` blob to bake it into.
+#
+# The slug is the one the article WILL have when it is authored — kebab-case of the title,
+# matching every existing entry. So when the content lands, its row takes over by slug and
+# the already-published plate is already at the right path. Nothing has to be re-uploaded.
+# =============================================================================
+PLACEHOLDER_TOPICS: dict[str, tuple[str, str, str]] = {}
 
 # =============================================================================
 # PALETTE OVERRIDES — slug -> a palette brief that REPLACES the category's.

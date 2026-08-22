@@ -6,3 +6,36 @@ __pycache__/
 .env.*
 .pytest_cache/
 .DS_Store
+
+# ---------------------------------------------------------------------------
+# Narration audio — 599 MB that ships to production and is never read there.
+#
+# The Dockerfile ends in `COPY . .` with no data/ exclusion, so every tracked byte under
+# backend/ landed in every Railway image: 688 MB, of which the running app reads about
+# 1.9 MB (the ten book_audio manifests, the two *_universe.json, whale_registry.json and
+# the two Learn content JSONs). The clips themselves are served to users from Supabase
+# Storage — book-media (10), journey-media (207), money-moves-media (16) — never from disk.
+#
+# ⚠️ KEEP everything else under data/book_audio/. `book_audio_service.py:31,45` globs
+# *.manifest.json AT IMPORT, so losing those empties BOOK_AUDIO_CATALOG and
+# GET /api/v1/learn/books/audio answers `temporarily_unavailable` for every user — and it
+# degrades at logger.warning, so nothing surfaces the failure. The *.readalong.json are the
+# read-along timings, whose only regeneration path is a forced-alignment pass over the very
+# audio excluded here. That is why these patterns name the audio extensions rather than the
+# directory.
+#
+# Consequence to know: a regeneration script run on Railway (`generate_*_audio.py`) skips
+# clips whose .m4a exists locally, and inside the container none now do. Re-run those from
+# a local checkout, or let the seeders fall back to the bucket URL as they already do.
+# ---------------------------------------------------------------------------
+data/book_audio/*.m4a
+data/book_audio/*.m4a.orig
+data/book_audio/orig/
+data/book_audio/orig_speed/
+data/journey_audio/
+data/money_moves_audio/
+data/journey_audio_gemini_bak/
+data/money_moves_audio_gemini_bak/
+data/money_moves_audio_clone/
+data/voice_samples/
+data/voice_clone/

@@ -179,7 +179,8 @@ for an app in this category:
 >
 > **In-app purchases.** Two auto-renewable subscriptions (Pro, Max) and four consumable
 > credit packs. Credits are consumed only inside the app for AI generation; they are not a
-> currency, cannot be transferred or cashed out, and expire per the Terms.
+> currency, cannot be transferred or cashed out. Purchased credit packs **do not expire**
+> (Guideline 3.1.1); the monthly subscription allowance resets separately each month.
 >
 > **Background modes.** `remote-notification` — opt-in push for price alerts, earnings and
 > watchlist moves, all user-configurable in Settings and off until permission is granted.

@@ -40,6 +40,13 @@ struct MoneyMoveArticleHeroHeader: View {
     var onBackTapped: (() -> Void)?
     var onShareTapped: (() -> Void)?
 
+    /// Whether this topic is the one saved topic (MoneyMoveBookmarkStore, keyed by slug).
+    /// `nil` hides the control entirely — an article with no slug has no id to save under
+    /// (unauthored placeholder cards), and a button that silently does nothing is worse than
+    /// no button.
+    var isBookmarked: Bool?
+    var onBookmarkTapped: (() -> Void)?
+
     /// Bottom edge of the back/share row, in `MoneyMoveArticleSpace.screen`. Drives when the
     /// sticky bar's CHROME arrives — i.e. the moment this screen's own back button leaves.
     var onNavBottomChange: ((CGFloat) -> Void)?
@@ -99,14 +106,30 @@ struct MoneyMoveArticleHeroHeader: View {
 
             Spacer()
 
-            Button(action: { onShareTapped?() }) {
-                Image(systemName: "square.and.arrow.up")
-                    .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textPrimary)
-                    .frame(width: 36, height: 36)
-                    .background(Circle().fill(AppColors.cardBackground))
+            HStack(spacing: AppSpacing.sm) {
+                // Save this topic. `primaryBlue` when filled — a TEXT-role token, which is what
+                // a meaningful glyph needs; the *Graphic tokens are 3:1 and must not leak here.
+                if let isBookmarked {
+                    Button(action: { onBookmarkTapped?() }) {
+                        Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
+                            .font(AppTypography.iconDefault).fontWeight(.semibold)
+                            .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textPrimary)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(AppColors.cardBackground))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .accessibilityLabel(isBookmarked ? "Remove saved topic" : "Save this topic")
+                }
+
+                Button(action: { onShareTapped?() }) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textPrimary)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(AppColors.cardBackground))
+                }
+                .buttonStyle(PlainButtonStyle())
             }
-            .buttonStyle(PlainButtonStyle())
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.md)

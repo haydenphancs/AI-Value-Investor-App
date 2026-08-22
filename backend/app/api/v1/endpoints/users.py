@@ -14,6 +14,7 @@ from typing import Optional
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.database import get_auth_client, get_supabase
 from app.dependencies import (
+    AvatarRateLimit,
     ProfileRateLimit,
     get_current_user,
     get_current_user_or_guest,  # TEMP: guest fallback
@@ -26,6 +27,13 @@ from app.schemas.investor_profile import (
 )
 from app.services.agents.investor_profile_prompt import may_apply_profile
 from app.services.entitlements import required_tier_for_signals
+from app.services import avatar_service
+from app.services.avatar_service import (
+    AvatarError,
+    AvatarInvalidImageError,
+    AvatarStorageError,
+    AvatarTooLargeError,
+)
 from app.services.user_investor_profile_service import (
     ProfileUnreadable,
     get_user_investor_profile_service,
@@ -33,7 +41,12 @@ from app.services.user_investor_profile_service import (
     merge_profiles,
     would_personalize,
 )
-from app.schemas.user import UserResponse, UserCreditsResponse, UpdateProfileRequest
+from app.schemas.user import (
+    UserResponse,
+    UserCreditsResponse,
+    UpdateProfileRequest,
+    UpdateAvatarRequest,
+)
 from app.schemas.subscription import SubscriptionResponse
 from app.schemas.settings import (
     UserSettingsResponse,
@@ -131,13 +144,50 @@ def credits_response_from_rows(rows: list) -> UserCreditsResponse:
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
     user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
 ):
-    """Get current user profile."""
+    """Get current user profile.
+
+    Does two things to `avatar_url` on the way out, both best-effort and both silent to the
+    caller when they fail:
+
+    1. **Imports a third-party avatar once.** `public.handle_new_auth_user()` copies
+       `raw_user_meta_data->>'avatar_url'` into `public.users` at signup, so every Google
+       sign-in arrives already pointing at `lh3.googleusercontent.com`. Left alone, the app
+       re-fetches from Google on every render — disclosing the user's IP to a third party our
+       privacy policy's service-provider list does not name, and leaving the image outside our
+       retention and deletion story. We re-host it once, here, on the first authenticated read
+       after signup, and rewrite the column.
+    2. **Signs it.** The bucket is private (migration 152).
+    """
+    user_id = user["id"]
+    avatar_url = user.get("avatar_url")
+
+    if avatar_service.is_external(avatar_url):
+        imported = await avatar_service.import_external_avatar(user_id, avatar_url)
+        if imported:
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("users")
+                    .update({"avatar_url": imported, "updated_at": _now_iso()})
+                    .eq("id", user_id)
+                    .execute()
+                )
+                avatar_url = imported
+            except Exception as exc:  # noqa: BLE001 — non-fatal, see below
+                # The object is stored but the column still points at Google. Not fatal and
+                # not silent: we keep serving the external URL and retry on the next read.
+                # The orphan is swept by the account-deletion purge.
+                logger.warning(
+                    "[Avatar] could not persist the imported avatar for user=%s: %s",
+                    user_id, f"{type(exc).__name__}: {exc}",
+                )
+
     return UserResponse(
-        id=user["id"],
+        id=user_id,
         email=user["email"],
         display_name=user.get("display_name"),
-        avatar_url=user.get("avatar_url"),
+        avatar_url=await avatar_service.signed_avatar_url(user_id, avatar_url),
         tier=user.get("tier", "free"),
         created_at=user["created_at"],
         updated_at=user.get("updated_at"),
@@ -876,10 +926,13 @@ async def update_profile(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
-    """Update current user profile (display_name, avatar_url).
+    """Update current user profile (display_name).
 
     Lengths are bounded on the schema (see `UpdateProfileRequest`); the trim happens here
     because a name that is ALL whitespace passes `min_length=1` and would blank the row.
+
+    `avatar_url` is NOT updatable here — it is server-owned, written only by
+    POST/DELETE /users/me/avatar. See `UpdateProfileRequest`'s docstring for why.
     """
     update_data = request.model_dump(exclude_none=True)
 
@@ -908,16 +961,168 @@ async def update_profile(
         "id", user["id"]
     ).execute()
 
+    # A Supabase UPDATE that matches ZERO rows does not raise — it returns `data == []`.
+    # Falling back to `user` answers 200 carrying the PRE-update values, so the client
+    # adopts them and the edit silently reverts with nothing logged anywhere. Keep the
+    # fallback (it is the safe render) but make the anomaly loud.
+    if not result.data:
+        logger.error(
+            "Profile update matched no rows for user=%s — responding with pre-update values",
+            user["id"],
+        )
     updated = result.data[0] if result.data else user
     return UserResponse(
         id=updated["id"],
         email=updated["email"],
         display_name=updated.get("display_name"),
-        avatar_url=updated.get("avatar_url"),
+        avatar_url=await avatar_service.signed_avatar_url(
+            user["id"], updated.get("avatar_url")
+        ),
         tier=updated.get("tier", "free"),
         created_at=updated["created_at"],
         updated_at=updated.get("updated_at"),
     )
+
+
+# ── Profile picture ───────────────────────────────────────────────────────────────────────
+#
+# `avatar_url` is SERVER-OWNED: these two routes are its only writers. The bytes go to the
+# private `user-avatars` bucket (migration 152) under a content-addressed, server-derived key,
+# and the read paths above hand back a short-lived signed URL.
+
+
+def _avatar_response(user: dict, row: dict, signed: Optional[str]) -> UserResponse:
+    return UserResponse(
+        id=row.get("id", user["id"]),
+        email=row.get("email", user["email"]),
+        display_name=row.get("display_name"),
+        avatar_url=signed,
+        tier=row.get("tier", user.get("tier", "free")),
+        created_at=row.get("created_at", user["created_at"]),
+        updated_at=row.get("updated_at"),
+    )
+
+
+def _write_avatar_url(supabase: Client, user_id: str, url: Optional[str]):
+    return (
+        supabase.table("users")
+        .update({"avatar_url": url, "updated_at": _now_iso()})
+        .eq("id", user_id)
+        .execute()
+    )
+
+
+@router.post("/me/avatar", response_model=UserResponse)
+async def upload_my_avatar(
+    request: UpdateAvatarRequest,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+    _rate: None = AvatarRateLimit,
+):
+    """Set the caller's profile picture from a base64 JPEG.
+
+    Order is store → write → delete-the-old, and each step's failure mode is deliberate:
+
+    * store fails  → nothing changed, AVATAR_UPLOAD_FAILED, the old picture still shows.
+    * write fails  → the just-uploaded object is orphaned, so we remove it again rather than
+      leave a byte nobody references. Answering 200 here would be worse than an error: the
+      client adopts the response, and a response built from an unwritten row carries the OLD
+      avatar_url, so the user's new picture silently vanishes.
+    * delete fails → warned, non-fatal. An orphan is swept by account deletion.
+
+    The previous object is removed only AFTER the write is confirmed. Deleting it first would
+    404 any view still rendering the old URL and flash the placeholder glyph.
+    """
+    user_id = user["id"]
+    previous_url = user.get("avatar_url")
+
+    try:
+        jpeg = avatar_service.decode_and_validate(request.image_base64)
+    except AvatarTooLargeError as exc:
+        logger.warning("[Avatar] rejected oversize upload user=%s: %s", user_id, exc)
+        return make_error_response(ErrorCode.AVATAR_TOO_LARGE, message=str(exc))
+    except AvatarInvalidImageError as exc:
+        logger.warning("[Avatar] rejected invalid upload user=%s: %s", user_id, exc)
+        return make_error_response(ErrorCode.AVATAR_INVALID_IMAGE, message=str(exc))
+
+    try:
+        stored_url = await avatar_service.store_avatar(user_id, jpeg)
+    except AvatarError as exc:
+        return make_error_response(
+            ErrorCode.AVATAR_UPLOAD_FAILED,
+            message=f"{type(exc).__name__}: {exc}",
+            details={"step": "store"},
+        )
+
+    try:
+        result = await asyncio.to_thread(_write_avatar_url, supabase, user_id, stored_url)
+    except Exception as exc:  # noqa: BLE001 — surfaced immediately below
+        logger.error(
+            "[Avatar] profile write failed user=%s: %s",
+            user_id, f"{type(exc).__name__}: {exc}",
+        )
+        await avatar_service.remove_object(user_id, stored_url)
+        return make_error_response(
+            ErrorCode.AVATAR_UPLOAD_FAILED,
+            message=f"{type(exc).__name__}: {exc}",
+            details={"step": "persist"},
+        )
+
+    # Zero rows is NOT an exception in the Supabase SDK. Untreated it becomes a silent
+    # success: the object exists, the column does not point at it, and the client renders the
+    # placeholder again with no error anywhere.
+    if not result.data:
+        logger.error("[Avatar] profile write matched no rows for user=%s", user_id)
+        await avatar_service.remove_object(user_id, stored_url)
+        return make_error_response(
+            ErrorCode.AVATAR_UPLOAD_FAILED,
+            message="profile update matched no rows",
+            details={"step": "persist"},
+        )
+
+    if previous_url and previous_url != stored_url:
+        await avatar_service.remove_object(user_id, previous_url)
+
+    signed = await avatar_service.signed_avatar_url(user_id, stored_url)
+    logger.info("[Avatar] updated for user=%s", user_id)
+    return _avatar_response(user, result.data[0], signed)
+
+
+@router.delete("/me/avatar", response_model=UserResponse)
+async def delete_my_avatar(
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+    _rate: None = AvatarRateLimit,
+):
+    """Remove the caller's profile picture, reverting to the placeholder glyph.
+
+    The column is cleared FIRST and the object removed after: if the remove fails the user
+    still sees the change they asked for, and the orphan is swept by account deletion. The
+    reverse order would leave a column pointing at a deleted object — a 404 render, which is
+    indistinguishable from a broken avatar.
+    """
+    user_id = user["id"]
+    previous_url = user.get("avatar_url")
+
+    try:
+        result = await asyncio.to_thread(_write_avatar_url, supabase, user_id, None)
+    except Exception as exc:  # noqa: BLE001 — surfaced immediately below
+        logger.error(
+            "[Avatar] clear failed user=%s: %s", user_id, f"{type(exc).__name__}: {exc}"
+        )
+        return make_error_response(
+            ErrorCode.AVATAR_UPLOAD_FAILED, message=f"{type(exc).__name__}: {exc}"
+        )
+
+    if not result.data:
+        logger.error("[Avatar] clear matched no rows for user=%s", user_id)
+        return make_error_response(
+            ErrorCode.AVATAR_UPLOAD_FAILED, message="profile update matched no rows"
+        )
+
+    await avatar_service.remove_object(user_id, previous_url)
+    logger.info("[Avatar] removed for user=%s", user_id)
+    return _avatar_response(user, result.data[0], None)
 
 
 # User-keyed tables with NO foreign key to public.users, so the auth.users cascade does
@@ -975,6 +1180,7 @@ _UNLINKED_IDENTITY_TABLES: tuple[str, ...] = (
 )
 
 _RESEARCH_PDF_BUCKET = "research-pdfs"
+_AVATAR_BUCKET = avatar_service.BUCKET
 
 
 def _purge_unlinked_rows(supabase: Client, user_id: str) -> dict[str, str]:
@@ -1072,6 +1278,69 @@ def _purge_research_pdfs(supabase: Client, user_id: str) -> Optional[str]:
         return f"{type(e).__name__}: {e}"
 
 
+def _purge_avatars(supabase: Client, user_id: str) -> Optional[str]:
+    """Delete the user's profile pictures from Storage.
+
+    Mirrors `_purge_research_pdfs` — same pagination, same offset-stays-0 reasoning, same
+    Optional[str] contract (None = done, a string = the failure to report).
+
+    ⚠️ ONE DELIBERATE DIFFERENCE: a MISSING BUCKET is treated as a completed purge.
+    `research-pdfs` has existed since migration 063, but `user-avatars` arrives with 152 and
+    the user applies migrations by hand — so there is a real window where the code is deployed
+    and the bucket is not. Without this carve-out, `bucket.list()` raises, `failures` is set,
+    and DELETE /users/me returns ACCOUNT_DELETE_INCOMPLETE for EVERY user, including the ~all
+    of them who never uploaded a picture. An account the user cannot delete is an App Store
+    5.1.1(v) break. `_purge_unlinked_rows` carries the same carve-out for a dropped TABLE
+    (PGRST205 / 42P01) for exactly this reason.
+    """
+    prefix = f"{avatar_service.PREFIX}/{user_id}"
+    _PAGE = 100
+    _MAX_PAGES = 500
+    try:
+        bucket = supabase.storage.from_(_AVATAR_BUCKET)
+        removed = 0
+        for page in range(_MAX_PAGES):
+            entries = bucket.list(
+                prefix, {"limit": _PAGE, "offset": 0, "sortBy": {"column": "name", "order": "asc"}}
+            ) or []
+            names = [e["name"] for e in entries if isinstance(e, dict) and e.get("name")]
+            if not names:
+                break
+            bucket.remove([f"{prefix}/{name}" for name in names])
+            removed += len(names)
+            if len(names) < _PAGE:
+                break
+        else:
+            msg = f"still not empty after {_MAX_PAGES} pages ({removed} removed)"
+            logger.error(
+                "Account deletion: avatar purge incomplete for user=%s: %s", user_id, msg
+            )
+            return msg
+
+        if removed:
+            logger.info(
+                "Account deletion: removed %d avatar object(s) for user=%s", removed, user_id
+            )
+        return None
+    except Exception as e:  # noqa: BLE001 — classified, then recorded or waived below
+        detail = str(e)
+        if "not found" in detail.lower() or "404" in detail:
+            # The bucket itself is absent. There is nothing of this user's to delete, so the
+            # purge is vacuously complete — do NOT block the deletion. Loud, because the only
+            # legitimate cause is a migration that has not been applied yet.
+            logger.warning(
+                "Account deletion: bucket %s is missing — treating the avatar purge as "
+                "complete for user=%s. Apply migration 152 (%s: %s)",
+                _AVATAR_BUCKET, user_id, type(e).__name__, e,
+            )
+            return None
+        logger.error(
+            "Account deletion: failed to purge avatars for user=%s: %s: %s",
+            user_id, type(e).__name__, e,
+        )
+        return f"{type(e).__name__}: {e}"
+
+
 @router.delete("/me")
 async def delete_account(
     user: dict = Depends(get_current_user),
@@ -1121,6 +1390,10 @@ async def delete_account(
     pdf_error = _purge_research_pdfs(supabase, user_id)
     if pdf_error:
         failures[f"storage:{_RESEARCH_PDF_BUCKET}"] = pdf_error
+
+    avatar_error = _purge_avatars(supabase, user_id)
+    if avatar_error:
+        failures[f"storage:{_AVATAR_BUCKET}"] = avatar_error
 
     # 2. Tables the cascade cannot reach.
     failures.update(_purge_unlinked_rows(supabase, user_id))

@@ -59,7 +59,24 @@ class UserCreditsResponse(BaseModel):
 #: value is safe to render in a fixed-height row, log, and embed in a support report.
 DISPLAY_NAME_MAX_LENGTH = 64
 #: Practical ceiling for an avatar URL. Well above any real CDN URL.
+#:
+#: Still load-bearing after `avatar_url` stopped being client-writable: `store_avatar`
+#: asserts the URL it CONSTRUCTS against this before writing it, so a future storage-host
+#: change that blows past 2048 fails loudly here instead of silently truncating in a column
+#: that has no CHECK (`users.avatar_url` is a bare `text`).
 AVATAR_URL_MAX_LENGTH = 2048
+
+#: Largest avatar we will STORE, measured on the decoded JPEG.
+#:
+#: The client sends a 512x512 q0.8 JPEG, which measures ~40-90 KB in practice, so 384 KB is
+#: ~4x headroom for a pathological photo rather than a limit real users meet.
+#:
+#: ⚠️ This is enforced in `avatar_service.decode_and_validate`, NOT as a `max_length` on the
+#: base64 field below — and that is deliberate. A Pydantic length error is raised BEFORE the
+#: handler runs, so it surfaces as a 422 carrying the validator's own text ("String should
+#: have at most N characters") instead of AVATAR_TOO_LARGE. The typed code would have been
+#: unreachable for the exact input it was written for.
+AVATAR_MAX_BYTES = 384 * 1024
 
 
 class UpdateProfileRequest(BaseModel):
@@ -76,9 +93,34 @@ class UpdateProfileRequest(BaseModel):
     `min_length=1` on the name because `exclude_none=True` only drops `None`: an empty string
     is a real value and would have blanked the name to "" — which the iOS side then renders as
     an empty row rather than falling back to "Investor" (that fallback is `nil`-only).
+
+    ⚠️ `avatar_url` is NOT here any more, and must not come back. It is SERVER-OWNED: the only
+    writers are `POST /users/me/avatar` (which constructs the URL from bytes it validated and
+    stored) and `DELETE /users/me/avatar`. While it was client-writable, any holder of a valid
+    token could point their own avatar at an arbitrary URL — including one inside our own
+    private Storage bucket, which the read path then SIGNS. Removing the field is what makes the
+    signer's "only this caller's own object prefix" rule an invariant rather than a hope.
     """
 
     display_name: Optional[str] = Field(
         default=None, min_length=1, max_length=DISPLAY_NAME_MAX_LENGTH
     )
-    avatar_url: Optional[str] = Field(default=None, max_length=AVATAR_URL_MAX_LENGTH)
+
+
+class UpdateAvatarRequest(BaseModel):
+    """`POST /users/me/avatar` — the profile picture, base64-encoded.
+
+    Base64-in-JSON rather than multipart, because `APIClient.buildRequest` on iOS hardcodes
+    `Content-Type: application/json` and `httpBody = encoder.encode(body)` for the single funnel
+    behind every request the app makes. A 512x512 q0.8 JPEG is ~40-90 KB, so base64's +33% is
+    ~120 KB — comfortably inside `main._MAX_JSON_BODY_BYTES` (1 MiB), which makes changing that
+    funnel (the highest-blast-radius file in the client) unnecessary for ~90 KB of pixels.
+
+    ⚠️ Deliberately UNBOUNDED here. See `AVATAR_MAX_BYTES`: a `max_length` would be enforced by
+    Pydantic before the handler and would preempt AVATAR_TOO_LARGE with a raw validator string.
+    The size decision belongs to `avatar_service.decode_and_validate`; the body-cap middleware
+    is the outer guard.
+    """
+
+    image_base64: str = Field(min_length=1)
+

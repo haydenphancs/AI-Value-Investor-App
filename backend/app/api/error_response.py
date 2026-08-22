@@ -69,6 +69,17 @@ class ErrorCode(str, Enum):
     # On a fresh install that is close to nothing — and it propagates everywhere.
     SETTINGS_UNAVAILABLE = "SETTINGS_UNAVAILABLE"
 
+    # --- Profile picture upload -------------------------------------------------------
+    # Split into three because each maps to a DIFFERENT thing the user can do, and
+    # collapsing them would put "try again" in front of a problem retrying cannot fix.
+    #   TOO_LARGE / INVALID_IMAGE -> pick a different photo (fix_input)
+    #   UPLOAD_FAILED             -> ours, transient, retry (retry_later)
+    # The client re-encodes to a 512x512 JPEG before sending, so in practice the first
+    # two mean a decode failure or a hand-rolled request, not an ordinary photo.
+    AVATAR_TOO_LARGE = "AVATAR_TOO_LARGE"
+    AVATAR_INVALID_IMAGE = "AVATAR_INVALID_IMAGE"
+    AVATAR_UPLOAD_FAILED = "AVATAR_UPLOAD_FAILED"
+
     # The notification inbox could not be READ. Same reasoning as the two above:
     # an EMPTY inbox and a BROKEN inbox look identical to a user, and "No
     # notifications yet" rendered over a database error is the kind of failure
@@ -243,6 +254,15 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.SETTINGS_UNAVAILABLE: (
         "We couldn't load your settings right now. They'll sync automatically in a moment."
     ),
+    ErrorCode.AVATAR_TOO_LARGE: (
+        "That photo is too large. Try picking a different one."
+    ),
+    ErrorCode.AVATAR_INVALID_IMAGE: (
+        "We couldn't read that photo. Try picking a different one."
+    ),
+    ErrorCode.AVATAR_UPLOAD_FAILED: (
+        "We couldn't save your photo right now. Please try again in a moment."
+    ),
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: (
         "We couldn't load your notifications right now. Pull to refresh in a moment."
     ),
@@ -363,6 +383,12 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
     ErrorCode.SETTINGS_UNAVAILABLE: "retry_later",
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: "retry_later",
+    # fix_input, NOT retry_later: the photo the user chose is the problem, and retrying
+    # the identical bytes produces the identical failure.
+    ErrorCode.AVATAR_TOO_LARGE: "fix_input",
+    ErrorCode.AVATAR_INVALID_IMAGE: "fix_input",
+    # Ours, and transient — the same photo will work on the next attempt.
+    ErrorCode.AVATAR_UPLOAD_FAILED: "retry_later",
     # Retrying is the right action AND it is safe: the purge is idempotent and the auth
     # row was kept precisely so a second attempt can reach whatever survived.
     ErrorCode.ACCOUNT_DELETE_INCOMPLETE: "retry_later",
@@ -445,6 +471,13 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.SETTINGS_UNAVAILABLE: 503,
     # Retryable, and distinguishable from "you have no notifications yet".
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: 503,
+    # 413, not 400: the request was well-formed, it was just too big. Distinct from the
+    # body-cap middleware's own 413, which fires earlier and on the whole body.
+    ErrorCode.AVATAR_TOO_LARGE: 413,
+    # 400: the bytes are not a JPEG we will store. A caller error, not ours.
+    ErrorCode.AVATAR_INVALID_IMAGE: 400,
+    # 503, not 500: Storage or the profile write was unavailable — ours, and retryable.
+    ErrorCode.AVATAR_UPLOAD_FAILED: 503,
     # 500, not 503: this is our own partial write, not an upstream being unavailable.
     ErrorCode.ACCOUNT_DELETE_INCOMPLETE: 500,
     # 409, not 400: the request was well-formed and the state is the conflict.

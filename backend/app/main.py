@@ -1276,7 +1276,15 @@ _MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 # JSON write in the app: the body is materialised and json.loads'd BEFORE Pydantic's
 # per-field `max_length` can fire, so without a cap a caller could post 50 MB and burn
 # ~150 MB of RSS per in-flight request with no credential at all.
-_BODY_CAPPED_PATH_SUFFIXES = ("/me/settings", "/users/me", "/me/investor-profile")
+# ⚠️ Matched with `str.endswith`, so a SUB-ROUTE does not inherit its parent's cap:
+# "/api/v1/users/me/avatar".endswith("/users/me") is False. The avatar route needs its own
+# entry, and it is the one route in the app that carries a payload measured in hundreds of KB.
+_BODY_CAPPED_PATH_SUFFIXES = (
+    "/me/settings",
+    "/users/me",
+    "/me/investor-profile",
+    "/me/avatar",
+)
 
 
 @app.middleware("http")
@@ -1303,7 +1311,11 @@ async def cap_json_body(request: Request, call_next):
                 content=make_error_body(
                     ErrorCode.INVALID_INPUT,
                     message=f"request body exceeds {_MAX_JSON_BODY_BYTES} bytes",
-                    user_message="Your settings couldn't be saved. Please try again.",
+                    # Route-NEUTRAL. This cap now guards four routes, and the old copy
+                    # ("Your settings couldn't be saved") told a user who had just picked a
+                    # profile picture that their settings had failed — naming a screen they
+                    # were not on.
+                    user_message="That was too large to send. Please try again.",
                 ),
             )
     return await call_next(request)

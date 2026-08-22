@@ -65,9 +65,15 @@ struct TrackingContentView: View {
                 }
 
                 // Loading overlay
-                if viewModel.isLoading {
-                    LoadingOverlay()
-                }
+                // NO LoadingOverlay here, deliberately.
+                //
+                // It is `ZStack { Color.black.opacity(0.3).ignoresSafeArea(); ProgressView() }`
+                // with no `.allowsHitTesting(false)`, so it dimmed the whole tab AND ate every
+                // tap for the 0.5–1s of the first load — the same trap removed from the five
+                // asset-detail screens (see project_ticker_detail_instant_load). The header,
+                // sub-tabs and portfolio bar always rendered outside the data gate; they were
+                // only ever covered. The Assets list now shows `TrackedAssetsSkeleton` in place
+                // of a full-screen spinner.
             }
             .sheet(isPresented: $viewModel.showAddAssetSheet) {
                 AddAssetSheet(
@@ -193,9 +199,15 @@ struct TrackingContentViewWithBinding: View {
                 }
 
                 // Loading overlay
-                if viewModel.isLoading {
-                    LoadingOverlay()
-                }
+                // NO LoadingOverlay here, deliberately.
+                //
+                // It is `ZStack { Color.black.opacity(0.3).ignoresSafeArea(); ProgressView() }`
+                // with no `.allowsHitTesting(false)`, so it dimmed the whole tab AND ate every
+                // tap for the 0.5–1s of the first load — the same trap removed from the five
+                // asset-detail screens (see project_ticker_detail_instant_load). The header,
+                // sub-tabs and portfolio bar always rendered outside the data gate; they were
+                // only ever covered. The Assets list now shows `TrackedAssetsSkeleton` in place
+                // of a full-screen spinner.
             }
             .sheet(isPresented: $viewModel.showAddAssetSheet) {
                 AddAssetSheet(
@@ -328,7 +340,12 @@ struct AssetsTabContent: View {
                 // "we couldn't load it"), so the two states are told apart here:
                 // a load failure shows the AppError copy + Retry, a genuinely
                 // empty portfolio invites the user to add a ticker.
-                if viewModel.filteredAssets.isEmpty {
+                if viewModel.filteredAssets.isEmpty && viewModel.isLoading {
+                    // Loading is NOT "you own nothing". Before this branch existed, a user
+                    // holding four tickers was told "No tickers yet — Add a ticker to start
+                    // tracking prices" for the whole first load.
+                    TrackedAssetsSkeleton()
+                } else if viewModel.filteredAssets.isEmpty {
                     AssetsPlaceholderCard(
                         errorMessage: viewModel.assetsErrorMessage,
                         isLoading: viewModel.isLoading,
@@ -417,6 +434,26 @@ struct WhalesTabContent: View {
                         onActivityTapped: { activity in viewModel.viewTradeGroupDetail(activity) },
                         onMoreTapped: { viewModel.viewMoreRecentTrades() }
                     )
+                }
+
+                // Whale data no longer blocks the Assets tab, so this sub-tab can be opened
+                // before it lands. Every section above is `if !isEmpty`, so without this the
+                // tab renders as a blank page — indistinguishable from "you follow nobody and
+                // no whale has traded". Inline and non-blocking on purpose: the full-screen
+                // LoadingOverlay that used to cover this is exactly what was removed.
+                if viewModel.isLoadingWhales
+                    && viewModel.trackedWhales.isEmpty
+                    && viewModel.groupedWhaleTrades.isEmpty
+                    && viewModel.allPopularWhales.isEmpty {
+                    VStack(spacing: AppSpacing.md) {
+                        ProgressView()
+                            .tint(AppColors.primaryBlue)
+                        Text("Loading investors\u{2026}")
+                            .font(AppTypography.bodySmall)
+                            .foregroundColor(AppColors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, AppSpacing.xxl)
                 }
 
                 // A roster load that failed outright. Rendered ABOVE Most Popular so it
@@ -1034,7 +1071,10 @@ struct WhaleCard: View {
 
                         if whale.hasActivityNotice {
                             TintedTagBadge(
-                                text: whale.activityLabel,
+                                // The short STATUS word, not the server's sentence. The
+                                // sentence belongs on the profile, where there is room to
+                                // read it; here it only ever truncated.
+                                text: whale.activityChipLabel,
                                 color: whale.activityStatus == "dormant"
                                     || whale.activityStatus == "inactive"
                                     ? AppColors.caution

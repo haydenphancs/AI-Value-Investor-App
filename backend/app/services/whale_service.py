@@ -3531,6 +3531,11 @@ class WhaleService:
 # ── Module-Level Helpers ─────────────────────────────────────────────
 
 
+# The roster chip for a filer marked inactive BY HAND whose filings still look current.
+# Short by contract: `activity_label` is rendered in a capsule badge, not a paragraph.
+_CURATED_INACTIVE_LABEL = "Inactive"
+
+
 def _activity_for(row: Dict[str, Any]) -> Activity:
     """Classify one `whales` row. Curated status wins over the derived one."""
     derived = compute_activity(
@@ -3540,11 +3545,28 @@ def _activity_for(row: Dict[str, Any]) -> Activity:
     )
     # A human-written note is a STATED reason; the derived label is an inferred one.
     # "Nancy Pelosi retired" can never be derived — she still shows recent trades — so
-    # when somebody has written it down, it wins.
-    note = str(row.get("lifecycle_note") or "").strip()
+    # when somebody has written it down, the STATUS it implies wins.
+    #
+    # ⚠️ The note itself must NOT become `label`. `label` is the roster CHIP
+    # (`WhaleResponse.activity_label`, documented as e.g. "Last filed Q3 2025") and iOS
+    # renders it in a `TintedTagBadge` capsule. A curated note is PROSE — Burry's is 172
+    # characters — and it wrapped that capsule into a near-square block, which `Capsule()`
+    # then drew as a CIRCLE with the sentence clipped inside it. Captured on device.
+    #
+    # The prose already has its own channel: `WhaleProfileResponse.lifecycle_note`, which
+    # the profile prefers verbatim (iOS `activityNotice`) and renders in the multi-line
+    # `WhaleActivityNotice`. Nothing is lost here — only the chip stays a chip.
     status = str(row.get("lifecycle_status") or "").strip().lower()
     if status and status != "active":
-        return Activity(status="inactive", label=note or derived.label, as_of=derived.as_of)
+        # `derived.label` is "" when the filer is still on cadence, which is exactly the
+        # curated-retirement case (Pelosi keeps filing). An empty label makes the client
+        # render NO chip at all — iOS requires both `activityStatus` and `activityLabel` to
+        # be non-empty — so the disclosure would silently vanish. Hence the short fallback.
+        return Activity(
+            status="inactive",
+            label=derived.label or _CURATED_INACTIVE_LABEL,
+            as_of=derived.as_of,
+        )
     return derived
 
 

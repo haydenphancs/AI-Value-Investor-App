@@ -956,6 +956,29 @@ struct TrendingWhale: Identifiable {
         !activityStatus.isEmpty && !activityLabel.isEmpty
     }
 
+    /// The ROSTER CHIP's text: one short word derived from the status, never the server's
+    /// sentence.
+    ///
+    /// `activityLabel` is a sentence ("No trades disclosed since Nov 2025", and for a
+    /// curated filer a whole paragraph). In a capsule beside the follower count there is
+    /// room for neither: it truncated to "No trades disclose…" — dropping the date, the
+    /// only informative half — and before that wrapped the capsule into a circle. A roster
+    /// card only needs to say THAT something is off; the profile says what, verbatim, in
+    /// `WhaleActivityNotice`.
+    var activityChipLabel: String {
+        switch activityStatus {
+        case "dormant":  return "Dormant"
+        case "inactive": return "Inactive"
+        case "late":     return "Late filing"
+        case "quiet":    return "Quiet"
+        case "none":     return "No trades yet"
+        // Any status this build does not know about. `hasActivityNotice` already gated on
+        // the server having something to say, so falling back to a neutral word keeps a
+        // future status visible instead of silently dropping the disclosure.
+        default:         return "Inactive"
+        }
+    }
+
     init(id: String = UUID().uuidString, name: String, category: WhaleCategory, avatarName: String, followersCount: Int, isFollowing: Bool, title: String = "", description: String = "", recentTradeCount: Int = 0, firmName: String? = nil, isLocked: Bool = false, isFollowingInactive: Bool = false, activityStatus: String = "", activityLabel: String = "") {
         self.id = id
         self.name = name

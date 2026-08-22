@@ -85,6 +85,10 @@ class TrackingViewModel: ObservableObject {
 
     // Loading States
     @Published var isLoading: Bool = false
+    /// Whale list + activity only. Deliberately SEPARATE from `isLoading`: those two
+    /// calls are not on the Assets tab's critical path, and conflating them is what
+    /// made the whole screen wait for them.
+    @Published private(set) var isLoadingWhales: Bool = false
     @Published var isRefreshing: Bool = false
 
     /// User-facing copy when the assets feed could not be loaded, mapped through
@@ -510,12 +514,17 @@ class TrackingViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Load assets, portfolios, and whale data in parallel.
+        // PHASE 1 — only what the Assets tab actually draws.
+        //
+        // Whale list + whale activity used to be awaited here too, and `isLoading` gates the
+        // whole screen, so the visible tab sat behind a spinner waiting for two responses it
+        // never renders (`AssetsTabContent` references no whale state at all). Measured warm
+        // against production: feed 0.21s, portfolios 0.42s, whales 0.13s + 0.10s, then a
+        // SEQUENTIAL insights hop on top — ~0.6–1.0s of gate for ~0.4s of needed data.
         async let feedTask: Bool = loadTrackingFeed()
         async let portfoliosTask: () = portfolioStore.loadPortfolios()
-        async let whalesTask: () = loadWhaleData()
 
-        let (feedSucceeded, _, _) = await (feedTask, portfoliosTask, whalesTask)
+        let (feedSucceeded, _) = await (feedTask, portfoliosTask)
 
         // Drop tickers from any portfolio that no longer exist on the master
         // watchlist (e.g. removed on another device). Only purge when the
@@ -537,10 +546,25 @@ class TrackingViewModel: ObservableObject {
             await portfolioStore.purgeTickers(notIn: allowed)
         }
 
-        // The diversification score is computed server-side (single source of
-        // truth, richer FMP data). Runs after portfolios load so the active
-        // portfolio id is known.
-        await loadPortfolioInsights()
+        // The Assets tab is renderable from here. Closing the gate now is the whole point:
+        // everything below is drawn by other surfaces and must not hold this one.
+        //
+        // The `defer` above stays as the cancellation safety net — setting it twice is
+        // idempotent, and on a cancelled load the defer is the only thing that runs.
+        isLoading = false
+
+        // PHASE 2 — off the critical path, but still AWAITED.
+        //
+        // Not detached: `loadIfNeeded()` latches `hasLoadedOnce` on this function returning,
+        // and `refresh()` drives pull-to-refresh's spinner from it. Fire-and-forget here would
+        // latch "loaded" before the data existed and end the refresh gesture early.
+        //
+        // Insights is now concurrent with the whales rather than queued behind them — it only
+        // ever needed `portfolioStore.activePortfolioId`, which the awaited portfolios call
+        // above has already set. That removes a whole round trip from the tail.
+        async let whalesTask: () = loadWhaleData()
+        async let insightsTask: () = loadPortfolioInsights()
+        _ = await (whalesTask, insightsTask)
     }
 
     /// Fetch the server-computed diversification health score for the active
@@ -613,6 +637,12 @@ class TrackingViewModel: ObservableObject {
     // MARK: - Whale Data Loading (Real API)
 
     private func loadWhaleData() async {
+        // The Whales sub-tab had no loading state of its own — it relied on the global
+        // LoadingOverlay, which is gone. Without this it would render its empty sections as
+        // though the user follows nobody and no whale has traded.
+        isLoadingWhales = true
+        defer { isLoadingWhales = false }
+
         async let listTask: () = loadWhaleList()
         async let activityTask: () = loadWhaleActivityFeed()
         _ = await (listTask, activityTask)

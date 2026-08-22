@@ -188,12 +188,15 @@ struct RichChatMessage: Identifiable {
     var sources: [ChatSource]?
     /// AI follow-up questions shown under the latest answer.
     var suggestions: [String]?
+    /// What this turn cost, when it cost less than usual. nil → render no chip.
+    var credit: ChatTurnCostDTO?
 
     /// `id` defaults to a fresh UUID (existing call sites unaffected). A caller
     /// can pass a stable id so a streaming message can be replaced in place each
     /// token without ForEach re-inserting the row.
     init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date,
-         thinking: ChatThinking? = nil, sources: [ChatSource]? = nil, suggestions: [String]? = nil) {
+         thinking: ChatThinking? = nil, sources: [ChatSource]? = nil, suggestions: [String]? = nil,
+         credit: ChatTurnCostDTO? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -201,6 +204,7 @@ struct RichChatMessage: Identifiable {
         self.thinking = thinking
         self.sources = sources
         self.suggestions = suggestions
+        self.credit = credit
     }
 
     var formattedTime: String {
@@ -651,6 +655,37 @@ struct ChatSessionDTO: Codable, Identifiable, Sendable {
     }
 }
 
+/// What one chat turn cost the user. Matches backend ``ChatTurnCost``.
+///
+/// Chat is a flat 1 credit and stays that way, so this exists to surface the cases where a
+/// turn cost LESS — a follow-up covered by the previous turn, or a credit handed back
+/// because the answer was degraded or came from a zero-cost cache hit. A normally-charged
+/// turn sends no payload at all, so there is nothing to render and no meter on every answer.
+///
+/// Every field is Optional/defaulted: this rides in `rich_content`, so it is absent on every
+/// message written before the feature shipped.
+struct ChatTurnCostDTO: Codable, Equatable, Sendable {
+    /// "charged" | "free_followup" | "refunded" | "guest"
+    let outcome: String
+    /// Credits actually retained for this turn.
+    let credits: Int
+    /// Machine-readable refund reason (`chat_cache_hit`, `chat_degraded_unmerged`, …).
+    let reason: String?
+    /// Server-authored display string. Rendered verbatim — never composed on the client, so
+    /// the wording can change without an App Store release.
+    let label: String?
+    /// Spendable balance after this turn. LIVE-ONLY: it arrives on the SSE frame and is never
+    /// persisted, because replaying "42 credits left" on a three-day-old message would be
+    /// showing a number that was true once.
+    let balance: Int?
+
+    /// Whether this turn actually moved the balance, i.e. whether a refresh is worth a request.
+    var movedCredits: Bool { outcome == "charged" || outcome == "refunded" }
+
+    /// Whether there is anything to tell the user. False for a plain charge.
+    var isWorthShowing: Bool { label?.isEmpty == false }
+}
+
 /// Matches backend ``ChatMessageResponse``.
 struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let id: String
@@ -668,6 +703,8 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let sources: [ChatSource]?
     let suggestions: [String]?
     let thinking: ChatThinking?
+    /// What this turn cost. Present only when it cost less than usual (free / refunded).
+    let credit: ChatTurnCostDTO?
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
@@ -675,7 +712,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         case sessionId = "session_id"
         case role, content, widget, widgets, citations
         case tokensUsed = "tokens_used"
-        case sources, suggestions, thinking
+        case sources, suggestions, thinking, credit
         case createdAt = "created_at"
     }
 
@@ -709,7 +746,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         // ChatSource decode above) so it renders as nothing rather than a blank chip.
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
                                thinking: thinking, sources: sources?.filter { !$0.label.isEmpty },
-                               suggestions: suggestions)
+                               suggestions: suggestions, credit: credit)
     }
 }
 

@@ -7,6 +7,7 @@ No network: gemini.generate_json is a fake.
 
 import pytest
 
+from app.config import settings
 from app.services.agents import chat_router
 from app.services.agents.chat_specialists import (
     SPECIALIST_KEYS,
@@ -90,10 +91,55 @@ async def test_router_drops_invalid_and_dedups_lenses():
 
 
 @pytest.mark.asyncio
-async def test_router_caps_at_three():
+async def test_router_caps_at_the_configured_specialist_limit():
+    """A synthesize turn never runs more lenses than `CHAT_MAX_SPECIALISTS`.
+
+    This is a COST bound, not a quality knob: each lens is its own agentic stream with
+    its own tool fan-out, and chat charges a flat 1 credit however many run.
+    """
     g = _FakeGemini('{"specialists": ["valuation","fundamentals","macro","sentiment"], "cross_domain": true}')
     r = await chat_router.route_question(g, "q")
-    assert len(r["specialists"]) == 3
+    assert len(r["specialists"]) == settings.CHAT_MAX_SPECIALISTS
+
+
+@pytest.mark.asyncio
+async def test_router_cap_follows_the_setting(monkeypatch):
+    """The cap is read per call, so a Railway env change lands on restart, not redeploy."""
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 3)
+    g = _FakeGemini('{"specialists": ["valuation","fundamentals","macro","sentiment"], "cross_domain": true}')
+    assert len((await chat_router.route_question(g, "q"))["specialists"]) == 3
+
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 2)
+    assert len((await chat_router.route_question(g, "q"))["specialists"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_router_cap_of_zero_does_not_empty_the_lens_list(monkeypatch):
+    """A misconfigured 0 must degrade to ONE lens, not to no lenses.
+
+    An empty `keys` list would take the `if not keys` branch and send EVERY turn to the
+    general fallback — a silent product outage dressed up as a cost cap.
+    """
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 0)
+    g = _FakeGemini('{"specialists": ["valuation","fundamentals"], "cross_domain": true}')
+    r = await chat_router.route_question(g, "q")
+    assert len(r["specialists"]) == 1
+    assert r["specialists"] == ["valuation"]      # the model's top pick, not "general"
+
+
+def test_router_prompt_asks_for_at_most_the_cap(monkeypatch):
+    """The prompt's lens instruction must MATCH the truncation.
+
+    Asking for "2-3" while keeping 2 would let us silently discard the lens the model
+    may have weighted highest — the cap has to be expressed to the model, not applied
+    behind its back.
+    """
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 2)
+    assert chat_router._multi_lens_phrase() == "exactly 2 lenses"
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 3)
+    assert chat_router._multi_lens_phrase() == "2-3 lenses"
+    monkeypatch.setattr(settings, "CHAT_MAX_SPECIALISTS", 1)
+    assert chat_router._multi_lens_phrase() == "a single lens"
 
 
 @pytest.mark.asyncio

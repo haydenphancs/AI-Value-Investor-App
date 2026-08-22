@@ -23,6 +23,7 @@ import SwiftUI
 struct AIChatScreen: View {
     @ObservedObject var viewModel: ChatViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appState) private var appState
 
     @State private var inputText: String = ""
     @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
@@ -112,6 +113,12 @@ struct AIChatScreen: View {
             // doesn't show a leftover banner. Conversation/session/messages are intentionally
             // preserved (resume) — only the transient error resets.
             viewModel.errorMessage = nil
+            // Hand the ViewModel the global state. This is the ONE render site for all 15
+            // hosts that present the chat, so injecting here covers every entry point without
+            // touching a single `.aiChatCover` call site. Chat is the only metered surface
+            // that never told AppState a credit had moved — this is what fixes that, and it
+            // is also what lets a 402 reach the Upgrade route.
+            viewModel.appState = appState
             // Load the history list so the top-left history icon is ready. Does NOT touch the
             // active conversation — reopening resumes whatever the caller's ViewModel holds.
             viewModel.loadHistory()
@@ -667,11 +674,24 @@ private struct AIChatCoverModifier: ViewModifier {
     @Binding var isPresented: Bool
     let viewModel: ChatViewModel
     @State private var token: ChatCoverToken?
+    @Environment(\.appState) private var appState
 
     func body(content: Content) -> some View {
         content
             .fullScreenCover(item: $token) { _ in
                 AIChatScreen(viewModel: viewModel)
+                    // A fullScreenCover is its own presentation: the root's error toast and
+                    // its `showPaywallFromError` sheet render BEHIND it and are never seen.
+                    // Without this, routing a 402 to `appState.handleError` produces an
+                    // invisible toast and an invisible Buy Credits sheet — i.e. decoding the
+                    // 402 correctly would still leave the user with no way out.
+                    .errorPresentationHost()
+                    // Re-inject explicitly. `EnvironmentValues.appState` is declared with a
+                    // default `AppState()`, so a broken inheritance chain across a
+                    // presentation boundary FAILS SILENTLY into a throwaway instance — the
+                    // balance would simply never update and the sheet would never open, with
+                    // no crash and no log. Same defence ProfileView and iosApp use for theirs.
+                    .environment(\.appState, appState)
             }
             .onChange(of: isPresented) { _, present in
                 // Create a stable token on present (don't replace an existing one — that would

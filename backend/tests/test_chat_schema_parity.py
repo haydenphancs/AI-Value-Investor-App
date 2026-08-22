@@ -62,6 +62,10 @@ _MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {
     # fine and old builds ignore them): the thinking card + sources pills + follow-up chips.
     # `widgets` (Phase 2) is the multi-widget list; `widget` stays for back-compat.
     "sources", "suggestions", "thinking",
+    # `credit` — what the turn cost (rich_content-backed, migration-free like the rest).
+    # Present ONLY on a free or refunded turn; absent on every legacy row and every
+    # normally-charged one, so iOS decodes it Optional and renders no chip by default.
+    "credit",
 }
 
 # iOS StockChartWidgetData / MarketOverviewWidgetData non-optional properties.
@@ -500,3 +504,71 @@ def test_update_response_row_decodes_like_a_list_row():
     _assert_keys_subset(_SESSION_ALL_KEYS, dumped, "update response")
     _assert_required_non_null(dumped, _SESSION_REQUIRED, "update response")
     assert dumped["is_saved"] is True and dumped["message_count"] == 6
+
+
+# ── Turn-cost chip (`rich_content["credit"]`) ───────────────────────
+#
+# Chat is a flat 1 credit and stays that way; the only thing the user is ever told is when
+# a turn cost them LESS. That makes this field's ABSENCE the common case and its presence
+# the exception — the opposite of most fields here, and the reason both directions are pinned.
+
+_CREDIT_KEYS = {"outcome", "credits", "reason", "label"}
+
+
+def test_message_surfaces_the_turn_cost_chip_from_rich_content():
+    """A refunded turn re-shows its chip on a HISTORY RELOAD, not just live on the stream."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "answer",
+        "created_at": "2026-08-22T00:00:00.000000+00:00",
+        "rich_content": {
+            "credit": {
+                "outcome": "refunded",
+                "credits": 0,
+                "reason": "chat_degraded_unmerged",
+                "label": "1 credit refunded — this answer came back incomplete",
+            },
+        },
+    }
+    dumped = _row_to_message(row).model_dump()
+    _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "credit message")
+    _assert_required_non_null(dumped, _MESSAGE_REQUIRED, "credit message")
+    assert dumped["credit"]["outcome"] == "refunded"
+    assert dumped["credit"]["credits"] == 0
+    assert dumped["credit"]["label"].endswith("incomplete")
+
+
+def test_message_credit_payload_carries_only_ios_mapped_keys():
+    """Pins the chip's shape. A backend rename here does not crash iOS — `credit` is a
+    dictionary on the wire — it silently BLANKS the chip, which is the failure mode a
+    decode test would never catch."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "a",
+        "created_at": "2026-08-22T00:00:00.000000+00:00",
+        "rich_content": {"credit": {
+            "outcome": "free_followup", "credits": 0, "reason": None, "label": "Free follow-up",
+        }},
+    }
+    got = set(_row_to_message(row).model_dump()["credit"].keys())
+    assert got == _CREDIT_KEYS, f"credit payload keys drifted: {got ^ _CREDIT_KEYS}"
+
+
+def test_a_normally_charged_row_has_no_credit_chip():
+    """The common case. A turn that simply cost 1 credit stores nothing, so iOS renders
+    nothing — no meter on every answer."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "a",
+        "created_at": "2026-08-22T00:00:00.000000+00:00",
+        "rich_content": {"thinking": {"stages": [], "source_count": 0, "elapsed_ms": 10}},
+    }
+    assert _row_to_message(row).model_dump()["credit"] is None
+
+
+def test_legacy_row_without_rich_content_has_no_credit_chip():
+    """Every message written before this feature. Must decode, not explode."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "a",
+        "created_at": "2026-07-01T00:00:00.000000+00:00",
+    }
+    dumped = _row_to_message(row).model_dump()
+    _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "legacy row")
+    assert dumped["credit"] is None

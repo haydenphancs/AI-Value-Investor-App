@@ -388,14 +388,27 @@ class ChatService:
             "asset_type": asset_type,
         }
 
-    async def stream_synthesis(self, prep, user_message, route, tools, tool_handlers):
+    async def stream_synthesis(
+        self, prep, user_message, route, tools, tool_handlers, *, signals=None,
+    ):
         """Cross-domain multi-agent: run each specialist's agentic answer in PARALLEL (non-streamed),
         then STREAM a synthesized answer that merges their perspectives.
 
         Yields the same (kind, payload) events the endpoint consumes: ("thought"|"answer", str) plus
         ("widget", dict) for each specialist's renderable widget (the endpoint dedups). Bounded
-        (max_rounds=2 per specialist, ≤3 specialists from the router). Degrades to a single general
-        agentic stream if every specialist fails, so the user always gets a reply."""
+        (max_rounds=2 per specialist, at most CHAT_MAX_SPECIALISTS from the router). Degrades to a
+        single general agentic stream if every specialist fails, so the user always gets a reply.
+
+        `signals` is an optional dict the caller owns; this sets `signals["degraded"]` to a short
+        reason when the turn DELIVERED an answer that is materially less than the one promised, so
+        the endpoint can hand the credit back. It is a mutable sink rather than a new yield kind
+        for two reasons: an async generator cannot `return` a value alongside `yield`, and adding a
+        kind would change a contract three call sites and `test_chat_agentic_stream.py` already
+        pin. Keyword-only with a None default, so every existing caller is untouched.
+
+        The two degraded shapes are deliberately the ones the USER CAN SEE us under-deliver on: the
+        `routing` SSE frame has already told them which lenses we are consulting, so answering with
+        one generic reply instead is a broken on-screen promise, not merely an internal fallback."""
         from app.services.agents.chat_specialists import apply_specialist, get_specialist
         from app.services.agents.chat_tools import widget_from_tool_result
 
@@ -432,6 +445,9 @@ class ChatService:
 
         if not results:
             # Every specialist failed → a single general agentic answer so the turn still completes.
+            # The user was told on screen which lenses we were consulting; none of them ran.
+            if signals is not None:
+                signals["degraded"] = "no_specialists"
             async for ev in self.gemini.stream_agentic(
                 prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                 system_instruction=prep["system_instruction"],
@@ -472,6 +488,10 @@ class ChatService:
         # specialist answers. The merge_yielded guard still prevents a double answer when partial
         # text already streamed. No Gemini call needed — the answer is already in hand.
         if not merge_yielded:
+            # The synthesis prompt's explicit contract ("do NOT list them separately") never ran;
+            # the user gets one lens's raw answer where a merged one was promised.
+            if signals is not None:
+                signals["degraded"] = "unmerged"
             yield "answer", results[0]["answer"]
 
     # Screen context_type → the human "source" label shown in the thinking card.
@@ -549,7 +569,18 @@ class ChatService:
         """Best-effort: 2 short follow-up questions the user might ask next, phrased as the
         USER would. Identity-guarded — reuses the Cay AI system instruction so the model can
         never leak "Gemini/LLM/language model" into a suggestion. Never raises: on any failure
-        (quota, timeout, bad JSON) returns [] so the answer + card are unaffected."""
+        (quota, timeout, bad JSON) returns [] so the answer + card are unaffected.
+
+        Runs on the CHEAP model. This fires on every single turn and was on the flagship,
+        making it a permanent per-turn tax second only to the answer itself — for two chips
+        of at most 60 characters each, generated from an answer that is already written.
+
+        Unlike `chat_router.select_model`, this needs no eval gate and no feature flag:
+        the flag on the answer path exists because a weaker model changes PROSE THE USER
+        READS AS THE ANSWER. Suggestions are neither prose nor an answer, they are already
+        best-effort (`[]` on any failure is a supported outcome and degrades to no chips),
+        and the identity guard is the system instruction, which does not change with the
+        model."""
         try:
             system = self._build_system_instruction("NORMAL", None)
             prompt = (
@@ -561,7 +592,9 @@ class ChatService:
                 f"CAY AI ANSWERED:\n{answer[:1500]}\n\n"
                 'Return ONLY JSON of the form {"suggestions": ["...", "..."]}.'
             )
-            result = await self.gemini.generate_json(prompt, system_instruction=system)
+            result = await self.gemini.generate_json(
+                prompt, system_instruction=system, model_name=settings.CHAT_CHEAP_MODEL,
+            )
             data = json.loads(result.get("text") or "{}")
             raw = data.get("suggestions") or []
             # Dedup case-insensitively, preserving order: the model can echo the same question twice,

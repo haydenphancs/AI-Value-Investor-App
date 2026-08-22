@@ -1,6 +1,6 @@
 """Chat question router for the multi-agent chat (Phase 3).
 
-A cheap classification call (flash-lite) maps a user question → the 1-3 most relevant specialist
+A cheap classification call (flash-lite) maps a user question → the most relevant specialist
 lenses + whether it's genuinely cross-domain (→ synthesize) or focused (→ a single specialist, the
 fast path). NEVER raises: any failure / bad JSON / quota falls back to the general specialist in
 single mode, so routing can never break the chat.
@@ -37,6 +37,31 @@ def _fallback() -> Dict[str, Any]:
     return {"specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True}
 
 
+def _max_specialists() -> int:
+    """How many lenses a synthesize turn may run. Read per call, never captured at import,
+    so the Railway env var takes effect on restart without a redeploy.
+
+    Floored at 1: a 0 or negative value would leave `keys` empty and send every turn down
+    the `_fallback()` general path, which is a silent product outage rather than a cost cap.
+    """
+    return max(1, int(getattr(settings, "CHAT_MAX_SPECIALISTS", 2) or 1))
+
+
+def _multi_lens_phrase() -> str:
+    """The prompt's cross-domain instruction, matched to the cap.
+
+    Asking for "2-3" while truncating to 2 would make the model rank three lenses and let
+    us silently discard the one it may have weighted highest; asking for the cap directly
+    means the lenses we keep are the ones it actually chose.
+    """
+    cap = _max_specialists()
+    if cap <= 1:
+        return "a single lens"
+    if cap == 2:
+        return "exactly 2 lenses"
+    return f"2-{cap} lenses"
+
+
 async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
     """Classify ``user_message`` into specialist lenses.
 
@@ -55,7 +80,7 @@ async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
             f"QUESTION: {msg[:400]}\n\n"
             "Rules:\n"
             "- Pick the SINGLE best lens for a focused question.\n"
-            "- Pick 2-3 lenses ONLY if the question genuinely spans multiple domains "
+            f"- Pick {_multi_lens_phrase()} ONLY if the question genuinely spans multiple domains "
             "(e.g. 'is X a good long-term buy?' → valuation + fundamentals; "
             "'why is the market shaky and should I worry about my tech stocks?' → macro + sentiment).\n"
             "- 'education' for concept explanations; 'general' if nothing else fits.\n"
@@ -70,7 +95,7 @@ async def route_question(gemini: Any, user_message: str) -> Dict[str, Any]:
                 kk = k.strip().lower()
                 if kk in _VALID and kk not in keys:
                     keys.append(kk)
-        keys = keys[:3]
+        keys = keys[: _max_specialists()]
         if not keys:
             keys = ["general"]
         cross_domain = bool(data.get("cross_domain")) and len(keys) > 1

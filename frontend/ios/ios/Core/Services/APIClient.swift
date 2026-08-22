@@ -480,21 +480,32 @@ actor APIClient {
             }
             switch http.statusCode {
             case 401:
-                // `session.bytes` yields no Data, so read a bounded prefix of the body to
-                // recover the structured code. Capped so a misbehaving endpoint streaming an
-                // error body can't grow unbounded here.
-                var raw = Data()
-                for try await byte in bytes {
-                    raw.append(byte)
-                    if raw.count >= 8192 { break }
-                }
-                if let errorResponse = try? decoder.decode(APIErrorResponse.self, from: raw) {
+                if let errorResponse = try? decoder.decode(
+                    APIErrorResponse.self, from: await Self.drainErrorBody(bytes)
+                ) {
                     throw APIError.authError(
                         code: errorResponse.errorCode,
                         message: errorResponse.userMessage
                     )
                 }
                 throw APIError.unauthorized
+            case 402, 403, 409:
+                // The pre-flight refusals: INSUFFICIENT_CREDITS (402), AUTH_FORBIDDEN (403)
+                // and SYSTEM_BUSY (409). These reached the `default:` arm before and became
+                // a bare `serverError`, which is why running out of credits mid-chat showed
+                // "something went wrong" instead of an Upgrade button — the streamed path is
+                // the one users are actually on. They are business outcomes with a machine
+                // -readable code, exactly like the non-streaming path decodes at the bottom
+                // of `request(_:)`, so decode them the same way.
+                if let errorResponse = try? decoder.decode(
+                    APIErrorResponse.self, from: await Self.drainErrorBody(bytes)
+                ) {
+                    throw APIError.businessError(
+                        code: errorResponse.errorCode,
+                        message: errorResponse.userMessage
+                    )
+                }
+                throw APIError.serverError(statusCode: http.statusCode)
             case 404: throw APIError.notFound
             case 429:
                 let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap { Int($0) } ?? 60
@@ -503,6 +514,29 @@ actor APIClient {
             }
         }
         return bytes
+    }
+
+    /// Read a bounded prefix of an SSE error body.
+    ///
+    /// `URLSession.bytes(for:)` hands back an `AsyncBytes` sequence and never a `Data`, so
+    /// the structured `APIErrorResponse` an error status carries can only be recovered by
+    /// draining it by hand. Capped at 8 KiB so a misbehaving endpoint streaming an endless
+    /// error body cannot grow this unbounded.
+    ///
+    /// Swallows a mid-drain read failure and returns what it has: the caller is already on
+    /// an error path and has a status-based fallback, so throwing here would replace a
+    /// specific business error with a transport one.
+    private static func drainErrorBody(_ bytes: URLSession.AsyncBytes) async -> Data {
+        var raw = Data()
+        do {
+            for try await byte in bytes {
+                raw.append(byte)
+                if raw.count >= 8192 { break }
+            }
+        } catch {
+            // Partial body — `try?` on the decode below handles it.
+        }
+        return raw
     }
 
     // MARK: - Failover

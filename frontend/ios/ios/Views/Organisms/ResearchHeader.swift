@@ -15,7 +15,11 @@ struct ResearchHeader: View {
     var onProfileTapped: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
+        // `md`, not `lg`: this is the gap between the header row and the segmented control.
+        // The row already contributes its own `.padding(.vertical, .sm)` underneath, so `lg`
+        // here read as ~24pt of dead space above the toggle. Kept identical in ResearchHeader
+        // and TrackingHeader — they sit at the same height and must stay in step.
+        VStack(spacing: AppSpacing.md) {
             // Standardized header row — same metrics as GlobalHeaderView (see
             // `globalHeaderRowHeight`), with the Cay AI mark where the search bar sits.
             HStack(spacing: AppSpacing.md) {

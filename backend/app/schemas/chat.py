@@ -134,6 +134,29 @@ class MarketOverviewWidget(BaseModel):
 
 # ── Chat Message / Session Response Schemas ─────────────────────────
 
+class ChatTurnCost(BaseModel):
+    """What one chat turn actually cost the user.
+
+    Chat is a flat 1 credit and always will be, so the interesting cases are the ones
+    where it cost LESS — a follow-up covered by the previous turn, or a credit handed
+    back because the answer was degraded or came from a zero-cost cache hit. Those are
+    the only ones iOS renders; a normal charge shows nothing, because stamping a price
+    on every answer turns the chat into a meter and suppresses the asking this product
+    depends on.
+
+    Persisted into `chat_messages.rich_content["credit"]` (no migration — the same trick
+    `thinking`/`sources`/`suggestions` already use), so the chip survives a history
+    reload. `balance` is deliberately NOT persisted and lives only on the live SSE frame:
+    a spendable balance is an ACCOUNT fact, and replaying "42 credits left" on a
+    three-day-old message would be showing the user a number that was true once.
+    """
+
+    outcome: str                       # "charged" | "free_followup" | "refunded" | "guest"
+    credits: int = 0                   # credits actually retained for this turn
+    reason: Optional[str] = None       # machine-readable: chat_cache_hit, chat_degraded_unmerged, …
+    label: Optional[str] = None        # server-authored display string (ships without an App Store release)
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     session_id: str
@@ -148,9 +171,14 @@ class ChatMessageResponse(BaseModel):
     #  • sources     — grounded-context "source" pills shown in the thinking card
     #  • suggestions — 1-2 AI-generated follow-up questions to show after the answer
     #  • thinking    — {stages: [str], source_count: int, elapsed_ms: int} for the "Done in Xs · N sources" card
+    #  • credit      — what this turn cost (see ChatTurnCost). Absent on every legacy row
+    #                   and on any turn charged normally; present only when there is GOOD
+    #                   news to show, so iOS renders a chip for a free or refunded turn
+    #                   and nothing at all otherwise.
     sources: Optional[List[Any]] = None
     suggestions: Optional[List[str]] = None
     thinking: Optional[Dict[str, Any]] = None
+    credit: Optional[Dict[str, Any]] = None
     created_at: str
 
 

@@ -195,45 +195,28 @@ struct LessonTopicCardView: View {
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
 
         case .completion:
+            // "Ask Cay AI about this" is the card's PRIMARY button now — it used to float as a
+            // capsule in an `.overlay(alignment: .bottom)` under the card while "Analyze a Stock"
+            // held the primary slot. `onCTATapped` / `currentCard.ctaDestination` are therefore no
+            // longer reachable from here; the content schema still carries a `cta` key and
+            // `JourneyContentStore.cta(_:)` still parses it, so that plumbing is left intact
+            // rather than torn out of the content layer.
             LessonCompletionCard(
                 title: currentCard.completionTitle ?? "You're ready.",
                 subtitle: currentCard.completionSubtitle ?? "",
-                lessonNumber: storyContent.lessonNumber,
-                totalLessons: storyContent.totalLessonsInLevel,
-                estimatedMinutes: storyContent.estimatedMinutes,
-                ctaButtonTitle: currentCard.ctaButtonTitle ?? "Continue",
                 imageName: currentCard.imageName,
-                onCTATapped: {
-                    if let destination = currentCard.ctaDestination {
-                        onCTATapped?(destination)
-                    }
+                onAskAITapped: onAskAI == nil ? nil : {
+                    // Same teardown the floating button did: the narration must not keep talking
+                    // over the chat, and the auto-advance timer must not fire behind the cover.
+                    voiceManager.stop()
+                    stopAutoAdvanceTimer()
+                    onAskAI?()
                 },
                 onCloseTapped: {
                     onDismiss?()
                 }
             )
             .transition(.opacity.combined(with: .move(edge: .bottom)))
-            .overlay(alignment: .bottom) {
-                if onAskAI != nil {
-                    Button {
-                        voiceManager.stop()
-                        stopAutoAdvanceTimer()
-                        onAskAI?()
-                    } label: {
-                        HStack(spacing: AppSpacing.xs) {
-                            Image(systemName: "sparkles")
-                            Text("Ask Cay AI about this")
-                        }
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .padding(.horizontal, AppSpacing.lg)
-                        .padding(.vertical, AppSpacing.sm)
-                        .background(Capsule().fill(AppColors.primaryFill))
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .padding(.bottom, AppSpacing.xxl)
-                }
-            }
         }
     }
 

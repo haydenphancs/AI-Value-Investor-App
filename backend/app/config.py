@@ -408,6 +408,22 @@ class Settings(BaseSettings):
     # specialists in parallel + a synthesizer. Kill switch → the plain single-agent streaming path.
     CHAT_MULTI_AGENT_ENABLED: bool = True
 
+    # How many specialist lenses a cross-domain ("synthesize") turn may run in parallel.
+    # This is the single most expensive path in chat and the only one that is not
+    # comfortably profitable: each specialist is its own agentic stream (`max_rounds=2`,
+    # its own tool fan-out), and the merge is a further call on top. Measured, a 3-lens
+    # turn costs roughly 4x a single-lens one — which puts it AT OR BELOW the net revenue
+    # of the 1 credit it charges on the Max tier ($0.0085/credit after Apple's 15%).
+    #
+    # Chat is priced at a flat 1 credit deliberately and permanently (the price basis
+    # would otherwise be an LLM classification, i.e. nondeterministic, and raising the
+    # price after credit packs are sold devalues a consumable — App Store 3.1.1). So the
+    # variance is bounded HERE, on the cost side, rather than passed to the user.
+    #
+    # 2 keeps the cross-domain answer genuinely multi-lens while cutting the worst case by
+    # a third. Raising it back to 3 is a real money decision, not a tuning knob.
+    CHAT_MAX_SPECIALISTS: int = 2
+
     # Chat RAG quality (Phase 4). Query rewrite resolves follow-ups ("why is it down?") into a
     # standalone search query (only when the message looks context-dependent, so standalone questions
     # skip the call). Rerank pulls a wider candidate set then LLM-scores it down to top-K. Both are
@@ -513,6 +529,21 @@ class Settings(BaseSettings):
     # is a real account id, which is not rotatable.
     CHAT_DAILY_TURN_LIMIT_PER_IP: int = 300
     CHAT_DAILY_TOKEN_LIMIT: int = 200000
+
+    # A charged chat turn earns the session ONE free follow-up, valid for this many seconds.
+    #
+    # Chat is a flat 1 credit per turn and stays that way, so the cost of the decision is
+    # "meter anxiety": a user who must spend a credit to ask "what does that mean?" learns
+    # to stop asking, and asking is the retention loop. This buys that back without making
+    # the price unpredictable — the allowance is granted by a turn the user ALREADY paid
+    # for, so nothing about the cost of sending a message becomes uncertain.
+    #
+    # 300s (5 min) is long enough to read an answer and type a real follow-up, short enough
+    # that it is not a free-chat mode. The bound that matters is structural, not temporal:
+    # only a CHARGED turn grants one, so the worst case is 2 turns per credit no matter how
+    # this is tuned. Set to 0 to disable (grant_free_followup then also CLEARS live windows,
+    # so it is a true kill switch rather than a slow drain).
+    CHAT_FREE_FOLLOWUP_SECONDS: int = 300
 
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the

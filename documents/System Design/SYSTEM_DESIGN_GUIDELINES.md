@@ -981,6 +981,11 @@ final class ResearchViewModel {
 > no-op governed by the daily-turn budget + rate limits. The `BIZ_*` enum below is
 > retained only as an illustrative sketch.
 >
+> **Updated 2026-08-22 (migration 154):** chat's 1 credit is now a **permanent** price
+> and the cost variance is bounded on the cost side instead (`CHAT_MAX_SPECIALISTS`);
+> a charged turn earns the session **one free follow-up**; and the charge `ref_id` is
+> **per turn**, not per session, so refund pairing is exact. See [§9b.8](#9b8-why-chat-is-a-flat-1-credit-permanently).
+>
 > **Updated 2026-08-08 (migrations 117/118, applied):** the balance is now **two pools** —
 > granted (monthly, expires) and purchased (consumable IAP, never expires per App Store
 > Guideline 3.1.1). `spend_credits` drains granted first; `refund_credits` reverses the
@@ -1939,6 +1944,76 @@ and is deliberately *not* shown there, because it is not what Apple would charge
 > documented $0.05–0.06, pulling Pro's worst-case margin from ~72% toward ~30–47%. The pack ladder
 > is unaffected (packs stay higher-margin by construction); the **subscription** allocations need a
 > re-check, and capping `thinking_budget` is the cheapest lever.
+
+### 9b.8 Why chat is a flat 1 credit, permanently
+
+Charging more for "harder" chat turns was considered and **rejected**. The reasoning is recorded
+here because the code that bounds the cost instead (`CHAT_MAX_SPECIALISTS`) makes no sense without
+it, and because the decision is one-way.
+
+1. **The price basis would be nondeterministic.** The expensive path (`mode == "synthesize"`: N
+   specialists, each its own agentic stream with its own tool fan-out, plus a merge) is chosen by
+   `chat_router.route_question()` — itself an LLM classification. The same question can classify
+   differently on different days, so the same question would cost differently. That is
+   indefensible to a user and generates refund requests.
+2. **Several questions in ONE message is cheaper for us than three messages.** One turn, one
+   context, one answer. Per-question pricing would push users toward the behaviour that costs
+   ~3× more.
+3. **The price can never go up.** Credit packs are consumables sold as "130 credits. Never
+   expire." Repricing what a credit *buys* devalues an already-purchased one — the same
+   Guideline 3.1.1 principle as §9b.1, one level up. Only *new opt-in* tiers may be added.
+
+**So the variance is bounded on the COST side.** A single-lens turn costs ~$0.003; a 3-lens
+synthesize turn ran ~4× that, which is at or below the net revenue of the 1 credit it charges on
+the Max tier ($0.0085/credit after Apple's 15%). `CHAT_MAX_SPECIALISTS` (default **2**) is that
+bound, and `generate_followup_suggestions` — which runs on *every* turn — moved to the cheap
+model. Raising the specialist cap back to 3 is a money decision, not a tuning knob.
+
+**One free follow-up per charged turn** (migration 154, `CHAT_FREE_FOLLOWUP_SECONDS`, default
+300s) buys back the cost of that flat price: a user who must spend a credit to ask "what does
+that mean?" learns to stop asking, and the asking is the retention loop. Invariants:
+
+- **Only a CHARGED turn grants one.** A free turn grants nothing, and a refunded turn grants
+  nothing. That single asymmetry is the whole bound — worst case 2 turns per credit, i.e. a
+  standing ~50% discount for a user who always replies inside the window. Steady state, not an
+  edge case: size the allocations knowing it.
+- The claim **skips the pre-charge**; it is never charge-then-refund, so no phantom debit/refund
+  pair enters the ledger.
+- **Claim and clear are ONE statement** (`claim_free_followup`), so two racing turns cannot both
+  go free; and the grant is an RPC too, so both sides read the **Postgres** clock — an app-side
+  expiry would drift the window by whatever separates Railway from Supabase.
+- It **fails closed**: a claim RPC error charges normally. Every other budget path in the chat
+  stack fails *open* so a DB blip cannot wall a user out of chat; this one is the mirror image,
+  because failing open would make chat free for everyone during an outage. It is also
+  self-healing — the allowance row was never cleared, so it applies to the next turn.
+- ⚠️ **A failed free turn must never reach `refund_ledgered`.** It wrote no debit, so
+  `refund_credits` would find no matching row, take the granted-first fallback and pay out
+  `LEAST(amount, used)` — **minting** a credit on every failed free turn. `_ChatQuota.refund_once`
+  returns in its `_free` branch first, and restores the *allowance* instead. Pinned by
+  `test_a_failed_free_turn_never_calls_refund_ledgered`.
+
+**Per-turn `ref_id`.** Chat used to pre-charge with `ref_id = session_id`, so every turn in a
+conversation wrote an identical `(ref_id, delta)` ledger row and a refund could adopt a *sibling*
+turn's recorded pool split — the residual migration 124's header names as unfixable without a
+per-charge-unique ref. Both chat surfaces now mint one per turn (`{session}:{uuid4}` and
+`report_chat:{ticker}:{uuid4}`), which makes 124's `NOT EXISTS` pairing exact rather than merely
+bounded.
+
+**What the user is told.** Chat spent credits silently: no cost anywhere in the UI, no balance
+refresh after a turn, and seven refund paths the user never saw. Now a turn that cost **less than
+usual** carries a `credit` payload — persisted in `rich_content` (no migration, same trick as
+`thinking`/`sources`/`suggestions`) so it replays on a history reload, plus a live `credits` SSE
+frame carrying the new `balance`. A normally-charged turn sends **no** payload and renders
+nothing: putting a price on every answer turns chat into a meter, which is the exact behaviour the
+flat price exists to avoid. `balance` is live-only — a spendable balance is an account fact, and
+replaying it on a three-day-old message would show a number that was true once.
+
+> ⚠️ **Out of credits inside chat used to be a dead end**, and it took three independent defects:
+> the SSE reader swept 402 into a generic `serverError`; `ChatViewModel` set a banner string and
+> never published the `AppError`, so the `.upgrade` action was unreachable; and the chat
+> `fullScreenCover` did not apply `.errorPresentationHost()`, so the root's toast and Buy Credits
+> sheet rendered *behind* it. Fixing any one alone is invisible. All three are pinned in
+> `tests/test_ios_paid_path_guards.py`.
 
 ---
 

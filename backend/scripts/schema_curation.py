@@ -608,9 +608,12 @@ MANAGED_SCHEMAS: dict[str, str] = {
     "auth": "Supabase GoTrue. `auth.users` is the identity root — public.users mirrors it 1:1 "
             "through the on_auth_user_created trigger, and every RLS policy comparing "
             "auth.uid() is comparing against a row in here.",
-    "storage": "Supabase Storage metadata. The buckets that matter to this app are "
-               "book-covers, book-media, journey-images, journey-media, money-moves-images, "
-               "money-moves-media, home-theme-media and research-pdfs (private).",
+    "storage": "Supabase Storage metadata. Nine buckets. PUBLIC (served from "
+               "/object/public/, which bypasses RLS): book-covers, journey-images, "
+               "money-moves-images, home-theme-media — none is LISTABLE any more, migration "
+               "153 dropped their anon SELECT policies so the object URL is the only way in. "
+               "PRIVATE (service-role write, short-lived signed URLs on read): book-media, "
+               "journey-media, money-moves-media, research-pdfs and user-avatars.",
     "realtime": "Supabase Realtime. Not used by this app's request paths.",
     "supabase_migrations": "Supabase CLI migration ledger.",
 }
@@ -621,6 +624,9 @@ MANAGED_TABLE_NOTES: dict[str, str] = {
     "auth.sessions": "Live sessions behind the access/refresh token pair.",
     "auth.identities": "One row per linked provider (Apple, Google, email) per user.",
     "auth.refresh_tokens": "Refresh-token chain; a reuse is what invalidates a family.",
-    "storage.objects": "Every stored file. 12 RLS policies scope the app's eight buckets.",
+    "storage.objects": "Every stored file. Service-role policies scope the app's nine "
+                       "buckets; the four public ones have no anon/authenticated policy at "
+                       "all, because a public bucket is served without touching RLS and the "
+                       "policy only ever enabled enumeration (migration 153).",
     "storage.buckets": "Bucket definitions, incl. which are public vs signed-URL only.",
 }

@@ -76,6 +76,17 @@ class ErrorCode(str, Enum):
     #   UPLOAD_FAILED             -> ours, transient, retry (retry_later)
     # The client re-encodes to a 512x512 JPEG before sending, so in practice the first
     # two mean a decode failure or a hand-rolled request, not an ordinary photo.
+    # The password the user just typed was REJECTED by the identity provider as unsafe —
+    # either too weak for the project's rules, or found in a known breach corpus once leaked-
+    # password protection is enabled. GoTrue returns ONE code (`weak_password`) for both, so
+    # this code deliberately does not claim to know which: a name asserting "compromised"
+    # would be a lie half the time, and the user's action is identical either way.
+    #
+    # Distinct from AUTH_CREDENTIALS_INVALID, which means "the password you typed does not
+    # match". Collapsing them would tell a user setting a NEW password that their EXISTING
+    # one was wrong.
+    AUTH_PASSWORD_REJECTED = "AUTH_PASSWORD_REJECTED"
+
     AVATAR_TOO_LARGE = "AVATAR_TOO_LARGE"
     AVATAR_INVALID_IMAGE = "AVATAR_INVALID_IMAGE"
     AVATAR_UPLOAD_FAILED = "AVATAR_UPLOAD_FAILED"
@@ -254,6 +265,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.SETTINGS_UNAVAILABLE: (
         "We couldn't load your settings right now. They'll sync automatically in a moment."
     ),
+    ErrorCode.AUTH_PASSWORD_REJECTED: (
+        "That password isn't safe to use. Please choose a different one."
+    ),
     ErrorCode.AVATAR_TOO_LARGE: (
         "That photo is too large. Try picking a different one."
     ),
@@ -383,6 +397,10 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.WATCHLIST_UNAVAILABLE: "retry_later",
     ErrorCode.SETTINGS_UNAVAILABLE: "retry_later",
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: "retry_later",
+    # fix_input: the user is looking at a form and must type a different password. NOT
+    # `sign_in` — they are already signed in (change-password) or mid-registration, and NOT
+    # retry_later — the same password will be rejected forever.
+    ErrorCode.AUTH_PASSWORD_REJECTED: "fix_input",
     # fix_input, NOT retry_later: the photo the user chose is the problem, and retrying
     # the identical bytes produces the identical failure.
     ErrorCode.AVATAR_TOO_LARGE: "fix_input",
@@ -471,6 +489,10 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.SETTINGS_UNAVAILABLE: 503,
     # Retryable, and distinguishable from "you have no notifications yet".
     ErrorCode.NOTIFICATIONS_UNAVAILABLE: 503,
+    # 400, not 401/422: the credential situation is fine and the session is untouched — the
+    # submitted VALUE is unacceptable. A 401 here would make iOS clear a valid token
+    # (auth.md §3) for a user who merely picked a bad new password.
+    ErrorCode.AUTH_PASSWORD_REJECTED: 400,
     # 413, not 400: the request was well-formed, it was just too big. Distinct from the
     # body-cap middleware's own 413, which fires earlier and on the whole body.
     ErrorCode.AVATAR_TOO_LARGE: 413,

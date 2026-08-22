@@ -167,6 +167,12 @@ _EXPECTED_ACTIONS = {
     # What they typed was wrong; the fix is in the field, not in a new session.
     ErrorCode.AUTH_CREDENTIALS_INVALID: "fix_input",
     ErrorCode.AUTH_PROVIDER_FAILED: "retry_later",
+    # The NEW password they chose was refused (too weak, or found in a breach once leaked-
+    # password protection is on). Same shape as AUTH_CREDENTIALS_INVALID: the user is looking
+    # at the field that needs to change, and the session is untouched. Emphatically NOT
+    # retry_later — the identical password is refused forever — and NOT sign_in, which would
+    # be nonsense for someone mid-registration or already authenticated.
+    ErrorCode.AUTH_PASSWORD_REJECTED: "fix_input",
 }
 
 

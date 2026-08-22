@@ -315,7 +315,20 @@ async def sign_up(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Sign up failed: {e}", exc_info=True)
+        # A REJECTED PASSWORD is not a server failure and must not be laundered into one.
+        # Every exception here used to become a bare 400 "Registration failed" — no reason, no
+        # action. With leaked-password protection enabled that is the single most likely
+        # failure on this route, and it would tell a user whose only mistake was reusing a
+        # breached password that registration is broken, at the exact moment they are deciding
+        # whether to bother.
+        if _is_password_rejected(e):
+            logger.info("Registration rejected: password refused by the provider")
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_REJECTED,
+                message="sign_up rejected the password",
+                details=_optional_details(reasons=_password_rejection_reasons(e)),
+            )
+        logger.error(f"Sign up failed: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail="Registration failed")
 
 
@@ -481,6 +494,72 @@ _REJECTED_CREDENTIAL_MARKERS = (
 def _is_rejected_credential(exc: Exception) -> bool:
     """True when the provider rejected the supplied password, as opposed to failing."""
     return any(marker in str(exc).lower() for marker in _REJECTED_CREDENTIAL_MARKERS)
+
+
+# Last-resort wording match for a rejected NEW password. Only reached when neither typed
+# signal below fires — see `_is_password_rejected`.
+_WEAK_PASSWORD_MARKERS = (
+    "weak_password",
+    "password is known to be weak",
+    "password should be at least",
+    "pwned",
+)
+
+
+def _is_password_rejected(exc: Exception) -> bool:
+    """True when the provider refused to SET the supplied password.
+
+    Covers both halves of GoTrue's single `weak_password` code: fails the project's strength
+    rules, and (once leaked-password protection is on) found in a breach corpus. The user's
+    action is the same for both — choose a different password — so they share one code.
+
+    THREE LAYERS, TYPED FIRST, and the order is deliberate:
+
+      1. `AuthWeakPasswordError` — a real class in supabase_auth 2.27, carrying `.reasons`.
+         Raised by the USER-facing calls (`sign_up`, `update_user`).
+      2. `.code == "weak_password"` — the ADMIN call `admin.update_user_by_id`, which
+         `change_password` uses, surfaces a plain `AuthApiError` whose `code` carries the same
+         string rather than the typed subclass. Miss this and the change-password half is
+         vacuously unhandled while the signup half looks fine.
+      3. Wording match, mirroring `_REJECTED_CREDENTIAL_MARKERS`.
+
+    Layer 3 alone would not be safe to rely on: an exception whose `str()` is empty defeats
+    every marker list, which is exactly how a Gemini timeout classifier failed in this repo.
+
+    ⚠️ `supabase_auth.errors.ErrorCode` is a `Literal` type alias, NOT an enum with members.
+    Compare the string; `ErrorCode.weak_password` does not exist.
+    """
+    try:
+        from supabase_auth.errors import AuthWeakPasswordError
+
+        if isinstance(exc, AuthWeakPasswordError):
+            return True
+    except ImportError:  # pragma: no cover - SDK moved; fall through to the softer checks
+        pass
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.strip().lower() == "weak_password":
+        return True
+
+    return any(marker in str(exc).lower() for marker in _WEAK_PASSWORD_MARKERS)
+
+
+def _optional_details(**kwargs) -> Optional[dict]:
+    """Flat, non-empty details only — or None so the key is omitted entirely."""
+    cleaned = {k: v for k, v in kwargs.items() if v}
+    return cleaned or None
+
+
+def _password_rejection_reasons(exc: Exception) -> Optional[str]:
+    """The provider's own reasons, as a flat comma-joined string, when it supplied any.
+
+    Flat on purpose: `details` values reach iOS through `AnyCodable`, which decodes
+    String/Int/Double/Bool only and silently yields "" for a list (auth.md §3).
+    """
+    reasons = getattr(exc, "reasons", None)
+    if isinstance(reasons, (list, tuple)) and reasons:
+        return ", ".join(str(r) for r in reasons)[:200]
+    return None
 
 
 def _enforce_credential_limits(
@@ -948,9 +1027,23 @@ async def change_password(
     try:
         _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
     except Exception as e:
+        # Same split as the re-authentication block above: THEIRS vs OURS.
+        #
+        # A refused new password is the user's to fix and is not an outage. As a bare-string
+        # 500 it was doubly broken: `APIClient.validateResponse`'s 5xx arm has no `detail`
+        # fallback (only the 4xx arm does), so the wording never reached iOS at all — the user
+        # saw a generic transient server error and was invited to retry the one password that
+        # can never be accepted.
+        if _is_password_rejected(e):
+            logger.info("change-password: new password refused by the provider for user=%s", user_id)
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_REJECTED,
+                message="admin.update_user_by_id rejected the new password",
+                details=_optional_details(reasons=_password_rejection_reasons(e)),
+            )
         logger.error(
             "change-password: update failed for user=%s: %s: %s",
-            user_id, type(e).__name__, e,
+            user_id, type(e).__name__, e, exc_info=True,
         )
         raise HTTPException(
             status_code=500,

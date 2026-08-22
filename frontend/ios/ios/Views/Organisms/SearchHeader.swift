@@ -2,67 +2,57 @@
 //  SearchHeader.swift
 //  ios
 //
-//  Organism: Header for search screen with back button, search bar, and suggestion chips
+//  Organism: Header for the search screen — back button + search field.
 //
 
 import SwiftUI
 
+/// The expanded form of `TappableSearchBar`, and it must keep looking like it: same grey
+/// `magnifyingglass`, same placeholder. It used to show a blue `sparkles.2` and read
+/// "Search or ask Cay AI…", back when this screen could start a chat. It can't any more — chat
+/// has its own door in the header (`AskCayAIButton`) — so the AI signalling is gone from here
+/// along with the starter-question chips that fed it.
 struct SearchHeader: View {
     @Binding var searchText: String
-    let suggestions: [SearchQuerySuggestion]
     var onBackTapped: (() -> Void)?
     var onSearchSubmit: (() -> Void)?
-    var onSuggestionTapped: ((SearchQuerySuggestion) -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Search bar row
-            HStack(spacing: AppSpacing.md) {
-                // Back button
-                Button(action: {
-                    onBackTapped?()
-                }) {
-                    Image(systemName: "chevron.down")
-                        .font(AppTypography.iconMedium).fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(PlainButtonStyle())
-
-                // Search bar
-                HStack(spacing: AppSpacing.sm) {
-                    Image(systemName: "sparkles.2")
-                        .font(AppTypography.iconDefault).fontWeight(.medium)
-                        .foregroundColor(AppColors.primaryBlue)
-
-                    TextField("", text: $searchText, prompt: Text("Search or ask Cay AI...")
-                        .foregroundColor(AppColors.textMuted))
-                        .font(AppTypography.body)
-                        .foregroundColor(AppColors.textPrimary)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .onSubmit {
-                            onSearchSubmit?()
-                        }
-                }
-                .padding(.horizontal, AppSpacing.md)
-                .padding(.vertical, AppSpacing.md)
-                .cardSurface(cornerRadius: AppCornerRadius.large)
+        // Search bar row
+        HStack(spacing: AppSpacing.md) {
+            // Back button
+            Button(action: {
+                onBackTapped?()
+            }) {
+                Image(systemName: "chevron.down")
+                    .font(AppTypography.iconMedium).fontWeight(.semibold)
+                    .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 32, height: 32)
             }
-            .padding(.horizontal, AppSpacing.lg)
+            .buttonStyle(PlainButtonStyle())
 
-            // Suggestion chips
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.sm) {
-                    ForEach(suggestions) { suggestion in
-                        SearchQueryChip(suggestion: suggestion) {
-                            onSuggestionTapped?(suggestion)
-                        }
+            // Search bar
+            HStack(spacing: AppSpacing.sm) {
+                Image(systemName: "magnifyingglass")
+                    .font(AppTypography.iconDefault).fontWeight(.medium)
+                    .foregroundColor(AppColors.textMuted)
+                    .accessibilityHidden(true)
+
+                TextField("", text: $searchText, prompt: Text("Search")
+                    .foregroundColor(AppColors.textMuted))
+                    .font(AppTypography.body)
+                    .foregroundColor(AppColors.textPrimary)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .onSubmit {
+                        onSearchSubmit?()
                     }
-                }
-                .padding(.horizontal, AppSpacing.lg)
             }
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.md)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
+        .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.sm)
         .padding(.bottom, AppSpacing.md)
     }
@@ -70,10 +60,7 @@ struct SearchHeader: View {
 
 #Preview {
     VStack {
-        SearchHeader(
-            searchText: .constant(""),
-            suggestions: SearchQuerySuggestion.sampleData
-        )
+        SearchHeader(searchText: .constant(""))
 
         Spacer()
     }

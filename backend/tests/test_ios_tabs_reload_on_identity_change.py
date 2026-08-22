@@ -353,3 +353,72 @@ def test_comment_only_mentions_do_not_satisfy_the_assertions():
     assert "isActiveTab" not in stripped
     assert "auth.status" not in stripped
     assert "let x = 1" in stripped
+
+
+# ── The global Cay AI chat must not outlive its session ────────────────────────
+#
+# `ContentView` owns the one general-purpose `ChatViewModel` (hoisted out of `LearnContentView`
+# when the chat door moved into `GlobalHeaderView`, so all four header bars raise the SAME
+# thread). It is a `@StateObject` on a view that never leaves the hierarchy — all five tabs are
+# opacity-mounted — so nothing tears it down between accounts. Without an explicit reset, the
+# next account to sign in on this device reads the previous user's messages, and the history
+# panel lists their conversation titles until a fetch returns.
+#
+# Same bug class as the ten stores in `AppState.discardDataForEndedSession()` (auth.md §7), and
+# it predates the hoist: `LearnContentView` held the view model with no reset at all. The hoist
+# widened it from one tab to four, which is what makes this a build-failing guard.
+
+_CHAT_VIEW_MODEL = _REPO / "frontend/ios/ios/ViewModels/ChatViewModel.swift"
+
+
+def _content_view_block() -> str:
+    return _decl_block(_read(_CONTENT_VIEW), "struct ContentView: View")
+
+
+def test_content_view_resets_the_chat_view_model_on_identity_change():
+    block = _content_view_block()
+    assert "reloadOnIdentityChange" in block, (
+        "ContentView owns the global ChatViewModel but has no identity-change hook — a "
+        "sign-out/sign-in leaves the previous account's conversation in memory (auth.md §7)"
+    )
+    assert "resetForIdentityChange()" in block, (
+        "ContentView does not reset the chat view model on identity change. "
+        "`resetConversation()` is NOT sufficient here — it leaves the history list populated"
+    )
+
+
+def test_content_view_dismisses_the_chat_cover_on_identity_change():
+    """Leaving the cover up across an identity change shows the arriving account a chat screen
+    it never opened, over a conversation that was just cleared underneath it."""
+    block = _content_view_block()
+    assert "isAIChatPresented = false" in block, (
+        "ContentView clears the conversation on identity change but leaves the cover presented"
+    )
+
+
+def test_reset_for_identity_change_clears_the_history_list_too():
+    """`resetConversation()` clears the thread but NOT `historySessions`/`historyGroups`, so on
+    its own it would let the next account see the previous user's conversation titles until
+    `loadHistory()` returns. A later fetch does not excuse showing them in the meantime."""
+    block = _decl_block(_read(_CHAT_VIEW_MODEL), "func resetForIdentityChange()")
+    assert "resetConversation()" in block, "resetForIdentityChange no longer clears the thread"
+    for field in ("historySessions", "historyGroups"):
+        assert field in block, (
+            f"resetForIdentityChange does not clear `{field}` — the arriving account would see "
+            "the previous user's chat history"
+        )
+
+
+def test_the_wiser_screen_no_longer_owns_a_general_chat_view_model():
+    """Wiser keeps `bookChatViewModel` (the book-grounded "Ask the Author Agent" chat) on
+    purpose. What must NOT come back is a second general-purpose thread there: it would be
+    reset by nothing, and would diverge from the one the header bar raises."""
+    learn_view = _REPO / "frontend/ios/ios/Views/Screens/LearnView.swift"
+    src = _strip_comments(_read(learn_view))
+    assert "bookChatViewModel = ChatViewModel()" in src, (
+        "LearnView lost the book chat view model — the author chat now clobbers the global thread"
+    )
+    assert "private var chatViewModel = ChatViewModel()" not in src, (
+        "LearnView re-declared a general chat view model; the global one lives in ContentView "
+        "and this one would never be reset on an identity change"
+    )

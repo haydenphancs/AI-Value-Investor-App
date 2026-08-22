@@ -14,6 +14,16 @@ struct ContentView: View {
     @State private var researchTickerSymbol: String? = nil
     @State private var researchSubTab: ResearchTab = .research
 
+    /// The ONE general-purpose Cay AI conversation, owned here so it survives tab switches and
+    /// the chat resumes wherever it is reopened from.
+    ///
+    /// It used to live in `LearnContentView`, which made "resume" a Wiser-only property: the
+    /// header bar's chat door is in `GlobalHeaderView` now, embedded by four tab headers, and a
+    /// per-header view model would have meant four unrelated threads. Contextual chats keep
+    /// their own view models on purpose — the reading screens' "Ask the Author Agent" and the
+    /// asset detail bars each seed a grounded conversation that must not clobber this one.
+    @StateObject private var chatViewModel = ChatViewModel()
+
     var body: some View {
         ZStack {
             AppColors.background
@@ -59,6 +69,27 @@ struct ContentView: View {
                 .opacity(selectedTab == .wiser ? 1 : 0)
                 .allowsHitTesting(selectedTab == .wiser)
                 .environment(\.isActiveTab, selectedTab == .wiser)
+        }
+        // The global chat cover. Presented here rather than per-tab so every header's sparkle
+        // opens the SAME conversation. `Binding(get:set:)` onto the @Observable AppState is the
+        // idiom `iosApp.swift` already uses for `signInPrompt`.
+        .aiChatCover(
+            isPresented: Binding(
+                get: { appState.isAIChatPresented },
+                set: { appState.isAIChatPresented = $0 }
+            ),
+            viewModel: chatViewModel
+        )
+        // auth.md §7 — clear UNCONDITIONALLY on a real identity change, and before anything that
+        // could gate on the active tab. `chatViewModel` is a `@StateObject` on a view that never
+        // leaves the hierarchy, so without this the next account to sign in on this device reads
+        // the previous user's messages and history titles. `identityGeneration` bumps on a real
+        // change and NOT on the first resolution of a process, so a cold launch never wipes the
+        // thread. Dismiss first: leaving the cover up would show the new identity an empty chat
+        // it never opened.
+        .reloadOnIdentityChange { _ in
+            appState.isAIChatPresented = false
+            chatViewModel.resetForIdentityChange()
         }
         .onChange(of: appState.pendingPushRoute, initial: true) { _, route in
             // `initial: true` for the same reason as HomeDashboardView: a cold launch

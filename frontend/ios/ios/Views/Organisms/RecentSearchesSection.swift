@@ -64,7 +64,7 @@ struct RecentSearchesSection: View {
 
             // Says what will fill it. The old copy was a bare "No recent searches", which was
             // permanently true and told the reader nothing about how to change that.
-            Text("Tickers you open and questions you ask Cay AI show up here")
+            Text("Tickers you open show up here")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)

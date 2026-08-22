@@ -119,14 +119,64 @@ def test_a_selected_ticker_is_recorded():
     )
 
 
-def test_an_asked_question_is_recorded():
-    block = _decl_block(_read(_SEARCH_VIEW), "private func handleAskCayAI(")
-    assert "SearchHistoryStore.shared.record(question:" in block, (
-        "asking Cay AI no longer records the question — Recent Searches will stay empty for "
-        "questions. Note the suggestion chips route through this same method."
+def test_the_search_screen_has_no_chat_entry_point():
+    """The INVERSE of the guard that used to live here.
+
+    Search could once ask Cay AI — an "Ask Cay AI" row above the results plus a strip of
+    starter-question chips. Both are gone: chat has its own door in the global header
+    (`AskCayAIButton`), and a second one a few points away had two controls claiming the same
+    thing. Re-adding one here is the regression; the header button is the only general entry.
+    """
+    src = _strip_comments(_read(_SEARCH_VIEW))
+    for token in ("askCayAIRow", "aiChatCover", "ChatViewModel", "startNewConversation"):
+        assert token not in src, (
+            f"SearchView can start a chat again ({token}). Search is ticker-only — the Cay AI "
+            "door is AskCayAIButton in GlobalHeaderView."
+        )
+    # Anti-vacuity: this must still be the real search screen.
+    assert "SearchResultsSection(" in src, "scan drifted — SearchView no longer renders results"
+
+
+def test_the_suggestion_chips_are_deleted():
+    """The chips ("What is P/E ratio?", "Best tech stocks") routed straight to Cay AI, so they
+    went with it. Their type and view are deleted, not merely unreferenced."""
+    assert not (_IOS / "Views/Molecules/SearchQueryChip.swift").exists(), (
+        "SearchQueryChip.swift is back — the starter-question chips fed the removed chat entry"
     )
-    # Anti-vacuity: the method must still actually start the conversation.
-    assert "startNewConversation" in block, "scan drifted — handleAskCayAI no longer opens chat"
+    assert "SearchQuerySuggestion" not in _read(_IOS / "Models/SearchModels.swift"), (
+        "SearchQuerySuggestion is back in SearchModels.swift"
+    )
+
+
+def test_history_loads_tickers_only():
+    """A stored `.question` row has nothing to reopen now, so `load` filters it out."""
+    block = _decl_block(_read(_STORE), "private static func load(from defaults: UserDefaults)")
+    assert ".filter { $0.kind == .ticker }" in block, (
+        "SearchHistoryStore.load no longer filters to tickers — saved questions would render as "
+        "rows that do nothing when tapped"
+    )
+
+
+def test_the_question_kind_survives_in_the_model():
+    """⚠️ The half that is easy to 'clean up' and expensive to get wrong.
+
+    `record(question:)` is gone and `load` filters `.question` out, so the enum case looks dead.
+    It is not: installs upgrading from an earlier build still have `"kind":"question"` rows in
+    UserDefaults, `load` decodes the array in ONE shot, and its `catch` deletes the ENTIRE blob.
+    Delete the case and every one of those users loses their TICKER history too.
+    """
+    src = _strip_comments(_read(_IOS / "Models/SearchModels.swift"))
+    # Anchored, NOT a substring test. `"case question" in src` is satisfied by
+    # `case questionAnything` — a rename would have slipped straight through it. (Found by
+    # mutation-testing this very assertion, which is the argument for doing so.)
+    assert re.search(r"^\s*case question\s*$", src, re.MULTILINE), (
+        "SearchHistoryEntry.Kind.question was removed or renamed. Stored question rows will now "
+        "fail to decode, and SearchHistoryStore.load deletes the whole history on a decode "
+        "error — so this silently wipes the user's ticker history on upgrade."
+    )
+    assert "func record(question:" not in _read(_STORE), (
+        "record(question:) is back — nothing should write question rows any more"
+    )
 
 
 def test_history_survives_an_emptied_search_field():
@@ -159,7 +209,7 @@ def test_the_search_screen_has_no_news():
 
     # Anti-vacuity: this must still be the real search screen.
     assert "RecentSearchesSection(" in body, "scan drifted — SearchView no longer renders history"
-    assert "askCayAIRow(" in body, "scan drifted — SearchView no longer renders the Ask Cay AI row"
+    assert "SearchResultsSection(" in body, "scan drifted — SearchView no longer renders results"
 
     for token in ("SearchLatestNewsSection", "latestNews", "NewsDetailView", "selectedNewsArticle"):
         assert token not in body, (

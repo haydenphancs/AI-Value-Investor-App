@@ -11,7 +11,6 @@ import Combine
 @MainActor
 class LearnViewModel: ObservableObject {
     // MARK: - Published Properties
-    @Published var selectedTab: LearnTab = .learn
     @Published var currentLevel: InvestorLevel = .foundation
     @Published var journeyTrack: JourneyTrack?
     @Published var nextLesson: NextLesson?
@@ -187,10 +186,6 @@ class LearnViewModel: ObservableObject {
 
 
     // MARK: - Actions
-    func selectTab(_ tab: LearnTab) {
-        selectedTab = tab
-    }
-
     func continueJourney() {
         print("Continue journey tapped")
     }

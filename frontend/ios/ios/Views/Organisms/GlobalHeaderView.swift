@@ -12,7 +12,7 @@ struct GlobalHeaderView: View {
     @Environment(\.appState) private var appState
     @State private var showSloganSheet = false
 
-    var searchPlaceholder: String = "Search ticker or ask AI..."
+    var searchPlaceholder: String = "Search"
     var onSearchTapped: (() -> Void)?
     var onProfileTapped: (() -> Void)?
 
@@ -26,11 +26,22 @@ struct GlobalHeaderView: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Center: Smart Search Bar (flexible)
+            // Center: search (tickers only — the "or ask Cay AI" half moved out to the button
+            // below, and the search screen dropped its chat entry with it).
             TappableSearchBar(
                 placeholder: searchPlaceholder,
                 onTap: onSearchTapped
             )
+
+            // The global Cay AI door, its own card so it reads as a control rather than as an
+            // ornament on the field.
+            //
+            // Routed through `AppState` rather than a closure parameter so the four headers that
+            // embed this view (Home / Updates / Tracking / Learn) need no signature change and no
+            // binding threaded down from `ContentView`, which owns the cover. Same reasoning as
+            // `requestSignIn`. Research is deliberately excluded — `ResearchHeader` renders a
+            // title instead of a search bar and the tab has its own AI surface.
+            AskCayAIButton { appState.requestAIChat() }
 
             // Right: Profile Avatar
             Button(action: {
@@ -43,11 +54,42 @@ struct GlobalHeaderView: View {
             }
             .buttonStyle(PlainButtonStyle())
         }
+        .globalHeaderRowHeight()
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.sm)
         .fullScreenCover(isPresented: $showSloganSheet) {
             CaydexSloganView()
         }
+    }
+}
+
+// MARK: - Shared Header Row Height
+
+/// One row height for EVERY tab header, so the header does not move between tabs.
+///
+/// Four of the five headers embed `GlobalHeaderView`, whose row is driven by
+/// `TappableSearchBar` (~42pt). `ResearchHeader` has no search bar — just a logo, a mark and the
+/// avatar — so its tallest element was a 36pt icon and its row came out several points shorter.
+/// Switching to Research pulled the whole header up, and switching away dropped it back down;
+/// the segmented control underneath moved with it. Nothing in either file named a height, so
+/// there was nothing to notice.
+///
+/// `@ScaledMetric` rather than a plain constant because the search bar grows with Dynamic Type:
+/// a fixed 44 would hold the rows level at the default text size and let them drift apart at
+/// accessibility sizes, which is the same bug one step further out.
+struct GlobalHeaderRowHeight: ViewModifier {
+    @ScaledMetric(relativeTo: .subheadline) private var minHeight: CGFloat = 44
+
+    func body(content: Content) -> some View {
+        content.frame(minHeight: minHeight)
+    }
+}
+
+extension View {
+    /// Pin a tab header's top row to the shared height. Apply to the row's `HStack`, BEFORE its
+    /// padding — otherwise the padding is inside the measured height and the rows differ again.
+    func globalHeaderRowHeight() -> some View {
+        modifier(GlobalHeaderRowHeight())
     }
 }
 
@@ -208,7 +250,7 @@ struct CaydexSloganView: View {
 #Preview {
     VStack {
         GlobalHeaderView()
-        GlobalHeaderView(searchPlaceholder: "Search market news...")
+        GlobalHeaderView(searchPlaceholder: "Add tickers")
         Spacer()
     }
     .environment(AppState())

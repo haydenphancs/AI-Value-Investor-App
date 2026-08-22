@@ -17,7 +17,7 @@ struct TrackingHeader: View {
         VStack(spacing: AppSpacing.lg) {
             // Standardized global header row
             GlobalHeaderView(
-                searchPlaceholder: "Search to add to watchlist...",
+                searchPlaceholder: "Add tickers",
                 onSearchTapped: onSearchTapped,
                 onProfileTapped: onProfileTapped
             )

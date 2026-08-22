@@ -8,43 +8,31 @@
 
 import SwiftUI
 
+/// The Wiser header is now just the shared global row.
+///
+/// It used to carry a `Learn | Chat` segmented control underneath, which was two separate
+/// problems: "Chat" never actually selected (it presented `AIChatScreen` as a cover while "Learn"
+/// stayed highlighted), and once the global header bar grew its own Cay AI door the two sat
+/// ~40pt apart wearing the same blue sparkle and read as duplicate controls. The chat door lives
+/// in `GlobalHeaderView` now — one per surface, on four tabs instead of just this one.
 struct LearnHeader: View {
-    @Binding var selectedTab: LearnTab
     var onSearchTapped: (() -> Void)?
     var onProfileTapped: (() -> Void)?
-    /// Called when the "Chat" tab is tapped — the Wiser screen presents the full-screen
-    /// AIChatScreen cover instead of switching inline content.
-    var onChatTapped: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: AppSpacing.lg) {
-            // Standardized global header row
-            GlobalHeaderView(
-                searchPlaceholder: "Search or ask Cay AI...",
-                onSearchTapped: onSearchTapped,
-                onProfileTapped: onProfileTapped
-            )
-
-            // Tab control
-            LearnTabControl(selectedTab: $selectedTab, onChatTapped: onChatTapped)
-                .padding(.horizontal, AppSpacing.lg)
-        }
+        GlobalHeaderView(
+            searchPlaceholder: "Search",
+            onSearchTapped: onSearchTapped,
+            onProfileTapped: onProfileTapped
+        )
         .padding(.bottom, AppSpacing.sm)
     }
 }
 
 #Preview {
-    struct PreviewWrapper: View {
-        @State private var selectedTab = LearnTab.learn
-
-        var body: some View {
-            VStack {
-                LearnHeader(selectedTab: $selectedTab)
-                Spacer()
-            }
-            .background(AppColors.background)
-        }
+    VStack {
+        LearnHeader()
+        Spacer()
     }
-
-    return PreviewWrapper()
+    .background(AppColors.background)
 }

@@ -7,8 +7,14 @@
 
 import SwiftUI
 
+/// Search only. The Cay AI door is `AskCayAIButton`, a separate card beside this one.
+///
+/// This briefly carried a trailing sparkle button of its own. Folding two actions into one card
+/// made the glyph read as decoration rather than as a control, and the tap target it needed
+/// pushed the card taller than the logo and avatar it sits between — hence the split, and hence
+/// the plain `md` vertical padding below, which is what keeps the row level.
 struct TappableSearchBar: View {
-    var placeholder: String = "Search ticker or ask AI..."
+    var placeholder: String = "Search"
     var onTap: (() -> Void)?
 
     var body: some View {
@@ -16,19 +22,9 @@ struct TappableSearchBar: View {
             onTap?()
         }) {
             HStack(spacing: AppSpacing.sm) {
-                // `sparkles.2` in `primaryBlue`, NOT a grey magnifying glass — this control is
-                // the app's global Cay AI entry, and its collapsed and expanded states used to
-                // disagree about that. Tapping it opens `SearchView`, whose field renders this
-                // exact glyph (SearchHeader.swift) at the SAME font and weight; the two now read
-                // as one control. A magnifier here made the placeholder's "…or ask Cay AI" a
-                // claim the icon contradicted, so the AI entry point read as plain search.
-                //
-                // `primaryBlue` is a TEXT-role token (4.52:1) and is already audited against this
-                // `.cardSurface()` — the same pairing SearchHeader ships. Do not swap it for a
-                // `*Graphic` token: those clear 3:1 only and must not carry meaning.
-                Image(systemName: "sparkles.2")
+                Image(systemName: "magnifyingglass")
                     .font(AppTypography.iconDefault).fontWeight(.medium)
-                    .foregroundColor(AppColors.primaryBlue)
+                    .foregroundColor(AppColors.textMuted)
                     // Decorative: the Button's label already exposes `placeholder` to VoiceOver,
                     // so announcing the glyph too would just read the control twice.
                     .accessibilityHidden(true)
@@ -36,21 +32,27 @@ struct TappableSearchBar: View {
                 Text(placeholder)
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textMuted)
+                    // The row now holds four elements, so the bar is ~205pt on a 393pt screen.
+                    // Never let a longer placeholder wrap the card taller than its neighbours.
+                    .lineLimit(1)
 
-                Spacer()
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, AppSpacing.md)
             .padding(.vertical, AppSpacing.md)
             .cardSurface(cornerRadius: AppCornerRadius.large)
+            // `Spacer` paints nothing for hit-testing to land on, so without this the tappable
+            // area is the glyph + text bounds rather than the whole card.
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
     }
 }
 
 #Preview {
-    VStack {
+    VStack(spacing: AppSpacing.lg) {
         TappableSearchBar()
-        TappableSearchBar(placeholder: "Search or ask Cay AI...")
+        TappableSearchBar(placeholder: "Add tickers")
     }
     .padding()
     .background(AppColors.background)

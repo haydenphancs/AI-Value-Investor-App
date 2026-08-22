@@ -67,7 +67,13 @@ class Settings(BaseSettings):
 
     # CoinGecko (Demo API — free tier, 30 calls/min, 10K/month)
     COINGECKO_API_KEY: str = ""
+    # Paid plans live on pro-api.coingecko.com; the Demo plan on api.coingecko.com. The
+    # integration derives the auth header from this value (`CoinGeckoClient._auth_header`),
+    # so changing plan is this one variable — never set a header separately.
     COINGECKO_BASE_URL: str = "https://api.coingecko.com/api/v3"
+    # Default is the safety margin under the free Demo plan's 30/min. A paid plan allows far
+    # more; leaving this at 25 throttles a paid key to demo speed.
+    COINGECKO_MAX_CALLS_PER_MINUTE: int = 25
 
     # FRED (Federal Reserve Economic Data) — free tier ~120 req/min.
     # Used to ground the Macro module in real CPI / Fed Funds / yield-curve

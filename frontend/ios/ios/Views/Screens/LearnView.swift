@@ -128,27 +128,9 @@ struct LearnContentView: View {
     // MARK: - Learn Tab Content
     private var learnTabContent: some View {
         VStack(spacing: 0) {
-            // Keyword filter over the Money Moves + Books on this dashboard.
-            // Client-side only — distinct from the top "Search or ask Cay AI" bar,
-            // which is global entity/AI search. Shown once there's content to
-            // filter, or while a keyword is active (so it can be cleared).
-            if showContentFilterBar {
-                SearchBar(
-                    text: $viewModel.contentFilter,
-                    placeholder: "Filter Money Moves & books…"
-                )
-                .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.sm)
-                .padding(.bottom, AppSpacing.sm)
-            }
-
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xxl) {
-                    if viewModel.isFilteringContent {
-                        filteredLearnContent
-                    } else {
-                        fullLearnDashboard
-                    }
+                    fullLearnDashboard
 
                     // Bottom padding for tab bar
                     Color.clear.frame(height: AppSpacing.xxxl)
@@ -160,13 +142,7 @@ struct LearnContentView: View {
         }
     }
 
-    /// Show the filter field once the dashboard has content, or while a filter is
-    /// active (so an empty result set can still be cleared).
-    private var showContentFilterBar: Bool {
-        !viewModel.moneyMoves.isEmpty || !viewModel.books.isEmpty || viewModel.isFilteringContent
-    }
-
-    // MARK: - Full dashboard (no filter active)
+    // MARK: - Dashboard
     @ViewBuilder
     private var fullLearnDashboard: some View {
         // Investor Journey Section (includes journey progress)
@@ -219,59 +195,6 @@ struct LearnContentView: View {
         // shown next to reading material invited a top-up at the moment the user was
         // least likely to need one, and duplicated a number that must never disagree
         // with itself across two screens.
-    }
-
-    // MARK: - Filtered content (keyword active)
-    //
-    // Only the two list-like sections are filterable. The Journey section is a
-    // progress track (current level only), not a content browser, and Credits
-    // isn't content — both are hidden while filtering.
-    @ViewBuilder
-    private var filteredLearnContent: some View {
-        if viewModel.filteredMoneyMoves.isEmpty && viewModel.filteredBooks.isEmpty {
-            learnFilterEmptyState
-        } else {
-            if !viewModel.filteredMoneyMoves.isEmpty {
-                MoneyMovesSection(
-                    concepts: viewModel.filteredMoneyMoves,
-                    onSeeAll: handleSeeAllMoneyMoves,
-                    onConceptTap: handleMoneyMoveTap
-                )
-                .padding(.top, AppSpacing.md)
-            }
-
-            if !viewModel.filteredBooks.isEmpty {
-                AIBooksSection(
-                    books: viewModel.filteredBooks,
-                    onSeeAll: handleSeeAllBooks,
-                    onBookTap: handleBookTap,
-                    onChatWithBook: handleChatWithBook,
-                    isBookmarked: { bookmarks.isBookmarked($0.title) },
-                    onToggleBookmark: { bookmarks.toggle($0.title) }
-                )
-            }
-        }
-    }
-
-    private var learnFilterEmptyState: some View {
-        VStack(spacing: AppSpacing.sm) {
-            Image(systemName: "magnifyingglass")
-                .font(AppTypography.iconXXL)
-                .foregroundColor(AppColors.textMuted)
-
-            Text("No content matches “\(viewModel.contentFilter)”")
-                .font(AppTypography.bodyEmphasis)
-                .foregroundColor(AppColors.textPrimary)
-                .multilineTextAlignment(.center)
-
-            Text("Try a different word, or clear the filter.")
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, AppSpacing.xxl)
-        .padding(.horizontal, AppSpacing.xl)
     }
 
     // MARK: - Action Handlers

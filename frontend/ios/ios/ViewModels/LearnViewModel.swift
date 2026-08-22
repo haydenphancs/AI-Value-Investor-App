@@ -25,37 +25,8 @@ class LearnViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var error: String?
     @Published var searchText: String = ""
-    /// Client-side keyword filter over the Money Moves + Books shown on the Wiser
-    /// dashboard (no backend learn-search endpoint exists). Distinct from the top
-    /// "Search or ask Cay AI" bar, which is global entity/AI search.
-    @Published var contentFilter: String = ""
 
     private var cancellables = Set<AnyCancellable>()
-
-    // MARK: - Content filter (Wiser dashboard)
-
-    /// Whether the keyword filter is narrowing the dashboard.
-    var isFilteringContent: Bool {
-        !contentFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Money Moves matching the keyword (title or subtitle). Full list when empty.
-    var filteredMoneyMoves: [MoneyMove] {
-        let kw = contentFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !kw.isEmpty else { return moneyMoves }
-        return moneyMoves.filter {
-            $0.title.lowercased().contains(kw) || $0.subtitle.lowercased().contains(kw)
-        }
-    }
-
-    /// Books matching the keyword (title or author). Full list when empty.
-    var filteredBooks: [EducationBook] {
-        let kw = contentFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !kw.isEmpty else { return books }
-        return books.filter {
-            $0.title.lowercased().contains(kw) || $0.author.lowercased().contains(kw)
-        }
-    }
 
     // MARK: - Initialization
     init() {

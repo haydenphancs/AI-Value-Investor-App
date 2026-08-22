@@ -198,3 +198,72 @@ def test_the_generated_swift_carries_no_storage_url():
     assert "/storage/v1/object/" not in swift
     assert "supabase.co" not in swift
     assert "audioUrl" not in swift
+
+
+# ---------------------------------------------------------------------------
+# The manifests must reach the PRODUCTION IMAGE, not just the repo.
+#
+# `book_audio_service` globs backend/data/book_audio/*.manifest.json at IMPORT and degrades
+# at logger.warning, so losing them empties BOOK_AUDIO_CATALOG and this endpoint answers
+# `temporarily_unavailable` for every user with nothing in the logs anyone would look at.
+#
+# Two changes can do it, and neither touches Python: excluding the directory in
+# backend/.dockerignore (Railway builds the image from this context), or `git rm --cached`
+# plus a trailing-slash .gitignore entry — git cannot re-include a file whose PARENT
+# DIRECTORY is excluded, so `!…/*.manifest.json` under `book_audio/` is silently inert.
+#
+# The 466 MB of .m4a genuinely should be excluded — the clips are served from Supabase
+# Storage, never from disk. This asserts the exclusion stays surgical.
+# ---------------------------------------------------------------------------
+_DOCKERIGNORE = _REPO / "backend/.dockerignore"
+_GITIGNORE = _REPO / ".gitignore"
+_KEEP_SUFFIXES = (".manifest.json", ".readalong.json", ".cost_report.json", ".jsonl")
+
+
+def _ignore_patterns(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [
+        ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+
+def _matches(pattern: str, rel: str) -> bool:
+    import fnmatch
+    base = pattern.rstrip("/").lstrip("/")
+    return fnmatch.fnmatch(rel, base) or rel.startswith(base + "/")
+
+
+@pytest.mark.parametrize(
+    "ignore_file, prefix",
+    [("backend/.dockerignore", "data/book_audio"), (".gitignore", "backend/data/book_audio")],
+)
+def test_the_book_audio_manifests_are_never_excluded_from_the_build(ignore_file, prefix):
+    path = _REPO / ignore_file
+    negations = [p[1:] for p in _ignore_patterns(path) if p.startswith("!")]
+    positives = [p for p in _ignore_patterns(path) if not p.startswith("!")]
+
+    # Enumerate the REAL files, never a synthesised name: `runpod_cost_log.jsonl` is not
+    # `<book>.jsonl`, and a guard that invents filenames fails on spellings that never ship.
+    real = sorted(
+        f.name for f in (_REPO / "backend/data/book_audio").glob("*")
+        if f.name.endswith(_KEEP_SUFFIXES)
+    )
+    assert real, "no book_audio metadata on disk — this guard would be vacuous"
+
+    for name in real:
+        rel = f"{prefix}/{name}"
+        hit = next((p for p in positives if _matches(p, rel)), None)
+        if hit is None:
+            continue
+        # A negation only rescues the file if no PARENT DIRECTORY was excluded — that is the
+        # trailing-slash trap, and it fails closed here rather than in production.
+        parent_excluded = _matches(hit, prefix) or hit.rstrip("/") == prefix
+        rescued = any(_matches(n, rel) for n in negations) and not parent_excluded
+        assert rescued, (
+            f"{ignore_file} pattern {hit!r} excludes {rel} from the build. "
+            "book_audio_service reads the manifests at import; without them "
+            "GET /learn/books/audio is dead for every user and says so only at "
+            "logger.warning. Exclude the .m4a by extension, never the directory."
+        )

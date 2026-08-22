@@ -13,6 +13,7 @@ import Combine
 struct MoneyMoveArticleDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var bookmarks = MoneyMoveBookmarkStore.shared
     @State private var audioCompletionCancellable: AnyCancellable?
     @State private var isFollowing: Bool = false
     @State private var showShareSheet: Bool = false
@@ -36,6 +37,21 @@ struct MoneyMoveArticleDetailView: View {
 
     /// The article actually on screen. Everything below reads this, never `article`.
     private var shown: MoneyMoveArticle { current ?? article }
+
+    /// Saved state for the article ON SCREEN, or nil when it cannot be saved.
+    ///
+    /// Reads `shown`, not `article`: a Related-articles tap swaps the article in place, and
+    /// keying this off `article` would leave the button reporting the topic the reader opened
+    /// with. Nil for an empty slug — `createArticleFromMove` builds placeholder articles for
+    /// unauthored cards and leaves `slug` blank, so there is no id to save under.
+    private var bookmarkState: Bool? {
+        shown.slug.isEmpty ? nil : bookmarks.isBookmarked(slug: shown.slug)
+    }
+
+    private func handleBookmarkTapped() {
+        guard !shown.slug.isEmpty else { return }
+        bookmarks.toggle(slug: shown.slug)
+    }
 
     /// Convert article to AudioEpisode for playback
     private var audioEpisode: AudioEpisode {
@@ -143,6 +159,8 @@ struct MoneyMoveArticleDetailView: View {
                             audioEpisode: audioEpisode,
                             onBackTapped: handleBackTapped,
                             onShareTapped: handleShareTapped,
+                            isBookmarked: bookmarkState,
+                            onBookmarkTapped: handleBookmarkTapped,
                             onNavBottomChange: { heroNavBottom = $0 },
                             onTitleBottomChange: { heroTitleBottom = $0 }
                         )
@@ -318,7 +336,23 @@ struct MoneyMoveArticleDetailView: View {
 
             Spacer(minLength: AppSpacing.sm)
 
-            // Same scrim-chip reasoning as the back capsule above.
+            // Same scrim-chip reasoning as the back capsule above — deliberately NOT the hero's
+            // `cardBackground`, which disappears on `.ultraThinMaterial` in both appearances.
+            if let isBookmarked = bookmarkState {
+                Button(action: handleBookmarkTapped) {
+                    Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
+                        .font(AppTypography.iconDefault).fontWeight(.semibold)
+                        .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textPrimary)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(AppColors.textPrimary.opacity(0.15))
+                        )
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel(isBookmarked ? "Remove saved topic" : "Save this topic")
+            }
+
             Button(action: handleShareTapped) {
                 Image(systemName: "square.and.arrow.up")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)

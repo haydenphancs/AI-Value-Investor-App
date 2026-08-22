@@ -145,6 +145,92 @@ the form first.
 
 ---
 
+## 1b — The FOLLOW-UP, after FMP's reply (added 2026-08-21)
+
+FMP answered the §1 enquiry: **$600–700/mo Enterprise Custom**, no separate Data Display and
+Licensing Agreement required *"provided the quote endpoint is removed"*, EOD cheaper than
+real-time, no LLC needed. Contact: Laith Shawer.
+
+Two things in that reply are unresolved and both change the plan materially, so the follow-up
+has to pin them **in writing** before anything is signed.
+
+### Why the term matters more than the price
+
+ToS §4.3 fixes pricing "for the initial term" and §1.4 says all sales are final, no refunds. A
+12-month commitment at $650 is **$7,800** — more than the bank balance, landing as the part-time
+income stops. Establish the term *before* discussing price; a good monthly number on a 12-month
+lock is worse than a worse monthly number month-to-month.
+
+### Why "the quote endpoint" has to be enumerated
+
+Taken at its broadest, that phrase reaches **38 call sites across 26 files** — `/stable/quote`
+and `/stable/batch-quote` feed Home, Tracking, portfolio valuation, the widget, the 60-second
+price-alert loop, the 300-second insight sweeper, all five detail-screen headers, chat and the
+AI report pipeline. There is also a live FMP **WebSocket** feed
+(`wss://websockets.financialmodelingprep.com`, `live_price_manager.py:30`) behind the ticking
+price on five iOS screens, which is a different product from the REST quote and may or may not
+be included.
+
+`/stable/profile` returns a `price` and is already used as a fallback in three places — but it
+has **no batch form**, so all 17 batched call sites would become N-call fan-outs, re-creating a
+performance problem this codebase has already fixed twice.
+
+**Broadest reading ≈ 2 weeks of work. Narrowest ≈ 2–3 days.** That difference decides whether
+the app can ship this month, so it cannot be left to interpretation.
+
+### Paste this into the reply
+
+```
+Thanks Laith — this is helpful. Two things I need pinned down before I can sign, and
+then I'm ready to move quickly.
+
+1) TERM. What is the minimum commitment? I'm looking for month-to-month, or three
+months at most. I'd rather pay a higher monthly rate for a short term than a lower one
+on a twelve-month commitment — given §1.4 (all sales final) I need to be able to stop.
+Please confirm the term in writing before we discuss the number.
+
+2) SCOPE OF "THE QUOTE ENDPOINT". I want to comply exactly, so could you confirm which
+of these are in and which are out under the arrangement you described:
+
+   - /stable/quote
+   - /stable/batch-quote
+   - the streaming feeds (wss://websockets.financialmodelingprep.com and
+     wss://crypto.financialmodelingprep.com)
+   - the `price` / `change` / `changePercentage` fields returned by /stable/profile
+   - the price fields on /stable/biggest-gainers, /biggest-losers, /most-actives
+
+   I ask because those last two also return a current price, and if they are acceptable
+   substitutes the change on my side is small. If they are not, it is a substantial
+   rebuild and I need to plan for it.
+
+3) Does choosing the EOD tier rather than real-time change either answer? If EOD is
+both cheaper and removes the Data Display question, that may be the better fit.
+
+Two smaller confirmations from my original enquiry, if you can:
+   - Server-side caching of responses in my own database on a TTL (minutes to 24h by
+     endpoint), served only to my own app's users, never re-exposed through an API.
+   - Generated research reports freeze the figures used into a point-in-time snapshot,
+     so some values persist past the cache TTL inside one user's saved report. Please
+     tell me if that needs an expiry.
+
+One more: I have build-time files derived from /stable/company-screener and
+/stable/available-industries (ticker-to-industry mappings with market caps) that I use
+to compute industry benchmarks. I am removing them from public view regardless — I just
+want to confirm that generating and storing such derived files for internal use is
+within the agreement.
+```
+
+### What to do with each answer
+
+| Their answer | What it means |
+|---|---|
+| Month-to-month, `/quote` + `batch-quote` only, profile OK | Best case. Sign. ~2–3 days of work, launch is not blocked |
+| Month-to-month, streaming also out | Sign, but the live-ticking price header goes. Plan the removal before submitting |
+| 12-month term | **Walk, or negotiate hard.** $7,800 non-refundable is the single largest risk on this launch |
+| Everything with a price is out | Re-scope to an EOD product and re-plan the timeline honestly — this is the 2-week branch |
+
+---
+
 ## 2 — CoinGecko
 
 CoinGecko *does* take email. Send from `support@caydexinvest.com`, using the account the API key

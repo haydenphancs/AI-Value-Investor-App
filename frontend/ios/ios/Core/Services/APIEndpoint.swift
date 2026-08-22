@@ -334,6 +334,14 @@ enum APIEndpoint: Sendable {
     case addBookBookmark(key: String)
     case removeBookBookmark(key: String)
 
+    // MARK: - Learn / Money Move bookmark (account-synced; key = article slug)
+    //
+    // SINGLE-VALUED, unlike the book bookmarks above: at most one topic is saved, so `set`
+    // REPLACES server-side (PUT) and there is no list to reconcile on the client.
+    case getMoneyMoveBookmark
+    case setMoneyMoveBookmark(slug: String)
+    case removeMoneyMoveBookmark(slug: String)
+
     // MARK: - Personas
     case getPersonas
 
@@ -640,6 +648,10 @@ enum APIEndpoint: Sendable {
         case .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
             return "/api/v1/learn/bookmarks"
 
+        // Learn / Money Move bookmark (slug travels in the body, not the path)
+        case .getMoneyMoveBookmark, .setMoneyMoveBookmark, .removeMoneyMoveBookmark:
+            return "/api/v1/learn/money-move-bookmark"
+
         // Personas
         case .getPersonas:
             return "/api/v1/research/personas"
@@ -675,7 +687,9 @@ enum APIEndpoint: Sendable {
         case .bulkUpdateHoldings,
              .renamePortfolio, .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
              .activatePortfolio,
-             .updateMySettings, .updateMyInvestorProfile:
+             .updateMySettings, .updateMyInvestorProfile,
+             // PUT, not POST: the saved topic is a single-valued resource and this REPLACES it.
+             .setMoneyMoveBookmark:
             return .PUT
 
         case .registerDevice, .markNotificationsRead, .createPriceAlert:
@@ -686,6 +700,7 @@ enum APIEndpoint: Sendable {
 
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem,
+             .removeMoneyMoveBookmark,
              .deleteAccount, .unregisterDevice, .deletePriceAlert:
             return .DELETE
 
@@ -875,6 +890,9 @@ enum APIEndpoint: Sendable {
 
         case .addBookBookmark(let key), .removeBookBookmark(let key):
             return BookBookmarkRequest(bookKey: key)
+
+        case .setMoneyMoveBookmark(let slug), .removeMoneyMoveBookmark(let slug):
+            return MoneyMoveBookmarkRequest(slug: slug)
 
         case .removeFromWatchlist(let stockId):
             return RemoveFromWatchlistRequest(stockId: stockId)
@@ -1071,7 +1089,11 @@ enum APIEndpoint: Sendable {
             return .guestAllowed
 
         case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem,
-             .getBookBookmarks, .addBookBookmark, .removeBookBookmark:
+             .getBookBookmarks, .addBookBookmark, .removeBookBookmark,
+             // Cheap, the caller's own data, claimable on sign-up (auth.md §1a) — the backend
+             // resolves a signed-out caller via `get_learn_identity`, so gating these would
+             // delete a working feature for every guest.
+             .getMoneyMoveBookmark, .setMoneyMoveBookmark, .removeMoneyMoveBookmark:
             return .guestAllowed
 
         // Learn CONTENT moved off `.public` when narration became Pro/Max. It is still
@@ -1429,4 +1451,10 @@ nonisolated struct BookBookmarkRequest: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case bookKey = "book_key"
     }
+}
+
+/// Body for PUT / DELETE `/api/v1/learn/money-move-bookmark`. The slug travels in the body
+/// rather than the path so it never needs percent-encoding — same reasoning as BookBookmarkRequest.
+nonisolated struct MoneyMoveBookmarkRequest: Encodable, Sendable {
+    let slug: String
 }

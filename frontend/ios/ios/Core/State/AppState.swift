@@ -946,6 +946,10 @@ final class AppState {
         JourneyProgressStore.shared.reset()
         MoneyMovesProgressStore.shared.reset()
         BookmarkStore.shared.reset()
+        // The saved Money Move topic is the same device-global bug class: one slug under a
+        // defaults key with no user id in it. Left behind, the next account sees the previous
+        // user's saved topic AND `pushUnsynced` writes it into their own rows.
+        MoneyMoveBookmarkStore.shared.reset()
         // Followed whales belong here for exactly the same reason the four Learn stores do:
         // `WhaleService.followedWhaleIds` persists to a device-global UserDefaults key with no
         // user id in it, and nothing cleared it on sign-out. So account B, signing in on A's

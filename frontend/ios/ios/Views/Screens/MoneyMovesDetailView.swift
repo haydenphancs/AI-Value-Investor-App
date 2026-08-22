@@ -11,6 +11,7 @@ import SwiftUI
 struct MoneyMovesDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var audioManager: AudioManager
+    @ObservedObject private var bookmarks = MoneyMoveBookmarkStore.shared
     @State private var blueprints: [MoneyMove] = []
     @State private var valueTraps: [MoneyMove] = []
     @State private var battles: [MoneyMove] = []
@@ -49,6 +50,17 @@ struct MoneyMovesDetailView: View {
                             )
                             .padding(.horizontal, AppSpacing.lg)
                             .padding(.top, AppSpacing.md)
+                        }
+
+                        // The one saved topic, as a shortcut back into it. Nothing renders
+                        // when nothing is saved, or when the saved slug no longer resolves —
+                        // see `bookmarkedArticle`.
+                        if let saved = bookmarkedArticle {
+                            BookmarkedMoneyMoveRow(
+                                article: saved,
+                                onTap: { selectedArticle = saved }
+                            )
+                            .padding(.horizontal, AppSpacing.lg)
                         }
 
                         // Section 1: The Blueprints
@@ -94,6 +106,11 @@ struct MoneyMovesDetailView: View {
             // server-side-only topics appear without an app update.
             await MoneyMovesContentStore.shared.prefetch()
             loadSampleData()
+            // Hydrated HERE rather than from `AppState.hydrateLearnStores()`: the saved-topic row
+            // exists on this screen alone, so putting it in the auth fan-out would add a request
+            // to every signed-in launch for a screen most launches never open. "Clear eagerly,
+            // fetch lazily" — see project_launch_fanout_and_analytics.
+            await bookmarks.hydrate()
         }
         // Prevent accidental navigation gestures
         .interactiveDismissDisabled(false)
@@ -123,6 +140,17 @@ struct MoneyMovesDetailView: View {
         blueprints = cards.filter { $0.category == .blueprints && !isHero($0) }
         valueTraps = cards.filter { $0.category == .valueTraps && !isHero($0) }
         battles = cards.filter { $0.category == .battles && !isHero($0) }
+    }
+
+    /// The saved topic resolved to its article, or nil.
+    ///
+    /// Returns nil when the slug no longer resolves. Money Moves content is served from the
+    /// backend, so an article can be retired out from under a bookmark made weeks ago — the same
+    /// tolerance `MoneyMoveArticleDetailView.openRelated` already applies to a stale related
+    /// card. Rendering a row that opens nothing would be worse than rendering none.
+    private var bookmarkedArticle: MoneyMoveArticle? {
+        guard let slug = bookmarks.bookmarkedSlug, !slug.isEmpty else { return nil }
+        return MoneyMovesContentStore.shared.article(forSlug: slug)
     }
 
     /// Newest first, via the SHARED sorter — the Wiser row and this screen must never drift

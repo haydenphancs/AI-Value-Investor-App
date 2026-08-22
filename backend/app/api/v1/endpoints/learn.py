@@ -6,6 +6,7 @@ Frontend:
   - GET  /api/v1/learn/progress/{content_type}       (user completion log)
   - POST /api/v1/learn/progress/{content_type}       (mark an item completed)
   - GET/POST/DELETE /api/v1/learn/bookmarks          (toggleable book bookmarks)
+  - GET/PUT/DELETE  /api/v1/learn/money-move-bookmark (the ONE saved Money Move topic)
 
 Serves authored learning content from Supabase:
   - Investor Journey lessons (skeleton + story content with media URLs) from `lessons`.
@@ -17,6 +18,9 @@ content_type ∈ {book_core, journey_lesson, money_move}, item_key is that featu
 (a guest still works, backed by the shared guest user id). Book bookmarks share that same
 unified table under content_type 'book_bookmark' (item_key = book title) but are toggleable, so
 they get their own GET/POST/DELETE /bookmarks routes (the /progress endpoint never deletes).
+The Money Moves bookmark is the same idea one more time (content_type
+'money_move_bookmark', item_key = article slug) but SINGLE-VALUED: at most one topic is
+saved, so PUT replaces instead of appending and the response carries one nullable slug.
 """
 
 import asyncio
@@ -28,7 +32,12 @@ from supabase import Client
 from app.api.error_response import error_response_from_exception
 from app.database import get_supabase
 from app.dependencies import get_learn_identity
-from app.schemas.bookmarks import BookmarkListResponse, BookmarkRequest
+from app.schemas.bookmarks import (
+    BookmarkListResponse,
+    BookmarkRequest,
+    MoneyMoveBookmarkRequest,
+    MoneyMoveBookmarkResponse,
+)
 from app.schemas.journey import JourneyResponse
 from app.schemas.learn_progress import CompleteLearnItemRequest, LearnProgressResponse
 from app.schemas.learn_books_audio import BooksAudioResponse
@@ -362,3 +371,158 @@ async def remove_book_bookmark(
             # and the bookmark reappears.
             return error_response_from_exception(exc, step="learn_remove_bookmark")
     return await get_book_bookmarks(user=user, supabase=supabase)
+
+
+# --- Money Moves bookmark ----------------------------------------------------------------------
+# The ONE saved Money Move topic, in the same unified table (user_learn_progress, migration 067)
+# under content_type 'money_move_bookmark'. item_key is the article SLUG — the canonical id, the
+# same key the money_move completion log uses, so a bookmark and a completion always agree about
+# which article they mean.
+#
+# SINGLE-VALUED, and that is the whole design. The Money Moves screen shows one saved topic below
+# its hero, so PUT REPLACES rather than appends: the client never has to reconcile an ordered list,
+# never needs tombstones for a displaced entry, and cannot end up rendering two saved rows. The
+# response carries one nullable slug instead of a list for the same reason.
+#
+# `completed_at` doubles as "saved_at". A row is only ever displaced or deleted, never updated.
+# Optional auth — a guest saves against their own per-install identity (auth.md §1a).
+
+MONEY_MOVE_BOOKMARK_CONTENT_TYPE = "money_move_bookmark"
+
+
+def _money_move_bookmark_rows(supabase: Client, user_id: str):
+    """The user's saved-topic rows, most-recent-first. Sync — call via asyncio.to_thread."""
+    return (
+        supabase.table("user_learn_progress")
+        .select("item_key")
+        .eq("user_id", user_id)
+        .eq("content_type", MONEY_MOVE_BOOKMARK_CONTENT_TYPE)
+        # `item_key` breaks ties DETERMINISTICALLY, exactly as get_book_bookmarks does.
+        # `completed_at` defaults to now(), so a PUT racing another device's PUT can leave two
+        # rows sharing a timestamp for the moment before the delete lands — and then which one
+        # this endpoint returns would be up to Postgres, i.e. the saved row could flip between
+        # two requests. Ordering by item_key second makes the answer stable either way.
+        .order("completed_at", desc=True)
+        .order("item_key", desc=False)
+        .limit(1)
+        .execute()
+    )
+
+
+@router.get("/money-move-bookmark", response_model=MoneyMoveBookmarkResponse)
+async def get_money_move_bookmark(
+    user: dict = Depends(get_learn_identity),
+    supabase: Client = Depends(get_supabase),
+):
+    """The slug of the user's saved Money Move topic, or null when nothing is saved."""
+    user_id = user["id"]
+    try:
+        result = await asyncio.to_thread(_money_move_bookmark_rows, supabase, user_id)
+        rows = result.data or []
+        return MoneyMoveBookmarkResponse(bookmark=rows[0]["item_key"] if rows else None)
+    except Exception as exc:
+        logger.error(
+            "[Learn] money-move bookmark fetch failed (user=%s): %s",
+            user_id,
+            f"{type(exc).__name__}: {exc}",
+        )
+        # NOT a 200-with-null. The iOS store treats a successful GET as authoritative and clears
+        # its unsynced flag, so answering null on a backend hiccup would look like "nothing is
+        # saved" and silently drop the user's bookmark. Same reasoning as get_book_bookmarks.
+        return error_response_from_exception(exc, step="learn_money_move_bookmark_fetch")
+
+
+@router.put("/money-move-bookmark", response_model=MoneyMoveBookmarkResponse)
+async def set_money_move_bookmark(
+    request: MoneyMoveBookmarkRequest,
+    user: dict = Depends(get_learn_identity),
+    supabase: Client = Depends(get_supabase),
+):
+    """
+    Save a topic, replacing whatever was saved before. Idempotent.
+
+    Returns the resulting bookmark so the client can adopt the server's view in one round trip.
+    """
+    user_id = user["id"]
+    slug = (request.slug or "").strip()
+    if not slug:
+        # A blank slug is not "clear the bookmark" — DELETE is. Writing it would create a row
+        # with an empty item_key that no article can ever resolve, i.e. a permanently dangling
+        # saved row. Answer with the current state instead.
+        return await get_money_move_bookmark(user=user, supabase=supabase)
+
+    def _replace():
+        # Insert BEFORE deleting. If the process dies between the two statements the user keeps a
+        # bookmark (possibly two for a moment, which the ordered GET resolves deterministically);
+        # deleting first would leave them with none.
+        supabase.table("user_learn_progress").upsert(
+            {
+                "user_id": user_id,
+                "content_type": MONEY_MOVE_BOOKMARK_CONTENT_TYPE,
+                "item_key": slug,
+            },
+            on_conflict="user_id,content_type,item_key",
+            ignore_duplicates=True,
+        ).execute()
+        return (
+            supabase.table("user_learn_progress")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("content_type", MONEY_MOVE_BOOKMARK_CONTENT_TYPE)
+            .neq("item_key", slug)
+            .execute()
+        )
+
+    try:
+        await asyncio.to_thread(_replace)
+    except Exception as exc:
+        logger.error(
+            "[Learn] money-move bookmark set failed (user=%s slug=%r): %s",
+            user_id,
+            slug,
+            f"{type(exc).__name__}: {exc}",
+        )
+        # Surfaced, not swallowed: the client clears its "needs push" flag on a 2xx, so a silent
+        # failure here loses the save with no retry and no trace.
+        return error_response_from_exception(exc, step="learn_money_move_bookmark_set")
+    return await get_money_move_bookmark(user=user, supabase=supabase)
+
+
+@router.delete("/money-move-bookmark", response_model=MoneyMoveBookmarkResponse)
+async def remove_money_move_bookmark(
+    request: MoneyMoveBookmarkRequest,
+    user: dict = Depends(get_learn_identity),
+    supabase: Client = Depends(get_supabase),
+):
+    """Remove the saved topic, by slug. Idempotent."""
+    user_id = user["id"]
+    slug = (request.slug or "").strip()
+    if not slug:
+        return await get_money_move_bookmark(user=user, supabase=supabase)
+
+    def _delete():
+        # Scoped to the NAMED slug, never "delete every row of this type". An un-bookmark queued
+        # offline on one device can land long after the user saved a different topic on another;
+        # an unscoped delete would then wipe a bookmark the user never touched.
+        return (
+            supabase.table("user_learn_progress")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("content_type", MONEY_MOVE_BOOKMARK_CONTENT_TYPE)
+            .eq("item_key", slug)
+            .execute()
+        )
+
+    try:
+        await asyncio.to_thread(_delete)
+    except Exception as exc:
+        logger.error(
+            "[Learn] money-move bookmark remove failed (user=%s slug=%r): %s",
+            user_id,
+            slug,
+            f"{type(exc).__name__}: {exc}",
+        )
+        # See remove_book_bookmark — a 200 here makes the client retire its pending removal and
+        # the next hydrate resurrects the bookmark the user just cleared.
+        return error_response_from_exception(exc, step="learn_money_move_bookmark_remove")
+    return await get_money_move_bookmark(user=user, supabase=supabase)

@@ -9,8 +9,13 @@ Three-tier symbol resolution:
   2. Supabase crypto_coin_id_cache (permanent, for dynamic coins)
   3. CoinGecko /search endpoint (1 API call, first time only)
 
-Free Demo Plan: 30 calls/min, 10,000 calls/month.
-Rate limiter enforces 25 calls/min with safety margin.
+Auth is DERIVED FROM THE BASE URL, never configured separately — see `_auth_header`.
+CoinGecko rejects a paid key sent to api.coingecko.com with error 10010, and a demo key
+sent to pro-api.coingecko.com with 10002, so the two must move together.
+
+Rate limit: `settings.COINGECKO_MAX_CALLS_PER_MINUTE` (default 25, a safety margin under the
+free Demo plan's 30/min). A paid plan allows far more — raise the setting when the plan
+changes, or the client throttles itself to demo speed on a paid key.
 """
 
 import asyncio
@@ -151,21 +156,25 @@ SYMBOL_TO_COINGECKO_ID: Dict[str, str] = {
 
 class CoinGeckoClient:
     """
-    Client for CoinGecko API (Demo plan).
+    Client for the CoinGecko API, Demo or paid.
 
-    Uses a persistent httpx.AsyncClient with connection pooling and
-    a sliding-window rate limiter (25 req/min).
+    Uses a persistent httpx.AsyncClient with connection pooling and a sliding-window rate
+    limiter. The plan is inferred from the base URL alone (`_auth_header`), so switching
+    plans is one environment variable.
     """
 
-    _MAX_CALLS_PER_MINUTE = 25  # safety margin below 30
+    _DEMO_HEADER = "x-cg-demo-api-key"
+    _PRO_HEADER = "x-cg-pro-api-key"
+    _PRO_HOST_MARKER = "pro-api."
     _WINDOW_SECONDS = 60
 
     def __init__(self):
         self.base_url = settings.COINGECKO_BASE_URL
         self.api_key = settings.COINGECKO_API_KEY
         self.timeout = settings.HTTP_TIMEOUT_SECONDS
+        self._max_calls_per_minute = max(1, int(settings.COINGECKO_MAX_CALLS_PER_MINUTE))
         self._client: Optional[httpx.AsyncClient] = None
-        self._rate_window: deque = deque(maxlen=self._MAX_CALLS_PER_MINUTE)
+        self._rate_window: deque = deque(maxlen=self._max_calls_per_minute)
         self._rate_lock = asyncio.Lock()
         # In-memory cache for dynamically resolved IDs (symbol → coingecko_id)
         self._dynamic_id_cache: Dict[str, str] = {}
@@ -187,11 +196,22 @@ class CoinGeckoClient:
             await self._client.aclose()
             self._client = None
 
+    @property
+    def _auth_header(self) -> str:
+        """The header name CoinGecko expects for THIS base URL.
+
+        Deriving it is the whole point. When these were configured independently, a paid key
+        kept being sent as `x-cg-demo-api-key` to `api.coingecko.com`; CoinGecko answered
+        10010 on key-required endpoints but served the public ones anonymously with HTTP 200,
+        so production looked healthy while running on the free tier with the paid key ignored.
+        """
+        return self._PRO_HEADER if self._PRO_HOST_MARKER in self.base_url else self._DEMO_HEADER
+
     async def _rate_limit(self):
-        """Sliding-window rate limiter: max 25 calls per 60 seconds."""
+        """Sliding-window rate limiter: max `_max_calls_per_minute` calls per 60 seconds."""
         async with self._rate_lock:
             now = time.monotonic()
-            if len(self._rate_window) >= self._MAX_CALLS_PER_MINUTE:
+            if len(self._rate_window) >= self._max_calls_per_minute:
                 oldest = self._rate_window[0]
                 elapsed = now - oldest
                 if elapsed < self._WINDOW_SECONDS:
@@ -210,7 +230,7 @@ class CoinGeckoClient:
         url = f"{self.base_url}/{endpoint}"
         headers = {}
         if self.api_key:
-            headers["x-cg-demo-api-key"] = self.api_key
+            headers[self._auth_header] = self.api_key
 
         try:
             client = await self._get_client()

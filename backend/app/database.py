@@ -81,58 +81,158 @@ def get_supabase() -> Client:
 
 
 _auth_client: Optional[Client] = None
+_admin_client: Optional[Client] = None
+
+
+def _new_isolated_client(label: str) -> Client:
+    """A fresh service-role client that never persists or refreshes a session.
+
+    `persist_session` / `auto_refresh_token` are off so the SDK never carries one caller's
+    session — or a background refresh thread — into another request on a client that serves
+    every user.
+
+    The options are an optimisation, not the isolation itself: a separate client INSTANCE is
+    what keeps the other clients clean. So a supabase-py bump that moves `ClientOptions`
+    degrades to a plain client rather than failing startup.
+    """
+    logger.info("Initializing Supabase %s client (isolated from the service-role client)", label)
+    try:
+        from supabase.lib.client_options import ClientOptions  # noqa: PLC0415
+
+        return create_client(
+            supabase_url=settings.SUPABASE_URL,
+            supabase_key=settings.SUPABASE_SERVICE_ROLE_KEY,
+            options=ClientOptions(persist_session=False, auto_refresh_token=False),
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not build the %s client with ClientOptions (%s: %s) — "
+            "falling back to a plain isolated client",
+            label, type(e).__name__, e,
+        )
+        return create_client(
+            supabase_url=settings.SUPABASE_URL,
+            supabase_key=settings.SUPABASE_SERVICE_ROLE_KEY,
+        )
+
+
+def _reset_to_service_role(client: Client) -> Client:
+    """Re-assert `service_role` on a process-wide client, once per dependency resolution.
+
+    IT IS ALL ONE DICT. `SyncClient.__init__` hands `self.options.headers` by REFERENCE to the
+    GoTrue client, which hands the same reference on to `SyncGoTrueAdminAPI`. Measured on
+    supabase 2.16.0 / gotrue 2.12.4:
+
+        options.headers is auth._headers   -> True
+        auth._headers  is admin._headers   -> True
+
+    So `_listen_to_auth_events` rewriting `Authorization` on SIGNED_IN rewrites it for
+    `auth.admin.*` as well, and `SyncGoTrueBaseAPI._request` sends `{**self._headers, ...}` —
+    `delete_user` / `update_user_by_id` / `get_user_by_id` pass no per-call `jwt` to override
+    it. GoTrue answers a user JWT on `/admin/*` with `User not allowed`.
+
+    Writing the SAME key the SDK's own listener writes is deliberate: it is the one place every
+    sub-client reads from. `_in_memory_session` is cleared too — `persist_session=False` routes
+    `_save_session` there instead of storage, so the last signer's session would otherwise stay
+    readable on the next caller's request.
+
+    Best-effort: a supabase-py bump that renames these internals must degrade, not take auth
+    down. The structural guarantee is the separate INSTANCE; this is a self-healing layer on
+    top, and `tests/test_supabase_client_isolation.py` is what actually detects misuse.
+    """
+    try:
+        client.options.headers["Authorization"] = (
+            f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}"
+        )
+        auth = getattr(client, "auth", None)
+        if getattr(auth, "_in_memory_session", None) is not None:
+            auth._in_memory_session = None
+    except Exception as e:
+        logger.warning(
+            "Could not reset a Supabase client to service_role (%s: %s) — the isolated "
+            "instance still stands, but the self-healing layer is inert",
+            type(e).__name__, e,
+        )
+    return client
 
 
 def get_auth_client() -> Client:
-    """Client used ONLY for `supabase.auth.*` calls. NEVER call `.table()` on it.
+    """Client for the SIGN-IN half of `supabase.auth.*`. NEVER call `.table()` or `.admin.*` on it.
 
     supabase-py registers an auth-state listener on every client it builds. On a successful
-    `sign_in_with_password` / `sign_in_with_id_token` / `verify_otp`, that listener REWRITES
-    `options.headers["Authorization"]` with the signing-in USER's JWT and sets `_postgrest`
-    to None, so the next `.table()` call rebuilds postgrest carrying that user's token.
-
-    On the shared service-role singleton that is a process-wide privilege demotion. Verified
-    directly against the installed SDK:
+    sign-in that listener REWRITES `options.headers["Authorization"]` with the signing-in USER's
+    JWT and sets `_postgrest` to None, so the next `.table()` call rebuilds postgrest carrying
+    that user's token. Verified directly against the installed SDK:
 
         before      : Bearer SERVICE_ROLE_FAKE
         after       : Bearer USER_A_JWT
         _postgrest reset to None: True
 
-    Every subsequent database read in the process then runs as that ONE user under RLS instead
-    of service_role — and nothing anywhere restored it. Concretely: user A signs in, and user
-    B's next request has `select("*") from users where id = B` return ZERO rows (RLS
-    `users_select_own` is `auth.uid() = id`, and uid is now A). `get_current_user` reads that
-    as a dead session and 401s, so B — who did nothing — is silently demoted to the guest
-    identity and the app renders "Guest" with no name or email.
+    On the shared service-role singleton that is a process-wide privilege demotion. Every
+    subsequent database read runs as that ONE user under RLS instead of service_role — and
+    nothing restored it. Concretely: user A signs in, and user B's next request has
+    `select("*") from users where id = B` return ZERO rows (RLS `users_select_own` is
+    `auth.uid() = id`, and uid is now A). `get_current_user` reads that as a dead session and
+    401s, so B — who did nothing — is silently demoted to the guest identity and the app renders
+    "Guest" with no name or email.
 
-    Confining auth calls to this second client keeps `get_supabase()` service_role forever.
-    `persist_session` / `auto_refresh_token` are off so the SDK never carries one caller's
-    session (or a background refresh thread) into another request.
+    MORE CALLS DEMOTE THAN THE OBVIOUS THREE. `gotrue_client.py` emits SIGNED_IN from
+    `sign_in_with_password`, `sign_in_with_id_token`, `sign_up`, `verify_otp`,
+    `exchange_code_for_session`, `sign_in_anonymously` and `_recover_and_refresh`, and
+    TOKEN_REFRESHED from `set_session` / `_call_refresh_token`. All of them rewrite the header.
+
+    ADMIN CALLS DO NOT BELONG HERE — use `get_admin_client()`. `auth.admin.*` shares this
+    client's headers dict (see `_reset_to_service_role`), so a sign-in demotes it too, and
+    GoTrue rejects `/admin/*` under a user JWT with `User not allowed`. That is what broke
+    account deletion, change-password and reset-password in production.
+
+    `_reset_to_service_role` runs on every resolution so a request always starts from
+    service_role and one caller's (possibly expired) JWT never rides along on the next
+    caller's sign-in.
     """
     global _auth_client
     if _auth_client is None:
-        logger.info("Initializing Supabase AUTH client (isolated from the service-role client)")
-        try:
-            from supabase.lib.client_options import ClientOptions  # noqa: PLC0415
+        _auth_client = _new_isolated_client("AUTH")
+    return _reset_to_service_role(_auth_client)
 
-            _auth_client = create_client(
-                supabase_url=settings.SUPABASE_URL,
-                supabase_key=settings.SUPABASE_SERVICE_ROLE_KEY,
-                options=ClientOptions(persist_session=False, auto_refresh_token=False),
-            )
-        except Exception as e:
-            # Options are an optimisation, not the isolation itself — a separate client
-            # instance is what keeps the service-role one clean. Degrade rather than fail.
-            logger.warning(
-                "Could not build the auth client with ClientOptions (%s: %s) — "
-                "falling back to a plain isolated client",
-                type(e).__name__, e,
-            )
-            _auth_client = create_client(
-                supabase_url=settings.SUPABASE_URL,
-                supabase_key=settings.SUPABASE_SERVICE_ROLE_KEY,
-            )
-    return _auth_client
+
+def get_admin_client() -> Client:
+    """Client used ONLY for `supabase.auth.admin.*`. NEVER sign in on it. NEVER call `.table()`.
+
+    The third client, and the reason is narrow: `auth.admin.*` authenticates with whatever sits
+    in the shared headers dict, and every sign-in verb rewrites that dict (see
+    `get_auth_client`). Sharing one client between sign-ins and admin calls meant a sign-in
+    anywhere in the process — or, for change-password and reset-password, the sign-in/OTP
+    check EARLIER IN THE SAME REQUEST — left `admin.delete_user` / `admin.update_user_by_id`
+    running as that user, which GoTrue refuses with `User not allowed`.
+
+    Nothing ever signs in here, so nothing ever rewrites its header. `_reset_to_service_role`
+    on each resolution makes that self-healing rather than merely conventional, and
+    `tests/test_supabase_client_isolation.py` fails the build if a sign-in verb or a `.table()`
+    call appears on this client.
+    """
+    global _admin_client
+    if _admin_client is None:
+        _admin_client = _new_isolated_client("ADMIN")
+    return _reset_to_service_role(_admin_client)
+
+
+def resolve_admin_client(*candidates) -> Client:
+    """The client to run `auth.admin.*` on: the first candidate that is really a client.
+
+    In production that is the injected `get_admin_client()`. The fallbacks exist because the
+    suite calls handlers DIRECTLY as Python functions (there is no TestClient anywhere in
+    `backend/tests`), so an un-injected parameter is still a FastAPI `Depends(...)` sentinel and
+    must fall through to the fake the test did pass. Same accommodation, and same reasoning, as
+    `api.v1.endpoints.auth._auth_of`.
+
+    Deliberately ONE name in ONE module: it is the token the source-scan guard greps for, so
+    every `auth.admin.*` call site is checkable with a single rule.
+    """
+    for candidate in candidates:
+        if hasattr(candidate, "auth"):
+            return candidate
+    return candidates[-1]
 
 
 async def check_supabase_health() -> bool:

@@ -45,6 +45,9 @@ class ProfileViewModel: BaseViewModel {
     /// Display-name editing (see `saveDisplayName`).
     @Published var isEditingName: Bool = false
     @Published var isSavingName: Bool = false
+    /// True while a picked photo is being processed and uploaded. Drives the spinner over the
+    /// avatar, and disables the picker so a second tap cannot start a competing upload.
+    @Published private(set) var isUploadingAvatar: Bool = false
 
     // MARK: - Credit Usage
 
@@ -248,13 +251,52 @@ class ProfileViewModel: BaseViewModel {
         isSavingName = true
         performTask("updateProfile", showLoading: false) { [weak self] in
             defer { self?.isSavingName = false }
-            let updated = try await AccountRepository.shared.updateProfile(
-                displayName: trimmed,
-                avatarUrl: nil
-            )
+            let updated = try await AccountRepository.shared.updateProfile(displayName: trimmed)
             self?.appState?.user.profile = updated
             self?.isEditingName = false
         }
+    }
+
+    // MARK: - Profile picture
+
+    /// Upload an already-processed square JPEG and adopt the server's profile.
+    ///
+    /// The response carries a freshly SIGNED avatar URL (the bucket is private), which is why
+    /// we take the server's profile wholesale instead of patching the local one — a URL we
+    /// invented would not be signed, and would 400 on load.
+    func saveAvatar(_ jpeg: Data) {
+        guard !isUploadingAvatar else { return }
+        isUploadingAvatar = true
+        performTask("saveAvatar", showLoading: false) { [weak self] in
+            defer { self?.isUploadingAvatar = false }
+            let updated = try await AccountRepository.shared.uploadAvatar(jpeg: jpeg)
+            self?.appState?.user.profile = updated
+        }
+    }
+
+    /// Remove the picture, reverting to the placeholder glyph.
+    ///
+    /// Its OWN task name, deliberately: `performTask` cancels any in-flight task with the same
+    /// name, so sharing one with `saveAvatar` would make a Remove tapped during an upload
+    /// silently cancel it — and `BaseViewModel` swallows `CancellationError` without reporting,
+    /// so the user would see nothing happen at all.
+    func removeAvatar() {
+        guard !isUploadingAvatar else { return }
+        isUploadingAvatar = true
+        performTask("removeAvatar", showLoading: false) { [weak self] in
+            defer { self?.isUploadingAvatar = false }
+            let updated = try await AccountRepository.shared.deleteAvatar()
+            self?.appState?.user.profile = updated
+        }
+    }
+
+    /// The picker handed back something we could not turn into a JPEG — an iCloud photo that
+    /// never downloaded, or a format this device cannot decode.
+    ///
+    /// Reported, never swallowed: a picker that appears to do nothing is indistinguishable
+    /// from a broken feature, which is exactly the class of silent failure auth.md §6 bans.
+    func reportAvatarPickFailed() {
+        errorMessage = "We couldn't read that photo. Try a different one."
     }
 
     func loadCredits() {

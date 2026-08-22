@@ -120,7 +120,13 @@ enum APIEndpoint: Sendable {
     // MARK: - User
     case getCurrentUser
     case getUserCredits
-    case updateProfile(displayName: String?, avatarUrl: String?)
+    case updateProfile(displayName: String?)
+    /// Set the profile picture. The JPEG travels base64-encoded in a JSON body because
+    /// `APIClient.buildRequest` is a single JSON funnel; a 512x512 q0.8 photo is ~40-90 KB,
+    /// so the +33% is comfortably inside the 1 MiB body cap.
+    case updateAvatar(imageBase64: String)
+    /// Clear the profile picture, reverting to the placeholder glyph.
+    case deleteAvatar
     case deleteAccount
     /// Move this install's guest watchlist + portfolios onto the account that just signed in.
     /// Migration 108 partitions guests per install, so without this call the guest-first funnel
@@ -385,6 +391,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/credits"
         case .updateProfile, .deleteAccount:
             return "/api/v1/users/me"
+        case .updateAvatar, .deleteAvatar:
+            return "/api/v1/users/me/avatar"
         case .claimGuestData:
             return "/api/v1/users/me/claim-guest-data"
 
@@ -676,6 +684,7 @@ enum APIEndpoint: Sendable {
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .enrichETFNews,
              .enrichUpdatesNews,
+             .updateAvatar,
              .createPortfolio, .regenerateResearchReportPDF,
              .prewarmReportCollection,
              .claimGuestData:
@@ -701,7 +710,8 @@ enum APIEndpoint: Sendable {
         case .removeFromWatchlist, .deleteReport, .deleteChatSession,
              .unfollowWhale, .deletePortfolio, .removeBookBookmark, .uncompleteLearnItem,
              .removeMoneyMoveBookmark,
-             .deleteAccount, .unregisterDevice, .deletePriceAlert:
+             .deleteAccount, .unregisterDevice, .deletePriceAlert,
+             .deleteAvatar:
             return .DELETE
 
         default:
@@ -852,8 +862,12 @@ enum APIEndpoint: Sendable {
         case .verifyPurchase(let signedTransaction):
             return VerifyPurchaseRequestBody(signedTransaction: signedTransaction)
 
-        case .updateProfile(let displayName, let avatarUrl):
-            return UpdateProfileRequest(displayName: displayName, avatarUrl: avatarUrl)
+        case .updateProfile(let displayName):
+            return UpdateProfileRequest(displayName: displayName)
+
+        case .updateAvatar(let imageBase64):
+            // `keyEncodingStrategy = .convertToSnakeCase` turns this into `image_base64`.
+            return UpdateAvatarRequestBody(imageBase64: imageBase64)
 
         case .updateMySettings(let preferences):
             return UpdateUserSettingsRequestBody(preferences: preferences)
@@ -1166,7 +1180,10 @@ enum APIEndpoint: Sendable {
         case .getTickerReport, .chatWithTickerReport, .prewarmReportCollection:
             return .signInRequired
 
-        case .getCurrentUser, .updateProfile, .deleteAccount, .claimGuestData:
+        case .getCurrentUser, .updateProfile, .deleteAccount, .claimGuestData,
+             // Costs storage per use and is durable cross-device identity — account-only, per
+             // auth.md §1a. A guest has no `public.users` row to own it.
+             .updateAvatar, .deleteAvatar:
             return .signInRequired
 
         case .getMySubscription, .getMySettings, .updateMySettings,
@@ -1326,9 +1343,16 @@ nonisolated struct PasswordChangedResponse: Decodable, Sendable {
     }
 }
 
+nonisolated struct UpdateAvatarRequestBody: Encodable, Sendable {
+    let imageBase64: String
+}
+
+/// ⚠️ NO `avatarUrl`. The column is SERVER-OWNED — written only by POST/DELETE
+/// /users/me/avatar, which construct the URL from bytes they validated and stored. While it
+/// was client-writable, any token holder could aim their avatar at an arbitrary URL, including
+/// one inside our own private bucket, which the read path then SIGNS.
 nonisolated struct UpdateProfileRequest: Encodable, Sendable {
     let displayName: String?
-    let avatarUrl: String?
 }
 
 /// PUT /users/me/settings body. Keys inside `preferences` are already snake_case

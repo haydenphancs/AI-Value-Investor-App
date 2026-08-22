@@ -809,6 +809,9 @@ actor APIClient {
         "token", "access_token", "refresh_token", "id_token", "identity_token",
         "authorization", "api_key", "secret",
         "email", "audio_url", "avatar_url", "url",
+        // Not a secret, but a ~120 KB base64 blob in the console buries every other logged
+        // request — and the avatar upload is the only route that carries one.
+        "image_base64",
     ]
 
     /// Replace the value of any sensitive key with `***`, and defang a signed URL wherever it

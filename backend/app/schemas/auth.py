@@ -15,8 +15,39 @@ PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128  # bcrypt truncates past 72 bytes; cap well below any DoS range
 
 
+#: Human-readable statement of the rule, used by the API error AND mirrored on the iOS sign-up
+#: form. One string so the two can never describe different rules to the same user.
+PASSWORD_RULE_TEXT = (
+    f"Password must be at least {PASSWORD_MIN_LENGTH} characters and include an uppercase "
+    "letter, a lowercase letter, a number, and a symbol."
+)
+
+
 def _validate_password_strength(value: str) -> str:
-    """Shared password rule for every endpoint that SETS a password."""
+    """Shared password rule for every endpoint that SETS a password.
+
+    ⚠️ THIS MIRRORS A SUPABASE SETTING, and must never be STRICTER than it.
+    Auth → Sign In/Providers → Email is configured with
+    `Password requirements = lowercase, uppercase letters, digits and symbols` and
+    `Minimum password length = 8`. GoTrue enforces that server-side whatever we do here.
+
+    Checking it here as well is not redundant — it is what stops the app ACCEPTING a password
+    the provider will refuse. Before this, iOS gated on `count >= 8` and this function checked
+    length only, so `abcdefgh` sailed through both and was rejected by GoTrue at the last
+    moment, for a rule the user had never been shown.
+
+    "Symbol" is deliberately ANY NON-ALPHANUMERIC character, which is a superset of GoTrue's
+    own symbol list. The asymmetry is the safety property: a superset can never reject
+    something the provider would have accepted (a false rejection the user cannot diagnose,
+    because our message would name a rule they appear to satisfy). The reverse — a password we
+    accept and GoTrue refuses, e.g. one whose only symbol is exotic — is still handled, and now
+    handled well: it surfaces as AUTH_PASSWORD_REJECTED carrying the provider's own reasons.
+
+    ⚠️ Applies ONLY to endpoints that SET a password (sign-up, reset, change). `SignInRequest`
+    has no such validator and must never grow one: existing accounts predate this rule, and
+    enforcing it at sign-in would lock out every user whose password does not satisfy it —
+    turning a hardening change into an outage.
+    """
     if len(value) < PASSWORD_MIN_LENGTH:
         raise ValueError(
             f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
@@ -27,6 +58,21 @@ def _validate_password_strength(value: str) -> str:
         )
     if value.strip() != value:
         raise ValueError("Password can't start or end with a space.")
+
+    # Reported as ONE message naming every unmet class, not the first failure. Revealing them
+    # one at a time makes the user resubmit repeatedly to discover a rule we already knew in
+    # full — and each round trip costs a slot against the registration rate limiter.
+    missing = []
+    if not any(c.isupper() for c in value):
+        missing.append("an uppercase letter")
+    if not any(c.islower() for c in value):
+        missing.append("a lowercase letter")
+    if not any(c.isdigit() for c in value):
+        missing.append("a number")
+    if not any(not c.isalnum() for c in value):
+        missing.append("a symbol")
+    if missing:
+        raise ValueError("Password must include " + ", ".join(missing) + ".")
     return value
 
 

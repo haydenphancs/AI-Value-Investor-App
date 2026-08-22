@@ -18,7 +18,11 @@ import Foundation
 
 protocol AccountRepositoryProtocol: Sendable {
     func fetchProfile() async throws -> UserProfile
-    func updateProfile(displayName: String?, avatarUrl: String?) async throws -> UserProfile
+    func updateProfile(displayName: String?) async throws -> UserProfile
+    /// Set the profile picture from an already-processed square JPEG.
+    func uploadAvatar(jpeg: Data) async throws -> UserProfile
+    /// Clear the profile picture.
+    func deleteAvatar() async throws -> UserProfile
     func fetchCredits() async throws -> CreditInfo
     func fetchPlanCatalog() async throws -> PlanCatalog
     func fetchCreditPackCatalog() async throws -> CreditPackCatalog
@@ -68,11 +72,27 @@ final class AccountRepository: AccountRepositoryProtocol {
     /// existed on both sides; nothing called them, so there was no way to change a
     /// display name from the app. Returns the updated profile so the caller can adopt
     /// server state rather than guessing what was saved.
-    func updateProfile(displayName: String?, avatarUrl: String?) async throws -> UserProfile {
+    func updateProfile(displayName: String?) async throws -> UserProfile {
         try await apiClient.request(
-            endpoint: .updateProfile(displayName: displayName, avatarUrl: avatarUrl),
+            endpoint: .updateProfile(displayName: displayName),
             responseType: UserProfile.self
         )
+    }
+
+    /// Base64-encoding happens HERE, at the transport boundary — not in the ViewModel and not
+    /// in the picker. Everything above this line deals in `Data`; only the wire needs a string.
+    ///
+    /// Both calls return the FULL updated profile, so the caller adopts server state (including
+    /// the freshly SIGNED avatar URL) rather than guessing what was saved.
+    func uploadAvatar(jpeg: Data) async throws -> UserProfile {
+        try await apiClient.request(
+            endpoint: .updateAvatar(imageBase64: jpeg.base64EncodedString()),
+            responseType: UserProfile.self
+        )
+    }
+
+    func deleteAvatar() async throws -> UserProfile {
+        try await apiClient.request(endpoint: .deleteAvatar, responseType: UserProfile.self)
     }
 
     func fetchCredits() async throws -> CreditInfo {

@@ -85,6 +85,14 @@ struct SignInView: View {
                             .textContentType(mode == .signIn ? .password : .newPassword)
                     }
 
+                    // Sign-up ONLY. On sign-in the rules are irrelevant and actively harmful:
+                    // accounts created before this rule existed do not satisfy it, and showing
+                    // it there would tell a user with a valid password that it is wrong.
+                    if mode == .signUp {
+                        PasswordRequirementsView(password: password)
+                            .padding(.top, AppSpacing.xs)
+                    }
+
                     if let errorMessage {
                         Text(errorMessage)
                             .font(AppTypography.bodySmall)
@@ -311,7 +319,11 @@ struct SignInView: View {
 
     private var canSubmit: Bool {
         let emailOK = email.contains("@") && email.count >= 5
-        let passwordOK = password.count >= 8
+        // Sign-IN keeps the length-only check on purpose — an existing account's password
+        // predates these rules and gating sign-in on them would lock its owner out.
+        let passwordOK = mode == .signIn
+            ? password.count >= 8
+            : PasswordRule.isSatisfied(password)
         let nameOK = mode == .signIn || !displayName.trimmingCharacters(in: .whitespaces).isEmpty
         return emailOK && passwordOK && nameOK
     }
@@ -403,3 +415,75 @@ struct SignInView: View {
         }
     }
 }
+
+
+// MARK: - Password rules
+
+/// The sign-up password rule, mirrored from the backend.
+///
+/// ⚠️ THIS MUST MATCH `_validate_password_strength` in `backend/app/schemas/auth.py`, which in
+/// turn mirrors the Supabase setting `Auth → Providers → Email → Password requirements`
+/// (lowercase, uppercase, digits and symbols; minimum 8). Pinned by
+/// `backend/tests/test_password_rule_parity.py`.
+///
+/// Checking it here is not belt-and-braces, it is the whole point: before this, the form
+/// enabled its button on `count >= 8`, so `abcdefgh` was submitted, accepted by our own API,
+/// and rejected by the identity provider at the last moment — for a rule the user had never
+/// been shown.
+///
+/// "Symbol" is any NON-ALPHANUMERIC character, matching the backend. Deliberately a superset of
+/// the provider's own symbol list, so this can never block a password the provider would take.
+enum PasswordRule {
+    static let minLength = 8
+
+    static func hasMinLength(_ p: String) -> Bool { p.count >= minLength }
+    static func hasUppercase(_ p: String) -> Bool { p.contains { $0.isUppercase } }
+    static func hasLowercase(_ p: String) -> Bool { p.contains { $0.isLowercase } }
+    static func hasDigit(_ p: String) -> Bool { p.contains { $0.isNumber } }
+    static func hasSymbol(_ p: String) -> Bool { p.contains { !$0.isLetter && !$0.isNumber } }
+
+    static func isSatisfied(_ p: String) -> Bool {
+        hasMinLength(p) && hasUppercase(p) && hasLowercase(p) && hasDigit(p) && hasSymbol(p)
+    }
+}
+
+/// The rule, shown as a live checklist rather than as an error after submitting.
+private struct PasswordRequirementsView: View {
+    let password: String
+
+    private var items: [(label: String, met: Bool)] {
+        [
+            ("At least \(PasswordRule.minLength) characters", PasswordRule.hasMinLength(password)),
+            ("An uppercase letter", PasswordRule.hasUppercase(password)),
+            ("A lowercase letter", PasswordRule.hasLowercase(password)),
+            ("A number", PasswordRule.hasDigit(password)),
+            ("A symbol", PasswordRule.hasSymbol(password)),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            ForEach(items, id: \.label) { item in
+                HStack(spacing: AppSpacing.xs) {
+                    // `gain` is a TEXT-role token (4.5:1 in both appearances) — correct for a
+                    // glyph read as meaning. `textMuted` for unmet, NOT `loss`: nothing is
+                    // wrong yet, the user is still typing, and painting the whole list red on
+                    // an empty field reads as five errors before a single keystroke.
+                    Image(systemName: item.met ? "checkmark.circle.fill" : "circle")
+                        .font(AppTypography.iconXS)
+                        .foregroundColor(item.met ? AppColors.gain : AppColors.textMuted)
+                    Text(item.label)
+                        .font(AppTypography.caption)
+                        .foregroundColor(item.met ? AppColors.textSecondary : AppColors.textMuted)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Password requirements. "
+            + items.map { "\($0.label): \($0.met ? "met" : "not met")" }.joined(separator: ", ")
+        )
+    }
+}
+

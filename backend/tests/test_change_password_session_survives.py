@@ -106,7 +106,7 @@ class _FakeRequest:
 async def _change(store) -> object:
     return await auth_ep.change_password(
         ChangePasswordRequest(current_password="old-password-value",
-                              new_password="a-different-password"),
+                              new_password="A-different-password1!"),
         _FakeRequest(),
         user_id=_USER_ID,
         supabase=_SB(store),

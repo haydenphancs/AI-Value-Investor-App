@@ -182,3 +182,89 @@ def test_a_naive_now_is_accepted():
 def test_unknown_status_never_asks_for_a_chip():
     from app.services._whale_common import Activity
     assert Activity(ACTIVITY_UNKNOWN, "", None).needs_disclosure is False
+
+
+# ── The roster chip must stay a chip ───────────────────────────────────────────
+#
+# A curated `lifecycle_note` used to be substituted straight into `activity_label`.
+# `activity_label` is the ROSTER CHIP — `WhaleResponse.activity_label`, documented as e.g.
+# "Last filed Q3 2025" — and iOS renders it in a `TintedTagBadge` capsule. Michael Burry's
+# note is 172 characters, so on the Tracking roster the capsule wrapped into a near-square
+# block and `Capsule()` drew it as a CIRCLE with the sentence clipped inside. Captured on
+# device. The prose has its own channel (`lifecycle_note` → the profile's multi-line
+# `WhaleActivityNotice`), so nothing is lost by keeping the chip short.
+
+_BURRY_NOTE = (
+    "Scion Asset Management deregistered as an investment adviser in 2025. Its last "
+    "Form 13F covers Q3 2025, so the positions shown here are that filing and will not "
+    "be updated."
+)
+
+# Longer than any legitimate chip. The real ones today are 18-34 characters
+# ("Last filed Q1 2026", "No trades disclosed since Nov 2025").
+_MAX_CHIP_LEN = 48
+
+
+def test_a_curated_note_never_becomes_the_roster_chip():
+    from app.services.whale_service import _activity_fields
+
+    fields = _activity_fields({
+        "data_source": "13f",
+        "last_filing_period": "2025-Q3",
+        "last_activity_date": None,
+        "lifecycle_status": "inactive",
+        "lifecycle_note": _BURRY_NOTE,
+    })
+
+    assert fields["activity_status"] == "inactive"
+    assert _BURRY_NOTE not in fields["activity_label"], (
+        "the curated prose is being served as the roster chip again — it wraps the "
+        "TintedTagBadge capsule into a circle with the text clipped inside"
+    )
+    assert len(fields["activity_label"]) <= _MAX_CHIP_LEN, (
+        f"activity_label is {len(fields['activity_label'])} chars; it is rendered in a "
+        f"capsule badge and must stay short"
+    )
+    # Anti-vacuity: it must still SAY something, and say the useful derived thing.
+    assert fields["activity_label"] == "Last filed Q3 2025"
+
+
+def test_a_curated_retirement_still_shows_a_chip_when_filings_look_current():
+    """The case that makes the fallback load-bearing.
+
+    A filer curated inactive who is still filing on cadence derives ACTIVITY_CURRENT with an
+    EMPTY label. iOS renders a chip only when `activityStatus` AND `activityLabel` are both
+    non-empty, so simply dropping the note would have made the disclosure vanish entirely —
+    a silent regression that looks like "no chip needed".
+    """
+    from app.services.whale_service import _activity_fields
+
+    fields = _activity_fields({
+        "data_source": "congressional_house",
+        "last_filing_period": None,
+        "last_activity_date": datetime.now(timezone.utc).date().isoformat(),
+        "lifecycle_status": "retired",
+        "lifecycle_note": "Retired from Congress in January 2027.",
+    })
+
+    assert fields["activity_status"] == "inactive"
+    assert fields["activity_label"], "a curated-inactive filer must still carry a chip"
+    assert len(fields["activity_label"]) <= _MAX_CHIP_LEN
+
+
+def test_an_active_filer_carries_no_chip_even_with_a_note():
+    """A note on an ACTIVE row is not a disclosure — it must not raise a chip."""
+    from app.services._whale_common import latest_filed_13f_quarter
+    from app.services.whale_service import _activity_fields
+
+    year, quarter = latest_filed_13f_quarter()
+
+    fields = _activity_fields({
+        "data_source": "13f",
+        "last_filing_period": f"{year}-Q{quarter}",
+        "last_activity_date": None,
+        "lifecycle_status": "active",
+        "lifecycle_note": _BURRY_NOTE,
+    })
+    assert fields["activity_label"] == ""
+    assert fields["activity_status"] == ""

@@ -20,6 +20,18 @@ struct TintedTagBadge: View {
     var backgroundOpacity: Double = 0.12
     var font: Font = AppTypography.captionEmphasis   // 11, semibold
     var tracking: CGFloat = 0
+    /// Hard ceiling on how tall this badge can grow.
+    ///
+    /// A badge is a WORD, so 1 is the default. Without ANY limit a long string wraps, the
+    /// capsule grows into a near-square block, and `Capsule()` draws that as a CIRCLE with
+    /// the text clipped inside it — which is exactly how a 172-character server-supplied
+    /// whale note rendered on the Tracking roster.
+    ///
+    /// Callers with a genuine short SENTENCE (the whale activity disclosure, e.g. "No trades
+    /// disclosed since Nov 2025") pass 2: at one line it truncates to "No trades disclose…",
+    /// dropping the only informative half. Two lines still cannot be square, so the circle
+    /// stays impossible either way.
+    var textLineLimit: Int? = 1
 
     var body: some View {
         HStack(spacing: 4) {
@@ -30,6 +42,8 @@ struct TintedTagBadge: View {
             Text(text)
                 .font(font)
                 .tracking(tracking)
+                .lineLimit(textLineLimit)
+                .multilineTextAlignment(.leading)
         }
         .foregroundColor(color)
         .padding(.horizontal, 9)

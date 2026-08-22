@@ -2,20 +2,25 @@
 //  RecentSearchesSection.swift
 //  ios
 //
-//  Organism: Section displaying recent search items
+//  Organism: the user's own search history — tickers they opened and questions they asked
+//  Cay AI — shown when the search field is empty.
+//
+//  ⚠️ This used to be handed `SearchViewModel.recentSearches`, which was the LIVE results array.
+//  It was reassigned on every keystroke and emptied the moment the field cleared, so at rest
+//  this section could only ever render its own empty state. It now takes real
+//  `SearchHistoryEntry` values from `SearchHistoryStore`; live results have their own section.
 //
 
 import SwiftUI
 
 struct RecentSearchesSection: View {
-    let items: [SearchResultItem]
+    let entries: [SearchHistoryEntry]
     var onClearAll: (() -> Void)?
-    var onItemTapped: ((SearchResultItem) -> Void)?
-    var onFollowTapped: ((SearchResultItem) -> Void)?
+    var onEntryTapped: ((SearchHistoryEntry) -> Void)?
+    var onEntryRemoved: ((SearchHistoryEntry) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Header
             HStack {
                 Text("Recent Searches")
                     .font(AppTypography.heading)
@@ -23,27 +28,24 @@ struct RecentSearchesSection: View {
 
                 Spacer()
 
-                if !items.isEmpty {
-                    ClearAllButton {
-                        onClearAll?()
-                    }
+                if !entries.isEmpty {
+                    ClearAllButton { onClearAll?() }
                 }
             }
             .padding(.horizontal, AppSpacing.lg)
 
-            // Search results list
-            if items.isEmpty {
+            if entries.isEmpty {
                 emptyStateView
             } else {
                 VStack(spacing: 0) {
-                    ForEach(items) { item in
-                        SearchResultRow(
-                            item: item,
-                            onTap: { onItemTapped?(item) },
-                            onFollowTap: { onFollowTapped?(item) }
+                    ForEach(entries) { entry in
+                        SearchHistoryRow(
+                            entry: entry,
+                            onTap: { onEntryTapped?(entry) },
+                            onRemove: { onEntryRemoved?(entry) }
                         )
 
-                        if item.id != items.last?.id {
+                        if entry.id != entries.last?.id {
                             Divider()
                                 .overlay(AppColors.cardBackgroundLight.opacity(0.5))
                         }
@@ -60,9 +62,14 @@ struct RecentSearchesSection: View {
                 .font(AppTypography.iconDisplay)
                 .foregroundColor(AppColors.textMuted)
 
-            Text("No recent searches")
-                .font(AppTypography.body)
+            // Says what will fill it. The old copy was a bare "No recent searches", which was
+            // permanently true and told the reader nothing about how to change that.
+            Text("Tickers you open and questions you ask Cay AI show up here")
+                .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, AppSpacing.xl)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.xxl)
@@ -72,9 +79,13 @@ struct RecentSearchesSection: View {
 #Preview {
     ScrollView {
         VStack(spacing: AppSpacing.xl) {
-            RecentSearchesSection(items: SearchResultItem.sampleData)
+            RecentSearchesSection(entries: [
+                SearchHistoryEntry(kind: .ticker, text: "AAPL", subtitle: "Apple Inc.", rawType: "stock"),
+                SearchHistoryEntry(kind: .question, text: "Why did the S&P fall this week?"),
+                SearchHistoryEntry(kind: .ticker, text: "BTC", subtitle: "Crypto", rawType: "crypto"),
+            ])
 
-            RecentSearchesSection(items: [])
+            RecentSearchesSection(entries: [])
         }
     }
     .background(AppColors.background)

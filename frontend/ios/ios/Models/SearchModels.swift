@@ -61,168 +61,57 @@ struct SearchQuerySuggestion: Identifiable {
     }
 }
 
-// MARK: - Search News Item
-struct SearchNewsItem: Identifiable {
-    let id = UUID()
-    let source: String
-    let timeAgo: String
-    let headline: String
-    let summary: String
-    let imageName: String
-    let imageURL: URL?
-    let readMoreAction: String
+// MARK: - Search History Entry
 
-    /// True when imageName is a remote URL (backend data) vs a local asset name
-    var isRemoteImage: Bool {
-        imageURL != nil
+/// One row of the user's own search history: a ticker they opened, or a question they asked
+/// Cay AI from this screen.
+///
+/// WHY THIS TYPE EXISTS. "Recent Searches" used to render `SearchViewModel.recentSearches`,
+/// which was the LIVE results array — reassigned on every keystroke and emptied the moment the
+/// field cleared. So the section could only ever say "No recent searches" at rest, and nothing
+/// anywhere recorded a ticker the user opened or a question they asked. This is the record that
+/// was missing; `SearchHistoryStore` owns it.
+struct SearchHistoryEntry: Identifiable, Codable, Equatable {
+    enum Kind: String, Codable {
+        case ticker
+        case question
     }
 
-    var formattedMeta: String {
-        "\(source)  \(timeAgo)"
+    let id: UUID
+    let kind: Kind
+    /// The ticker symbol, or the question exactly as the user typed it.
+    let text: String
+    /// Company name for a ticker ("Apple Inc."), or the asset label ("Crypto" / "ETF"). Nil for
+    /// a question — the text is the whole content.
+    let subtitle: String?
+    /// `"stock"` / `"crypto"` / `"etf"` / `"fund"`, carried so a tapped ticker rebuilds the same
+    /// `SearchSelection` the live result would have. WITHOUT IT every replayed tap opens
+    /// `TickerDetailView`, so a crypto or an ETF silently reopens as a stock.
+    let rawType: String?
+    let createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        kind: Kind,
+        text: String,
+        subtitle: String? = nil,
+        rawType: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.subtitle = subtitle
+        self.rawType = rawType
+        self.createdAt = createdAt
     }
 
-    /// Create from a backend API article
-    init(from article: SearchNewsAPIArticle) {
-        self.source = article.sourceName ?? "Unknown"
-        self.timeAgo = Self.formatTimeAgo(article.publishedAt)
-        self.headline = article.headline
-        self.summary = article.summary ?? ""
-        self.imageName = article.thumbnailUrl ?? ""
-        self.imageURL = URL(string: article.thumbnailUrl ?? "")
-        self.readMoreAction = "Read More"
-    }
-
-    /// Create from the Updates market feed — the source of real market news.
-    /// Carries `apiId`, `articleUrl` and `sentiment` so the detail screen can
-    /// enrich and render honestly instead of stamping a hardcoded Neutral.
-    init(from dto: UpdatesArticleDTO) {
-        self.source = dto.sourceName?.isEmpty == false ? dto.sourceName! : "News"
-        self.timeAgo = Self.formatTimeAgo(dto.publishedAt)
-        self.headline = dto.headline
-        self.summary = dto.summary ?? ""
-        self.imageName = dto.thumbnailUrl ?? ""
-        self.imageURL = URL(string: dto.thumbnailUrl ?? "")
-        self.readMoreAction = "Read More"
-        self.apiId = dto.id
-        self.articleURL = URL(string: dto.articleUrl ?? "")
-        self.sentiment = NewsSentiment(backend: dto.sentiment)
-        self.publishedAt = UpdatesDateParser.parse(dto.publishedAt)
-        self.relatedTickers = dto.relatedTickers ?? []
-        self.summaryBullets = dto.summaryBullets ?? []
-        self.aiProcessed = dto.aiProcessed ?? false
-    }
-
-    // ── Fields carried through to NewsDetailView ──
-    // Defaulted so the legacy/sample initialisers keep compiling.
-
-    var apiId: String = ""
-    var articleURL: URL? = nil
-    /// nil until AI enrichment has run — the badge is HIDDEN rather than
-    /// defaulted to a Neutral verdict no model produced.
-    var sentiment: NewsSentiment? = nil
-    var publishedAt: Date? = nil
-    var relatedTickers: [String] = []
-    var summaryBullets: [String] = []
-    var aiProcessed: Bool = false
-
-    /// Bridge to the shared article model used by NewsDetailView.
-    func toNewsArticle() -> NewsArticle {
-        NewsArticle(
-            headline: headline,
-            summary: summary.isEmpty ? nil : summary,
-            source: NewsSource(name: source, iconName: nil),
-            sentiment: sentiment,
-            publishedAt: publishedAt ?? Date(),
-            thumbnailName: nil,
-            relatedTickers: relatedTickers,
-            apiId: apiId,
-            imageURL: imageURL,
-            articleURL: articleURL,
-            summaryBullets: summaryBullets,
-            aiProcessed: aiProcessed
-        )
-    }
-
-    /// Create with explicit values (sample data / legacy)
-    init(source: String, timeAgo: String, headline: String, summary: String,
-         imageName: String, readMoreAction: String) {
-        self.source = source
-        self.timeAgo = timeAgo
-        self.headline = headline
-        self.summary = summary
-        self.imageName = imageName
-        self.imageURL = nil
-        self.readMoreAction = readMoreAction
-    }
-
-    private static func formatTimeAgo(_ dateString: String?) -> String {
-        guard let dateString = dateString else { return "" }
-
-        // Try ISO 8601 with fractional seconds first, then without
-        let formatters: [ISO8601DateFormatter] = {
-            let f1 = ISO8601DateFormatter()
-            f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let f2 = ISO8601DateFormatter()
-            f2.formatOptions = [.withInternetDateTime]
-            return [f1, f2]
-        }()
-
-        var parsedDate: Date?
-        for formatter in formatters {
-            if let date = formatter.date(from: dateString) {
-                parsedDate = date
-                break
-            }
+    /// The icon for the row. A question is visually an AI prompt, not a symbol lookup.
+    var iconName: String {
+        switch kind {
+        case .ticker: return "magnifyingglass"
+        case .question: return "sparkles"
         }
-        guard let date = parsedDate else { return "" }
-
-        let seconds = Int(Date().timeIntervalSince(date))
-        if seconds < 60 { return "Just now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m ago" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h ago" }
-        let days = hours / 24
-        if days == 1 { return "Yesterday" }
-        return "\(days)d ago"
-    }
-}
-
-// MARK: - News API Response Models (Codable — matches backend /api/v1/news)
-
-struct SearchNewsFeedResponse: Codable {
-    let articles: [SearchNewsAPIArticle]
-    let page: Int
-    let perPage: Int
-    let total: Int?
-    let hasMore: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case articles, page, total
-        case perPage = "per_page"
-        case hasMore = "has_more"
-    }
-}
-
-struct SearchNewsAPIArticle: Codable, Identifiable {
-    let id: String
-    let headline: String
-    let summary: String?
-    let sourceName: String?
-    let publishedAt: String?
-    let thumbnailUrl: String?
-    let articleUrl: String?
-    let sentiment: String?
-    let relatedTickers: [String]?
-    let category: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id, headline, summary, sentiment, category
-        case sourceName = "source_name"
-        case publishedAt = "published_at"
-        case thumbnailUrl = "thumbnail_url"
-        case articleUrl = "article_url"
-        case relatedTickers = "related_tickers"
     }
 }
 
@@ -310,35 +199,6 @@ extension SearchResultItem {
             imageName: "avatar_michael_burry",
             isFollowable: true,
             isFollowing: false
-        )
-    ]
-}
-
-extension SearchNewsItem {
-    static let sampleData: [SearchNewsItem] = [
-        SearchNewsItem(
-            source: "TechCrunch",
-            timeAgo: "8 hours ago",
-            headline: "Fed Signals Potential Rate Cuts in 2024",
-            summary: "Federal Reserve hints at monetary policy shifts that could impact market dynamics...",
-            imageName: "news_fed_rates",
-            readMoreAction: "Read More"
-        ),
-        SearchNewsItem(
-            source: "CNBC",
-            timeAgo: "8 hours ago",
-            headline: "Apple Announces Revolutionary AI Features Coming to iPhone 16 Pro",
-            summary: "Tech giant unveils groundbreaking artificial intelligence capabilities that could reshape the smartphone industry and boost stock performance...",
-            imageName: "news_apple_ai",
-            readMoreAction: "Read More"
-        ),
-        SearchNewsItem(
-            source: "Reuters",
-            timeAgo: "10 hours ago",
-            headline: "Bitcoin Reaches New All-Time High Above $68K",
-            summary: "Cryptocurrency markets rally as institutional adoption continues to grow worldwide...",
-            imageName: "news_bitcoin",
-            readMoreAction: "Read More"
         )
     ]
 }

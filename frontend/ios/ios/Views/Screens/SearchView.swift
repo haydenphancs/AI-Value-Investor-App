@@ -2,8 +2,16 @@
 //  SearchView.swift
 //  ios
 //
-//  Universal search screen: ticker/company lookup + "Ask Cay AI".
-//  Opened from the Home, Updates, and Wiser top search bars.
+//  Universal search screen: ticker/company lookup + "Ask Cay AI" + the user's own history.
+//  Opened from the Home, Updates, Learn, ETF, Crypto and Commodity screens' search bars.
+//
+//  TWO STATES, and keeping them apart is the point:
+//    field has text → Ask Cay AI + live Results
+//    field empty    → Recent Searches (durable history)
+//  They used to share one array, which is why "Recent Searches" was never a history at all.
+//
+//  Deliberately no news section. This screen is search and Cay AI; market news lives on the
+//  Updates tab, and duplicating a feed here made the primary action harder to find.
 //
 
 import SwiftUI
@@ -14,8 +22,10 @@ struct SearchView: View {
     /// Caller-owned chat VM (the established pattern — see TickerDetailView). A fresh
     /// SearchView is created per present, so a fresh conversation per open is correct.
     @StateObject private var chatViewModel = ChatViewModel()
+    /// Observed so a recorded search re-renders the history list without the ViewModel having
+    /// to mirror the store's contents.
+    @ObservedObject private var history = SearchHistoryStore.shared
     @State private var showAIChat = false
-    @State private var selectedNewsArticle: NewsArticle?
 
     /// The current query with surrounding whitespace stripped. Drives the "Ask Cay AI"
     /// row's visibility so an empty / spaces-only field never seeds a chat.
@@ -25,13 +35,10 @@ struct SearchView: View {
 
     var body: some View {
         ZStack {
-            // Background
             AppColors.background
                 .ignoresSafeArea()
 
-            // Main Content
             VStack(spacing: 0) {
-                // Header with search bar
                 SearchHeader(
                     searchText: $viewModel.searchText,
                     suggestions: viewModel.querySuggestions,
@@ -40,64 +47,43 @@ struct SearchView: View {
                     onSuggestionTapped: handleSuggestionTapped
                 )
 
-                // Scrollable Content
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: AppSpacing.xxl) {
-                        // Error banner (if any)
                         if let error = viewModel.error {
                             errorBanner(message: error)
                         }
 
-                        // Ask Cay AI — the primary action whenever the user has typed
-                        // something. Routes the query to the real chat (not ticker search).
-                        if !trimmedQuery.isEmpty {
+                        if trimmedQuery.isEmpty {
+                            // Nothing typed → the durable history.
+                            RecentSearchesSection(
+                                entries: history.entries,
+                                onClearAll: viewModel.clearAllHistory,
+                                onEntryTapped: handleHistoryTapped,
+                                onEntryRemoved: viewModel.removeHistoryEntry
+                            )
+                        } else {
+                            // Ask Cay AI first: it is the primary action, and it works for any
+                            // query including ones that match no ticker.
                             askCayAIRow(query: trimmedQuery)
+
+                            SearchResultsSection(
+                                items: viewModel.results,
+                                onItemTapped: viewModel.selectSearchResult
+                            )
                         }
 
-                        // Recent Searches Section (live ticker/company results)
-                        RecentSearchesSection(
-                            items: viewModel.recentSearches,
-                            onClearAll: handleClearAll,
-                            // `onFollowTapped` deliberately not wired. Search results are all
-                            // built with `isFollowable: false`, so `SearchResultRow` never
-                            // renders the button — and the handler it used to point at only
-                            // flipped a flag in the transient `recentSearches` array: no
-                            // backend call, no sign-in gate, no failure reporting. Following
-                            // is account-scoped and `.signInRequired` on both sides
-                            // (`WhaleService.toggleFollow` is the real implementation), so
-                            // wiring the old one up would have broken three auth rules at
-                            // once. Making search return followable results is a product
-                            // decision, not a fix.
-                            onItemTapped: handleSearchItemTapped
-                        )
-
-                        // Latest News Section
-                        SearchLatestNewsSection(
-                            items: viewModel.latestNews,
-                            onItemTapped: handleNewsItemTapped,
-                            onReadMore: handleNewsReadMore
-                        )
-
-                        // Bottom spacing for safe area
                         Spacer()
                             .frame(height: AppSpacing.xxxl)
                     }
                     .padding(.top, AppSpacing.md)
                 }
-                .refreshable {
-                    await viewModel.refresh()
-                }
             }
 
-            // Loading overlay
             if viewModel.isLoading {
                 LoadingOverlay()
             }
         }
         .navigationBarHidden(true)
-        .task {
-            await viewModel.loadInitialData()
-        }
         .gesture(
             DragGesture()
                 .onEnded { gesture in
@@ -107,9 +93,6 @@ struct SearchView: View {
                     }
                 }
         )
-        .fullScreenCover(item: $selectedNewsArticle) { article in
-            NewsDetailView(article: article)
-        }
         .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
             NavigationStack {
                 AssetDetailRouter(selection: selection)
@@ -191,12 +174,16 @@ struct SearchView: View {
         viewModel.performSearch()
     }
 
-    /// Seed a fresh Cay AI conversation with the query and present the chat cover.
+    /// Seed a fresh Cay AI conversation with the query, RECORD it, and present the chat cover.
     /// `ChatViewModel.startNewConversation` has its own one-seed-in-flight guard, so a
     /// rapid double-tap can't create two sessions.
     private func handleAskCayAI(_ query: String) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Recorded here rather than inside ChatViewModel: this is the SEARCH screen's history,
+        // and hooking the shared `startNewConversation` would also capture chats started from a
+        // ticker page or a Money Moves article, which are not searches.
+        SearchHistoryStore.shared.record(question: trimmed)
         // Explicitly `nil`, NOT `.none`.
         //
         // `ChatContextType` has a `case none = "NONE"` AND the parameter is
@@ -218,24 +205,16 @@ struct SearchView: View {
         handleAskCayAI(suggestion.text)
     }
 
-    private func handleClearAll() {
-        viewModel.clearAllRecentSearches()
-    }
-
-    private func handleSearchItemTapped(_ item: SearchResultItem) {
-        viewModel.selectSearchResult(item)
-    }
-
-    private func handleNewsItemTapped(_ item: SearchNewsItem) {
-        // `toNewsArticle()` carries the REAL apiId / url / sentiment / date, so the
-        // detail screen can enrich. Building it inline stamped `sentiment: .neutral`
-        // and `publishedAt: Date()` — a verdict no model produced and a fabricated
-        // "just now" timestamp, on an article that may be days old.
-        selectedNewsArticle = item.toNewsArticle()
-    }
-
-    private func handleNewsReadMore(_ item: SearchNewsItem) {
-        handleNewsItemTapped(item)
+    /// A history row. A ticker reopens its detail screen; a question is asked again in a fresh
+    /// conversation (the entry stores the text, not a session id, so this always works — even
+    /// signed out, or after that session was deleted).
+    private func handleHistoryTapped(_ entry: SearchHistoryEntry) {
+        switch entry.kind {
+        case .ticker:
+            viewModel.openHistoryEntry(entry)
+        case .question:
+            handleAskCayAI(entry.text)
+        }
     }
 }
 

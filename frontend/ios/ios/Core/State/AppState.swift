@@ -952,6 +952,11 @@ final class AppState {
         // phone, saw A's followed investors — and any list the server hadn't yet reconciled
         // stayed wrong. Same bug class, same fix, one funnel.
         WhaleService.shared.reset()
+        // Search history is the same bug class one more time: tickers the user opened and
+        // questions they asked Cay AI, on a device-global UserDefaults key with no user id in
+        // it. Left behind, the next account to sign in on this phone reads the previous user's
+        // searches — and re-taps them straight into their own session.
+        SearchHistoryStore.shared.reset()
         // Narration entitlement is device-global state in the same sense: the ended session's
         // tier must not carry into the next account, and any Learn audio still playing is
         // now unentitled. `.free` is the safe direction — it locks, never unlocks.

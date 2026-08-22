@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict aKx1yuycMsyqLa8cvYskKT9J7RuYRFKJdJrdwhnE5Ybco8mlsPOZkOBXrncZt7S
+\restrict uZbUwealSLaRaBPBIulWq3boMqVq3bQSwPuCs89H9cgdOIVgRPX3E3UmGX7RxgK
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1232,6 +1232,35 @@ $$;
 
 
 --
+-- Name: claim_free_followup(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_free_followup(p_session_id uuid) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_claimed BOOLEAN;
+BEGIN
+    IF p_session_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    UPDATE chat_sessions
+       SET free_followup_until = NULL
+     WHERE id = p_session_id
+       AND free_followup_until IS NOT NULL
+       AND free_followup_until > NOW()
+    RETURNING TRUE INTO v_claimed;
+
+    -- No row updated => no live allowance => NULL, not FALSE. Normalise it.
+    RETURN COALESCE(v_claimed, FALSE);
+END;
+$$;
+
+
+--
 -- Name: claim_guest_report(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1697,6 +1726,31 @@ BEGIN
     GROUP BY wi.ticker
     ORDER BY watch_count DESC
     LIMIT n;
+END;
+$$;
+
+
+--
+-- Name: grant_free_followup(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.grant_free_followup(p_session_id uuid, p_seconds integer) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+BEGIN
+    IF p_session_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    UPDATE chat_sessions
+       SET free_followup_until = CASE
+               WHEN COALESCE(p_seconds, 0) > 0
+                   THEN NOW() + make_interval(secs => p_seconds)
+               ELSE NULL
+           END
+     WHERE id = p_session_id;
 END;
 $$;
 
@@ -5506,7 +5560,8 @@ CREATE TABLE public.chat_sessions (
     reference_id text,
     context_snapshot text,
     memory_summary text,
-    memory_summary_upto timestamp with time zone
+    memory_summary_upto timestamp with time zone,
+    free_followup_until timestamp with time zone
 );
 
 
@@ -5564,6 +5619,13 @@ COMMENT ON COLUMN public.chat_sessions.memory_summary IS 'Rolling flash-lite sum
 --
 
 COMMENT ON COLUMN public.chat_sessions.memory_summary_upto IS 'created_at of the newest chat_message included in memory_summary. The service regenerates the summary once CHAT_SUMMARY_REFRESH_AFTER_MESSAGES older-slice messages are newer than this watermark. NULL means no usable cached summary.';
+
+
+--
+-- Name: COLUMN chat_sessions.free_followup_until; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_sessions.free_followup_until IS 'When the session''s one free follow-up expires. Set after a CHARGED turn; cleared atomically by claim_free_followup(). NULL means no allowance. A free turn never sets it — that is what stops a free streak.';
 
 
 --
@@ -10371,6 +10433,13 @@ CREATE INDEX idx_chat_messages_session ON public.chat_messages USING btree (sess
 
 
 --
+-- Name: idx_chat_sessions_free_followup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_sessions_free_followup ON public.chat_sessions USING btree (id) WHERE (free_followup_until IS NOT NULL);
+
+
+--
 -- Name: idx_chat_sessions_saved; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -14112,13 +14181,6 @@ CREATE POLICY whales_service_all ON public.whales USING ((auth.role() = 'service
 ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: objects book_covers_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY book_covers_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'book-covers'::text));
-
-
---
 -- Name: objects book_covers_service_write; Type: POLICY; Schema: storage; Owner: -
 --
 
@@ -14151,24 +14213,10 @@ ALTER TABLE storage.buckets_analytics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage.buckets_vectors ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: objects home_theme_media_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY home_theme_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'home-theme-media'::text));
-
-
---
 -- Name: objects home_theme_media_service_write; Type: POLICY; Schema: storage; Owner: -
 --
 
 CREATE POLICY home_theme_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'home-theme-media'::text)) WITH CHECK ((bucket_id = 'home-theme-media'::text));
-
-
---
--- Name: objects journey_images_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY journey_images_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'journey-images'::text));
 
 
 --
@@ -14190,13 +14238,6 @@ CREATE POLICY journey_media_service_write ON storage.objects TO service_role USI
 --
 
 ALTER TABLE storage.migrations ENABLE ROW LEVEL SECURITY;
-
---
--- Name: objects money_moves_images_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY money_moves_images_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'money-moves-images'::text));
-
 
 --
 -- Name: objects money_moves_images_service_write; Type: POLICY; Schema: storage; Owner: -
@@ -14236,6 +14277,20 @@ ALTER TABLE storage.s3_multipart_uploads ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE storage.s3_multipart_uploads_parts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: objects user_avatars_service_all; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY user_avatars_service_all ON storage.objects TO service_role USING ((bucket_id = 'user-avatars'::text)) WITH CHECK ((bucket_id = 'user-avatars'::text));
+
+
+--
+-- Name: POLICY user_avatars_service_all ON objects; Type: COMMENT; Schema: storage; Owner: -
+--
+
+COMMENT ON POLICY user_avatars_service_all ON storage.objects IS 'Profile pictures. Service-role only; reads go out as short-lived signed URLs minted by avatar_service.';
+
 
 --
 -- Name: vector_indexes; Type: ROW SECURITY; Schema: storage; Owner: -
@@ -14306,5 +14361,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict aKx1yuycMsyqLa8cvYskKT9J7RuYRFKJdJrdwhnE5Ybco8mlsPOZkOBXrncZt7S
+\unrestrict uZbUwealSLaRaBPBIulWq3boMqVq3bQSwPuCs89H9cgdOIVgRPX3E3UmGX7RxgK
 

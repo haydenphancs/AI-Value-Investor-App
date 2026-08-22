@@ -9,7 +9,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.database import get_auth_client, get_supabase
+from app.database import (
+    get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
+)
 from app.dependencies import get_current_user_id
 from app.core.security import (
     create_access_token, create_refresh_token, decode_token, rate_limiter,
@@ -852,6 +854,7 @@ async def reset_password(
     req: Request,
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
 ):
     """Complete a reset with the emailed code, then set the new password.
 
@@ -894,10 +897,15 @@ async def reset_password(
         )
     user_id = str(user.id)
 
-    # 2. Set the new password with the admin API. Using admin rather than the session from
-    #    verify_otp keeps this independent of SDK session state on a shared client.
+    # 2. Set the new password with the admin API — on the ADMIN client, which nothing ever
+    #    signs in on. The `verify_otp` above returns a session, so it emits SIGNED_IN, so the
+    #    SDK rewrote `Authorization` on the auth client to THIS user's JWT (auth, admin and
+    #    postgrest all share one headers dict — see database._reset_to_service_role). Running
+    #    admin there meant GoTrue saw a user JWT on /admin/* and refused with "User not
+    #    allowed", so every reset 500'd. Admin is still right over the verify_otp session: it
+    #    keeps this independent of SDK session state.
     try:
-        _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
     except Exception as e:
         logger.error(
             "Password update failed after a VERIFIED reset code for user=%s: %s: %s",
@@ -924,6 +932,7 @@ async def change_password(
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
 ):
     """Change the password of a signed-in user.
 
@@ -1024,8 +1033,12 @@ async def change_password(
             message=f"current-password check upstream failure: {type(e).__name__}",
         )
 
+    # ADMIN client. The `sign_in_with_password` above — three statements up, same request —
+    # emits SIGNED_IN, which rewrites `Authorization` on the auth client to this user's JWT.
+    # Running admin there made every single change-password call fail with GoTrue's "User not
+    # allowed", which no classifier below matches, so it surfaced as a bare 500.
     try:
-        _auth_of(auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
     except Exception as e:
         # Same split as the re-authentication block above: THEIRS vs OURS.
         #

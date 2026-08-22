@@ -23,6 +23,14 @@ a Sign In button, no name, no email.
 The fix is a second, isolated client used only for `auth.*`. This file pins that at the source
 level, so it holds regardless of how handlers are invoked.
 
+THE SECOND HALF (see tests/test_admin_client_not_demoted.py for the behavioural proof). That
+second client was still shared between SIGN-INS and `auth.admin.*`, and the SDK hands ONE
+headers dict to `auth`, `auth.admin` and postgrest alike — so a sign-in re-authenticated the
+admin API as that user and GoTrue refused `/admin/*` with `User not allowed`. Account deletion
+(Guideline 5.1.1(v)), change-password and reset-password all failed. A THIRD client,
+`get_admin_client()`, is admin-only and is never signed in on; the guards below keep it that
+way.
+
 No network — the SDK behaviour is exercised against a throwaway client.
 """
 from __future__ import annotations
@@ -108,7 +116,7 @@ def test_no_auth_call_on_the_service_role_client():
 
 def test_every_handler_that_runs_auth_has_the_isolated_dependency():
     src = (_APP / "api" / "v1" / "endpoints" / "auth.py").read_text(encoding="utf-8")
-    assert "from app.database import get_auth_client" in src
+    assert "get_auth_client" in src
     # Every auth.* call goes through the resolver, which prefers the injected isolated client.
     assert "_auth_of(auth_client, supabase).auth." in src
     assert src.count("auth_client: Client = Depends(get_auth_client)") >= 8, (
@@ -133,3 +141,106 @@ def test_the_auth_client_does_not_carry_sessions_between_requests(session_flag):
     alive on a process-wide client that serves every user."""
     src = (_APP / "database.py").read_text(encoding="utf-8")
     assert f"{session_flag}=False" in src
+
+
+# ---------------------------------------------------------------------------
+# 3. `auth.admin.*` only ever runs on the admin client
+# ---------------------------------------------------------------------------
+
+# Every gotrue call that emits SIGNED_IN / TOKEN_REFRESHED, i.e. every call that rewrites
+# `Authorization` on the client it runs on. `sign_up` is in here because it demotes too
+# whenever the project returns a session — the original docstrings named only three of these.
+_SIGN_IN_VERBS = (
+    "sign_in_with_password", "sign_in_with_id_token", "sign_up", "verify_otp",
+    "exchange_code_for_session", "sign_in_anonymously", "set_session",
+)
+
+
+def _code_lines(src: str):
+    """Numbered lines with whole-line comments dropped.
+
+    A comment next to a fix usually contains every token the scan greps for, so an
+    un-stripped scan keeps passing on prose after the code is reverted.
+    """
+    for i, line in enumerate(src.splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        yield i, line
+
+
+def _signature_of(src: str, handler: str) -> str:
+    """The parameter list of ONE handler.
+
+    Bounded deliberately: asserting a dependency against a whole FILE passes as soon as ANY
+    handler in it declares the dependency, which is how a fix to one route can look like a fix
+    to its neighbour.
+    """
+    start = src.index(f"async def {handler}(")
+    return src[start:src.index("):", start)]
+
+
+def test_admin_calls_only_ever_run_on_the_admin_client():
+    """THE invariant. `auth.admin.*` authenticates with the shared headers dict, so it must be
+    resolved through `resolve_admin_client` — whose first candidate is the client nothing
+    signs in on."""
+    offenders = []
+    for path, src in _sources():
+        if path.name == "database.py":
+            continue  # its docstrings name the pattern they exist to prevent
+        for i, line in _code_lines(src):
+            if ".auth.admin." in line and not line.lstrip().startswith("resolve_admin_client("):
+                offenders.append(f"{path.relative_to(_BACKEND)}:{i}: {line.strip()}")
+    assert not offenders, (
+        "auth.admin.* not resolved through resolve_admin_client — one sign-in anywhere in the "
+        "process makes GoTrue answer these with 'User not allowed':\n" + "\n".join(offenders)
+    )
+
+
+def test_nothing_signs_in_on_the_admin_client():
+    """A sign-in here re-arms the whole bug: it rewrites the header the admin API reads."""
+    offenders = []
+    for path, src in _sources():
+        for i, line in _code_lines(src):
+            if "admin_client" not in line and "resolve_admin_client(" not in line:
+                continue
+            for verb in _SIGN_IN_VERBS:
+                if f".{verb}(" in line:
+                    offenders.append(f"{path.relative_to(_BACKEND)}:{i}: {line.strip()}")
+    assert not offenders, f"a sign-in verb on the admin client: {offenders}"
+
+
+def test_the_admin_client_never_reads_tables():
+    """Admin-only by contract, exactly like the auth client."""
+    offenders = []
+    for path, src in _sources():
+        for i, line in _code_lines(src):
+            if "admin_client.table(" in line:
+                offenders.append(f"{path.relative_to(_BACKEND)}:{i}")
+    assert not offenders, f"admin_client used for a table read: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "module, handler",
+    [
+        ("auth.py", "reset_password"),
+        ("auth.py", "change_password"),
+        ("users.py", "delete_account"),
+    ],
+)
+def test_each_admin_handler_declares_the_admin_dependency(module, handler):
+    """Brace-bounded to the handler's own signature — see `_signature_of`."""
+    src = (_APP / "api" / "v1" / "endpoints" / module).read_text(encoding="utf-8")
+    assert "admin_client: Client = Depends(get_admin_client)" in _signature_of(src, handler), (
+        f"{module}::{handler} would fall back to the sign-in client for its admin call"
+    )
+
+
+def test_sdk_still_aliases_the_admin_headers_onto_options():
+    """The mechanism, pinned on the dependency. `_reset_to_service_role` writes
+    `options.headers`; that is only the right place while the SDK keeps handing the same dict
+    to the admin API. A bump that de-aliases them makes the re-assert silently inert."""
+    from supabase import create_client
+
+    c = create_client("https://example.supabase.co", "SERVICE_ROLE_FAKE")
+    assert c.options.headers is c.auth._headers
+    assert c.auth._headers is c.auth.admin._headers

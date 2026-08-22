@@ -12,7 +12,9 @@ import logging
 from typing import Optional
 
 from app.api.error_response import ErrorCode, auth_error, make_error_response
-from app.database import get_auth_client, get_supabase
+from app.database import (
+    get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
+)
 from app.dependencies import (
     AvatarRateLimit,
     ProfileRateLimit,
@@ -1346,6 +1348,7 @@ async def delete_account(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
 ):
     """Permanently delete the CALLER'S OWN account and all of their data.
 
@@ -1419,17 +1422,22 @@ async def delete_account(
 
     # 3. Identity row + every FK-linked child table.
     try:
-        # Isolated auth client. `admin.*` does not emit SIGNED_IN today, so this is not the
-        # demotion path — but keeping ALL `auth.*` off the service-role singleton makes the
-        # invariant simple, greppable, and testable (see test_supabase_client_isolation.py).
+        # ADMIN client — the one nothing ever signs in on. `admin.*` does not emit SIGNED_IN
+        # itself, which is what made this look safe, but it READS the same headers dict a
+        # sign-in rewrites (auth, admin and postgrest all alias `options.headers`; see
+        # database._reset_to_service_role). On long-lived Railway, ONE sign-in anywhere in the
+        # process left this call running as that user, and GoTrue refuses /admin/* under a user
+        # JWT with `User not allowed` — Sentry python-fastapi 7687048937, an account that was
+        # told it had been deleted and had not been. Guideline 5.1.1(v) requires this to work.
         # Falls back to `supabase` when this handler is called directly (the suite's idiom);
         # see auth._auth_of for the same accommodation.
-        client = auth_client if hasattr(auth_client, "auth") else supabase
-        client.auth.admin.delete_user(user_id)
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.delete_user(user_id)
     except Exception as e:
+        # exc_info: this one is diagnosed from logs alone, with no repro — the account is
+        # half-deleted by the time we get here and the user cannot be asked to reproduce it.
         logger.error(
             "Account deletion failed at the auth step for user=%s: %s: %s",
-            user_id, type(e).__name__, e,
+            user_id, type(e).__name__, e, exc_info=True,
         )
         # Same contract as the partial-failure branch above. Storage and the un-FK'd tables
         # have already been purged at this point, so the account is genuinely half-deleted —

@@ -152,3 +152,95 @@ def test_every_single_call_is_inside_a_try():
         + " — postgrest raises on zero rows, so this returns a bare 500 instead of 404 and "
         "makes the adjacent `if not session.data` check dead code."
     )
+
+
+# ── 3. the turn-cost frame must report SETTLED state, and reach the client ───
+#
+# `credits` is the only thing that tells a user a turn was free or refunded, and the only
+# thing that keeps the client's credit balance from going stale — chat is the one metered
+# surface that never refreshed it. Both failure modes here are ordering bugs that no
+# functional test would catch, because the frame would still be emitted and still decode:
+# it would just carry the WRONG answer, or arrive after the client stopped reading.
+
+
+def _sse_events_in(fn) -> list[tuple[int, str]]:
+    """(lineno, event-name) for every `yield _sse("<literal>", ...)` in `fn`."""
+    out = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Yield) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if not (isinstance(call.func, ast.Name) and call.func.id == "_sse"):
+            continue
+        if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+            out.append((node.lineno, call.args[0].value))
+    return sorted(out)
+
+
+def _first_lineno(fn, attr: str):
+    """Line of the first call to `<something>.attr(...)` in `fn`, or None."""
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == attr):
+            return node.lineno
+    return None
+
+
+def test_the_scan_finds_the_stream_frames():
+    """Guard against the guard: no frames found makes every assertion below vacuous."""
+    events = _sse_events_in(_stream_generator(_tree()))
+    assert events, "no `yield _sse(...)` found in event_gen — this guard has drifted"
+    assert "done" in {name for _, name in events}
+
+
+def test_the_credits_frame_is_emitted_before_done():
+    """It must actually go out, and go out before the terminal frame.
+
+    iOS holds the `credits` payload and applies it when `done` lands. Emitted after `done`
+    the client has already finished the turn and drops it — the chip never renders and the
+    balance stays stale, with nothing anywhere reporting a problem.
+    """
+    events = _sse_events_in(_stream_generator(_tree()))
+    names = [name for _, name in events]
+    assert "credits" in names, (
+        "the streaming endpoint no longer emits a `credits` frame — a free or refunded turn "
+        "is invisible to the user and the client balance goes stale"
+    )
+    credits_at = max(ln for ln, name in events if name == "credits")
+    done_at = max(ln for ln, name in events if name == "done")
+    assert credits_at < done_at, (
+        f"`credits` (line {credits_at}) must be yielded before `done` (line {done_at}); "
+        "iOS applies the held payload when `done` arrives and drops anything after it"
+    )
+
+
+def test_the_credits_frame_reports_state_after_settlement():
+    """The frame must be built AFTER the refund/grant decisions, not before.
+
+    `cost_frame()` reads `outcome`, `credits` and `balance` off the quota, and all three
+    are only correct once `refund_once` / `on_delivered` have run. Hoisting the yield above
+    them — or moving the settlement down — would report every refunded turn as `charged`
+    and hand the client a pre-refund balance. Everything still works; it just lies.
+    """
+    fn = _stream_generator(_tree())
+    events = _sse_events_in(fn)
+    credits_at = max(ln for ln, name in events if name == "credits")
+
+    settled_at = _first_lineno(fn, "on_delivered")
+    assert settled_at is not None, "event_gen no longer settles the quota — this guard has drifted"
+    assert settled_at < credits_at, (
+        f"`quota.on_delivered()` (line {settled_at}) must run before the `credits` frame "
+        f"(line {credits_at}), or the frame reports pre-settlement state"
+    )
+
+    attached_at = None
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_attach_turn_cost"):
+            attached_at = node.lineno
+            break
+    assert attached_at is not None, (
+        "event_gen no longer persists the turn cost — the chip would show live but vanish "
+        "on a history reload"
+    )
+    assert attached_at < credits_at

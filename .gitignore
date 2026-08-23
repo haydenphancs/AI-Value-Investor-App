@@ -229,6 +229,14 @@ __marimo__/
 DerivedData/
 *.xcuserstate
 *.xcworkspace
+# ...but NOT ios.xcodeproj/project.xcworkspace/ — the SPM Package.resolved lives in there and Xcode
+# Cloud REQUIRES it committed (automatic dependency resolution is disabled), so the blanket rule
+# above failed build 311 the moment sentry-cocoa was added. project.xcworkspace is the only
+# .xcworkspace in this repo, so the rule was protecting nothing and breaking CI.
+# NOTE: git cannot re-include a file whose PARENT DIRECTORY is excluded — the directory itself has
+# to be un-excluded first, which is why this negates the dir and not the file path.
+!**/project.xcworkspace/
+**/xcuserdata/
 !default.xcworkspace.temp/
 .temp/
 .vscode/settings.json

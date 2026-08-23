@@ -19,22 +19,17 @@ struct AIDataConsentView: View {
 
     private struct Row: Identifiable {
         let id = UUID()
-        let icon: String
         let text: String
     }
 
     private let whatWeSend: [Row] = [
-        Row(icon: "text.bubble",
-            text: "The message you type, and the recent messages in that conversation."),
-        Row(icon: "chart.line.uptrend.xyaxis",
-            text: "Market data for whatever you're looking at, so the answer is relevant.")
+        Row(text: "The message you type, and the recent messages in that conversation."),
+        Row(text: "Market data for whatever you're looking at, so the answer is relevant.")
     ]
 
     private let whatWeDont: [Row] = [
-        Row(icon: "person.crop.circle.badge.xmark",
-            text: "Your name, email, or account identifier."),
-        Row(icon: "briefcase",
-            text: "Your watchlist, portfolio, or holdings.")
+        Row(text: "Your name, email, or account identifier."),
+        Row(text: "Your watchlist, portfolio, or holdings.")
     ]
 
     /// The accuracy / not-advice half of the gate.
@@ -48,14 +43,11 @@ struct AIDataConsentView: View {
     /// ⚠️ Never name the model or the vendor here (CLAUDE.md invariant #7) — "a third-party AI
     /// provider", matching the wording already used above.
     private let whatItIsNot: [Row] = [
-        Row(icon: "exclamationmark.triangle",
-            text: "Cay AI can be wrong. It can misread data, miss context, or state something "
+        Row(text: "Cay AI can be wrong. It can misread data, miss context, or state something "
                 + "confidently that is already out of date. Verify anything you act on."),
-        Row(icon: "hand.raised",
-            text: "It isn't financial advice. Nothing Cay AI says is a recommendation to buy "
+        Row(text: "It isn't financial advice. Nothing Cay AI says is a recommendation to buy "
                 + "or sell, and it isn't tailored to your situation."),
-        Row(icon: "building.columns",
-            text: "Caydex is not a registered investment adviser or broker-dealer. Investing "
+        Row(text: "Caydex is not a registered investment adviser or broker-dealer. Investing "
                 + "carries risk, including loss of principal.")
     ]
 
@@ -152,10 +144,18 @@ struct AIDataConsentView: View {
 
             ForEach(rows) { row in
                 HStack(alignment: .top, spacing: AppSpacing.md) {
-                    Image(systemName: row.icon)
-                        .font(AppTypography.iconDefault)
-                        .foregroundColor(tint)
-                        .frame(width: 24)
+                    // A dot, not a glyph. Nine different icons across three groups read as
+                    // decoration competing with the text, and the "what this is not" set in
+                    // particular (warning triangle, raised hand, columns) made a consent screen
+                    // look like a wall of alarms. The tint still carries the grouping; the dot
+                    // just stops shouting. `width: 24` matches the old icon frame so the text
+                    // column does not shift.
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 6, height: 6)
+                        .frame(width: 24, alignment: .center)
+                        .padding(.top, 7)
+                        .accessibilityHidden(true)
                     Text(row.text)
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textSecondary)

@@ -73,6 +73,37 @@ ls -lh backend/data/book_audio/2_*          # confirm m4a + manifest + cost_repo
 **GATE:** review **book 2** in-app (audio quality + read-along sync) before rolling out
 books 1, 3, 4, 8 then 5, 6, 7, 9, 10. Each later book skips the model download (warm volume).
 
+## Learn narration (Money Moves / Investor Journey)
+
+Same pod, same voice clone — different content and a different output path. This is the narration
+step in `.claude/skills/add-learn-content/SKILL.md`, moved to a GPU because the Mac runs it at
+**~0.38 spoken words/sec** (a ~600-word article ≈ 27 min); a 4090 is roughly 8-10x that.
+
+```bash
+# 1. [Mac] push code + the ref wav + BOTH learn content JSONs (sync_up.sh covers all of it):
+export POD_HOST=<pod-ip> POD_PORT=<ssh-port> POD_USER=root
+bash backend/scripts/runpod/sync_up.sh
+
+# 2. [Pod] provision once per pod, then run DETACHED (SSH drops under GPU load):
+cd /workspace/AI-Value-Investor-App/backend
+bash scripts/runpod/setup_runpod.sh                      # first boot only
+setsid nohup bash scripts/runpod/run_learn_clone.sh > /workspace/learn_clone.out 2>&1 &
+tail -f /workspace/learn_clone.out                       # Ctrl-C is safe; the job survives
+
+# 3. [Mac] pull, verify, THEN terminate the pod:
+bash backend/scripts/runpod/sync_down_learn.sh moneymoves
+```
+
+`run_learn_clone.sh` preflights (venv_clone, ffmpeg, ref wav, content JSON, **CUDA**) before
+generating, so a misconfigured pod fails in seconds instead of after an hour of billing. It exports
+`CLONE_MODE=block` itself, keeps going past a failed slug, and prints the first slug's wall clock so
+the rate can be checked before walking away. Re-running skips finished clips.
+
+**Clips land in `data/money_moves_audio_clone/`, never the live dir** — `sync_down_learn.sh` keeps
+that separation on purpose. Re-voicing a published article means backing up its old `.m4a` first,
+and `align_*.py` downloads the PUBLISHED clip when the local one is absent, which would align new
+timings against old audio. Do the move on the Mac, then align + seed there.
+
 ## Cost / time tracking
 
 - **Live** (`time_and_cost.py`): `elapsed Xm, $Y at $0.34/hr` every 15 s + a final `DONE` line.

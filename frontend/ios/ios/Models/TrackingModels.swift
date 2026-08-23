@@ -17,6 +17,19 @@ extension Notification.Name {
 enum TrackingTab: String, CaseIterable {
     case assets = "Assets"
     case whales = "Whales"
+    /// The notification inbox, and the home of the tab-bar badge.
+    ///
+    /// It lives HERE because that is what the notifications are about: 7 of the 9 kinds in
+    /// `notification_kinds.py` fire on a watchlist ticker or a followed investor, and 8 of 9
+    /// route to a ticker. The badge previously sat on Updates — a news feed that never reads
+    /// the inbox — so tapping the badged tab could not clear it, and the only surface that
+    /// could was buried at `Profile → Notification History`.
+    ///
+    /// Named broadly on purpose: `research_complete` (the one `CATEGORY_APP` kind, and the
+    /// only one routing to `report`) and `profile_match` (discovery, not tracking) live here
+    /// too. Filtering them out would need a category filter the inbox service does not have,
+    /// and would leave their unread state with nothing able to clear it.
+    case alerts = "Alerts"
 }
 
 // MARK: - Asset Sort Option
@@ -377,7 +390,7 @@ enum AnalystRatingAction: String {
         switch self {
         case .upgrade: return "arrow.up.right"
         case .downgrade: return "arrow.down.right"
-        case .initiate: return "sparkles"
+        case .initiate: return "sparkles.2"
         case .maintain: return "equal"
         }
     }

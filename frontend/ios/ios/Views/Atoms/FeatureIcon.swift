@@ -29,7 +29,7 @@ struct FeatureIcon: View {
     HStack(spacing: AppSpacing.lg) {
         FeatureIcon(systemIconName: "chart.pie.fill", color: AppColors.gain)
         FeatureIcon(systemIconName: "building.2.fill", color: AppColors.primaryBlue)
-        FeatureIcon(systemIconName: "sparkles", color: AppColors.alertOrange)
+        FeatureIcon(systemIconName: "sparkles.2", color: AppColors.alertOrange)
         FeatureIcon(systemIconName: "exclamationmark.triangle.fill", color: AppColors.loss)
     }
     .padding()

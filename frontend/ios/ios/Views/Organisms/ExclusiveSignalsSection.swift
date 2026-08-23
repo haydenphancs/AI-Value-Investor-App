@@ -31,7 +31,7 @@ struct ExclusiveSignalsSection: View {
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
                 TintedTagBadge(text: "CAYDEX", color: accent,
-                               systemImage: "sparkles",
+                               systemImage: "sparkles.2",
                                backgroundOpacity: 0.14,
                                font: AppTypography.captionSmallEmphasis,
                                tracking: 0.4)

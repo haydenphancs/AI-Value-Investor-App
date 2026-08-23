@@ -14,7 +14,7 @@ struct MoneyMoveArticleKeyHighlights: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Section header
             HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "sparkles")
+                Image(systemName: "sparkles.2")
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.neutral)
 

@@ -248,7 +248,18 @@ backend/data/book_audio/orig_speed/
 backend/data/book_audio/.cache_*/
 backend/data/book_audio/.clone_cache_*/
 backend/data/book_audio/.tmp_*/
-backend/data/voice_clone/
+# Ignore voice_clone EXCEPT refs/ — everything else in there is a one-off audition render or a
+# regenerable cache (~118 MB), but refs/ holds the reference clips that DEFINE the narration
+# voices: caydex_voice_achird_v2.wav is the voice of every Money Moves article AND all 207
+# Investor Journey cards. It cannot be regenerated — the clone is not reproducible without it —
+# and ignoring it left the whole catalog's voice living on exactly one laptop. 6.5 MB total.
+backend/data/voice_clone/*
+!backend/data/voice_clone/refs/
+# Transient staging for clone_learn_audio.py: clips land here, get voice-verified, then are
+# MOVED into data/{money_moves,journey}_audio/ which are tracked. Committing the staging copy
+# would double every clip in the repo and blur which dir is canonical.
+backend/data/money_moves_audio_clone/
+backend/data/journey_audio_clone/
 
 # --- Book cover generation local artifacts (regenerable; never commit) ---
 # The .art.jpg masters and the composited .hero/.thumb ARE committed: art generation is

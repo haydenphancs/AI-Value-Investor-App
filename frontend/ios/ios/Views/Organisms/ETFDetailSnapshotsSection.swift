@@ -869,7 +869,7 @@ struct ETFSnapshotsInfoSheet: View {
                     // Pro Tips
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         HStack(spacing: AppSpacing.sm) {
-                            Image(systemName: "sparkles")
+                            Image(systemName: "sparkles.2")
                                 .font(AppTypography.iconMedium)
                                 .foregroundColor(AppColors.neutral)
                             Text("Pro Tips")

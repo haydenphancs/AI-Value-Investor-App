@@ -30,6 +30,13 @@ Usage (from backend/):
 Outputs (skip-existing checkpoint):
     data/journey_audio_clone/<audioClip>.m4a      (one per narrated card)
     data/money_moves_audio_clone/<slug>.m4a       (one per article)
+
+    --canonical writes straight into data/{journey,money_moves}_audio/ instead — the directory the
+    align + seed scripts actually read. Without it the clips must be moved by hand, which nothing in
+    this repo automates and which is easy to forget; align_*.py then DOWNLOADS the published clip
+    from the bucket and silently aligns the new timings against the OLD audio.
+    Skip-existing still applies, so RE-VOICING an already-narrated item means deleting (or backing
+    up) its .m4a first — otherwise it is skipped and you get a silent no-op.
 """
 import hashlib
 import json
@@ -212,6 +219,9 @@ def synth_clip(raw_blocks: list[str], out: Path) -> float:
 
 def main():
     argv = list(sys.argv[1:])
+    canonical = "--canonical" in argv
+    if canonical:
+        argv.remove("--canonical")
     shard_i, shard_n = 0, 1
     if "--shard" in argv:
         si = argv.index("--shard")
@@ -224,15 +234,21 @@ def main():
     elif kind == "moneymoves":
         items, outdir = moneymoves_items(only)
     else:
-        raise SystemExit("usage: clone_learn_audio.py {journey|moneymoves} {<slug/prefix>|--all} [--shard i N]")
+        raise SystemExit("usage: clone_learn_audio.py {journey|moneymoves} {<slug/prefix>|--all} [--canonical] [--shard i N]")
     if not REF.exists():
         raise SystemExit(f"reference clip missing: {REF}")
+    if canonical:
+        # the directory align_*.py and seed_*.py actually read
+        outdir = outdir.with_name(outdir.name.removesuffix("_clone"))
     items = items[shard_i::shard_n]
     if not items:
         raise SystemExit(f"no items matched '{only}' for {kind} (shard {shard_i}/{shard_n})")
     outdir.mkdir(parents=True, exist_ok=True)
     print(f"[clone_learn] {kind} '{only}' mode={MODE} shard={shard_i}/{shard_n}: {len(items)} item(s) -> "
           f"{outdir.name} · ref={REF.name} · exag={EXAG} · {TARGET_WPM}wpm · pause(blk={BLOCK_PAUSE}s)", flush=True)
+    if canonical:
+        print("  --canonical: writing into the LIVE audio dir; existing clips are SKIPPED, so a "
+              "re-voice needs the old .m4a moved away first.", flush=True)
     done = 0
     for label, blocks in items:
         out = outdir / f"{label}.m4a"

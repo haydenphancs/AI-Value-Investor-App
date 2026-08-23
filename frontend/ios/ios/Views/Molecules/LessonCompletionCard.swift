@@ -58,9 +58,10 @@ struct LessonCompletionCard: View {
                 if let onAskAITapped {
                     Button(action: onAskAITapped) {
                         HStack(spacing: AppSpacing.sm) {
-                            // `sparkles.2` — the app's Cay AI mark, the same glyph the header
+                            // `sparkles.2` — the app's sparkle mark, the same glyph the header
                             // button and every chat surface use. This was `sparkles` (the
-                            // three-star variant), the only place it appeared.
+                            // three-star variant); the app has since standardised on the
+                            // two-star glyph everywhere, so no `sparkles` remains.
                             Image(systemName: "sparkles.2")
                             Text("Ask Cay AI about this")
                         }

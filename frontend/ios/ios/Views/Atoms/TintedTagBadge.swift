@@ -58,7 +58,7 @@ struct TintedTagBadge: View {
         TintedTagBadge(text: "Volume", color: AppColors.accentCyan)
         TintedTagBadge(text: "Shorts", color: AppColors.neutral)
         TintedTagBadge(text: "CAYDEX", color: AppColors.accentCyan,
-                       systemImage: "sparkles",
+                       systemImage: "sparkles.2",
                        backgroundOpacity: 0.14,
                        font: AppTypography.captionSmallEmphasis, tracking: 0.4)
         TintedTagBadge(text: "+3.4%", color: AppColors.bullish)

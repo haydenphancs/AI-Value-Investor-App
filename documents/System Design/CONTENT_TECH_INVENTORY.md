@@ -290,7 +290,8 @@ Authoritative docs: `.claude/rules/learn-content.md`, `.claude/skills/add-learn-
 2. **Generate audio** (only quota step) — `generate_money_moves_audio.py <slug>` /
    `generate_journey_audio.py <key>` (or re-voice via `clone_learn_audio.py` on RunPod).
 3. **Align** (free, local) — `align_money_moves_audio.py` (sentence) / `align_journey_audio.py`
-   (word) → writes timings back into the JSON.
+   (word) → writes timings back into the JSON. Run under **`./venv_clone/bin/python`**: that env
+   pins torchaudio 2.6.0, the main venv's is unpinned. Verified byte-identical output.
 4. **Seed** — `seed_money_moves.py` / `seed_journey.py` → uploads clips, bakes `audioUrl` +
    timings, upserts one idempotent row (reseed is wipe-safe).
 5. **Wait** — surfaces after the ≤1h cache expires or a Railway restart.

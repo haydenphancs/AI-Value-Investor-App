@@ -15,8 +15,17 @@ money-moves-media first — with the SERVICE-ROLE key, because migration 128 mad
 private; the old public-URL fetch has 404'd ever since and needs live Supabase creds now.
 
 Usage (from backend/):
-    ./venv/bin/python scripts/align_money_moves_audio.py            # all articles
-    ./venv/bin/python scripts/align_money_moves_audio.py amazon     # slug substring filter
+    ./venv_clone/bin/python scripts/align_money_moves_audio.py         # all articles
+    ./venv_clone/bin/python scripts/align_money_moves_audio.py amazon  # slug substring filter
+
+Run this with venv_clone, NOT venv. venv_clone pins torch/torchaudio 2.6.0 via
+requirements_clone.txt; the main venv's torchaudio is unpinned (2.9.1 today) and prints a stale
+"forced_align will be removed in 2.9" warning — stale because upstream PRESERVED forced_align
+(pytorch/audio#3902, edited 2026-01-22) and MMS_FA is still in current stable. Nothing is broken
+on the main venv, but nothing records which version works there either, so a rebuild on a new
+machine resolves to whatever torchaudio is current — and torchaudio is in maintenance and was
+dropped from PyTorch's official install instructions at 2.10. Verified byte-identical output
+between 2.6.0 and 2.9.1. Do not "fix" these commands back to ./venv/bin/python.
 """
 import json
 import sys

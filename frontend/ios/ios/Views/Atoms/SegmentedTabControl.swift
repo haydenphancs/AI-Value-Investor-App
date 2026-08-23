@@ -22,6 +22,14 @@ struct SegmentedTabControl<T: Hashable & RawRepresentable>: View where T.RawValu
                     Text(tab.rawValue)
                         .font(AppTypography.bodyEmphasis)
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
+                        // Segments split the width evenly, so every tab added narrows all of
+                        // them — Tracking went from two to three ("Assets/Whales/Alerts") and
+                        // each column lost a third. Without these, SwiftUI's only remedy is to
+                        // wrap, and single-word labels have no inter-word break so they split
+                        // mid-word. Same trade, and the same three modifiers, as `TabBarItem`.
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .allowsTightening(true)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.md)
                         .background(

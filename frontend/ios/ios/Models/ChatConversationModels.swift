@@ -59,7 +59,7 @@ enum ChatContextType: String {
         case .moneyMovesArticle: return "newspaper.fill"
         case .journeyLesson: return "map.fill"
         case .book: return "book.fill"
-        case .none: return "sparkles"
+        case .none: return "sparkles.2"
         }
     }
 }

@@ -338,7 +338,7 @@ struct AnalysisFeature: Identifiable {
             title: "AI Chat with Report",
             subtitle: "Ask follow-up questions and get instant answers",
             iconName: "icon_feature_ai",
-            systemIconName: "sparkles",
+            systemIconName: "sparkles.2",
             iconColor: AppColors.alertPurple
         )
     ]

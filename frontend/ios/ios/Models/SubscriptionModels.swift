@@ -517,7 +517,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
 
     var symbol: String {
         switch self {
-        case .general:          return "sparkles"
+        case .general:          return "sparkles.2"
         case .moreCredits:      return "creditcard.fill"
         case .updatesTickers:   return "chart.bar.doc.horizontal"
         case .signals:          return "antenna.radiowaves.left.and.right"

@@ -134,6 +134,13 @@ def align_article(slug: str, article: dict) -> bool:
                 block["itemsReadAlong"] = [spans_for(("item", si, bi, ii)) for ii in range(len(items))]
                 n_sent += sum(len(x) for x in block["itemsReadAlong"])
     article["audioDurationSeconds"] = int(round(total))   # refresh to the new clone clip's real length
+    # Set the flag here too. We have just decoded this article's clip, so narration demonstrably
+    # exists — and this is the only step that knows it: the cloner writes the .m4a but not the JSON,
+    # and seed_money_moves.py derives has_audio_version from the UPLOAD and writes it to the DB ROW,
+    # never back to this file. Leaving it to the seeder stranded seven newly-narrated articles at
+    # `hasAudioVersion: false` locally, which is coherent-looking, wrong, and invisible in
+    # production (which reads the audio_url COLUMN). Pinned by test_narration_flags_are_coherent.
+    article["hasAudioVersion"] = True
     print(f"  {slug:32s} {n_sent:3d} sentences  ({total:.0f}s)")
     return True
 

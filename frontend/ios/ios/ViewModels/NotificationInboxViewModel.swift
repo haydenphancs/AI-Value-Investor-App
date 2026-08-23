@@ -50,6 +50,17 @@ final class NotificationInboxViewModel: ObservableObject {
         }
     }
 
+    /// `load()` that the caller can await.
+    ///
+    /// The Alerts tab has to mark everything read as soon as it has something to mark — that
+    /// is what clears the badge — and it cannot do that before the first page lands.
+    /// Sequencing on `state` instead would miss the case where the page is ALREADY loaded on
+    /// re-entry, since `.onChange` does not fire when nothing changed.
+    func loadAndWait() async {
+        load()
+        await loadTask?.value
+    }
+
     private func performLoad() async {
         do {
             let page = try await repository.fetchNotifications(limit: 30, before: nil)
@@ -159,6 +170,31 @@ final class NotificationInboxViewModel: ObservableObject {
         item.isRead || locallyRead.contains(item.id)
     }
 
+    /// Ids that were still unread when this viewing session began.
+    ///
+    /// The Alerts tab clears the badge by marking everything read the moment it is shown —
+    /// which is the whole point, since the reported bug was a badge nothing could clear.
+    /// Without this snapshot that would blank every row as it appeared, so the screen you
+    /// opened to see what was new would tell you nothing.
+    @Published private(set) var unreadOnOpen: Set<String> = []
+
+    /// Draw the "new" dot for rows that were unread when you arrived, even once the
+    /// mark-all-read below has landed.
+    func showsUnreadDot(_ item: NotificationEventDTO) -> Bool {
+        unreadOnOpen.contains(item.id) || !isRead(item)
+    }
+
+    /// Mark everything read because the user is LOOKING at the list.
+    ///
+    /// Separate from `markAllRead()` — that one is the explicit toolbar action and carries no
+    /// snapshot. Safe to call on every appearance: `markAllRead` no-ops at `unreadCount == 0`,
+    /// and the snapshot only ever grows within a viewing session.
+    func markAllReadOnView() async {
+        guard unreadCount > 0 else { return }
+        unreadOnOpen.formUnion(items.filter { !isRead($0) }.map(\.id))
+        await markAllRead()
+    }
+
     /// Clear everything when the session ends.
     ///
     /// auth.md §7: any store not keyed by user id must be reset when a session ends, or
@@ -169,6 +205,7 @@ final class NotificationInboxViewModel: ObservableObject {
         unreadCount = 0
         nextCursor = nil
         locallyRead = []
+        unreadOnOpen = []
         state = .loading
     }
 }

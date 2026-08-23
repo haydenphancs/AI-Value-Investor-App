@@ -9,9 +9,18 @@ import SwiftUI
 
 struct CustomTabBar: View {
     @Binding var selectedTab: HomeTab
-    /// Unread notifications, badged on the Updates tab — the closest thing the app has
-    /// to a notification surface. Device-global state, so `AppState` resets it when a
-    /// session ends; otherwise the next account inherits the previous user's count.
+    /// Unread notifications, badged on **Tracking**, whose "Alerts" segment shows them.
+    ///
+    /// It used to be badged on Updates — "the closest thing the app has to a notification
+    /// surface" — and that approximation WAS the bug a TestFlight tester reported: Updates is
+    /// a news feed that never reads `notification_events`, so tapping the badged tab could
+    /// not clear the count, and the only surface that could was buried at
+    /// `Profile → Notification History`. Tracking owns the data (7 of the 9 notification
+    /// kinds fire on a watchlist ticker or a followed investor), and its Alerts segment marks
+    /// everything read on sight.
+    ///
+    /// Device-global state, so `AppState` resets it when a session ends; otherwise the next
+    /// account inherits the previous user's count.
     var unreadNotifications: Int = 0
 
     var body: some View {
@@ -25,7 +34,7 @@ struct CustomTabBar: View {
                             selectedTab = tab
                         }
                     },
-                    badgeCount: tab == .updates ? unreadNotifications : 0
+                    badgeCount: tab == .tracking ? unreadNotifications : 0
                 )
             }
         }

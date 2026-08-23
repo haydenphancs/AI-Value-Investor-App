@@ -60,6 +60,8 @@ struct TrackingContentView: View {
                             AssetsTabContent(viewModel: viewModel)
                         case .whales:
                             WhalesTabContent(viewModel: viewModel)
+                        case .alerts:
+                            AlertsTabContent()
                         }
                     }
                 }
@@ -194,6 +196,8 @@ struct TrackingContentViewWithBinding: View {
                             AssetsTabContent(viewModel: viewModel)
                         case .whales:
                             WhalesTabContent(viewModel: viewModel)
+                        case .alerts:
+                            AlertsTabContent()
                         }
                     }
                 }
@@ -405,6 +409,36 @@ struct AssetsTabContent: View {
                 viewModel.openPortfolioConfigSheet()
             }
         }
+    }
+}
+
+// MARK: - Alerts Tab Content
+
+/// The notification inbox, as a Tracking segment.
+///
+/// THE FIX FOR THE REPORTED BUG. The tab-bar badge counts unread `notification_events`, and
+/// it used to sit on Updates — a news feed with no connection to the inbox — so tapping the
+/// badged tab could not clear it ("Update shows 6, touch it and move out, it still shows 6").
+/// The badge now sits on Tracking and this segment is what it points at.
+///
+/// Marks everything read ON SIGHT rather than behind a button: a badge the user cannot clear
+/// by looking at the thing it counts is the bug, not the fix. `showsUnreadDot` keeps the dots
+/// visible for this viewing, so the screen still tells you what was new.
+///
+/// Owns its own view model instance. `NotificationInboxView` (Profile → Notification History)
+/// owns a separate one — they share the TYPE, not an object, and every count either produces
+/// flows through `AppState.notificationUnreadDidChange(_:)`, which stays the single writer.
+struct AlertsTabContent: View {
+    @StateObject private var viewModel = NotificationInboxViewModel()
+
+    var body: some View {
+        NotificationInboxContent(viewModel: viewModel)
+            .task {
+                Analytics.shared.track(.notificationInboxOpened)
+                await viewModel.loadAndWait()
+                await viewModel.markAllReadOnView()
+            }
+            .refreshable { viewModel.load() }
     }
 }
 

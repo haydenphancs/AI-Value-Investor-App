@@ -13,7 +13,11 @@ Output: backend/data/book_audio/<order>_<slug>.readalong.json
 which gen_book_read_along.py prefers over the proportional estimate when present.
 
 Usage (from backend/):
-    ./venv/bin/python scripts/align_book_audio.py 1
+    ./venv_clone/bin/python scripts/align_book_audio.py 1
+
+    (venv_clone, not venv — same pinned-torchaudio reason as the two Learn align scripts.
+    UNVERIFIED here: checking it means regenerating book timings, so the next book run is
+    what proves it. Fall back to ./venv/bin/python if it misbehaves.)
 """
 import contextlib
 import io

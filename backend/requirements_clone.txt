@@ -1,5 +1,11 @@
 # Chatterbox voice-clone GPU env — Python 3.11. Frozen from backend/venv_clone.
 #
+# ⚠️ This file is ALSO the pin for read-along FORCED ALIGNMENT. align_money_moves_audio.py,
+# align_journey_audio.py and align_book_audio.py all run under venv_clone precisely because the
+# main venv's torchaudio is unpinned. torchaudio is in maintenance and was dropped from PyTorch's
+# official install instructions at 2.10, so bumping torch/torchaudio here can break alignment for
+# ALL Learn content — not just Chatterbox generation. Re-verify both after any bump.
+#
 # On a CUDA pod, install torch/torchaudio FIRST from the cu124 index (setup_runpod.sh
 # does this) so pip never resolves a CPU-only wheel; then `pip install -r` this file.
 # These pins are exactly what runs on the Mac (MPS), so the only backend difference

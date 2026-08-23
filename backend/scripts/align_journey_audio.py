@@ -15,8 +15,17 @@ migration 128 made that bucket private; the old public-URL fetch has 404'd ever 
 live Supabase creds now.
 
 Usage (from backend/):
-    ./venv/bin/python scripts/align_journey_audio.py            # all lessons
-    ./venv/bin/python scripts/align_journey_audio.py compound   # lesson-key / clip prefix filter
+    ./venv_clone/bin/python scripts/align_journey_audio.py           # all lessons
+    ./venv_clone/bin/python scripts/align_journey_audio.py compound  # lesson-key / clip prefix filter
+
+Run this with venv_clone, NOT venv. venv_clone pins torch/torchaudio 2.6.0 via
+requirements_clone.txt; the main venv's torchaudio is unpinned (2.9.1 today) and prints a stale
+"forced_align will be removed in 2.9" warning — stale because upstream PRESERVED forced_align
+(pytorch/audio#3902, edited 2026-01-22) and MMS_FA is still in current stable. Nothing is broken
+on the main venv, but nothing records which version works there either, so a rebuild on a new
+machine resolves to whatever torchaudio is current — and torchaudio is in maintenance and was
+dropped from PyTorch's official install instructions at 2.10. Verified byte-identical output
+between 2.6.0 and 2.9.1. Do not "fix" these commands back to ./venv/bin/python.
 """
 import json
 import sys

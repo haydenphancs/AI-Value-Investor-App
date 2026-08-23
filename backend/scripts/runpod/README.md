@@ -13,7 +13,7 @@ downstream (seed / swift-gen / read-along / Xcode) stays on the Mac, unchanged.
 | Step | Where |
 |---|---|
 | `generate_book_audio_clone.py N` (Chatterbox) | **RunPod GPU** |
-| `align_book_audio.py N` (torchaudio MMS_FA) | Mac (CPU-OK; movable to GPU later) |
+| `align_book_audio.py N` (torchaudio MMS_FA) | Mac, under `venv_clone` (pinned torchaudio) |
 | `seed_book_audio.py N --force` (Supabase upload — needs secrets) | Mac |
 | `gen_books_swift.py` / `gen_book_audio_swift.py` / `gen_book_read_along.py` (write `*.swift`) | Mac |
 | Xcode rebuild + sim reinstall | Mac |
@@ -65,7 +65,7 @@ ls -lh backend/data/book_audio/2_*          # confirm m4a + manifest + cost_repo
 ./venv/bin/python scripts/seed_book_audio.py 2 --force
 ./venv/bin/python scripts/gen_books_swift.py
 ./venv/bin/python scripts/gen_book_audio_swift.py
-./venv/bin/python scripts/align_book_audio.py 2
+./venv_clone/bin/python scripts/align_book_audio.py 2
 ./venv/bin/python scripts/gen_book_read_along.py
 #   -> Xcode rebuild + reinstall in the sim (same bucket URL → clear cache)
 ```

@@ -37,6 +37,28 @@ struct AIDataConsentView: View {
             text: "Your watchlist, portfolio, or holdings.")
     ]
 
+    /// The accuracy / not-advice half of the gate.
+    ///
+    /// This screen used to cover PRIVACY only — what gets sent, what doesn't — and said nothing
+    /// about the answers being generated, fallible, or not advice. The first-run
+    /// `DisclaimerAcknowledgementView` does say it, but that is accepted once, long before
+    /// anyone reads an AI answer about a specific stock. A disclaimer carries weight where the
+    /// user is actually relying on the output, so it belongs on the gate into chat as well.
+    ///
+    /// ⚠️ Never name the model or the vendor here (CLAUDE.md invariant #7) — "a third-party AI
+    /// provider", matching the wording already used above.
+    private let whatItIsNot: [Row] = [
+        Row(icon: "exclamationmark.triangle",
+            text: "Cay AI can be wrong. It can misread data, miss context, or state something "
+                + "confidently that is already out of date. Verify anything you act on."),
+        Row(icon: "hand.raised",
+            text: "It isn't financial advice. Nothing Cay AI says is a recommendation to buy "
+                + "or sell, and it isn't tailored to your situation."),
+        Row(icon: "building.columns",
+            text: "Caydex is not a registered investment adviser or broker-dealer. Investing "
+                + "carries risk, including loss of principal.")
+    ]
+
     var body: some View {
         ZStack {
             AppColors.background.ignoresSafeArea()
@@ -64,6 +86,9 @@ struct AIDataConsentView: View {
 
                         group(title: "What gets sent", rows: whatWeSend, tint: AppColors.primaryBlue)
                         group(title: "What never gets sent", rows: whatWeDont, tint: AppColors.bullish)
+                        // `caution` is a TEXT-role token (4.5:1). NOT `cautionGraphic` — the
+                        // graphic tokens are chart-only and fail AA as text (ios-swiftui.md).
+                        group(title: "What this is not", rows: whatItIsNot, tint: AppColors.caution)
 
                         Text("Your conversations are saved to your account so you can come "
                              + "back to them, and you can delete any conversation at any "
@@ -73,6 +98,15 @@ struct AIDataConsentView: View {
                             .font(AppTypography.caption)
                             .foregroundColor(AppColors.textMuted)
                             .fixedSize(horizontal: false, vertical: true)
+
+                        // The full disclaimers, one tap from the screen that gates chat.
+                        // Self-contained: presents DisclaimersView in its own sheet with a Done
+                        // button, so it works inside this cover with no extra plumbing.
+                        InlineDisclaimerNotice(
+                            text: "Full risk and AI disclaimers",
+                            linkLabel: "Read"
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                         Spacer(minLength: AppSpacing.xl)
                     }

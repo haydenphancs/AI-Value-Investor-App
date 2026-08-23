@@ -305,3 +305,9 @@ dump.rdb
 frontend/ios/ios/.sentryclirc
 
 xcuserdata/
+
+# --- TestFlight tester credentials (never commit) ---
+# scripts/seed_testflight_testers.py reads its account list from this file. It holds
+# plaintext passwords for real accounts on the production Supabase project, so the script
+# is committable and the credentials are not.
+backend/scripts/testflight_testers.local.json

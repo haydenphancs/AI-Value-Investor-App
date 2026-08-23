@@ -15,6 +15,8 @@ review confirmed in the chat data flow:
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.chat_service import ChatService
 
 
@@ -73,21 +75,62 @@ def test_none_and_unknown_shape_yield_empty():
     assert ChatService._normalize_historical(42) == []
 
 
-def test_present_but_null_fields_coerce_to_zero_no_crash():
-    # The crux: int(None) / a null-in-sort-key would abort the whole widget.
+def test_null_close_row_is_dropped_not_coerced_to_zero():
+    """A null close must DISAPPEAR, not become a $0.00 bar.
+
+    This used to assert the opposite (`close: 0`). The coercion never crashed, which is why it
+    looked safe — but the frontend derives the chart's y-domain from min/max of the closes, so a
+    single $0 bar turned a 302-340 price band into -34...374: the real prices collapse into ~9%
+    of a 140pt plot, the line reads dead flat, and the axis prints "$0 / $100 / $200 / $300"
+    beside a "$309.35" header. Degrade to skip, never to a wrong number.
+    """
     raw = [{"date": "2025-01-02", "open": None, "high": None, "low": None, "close": None, "volume": None}]
+    assert ChatService._normalize_historical(raw) == []
+
+
+def test_null_ohlv_around_a_good_close_still_yields_a_plottable_row():
+    # Only `close` is plotted; a bad open/high/low/volume must not cost the whole day's bar.
+    raw = [{"date": "2025-01-02", "open": None, "high": None, "low": None, "close": 10.5, "volume": None}]
     rows = ChatService._normalize_historical(raw)
-    assert rows == [{"date": "2025-01-02", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}]
+    assert rows == [{"date": "2025-01-02", "open": 0, "high": 0, "low": 0, "close": 10.5, "volume": 0}]
 
 
-def test_null_date_does_not_crash_sort():
+def test_adj_close_rescues_a_null_close():
+    # FMP really does emit a null `close` with a usable `adjClose` — chart_helper does the same.
+    raw = [{"date": "2025-01-02", "close": None, "adjClose": 12.25, "volume": 5}]
+    rows = ChatService._normalize_historical(raw)
+    assert [r["close"] for r in rows] == [12.25]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), 0, -3.5, "oops", None])
+def test_non_finite_or_non_positive_close_is_dropped(bad):
+    """`or 0` does NOT catch NaN — NaN is truthy, so `nan or 0` is `nan`.
+
+    A NaN reaching the payload serialises as the bare token `NaN`: invalid JSON (the iOS decoder
+    rejects the whole message) and rejected outright by Postgres JSONB, losing the persisted turn.
+    """
+    raw = [{"date": "2025-01-02", "close": bad, "volume": 1}]
+    assert ChatService._normalize_historical(raw) == []
+
+
+def test_non_finite_volume_does_not_abort_the_row():
+    # `int(float("nan"))` RAISES, and the caller's except is wide enough to swallow it into
+    # "no card at all". The close is fine, so the bar must survive with volume degraded to 0.
+    raw = [{"date": "2025-01-02", "close": 10.0, "volume": float("nan")}]
+    rows = ChatService._normalize_historical(raw)
+    assert rows == [{"date": "2025-01-02", "open": 0, "high": 0, "low": 0, "close": 10.0, "volume": 0}]
+
+
+def test_null_date_row_is_dropped_and_sort_does_not_crash():
     raw = [
         {"date": None, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
+        {"date": "   ", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1},
         {"date": "2025-01-01", "open": 2, "high": 2, "low": 2, "close": 2, "volume": 2},
     ]
     rows = ChatService._normalize_historical(raw)
-    # Null date coerces to "" which sorts first; no TypeError comparing None vs str.
-    assert [r["date"] for r in rows] == ["", "2025-01-01"]
+    # No TypeError comparing None vs str, and the undated rows are gone rather than sorting to
+    # the FRONT as "" — where they became a bogus oldest bar and blanked the left date label.
+    assert [r["date"] for r in rows] == ["2025-01-01"]
 
 
 def test_non_dict_rows_skipped():
@@ -96,10 +139,18 @@ def test_non_dict_rows_skipped():
     assert len(rows) == 1 and rows[0]["date"] == "2025-01-01"
 
 
-def test_missing_key_falls_back_to_zero():
+def test_missing_close_key_is_dropped():
     raw = [{"date": "2025-01-01"}]  # only a date, rest absent
-    rows = ChatService._normalize_historical(raw)
-    assert rows[0] == {"date": "2025-01-01", "open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}
+    assert ChatService._normalize_historical(raw) == []
+
+
+def test_every_row_bad_yields_empty_rather_than_a_fabricated_series():
+    raw = [
+        {"date": "2025-01-01", "close": None},
+        {"date": "2025-01-02", "close": float("nan")},
+        {"date": None, "close": 5},
+    ]
+    assert ChatService._normalize_historical(raw) == []
 
 
 # ── _build_stock_widget (null quote fields → no ValidationError) ─────────────

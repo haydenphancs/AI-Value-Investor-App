@@ -40,7 +40,13 @@ struct NotificationRouteDestination: View {
                     TickerDetailView(tickerSymbol: ticker ?? "")
 
                 case .inbox:
-                    NotificationInboxView()
+                    // Unreachable by construction: the only caller
+                    // (`NotificationInboxContent`) filters `.inbox` out before setting a
+                    // route, because "the row itself is already the content". Kept as an
+                    // explicit no-op so the switch stays exhaustive — `NotificationRoute`
+                    // gains cases over time and a `default:` here would silently swallow
+                    // the next one.
+                    EmptyView()
                 }
             }
             .navigationBarHidden(route.isTickerLike)
@@ -49,8 +55,7 @@ struct NotificationRouteDestination: View {
 }
 
 private extension NotificationRoute {
-    /// The detail screens draw their own header, so the nav bar is hidden for them — the
-    /// inbox uses a real navigation title and must keep it.
+    /// The detail screens draw their own header, so the nav bar is hidden for them.
     var isTickerLike: Bool {
         switch self {
         case .ticker, .report: return true

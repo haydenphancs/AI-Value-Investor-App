@@ -482,19 +482,17 @@ struct ProfileView: View {
                     settingsRowDivider
                 }
 
-                // Notification history. A push that arrives while the phone is face-down
-                // is otherwise gone: before this the app kept no record of what fired.
-                NavigationLink {
-                    NotificationInboxView()
-                } label: {
-                    ProfileSettingsRowContent(
-                        icon: "tray.full.fill",
-                        iconColor: AppColors.textSecondary,
-                        title: "Notification History"
-                    )
-                }
-
-                settingsRowDivider
+                // NO "Notification History" row here any more.
+                //
+                // It opened a second copy of the same list Tracking → Alerts already shows —
+                // same organism, same view-model type — and the tab-bar badge points at
+                // Tracking, so this was the one surface the badge could not lead you to.
+                // Two surfaces meant two sets of read semantics to keep correct for no gain.
+                // The only thing it had that Alerts lacks was an explicit "Mark all read"
+                // button, and Alerts marks read ON SIGHT, which makes that redundant.
+                //
+                // The row below is notification PREFERENCES — a different feature. Do not
+                // confuse the two and delete it as well.
 
                 // Notification PREFERENCES. The flag used to gate this because every
                 // toggle wrote a preference nothing read; each one now has a real sender

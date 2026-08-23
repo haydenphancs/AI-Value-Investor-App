@@ -111,6 +111,16 @@ final class AppState {
     /// keeps working through the transition.
     var pendingPushRoute: NotificationRoute?
 
+    /// Which Tracking segment to open on arrival, consumed by `TrackingContentViewWithBinding`.
+    ///
+    /// The Tracking sub-tab lives in `TrackingViewModel`, which is a `@StateObject` private to
+    /// that screen and therefore unreachable from a push handler. This parks the intent the
+    /// same way `pendingPushRoute` does, and for the same reason: a tap that resolves to no
+    /// detail screen must still land on the notification list rather than nowhere.
+    ///
+    /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
+    var pendingTrackingTab: TrackingTab?
+
     /// Unread notification count, for the tab-bar badge.
     ///
     /// Device-global (no user id), so it MUST be reset in `discardDataForEndedSession()`
@@ -1002,6 +1012,7 @@ final class AppState {
         unreadNotificationCount = 0
         pendingPushRoute = nil
         pendingPushTicker = nil
+        pendingTrackingTab = nil
         PortfolioStore.shared.reset()
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()

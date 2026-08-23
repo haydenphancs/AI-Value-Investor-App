@@ -8,6 +8,7 @@
 
 import Combine
 import Foundation
+import os
 
 @MainActor
 final class NotificationInboxViewModel: ObservableObject {
@@ -17,6 +18,13 @@ final class NotificationInboxViewModel: ObservableObject {
         case loaded
         case empty
         case error(String)
+        /// A stored credential that has not been validated yet. NOT `signedOut` — this user is
+        /// signed in as far as they are concerned, and `AppState.requestSignIn` declines to
+        /// prompt during a restore, so a Sign In button here would be inert. (auth.md §5)
+        case reconnecting
+        /// No account. Distinct from `.empty`: their notifications may well exist, just not
+        /// for this device — "No notifications yet" would be a lie by omission.
+        case signedOut
     }
 
     @Published private(set) var state: State = .loading
@@ -25,6 +33,7 @@ final class NotificationInboxViewModel: ObservableObject {
     @Published private(set) var isLoadingMore = false
 
     private let repository: NotificationRepositoryProtocol
+    private let log = Logger(subsystem: "com.phan.caydex", category: "notifications")
     /// Keyset cursor. `nil` after a load means there is no next page.
     private var nextCursor: String?
     private var loadTask: Task<Void, Never>?
@@ -62,6 +71,23 @@ final class NotificationInboxViewModel: ObservableObject {
     }
 
     private func performLoad() async {
+        // THREE outcomes, not two. `GET /users/me/notifications` is `.signInRequired`, so a
+        // signed-out caller is refused PRE-FLIGHT by APIClient and the raw failure would render
+        // as a generic error blob. Worse, "not armed right now" is not "signed out": at launch
+        // this can run while session restore is still in flight. Same guard shape as
+        // `ResearchViewModel.loadReports`.
+        //
+        // This mattered less when Profile → Notification History was a second door to the same
+        // list; it is the only door now.
+        guard AppActions.shared.isSignedIn else {
+            items = []
+            nextCursor = nil
+            state = AppActions.shared.isRestoringSession ? .reconnecting : .signedOut
+            // Deliberately does NOT publish an unread count. A signed-out read proves nothing
+            // about what is unread, and zeroing the badge here would be the second-writer bug
+            // documented in `AlertsTabContent` wearing different clothes.
+            return
+        }
         do {
             let page = try await repository.fetchNotifications(limit: 30, before: nil)
             guard !Task.isCancelled else { return }
@@ -77,10 +103,16 @@ final class NotificationInboxViewModel: ObservableObject {
             // nested. `Task.isCancelled` is the reliable check (the same trap
             // SettingsSyncManager documents).
             let appError = AppError.from(error)
+            log.error("load notifications failed: \(String(describing: type(of: error))): \(appError.message, privacy: .public)")
             // An EMPTY inbox and a BROKEN inbox must not look alike: the backend answers
             // 503 NOTIFICATIONS_UNAVAILABLE rather than an empty 200 precisely so this
             // branch can exist.
-            state = .error(appError.message)
+            //
+            // And never an EMPTY message — `AppError.message` passes some backend strings
+            // through verbatim, and a blank one renders as a warning triangle with no
+            // sentence, which says less than saying nothing.
+            let text = appError.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            state = .error(text.isEmpty ? "We couldn't load your notifications." : text)
         }
     }
 

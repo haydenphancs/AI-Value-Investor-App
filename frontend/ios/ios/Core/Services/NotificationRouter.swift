@@ -121,6 +121,23 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
         }
     }
 
+    /// Whether this tap has no detail screen to open, and must fall back to the notification
+    /// list in Tracking → Alerts.
+    ///
+    /// Defined HERE, once, because two files act on it — `ContentView` picks the tab and
+    /// `HomeDashboardView` declines to consume these routes — and a forked copy of the
+    /// predicate would drift into "some unroutable taps land nowhere", which is silent.
+    ///
+    /// `.report` with no ticker qualifies: the report id alone cannot open anything today, so
+    /// it is as unroutable as `.inbox` is.
+    var needsAlertsFallback: Bool {
+        switch self {
+        case .inbox: return true
+        case .report(_, let ticker): return ticker?.isEmpty != false
+        case .ticker: return false
+        }
+    }
+
     /// Low-cardinality label for analytics. Never include a ticker here — `props` is for
     /// dimensions, not for user-specific values.
     var analyticsName: String {

@@ -10,6 +10,10 @@ import SwiftUI
 struct AIMessageContent: View {
     let content: [RichContentType]
     let timestamp: String
+    /// The message's real creation date, distinct from the formatted `timestamp` string.
+    /// Rich cards that make a claim about NOW (the stock card's "Live" dot) need it to tell a
+    /// freshly-generated payload from a replayed transcript row. nil keeps the previous behaviour.
+    var messageDate: Date? = nil
     /// When true, a blinking caret trails the content (tokens still streaming in).
     var isStreaming: Bool = false
     // Futuristic-chat extras (assistant messages only; defaults keep other callers/previews working).
@@ -140,7 +144,7 @@ struct AIMessageContent: View {
             StockPerformanceCard(performance: performance)
 
         case .stockChart(let widgetData):
-            ChatStockWidgetView(widget: widgetData)
+            ChatStockWidgetView(widget: widgetData, messageDate: messageDate)
 
         case .marketOverview(let widgetData):
             ChatMarketOverviewWidget(data: widgetData)

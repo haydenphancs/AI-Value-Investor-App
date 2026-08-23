@@ -94,10 +94,27 @@ struct ContentView: View {
         .onChange(of: appState.pendingPushRoute, initial: true) { _, route in
             // `initial: true` for the same reason as HomeDashboardView: a cold launch
             // from a tap sets this before either view exists.
-            // Bring Home forward FIRST. Tabs are opacity-mounted, so without this the
-            // destination cover would present over a tab the user isn't looking at.
-            // HomeDashboardView consumes and clears the value.
-            if route != nil { selectedTab = .home }
+            // Bring the destination tab forward FIRST. Tabs are opacity-mounted, so without
+            // this the destination cover would present over a tab the user isn't looking at.
+            guard let route else { return }
+
+            // ONE OWNER PER ROUTE KIND — this is a race, not a style choice. Both this and
+            // HomeDashboardView observe `pendingPushRoute`, and Home's handler CLEARS it. If
+            // Home ran first on a fallback route, the clear would land before this branch read
+            // it and the tap would go nowhere. So the two handlers partition the route space
+            // via `needsAlertsFallback` and each clears only what it owns.
+            if route.needsAlertsFallback {
+                // No detail screen to open. The notification list at least SHOWS the
+                // notification, which beats a tap that appears to do nothing — it just lives
+                // in Tracking → Alerts now rather than a separate inbox screen.
+                selectedTab = .tracking
+                appState.pendingTrackingTab = .alerts
+                appState.pendingPushRoute = nil
+                appState.pendingPushTicker = nil
+            } else {
+                // HomeDashboardView consumes and clears these.
+                selectedTab = .home
+            }
         }
         .onChange(of: selectedTab) { oldValue, newValue in
             // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this

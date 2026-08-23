@@ -88,6 +88,7 @@ struct ChatMessageRow: View {
         AIMessageContent(
             content: message.content,
             timestamp: message.formattedTime,
+            messageDate: message.timestamp,
             isStreaming: isStreaming,
             thinking: message.thinking,
             sources: message.sources,

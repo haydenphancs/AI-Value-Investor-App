@@ -294,9 +294,40 @@ struct StockChartWidgetData: Codable, Identifiable {
         return Self.abbreviate(mc)
     }
 
-    /// Close prices for the chart line
+    /// The points the chart may actually plot.
+    ///
+    /// The backend used to coerce a present-but-null FMP `close` to the literal `0`, and NaN
+    /// survives an `or 0` coercion outright (NaN is truthy). Either one plotted as a real price
+    /// drags the y-domain floor to zero — the true price band then occupies ~9% of a 140pt plot
+    /// and the line reads as dead flat beside a three-figure header. The backend now drops those
+    /// rows; this filter is the second half of the same guard, so an already-persisted
+    /// `rich_content` row from before that fix still renders honestly.
+    ///
+    /// The index is the ORIGINAL enumeration offset, which is what makes it a stable, unique
+    /// `ForEach` id even when FMP returns duplicate or empty dates.
+    var chartPoints: [ChatChartPoint] {
+        historicalData.enumerated().compactMap { index, point in
+            guard let close = point.close.finiteOrNil, close > 0 else { return nil }
+            return ChatChartPoint(id: index, date: point.date, close: close)
+        }
+    }
+
+    /// Close prices for the chart line. Derived from `chartPoints` so the y-domain and the marks
+    /// can never be computed from different sets of values.
     var chartCloses: [Double] {
-        historicalData.map(\.close)
+        chartPoints.map(\.close)
+    }
+
+    /// Direction of the PLOTTED series (first → last close), which is what colours the chart.
+    ///
+    /// Deliberately NOT `isPositive`: that is the quote's ONE-DAY change, while the line spans
+    /// ~30 days. A stock up 1% today inside a 12% monthly decline would otherwise render a
+    /// falling curve in green. The header price/arrow/badge keep the one-day change — the date
+    /// range printed under the chart is what scopes the line.
+    var isSeriesPositive: Bool {
+        let closes = chartCloses
+        guard let first = closes.first, let last = closes.last, first > 0 else { return isPositive }
+        return last >= first
     }
 
     private static func abbreviate(_ value: Double) -> String {
@@ -313,6 +344,18 @@ struct StockChartWidgetData: Codable, Identifiable {
             return String(format: "%.0f", value)
         }
     }
+}
+
+/// One plottable chart vertex: a validated close plus its original index in `historicalData`.
+///
+/// A struct rather than a tuple because `ForEach(_:id:)` needs a `KeyPath`, and Swift has no
+/// key paths into tuple elements.
+struct ChatChartPoint: Identifiable, Equatable {
+    let id: Int
+    /// Carried so the chart's date-range caption labels the bars actually DRAWN. Reading
+    /// `historicalData.first` instead would name a day that got filtered out.
+    let date: String
+    let close: Double
 }
 
 struct HistoricalDataPointDTO: Codable, Identifiable {

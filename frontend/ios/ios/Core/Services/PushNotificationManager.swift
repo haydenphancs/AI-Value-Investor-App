@@ -60,7 +60,26 @@ final class PushNotificationManager {
 
     func configure(appState: AppState) {
         self.appState = appState
+        // Deliver a tap that arrived before this ran. See `pendingRoute`.
+        if let parked = pendingRoute {
+            pendingRoute = nil
+            deliver(parked)
+        }
     }
+
+    /// A tap captured BEFORE `configure(appState:)` had run.
+    ///
+    /// This is the cold-launch path and it silently lost every tap. `configure` is called from
+    /// `iosApp`'s `.task`, which runs after first render AND after an `await` on
+    /// `ServerEnvironmentManager.resolve()` — while `userNotificationCenter(_:didReceive:)`
+    /// fires as soon as the app is launched BY the tap. So `appState` was routinely still nil,
+    /// `appState?.pendingPushRoute = route` wrote to nothing, and the app opened on Home with
+    /// no error anywhere: the exact "tappable banner, tap does nothing" symptom that
+    /// `NotificationRoute` was introduced to kill, just moved one layer up.
+    ///
+    /// In memory only, unlike `pendingToken`: a tap is meaningful for this launch, not a day
+    /// later. If the process dies before AppState exists there is nothing worth restoring.
+    private var pendingRoute: NotificationRoute?
 
     /// Ask for notification permission; register for remote notifications on grant.
     /// Safe to call repeatedly — iOS only prompts once.
@@ -98,6 +117,15 @@ final class PushNotificationManager {
     /// asset type (so a crypto alert opens the crypto screen), and `pendingPushTicker` is
     /// kept so any existing reader keeps working.
     func handleTap(route: NotificationRoute) {
+        // Park it if AppState is not wired yet — a cold launch FROM a tap gets here first.
+        guard appState != nil else {
+            pendingRoute = route
+            return
+        }
+        deliver(route)
+    }
+
+    private func deliver(_ route: NotificationRoute) {
         appState?.pendingPushRoute = route
         appState?.pendingPushTicker = route.symbol
     }

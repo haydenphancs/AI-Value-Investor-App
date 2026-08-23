@@ -20,6 +20,10 @@ import SwiftUI
 struct InlineRetryNotice: View {
     let message: String
     var systemImage: String = "exclamationmark.triangle"
+    /// Defaults to the error reading. Pass `textMuted` when the notice is NOT a failure —
+    /// an empty list or a "sign in to see this" prompt is not something that went wrong, and
+    /// `caution` next to that copy reads as a bug the user should report.
+    var iconColor: Color = AppColors.caution
     var retryTitle: String = "Try Again"
     /// Omit to render the notice with no action.
     var onRetry: (() -> Void)?
@@ -28,7 +32,7 @@ struct InlineRetryNotice: View {
         HStack(alignment: .top, spacing: AppSpacing.sm) {
             Image(systemName: systemImage)
                 .font(AppTypography.iconSmall)
-                .foregroundColor(AppColors.caution)
+                .foregroundColor(iconColor)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: AppSpacing.xs) {

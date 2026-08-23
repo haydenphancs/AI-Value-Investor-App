@@ -26,6 +26,9 @@ from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
+# The chart normaliser the rest of the app already gets right. `_normalize_historical` below
+# used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
+from app.services.chart_helper import _finite_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -709,24 +712,44 @@ class ChatService:
             if not quote:
                 return {"error": f"No quote data found for {ticker}"}
 
-            # Historical 30-day chart
-            to_date = datetime.utcnow().strftime("%Y-%m-%d")
-            from_date = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
-            hist_raw = await self.fmp.get_historical_prices(
-                ticker, from_date=from_date, to_date=to_date
-            )
+            # Historical 30-day chart. Degrades on its own rather than sharing the quote's fate:
+            # a rate-limited / failed history call used to propagate to the outer handler and
+            # throw away a perfectly good live quote, so the user got NO card instead of a card
+            # without a chart. iOS already hides the chart section when the series is too short.
+            now = datetime.now(timezone.utc)
+            to_date = now.strftime("%Y-%m-%d")
+            from_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+            historical_data: List[Dict[str, Any]] = []
+            try:
+                hist_raw = await self.fmp.get_historical_prices(
+                    ticker, from_date=from_date, to_date=to_date
+                )
+                historical_data = self._normalize_historical(hist_raw)
+            except Exception as e:
+                logger.warning(
+                    "chat widget history DEGRADED for %s (%s: %s) — card renders without a chart",
+                    ticker, type(e).__name__, e,
+                )
 
-            historical_data = self._normalize_historical(hist_raw)
+            if not historical_data:
+                logger.info(
+                    "chat widget for %s has no plottable history (%s..%s) — chart section hidden",
+                    ticker, from_date, to_date,
+                )
 
             # FMP's /stable/quote returns avgVolume=0 (documented elsewhere in the codebase). Fall
             # back to the company profile's averageVolume (what every other service uses), then to
             # the mean of the daily volumes we already fetched — so the card never shows "0".
-            avg_volume = int(quote.get("avgVolume") or 0)
+            avg_volume = int(_finite_or_none(quote.get("avgVolume")) or 0)
             if avg_volume <= 0:
                 try:
                     profile = await self.fmp.get_company_profile(ticker)
                     if profile:
-                        avg_volume = int(profile.get("averageVolume") or profile.get("volAvg") or 0)
+                        avg_volume = int(
+                            _finite_or_none(profile.get("averageVolume"))
+                            or _finite_or_none(profile.get("volAvg"))
+                            or 0
+                        )
                 except Exception as e:
                     logger.warning("avg_volume profile fallback failed for %s: %s", ticker, e)
             if avg_volume <= 0 and historical_data:
@@ -744,19 +767,39 @@ class ChatService:
             )
 
         except Exception as e:
-            logger.error(f"FMP stock widget fetch failed for {ticker}: {e}")
+            logger.error(
+                "FMP stock widget fetch failed for %s (%s: %s)",
+                ticker, type(e).__name__, e, exc_info=True,
+            )
             return {"error": str(e)}
 
     # FMP fields arrive as present-but-null for halted / thinly-traded / pre-market / newly-listed
     # tickers. `dict.get(k, 0)` only substitutes on an ABSENT key, so int(None) — or a None fed into
     # a non-Optional float field — would abort the WHOLE widget (caught above → no chart at all).
-    # These two pure helpers coerce with the `or 0` idiom every sibling FMP service already uses,
-    # and are unit-tested directly (no network) for the null/malformed-row outliers.
+    # These two pure helpers therefore degrade instead of raising, and are unit-tested directly
+    # (no network) for the null/malformed-row outliers.
     @staticmethod
     def _normalize_historical(hist_raw: Any) -> List[Dict[str, Any]]:
-        """FMP EOD history → sorted, null-safe OHLCV rows. Handles the /stable bare-LIST shape, the
-        legacy ``{"historical": [...]}`` dict shape, None, and non-dict / null-field rows (a single
-        bad day is coerced/skipped, never aborting the chart)."""
+        """FMP EOD history → sorted, PLOTTABLE OHLCV rows. Handles the /stable bare-LIST shape, the
+        legacy ``{"historical": [...]}`` dict shape, None, and non-dict / null-field rows.
+
+        A row whose ``close`` is not a finite positive number, or whose ``date`` is blank, is
+        DROPPED — not coerced. This mirrors ``chart_helper._normalize_prices``, and it is the
+        difference between a degraded chart and a confidently wrong one:
+
+        * ``day.get("close") or 0`` used to emit a literal ``0.0`` for a null close. iOS derives
+          the y-domain from min/max of the closes, so ONE such bar turned a 302–340 band into
+          -34…374: the real prices collapse into ~9% of a 140pt plot, the line reads dead flat,
+          and the axis prints "$0 / $100 / $200 / $300" beside a "$309.35" header.
+        * ``or 0`` does not even catch NaN — **NaN is truthy**, so ``nan or 0`` is ``nan``. That
+          reaches ``json.dumps`` as the bare token ``NaN`` (invalid JSON → the iOS decoder rejects
+          the whole message) and Postgres JSONB refuses it outright, losing the persisted turn.
+        * ``int()`` on a non-finite volume RAISES, and the caller's ``except`` is wide enough to
+          swallow that into "no card at all".
+
+        A blank date is dropped rather than sorted to the front as ``""``, where it became a bogus
+        leading bar and blanked the chart's left-hand date label.
+        """
         if isinstance(hist_raw, list):
             hist_list = hist_raw
         elif isinstance(hist_raw, dict):
@@ -768,13 +811,25 @@ class ChatService:
             (d for d in hist_list if isinstance(d, dict)),
             key=lambda d: d.get("date") or "",
         ):
+            date = day.get("date")
+            if not isinstance(date, str) or not date.strip():
+                continue
+            # `adjClose` fallback matches chart_helper — FMP really does emit a null `close`.
+            close = _finite_or_none(day.get("close"))
+            if close is None or close <= 0:
+                close = _finite_or_none(day.get("adjClose"))
+            if close is None or close <= 0:
+                continue
+            volume = _finite_or_none(day.get("volume"))
             rows.append({
-                "date": day.get("date") or "",
-                "open": day.get("open") or 0,
-                "high": day.get("high") or 0,
-                "low": day.get("low") or 0,
-                "close": day.get("close") or 0,
-                "volume": int(day.get("volume") or 0),
+                "date": date,
+                # OHL are carried for completeness but never plotted, so a bad one degrades to 0
+                # rather than costing the whole day's bar.
+                "open": _finite_or_none(day.get("open")) or 0,
+                "high": _finite_or_none(day.get("high")) or 0,
+                "low": _finite_or_none(day.get("low")) or 0,
+                "close": close,
+                "volume": int(volume) if volume is not None else 0,
             })
         return rows
 
@@ -808,7 +863,9 @@ class ChatService:
             ) or 0,
             day_high=quote.get("dayHigh") or 0,
             day_low=quote.get("dayLow") or 0,
-            volume=int(quote.get("volume") or 0),
+            # NOT `int(quote.get("volume") or 0)`: a NaN survives `or 0` (NaN is truthy) and
+            # `int(nan)` raises ValueError inside the caller's try → the entire card disappears.
+            volume=int(_finite_or_none(quote.get("volume")) or 0),
             avg_volume=avg_volume,
             market_cap=quote.get("marketCap"),
             pe_ratio=quote.get("pe"),

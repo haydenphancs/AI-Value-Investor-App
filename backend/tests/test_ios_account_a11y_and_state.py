@@ -25,7 +25,10 @@ import pytest
 _IOS = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
 _PROFILE = _IOS / "Views" / "Screens" / "ProfileView.swift"
 _NOTIFS = _IOS / "Views" / "Screens" / "NotificationsSettingsView.swift"
-_INBOX = _IOS / "Views" / "Screens" / "NotificationInboxView.swift"
+# `NotificationInboxView.swift` (Profile -> Notification History) was DELETED: it was a
+# second copy of the list Tracking -> Alerts already shows. The badge invariant it carried
+# moved with it, so the guard below now reads the surviving surface.
+_ALERTS_TAB = _IOS / "Views" / "Organisms" / "AlertsTabContent.swift"
 _VM = _IOS / "ViewModels" / "ProfileViewModel.swift"
 
 
@@ -138,10 +141,31 @@ def test_the_quiet_hours_pickers_are_dimmed_when_notifications_are_denied():
     )
 
 
+def test_the_notification_list_surface_still_exists():
+    """Anti-vacuity for the guard below.
+
+    `_read` SKIPS on a missing file, so retargeting a path at something that does not exist
+    turns its guard green while proving nothing — which is exactly what happened to this pair
+    when `NotificationInboxView.swift` was deleted. Fail loudly instead.
+    """
+    assert _ALERTS_TAB.exists(), (
+        f"{_ALERTS_TAB} is gone. The notification list has to live SOMEWHERE — retarget the "
+        "badge guard below at whatever replaced it rather than letting it skip."
+    )
+
+
 def test_the_inbox_badge_is_not_published_before_the_first_load():
-    src = _read(_INBOX)
+    src = _read(_ALERTS_TAB)
+    # Comment-stripped on purpose: the header of that file EXPLAINS this bug in prose and
+    # contains the literal token below, so an un-stripped scan would pass on the explanation
+    # after the code regressed.
     assert "initial: true" not in src, (
-        "the inbox publishes its placeholder unread count (0) on appear, before any page has "
-        "loaded — so opening the inbox clears the badge, and a failed load leaves it cleared "
-        "while the notifications are still unread"
+        "the notification list publishes its placeholder unread count (0) on appear, before "
+        "any page has loaded — so opening the Alerts tab clears the badge, and a failed load "
+        "leaves it cleared while the notifications are still unread"
+    )
+    assert "unreadCount" not in src, (
+        "the Alerts tab reads `unreadCount` directly. `AppState.notificationUnreadDidChange` "
+        "is the SINGLE writer of the badge and the view model already calls it on every real "
+        "count; a second reader here is one refactor away from being a second writer"
     )

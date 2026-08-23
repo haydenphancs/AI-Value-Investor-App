@@ -168,57 +168,17 @@ struct PriceAlertsSheet: View {
 
                 VStack(spacing: 1) {
                     ForEach(viewModel.alerts) { alert in
-                        alertRow(alert)
+                        PriceAlertRuleRow(
+                            alert: alert,
+                            onToggle: { Task { await viewModel.toggleActive(alert) } },
+                            onDelete: { Task { await viewModel.delete(alert) } }
+                        )
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
                 .cardBorder(cornerRadius: AppCornerRadius.large)
             }
         }
-    }
-
-    private func alertRow(_ alert: PriceAlertDTO) -> some View {
-        HStack(spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(alert.summary)
-                    .font(AppTypography.body)
-                    .foregroundColor(alert.isActive ? AppColors.textPrimary : AppColors.textMuted)
-
-                // Surfaces `armed == false`. Without it, a rule that is active but latched
-                // after firing looks simply broken.
-                if let reason = alert.quietReason {
-                    Text(reason)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                } else {
-                    Text(alert.repeatRule.label)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
-            }
-
-            Spacer()
-
-            Toggle("", isOn: Binding(
-                get: { alert.isActive },
-                set: { _ in Task { await viewModel.toggleActive(alert) } }
-            ))
-            .labelsHidden()
-            .tint(AppColors.primaryBlue)
-
-            Button {
-                Task { await viewModel.delete(alert) }
-            } label: {
-                Image(systemName: "trash")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.loss)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Delete alert \(alert.summary)")
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
     }
 }
 

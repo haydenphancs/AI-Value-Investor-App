@@ -23,7 +23,6 @@ struct HomeDashboardView: View {
     @Binding var selectedTab: HomeTab
 
     @State private var showSearch = false
-    @State private var showNotificationInbox = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
     /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
@@ -141,6 +140,13 @@ struct HomeDashboardView: View {
             // Consume the tap: open the destination, then CLEAR it so the same tap
             // can't re-present after the sheet is dismissed.
             guard let route = appState.pendingPushRoute else { return }
+
+            // NOT OURS — leave it, and above all do NOT clear it. A route with no detail
+            // screen belongs to Tracking → Alerts, and `ContentView` owns switching to it.
+            // Clearing here would race that handler and drop the tap. See
+            // `NotificationRoute.needsAlertsFallback`.
+            guard !route.needsAlertsFallback else { return }
+
             defer {
                 appState.pendingPushRoute = nil
                 appState.pendingPushTicker = nil
@@ -162,21 +168,18 @@ struct HomeDashboardView: View {
                     sparklineData: []
                 )
             case .report(_, let ticker):
-                guard let ticker, !ticker.isEmpty else { showNotificationInbox = true; return }
+                // A ticker-less report is `needsAlertsFallback` and was filtered out above,
+                // so this force-unwrap-shaped guard can only fall through on a future route
+                // shape — in which case doing nothing is correct, not a dropped tap.
+                guard let ticker, !ticker.isEmpty else { return }
                 selectedTicker = MarketTicker(
                     name: ticker, symbol: ticker, type: .stock,
                     price: 0, changePercent: 0, sparklineData: []
                 )
             case .inbox:
-                // A payload we could not route. The inbox at least SHOWS the
-                // notification, which beats a tap that appears to do nothing.
-                showNotificationInbox = true
-            }
-        }
-        .fullScreenCover(isPresented: $showNotificationInbox) {
-            NavigationStack {
-                NotificationInboxView()
-                    .environment(appState)
+                // Unreachable: `needsAlertsFallback` is true for `.inbox`, so ContentView has
+                // already routed it to Tracking → Alerts.
+                break
             }
         }
         .fullScreenCover(item: $selectedTicker) { ticker in

@@ -61,7 +61,7 @@ struct TrackingContentView: View {
                         case .whales:
                             WhalesTabContent(viewModel: viewModel)
                         case .alerts:
-                            AlertsTabContent()
+                            AlertsTabContent(trackingViewModel: viewModel)
                         }
                     }
                 }
@@ -197,7 +197,7 @@ struct TrackingContentViewWithBinding: View {
                         case .whales:
                             WhalesTabContent(viewModel: viewModel)
                         case .alerts:
-                            AlertsTabContent()
+                            AlertsTabContent(trackingViewModel: viewModel)
                         }
                     }
                 }
@@ -306,6 +306,22 @@ struct TrackingContentViewWithBinding: View {
             guard isActiveTab else { return }
             await viewModel.loadIfNeeded()
         }
+        // A push tap that resolved to no detail screen lands on the Alerts segment.
+        //
+        // `ContentView` brings this tab forward and parks the target segment here, because the
+        // sub-tab lives in a `@StateObject` private to this screen and is unreachable from the
+        // push handler. Consume-and-clear, exactly as `HomeDashboardView` does for
+        // `pendingPushRoute`, so one tap opens one screen.
+        //
+        // `initial: true` is load-bearing: on a COLD launch from a tap the value is set before
+        // this view has ever rendered, and a plain `.onChange` only fires on a change AFTER
+        // first render — which is precisely the scenario the tap handler exists for. Warm
+        // taps would still work, so this would survive manual testing. DO NOT "clean it up".
+        .onChange(of: appState.pendingTrackingTab, initial: true) { _, pending in
+            guard let pending else { return }
+            viewModel.selectedTab = pending
+            appState.pendingTrackingTab = nil
+        }
     }
 
     // MARK: - Action Handlers
@@ -365,13 +381,10 @@ struct AssetsTabContent: View {
                     )
                 }
 
-                // Alerts & Upcoming Events — filtered to this portfolio's tickers.
-                AlertsEventsSection(
-                    alerts: viewModel.filteredAlerts,
-                    onAlertTapped: { alert in viewModel.viewAlertDetail(alert) }
-                )
-                // Extra breathing room between the holdings cards and this section.
-                .padding(.top, AppSpacing.sm)
+                // "Alerts & Upcoming Events" used to render HERE. It moved to the Alerts
+                // tab (as "Upcoming & Events") so everything alert-shaped lives in one place.
+                // It is still fed by `viewModel.filteredAlerts`, and its detail sheet still
+                // hangs off `viewModel.selectedAlert` on this screen.
 
                 // Portfolio Insights — computed locally from the active portfolio.
                 PortfolioInsightsSection(
@@ -409,36 +422,6 @@ struct AssetsTabContent: View {
                 viewModel.openPortfolioConfigSheet()
             }
         }
-    }
-}
-
-// MARK: - Alerts Tab Content
-
-/// The notification inbox, as a Tracking segment.
-///
-/// THE FIX FOR THE REPORTED BUG. The tab-bar badge counts unread `notification_events`, and
-/// it used to sit on Updates — a news feed with no connection to the inbox — so tapping the
-/// badged tab could not clear it ("Update shows 6, touch it and move out, it still shows 6").
-/// The badge now sits on Tracking and this segment is what it points at.
-///
-/// Marks everything read ON SIGHT rather than behind a button: a badge the user cannot clear
-/// by looking at the thing it counts is the bug, not the fix. `showsUnreadDot` keeps the dots
-/// visible for this viewing, so the screen still tells you what was new.
-///
-/// Owns its own view model instance. `NotificationInboxView` (Profile → Notification History)
-/// owns a separate one — they share the TYPE, not an object, and every count either produces
-/// flows through `AppState.notificationUnreadDidChange(_:)`, which stays the single writer.
-struct AlertsTabContent: View {
-    @StateObject private var viewModel = NotificationInboxViewModel()
-
-    var body: some View {
-        NotificationInboxContent(viewModel: viewModel)
-            .task {
-                Analytics.shared.track(.notificationInboxOpened)
-                await viewModel.loadAndWait()
-                await viewModel.markAllReadOnView()
-            }
-            .refreshable { viewModel.load() }
     }
 }
 

@@ -1,7 +1,7 @@
 """Chat schemas matching DB chat_sessions + chat_messages tables."""
 
 from enum import Enum
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Optional, List, Any, Dict
 
 from app.config import settings
@@ -74,8 +74,18 @@ class UpdateChatSessionRequest(BaseModel):
 
 # ── Rich Media Widget Schemas ───────────────────────────────────────
 
+# A non-finite float is not merely a bad number here — `json.dumps` emits the bare tokens
+# `NaN` / `Infinity`, which are invalid JSON (the iOS decoder rejects the WHOLE message) and
+# which Postgres JSONB refuses outright, losing the persisted turn. `allow_inf_nan=False` makes
+# Pydantic reject it at the boundary instead, as a last line behind the service-layer filtering
+# in `ChatService._normalize_historical` / `_build_stock_widget`.
+_NO_INF_NAN = ConfigDict(allow_inf_nan=False)
+
+
 class HistoricalDataPoint(BaseModel):
     """Single day of OHLCV price data for chart rendering."""
+    model_config = _NO_INF_NAN
+
     date: str
     open: float
     high: float
@@ -86,6 +96,8 @@ class HistoricalDataPoint(BaseModel):
 
 class StockChartWidget(BaseModel):
     """Structured payload the frontend uses to render a native stock chart."""
+    model_config = _NO_INF_NAN
+
     widget_type: str = "stock_chart"
     ticker: str
     company_name: str

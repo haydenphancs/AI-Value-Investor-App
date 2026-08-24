@@ -79,19 +79,39 @@ def test_normalize_crypto_symbol(raw, expected):
 
 # ── ETF benchmark CAGR: NaN close must not crash / poison the response ────────
 
-def test_etf_benchmark_nan_last_close_returns_none_not_nan():
+# ⚠️ BEHAVIOUR CHANGED, DELIBERATELY. These two used to assert `out is None`: a single
+# NaN in the first or last bar blanked the ENTIRE Performance card. The invariant this
+# module exists to protect — stated in its own docstring — is that no NaN reaches the
+# REQUIRED float and 500s the screen, and `benchmark_math` now honours it by SKIPPING the
+# poisoned bar and taking the adjacent good one. One corrupt row out of 300 costing the
+# whole card was never the goal, and the sibling `..._nan_in_spy_does_not_poison_response`
+# below has always asserted exactly this tolerant shape for the benchmark side.
+#
+# What must never regress is the last line of each: finite, and renders under allow_nan=False.
+
+def test_etf_benchmark_nan_last_close_skips_the_bar_and_stays_finite():
     svc = object.__new__(ETFService)  # bypass __init__ (no FMP/Supabase)
     etf_hist = _rows(300, last_close=float("nan"))
     spy_hist = _rows(300)
     out = svc._build_benchmark_summary(etf_hist, spy_hist)
-    # Degrades to None (finite guard) rather than an avg_annual_return=NaN 500.
-    assert out is None
+    assert out is not None
+    assert math.isfinite(out.avg_annual_return)
+    # Computed from the second-to-last bar, not the NaN one: identical to the series
+    # truncated by a day, and nowhere near the clean 300-bar figure being NaN.
+    clean = svc._build_benchmark_summary(_rows(299), _rows(300))
+    assert out.avg_annual_return == pytest.approx(clean.avg_annual_return, abs=0.2)
+    assert _renders_without_nan(out)
 
 
-def test_etf_benchmark_nan_first_close_returns_none():
+def test_etf_benchmark_inf_first_close_skips_the_bar_and_stays_finite():
     svc = object.__new__(ETFService)
     out = svc._build_benchmark_summary(_rows(300, first_close=float("inf")), _rows(300))
-    assert out is None
+    assert out is not None
+    assert math.isfinite(out.avg_annual_return)
+    assert _renders_without_nan(out)
+    # The window now starts one bar later, and `since_date` says so rather than
+    # reporting the discarded bar's date.
+    assert out.since_date is not None
 
 
 def test_etf_benchmark_nan_in_spy_does_not_poison_response():
@@ -150,10 +170,14 @@ def test_etf_asset_allocation_inf_exposure_is_finite():
 
 # ── Stock benchmark CAGR: NaN close must not crash ───────────────────────────
 
-def test_stock_benchmark_nan_last_close_returns_none():
+def test_stock_benchmark_nan_last_close_skips_the_bar_and_stays_finite():
+    # Same deliberate change as the two ETF cases above — see the note there.
     svc = object.__new__(StockOverviewService)
     out = svc._build_benchmark_summary(_rows(300, last_close=float("nan")), _rows(300))
-    assert out is None
+    assert out is not None
+    assert math.isfinite(out.avg_annual_return)
+    assert math.isfinite(out.sp_benchmark)
+    assert _renders_without_nan(out)
 
 
 def test_stock_benchmark_nan_in_spy_stays_finite_and_renders():

@@ -24,7 +24,8 @@ from app.integrations.fmp import get_fmp_client
 from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
-from app.services.asset_class import detect_asset_class
+from app.services.asset_class import detect_asset_class, trades_extended_hours
+from app.services.agents.chat_tools import tools_for_asset_type
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
@@ -135,6 +136,25 @@ _MARKET_OVERVIEW_TOOL = types.Tool(
 )
 
 
+# Asset classes that carry a single live quote, so the `stock_chart` card is meaningful for
+# them. INDEX is deliberately absent — it has no single quote and gets `market_overview`.
+_QUOTED_WIDGET_ASSET_TYPES = frozenset({"STOCK", "ETF", "CRYPTO", "COMMODITY"})
+
+
+def _chat_output_cap(is_deep_dive: bool) -> int:
+    """Output ceiling for a chat turn.
+
+    The ordinary cap assumes the brevity directive and is a blast-radius guard, not a style
+    control. A deep dive is the one answer that is deliberately long, so it gets its own
+    ceiling — otherwise the structured brief is truncated mid-sentence.
+    """
+    return (
+        settings.CHAT_DEEP_DIVE_MAX_OUTPUT_TOKENS
+        if is_deep_dive
+        else settings.CHAT_MAX_OUTPUT_TOKENS
+    )
+
+
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -214,6 +234,7 @@ class ChatService:
             asset_type=asset_type,
             context_is_replayed=context_is_replayed,
             reader_lens=reader_lens,
+            is_deep_dive=is_deep_dive,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
 
@@ -249,16 +270,25 @@ class ChatService:
                 "tokens_used": 0,
             }
 
-        # Select tools based on asset type
-        tools = [_STOCK_CHART_TOOL, _ANALYST_ANALYSIS_TOOL, _SENTIMENT_ANALYSIS_TOOL]
-        handlers = {
-            "get_stock_chart_data": _handle_stock_tool,
-            "get_analyst_analysis": _handle_analyst_tool,
-            "get_sentiment_analysis": _handle_sentiment_tool,
+        # Tools the asset class may call — one shared table with the streaming path
+        # (`agents.chat_tools.tools_for_asset_type`), so the two cannot drift.
+        #
+        # This used to be append-only: the three EQUITY tools went out on EVERY chat and
+        # asset_type could only ADD the index tool. So a crypto chat could call
+        # `get_analyst_analysis("BTCUSD")` — nothing covers a coin — and an index chat could
+        # ask for per-ticker sentiment on ^GSPC. Both come back empty and the model then has to
+        # narrate around a hole it dug itself.
+        allowed = tools_for_asset_type(asset_type)
+        _ALL_TOOLS = {
+            "get_stock_chart_data": (_STOCK_CHART_TOOL, _handle_stock_tool),
+            "get_analyst_analysis": (_ANALYST_ANALYSIS_TOOL, _handle_analyst_tool),
+            "get_sentiment_analysis": (_SENTIMENT_ANALYSIS_TOOL, _handle_sentiment_tool),
+            "get_market_overview": (_MARKET_OVERVIEW_TOOL, _handle_market_overview_tool),
         }
-        if asset_type == "INDEX":
-            tools.append(_MARKET_OVERVIEW_TOOL)
-            handlers["get_market_overview"] = _handle_market_overview_tool
+        tools = [tool for name, (tool, _) in _ALL_TOOLS.items() if name in allowed]
+        handlers = {
+            name: handler for name, (_, handler) in _ALL_TOOLS.items() if name in allowed
+        }
 
         try:
             response = await self.gemini.generate_with_tools(
@@ -270,7 +300,7 @@ class ChatService:
                 # 6.8x the chat ceiling — because Phase 1d only threaded the cap through
                 # the two STREAM methods, and the guard scanned only those, so it stayed
                 # green with the hole open. Reports keep 8192; chat does not.
-                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                max_output_tokens=_chat_output_cap(is_deep_dive),
             )
 
             # If the tool was invoked, extract the widget payload
@@ -288,7 +318,7 @@ class ChatService:
             response = await self.gemini.generate_text(
                 prompt=prompt,
                 system_instruction=system_instruction,
-                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                max_output_tokens=_chat_output_cap(is_deep_dive),
             )
 
         ai_text = response["text"]
@@ -356,6 +386,21 @@ class ChatService:
             self._detect_asset_type(stock_id, context_type) if stock_id else "NORMAL"
         )
 
+        # Is this the "AI Analyst" button rather than a typed question?
+        #
+        # This check existed only in the NON-streaming `generate_response`, and streaming is on
+        # by default (`ChatViewModel.streamingEnabled = true`) — so on the path every real user
+        # takes, the 24h `market_deep_dive_cache` was never read or written, and there was
+        # nowhere to hang a deep-dive answer format. Both now work on this path too.
+        is_deep_dive = self._is_deep_dive_request(
+            asset_type == "STOCK", stock_id, user_message
+        )
+        cached_report = (
+            self._check_deep_dive_cache(stock_id, context, user_message)
+            if is_deep_dive and context and stock_id
+            else None
+        )
+
         # Stock enrichment (only for STOCK — other types are grounded by the resolver).
         profit_summary = snapshot_summary = company_profile_summary = None
         if stock_id and asset_type == "STOCK":
@@ -371,6 +416,7 @@ class ChatService:
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
             context_is_replayed=context_is_replayed, reader_lens=reader_lens,
+            is_deep_dive=is_deep_dive,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
@@ -389,6 +435,11 @@ class ChatService:
             "widget": widget,
             "sources": sources if sources else None,
             "asset_type": asset_type,
+            # The endpoint uses these to serve a cache hit without touching Gemini, and to
+            # write the answer back after a successful stream.
+            "is_deep_dive": is_deep_dive,
+            "deep_dive_cached": cached_report,
+            "deep_dive_context": context if is_deep_dive else None,
         }
 
     async def stream_synthesis(
@@ -416,6 +467,13 @@ class ChatService:
         from app.services.agents.chat_tools import widget_from_tool_result
 
         keys = route["specialists"]
+        # The endpoint's cap never reached this path — `stream_synthesis` had `CHAT_MAX_OUTPUT_TOKENS`
+        # hard-coded three times, so a deep dive routed to a specialist silently kept the 1200
+        # ceiling and its brief was cut off mid-sentence. The per-specialist runs below deliberately
+        # KEEP the ordinary cap: their text is truncated to 1200 chars when merged, so a larger
+        # budget there would be spent and then thrown away.
+        is_deep_dive = bool(prep.get("is_deep_dive"))
+        deep_dive_cap = _chat_output_cap(is_deep_dive)
         # Progress note into the thinking card while the specialists work (no answer tokens yet).
         yield "thought", f"Consulting the {', '.join(route['labels'])} perspectives, then synthesizing…"
 
@@ -454,19 +512,27 @@ class ChatService:
             async for ev in self.gemini.stream_agentic(
                 prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                 system_instruction=prep["system_instruction"],
-                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                max_output_tokens=deep_dive_cap,
             ):
                 yield ev
             return
 
         # Synthesize: stream ONE unified answer (no tools — the data's already gathered).
         perspectives = "\n\n".join(f"[{r['label']} view]\n{r['answer'][:1200]}" for r in results)
+        # "the 2-3 points that matter most" is a SECOND brevity rule, and on a deep dive it
+        # contradicts the structured brief the system instruction just asked for. The two
+        # instructions fighting is what produced a shapeless, half-length answer.
+        shape = (
+            "Follow the STYLE rules exactly, including the section structure."
+            if is_deep_dive else
+            "Lead with the direct answer, then the 2-3 points that matter most across the lenses. "
+            "Follow the STYLE rules."
+        )
         synth_prompt = (
             f"USER QUESTION:\n{user_message}\n\n"
             f"You considered these analyst perspectives:\n\n{perspectives}\n\n"
-            "Write ONE concise, unified answer that INTEGRATES the perspectives above — do NOT list "
-            "them separately and do NOT mention 'perspectives'/'specialists'/'views'. Lead with the "
-            "direct answer, then the 2-3 points that matter most across the lenses. Follow the STYLE rules."
+            "Write ONE unified answer that INTEGRATES the perspectives above — do NOT list "
+            "them separately and do NOT mention 'perspectives'/'specialists'/'views'. " + shape
         )
         # If the merge itself fails (e.g. the quota circuit opened between the specialists finishing
         # and this call), degrade to the already-computed specialist answer instead of throwing away
@@ -475,7 +541,7 @@ class ChatService:
         try:
             async for kind, text in self.gemini.stream_text(
                 synth_prompt, system_instruction=prep["system_instruction"],
-                max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                max_output_tokens=deep_dive_cap,
             ):
                 if kind == "answer" and text:
                     merge_yielded = True
@@ -585,7 +651,17 @@ class ChatService:
         and the identity guard is the system instruction, which does not change with the
         model."""
         try:
-            system = self._build_system_instruction("NORMAL", None)
+            # `context_type` and `reference_id` were accepted here and read by NOTHING, so
+            # `asset_type` fell to its "STOCK" default on every call: the chips under a Bitcoin
+            # or S&P answer were generated by a stock-flavoured prompt with no idea what the
+            # subject was. Resolve them from the parameters this method already receives.
+            symbol = (reference_id or "").split("|")[0].strip().upper()
+            asset_type = (
+                self._detect_asset_type(symbol, context_type) if symbol else "NORMAL"
+            )
+            system = self._build_system_instruction(
+                "NORMAL", None, asset_type=asset_type,
+            )
             prompt = (
                 "Given this question-and-answer, propose EXACTLY 2 short follow-up questions "
                 "the user is likely to ask next. Rules: each under 60 characters; specific to "
@@ -629,13 +705,20 @@ class ChatService:
             symbol = (stock_id or reference_id or "").split("|")[0].strip().upper()
             if not symbol:
                 return None
-            if asset_type == "STOCK":
-                raw = await self._fetch_stock_widget_data(symbol)
-                if raw and raw.get("widget_type") == "stock_chart":
-                    return raw
-            elif asset_type == "INDEX":
+            if asset_type == "INDEX":
                 raw = await self._fetch_market_overview_data(symbol)
                 if raw and raw.get("widget_type") == "market_overview":
+                    return raw
+            elif asset_type in _QUOTED_WIDGET_ASSET_TYPES:
+                # ETF / CRYPTO / COMMODITY used to fall through to `return None`, so a stock
+                # chat and an index chat each rendered a card and a Bitcoin chat rendered
+                # nothing at all. All three are quoted by FMP `/stable/quote`, and the card
+                # degrades honestly for them: `pe_ratio` / `market_cap` are Optional on
+                # `StockChartWidget` and iOS renders P/E only when it is present. The model
+                # could ALREADY produce this exact card for a coin via `get_stock_chart_data`,
+                # so the path is proven — it just wasn't deterministic.
+                raw = await self._fetch_stock_widget_data(symbol)
+                if raw and raw.get("widget_type") == "stock_chart":
                     return raw
         except Exception as e:
             logger.warning(
@@ -654,7 +737,9 @@ class ChatService:
 
         Only the ``stock_chart`` widget carries a single live quote; INDEX
         (market_overview) is already grounded by the resolver's INDEX branch and
-        has no single quote, so it's intentionally skipped. Never raises; returns
+        has no single quote, so it's intentionally skipped. Since ETF / CRYPTO /
+        COMMODITY now render a ``stock_chart`` too, they pick this grounding up for
+        free — their prose quotes the same numbers as their card. Never raises; returns
         None when there's no finite, non-zero price — ``_build_stock_widget``
         coerces a null price to 0, and we must not assert the stock costs $0.
         """
@@ -757,10 +842,18 @@ class ChatService:
                 if vols:
                     avg_volume = int(sum(vols) / len(vols))
 
-            # Is the US session open right now? Drives the card's "Live"/"Closed" dot (clock-based,
-            # DST-aware — reuses the home-dashboard helper).
-            from app.services.home_dashboard_service import _market_status
-            is_market_open = _market_status()[1]
+            # Drives the card's "Live"/"Closed" dot.
+            #
+            # The US equity clock is the RIGHT answer only for equities. Crypto trades 24/7 and
+            # the FMP commodity codes are continuously-quoted futures, so stamping the equity
+            # session on them made a Bitcoin card read "Closed" at 2am on a Sunday while BTC was
+            # very much trading — a confidently wrong claim on an AI-authored card. Same
+            # classifier the charts use, so the card and the detail screen agree.
+            if trades_extended_hours(detect_asset_class(ticker)):
+                is_market_open = True
+            else:
+                from app.services.home_dashboard_service import _market_status
+                is_market_open = _market_status()[1]
 
             return self._build_stock_widget(
                 ticker, quote, historical_data, avg_volume, is_market_open
@@ -899,12 +992,30 @@ class ChatService:
         """
         Fetch sentiment analysis data for use in chat responses.
         Returns a dict summary suitable for Gemini to interpret.
+
+        `is_crypto` must be passed, not defaulted. `SentimentService.get_sentiment` defaults it
+        to False and routes the news fetch on it (`get_crypto_news` vs the equity feed), so this
+        call site was asking for STOCK news about "BTCUSD" — which returns nothing — and then
+        handing the model a confident zero-mention sentiment reading for the most-discussed
+        asset on the screen.
+
+        Passed as an ARGUMENT every time, never stored: `_is_crypto` used to live on the
+        service singleton and a crypto request would flip it under an in-flight equity one.
         """
         try:
             from app.services.sentiment_service import get_sentiment_service
 
             service = get_sentiment_service()
-            analysis = await service.get_sentiment(ticker)
+            is_crypto = detect_asset_class(ticker) == "crypto"
+            # FMP wants the pair ("BTCUSD"); ApeWisdom wants the bare base ("BTC"). The crypto
+            # endpoint already splits them this way — mirror it, or social mentions come back
+            # empty for every coin. Trailing-only strip: a global replace turns USDT into T.
+            social_ticker = None
+            if is_crypto and len(ticker) > 3 and ticker.upper().endswith("USD"):
+                social_ticker = ticker[:-3]
+            analysis = await service.get_sentiment(
+                ticker, social_ticker=social_ticker, is_crypto=is_crypto
+            )
             return analysis.model_dump()
         except Exception as e:
             logger.error(f"Sentiment data fetch failed for {ticker}: {e}")
@@ -1393,10 +1504,19 @@ class ChatService:
     _LEARN_SESSION_TYPES = frozenset({"BOOK", "CONCEPT", "JOURNEY"})
 
     _ASSET_PERSONAS = {
+        # The old rule here was "Do NOT name specific index names like 'S&P 500' … say 'the
+        # market' instead". `asset_type == "INDEX"` is reached ONLY when the subject is a named
+        # index (an index detail screen, or a `^` symbol), and the resolver's own grounding lead
+        # opens with "The user is viewing the market/index detail screen for S&P 500" — so the
+        # rule could only ever fire in the one situation where it is wrong, forcing the model to
+        # be evasive about the exact thing the user tapped. The rest of the product names these
+        # indices freely (Home's Market Pulse tiles, `_INDEX_PROFILES`), so this was also the
+        # only surface pretending otherwise.
         "INDEX": (
-            "\nAnswer as a senior market strategist — broad conditions, valuations, sector rotation, "
-            "macro. Be specific with the provided numbers, but keep it concise. Do NOT name specific "
-            "index names like 'S&P 500', 'Dow Jones', or 'Nasdaq' — say 'the market' instead."
+            "\nAnswer as a senior market strategist — broad conditions, valuations, breadth, "
+            "sector rotation, macro. Name the index you are actually discussing; use 'the market' "
+            "only when you mean conditions broadly rather than that specific index. Be specific "
+            "with the provided numbers, but keep it concise."
         ),
         "CRYPTO": (
             "\nAnswer as a crypto analyst — adoption, regulation, on-chain metrics, tokenomics, "
@@ -1412,6 +1532,42 @@ class ChatService:
         ),
     }
 
+    # ── Answer shape ────────────────────────────────────────────────
+    #
+    # Two mutually exclusive directives. Exactly one is inserted per turn.
+
+    _BRIEF_STYLE = (
+        "STYLE: Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
+        "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
+        "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
+        "everything you know — answer the specific question. Only expand into full detail if the "
+        "user explicitly asks for more. Use plain, conversational language. "
+    )
+
+    # Used ONLY for the "AI Analyst" / "Deep Research" button, whose own prompt asks for a
+    # comprehensive multi-topic analysis. Under `_BRIEF_STYLE` the model was told to answer that
+    # in 2-3 bullets with no headings, so the result was thin and unstructured — the "information
+    # correct and organized so users can easy to read" complaint.
+    #
+    # The accuracy half matters as much as the shape: the grounding block already carries the
+    # whole screen payload (`ChatContextResolver` dumps it under `_DUMP_CAP`), and nothing
+    # previously told the model to stay inside it.
+    _DEEP_DIVE_STYLE = (
+        "STYLE — THIS IS A FULL BRIEF, NOT A CHAT REPLY. The user tapped an 'AI Analyst' button "
+        "asking for a comprehensive analysis, so write a structured brief they can skim. "
+        "FORMAT, exactly: (1) open with ONE bold sentence giving your overall read — no preamble, "
+        "no restating the question; (2) then 4-5 short sections, each a '## ' heading of 1-3 "
+        "words, each holding 2-3 tight bullets of at most two lines; (3) close with a section "
+        "titled 'What to watch' listing 2-3 specific, checkable things. Bold the metric name at "
+        "the start of a bullet so the eye can scan (e.g. '**Market cap** — ...'). "
+        "ACCURACY: use ONLY figures that appear in the data provided to you. Every number needs "
+        "its unit and, where the data gives one, its as-of date. If something a section would "
+        "normally cover is missing from the data, write 'not available' and move on — never "
+        "estimate it, never carry a figure over from a different asset, and never present a "
+        "market-wide number as if it belonged to this one specific asset. Prefer fewer, "
+        "well-sourced points over broad coverage. "
+    )
+
     def _build_system_instruction(
         self, session_type: str, stock_id: Optional[str],
         profit_summary: Optional[str] = None,
@@ -1421,6 +1577,7 @@ class ChatService:
         asset_type: str = "STOCK",
         context_is_replayed: bool = False,
         reader_lens: Optional[str] = None,
+        is_deep_dive: bool = False,
     ) -> str:
         base = (
             # Single source of truth for the identity guard (persona_config.IDENTITY_RULE),
@@ -1436,12 +1593,13 @@ class ChatService:
             "incorporate the mood score, social mentions, and news sentiment into your analysis. "
             "Explain what the sentiment means in plain language. "
             "Write your response in clean markdown. "
-            # ── Brevity: direct, friendly, a few points (detail only on request) ──
-            "STYLE: Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
-            "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
-            "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
-            "everything you know — answer the specific question. Only expand into full detail if the "
-            "user explicitly asks for more. Use plain, conversational language. "
+            # Brevity for an ordinary question, a structured brief for the AI Analyst button.
+            # These two CONTRADICT each other, which is why only one may ever be present: the
+            # deep-dive prompt asks for fundamentals + valuation + moat + risks + outlook, and
+            # the brevity rule below simultaneously forbade sections and capped the answer at
+            # 2-3 bullets. The model resolved that by writing something thin and shapeless.
+            + (self._DEEP_DIVE_STYLE if is_deep_dive else self._BRIEF_STYLE)
+            +
             # ── Disclaimer: CONDITIONAL on trade-action intent ──
             # A note on every answer — including "Hi" — trains people to skip it. It
             # earns its place on the turn where someone might act. `chat_security.
@@ -1493,7 +1651,18 @@ class ChatService:
         # Add asset-specific persona
         if asset_type in self._ASSET_PERSONAS:
             base += self._ASSET_PERSONAS[asset_type]
-        elif stock_id:
+
+        # The SUBJECT line is no longer an `elif` on the persona — it applies to every asset
+        # type. It used to be mutually exclusive with the persona block above, so an INDEX /
+        # CRYPTO / ETF / COMMODITY chat got a VOICE but was never told WHAT it was looking at.
+        #
+        # That is invisible while the resolver's grounding block arrives, and catastrophic when
+        # it doesn't: `ChatContextResolver` gives up after 4s (`_RESOLVE_TIMEOUT_SECONDS`) on a
+        # cold detail cache and proceeds ungrounded — deliberately, so the first token is never
+        # blocked. Reproduced live on ^GSPC: the resolve timed out and Cay AI replied "Please
+        # tell me which index you are interested in" ON the index detail screen. One sanitized
+        # symbol costs nothing and makes the degraded path answer about the right asset.
+        if stock_id:
             # ⚠️ `stock_id` is caller-supplied and lands here UNFENCED, directly after
             # ADVICE_BOUNDARY and the identity rule — the one position from which text can
             # override them. Every other untrusted span is spotlight-fenced; this one was

@@ -22,7 +22,8 @@ struct ETFDetailOverviewContent: View {
             // Performance
             TickerDetailPerformanceSection(
                 periods: etfData.performancePeriods,
-                benchmarkSummary: etfData.benchmarkSummary
+                benchmarkSummary: etfData.benchmarkSummary,
+                symbol: etfData.symbol
             )
 
             // Snapshots (Identity & Rating, Strategy, Net Yield, Holdings & Risk)

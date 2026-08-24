@@ -165,13 +165,26 @@ struct RelatedCryptoDTO: Codable {
 
 // MARK: - Benchmark Summary DTO
 
+/// The ONE benchmark decoder. Stock, ETF, commodity AND crypto all decode this same
+/// struct (only the index screen has its own, and it never sends a summary), so a field
+/// added here reaches all four screens at once — and so does a mistake.
+///
+/// `benchmarkSinceDate` was REMOVED: it was either identical to `sinceDate` (stock) or
+/// nil (everything else) at every call site, and rendering it is what put two identical
+/// "Since Aug 2021" labels side by side on the card. Both sides of a row now share one
+/// window by construction — see `benchmark_math` on the backend.
 struct BenchmarkSummaryDTO: Codable {
     let avgAnnualReturn: Double
     let spBenchmark: Double
     let benchmarkName: String?
     let sinceDate: String?
-    let benchmarkSinceDate: String?
     let badgeThreshold: Double?
+    /// "5-year" | "All-time" — names the window BOTH columns cover. Optional so an older
+    /// backend simply yields no row label rather than failing to decode.
+    let windowLabel: String?
+    /// `false` when the backend could not measure the benchmark. Absent on an older
+    /// backend, where `true` reproduces the previous behaviour exactly.
+    let benchmarkAvailable: Bool?
     let alltimeAnnualReturn: Double?
     let alltimeBenchmark: Double?
     let alltimeSinceDate: String?
@@ -181,8 +194,9 @@ struct BenchmarkSummaryDTO: Codable {
         case spBenchmark = "sp_benchmark"
         case benchmarkName = "benchmark_name"
         case sinceDate = "since_date"
-        case benchmarkSinceDate = "benchmark_since_date"
         case badgeThreshold = "badge_threshold"
+        case windowLabel = "window_label"
+        case benchmarkAvailable = "benchmark_available"
         case alltimeAnnualReturn = "alltime_annual_return"
         case alltimeBenchmark = "alltime_benchmark"
         case alltimeSinceDate = "alltime_since_date"
@@ -194,8 +208,9 @@ struct BenchmarkSummaryDTO: Codable {
             spBenchmark: spBenchmark,
             benchmarkName: benchmarkName ?? "Bitcoin (BTC)",
             sinceDate: sinceDate,
-            benchmarkSinceDate: benchmarkSinceDate,
             badgeThreshold: badgeThreshold ?? 5.0,
+            windowLabel: windowLabel,
+            benchmarkAvailable: benchmarkAvailable ?? true,
             alltimeAnnualReturn: alltimeAnnualReturn,
             alltimeBenchmark: alltimeBenchmark,
             alltimeSinceDate: alltimeSinceDate

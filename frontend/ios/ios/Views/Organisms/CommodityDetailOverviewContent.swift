@@ -19,7 +19,8 @@ struct CommodityDetailOverviewContent: View {
             // Performance (reuses TickerDetailPerformanceSection)
             TickerDetailPerformanceSection(
                 periods: commodityData.performancePeriods,
-                benchmarkSummary: commodityData.benchmarkSummary
+                benchmarkSummary: commodityData.benchmarkSummary,
+                symbol: commodityData.symbol
             )
 
             // Commodity Profile

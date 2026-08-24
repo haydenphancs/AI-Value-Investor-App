@@ -23,7 +23,8 @@ struct CryptoDetailOverviewContent: View {
             // Performance
             TickerDetailPerformanceSection(
                 periods: cryptoData.performancePeriods,
-                benchmarkSummary: cryptoData.benchmarkSummary
+                benchmarkSummary: cryptoData.benchmarkSummary,
+                symbol: cryptoData.symbol
             )
 
             // Snapshots (Origin and Technology, Tokenomics, Next Big Moves, Risks)

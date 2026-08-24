@@ -28,13 +28,11 @@ struct CryptoDetailView: View {
     @State private var compactToken = UUID().uuidString
 
     let cryptoSymbol: String
-    var onNavigateToResearch: (() -> Void)?
 
-    init(cryptoSymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
+    init(cryptoSymbol: String) {
         // Bare form everywhere on screen; `CryptoSymbol.pair` builds the FMP
         // pair where one is needed. Home passes "BTCUSD", search passes "BTC".
         self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
-        self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: CryptoDetailViewModel(cryptoSymbol: CryptoSymbol.bare(cryptoSymbol)))
     }
 
@@ -368,15 +366,21 @@ struct CryptoDetailView: View {
         dismiss()
     }
 
+    /// Crypto stays on Cay AI: the research report needs an FMP company profile and income
+    /// statements, which a coin has none of.
+    ///
+    /// Guarded on the return value — `false` means `startNewConversation` bailed on its
+    /// `guard !isAITyping` and seeded NOTHING, so presenting would show the previous
+    /// conversation. Same guard the `pendingAIQuery` handler already uses.
     private func handleDeepResearchTap() {
-        chatViewModel.startNewConversation(
+        let seeded = chatViewModel.startNewConversation(
             firstMessage: "Give me a comprehensive Deep Analysis of \(cryptoSymbol). Analyze the current price action, market position, key risks, and outlook.",
             stockId: CryptoSymbol.pair(cryptoSymbol),
             context: viewModel.contextForCurrentTab,
             contextType: .crypto,
             referenceId: cryptoSymbol
         )
-        showAIChat = true
+        if seeded { showAIChat = true }
     }
 
     private func handleSearchTapped() {

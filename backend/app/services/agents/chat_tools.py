@@ -9,7 +9,7 @@ becomes an inline widget; analyst / sentiment results only inform the model's an
 Handlers take an svc argument (a ChatService) rather than importing it, to avoid a circular import.
 """
 
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from google.genai import types
 
@@ -31,9 +31,54 @@ def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
     )
 
 
-def build_chat_tool_declarations(include_market_overview: bool = False) -> List[types.Tool]:
-    """The tools the agentic chat may call. ``include_market_overview`` adds the index tool
-    (only relevant for INDEX/market chats, matching the legacy asset-type gating)."""
+# ── Which tools each asset class may call ────────────────────────────────────
+#
+# SINGLE SOURCE OF TRUTH, shared by both chat paths. The streaming endpoint and
+# `ChatService.generate_response` build their `types.Tool` objects separately (a
+# long-standing duplication), so without one shared name set they drift silently.
+#
+# This used to be append-only: every chat — crypto, index, commodity — was offered the three
+# EQUITY tools, and `asset_type` could only ever ADD the index tool on top. So on a Bitcoin
+# chat the model could call `get_analyst_analysis("BTCUSD")`, and no analyst covers a coin:
+# it comes back empty and the answer has to talk around a hole it created itself. Removing a
+# tool is the point of this table; adding one is the easy half.
+#
+# `get_stock_chart_data` is kept for ETF / CRYPTO / COMMODITY on purpose — all three are quoted
+# by FMP's `/stable/quote` and the resulting card is honest for them (`pe_ratio` and
+# `market_cap` are Optional on `StockChartWidget`, and iOS renders P/E only when present).
+_STOCK_TOOLSET = frozenset({
+    "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
+})
+
+_TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
+    "STOCK": _STOCK_TOOLSET,
+    # No screen context: the user may ask about any stock, so keep the full equity set.
+    "NORMAL": _STOCK_TOOLSET,
+    # A fund has no analyst coverage, but it does have news sentiment and a real quote.
+    "ETF": frozenset({"get_stock_chart_data", "get_sentiment_analysis"}),
+    # Sentiment IS meaningful for a coin — `sentiment_service` has a crypto news branch — but
+    # only if the caller passes `is_crypto`; see `ChatService._fetch_sentiment_data`.
+    "CRYPTO": frozenset({"get_stock_chart_data", "get_sentiment_analysis"}),
+    # An index has no analyst ratings and no per-symbol social sentiment; it has the
+    # market-overview aggregate, which is the tool built for exactly this case.
+    "INDEX": frozenset({"get_market_overview"}),
+    # A futures contract has neither analyst coverage nor ticker sentiment.
+    "COMMODITY": frozenset({"get_stock_chart_data"}),
+}
+
+
+def tools_for_asset_type(asset_type: Optional[str]) -> frozenset:
+    """Tool NAMES the given asset class may call.
+
+    An unknown / missing asset type falls back to the full equity set — the conservative
+    direction, since that is exactly what every caller did before this table existed.
+    """
+    return _TOOLS_BY_ASSET_TYPE.get((asset_type or "").strip().upper(), _STOCK_TOOLSET)
+
+
+def build_chat_tool_declarations(asset_type: Optional[str] = None) -> List[types.Tool]:
+    """The tools the agentic chat may call, filtered to those meaningful for `asset_type`."""
+    allowed = tools_for_asset_type(asset_type)
     decls = [
         _ticker_tool(
             "get_stock_chart_data",
@@ -54,7 +99,7 @@ def build_chat_tool_declarations(include_market_overview: bool = False) -> List[
             "bullish/bearish.",
         ),
     ]
-    if include_market_overview:
+    if "get_market_overview" in allowed:
         decls.append(
             types.FunctionDeclaration(
                 name="get_market_overview",
@@ -75,7 +120,9 @@ def build_chat_tool_declarations(include_market_overview: bool = False) -> List[
                 ),
             )
         )
-    return [types.Tool(function_declarations=decls)]
+    decls = [d for d in decls if d.name in allowed]
+    # An empty `function_declarations` list is not a valid Tool — return no tools at all.
+    return [types.Tool(function_declarations=decls)] if decls else []
 
 
 def build_chat_tool_handlers(

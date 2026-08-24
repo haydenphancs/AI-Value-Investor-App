@@ -205,8 +205,8 @@ extension CommodityDetailData {
             spBenchmark: 10.5,
             benchmarkName: "S&P 500",
             sinceDate: "2015",
-            benchmarkSinceDate: "2015",
-            badgeThreshold: 2
+            badgeThreshold: 2,
+            windowLabel: "All-time"
         )
     )
 
@@ -241,8 +241,8 @@ extension CommodityDetailData {
             spBenchmark: 10.5,
             benchmarkName: "S&P 500",
             sinceDate: "2015",
-            benchmarkSinceDate: "2015",
-            badgeThreshold: 2
+            badgeThreshold: 2,
+            windowLabel: "All-time"
         )
     )
 }

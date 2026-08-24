@@ -28,11 +28,15 @@ struct PerformanceItem: View {
 
             // Benchmark comparison (only shown when data exists)
             if let vsText = period.formattedVsMarket {
+                // Two lines rather than shrinking: `minimumScaleFactor(0.6)` on an 11pt
+                // caption bottoms out around 6.6pt, which is below anything legible and
+                // is the other half of "hard to read" on this card. Let it wrap instead.
                 Text(vsText)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.9)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -69,10 +69,19 @@ class RelatedCommodityResponse(BaseModel):
 
 
 class BenchmarkSummaryResponse(BaseModel):
+    """Commodity's copy of the benchmark shape. Same contract as `schemas.etf`’s —
+    read the invariant documented there before changing either.
+
+    `badge_threshold` is absent on purpose, so iOS falls back to 0 and shows the verdict
+    badge on any non-zero gap.
+    """
+
     avg_annual_return: float
     sp_benchmark: float
     benchmark_name: str = "S&P 500"
     since_date: Optional[str] = None
+    window_label: Optional[str] = None
+    benchmark_available: bool = True
     alltime_annual_return: Optional[float] = None
     alltime_benchmark: Optional[float] = None
     alltime_since_date: Optional[str] = None

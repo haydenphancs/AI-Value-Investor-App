@@ -30,6 +30,11 @@ from app.schemas.commodity import (
     RelatedCommodityResponse,
 )
 from app.services.chart_helper import _finite_or_none
+from app.services.benchmark_math import (
+    cagr_between,
+    format_since,
+    overlapping_cagrs,
+)
 from app.utils.market_hours import to_utc_instant
 
 logger = logging.getLogger(__name__)
@@ -606,6 +611,37 @@ class CommodityService:
         _cache_set(key, historical, _HISTORY_TTL)
         return historical
 
+    async def _get_spy_history(self) -> List[Dict[str, Any]]:
+        """S&P 500 daily history, oldest-first — the benchmark every commodity is scored
+        against. Keyed WITHOUT the commodity symbol on purpose: the series is identical
+        for all of them, so this is one fetch per 12h for the whole service rather than
+        one per commodity.
+
+        This replaced a hardcoded `sp_benchmark=10.5`. That literal was compared against
+        a window the commodity chose, under a label naming that window, so the card
+        rendered an "Outperforming"/"Underperforming" verdict against a number that had
+        never been measured over anything.
+        """
+        key = "com:spy_hist"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            from app.services.chart_helper import _fetch_all_daily
+            spy = await _fetch_all_daily(self.fmp, "SPY")
+        except Exception as e:
+            logger.warning(
+                "Commodity SPY benchmark history fetch failed: %s: %s",
+                type(e).__name__, e,
+            )
+            return []
+        if not spy:
+            logger.warning("Commodity SPY benchmark history came back empty")
+            return []
+        spy.sort(key=lambda p: p.get("date") or "")
+        _cache_set(key, spy, _HISTORY_TTL)
+        return spy
+
     async def _get_derived(self, fmp_symbol: str) -> Dict[str, Any]:
         """Everything computed FROM the daily history, cached in both tiers.
 
@@ -631,8 +667,10 @@ class CommodityService:
             _cache_set(key, db, _DERIVED_TTL)
             return db
 
-        historical = await self._get_history(fmp_symbol)
-        derived = self._derive_from_history(historical)
+        historical, spy_hist = await asyncio.gather(
+            self._get_history(fmp_symbol), self._get_spy_history(),
+        )
+        derived = self._derive_from_history(historical, spy_hist)
 
         # Degradation gate: a history that failed or came back empty yields a bundle of
         # nulls. Persisting it would pin an empty Performance card and a blank 200-day
@@ -651,7 +689,11 @@ class CommodityService:
         )
         return derived
 
-    def _derive_from_history(self, historical: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _derive_from_history(
+        self,
+        historical: List[Dict[str, Any]],
+        spy_hist: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Pure: daily history -> the JSON-serialisable scalars every section needs."""
         closes = [p.get("close", 0) for p in historical if p.get("close")]
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
@@ -667,15 +709,40 @@ class CommodityService:
         # so its output is a pure function of the history and is safe to persist verbatim.
         performance = [p.model_dump() for p in self._build_performance(historical)]
 
+        # ── Benchmark baseline: the SHARED window, not the commodity's own start ──
+        #
+        # `bench_base` is the commodity's close at the start of the window it and the
+        # S&P BOTH cover, and `bench_sp_cagr` is the S&P's annualised return over that
+        # same window. Storing the window rather than a finished summary is what lets
+        # the commodity's own figure be recomputed from the LIVE price at response time
+        # without ever persisting a price (see this method's caller).
+        #
+        # Neither value is a live quote: both are functions of closed daily bars, so
+        # they are safe in Tier 2 for the full 12h.
         bench_base = None
+        bench_sp_cagr = None
+        bench_since = None
         if historical and len(historical) >= 252:
-            earliest = historical[0]
-            earliest_close = _finite_or_none(earliest.get("close"))
-            if earliest_close and earliest_close > 0:
-                bench_base = {
-                    "close": earliest_close,
-                    "date": earliest.get("date") or "",
-                }
+            _, bench_sp_cagr, bench_since = overlapping_cagrs(
+                historical, spy_hist or [], label="commodity",
+            )
+            if bench_since:
+                start_row = next(
+                    (p for p in historical if (p.get("date") or "")[:10] >= bench_since),
+                    None,
+                )
+                start_close = _finite_or_none((start_row or {}).get("close"))
+                if start_close and start_close > 0:
+                    bench_base = {
+                        "close": start_close,
+                        "date": (start_row.get("date") or "")[:10],
+                    }
+            if bench_base is None:
+                logger.warning(
+                    "Commodity benchmark baseline unavailable (%d history rows, "
+                    "%d SPY rows) — the Performance card will omit the comparison",
+                    len(historical), len(spy_hist or []),
+                )
 
         return {
             "ma_200": _finite_or_none(ma_200),
@@ -684,6 +751,8 @@ class CommodityService:
             "prev_close": _finite_or_none(closes[-2]) if len(closes) >= 2 else None,
             "performance_periods": performance,
             "bench_base": bench_base,
+            "bench_sp_cagr": bench_sp_cagr,
+            "bench_since": bench_since,
         }
 
     async def _get_related(
@@ -1057,27 +1126,55 @@ class CommodityService:
         # Recomputed from the persisted inception close + the LIVE price. The total-return
         # figure is a function of the current price, so persisting the finished summary
         # would put a stale price in Tier 2 — the one thing this design refuses to do.
+        # ⚠️ Two bugs lived here, both visible on screen as confident numbers:
+        #
+        #   1. `avg_annual = total_return / years` is an ARITHMETIC mean, not a CAGR.
+        #      Gold's ~+180% over 16 years read 11.3%/yr where the compound rate is
+        #      6.6%/yr — and the label said "Average Annual Return".
+        #   2. `sp_benchmark=10.5` was a hardcoded literal compared against whatever
+        #      window the commodity happened to have, under a label naming that window.
+        #      With no `badge_threshold` in this schema iOS falls back to 0, so the card
+        #      also rendered an "Outperforming"/"Underperforming" verdict off it.
+        #
+        # There was a third, silent one: `if _bench_base and price` lets a NaN `price`
+        # through (NaN is truthy), and it survived `round()` into the REQUIRED
+        # `avg_annual_return` float, where Starlette's `allow_nan=False` 500s the whole
+        # commodity detail. The `except Exception: pass` below could not catch it
+        # because nothing raised.
+        #
+        # The commodity's side still ends on the LIVE price while the S&P's ends on its
+        # last close — deliberate, and the same asymmetry this file has always had. Over
+        # a 15-year CAGR the gap is orders of magnitude below the 1 dp published.
         benchmark = None
         _bench_base = derived.get("bench_base") or {}
-        if _bench_base and price:
-            earliest_close = _bench_base.get("close") or 0
-            earliest_date = _bench_base.get("date") or ""
-            if earliest_close and earliest_close > 0:
-                total_return = ((price - earliest_close) / earliest_close) * 100
-                # Compute years from earliest date
-                try:
-                    start = datetime.strptime(earliest_date, "%Y-%m-%d")
-                    years = max(1, (datetime.now() - start).days / 365.25)
-                    avg_annual = total_return / years
-                    since_year = earliest_date[:4]  # e.g. "2010"
-                    benchmark = BenchmarkSummaryResponse(
-                        avg_annual_return=round(avg_annual, 1),
-                        sp_benchmark=10.5,
-                        benchmark_name="S&P 500",
-                        since_date=since_year,
-                    )
-                except Exception:
-                    pass
+        _live_price = _finite_or_none(price)
+        if _bench_base and _live_price and _live_price > 0:
+            avg_annual = cagr_between(
+                _bench_base.get("close"),
+                _live_price,
+                _bench_base.get("date"),
+                datetime.now(tz=timezone.utc).date().isoformat(),
+            )
+            if avg_annual is not None:
+                sp_cagr = _finite_or_none(derived.get("bench_sp_cagr"))
+                benchmark = BenchmarkSummaryResponse(
+                    avg_annual_return=avg_annual,
+                    # Required float on the wire (iOS decodes a non-optional Double),
+                    # so "we could not measure it" travels in `benchmark_available`.
+                    sp_benchmark=sp_cagr if sp_cagr is not None else 0.0,
+                    benchmark_name="S&P 500",
+                    since_date=format_since(
+                        derived.get("bench_since") or _bench_base.get("date"), style="day"
+                    ),
+                    window_label="All-time",
+                    benchmark_available=sp_cagr is not None,
+                )
+            else:
+                logger.warning(
+                    "Commodity benchmark CAGR unmeasurable for %s (base=%s @ %s, "
+                    "price=%s) — omitting the Performance comparison",
+                    fmp_symbol, _bench_base.get("close"), _bench_base.get("date"), price,
+                )
 
         return CommodityDetailResponse(
             symbol=fmp_symbol,

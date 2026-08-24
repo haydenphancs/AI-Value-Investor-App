@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.agents.persona_config import neutral_system_instruction
+from app.services.benchmark_math import format_since, overlapping_cagrs
 from app.integrations.gemini import get_gemini_client
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
@@ -1642,54 +1643,43 @@ class ETFService:
         self, etf_hist: List[Dict], spy_hist: List[Dict],
         *, symbol: str = "", index_tracked: str = "",
     ) -> Optional[BenchmarkSummaryResponse]:
-        """Compute annualized (CAGR) returns since inception for ETF vs S&P 500.
+        """Annualised (CAGR) return for the ETF next to the S&P 500, SAME WINDOW.
 
-        Each uses its OWN full history independently:
-          - ETF CAGR: from ETF's first available date to today
-          - S&P CAGR: from S&P's first available date to today
-        The "Since" dates will differ (e.g. SPY since 2006, S&P since 1993).
+        ⚠️ This used to measure each side over its own full history — "ETF CAGR: from
+        ETF's first available date to today, S&P CAGR: from S&P's first available date
+        to today" — and its docstring described the differing "Since" dates as expected
+        behaviour. It then sent `benchmark_since_date=None`, so the card showed ONE date
+        and the reader took it to cover both columns. It never did: FMP caps a daily
+        series at 5,000 rows, which puts SPY's full-history fetch at 2006-10-05.
+
+        MEASURED against the live API on 2026-08-23: ARKK read 13.0% vs 9.1% under the
+        old code (ARKK from 2014-10-31, the S&P from 2006-10-05) and reads 13.0% vs 12.0%
+        now — the old card tripled ARKK's apparent edge over the market. SPY against
+        itself returns 9.1% vs 9.1%, which is the check that the alignment is real.
+
+        `overlapping_cagrs` measures both sides over the window they share and hands back
+        the date that describes both.
         """
         if not etf_hist or len(etf_hist) < 252:
             return None
 
-        # ── ETF: CAGR from its own first available date ──────────
-        etf_days = len(etf_hist) - 1
-        etf_years = etf_days / 252
-
-        # Finite-guard: a NaN/Inf close (bare NaN/Infinity FMP JSON token) is truthy
-        # and slips past `not x` / `x <= 0`, producing a NaN CAGR in the REQUIRED
-        # avg_annual_return float → Starlette allow_nan=False 500s the ENTIRE ETF
-        # detail (and iOS falls back to sample data). _finite_num returns 0.0 for
-        # non-finite, which the existing guard rejects. Mirrors _compute_return.
-        etf_start = _finite_num(etf_hist[0].get("close") or etf_hist[0].get("adjClose"))
-        etf_end = _finite_num(etf_hist[-1].get("close") or etf_hist[-1].get("adjClose"))
-        etf_start_date = etf_hist[0].get("date") or ""
-
-        if not etf_start or not etf_end or etf_start <= 0 or etf_years <= 0:
+        etf_cagr, sp_cagr, since_iso = overlapping_cagrs(
+            etf_hist, spy_hist, label=f"etf:{symbol or '?'}",
+        )
+        if etf_cagr is None:
             return None
 
-        etf_annual = ((etf_end / etf_start) ** (1 / etf_years) - 1) * 100
-
-        # ── S&P 500: CAGR from its own first available date ─────
-        sp_annual = 0.0
-        sp_start_date = ""
-        if spy_hist and len(spy_hist) >= 252:
-            sp_start_price = _finite_num(spy_hist[0].get("close") or spy_hist[0].get("adjClose"))
-            sp_end_price = _finite_num(spy_hist[-1].get("close") or spy_hist[-1].get("adjClose"))
-            sp_start_date = spy_hist[0].get("date") or ""
-            sp_days = len(spy_hist) - 1
-            sp_years = sp_days / 252
-
-            if sp_start_price and sp_end_price and sp_start_price > 0 and sp_years > 0:
-                sp_annual = ((sp_end_price / sp_start_price) ** (1 / sp_years) - 1) * 100
-
         return BenchmarkSummaryResponse(
-            avg_annual_return=round(etf_annual, 1),
-            sp_benchmark=round(sp_annual, 1),
+            avg_annual_return=etf_cagr,
+            # Required float on the wire (the shipped iOS build decodes a non-optional
+            # Double), so "we could not measure it" travels in `benchmark_available`
+            # rather than as a null — or, as before, as an indistinguishable 0.0.
+            sp_benchmark=sp_cagr if sp_cagr is not None else 0.0,
             benchmark_name="S&P 500",
-            since_date=_format_date_readable(etf_start_date),
-            benchmark_since_date=None,
+            since_date=format_since(since_iso, style="day"),
             badge_threshold=0.0,
+            window_label="All-time",
+            benchmark_available=sp_cagr is not None,
         )
 
     # ── Holdings builder ──────────────────────────────────────────

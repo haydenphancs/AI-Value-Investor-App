@@ -50,12 +50,21 @@ class RelatedCryptoResponse(BaseModel):
 
 
 class BenchmarkSummaryResponse(BaseModel):
+    """Crypto's copy of the benchmark shape. Same contract as `schemas.etf`’s —
+    read the invariant documented there before changing either.
+
+    Kept separate only for its defaults: the benchmark here is BTC (or the S&P, for
+    BTC itself) and `badge_threshold` is 5.0 rather than 0, because crypto CAGRs are
+    large enough that a sub-5-point gap is noise.
+    """
+
     avg_annual_return: float
     sp_benchmark: float
     benchmark_name: str = "Bitcoin (BTC)"
     since_date: Optional[str] = None
-    benchmark_since_date: Optional[str] = None
     badge_threshold: float = 5.0
+    window_label: Optional[str] = None
+    benchmark_available: bool = True
     # All-time secondary info (shown below the primary 5-year CAGR)
     alltime_annual_return: Optional[float] = None
     alltime_benchmark: Optional[float] = None

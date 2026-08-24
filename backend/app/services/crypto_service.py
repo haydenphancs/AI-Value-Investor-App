@@ -22,6 +22,7 @@ from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.coingecko import get_coingecko_client, CoinGeckoClient
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.gemini import get_gemini_client
+from app.services.benchmark_math import format_since, overlapping_cagrs
 from app.schemas.crypto import (
     BenchmarkSummaryResponse,
     CryptoDetailResponse,
@@ -1029,109 +1030,81 @@ class CryptoService:
         )
 
         # ── Step 11: Build benchmark summary (CAGR) ─────────────────
-        # CAGR = ((end/start)^(1/years) - 1) * 100
-        # Use 1-year return if less than 1 year of data
+        #
+        # Both figures now come from `benchmark_math.overlapping_cagrs`, which measures
+        # the asset and its benchmark over the window they SHARE and returns the start of
+        # that window so the label can be true. It replaced three nested helpers here that
+        # each had a way of being quietly wrong:
+        #
+        #   * `_cagr` returned a TOTAL return, not an annualised one, whenever the span
+        #     was under a year — into a field named `avg_annual_return`.
+        #   * on an unparseable date it fell back to `days = len(prices)`, annualising
+        #     over a row count.
+        #   * `_cagr_aligned` fell back to the benchmark's OWN full history when the
+        #     benchmark had nothing at the asset's start, then published that number
+        #     under the asset's start date. That is the same defect that made a stock
+        #     card read "S&P 500 9.1% · Since Dec 31, 1981" for a 2006-start series.
+        #
+        # And every failure returned `0.0`, which is indistinguishable from a flat
+        # market; `benchmark_available` carries that signal properly now.
 
-        def _cagr(prices: list) -> float:
-            """Compute compound annual growth rate from price history.
-            Uses actual date span from the data, not data point count.
-            """
-            if not prices or len(prices) < 2:
-                return 0.0
-            # Finite-guard both ends. A NaN/Inf close (FMP can emit a bare
-            # NaN/Infinity JSON token) is truthy and slips past `x or 0` / `x <= 0`,
-            # yielding a NaN CAGR that lands in the REQUIRED avg_annual_return /
-            # sp_benchmark float and crashes the iOS decode of the whole detail
-            # screen (or 500s via Starlette allow_nan=False). Matches every sibling
-            # return helper (_compute_return / _compute_all_time_return).
-            from app.services.chart_helper import _finite_or_none
-            start_price = _finite_or_none(prices[0].get("close") or prices[0].get("adjClose"))
-            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
-            if not start_price or not end_price or start_price <= 0 or end_price <= 0:
-                return 0.0
-
-            # Compute actual years from date strings
-            start_date_str = (prices[0].get("date") or "")[:10]
-            end_date_str = (prices[-1].get("date") or "")[:10]
-            try:
-                from datetime import date as _date
-                sd = _date.fromisoformat(start_date_str)
-                ed = _date.fromisoformat(end_date_str)
-                days = (ed - sd).days
-            except (ValueError, TypeError):
-                # Fallback: estimate from data point count
-                days = len(prices)
-
-            if days <= 0:
-                return 0.0
-            years = days / 365.25
-            if years < 1:
-                # Less than 1 year — just return total return
-                return round(((end_price - start_price) / start_price) * 100, 1)
-            return round(((end_price / start_price) ** (1 / years) - 1) * 100, 1)
-
-        # Helper: filter prices to those on or after a cutoff date
         def _filter_from(prices: list, cutoff: str) -> list:
             return [p for p in prices if (p.get("date") or "")[:10] >= cutoff]
 
-        # Helper: CAGR for benchmark aligned to a start date
-        def _cagr_aligned(bench_prices: list, start_date: str) -> float:
-            if not bench_prices or not start_date:
-                return 0.0
-            aligned = _filter_from(bench_prices, start_date)
-            return _cagr(aligned) if aligned else _cagr(bench_prices)
+        bench_rows = (spy_hist if symbol == "BTC" else btc_hist) or []
+        bench_name = "S&P 500" if symbol == "BTC" else "Bitcoin (BTC)"
+        _label = f"crypto:{symbol}"
 
-        # ── All-time CAGR ──────────────────────────────────────────
-        asset_start_date = (historical[0].get("date") or "")[:10] if historical else ""
-        alltime_asset = _cagr(historical)
-        alltime_bench = 0.0
-        if symbol == "BTC" and spy_hist:
-            alltime_bench = _cagr_aligned(spy_hist, asset_start_date)
-        elif symbol != "BTC" and btc_hist:
-            alltime_bench = _cagr_aligned(btc_hist, asset_start_date)
+        alltime_asset, alltime_bench, alltime_since_iso = overlapping_cagrs(
+            historical or [], bench_rows, label=_label,
+        )
 
-        # Determine all-time "since" date from actual data
-        alltime_since = None
-        if historical:
-            try:
-                from datetime import date as _date
-                d = _date.fromisoformat(asset_start_date)
-                alltime_since = d.strftime("%B %d, %Y")
-            except (ValueError, TypeError):
-                alltime_since = profile_meta.get("launch_date")
-        if not alltime_since:
-            alltime_since = profile_meta.get("launch_date")
-
-        # ── 5-year CAGR (primary display) ──────────────────────────
+        # ── 5-year window (primary display when the asset is old enough) ──
         five_year_cutoff = (today - timedelta(days=365 * 5)).isoformat()
-        hist_5y = _filter_from(historical, five_year_cutoff)
+        hist_5y = _filter_from(historical or [], five_year_cutoff)
 
         if len(hist_5y) >= 252:
-            asset_annual = _cagr(hist_5y)
-            bench_prices = spy_hist if symbol == "BTC" else btc_hist
-            bench_5y = _filter_from(bench_prices, five_year_cutoff) if bench_prices else []
-            bench_annual = _cagr(bench_5y) if bench_5y else 0.0
-            try:
-                from datetime import date as _date
-                d5 = _date.fromisoformat(five_year_cutoff)
-                since_display = d5.strftime("%B %Y")  # e.g. "April 2021"
-            except (ValueError, TypeError):
-                since_display = alltime_since
+            asset_annual, bench_annual, since_iso = overlapping_cagrs(
+                hist_5y, _filter_from(bench_rows, five_year_cutoff), label=_label,
+            )
         else:
-            # Asset has <5 years of data — use all-time for primary
-            asset_annual = alltime_asset
-            bench_annual = alltime_bench
-            since_display = alltime_since
+            asset_annual, bench_annual, since_iso = (
+                alltime_asset, alltime_bench, alltime_since_iso,
+            )
 
-        benchmark = BenchmarkSummaryResponse(
-            avg_annual_return=asset_annual,
-            sp_benchmark=bench_annual,
-            benchmark_name="Bitcoin (BTC)" if symbol != "BTC" else "S&P 500",
-            since_date=since_display,
-            alltime_annual_return=alltime_asset if alltime_since != since_display else None,
-            alltime_benchmark=alltime_bench if alltime_since != since_display else None,
-            alltime_since_date=alltime_since if alltime_since != since_display else None,
-        )
+        # From the MEASURED window, not the branch — see the note in
+        # `stock_overview_service._build_benchmark_summary`. A coin listed last year has
+        # enough rows inside the five-year cutoff to take that branch while covering
+        # nothing like five years.
+        window_label = "All-time" if since_iso == alltime_since_iso else "5-year"
+
+        if asset_annual is None:
+            # Nothing measurable to compare — omit the whole block rather than publish a
+            # 0.0% that reads as a real result. iOS gates the section on `if let`.
+            benchmark = None
+        else:
+            # The secondary all-time row only earns its space when it covers a DIFFERENT
+            # window from the primary one.
+            _show_alltime = (
+                alltime_since_iso is not None
+                and alltime_since_iso != since_iso
+                and alltime_asset is not None
+            )
+            benchmark = BenchmarkSummaryResponse(
+                avg_annual_return=asset_annual,
+                # Required float on the wire (iOS decodes a non-optional Double), so
+                # "unmeasurable" travels in `benchmark_available` rather than as a null.
+                sp_benchmark=bench_annual if bench_annual is not None else 0.0,
+                benchmark_name=bench_name,
+                since_date=format_since(since_iso),
+                window_label=window_label,
+                benchmark_available=bench_annual is not None,
+                alltime_annual_return=alltime_asset if _show_alltime else None,
+                alltime_benchmark=alltime_bench if _show_alltime else None,
+                alltime_since_date=(
+                    format_since(alltime_since_iso, style="day") if _show_alltime else None
+                ),
+            )
 
         return CryptoDetailResponse(
             symbol=symbol,

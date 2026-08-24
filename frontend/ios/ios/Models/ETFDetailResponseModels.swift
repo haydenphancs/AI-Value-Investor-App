@@ -594,9 +594,10 @@ extension ETFDetailResponseDTO {
             benchmark = PerformanceBenchmarkSummary(
                 avgAnnualReturn: bs.avgAnnualReturn,
                 spBenchmark: bs.spBenchmark,
-                benchmarkName: bs.benchmarkName ?? "S&P 500 Benchmark",
+                benchmarkName: bs.benchmarkName ?? "S&P 500",
                 sinceDate: bs.sinceDate ?? "",
-                benchmarkSinceDate: bs.benchmarkSinceDate ?? "",
+                windowLabel: bs.windowLabel,
+                benchmarkAvailable: bs.benchmarkAvailable ?? true,
                 alltimeAnnualReturn: bs.alltimeAnnualReturn,
                 alltimeBenchmark: bs.alltimeBenchmark,
                 alltimeSinceDate: bs.alltimeSinceDate

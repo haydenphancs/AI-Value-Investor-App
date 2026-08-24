@@ -57,10 +57,7 @@ struct ContentView: View {
             .allowsHitTesting(selectedTab == .research)
             .environment(\.isActiveTab, selectedTab == .research)
 
-            TrackingViewWithBinding(
-                selectedTab: $selectedTab,
-                researchTickerSymbol: $researchTickerSymbol
-            )
+            TrackingViewWithBinding(selectedTab: $selectedTab)
             .opacity(selectedTab == .tracking ? 1 : 0)
             .allowsHitTesting(selectedTab == .tracking)
             .environment(\.isActiveTab, selectedTab == .tracking)
@@ -115,6 +112,22 @@ struct ContentView: View {
                 // HomeDashboardView consumes and clears these.
                 selectedTab = .home
             }
+        }
+        // "AI Deep Research" on a stock detail screen, from ANY of its ~14 entry points.
+        //
+        // ONE OWNER PER ROUTE KIND (see the push-route handler above): this is a new route kind
+        // and ContentView is its only observer and its only clearer, so there is no race with
+        // HomeDashboardView's handler. `initial: true` matches the push route — a cold launch
+        // could park the intent before this view exists.
+        //
+        // Order matters: seed the ticker BEFORE switching tabs, so the Research tab's own
+        // `onChange(of: prefilledTicker)` sees a non-nil value the moment it comes forward.
+        .onChange(of: appState.pendingResearchTicker, initial: true) { _, ticker in
+            guard let ticker, !ticker.isEmpty else { return }
+            researchTickerSymbol = ticker
+            researchSubTab = .research
+            selectedTab = .research
+            appState.pendingResearchTicker = nil
         }
         .onChange(of: selectedTab) { oldValue, newValue in
             // Which tabs actually get used. `HomeTab` is a fixed 5-case enum, so this
@@ -186,6 +199,19 @@ struct ResearchViewWithBinding: View {
         }
         .onAppear {
             viewModel.selectedTab = initialSubTab
+        }
+        // The `init` seed below covers a COLD LAUNCH only, and nothing else did.
+        //
+        // `prefilledTicker` reaches the ViewModel through
+        // `StateObject(wrappedValue: ResearchViewModel(prefilledTicker:))`, and that autoclosure
+        // is evaluated exactly ONCE — all five tabs are opacity-mounted in one ZStack and this
+        // view is never re-created. So every later handoff ("open Research for NOC") switched the
+        // tab and then presented an EMPTY search field, which is indistinguishable from the
+        // button having done nothing. This is the half of the bug that survived even on the one
+        // entry point that was wired up.
+        .onChange(of: prefilledTicker) { _, ticker in
+            guard let ticker, !ticker.isEmpty else { return }
+            viewModel.searchText = ticker
         }
         // Live-poll the Reports list while anything is generating.
         //
@@ -461,7 +487,6 @@ struct TrackingViewWithBinding: View {
     // the user switches tabs.
     @Environment(AppState.self) private var appState
     @Binding var selectedTab: HomeTab
-    @Binding var researchTickerSymbol: String?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -469,10 +494,7 @@ struct TrackingViewWithBinding: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TrackingContentViewWithBinding(
-                    selectedTab: $selectedTab,
-                    researchTickerSymbol: $researchTickerSymbol
-                )
+                TrackingContentViewWithBinding(selectedTab: $selectedTab)
 
                 CustomTabBar(
                     selectedTab: $selectedTab,

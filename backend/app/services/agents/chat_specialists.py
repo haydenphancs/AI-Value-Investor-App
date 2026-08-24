@@ -50,7 +50,11 @@ _SPECIALISTS: Dict[str, ChatSpecialist] = {
         "macro", "Macro",
         "LENS: Answer through a MACRO / market lens — overall conditions, valuations, sector "
         "rotation, rates, and macro drivers. Use the market-overview tool for market/index "
-        "questions. Do NOT name specific indices — say 'the market'.",
+        # Was "Do NOT name specific indices — say 'the market'", a second copy of the gag that
+        # `_ASSET_PERSONAS["INDEX"]` carried. This lens is selected on index detail screens too,
+        # so leaving it here would have re-imposed the evasion the persona fix removes.
+        "questions. Name the index you are actually discussing; say 'the market' only when you "
+        "mean conditions broadly rather than one specific index.",
     ),
     "sentiment": ChatSpecialist(
         "sentiment", "Sentiment",

@@ -246,8 +246,8 @@ extension CryptoDetailData {
             spBenchmark: 68.4,
             benchmarkName: "Bitcoin (BTC)",
             sinceDate: "Jul 2015",
-            benchmarkSinceDate: "Jan 2009",
-            badgeThreshold: 5
+            badgeThreshold: 5,
+            windowLabel: "5-year"
         )
     )
 }

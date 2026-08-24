@@ -26,11 +26,9 @@ struct ETFDetailView: View {
     @State private var compactToken = UUID().uuidString
 
     let etfSymbol: String
-    var onNavigateToResearch: (() -> Void)?
 
-    init(etfSymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
+    init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
-        self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: ETFDetailViewModel(etfSymbol: etfSymbol))
     }
 
@@ -309,11 +307,27 @@ struct ETFDetailView: View {
         dismiss()
     }
 
+    /// A fund is not a company, so this goes to Cay AI — never to the Research tab.
+    ///
+    /// The research report is built from an FMP company profile, income statements and peers
+    /// (`ticker_report_data_collector` RAISES without a profile), and the report target picker
+    /// says so outright: "ETFs and crypto aren't supported here". Chat, by contrast, already has
+    /// a grounded ETF branch in `ChatContextResolver` that nothing was using.
+    ///
+    /// This handler was previously `if let onNavigateToResearch { … }` with NO else, and no call
+    /// site ever passed that closure — so the button was inert in every shipped build.
+    ///
+    /// Guarded on the return value for the same reason as `pendingAIQuery` above: `false` means
+    /// nothing was seeded, and presenting anyway shows the PREVIOUS conversation.
     private func handleDeepResearchTap() {
-        if let onNavigateToResearch = onNavigateToResearch {
-            dismiss()
-            onNavigateToResearch()
-        }
+        let seeded = chatViewModel.startNewConversation(
+            firstMessage: "Give me a comprehensive Deep Analysis of \(etfSymbol). Cover what it holds, how concentrated it is, cost, how it has tracked its benchmark, and the key risks.",
+            stockId: etfSymbol,
+            context: viewModel.contextForCurrentTab,
+            contextType: .etf,
+            referenceId: etfSymbol
+        )
+        if seeded { showAIChat = true }
     }
 
     private func handleSearchTapped() {

@@ -20,7 +20,8 @@ struct IndexDetailOverviewContent: View {
             // Performance
             TickerDetailPerformanceSection(
                 periods: indexData.performancePeriods,
-                benchmarkSummary: indexData.benchmarkSummary
+                benchmarkSummary: indexData.benchmarkSummary,
+                symbol: indexData.symbol
             )
 
             // Snapshots (Valuation, Sector Performance, Systemic Risk)

@@ -1359,8 +1359,14 @@ def _fake_fmp_counter():
     """A stand-in FMP client that counts calls by kind and serves plausible data."""
     import datetime as _dt
 
-    calls = {"quote": 0, "hist": 0, "news": 0, "intraday": 0}
+    # `hist_by_symbol` because the commodity screen now pulls TWO series: the commodity's
+    # own 972 KB history (per symbol) and SPY's, which is the benchmark and is shared by
+    # every commodity. A symbol-blind counter cannot tell "we refetched the expensive one"
+    # from "we fetched the shared benchmark once", and that is the whole point of these
+    # tests.
+    calls = {"quote": 0, "hist": 0, "news": 0, "intraday": 0, "hist_by_symbol": {}}
     today = _dt.date.today()
+
 
     def _rows(n=4333):
         return [
@@ -1383,6 +1389,7 @@ def _fake_fmp_counter():
 
         async def get_historical_prices(self, sym, f, t):
             calls["hist"] += 1
+            calls["hist_by_symbol"][sym] = calls["hist_by_symbol"].get(sym, 0) + 1
             return _rows()
 
         async def get_stock_news(self, sym, limit=10):
@@ -1415,11 +1422,19 @@ async def test_browsing_every_range_shares_one_history_fetch(monkeypatch):
     for rng in ["1D", "1W", "3M", "6M", "1Y", "5Y", "ALL"]:
         await svc.get_commodity_detail("GCUSD", chart_range=rng)
 
-    total = sum(calls.values())
-    assert calls["hist"] == 1, f"the 972 KB history was fetched {calls['hist']}x, not once"
+    by_sym = calls["hist_by_symbol"]
+    assert by_sym.get("GCUSD") == 1, (
+        f"the 972 KB history was fetched {by_sym.get('GCUSD')}x, not once"
+    )
     assert calls["news"] == 0, "the dead news call is back — it always returns []"
-    # 1 root quote + 4 related (gold) + 1 history + 2 intraday (1D, 1W).
-    assert total <= 10, f"expected <=10 FMP calls for a 7-range browse, got {total}: {calls}"
+    # SPY is the BENCHMARK series, not this commodity's data — it replaced a hardcoded
+    # `sp_benchmark=10.5`. Fetched ONCE and cached service-wide (the key carries no
+    # symbol), so a second commodity adds none; what this pins is that it does not
+    # multiply with the RANGE.
+    assert by_sym.get("SPY") == 1, f"SPY benchmark fetches: {by_sym}"
+    total = calls["quote"] + calls["hist"] + calls["news"] + calls["intraday"]
+    # 1 root quote + 4 related (gold) + 1 GCUSD history + 1 SPY benchmark + 2 intraday.
+    assert total <= 9, f"expected <=9 FMP calls for a 7-range browse, got {total}: {calls}"
 
 
 @pytest.mark.asyncio
@@ -1577,7 +1592,7 @@ async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypat
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
     cold = await svc.get_commodity_detail("GCUSD", chart_range="3M")
-    assert calls["hist"] == 1
+    assert calls["hist_by_symbol"].get("GCUSD") == 1
     assert store, "nothing was persisted to tier 2"
 
     # A deploy: the in-process tier is gone, Supabase survives.
@@ -1587,7 +1602,8 @@ async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypat
     svc2.fmp, calls2 = _fake_fmp_counter()
     warm = await svc2.get_commodity_detail("GCUSD", chart_range="3M")
 
-    assert calls2["hist"] == 0, "the history was re-fetched after a restart"
+    assert calls2["hist_by_symbol"].get("GCUSD") is None, \
+        "the history was re-fetched after a restart"
     assert [p.model_dump() for p in warm.performance_periods] == \
         [p.model_dump() for p in cold.performance_periods]
     # ...and the price is still LIVE, because no persisted section carries one. This is

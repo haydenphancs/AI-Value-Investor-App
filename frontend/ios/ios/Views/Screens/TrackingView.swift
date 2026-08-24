@@ -169,7 +169,6 @@ struct TrackingContentViewWithBinding: View {
     @Environment(\.isActiveTab) private var isActiveTab
     @StateObject private var viewModel = TrackingViewModel()
     @Binding var selectedTab: HomeTab
-    @Binding var researchTickerSymbol: String?
     @State private var showProfile = false
     @State private var showSearch = false
 
@@ -247,16 +246,10 @@ struct TrackingContentViewWithBinding: View {
                 ManageTickersSheet(viewModel: viewModel)
             }
             .navigationDestination(item: $viewModel.selectedAssetNavigation) { selection in
-                AssetDetailRouter(selection: selection, onNavigateToResearch: {
-                    researchTickerSymbol = selection.symbol
-                    selectedTab = .research
-                })
+                AssetDetailRouter(selection: selection)
             }
             .navigationDestination(item: $viewModel.selectedSearchResult) { selection in
-                AssetDetailRouter(selection: selection, onNavigateToResearch: {
-                    researchTickerSymbol = selection.symbol
-                    selectedTab = .research
-                })
+                AssetDetailRouter(selection: selection)
             }
             .navigationDestination(item: $viewModel.selectedWhaleId) { whaleId in
                 WhaleProfileView(whaleId: whaleId)

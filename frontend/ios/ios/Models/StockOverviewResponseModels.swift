@@ -319,7 +319,8 @@ extension StockOverviewResponseDTO {
                 avgAnnualReturn: $0.avgAnnualReturn,
                 spBenchmark: $0.spBenchmark,
                 sinceDate: $0.sinceDate,
-                benchmarkSinceDate: $0.benchmarkSinceDate,
+                windowLabel: $0.windowLabel,
+                benchmarkAvailable: $0.benchmarkAvailable ?? true,
                 alltimeAnnualReturn: $0.alltimeAnnualReturn,
                 alltimeBenchmark: $0.alltimeBenchmark,
                 alltimeSinceDate: $0.alltimeSinceDate

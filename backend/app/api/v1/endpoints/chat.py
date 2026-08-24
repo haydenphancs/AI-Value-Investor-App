@@ -674,6 +674,20 @@ def _persist_context_snapshot(
         )
 
 
+async def _replay_cached_answer(text: str, chunk_size: int = 240):
+    """Yield a stored answer as ``("answer", chunk)`` events, matching `stream_agentic`'s shape.
+
+    Lets a cached deep dive reuse the entire live-stream path (token frames, persistence, the
+    terminal `done` frame) instead of needing a parallel branch through the endpoint.
+
+    Chunked rather than sent whole so the text reveals like a real answer — the iOS reveal
+    buffer meters chunks, and one 4KB frame would land as an instant wall of text. No sleeps:
+    pacing belongs to the client, and an artificial delay here would hold a worker open.
+    """
+    for i in range(0, len(text), chunk_size):
+        yield "answer", text[i:i + chunk_size]
+
+
 def _sse(event: str, data: dict) -> str:
     """Format a single Server-Sent Events frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -1273,7 +1287,9 @@ async def stream_chat_message(
                 widget_from_tool_result, widget_key,
             )
             asset_type = prep.get("asset_type") or "NORMAL"
-            tools = build_chat_tool_declarations(include_market_overview=(asset_type == "INDEX"))
+            # Filtered to the tools that MEAN something for this asset class — not just
+            # "equity three, plus the index one for INDEX". See `chat_tools._TOOLS_BY_ASSET_TYPE`.
+            tools = build_chat_tool_declarations(asset_type)
             handlers = build_chat_tool_handlers(chat_service)
 
             # Start with the deterministic base widget (so an asset-detail chat always shows its
@@ -1287,7 +1303,26 @@ async def stream_chat_message(
             # Single mode: one specialist streams its focused agentic answer. Synthesize mode: several
             # specialists run in parallel + a merged answer streams (their widgets arrive as
             # ("widget", …) events since the specialist runs aren't streamed to the client directly).
-            if route["mode"] == "synthesize":
+            # A cached "AI Analyst" brief — replay it instead of paying Gemini again.
+            #
+            # This cache (24h, `market_deep_dive_cache`) existed but was consulted ONLY by the
+            # non-streaming path, and streaming is on by default — so no real user ever hit it.
+            # The button's prompt is a constant per symbol, so a second tap now costs nothing.
+            logger.info(
+                "CHAT_TURN session=%s asset=%s deep_dive=%s cached=%s cap=%s",
+                session_id, asset_type, prep.get("is_deep_dive"),
+                bool(prep.get("deep_dive_cached")),
+                settings.CHAT_DEEP_DIVE_MAX_OUTPUT_TOKENS
+                if prep.get("is_deep_dive") else settings.CHAT_MAX_OUTPUT_TOKENS,
+            )
+            deep_dive_cached = prep.get("deep_dive_cached")
+            if deep_dive_cached:
+                logger.info(
+                    "Deep dive cache HIT (stream) for %s — replaying %d chars, no Gemini call",
+                    stock_id, len(deep_dive_cached),
+                )
+                answer_stream = _replay_cached_answer(deep_dive_cached)
+            elif route["mode"] == "synthesize":
                 answer_stream = chat_service.stream_synthesis(
                     prep, user_message, route, tools, handlers, signals=stream_signals,
                 )
@@ -1305,7 +1340,13 @@ async def stream_chat_message(
                     prep["prompt"], tools=tools, tool_handlers=handlers,
                     system_instruction=system_instruction,
                     model_name=answer_model,
-                    max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                    # A deep dive is deliberately long; the ordinary ceiling assumes the
+                    # brevity directive and cut the brief off mid-sentence.
+                    max_output_tokens=(
+                        settings.CHAT_DEEP_DIVE_MAX_OUTPUT_TOKENS
+                        if prep.get("is_deep_dive")
+                        else settings.CHAT_MAX_OUTPUT_TOKENS
+                    ),
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
@@ -1337,6 +1378,22 @@ async def stream_chat_message(
             if not content.strip():
                 raise RuntimeError("empty stream result")
             citations = prep.get("citations")
+
+            # Persist a freshly-generated brief so the next tap replays it for free. Best-effort
+            # by design — a cache write must never cost the user an answer they already received
+            # — but never silent: `_upsert_deep_dive_cache` logs its own failure. Off the event
+            # loop because it is a synchronous Supabase call.
+            if (
+                prep.get("is_deep_dive")
+                and not deep_dive_cached
+                and prep.get("deep_dive_context")
+                and stock_id
+                and len(content) > 100
+            ):
+                await asyncio.to_thread(
+                    chat_service._upsert_deep_dive_cache,
+                    stock_id, prep["deep_dive_context"], content, user_message,
+                )
 
         except Exception as e:
             # Stream failed (quota / timeout / empty / disconnect). Fall back to

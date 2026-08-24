@@ -870,11 +870,23 @@ class IndexService:
         self, symbol: str, chart_range: str = "3M", interval: str = None
     ) -> IndexDetailResponse:
         """Assemble complete index detail data from the per-section caches."""
-        profile_meta = _INDEX_PROFILES.get(
-            symbol.upper(),
-            _INDEX_PROFILES.get("^GSPC"),  # fallback to S&P 500
-        )
-        index_name = profile_meta.get("name", symbol)
+        # An unrecognised index gets NO profile, not the S&P 500's.
+        #
+        # This used to fall back to `_INDEX_PROFILES["^GSPC"]`, and `_INDEX_PROFILES` holds only
+        # ^GSPC / ^IXIC / ^DJI — so any other symbol (`indices.py` accepts `^[A-Z0-9.\-]{1,12}`)
+        # silently served the S&P 500's NAME, description, inception date, constituent count and
+        # historical P/E as its own. Cay AI grounds on this payload and then states those as
+        # fact about a completely different index. An empty profile degrades to blank fields,
+        # which the UI already renders as absent — a gap the user can see, instead of a
+        # confident lie they can't.
+        profile_meta = _INDEX_PROFILES.get(symbol.upper()) or {}
+        if not profile_meta:
+            logger.warning(
+                "index profile MISSING for %s — serving an unbranded profile rather than the "
+                "S&P 500's. Add it to _INDEX_PROFILES if this index is now reachable.",
+                symbol,
+            )
+        index_name = profile_meta.get("name") or symbol
 
         # ── Step 1: Parallel, per-section cached fetches ──────────
         #

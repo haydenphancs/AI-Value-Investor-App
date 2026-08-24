@@ -27,6 +27,7 @@ from app.schemas.etf import (
     PerformancePeriodResponse,
     RelatedTickerResponse,
 )
+from app.services.benchmark_math import format_since, overlapping_cagrs
 from app.schemas.stock_overview import (
     CompanyProfileResponse,
     SectorIndustryResponse,
@@ -448,6 +449,12 @@ class StockOverviewService:
         # ── Fetch IPO-era price for true all-time CAGR ──────────────
         # FMP caps historical data at 5,000 rows; for old stocks like AAPL
         # (IPO 1980) we fetch the first few days around the IPO date separately.
+        #
+        # ⚠️ This price no longer moves the benchmark card. The same 5,000-row cap applies
+        # to SPY, so the shared stock-vs-S&P window floors at the cap date either way and
+        # `benchmark_math` falls through to the dense ranges (measured: AAPL's all-time row
+        # is identical with and without a 1993 SPY anchor). It still carries the degraded
+        # path where SPY history fails outright. The fetch is a candidate for deletion.
         ipo_price_data = None
         profile = fundamentals.get("profile", {})
         ipo_date_str = profile.get("ipoDate", "")
@@ -944,6 +951,7 @@ class StockOverviewService:
 
         benchmark_summary = self._build_benchmark_summary(
             stock_historical, spy_historical, ipo_price_data=ipo_price_data,
+            ticker=ticker,
         )
 
         return StockOverviewResponse(
@@ -1686,123 +1694,95 @@ class StockOverviewService:
     def _build_benchmark_summary(
         self, stock_hist: List[Dict], spy_hist: List[Dict],
         ipo_price_data: Optional[Dict] = None,
+        ticker: str = "",
     ) -> Optional[BenchmarkSummaryResponse]:
-        """Compute annualized (CAGR) returns since inception vs S&P 500.
+        """Annualised (CAGR) returns for the stock next to the S&P 500, SAME WINDOW.
 
-        ipo_price_data: {"price": float, "date": str} from the IPO-era fetch
-                        done in get_overview (avoids 5,000-row FMP cap).
-        The 5-year CAGR uses the already-fetched stock_hist (which covers 5Y+).
+        ⚠️ THE BUG THIS REPLACED, because it is invisible from the screen and easy to
+        reintroduce. The old code aligned SPY to the stock's start date with a scan, and
+        when SPY had no row that far back it fell through to `spy_hist[0]` and kept the
+        STOCK's label. FMP caps a daily series at 5,000 rows, so the full-history SPY
+        fetch begins 2006-10-05 (measured 2026-08-23) — meaning a card reading
+        "S&P 500 9.1% · Since Dec 31, 1981" was showing SPY's 2006→2026 CAGR. The two
+        numbers a reader was invited to compare covered windows 25 years apart.
+
+        `overlapping_cagrs` measures both sides over the window they share and returns
+        the start of it, which is then published verbatim as `since_date`.
+
+        `ipo_price_data` is passed through as the asset anchor. It is INERT on the normal
+        path — FMP applies the same 5,000-row cap to SPY, so the shared window floors at
+        the cap date regardless — and only reaches the number when SPY history is missing
+        entirely. See `benchmark_math`'s module docstring for the measurement.
         """
         if not stock_hist or len(stock_hist) < 252:
             return None
 
-        from datetime import date as _date, datetime as _dt
+        from datetime import date as _date
 
-        from app.services.chart_helper import _finite_or_none as _fin
-        stock_end = _fin(stock_hist[-1].get("close") or stock_hist[-1].get("adjClose"))
-        end_date_str = (stock_hist[-1].get("date") or "")[:10]
-        # `not stock_end` now also catches a non-finite latest close (a bare NaN/Inf
-        # FMP token slips past a plain `stock_end <= 0` and produces a NaN CAGR in the
-        # REQUIRED avg_annual_return/sp_benchmark, crashing the whole /overview).
-        if not stock_end or stock_end <= 0:
+        label = f"stock:{ticker or '?'}"
+        ipo_anchor = None
+        if ipo_price_data and ipo_price_data.get("price") and ipo_price_data.get("date"):
+            ipo_anchor = {
+                "price": ipo_price_data["price"],
+                "date": str(ipo_price_data["date"])[:10],
+            }
+
+        # ── All-time, over the window the stock and the S&P both cover ──
+        alltime_stock, alltime_sp, alltime_since = overlapping_cagrs(
+            stock_hist, spy_hist or [],
+            asset_anchor=ipo_anchor, label=label,
+        )
+
+        # ── 5-year window (the primary row whenever the stock is old enough) ──
+        five_year_cutoff = (_date.today() - timedelta(days=365 * 5)).isoformat()
+
+        def _from_cutoff(rows):
+            return [p for p in (rows or []) if (p.get("date") or "")[:10] >= five_year_cutoff]
+
+        hist_5y = _from_cutoff(stock_hist)
+        if len(hist_5y) >= 252:
+            primary_stock, primary_sp, primary_since = overlapping_cagrs(
+                hist_5y, _from_cutoff(spy_hist), label=label,
+            )
+        else:
+            primary_stock, primary_sp, primary_since = alltime_stock, alltime_sp, alltime_since
+
+        # Derived from the MEASURED window, never from which branch ran. `len(hist_5y)
+        # >= 252` counts ROWS: a stock that listed fourteen months ago has ~290 of them
+        # inside the five-year cutoff, so it took the 5-year branch and would have been
+        # labelled "5-year" directly above "since Jul 2025". When the trailing window
+        # starts where the whole history does, the honest name for it is "All-time".
+        window_label = "All-time" if primary_since == alltime_since else "5-year"
+
+        # The asset's own figure is the reason the block exists. With no number for it
+        # there is nothing to compare, and the old `or 0.0` published a flat 0.0% for a
+        # stock whose history merely failed to parse. iOS gates the section on `if let`.
+        if primary_stock is None:
             return None
 
-        def _cagr_from(start_price, end_price, start_date_str, end_date_str_):
-            """Compute CAGR between two price/date pairs."""
-            # isfinite guard: a NaN/Inf price is truthy and passes `not x`/`x <= 0`.
-            if (not start_price or not end_price or start_price <= 0
-                    or not math.isfinite(start_price) or not math.isfinite(end_price)):
-                return None
-            try:
-                sd = _date.fromisoformat(start_date_str[:10])
-                ed = _date.fromisoformat(end_date_str_[:10])
-                yrs = (ed - sd).days / 365.25
-            except (ValueError, TypeError):
-                return None
-            if yrs <= 0:
-                return None
-            return round(((end_price / start_price) ** (1 / yrs) - 1) * 100, 1)
+        # The secondary all-time row only earns its space when it covers a DIFFERENT
+        # window from the primary one.
+        show_alltime = (
+            alltime_since is not None
+            and alltime_since != primary_since
+            and alltime_stock is not None
+        )
 
-        # ── All-time CAGR (from IPO) ──────────────────────────────
-        alltime_stock = None
-        alltime_sp = None
-        alltime_since = None
-        ipo_start_date = None
-
-        if ipo_price_data and ipo_price_data.get("price") and ipo_price_data.get("date"):
-            ipo_price = ipo_price_data["price"]
-            ipo_start_date = ipo_price_data["date"][:10]
-            alltime_stock = _cagr_from(ipo_price, stock_end, ipo_start_date, end_date_str)
-
-        # Fallback: use the earliest available price in stock_hist
-        if alltime_stock is None:
-            stock_start = stock_hist[0].get("close") or stock_hist[0].get("adjClose")
-            ipo_start_date = (stock_hist[0].get("date") or "")[:10]
-            alltime_stock = _cagr_from(stock_start, stock_end, ipo_start_date, end_date_str)
-
-        # Format since date
-        if ipo_start_date:
-            try:
-                alltime_since = _dt.strptime(ipo_start_date, "%Y-%m-%d").strftime("%b %d, %Y")
-            except (ValueError, TypeError):
-                alltime_since = ipo_start_date
-
-        # S&P 500 aligned to the stock's actual start date
-        if spy_hist and ipo_start_date:
-            sp_start_price = None
-            sp_found_date = ""
-            for p in spy_hist:
-                if (p.get("date") or "")[:10] >= ipo_start_date:
-                    sp_start_price = p.get("close") or p.get("adjClose")
-                    sp_found_date = (p.get("date") or "")[:10]
-                    break
-            if sp_start_price is None and spy_hist:
-                sp_start_price = spy_hist[0].get("close") or spy_hist[0].get("adjClose")
-                sp_found_date = (spy_hist[0].get("date") or "")[:10]
-            sp_end_price = spy_hist[-1].get("close") or spy_hist[-1].get("adjClose")
-            alltime_sp = _cagr_from(sp_start_price, sp_end_price, sp_found_date, end_date_str)
-        alltime_sp = alltime_sp or 0.0
-
-        # ── 5-year windowed CAGR (primary display) ─────────────────
-        five_year_cutoff = (_date.today() - timedelta(days=365 * 5)).isoformat()
-        hist_5y = [p for p in stock_hist if (p.get("date") or "")[:10] >= five_year_cutoff]
-
-        if len(hist_5y) >= 252:
-            s5 = hist_5y[0].get("close") or hist_5y[0].get("adjClose")
-            stock_5y = _cagr_from(s5, stock_end, (hist_5y[0].get("date") or "")[:10], end_date_str)
-
-            spy_5y = [p for p in spy_hist if (p.get("date") or "")[:10] >= five_year_cutoff] if spy_hist else []
-            sp_5y_val = 0.0
-            if len(spy_5y) >= 2:
-                sp5_s = spy_5y[0].get("close") or spy_5y[0].get("adjClose")
-                sp5_e = spy_5y[-1].get("close") or spy_5y[-1].get("adjClose")
-                sp_5y_val = _cagr_from(sp5_s, sp5_e, (spy_5y[0].get("date") or "")[:10], end_date_str) or 0.0
-
-            try:
-                since_5y_display = _date.fromisoformat(five_year_cutoff).strftime("%b %Y")
-            except (ValueError, TypeError):
-                since_5y_display = alltime_since or ""
-
-            return BenchmarkSummaryResponse(
-                avg_annual_return=stock_5y or 0.0,
-                sp_benchmark=sp_5y_val,
-                benchmark_name="S&P 500",
-                since_date=since_5y_display,
-                benchmark_since_date=since_5y_display,
-                badge_threshold=0.0,
-                alltime_annual_return=alltime_stock if alltime_since else None,
-                alltime_benchmark=alltime_sp if alltime_since else None,
-                alltime_since_date=alltime_since,
-            )
-
-        # Stock has <5 years of data — use all-time only
         return BenchmarkSummaryResponse(
-            avg_annual_return=alltime_stock or 0.0,
-            sp_benchmark=alltime_sp,
+            avg_annual_return=primary_stock,
+            # Required float on the wire — the shipped iOS build decodes a non-optional
+            # Double — so "we could not measure it" travels in `benchmark_available`.
+            sp_benchmark=primary_sp if primary_sp is not None else 0.0,
             benchmark_name="S&P 500",
-            since_date=alltime_since or "",
-            benchmark_since_date=alltime_since or "",
+            since_date=format_since(primary_since),
             badge_threshold=0.0,
+            window_label=window_label,
+            benchmark_available=primary_sp is not None,
+            alltime_annual_return=alltime_stock if show_alltime else None,
+            alltime_benchmark=alltime_sp if show_alltime else None,
+            alltime_since_date=(
+                format_since(alltime_since, style="day") if show_alltime else None
+            ),
         )
 
 

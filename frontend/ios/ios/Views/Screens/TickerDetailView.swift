@@ -28,17 +28,18 @@ struct TickerDetailView: View {
     @State private var compactToken = UUID().uuidString
 
     let tickerSymbol: String
-    var onNavigateToResearch: (() -> Void)?
+
+    /// The Research route is parked on AppState rather than injected as a closure — see
+    /// `AppState.pendingResearchTicker`. The closure form only ever worked from Tracking.
+    @Environment(AppState.self) private var appState
 
     /// `destination` is the notification deep link: which tab, and which sub-tab inside
     /// it. Defaults to `.default` so every non-notification call site is unchanged.
     init(
         tickerSymbol: String,
-        onNavigateToResearch: (() -> Void)? = nil,
         destination: TickerDestination = .default
     ) {
         self.tickerSymbol = tickerSymbol
-        self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: TickerDetailViewModel(
             tickerSymbol: tickerSymbol,
             initialTab: destination.tab ?? .overview,
@@ -481,21 +482,19 @@ struct TickerDetailView: View {
         dismiss()
     }
 
+    /// A stock is the ONE asset class the research report supports, so this always goes to the
+    /// Research tab — never to chat.
+    ///
+    /// It used to go to Research only when an `onNavigateToResearch` closure had been injected,
+    /// and exactly one of ~14 call sites injected it (Tracking). Reaching NOC from Home, Search,
+    /// Themes, Signals or a notification hit the `else` and opened a chat instead, which is what
+    /// the TestFlight report described. Parking the intent on AppState works from all of them.
+    ///
+    /// `dismiss()` runs AFTER the intent is parked: this screen is pushed inside another tab's
+    /// navigation stack, so leaving it on the stack would strand it behind the Research tab.
     private func handleDeepResearchTap() {
-        if let onNavigateToResearch = onNavigateToResearch {
-            dismiss()
-            onNavigateToResearch()
-        } else {
-            // Fallback: open AI chat with deep research prompt
-            chatViewModel.startNewConversation(
-                firstMessage: "Give me a comprehensive Deep Analysis of \(tickerSymbol). Analyze the fundamentals, valuation, competitive moat, key risks, and outlook.",
-                stockId: tickerSymbol,
-                context: viewModel.contextForCurrentTab,
-                contextType: .stock,
-                referenceId: tickerSymbol
-            )
-            showAIChat = true
-        }
+        appState.pendingResearchTicker = tickerSymbol
+        dismiss()
     }
 
     private func handleSearchTapped() {

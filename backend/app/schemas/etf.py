@@ -38,12 +38,36 @@ class MarketStatusResponse(BaseModel):
 
 
 class BenchmarkSummaryResponse(BaseModel):
+    """Annualised (CAGR) return for an asset next to its benchmark.
+
+    ⚠️ THE INVARIANT THIS SHAPE PROMISES — both columns are measured over the SAME
+    window, and `window_label` + `since_date` name it. The iOS table prints one window
+    per row spanning both columns, so a service that measures its two sides over
+    different spans is publishing a false statement, not merely an imprecise one.
+    `tests/test_benchmark_summary_parity.py` pins it for every service that builds one.
+
+    (This is not hypothetical: `etf_service` used to compute the ETF's CAGR from the
+    ETF's first date and the S&P's from the S&P's first date — SPY-since-2006 against
+    S&P-since-1993 — and then sent `benchmark_since_date=None`, which HID the mismatch.)
+
+    `benchmark_available=False` is how a service says "the benchmark could not be
+    computed". Before it existed the fallback was `sp_benchmark=0.0`, which rendered as
+    a confident "S&P 500 Benchmark 0.0%" plus an "Outperforming" badge whenever the SPY
+    fetch failed. Deliberately a DEFAULTED, NON-NULLABLE bool rather than making
+    `sp_benchmark` `Optional[float]`: the shipped iOS build decodes that field as a
+    non-optional `Double`, and the backend deploys before the client, so a null there
+    would crash the Performance screen on every already-installed copy.
+    """
+
     avg_annual_return: float
     sp_benchmark: float
     benchmark_name: Optional[str] = None
     since_date: Optional[str] = None
-    benchmark_since_date: Optional[str] = None
     badge_threshold: Optional[float] = None
+    #: "5-year" | "All-time" — names the window the PRIMARY row covers. The all-time row
+    #: is always "All-time", so it needs no label of its own.
+    window_label: Optional[str] = None
+    benchmark_available: bool = True
     alltime_annual_return: Optional[float] = None
     alltime_benchmark: Optional[float] = None
     alltime_since_date: Optional[str] = None

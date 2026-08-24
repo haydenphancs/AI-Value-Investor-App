@@ -301,14 +301,18 @@ struct IndexDetailView: View {
                 IndexDetailOverviewContent(
                     indexData: indexData,
                     onAIAnalystTap: {
-                        chatViewModel.startNewConversation(
-                            firstMessage: "Give me a comprehensive Market Deep Dive. Analyze the current market valuation, sector rotation patterns, and macroeconomic risks. Include actionable takeaways and what to watch this week.",
+                        // Guarded on the return value — `false` means nothing was seeded
+                        // (`guard !isAITyping`) and presenting would show the PREVIOUS
+                        // conversation. Same guard the `pendingAIQuery` handler uses.
+                        if chatViewModel.startNewConversation(
+                            firstMessage: "Give me a comprehensive Market Deep Dive of \(indexSymbol). Analyze the current valuation, breadth and sector rotation, and the macro risks. Include what to watch this week.",
                             stockId: indexSymbol,
                             context: viewModel.contextForCurrentTab,
                             contextType: .index,
                             referenceId: indexSymbol
-                        )
-                        showAIChat = true
+                        ) {
+                            showAIChat = true
+                        }
                     },
                     onWebsiteTap: viewModel.handleWebsiteTap
                 )

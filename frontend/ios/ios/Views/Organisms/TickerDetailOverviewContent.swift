@@ -21,7 +21,8 @@ struct TickerDetailOverviewContent: View {
             // Performance
             TickerDetailPerformanceSection(
                 periods: tickerData.performancePeriods,
-                benchmarkSummary: tickerData.benchmarkSummary
+                benchmarkSummary: tickerData.benchmarkSummary,
+                symbol: tickerData.symbol
             )
 
             // Snapshots

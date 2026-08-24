@@ -27,11 +27,9 @@ struct CommodityDetailView: View {
     @State private var compactToken = UUID().uuidString
 
     let commoditySymbol: String
-    var onNavigateToResearch: (() -> Void)?
 
-    init(commoditySymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
+    init(commoditySymbol: String) {
         self.commoditySymbol = commoditySymbol
-        self.onNavigateToResearch = onNavigateToResearch
         self._viewModel = StateObject(wrappedValue: CommodityDetailViewModel(commoditySymbol: commoditySymbol))
     }
 

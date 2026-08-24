@@ -121,6 +121,22 @@ final class AppState {
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
     var pendingTrackingTab: TrackingTab?
 
+    /// Ticker the Research tab should open pre-filled, consumed by `ContentView`.
+    ///
+    /// The "AI Deep Research" button lives on a detail screen that is pushed, covered or
+    /// presented from ~14 different places, none of which can reach the Research tab's
+    /// `ResearchViewModel` — it is a `@StateObject` private to `ResearchViewWithBinding`.
+    /// This used to travel as an injected `onNavigateToResearch` closure, which exactly ONE
+    /// call site supplied; everywhere else the button silently fell back to opening a chat.
+    /// Parking the intent here is the same shape as `pendingTrackingTab` above and works from
+    /// every entry point without threading an argument through the whole view tree.
+    ///
+    /// Carries the ticker only — it PRE-FILLS the target and never starts a generation, so a
+    /// tap can't spend 20 credits the user didn't choose to spend.
+    ///
+    /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
+    var pendingResearchTicker: String?
+
     /// Unread notification count, for the tab-bar badge.
     ///
     /// Device-global (no user id), so it MUST be reset in `discardDataForEndedSession()`
@@ -1013,6 +1029,7 @@ final class AppState {
         pendingPushRoute = nil
         pendingPushTicker = nil
         pendingTrackingTab = nil
+        pendingResearchTicker = nil
         PortfolioStore.shared.reset()
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()

@@ -10,7 +10,6 @@ import SwiftUI
 
 struct AssetDetailRouter: View {
     let selection: SearchSelection
-    var onNavigateToResearch: (() -> Void)? = nil
 
     var body: some View {
         switch selection.type {
@@ -23,7 +22,10 @@ struct AssetDetailRouter: View {
         case "commodity":
             CommodityDetailView(commoditySymbol: selection.symbol)
         default:
-            TickerDetailView(tickerSymbol: selection.symbol, onNavigateToResearch: onNavigateToResearch)
+            // The Research route is parked on `AppState.pendingResearchTicker` by the detail
+            // screen itself now. It used to be an injected closure that only Tracking supplied,
+            // so the "AI Deep Research" button opened a chat from every other entry point.
+            TickerDetailView(tickerSymbol: selection.symbol)
         }
     }
 }

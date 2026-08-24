@@ -464,6 +464,18 @@ class Settings(BaseSettings):
     # blast-radius cap, not a style control: it should never fire on a healthy turn.
     CHAT_MAX_OUTPUT_TOKENS: int = 1200
 
+    # The "AI Analyst" / deep-dive turn is the one chat answer that is DELIBERATELY long: a
+    # verdict line, 4-5 titled sections and a "what to watch" list (see
+    # `ChatService._DEEP_DIVE_STYLE`). The 1200 ceiling above assumes the brevity directive,
+    # and it is not a style control — so under it the brief was cut off MID-SENTENCE, leaving
+    # a dangling `**` rendered as literal asterisks. Measured on a live SPY tap: 683 output
+    # tokens went to the agentic round's thinking + tool calls before the prose even started
+    # (gemini-2.5-flash counts thinking in `output_tok`), so the answer had no room left.
+    #
+    # Applies ONLY when `is_deep_dive`, which is button-only and cached for 24h — so this
+    # raises the ceiling on a rare turn, not on the per-turn cost base.
+    CHAT_DEEP_DIVE_MAX_OUTPUT_TOKENS: int = 3500
+
     # Reuse the stored rolling summary instead of regenerating it every turn.
     # `_condense_history` fires a flash-lite call on EVERY turn once a chat passes
     # `_RECENT_TURNS`, re-summarising almost the same older messages each time. The

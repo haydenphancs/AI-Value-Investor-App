@@ -190,13 +190,29 @@ async def test_stream_agentic_fails_fast_when_circuit_open(monkeypatch):
 
 # ── chat_tools helpers ──────────────────────────────────────────────────────
 
+def _tool_names(asset_type=None):
+    return {
+        fd.name
+        for t in chat_tools.build_chat_tool_declarations(asset_type)
+        for fd in (t.function_declarations or [])
+    }
+
+
+def test_declarations_default_to_the_full_equity_set():
+    """No asset type = no screen context, so any stock may come up. Also the safe default:
+    an unrecognised value must never silently strip a tool."""
+    equity = {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"}
+    assert _tool_names() == equity
+    assert _tool_names("STOCK") == equity
+    assert _tool_names("NORMAL") == equity
+    assert _tool_names("who-knows") == equity
+
+
 def test_declarations_gate_market_overview():
-    base = chat_tools.build_chat_tool_declarations()
-    names = {fd.name for t in base for fd in t.function_declarations}
-    assert names == {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"}
-    with_idx = chat_tools.build_chat_tool_declarations(include_market_overview=True)
-    names2 = {fd.name for t in with_idx for fd in t.function_declarations}
-    assert "get_market_overview" in names2
+    """The index tool is offered to INDEX chats and to nothing else."""
+    assert "get_market_overview" in _tool_names("INDEX")
+    for other in ("STOCK", "NORMAL", "ETF", "CRYPTO", "COMMODITY"):
+        assert "get_market_overview" not in _tool_names(other), other
 
 
 def test_widget_from_tool_result_only_renderable():

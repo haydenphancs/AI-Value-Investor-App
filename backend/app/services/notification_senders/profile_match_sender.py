@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from app.database import get_supabase
 from app.services.entitlements import signals_unlocked
 from app.services.notification_jobs import JOB_PROFILE_MATCH, claimed_job
-from app.services.notification_kinds import KIND_PROFILE_MATCH
+from app.services.notification_kinds import KIND_PROFILE_MATCH, ticker_route
 from app.services.profile_match import Match, match_profile, sectors_from_rows
 
 logger = logging.getLogger(__name__)
@@ -261,7 +261,7 @@ async def run_profile_match_notifications(now: Optional[datetime] = None) -> int
                 # Per user per day: the matched set is derived from their own profile,
                 # so a shared key would let the first reader's send suppress everyone's.
                 dedup_key=f"{KIND_PROFILE_MATCH}:{day}:{user_id}",
-                route={"kind": "ticker", "ticker": lead.symbol},
+                route=ticker_route(KIND_PROFILE_MATCH, lead.symbol),
                 now=now,
             )
 

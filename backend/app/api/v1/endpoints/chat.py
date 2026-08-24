@@ -31,13 +31,14 @@ from app.services.chat_security import (
     sanitize_context,
     sanitize_symbol,
     scan_input,
-    ensure_disclaimer,
-    disclaimer_suffix,
+    finalize_disclaimer,
+    strip_trailing_disclaimer,
 )
 from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
 from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
+from app.services.chat_intent import is_trade_intent
 from app.schemas.chat import (
     CreateChatSessionRequest,
     SendChatMessageRequest,
@@ -717,8 +718,14 @@ def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict]
     return merged
 
 
-def _row_to_message(row: dict) -> ChatMessageResponse:
-    """Map a Supabase chat_messages row to the response schema."""
+def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessageResponse:
+    """Map a Supabase chat_messages row to the response schema.
+
+    `strip_disclaimer` is OPT-IN, and only `get_chat_history` opts in. A blanket strip
+    here would be wrong: this same function also serves the fresh non-streaming response
+    and the `done` frame, whose content already went through `finalize_disclaimer` in
+    THIS request — stripping again would delete a disclaimer that was required.
+    """
     rc = row.get("rich_content") if isinstance(row.get("rich_content"), dict) else None
     # `widgets` (list) is the Phase-2 multi-widget field; `widget` (single) stays for back-compat
     # with old iOS builds. Fall the list back to the single widget for legacy rows.
@@ -735,11 +742,19 @@ def _row_to_message(row: dict) -> ChatMessageResponse:
     # chip. Absent on every legacy row and every normally-charged turn → None → no chip.
     credit = rc.get("credit") if rc else None
 
+    # Replay strip. Rows persisted before the disclaimer became conditional carry the
+    # line on EVERY answer, including "Hi". Rewriting `chat_messages` was rejected —
+    # destructive, and the policy may change again — so history is corrected on READ and
+    # the durable row is left exactly as it was written.
+    content = row["content"]
+    if strip_disclaimer and row.get("role") == "assistant":
+        content = strip_trailing_disclaimer(content)
+
     return ChatMessageResponse(
         id=row["id"],
         session_id=row["session_id"],
         role=row["role"],
-        content=row["content"],
+        content=content,
         widget=stored_widget,
         widgets=stored_widgets,
         rich_content=row.get("rich_content"),
@@ -935,8 +950,8 @@ async def send_chat_message(
         )
 
         # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
-        # secret / internal-schema leaks, log any advice-boundary drift, then GUARANTEE
-        # the 'educational, not financial advice' line in code (not prompt-hope).
+        # secret / internal-schema leaks, log any advice-boundary drift, then apply the
+        # intent-gated disclaimer policy in code (not prompt-hope).
         clean_answer, enforced = enforce_answer(ai_result.get("content") or "")
         if not clean_answer.strip():
             # Empty generation → non-delivery. Don't persist a disclaimer-only row or bill
@@ -955,7 +970,14 @@ async def send_chat_message(
                 "Chat guardrail (send) session=%s enforced=%r flags=%r: %r",
                 session_id, enforced, advice_flags, clean_answer[:200],
             )
-        ai_result["content"] = ensure_disclaimer(clean_answer)
+        # Disclaimer, gated on trade-action intent. The user's question is the primary
+        # signal; `advice_directive` is OR'd in so a volunteered "you should buy it"
+        # forces the line on even when the question itself was informational.
+        # `suitability_claim` is deliberately NOT a trigger — chat_guardrails documents
+        # that it fires on the model COMPLYING ("depends on circumstances I can't see"),
+        # so using it would re-attach the line almost everywhere and undo the gate.
+        trade_intent = is_trade_intent(msg) or ("advice_directive" in advice_flags)
+        ai_result["content"], _ = finalize_disclaimer(clean_answer, trade_intent=trade_intent)
 
         # Build the widget payload (if Gemini triggered the stock tool)
         widget_payload = ai_result.get("widget")
@@ -1406,14 +1428,15 @@ async def stream_chat_message(
                     session_id, reasoning_enforced, reasoning_text[:200],
                 )
 
-        # GUARANTEE the advice disclaimer in code. Append to the durable content so the
-        # `done` frame + persisted row carry it; also stream it live on the pure-streamed
-        # path (a fallback answer arrives whole via `done`, so no live token there).
-        _suffix = disclaimer_suffix(content)
-        if _suffix:
-            content += _suffix
-            if streamed_any and not used_fallback:
-                yield _sse("token", {"delta": _suffix})
+        # Disclaimer policy in code, gated on trade-action intent — same two signals and
+        # the same helper as the non-streaming path, so the two cannot drift. The helper
+        # may SHORTEN `content` (the strip), hence assign-then-yield rather than append.
+        # The suffix is streamed live only on the pure-streamed path; a fallback answer
+        # arrives whole via `done`, so there is no live token to chase there.
+        trade_intent = is_trade_intent(user_message) or ("advice_directive" in advice_flags)
+        content, _suffix = finalize_disclaimer(content, trade_intent=trade_intent)
+        if _suffix and streamed_any and not used_fallback:
+            yield _sse("token", {"delta": _suffix})
 
         elapsed_ms = int((_time.monotonic() - started) * 1000)
         thinking_payload = {
@@ -1636,9 +1659,27 @@ async def get_chat_history(
         .execute()
     )
 
+    # Pair each assistant row with the question it answered, so the replay strip is
+    # INTENT-AWARE: a stored "should I buy AAPL?" answer keeps its disclaimer while a
+    # stored "Hi" loses one. Rows arrive `created_at asc` and the insert stamps the user
+    # row 1 ms ahead of the assistant row (see both persist sites), so "nearest preceding
+    # user row" is exact rather than a guess.
+    replayed: List[ChatMessageResponse] = []
+    last_question = ""
+    for row in (messages.data or []):
+        if row.get("role") == "user":
+            last_question = row.get("content") or ""
+            replayed.append(_row_to_message(row))
+            continue
+        stored = row.get("content") or ""
+        # `scan_answer` is re-run because the tag was never persisted; a handful of
+        # compiled regexes is what keeps replay symmetric with the live decision.
+        keep = is_trade_intent(last_question) or ("advice_directive" in scan_answer(stored))
+        replayed.append(_row_to_message(row, strip_disclaimer=not keep))
+
     return ChatHistoryResponse(
         session=_row_to_session(session.data),
-        messages=[_row_to_message(m) for m in (messages.data or [])],
+        messages=replayed,
     )
 
 

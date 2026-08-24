@@ -10,6 +10,8 @@ import SwiftUI
 
 struct TickerHoldersContent: View {
     let holdersData: HoldersData
+    /// Sub-tab a notification deep link asked for; `nil` = the section's own default.
+    var initialActivitiesTab: RecentActivitiesTab?
 
     var body: some View {
         LazyVStack(spacing: AppSpacing.lg) {
@@ -23,7 +25,8 @@ struct TickerHoldersContent: View {
 
             // Recent Activities Section
             RecentActivitiesSection(
-                data: holdersData.recentActivities
+                data: holdersData.recentActivities,
+                initialTab: initialActivitiesTab
             )
 
             // Bottom spacing for AI bar

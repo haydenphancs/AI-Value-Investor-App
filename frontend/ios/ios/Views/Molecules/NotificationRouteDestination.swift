@@ -20,13 +20,15 @@ struct NotificationRouteDestination: View {
         NavigationStack {
             Group {
                 switch route {
-                case .ticker(let symbol, let assetType):
+                case .ticker(let symbol, let assetType, let destination):
                     // Asset type comes from the PAYLOAD. The old tap handler hardcoded
                     // `.stock`, so a crypto alert opened `TickerDetailView` and showed
                     // stock fundamentals for a coin.
                     switch assetType {
                     case .index:     IndexDetailView(indexSymbol: symbol)
-                    case .stock:     TickerDetailView(tickerSymbol: symbol)
+                    // Only the stock screen has Financials/Holders, so only it takes
+                    // the destination. The others ignore a tab they do not have.
+                    case .stock:     TickerDetailView(tickerSymbol: symbol, destination: destination)
                     case .crypto:    CryptoDetailView(cryptoSymbol: symbol)
                     case .commodity: CommodityDetailView(commoditySymbol: symbol)
                     case .etf:       ETFDetailView(etfSymbol: symbol)

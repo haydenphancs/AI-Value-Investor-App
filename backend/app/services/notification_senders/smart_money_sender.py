@@ -42,6 +42,7 @@ from app.services.notification_kinds import (
     KIND_CONGRESS_TRADE,
     KIND_INSIDER_TRADE,
     KIND_WHALE_13F,
+    ticker_route,
 )
 from app.services.push_dispatch_service import get_push_dispatch_service
 from app.services.updates_materiality import finite
@@ -220,7 +221,7 @@ async def _run_insider_phase(now: datetime) -> int:
             # re-run on the same day cannot.
             dedup_key=f"insider:{symbol}:{filed}:{name}:{action}",
             kind=KIND_INSIDER_TRADE,
-            data={"ticker": symbol, "asset_type": "stock", "route": "ticker"},
+            data=ticker_route(KIND_INSIDER_TRADE, symbol),
         )
     return sent
 
@@ -419,7 +420,7 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
             title=title,
             body=body,
             dedup_key=f"whale:{whale_id}:{action}:{group['latest_date'] or 'nodate'}",
-            route={"ticker": route_ticker, "asset_type": "stock", "route": "ticker"},
+            route=ticker_route(group["kind"], route_ticker),
         )
 
     return sent, _max_created_at(raw, since)

@@ -20,7 +20,11 @@ struct RecentActivitiesSection: View {
 
     // MARK: - State
 
-    @State private var selectedTab: RecentActivitiesTab = .insiders
+    /// Which sub-tab to open on. `@State` with an `init`-provided seed rather than a
+    /// `Binding`: the user's taps stay local (nobody outside cares), but a NOTIFICATION
+    /// DEEP LINK can preselect the list it is about — "Insider activity in ACHR" opens
+    /// on Insiders, "Josh Gottheimer bought GOOGL" on Congress.
+    @State private var selectedTab: RecentActivitiesTab
     @State private var selectedSort: RecentActivitiesSortOption = .byValue
     @State private var selectedFilter: InsiderActivityFilterOption = .all
     @State private var congressSort: RecentActivitiesSortOption = .byValue
@@ -28,6 +32,14 @@ struct RecentActivitiesSection: View {
     @State private var institutionsExpanded: Bool = false
     @State private var insidersExpanded: Bool = false
     @State private var congressExpanded: Bool = false
+
+    /// `initialTab` defaults to Insiders — the previous hardcoded value — so the only
+    /// behaviour that changes is a deep link that names a section.
+    init(data: RecentActivitiesData, initialTab: RecentActivitiesTab? = nil) {
+        self.data = data
+        self._selectedTab = State(initialValue: initialTab ?? .insiders)
+    }
+
 
     // MARK: - Computed Properties
 

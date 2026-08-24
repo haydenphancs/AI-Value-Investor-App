@@ -2202,6 +2202,17 @@ _SHELL_RULE_TITLES = [
     "no inert Divider().background()",
     "CaydexLogo rendered only via CaydexLogoMark",
     "every stored colour token is in TokenInventory AND auditManifest",
+    # Rule 9. A card fill applied as a bare `.background(AppColors.cardBackground)` has
+    # no shape, no `cardEdge` and no shadow: in DARK it separates on fill and looks fine,
+    # in LIGHT it is #FFFFFF on the #F4F5F8 page — 1.09:1, an invisible card. The
+    # notification rows shipped that way, because the runtime audit resolves DECLARED
+    # tokens against DECLARED surfaces and cannot see how one is APPLIED.
+    #
+    # Scoped to the alert surfaces on purpose: 23 pre-existing sites live in settings
+    # screens and report sections, some of them legitimately inside an already-shaped
+    # group. Each needs looking at in light mode; the shell prints them as a counted
+    # note so they stay visible without turning the gate red for unreviewed work.
+    "no bare .background(AppColors.cardBackground) on the alert surfaces",
 ]
 
 

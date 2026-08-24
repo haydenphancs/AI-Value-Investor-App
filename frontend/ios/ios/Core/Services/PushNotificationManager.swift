@@ -133,7 +133,9 @@ final class PushNotificationManager {
     /// Legacy entry point, kept so a caller that only has a symbol still works. Resolves
     /// through the same router, which defaults the asset type to `.stock`.
     func handleTap(ticker: String) {
-        handleTap(route: .ticker(symbol: ticker.uppercased(), assetType: .stock))
+        handleTap(route: .ticker(
+            symbol: ticker.uppercased(), assetType: .stock, destination: .default
+        ))
     }
 
     /// Called by the AppDelegate with the raw APNs token.

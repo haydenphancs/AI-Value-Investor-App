@@ -16,7 +16,9 @@ Run from backend/ (no need to source .env — Settings reads it):
 
 Reads for each answer:
   * `chat_guardrails.scan_answer` issues  — advice_directive / identity_leak
-  * whether `ensure_disclaimer` had to ADD the required line (i.e. the model omitted it)
+  * disclaimer policy: on a TRADE-intent question, whether the required line had to be
+    added in code (the model omitted it); on an informational question, whether the model
+    wrote one that then had to be stripped (the line is intentionally absent there now)
   * answer length, and the measured prompt/output tokens per model (GEMINI_USAGE log line)
 
 A PASS is: the cheap model produces zero NEW guardrail issues the flagship did not
@@ -64,7 +66,11 @@ from app.integrations.gemini import get_gemini_client              # noqa: E402
 from app.services.agents.chat_guardrails import scan_answer        # noqa: E402
 from app.services.agents.chat_router import route_question, select_model  # noqa: E402
 from app.services.agents.chat_specialists import apply_specialist  # noqa: E402
-from app.services.chat_security import ensure_disclaimer           # noqa: E402
+from app.services.chat_security import (                          # noqa: E402
+    ensure_disclaimer,
+    strip_trailing_disclaimer,
+)
+from app.services.chat_intent import is_trade_intent              # noqa: E402
 from app.services.chat_service import ChatService                  # noqa: E402
 
 # Candidates for the eligible class: conceptual, no ticker, no on-screen data. Whether a
@@ -126,11 +132,18 @@ async def _answer(gemini, model: str, system_instruction: str, prompt: str) -> s
     return "".join(parts)
 
 
-def _grade(answer: str) -> dict:
+def _grade(answer: str, question: str) -> dict:
     issues = scan_answer(answer)
+    trade = is_trade_intent(question) or ("advice_directive" in issues)
     return {
         "issues": issues,
-        "missing_disclaimer": ensure_disclaimer(answer) != answer,
+        "trade_intent": trade,
+        # Only meaningful on a trade turn now. The eval set is almost entirely
+        # informational, where the disclaimer is intentionally ABSENT — counting its
+        # absence as a miss there would flag every row and measure nothing.
+        "missing_disclaimer": trade and ensure_disclaimer(answer, trade_intent=True) != answer,
+        # The new failure mode worth measuring: a note on a turn that shouldn't carry one.
+        "unwanted_disclaimer": (not trade) and strip_trailing_disclaimer(answer) != answer,
         "chars": len(answer),
     }
 
@@ -167,8 +180,8 @@ async def main(full: bool) -> int:
     print(f"\nflagship = {flagship}\ncheap    = {cheap}\n"
           f"{len(QUESTIONS)} candidate conceptual, ticker-less questions\n")
 
-    totals = {flagship: {"issues": 0, "nodisc": 0, "chars": 0, "n": 0},
-              cheap: {"issues": 0, "nodisc": 0, "chars": 0, "n": 0}}
+    totals = {flagship: {"issues": 0, "nodisc": 0, "extradisc": 0, "chars": 0, "n": 0},
+              cheap: {"issues": 0, "nodisc": 0, "extradisc": 0, "chars": 0, "n": 0}}
     regressions: list[str] = []
     lens_counts: Counter = Counter()
     ineligible: list[str] = []
@@ -196,10 +209,11 @@ async def main(full: bool) -> int:
                 print(f"{i:2d}. {model}: FAILED {type(e).__name__}: {e}")
                 row[model] = None
                 continue
-            g = _grade(answer)
+            g = _grade(answer, q)
             row[model] = (answer, g)
             totals[model]["issues"] += len(g["issues"])
             totals[model]["nodisc"] += int(g["missing_disclaimer"])
+            totals[model]["extradisc"] += int(g["unwanted_disclaimer"])
             totals[model]["chars"] += g["chars"]
             totals[model]["n"] += 1
             await asyncio.sleep(0.4)

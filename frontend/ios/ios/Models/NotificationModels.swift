@@ -15,6 +15,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 // MARK: - Notification inbox
 
@@ -92,6 +93,62 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
 
     /// Where a tap should land.
     var destination: NotificationRoute { NotificationRoute(payload: route) }
+
+    // MARK: - Visual vocabulary
+
+    /// Icon for this notification's kind.
+    ///
+    /// `kind` has been on the wire and decoded since the inbox shipped, and NOTHING read
+    /// it — the router deliberately switches on `route` instead. That left notifications
+    /// as the only rows in the Alerts tab with no icon, sitting beside `AppAlert` cards
+    /// that have one, which is most of why the two looked like different apps.
+    ///
+    /// Glyphs are taken from `NotificationSettingsViewModel.groups`, where the same
+    /// categories already have icons the user has seen — inventing a second set would
+    /// mean the Notifications settings screen and the Alerts tab disagreed about what an
+    /// earnings alert looks like. `price_alert` has no settings group of its own (its
+    /// toggle lives under Watchlist), so it borrows the app's price-alert bell.
+    ///
+    /// An unknown `kind` decodes to `"unknown"` upstream and lands on the default here,
+    /// so a kind added by a newer backend degrades to a neutral glyph rather than a gap.
+    var iconName: String {
+        switch kind {
+        case "ticker_move":       return "chart.line.uptrend.xyaxis"
+        case "earnings_upcoming",
+             "earnings_result":   return "calendar.badge.clock"
+        case "insider_trade":     return "person.badge.key.fill"
+        case "whale_13f":         return "building.columns.fill"
+        case "congress_trade":    return "building.columns.fill"
+        case "price_alert":       return "bell.badge"
+        case "research_complete": return "sparkles"
+        case "profile_match":     return "sparkles.2"
+        default:                  return "app.badge.fill"
+        }
+    }
+
+    /// Tint for `iconName`.
+    ///
+    /// ⚠️ These are TEXT-role tokens, and they must stay that way. The icon is a
+    /// meaningful glyph carrying the row's category — not chart furniture — so it needs
+    /// the 4.5:1 bar, not the 3:1 `*Graphic` one. See the role table in
+    /// `.claude/rules/ios-swiftui.md`.
+    ///
+    /// Deliberately NOT direction-coloured (bullish/bearish) the way `AppAlert` is: a
+    /// `NotificationEventDTO` carries no direction — "Insider activity in ACHR" does not
+    /// say bought or sold in any structured field — so tinting by sentiment would mean
+    /// guessing, and a green icon over a sale is worse than a neutral one.
+    var iconColor: Color {
+        switch kind {
+        case "insider_trade", "whale_13f", "congress_trade":
+            return AppColors.alertOrange
+        case "profile_match":
+            return AppColors.alertPurple
+        case "price_alert":
+            return AppColors.caution
+        default:
+            return AppColors.primaryBlue
+        }
+    }
 
     var relativeTime: String {
         guard let date = NotificationEventDTO.isoFormatter.date(from: createdAt)

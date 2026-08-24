@@ -166,7 +166,9 @@ struct PriceAlertsSheet: View {
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
 
-                VStack(spacing: 1) {
+                // Self-carded rows (`ActivityRow`), so no group wrapper — nesting a
+                // card in a card measures 1.00:1 in dark and the rows disappear.
+                VStack(spacing: AppSpacing.md) {
                     ForEach(viewModel.alerts) { alert in
                         PriceAlertRuleRow(
                             alert: alert,
@@ -175,8 +177,6 @@ struct PriceAlertsSheet: View {
                         )
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
-                .cardBorder(cornerRadius: AppCornerRadius.large)
             }
         }
     }

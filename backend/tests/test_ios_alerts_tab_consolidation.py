@@ -91,7 +91,7 @@ def test_the_account_screen_has_no_notification_history_row():
 # --------------------------------------------------------------------------- the tab owns everything
 
 
-def test_the_alerts_tab_carries_all_three_sections():
+def test_the_alerts_tab_carries_all_three_sources():
     src = _read(_ALERTS_TAB)
     for section in ("AlertsEventsSection", "PriceAlertRuleRow", "NotificationInboxSection.rows"):
         assert section in src, f"the Alerts tab no longer renders {section}"
@@ -242,4 +242,70 @@ def test_neither_list_can_render_an_empty_error_message():
         )
         assert "log.error(" in src, (
             f"the {label} load failure is not logged — it would be diagnosed from nothing"
+        )
+
+
+# ------------------------------------------------------------------ one row grammar
+
+
+_ACTIVITY_ROW = _IOS / "Views" / "Molecules" / "ActivityRow.swift"
+_ALERT_CARD = _IOS / "Views" / "Molecules" / "AlertCardView.swift"
+_RULE_ROW = _IOS / "Views" / "Molecules" / "PriceAlertRuleRow.swift"
+_INBOX_SECTION = _IOS / "Views" / "Organisms" / "NotificationInboxSection.swift"
+
+
+def test_all_three_alert_sources_render_through_one_row():
+    """The digest cards, the notification rows and the price rules were three different
+    card grammars in ONE scroll view — rounded inset cards with a tinted glyph, full-bleed
+    square slabs with an 8pt dot and no glyph, and a bordered group with 1pt separators.
+    Equally important information, three visual languages, and the split was not even
+    semantic: the digest and the notifications both cover whale trades and insiders."""
+    assert _ACTIVITY_ROW.exists(), "the shared row is gone"
+    for path, label in (
+        (_ALERT_CARD, "the Upcoming digest cards"),
+        (_RULE_ROW, "the price rules"),
+        (_INBOX_SECTION, "the notification rows"),
+    ):
+        assert "ActivityRow(" in _read(path), f"{label} no longer render through ActivityRow"
+
+
+def test_the_notification_rows_have_an_icon():
+    """`kind` rode the wire and was decoded since the inbox shipped, and NOTHING read it —
+    which is why notifications were the only rows in the tab with no glyph."""
+    model = _read(_IOS / "Models" / "NotificationModels.swift")
+    assert "var iconName: String" in model and "var iconColor: Color" in model, (
+        "NotificationEventDTO lost its icon vocabulary, so notification rows fall back "
+        "to a bare row beside the digest's tinted cards"
+    )
+    assert "ActivityRow(" in _read(_INBOX_SECTION)
+    assert "item.iconName" in _read(_INBOX_SECTION)
+
+
+def test_the_upcoming_section_is_forward_looking_only():
+    """Upcoming holds dated, not-yet-happened items; everything that already happened is
+    in Activity with the notifications. `isUpcoming` is the split."""
+    # Brace-bounded: `isUpcoming` also appears in `activitySection` (negated), so a
+    # file-wide `in src` stays green when the Upcoming filter alone is removed — verified
+    # by mutation, where exactly that passed.
+    body = _balanced(_read(_ALERTS_TAB), "private func upcomingSection() -> some View {")
+    assert "isUpcoming" in body, (
+        "Upcoming no longer filters to forward-looking items, so this week's whale and "
+        "insider roll-ups render under a heading that says they haven't happened yet"
+    )
+    activity = _balanced(_read(_ALERTS_TAB), "private func activitySection() -> some View {")
+    assert "!$0.isUpcoming" in activity, "Activity no longer excludes the upcoming items"
+    tracking = _read(_IOS / "Models" / "TrackingModels.swift")
+    assert "var isUpcoming: Bool" in tracking
+
+
+def test_the_activity_feed_does_not_invent_a_timestamp():
+    """The roll-up containers carry a `timeWindowLabel` ("this week") and NO date, and
+    their items have a day and month with no year. Sorting them against
+    `NotificationEventDTO.createdAt` would mean fabricating one — so Activity GROUPS
+    (roll-ups, then events) rather than interleaving."""
+    body = _balanced(_read(_ALERTS_TAB), "private func activitySection() -> some View {")
+    for banned in ("sorted(", "sort(", "Date("):
+        assert banned not in body, (
+            f"activitySection uses {banned!r} — the roll-ups have no timestamp to sort on, "
+            "so any ordering key here is invented"
         )

@@ -15,57 +15,45 @@ import SwiftUI
 
 struct PriceAlertRuleRow: View {
     let alert: PriceAlertDTO
-    /// The per-ticker sheet is already titled with the ticker, so repeating it in every row is
-    /// noise. The cross-ticker list has nothing else to tell two rules apart.
+    /// The per-ticker sheet is already titled with the ticker, so repeating it in every
+    /// row is noise. The cross-ticker list has nothing else to tell two rules apart.
     var showsTicker: Bool = false
     let onToggle: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: AppSpacing.md) {
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                if showsTicker {
-                    Text(alert.ticker)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
+        // Same `ActivityRow` as the digest and the notifications. A price rule is the one
+        // alert-shaped thing the user CREATED, so it earns the same row as the ones the
+        // app sends them.
+        ActivityRow(
+            systemName: "bell.badge",
+            // `caution` reads as "armed and waiting", and matches the price-alert glyph
+            // the notification rows use for the same kind.
+            iconColor: alert.isActive ? AppColors.caution : AppColors.textMuted,
+            title: showsTicker ? "\(alert.ticker) · \(alert.summary)" : alert.summary,
+            subtitle: alert.quietReason ?? alert.repeatRule.label,
+            trailing: {
+                HStack(spacing: AppSpacing.md) {
+                    Toggle("", isOn: Binding(
+                        get: { alert.isActive },
+                        set: { _ in onToggle() }
+                    ))
+                    .labelsHidden()
+                    .tint(AppColors.primaryBlue)
 
-                Text(alert.summary)
-                    .font(AppTypography.body)
-                    .foregroundColor(alert.isActive ? AppColors.textPrimary : AppColors.textMuted)
-
-                // Surfaces `armed == false`. Without it, a rule that is active but latched
-                // after firing looks simply broken.
-                if let reason = alert.quietReason {
-                    Text(reason)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                } else {
-                    Text(alert.repeatRule.label)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.loss)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete alert \(alert.summary)")
                 }
             }
-
-            Spacer()
-
-            Toggle("", isOn: Binding(
-                get: { alert.isActive },
-                set: { _ in onToggle() }
-            ))
-            .labelsHidden()
-            .tint(AppColors.primaryBlue)
-
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.loss)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Delete alert \(alert.summary)")
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
+        )
+        // An inactive rule dims as a WHOLE — text, glyph and controls together. Dimming
+        // only the label (the previous behaviour) left a full-strength toggle beside
+        // greyed text, which reads as a broken control rather than a paused rule.
+        .opacity(alert.isActive ? 1 : 0.55)
     }
 }

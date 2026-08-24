@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.services.notification_kinds import KIND_PRICE_ALERT
+from app.services.notification_kinds import KIND_PRICE_ALERT, ticker_route
 from app.services.price_alert_engine import (
     KIND_PERCENT,
     VALID_KINDS,
@@ -433,11 +433,15 @@ class PriceAlertService:
                 body=body,
                 dedup_key=self.dedup_key(rule, rule.get("repeat_mode") or "once"),
                 route={
-                    "ticker": symbol,
                     # From the ROW, not hardcoded: a crypto alert must open the crypto
                     # screen. The old tap handler hardcoded `.stock` for everything.
-                    "asset_type": str(rule.get("asset_type") or "stock"),
-                    "route": "ticker",
+                    **ticker_route(
+                        KIND_PRICE_ALERT,
+                        symbol,
+                        asset_type=str(rule.get("asset_type") or "stock"),
+                    ),
+                    # Not read by the client yet; carried so a future tap can open the
+                    # rule that fired rather than just the ticker.
                     "alert_id": str(rule.get("id") or ""),
                 },
             )

@@ -165,7 +165,9 @@ class PushDispatchService:
         try:
             rows = (
                 self.supabase.table("watchlist_items")
-                .select("user_id")
+                # `asset_type` rides along for `asset_type_of` below — same row, same
+                # index, no extra round trip.
+                .select("user_id, asset_type")
                 .eq("ticker", ticker.upper())
                 .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
                 .execute()
@@ -187,6 +189,55 @@ class PushDispatchService:
             )
             users = users[:MAX_RECIPIENTS_PER_SCOPE]
         return users
+
+    def asset_type_of(self, ticker: str) -> Optional[str]:
+        """The asset type watchers have recorded for `ticker`, or None.
+
+        WHY THIS EXISTS. `NotificationRoute` falls back to `.stock` when a payload has
+        no `asset_type` — a documented fallback for unknown values. `ticker_move` never
+        set one, so that fallback became the primary path for the app's most common
+        notification and every BTC and ETH price alert opened `TickerDetailView`, the
+        EQUITY screen, to render stock fundamentals for a coin. (Confirmed live: BTC and
+        ETH `ticker_move` rows exist in `notification_events`.)
+
+        `watchlist_items.asset_type` is the same column the price-alert path already
+        sources, and it has never been normalised — several writers populate it — so the
+        value is lowercased here and iOS matches case-insensitively.
+
+        Returns None rather than guessing "stock": a None lets `notify_watchers` leave
+        the key off entirely, which keeps the client's own fallback the single place
+        that decides what an unknown asset type means.
+        """
+        try:
+            rows = (
+                self.supabase.table("watchlist_items")
+                .select("asset_type")
+                .eq("ticker", ticker.upper())
+                .limit(50)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            # Best-effort: a missing asset type costs the client its `.stock` fallback,
+            # which is the behaviour we already had. Never fail a send over it.
+            logger.warning(
+                "push: asset_type lookup failed for %s (%s: %s) — routing without it",
+                ticker, type(e).__name__, e,
+            )
+            return None
+
+        # Modal non-empty value. Watchlist rows for one ticker can disagree (different
+        # writers, different vintages), and picking the most common beats trusting
+        # whichever row sorted first.
+        counts: Dict[str, int] = {}
+        for r in rows:
+            value = str(r.get("asset_type") or "").strip().lower()
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda kv: kv[1])[0]
 
     def followers_of_whale(self, whale_id: str) -> List[str]:
         """User ids following a whale. The second audience selector, used by the
@@ -924,6 +975,13 @@ class PushDispatchService:
 
         route = dict(data or {})
         route.setdefault("ticker", ticker.upper())
+        # Backfill the asset type for any caller that did not supply one, so a crypto
+        # alert opens the crypto screen. `setdefault`, so a sender that knows better
+        # (price alerts read it from their own row) always wins.
+        if not route.get("asset_type"):
+            resolved_type = await asyncio.to_thread(self.asset_type_of, ticker)
+            if resolved_type:
+                route["asset_type"] = resolved_type
         return await self.notify_users(
             users, kind=resolved, title=title, body=body,
             dedup_key=dedup_key, route=route,

@@ -14,5 +14,7 @@
   "route": "ticker",
   "ticker": "ORCL",
   "asset_type": "stock",
+  "tab": "holders",
+  "section": "insiders",
   "Simulator Target Bundle": "com.phan.caydex"
 }

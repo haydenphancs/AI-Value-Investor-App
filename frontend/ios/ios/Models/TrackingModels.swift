@@ -345,6 +345,24 @@ enum AppAlert: Identifiable {
         }
     }
 
+    /// Is this something that HASN'T happened yet?
+    ///
+    /// Splits the digest across the Alerts tab's two sections. `.earnings` and `.market`
+    /// carry a future day/month — a date the user can plan around — while the three
+    /// roll-ups (`.whaleTrade`, `.analystRating`, `.insiderTransaction`) summarise what
+    /// already happened this week and belong with the notifications.
+    ///
+    /// ⚠️ That is also why the two sections are not merged into one chronological feed:
+    /// the roll-up containers carry a `timeWindowLabel` ("this week") and NO date, so
+    /// interleaving them with timestamped notifications would mean inventing a
+    /// timestamp for them.
+    var isUpcoming: Bool {
+        switch self {
+        case .earnings, .market: return true
+        case .whaleTrade, .analystRating, .insiderTransaction: return false
+        }
+    }
+
     var iconName: String {
         switch self {
         case .earnings, .market: return "bell.fill"

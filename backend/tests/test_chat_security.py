@@ -12,6 +12,8 @@ No network / no Supabase — pure functions.
 
 from __future__ import annotations
 
+import pytest
+
 from app.services import chat_security as cs
 from app.api.error_response import ErrorCode
 from app.config import settings
@@ -149,38 +151,222 @@ def test_cap_prompt_tail_preserves_user_message_end():
 
 # ── Disclaimer guarantee ─────────────────────────────────────────────────────
 
-def test_disclaimer_appended_when_missing():
-    out = cs.ensure_disclaimer("Apple trades at 38x earnings.")
+# The disclaimer is GATED on trade-action intent now (the caller decides it via
+# `chat_intent.is_trade_intent`). These tests keep their original meaning — WHEN the line
+# is required, it is guaranteed in code and not left to prompt-hope — and each gains the
+# `trade_intent=False` mirror, which is the new half of the contract.
+
+_INCIDENTAL_FINANCE_PROSE = (
+    "To evaluate any stock, always do your own research on the fundamentals first.",
+    "Coursera offers stock-analysis courses for educational purposes.",
+    "You may want to consult a qualified financial planner about tax-loss harvesting.",
+)
+
+
+def test_disclaimer_appended_on_trade_intent_when_missing():
+    out = cs.ensure_disclaimer("Apple trades at 38x earnings.", trade_intent=True)
     assert settings.LEGAL_DISCLAIMER in out
+
+
+def test_disclaimer_not_appended_without_trade_intent():
+    answer = "Apple trades at 38x earnings."
+    assert cs.ensure_disclaimer(answer, trade_intent=False) == answer
+    assert cs.disclaimer_suffix(answer, trade_intent=False) == ""
 
 
 def test_disclaimer_not_doubled_when_present():
     already = "Apple is pricey. This is educational, not financial advice."
-    assert cs.disclaimer_suffix(already) == ""
-    assert cs.ensure_disclaimer(already) == already
+    assert cs.disclaimer_suffix(already, trade_intent=True) == ""
+    assert cs.ensure_disclaimer(already, trade_intent=True) == already
 
 
-def test_disclaimer_idempotent():
-    once = cs.ensure_disclaimer("some answer")
-    twice = cs.ensure_disclaimer(once)
+def test_disclaimer_idempotent_on_trade_intent():
+    once = cs.ensure_disclaimer("some answer", trade_intent=True)
+    twice = cs.ensure_disclaimer(once, trade_intent=True)
     assert once == twice
 
 
+def test_disclaimer_idempotent_without_trade_intent():
+    # The strip runs once; a second pass has nothing left to remove.
+    once = cs.ensure_disclaimer("some answer\n\n" + settings.LEGAL_DISCLAIMER, trade_intent=False)
+    assert once == "some answer"
+    assert cs.ensure_disclaimer(once, trade_intent=False) == once
+
+
 def test_disclaimer_handles_none():
-    assert settings.LEGAL_DISCLAIMER in cs.ensure_disclaimer(None)   # type: ignore[arg-type]
+    assert settings.LEGAL_DISCLAIMER in cs.ensure_disclaimer(None, trade_intent=True)  # type: ignore[arg-type]
+    assert cs.ensure_disclaimer(None, trade_intent=False) == ""                        # type: ignore[arg-type]
 
 
 def test_disclaimer_not_suppressed_by_incidental_finance_prose():
     # Regression: common phrases ("do your own research", "educational purposes", "consult a
-    # qualified financial advisor") must NOT count as an existing disclaimer, or ensure_disclaimer
-    # would silently drop the legally-required line on ordinary answers.
-    for answer in (
-        "To evaluate any stock, always do your own research on the fundamentals first.",
-        "Coursera offers stock-analysis courses for educational purposes.",
-        "You may want to consult a qualified financial planner about tax-loss harvesting.",
-    ):
-        assert cs.disclaimer_suffix(answer) != "", answer
-        assert settings.LEGAL_DISCLAIMER in cs.ensure_disclaimer(answer)
+    # qualified financial advisor") must NOT count as an existing disclaimer, or the append
+    # would silently drop the required line on a trade turn.
+    for answer in _INCIDENTAL_FINANCE_PROSE:
+        assert cs.disclaimer_suffix(answer, trade_intent=True) != "", answer
+        assert settings.LEGAL_DISCLAIMER in cs.ensure_disclaimer(answer, trade_intent=True)
+
+
+def test_incidental_finance_prose_survives_the_strip():
+    """The mirror of the test above, and the more dangerous direction.
+
+    The same narrow marker set now also decides what may be REMOVED. If it were widened
+    to catch "do your own research", the strip would eat a real closing sentence instead
+    of boilerplate — silent content loss, with nothing in the logs.
+    """
+    for answer in _INCIDENTAL_FINANCE_PROSE:
+        assert cs.strip_trailing_disclaimer(answer) == answer, answer
+
+
+# ── strip_trailing_disclaimer ────────────────────────────────────────────────
+
+_OPENING_BOUNDARY = (
+    "As Cay AI, I cannot tell you whether you should buy Apple, as I am not a "
+    "financial advisor. Apple trades at 38x earnings."
+)
+
+
+def test_strip_removes_appended_legal_disclaimer():
+    assert cs.strip_trailing_disclaimer(
+        "Apple trades at 38x.\n\n" + settings.LEGAL_DISCLAIMER
+    ) == "Apple trades at 38x."
+
+
+def test_strip_removes_model_note_on_own_line():
+    assert cs.strip_trailing_disclaimer(
+        "P/E is 38x.\nThis is educational, not financial advice."
+    ) == "P/E is 38x."
+
+
+def test_strip_removes_note_glued_to_last_sentence():
+    assert cs.strip_trailing_disclaimer(
+        "P/E is 38x. This is educational, not financial advice."
+    ) == "P/E is 38x."
+
+
+def test_strip_removes_italic_note_after_bullets():
+    assert cs.strip_trailing_disclaimer(
+        "- P/E is 38x\n- Margins strong\n\n*This is not financial advice.*"
+    ) == "- P/E is 38x\n- Margins strong"
+
+
+def test_strip_removes_hr_separator_with_note():
+    assert cs.strip_trailing_disclaimer(
+        "Solid margins.\n\n---\n\nThis is not financial advice."
+    ) == "Solid margins."
+
+
+def test_strip_preserves_opening_advice_boundary():
+    """THE load-bearing case. Verbatim from a real answer.
+
+    That opening sentence is the advice boundary in the model's OWN voice — it is the
+    substance of the answer to "should I buy Apple?", not boilerplate. It carries the
+    marker, so only the trailing-only rule saves it. Widen the strip beyond the last
+    line/sentence and this is what gets eaten.
+    """
+    assert cs.strip_trailing_disclaimer(_OPENING_BOUNDARY) == _OPENING_BOUNDARY
+
+
+def test_strip_preserves_opening_boundary_while_removing_trailing_line():
+    assert cs.strip_trailing_disclaimer(
+        _OPENING_BOUNDARY + "\n\n" + settings.LEGAL_DISCLAIMER
+    ) == _OPENING_BOUNDARY
+
+
+def test_strip_never_removes_a_bullet():
+    text = "Key risks:\n- Not financial advice is a phrase people misuse\n- Margin pressure"
+    assert cs.strip_trailing_disclaimer(text) == text
+
+
+def test_strip_never_removes_long_trailing_prose():
+    """A paragraph that merely CONTAINS the phrase is analysis, not a closing note."""
+    tail = (
+        "Analysts continue to debate whether the multiple is justified given the services "
+        "mix and the pace of repurchases, and this is not financial advice anyone should "
+        "lean on, though reasonable people disagree about how much of the AI narrative is "
+        "already priced in at today's levels and what the next two years actually look like."
+    )
+    assert len(tail) > cs._MAX_DISCLAIMER_CHARS, "fixture must exceed the cap to test it"
+    long_tail = "Apple is fine.\n\n" + tail
+    assert cs.strip_trailing_disclaimer(long_tail) == long_tail
+
+
+def test_strip_takes_back_the_configured_line_at_any_length():
+    """The exact-match escape is checked BEFORE the length bound, on purpose.
+
+    Production supplies `LEGAL_DISCLAIMER` from the environment. If someone deploys a
+    verbose one longer than `_MAX_DISCLAIMER_CHARS`, we must still be able to remove
+    exactly what we ourselves appended — otherwise the append and the strip disagree and
+    every informational answer keeps a line the gate says it should not have.
+    """
+    verbose = (
+        "For educational purposes only and not financial advice of any kind. "
+        + "AI generated content may be inaccurate or incomplete in ways that are not obvious. "
+        * 3
+    )
+    assert len(verbose) > cs._MAX_DISCLAIMER_CHARS
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(settings, "LEGAL_DISCLAIMER", verbose)
+        assert cs.strip_trailing_disclaimer("Apple is fine.\n\n" + verbose) == "Apple is fine."
+
+
+def test_strip_never_empties_the_answer():
+    # A disclaimer-only body is all there is; removing it would leave nothing at all.
+    assert cs.strip_trailing_disclaimer(settings.LEGAL_DISCLAIMER) == settings.LEGAL_DISCLAIMER
+
+
+def test_strip_removes_doubled_disclaimer():
+    # A stored row can carry the model's own note AND the line an earlier build appended.
+    assert cs.strip_trailing_disclaimer(
+        "P/E is 38x.\nThis is not financial advice.\n\n" + settings.LEGAL_DISCLAIMER
+    ) == "P/E is 38x."
+
+
+def test_strip_is_idempotent():
+    once = cs.strip_trailing_disclaimer("x.\n\n" + settings.LEGAL_DISCLAIMER)
+    assert cs.strip_trailing_disclaimer(once) == once
+
+
+@pytest.mark.parametrize("empty", [None, "", "   "])
+def test_strip_handles_none_and_empty(empty):
+    assert cs.strip_trailing_disclaimer(empty).strip() == ""
+
+
+def test_configured_disclaimer_is_recognised_by_its_own_markers():
+    """The Railway guard.
+
+    PRODUCTION supplies `LEGAL_DISCLAIMER` via the environment, not `config.py`'s default
+    and not `.env`. If it is ever set to wording that carries none of the narrow markers,
+    the append and the strip stop agreeing: `ensure_disclaimer` would stack a second copy
+    on every trade turn, and the strip would leave it behind on every other one. This
+    catches that in CI against whatever value the environment actually holds.
+    """
+    assert cs._has_disclaimer(settings.LEGAL_DISCLAIMER) is True
+
+
+# ── finalize_disclaimer — the function BOTH endpoints call ───────────────────
+
+def test_finalize_returns_the_exact_suffix_the_stream_yields():
+    # The second element is emitted as a live SSE token; if it ever differs from what was
+    # appended, the visible reveal and the persisted row drift apart.
+    final, suffix = cs.finalize_disclaimer("Apple is at 38x.", trade_intent=True)
+    assert suffix == "\n\n" + settings.LEGAL_DISCLAIMER
+    assert final == "Apple is at 38x." + suffix
+
+
+def test_finalize_yields_nothing_when_the_model_already_disclaimed():
+    final, suffix = cs.finalize_disclaimer(
+        "Pricey. This is not financial advice.", trade_intent=True
+    )
+    assert suffix == ""
+    assert final == "Pricey. This is not financial advice."
+
+
+def test_finalize_strips_and_yields_nothing_without_trade_intent():
+    final, suffix = cs.finalize_disclaimer(
+        "Apple is at 38x.\n\n" + settings.LEGAL_DISCLAIMER, trade_intent=False
+    )
+    assert (final, suffix) == ("Apple is at 38x.", "")
 
 
 # ── Fence neutralization (delimiter-injection defense) ────────────────────────

@@ -30,10 +30,20 @@ struct TickerDetailView: View {
     let tickerSymbol: String
     var onNavigateToResearch: (() -> Void)?
 
-    init(tickerSymbol: String, onNavigateToResearch: (() -> Void)? = nil) {
+    /// `destination` is the notification deep link: which tab, and which sub-tab inside
+    /// it. Defaults to `.default` so every non-notification call site is unchanged.
+    init(
+        tickerSymbol: String,
+        onNavigateToResearch: (() -> Void)? = nil,
+        destination: TickerDestination = .default
+    ) {
         self.tickerSymbol = tickerSymbol
         self.onNavigateToResearch = onNavigateToResearch
-        self._viewModel = StateObject(wrappedValue: TickerDetailViewModel(tickerSymbol: tickerSymbol))
+        self._viewModel = StateObject(wrappedValue: TickerDetailViewModel(
+            tickerSymbol: tickerSymbol,
+            initialTab: destination.tab ?? .overview,
+            initialHoldersSection: destination.section
+        ))
     }
     
     // Share sheet items
@@ -388,7 +398,8 @@ struct TickerDetailView: View {
         case .holders:
             if let holdersData = viewModel.holdersData {
                 TickerHoldersContent(
-                    holdersData: holdersData
+                    holdersData: holdersData,
+                    initialActivitiesTab: viewModel.initialHoldersSection
                 )
             } else if !viewModel.isHoldersLoaded {
                 placeholderContent(title: "Holders", description: "Loading holders data...")

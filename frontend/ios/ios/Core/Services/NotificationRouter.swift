@@ -39,10 +39,59 @@ extension Notification.Name {
         Notification.Name("caydexNotificationUnreadChanged")
 }
 
+/// Where inside a ticker screen a tap should land.
+///
+/// Separate from `NotificationRoute` because `route` names the destination FAMILY (which
+/// screen) while this names a location within it. Folding them together would mean one
+/// route case per screen×tab combination — `ticker`, `tickerHolders`, `tickerFinancials`,
+/// … — and `test_every_registered_kind_is_nameable_by_the_ios_router` demands a matching
+/// literal in this file for each one.
+///
+/// ⚠️ ONLY the STOCK screen (`TickerDetailTab`) has Financials and Holders. Crypto, ETF,
+/// index and commodity top out at Overview/News/Analysis, so a tab is a HINT: an asset
+/// type that lacks it falls back to its own default rather than failing.
+struct TickerDestination: Equatable, Hashable, Sendable {
+    /// `nil` = the screen's own default tab.
+    let tab: TickerDetailTab?
+    /// Sub-tab within `tab`. Only Holders has any.
+    let section: RecentActivitiesTab?
+
+    static let `default` = TickerDestination(tab: nil, section: nil)
+
+    /// Parse the backend's lowercase `tab` / `section` values.
+    ///
+    /// The backend spells these lowercase; the Swift `rawValue`s are title-case
+    /// ("Holders"), so match on a lowercased comparison rather than `init(rawValue:)`.
+    /// Anything unrecognised becomes `nil` — a newer backend naming a tab this build has
+    /// never heard of must land on the default screen, not fail to open.
+    init(tabRaw: String?, sectionRaw: String?) {
+        func match<T: CaseIterable & RawRepresentable>(_ raw: String?) -> T?
+        where T.RawValue == String {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  !raw.isEmpty else { return nil }
+            return T.allCases.first { $0.rawValue.lowercased() == raw }
+        }
+        let parsedTab: TickerDetailTab? = match(tabRaw)
+        self.tab = parsedTab
+        // A section without its tab is meaningless, and acting on it would select a
+        // sub-tab on a screen the user did not ask for.
+        self.section = parsedTab == nil ? nil : match(sectionRaw)
+    }
+
+    init(tab: TickerDetailTab?, section: RecentActivitiesTab?) {
+        self.tab = tab
+        self.section = section
+    }
+}
+
 /// Where a notification tap should take the user.
 enum NotificationRoute: Equatable, Hashable, Sendable {
-    /// A ticker detail screen. `assetType` decides WHICH of the five it is.
-    case ticker(symbol: String, assetType: MarketTickerType)
+    /// A ticker detail screen. `assetType` decides WHICH of the five it is;
+    /// `destination` decides where INSIDE it to land.
+    ///
+    /// Stays `Hashable` on purpose — `AppState.pendingPushRoute` is observed with
+    /// `.onChange(of:)`, so every associated value has to be.
+    case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
     /// A generated research report.
     case report(id: String, ticker: String?)
     /// The in-app notification inbox — the fallback for anything unroutable.
@@ -82,7 +131,12 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
                 // alert opens the crypto screen. An unknown or missing value falls back
                 // to `.stock`, which is the overwhelming majority and the least wrong
                 // guess — but it is a FALLBACK now, not the only behaviour.
-                assetType: NotificationRoute.assetType(from: string("asset_type"))
+                assetType: NotificationRoute.assetType(from: string("asset_type")),
+                // Absent keys → `.default` → the screen's own default tab. An older
+                // backend sends neither and nothing changes.
+                destination: TickerDestination(
+                    tabRaw: string("tab"), sectionRaw: string("section")
+                )
             )
             return
         }
@@ -115,7 +169,7 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
     /// The ticker a route concerns, when it has one. Used for analytics dimensions.
     var symbol: String? {
         switch self {
-        case .ticker(let symbol, _): return symbol
+        case .ticker(let symbol, _, _): return symbol
         case .report(_, let ticker): return ticker
         case .inbox: return nil
         }

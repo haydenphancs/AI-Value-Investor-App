@@ -718,6 +718,18 @@ Rules:
     - "neutral": the upward and downward forces are genuinely balanced, or the articles are purely backward-looking / educational with no directional read.
   Commit to the net lean: a set that leans positive is "bullish" even if it carries caveats, and likewise "bearish" for a set that leans negative. Reserve "neutral" for a true balance — do NOT use it as a safe default.
 - Never state a fact, number, company or event that is not in the articles below.
+- ATTRIBUTION. The brief is about {subject} and nothing else. Several articles below may
+  cover peers or the whole sector — use them only as context, and never write a headline
+  that states a peer's event, or a sector-wide move, as though it happened to {subject}.
+  If the articles do not support a claim about {subject} specifically, say what they do
+  support in plainer terms rather than reaching for a bigger one.
+- RECENCY. Each article is stamped with its publication time. Describe what is happening
+  NOW; do not recap an older quarter, filing or event as if it were current news just
+  because a recent article mentions it in passing.
+- NAME THE METRIC. "beats estimates" is ambiguous when revenue and earnings disagree —
+  and they often do. If the articles report a beat or a miss, say WHICH measure it was
+  (revenue, earnings, guidance). An unqualified "beats estimates" next to an earnings
+  chart showing the opposite measure reads to the user as a straight contradiction.
 {price_line}
 
 Input set: {inputset_id}
@@ -968,8 +980,127 @@ def articles_within_window(
     return kept
 
 
+# Multi-ticker round-ups: how many tagged symbols before an article stops being
+# "about" any one of them. FMP tags a sector wrap with every name it mentions.
+_ROUNDUP_TICKER_COUNT = 3
+
+
+def article_is_about(
+    row: Dict[str, Any], scope: str, company_name: Optional[str] = None
+) -> bool:
+    """Is this article ABOUT `scope`, as opposed to merely listing it?
+
+    WHY THIS EXISTS — a real card, observed in production:
+
+        scope         PLUG
+        article_count 1
+        source        "FuelCell Energy Sinks 8%, Bloom Energy Falls 3%,
+                       Plug Power Drops 3%: What's Behind the Hydrogen Stock Selloff?"
+        headline      "Hydrogen Stocks Face Selloff"
+        trigger       band Notable->Typical (+4.16%)
+
+    A sector wrap led by two other companies became the SOLE input for a card about
+    PLUG, and the model — correctly summarising what it was given — announced a selloff
+    on a day PLUG rose 4.16%. Nothing was wrong with the summary; the corpus was wrong.
+
+    ⚠️ NEITHER OBVIOUS TEST CATCHES THAT ARTICLE:
+
+      * tag membership — FMP genuinely tags it `PLUG`, so `scope in related_tickers`
+        is true;
+      * name-in-title — "Plug Power" IS in the title. It is simply THIRD, after
+        FuelCell and Bloom.
+
+    So the discriminating signal is POSITION, not presence. In a wrap, the companies are
+    listed in order of what the piece is about, and ours has to lead. The leading clause
+    (up to the first comma, colon or dash) is what a headline puts its subject in.
+
+    Deliberately reads the title only, never the body: a body mention is exactly the
+    passing reference this exists to reject. Not applied to `MARKET_SCOPE`, which is
+    about the market by definition.
+    """
+    if not isinstance(row, dict) or not scope:
+        return False
+
+    title = str(row.get("headline") or "").strip()
+    if not title:
+        # An untitled row cannot be shown to be about anything. Reject rather than
+        # guess — an unattributable article is the input this function exists to drop.
+        return False
+
+    symbol = scope.strip().upper()
+    tags = []
+    related = row.get("related_tickers")
+    if isinstance(related, list):
+        tags = [str(t).strip().upper() for t in related if str(t or "").strip()]
+
+    # A wrap names several companies; a story names one. Above the threshold we demand
+    # the lead clause, below it the whole title is fair game.
+    is_roundup = len(tags) >= _ROUNDUP_TICKER_COUNT
+    haystack = title.lower()
+    if is_roundup:
+        # FMP lists the article's PRIMARY symbol first, so a wrap is "about" its lead
+        # tag. This is the only signal that works when the title names companies but
+        # the tags are symbols — we have no ticker→name map, so "FuelCell Energy" in
+        # the title is unmatchable from "FCEL".
+        #
+        # Without it the lead-clause rule below rejects a wrap for EVERY member, which
+        # is the wrong over-correction: FuelCell's own readers should get that card.
+        # Treated as a soft signal (an OR, never a veto) because the ordering is FMP's
+        # convention rather than a contract — worst case we admit one extra member of a
+        # wrap, which is far better than dropping it for all of them.
+        if tags and tags[0] == symbol:
+            return True
+        haystack = re.split(r"[,:—–-]", haystack, maxsplit=1)[0]
+
+    if symbol and symbol.lower() in haystack:
+        return True
+
+    name = (company_name or "").strip()
+    if name:
+        if name.lower() in haystack:
+            return True
+        # "Plug Power Inc." must match a title saying "Plug Power"; "Archer Aviation
+        # Inc." one saying "Archer".
+        lead = " ".join(name.split()[:2]).lower()
+        if len(lead) >= 4 and lead in haystack:
+            return True
+
+    # No title match. Accept only when the article is tagged with OUR SYMBOL ALONE —
+    # then an oblique headline ("Hydrogen maker lands 5MW order") is still plausibly
+    # about us. Two or more tags with no title mention means the piece is about the
+    # other one.
+    return tags == [symbol]
+
+
+def filter_to_subject(
+    rows: Sequence[Dict[str, Any]],
+    scope: str,
+    company_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Keep only the articles actually about `scope`.
+
+    FAILS OPEN TO NOTHING, deliberately. When no article survives, the caller gets an
+    empty corpus and `generate_and_store` produces no card — which is the honest
+    outcome, because every remaining article is about somebody else. The alternative
+    (fall back to the unfiltered set "so there is at least a card") is precisely the
+    behaviour that shipped the Hydrogen-selloff headline.
+    """
+    kept = [r for r in rows if article_is_about(r, scope, company_name)]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        logger.info(
+            "news corpus: dropped %d/%d article(s) not about %s (peer or sector "
+            "coverage); %d kept",
+            dropped, len(rows), scope, len(kept),
+        )
+    return kept
+
+
 def select_recent_corpus(
-    rows: Sequence[Dict[str, Any]], now: datetime
+    rows: Sequence[Dict[str, Any]],
+    now: datetime,
+    scope: Optional[str] = None,
+    company_name: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Pick the corpus window for a scope: prefer the last 24h, fall back to 48h.
 
@@ -981,6 +1112,19 @@ def select_recent_corpus(
     matches the news the card actually summarises. An empty return (no news in
     48h) means "no card".
     """
+    # SUBJECT FILTER BEFORE THE WINDOW, not after.
+    #
+    # Order matters: filtering first means the 24h/48h choice is made over articles that
+    # are actually about this scope. The other way round, a scope whose only 24h article
+    # is a peer round-up would pick the 24h window, then filter it to empty and emit no
+    # card — while a perfectly good 36h-old article about the company sat in the 48h
+    # window, unread. That is a silent loss of a real card.
+    #
+    # `scope=None` (MARKET_SCOPE, and any caller that has not opted in) skips the filter
+    # entirely, so market coverage is unaffected.
+    if scope:
+        rows = filter_to_subject(rows, scope, company_name)
+
     upper = now + timedelta(hours=_FUTURE_SKEW_HOURS)
     primary = articles_within_window(
         rows, now - timedelta(hours=PRIMARY_WINDOW_HOURS), upper

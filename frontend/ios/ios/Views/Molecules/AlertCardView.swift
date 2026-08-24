@@ -12,43 +12,17 @@ struct AlertCardView: View {
     var onTap: (() -> Void)?
 
     var body: some View {
-        Button {
-            onTap?()
-        } label: {
-            HStack(spacing: AppSpacing.md) {
-                // Icon
-                ZStack {
-                    Circle()
-                        .fill(alert.iconColor.opacity(0.15))
-                        .frame(width: 40, height: 40)
-
-                    Image(systemName: alert.iconName)
-                        .font(AppTypography.iconMedium).fontWeight(.semibold)
-                        .foregroundColor(alert.iconColor)
-                }
-
-                // Content
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text(alert.title)
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-
-                    Text(alert.description)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-
-                Spacer()
-
-                // Trailing view varies by alert type
-                trailingView
-            }
-            .padding(AppSpacing.lg)
-            .cardSurface(cornerRadius: AppCornerRadius.large)
-        }
-        .buttonStyle(.plain)
+        // Renders through the shared `ActivityRow` so the digest, the notifications and
+        // the price rules are one visual grammar. This view now supplies only what is
+        // SPECIFIC to a digest item: its glyph, its tint and its trailing detail.
+        ActivityRow(
+            systemName: alert.iconName,
+            iconColor: alert.iconColor,
+            title: alert.title,
+            subtitle: alert.description,
+            onTap: onTap,
+            trailing: { trailingView }
+        )
     }
 
     @ViewBuilder

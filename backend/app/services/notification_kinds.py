@@ -104,6 +104,36 @@ LEVEL_TIME_SENSITIVE = "time-sensitive"  # pierces Focus. REQUIRES the entitleme
 _VALID_LEVELS = frozenset({LEVEL_PASSIVE, LEVEL_ACTIVE, LEVEL_TIME_SENSITIVE})
 
 
+# ── Destinations inside the ticker screen ────────────────────────────────────
+# These MIRROR the iOS enums and are spelled lowercase here; iOS lowercases the
+# `rawValue` before matching, so "holders" pairs with `TickerDetailTab.holders`
+# ("Holders"). Keep them in step with:
+#   frontend/ios/ios/Models/TickerDetailModels.swift  — TickerDetailTab
+#   frontend/ios/ios/Models/HoldersModels.swift       — RecentActivitiesTab / SmartMoneyTab
+# `tests/test_notification_schema_parity.py` scans the Swift source and fails if a value
+# here has no counterpart there, so a typo cannot ship as a silent land-on-Overview.
+
+TAB_OVERVIEW = "overview"
+TAB_NEWS = "news"
+TAB_ANALYSIS = "analysis"
+TAB_FINANCIALS = "financials"
+TAB_HOLDERS = "holders"
+
+_VALID_TABS = frozenset({TAB_OVERVIEW, TAB_NEWS, TAB_ANALYSIS, TAB_FINANCIALS, TAB_HOLDERS})
+
+# Sub-tabs of Holders. Note the code name / UI label split the app already carries:
+# `SmartMoneyTab.hedgeFunds` renders as "Institutions" (see project_hedge_fund_naming).
+SECTION_INSIDERS = "insiders"
+SECTION_INSTITUTIONS = "institutions"
+SECTION_CONGRESS = "congress"
+
+_VALID_SECTIONS = frozenset({SECTION_INSIDERS, SECTION_INSTITUTIONS, SECTION_CONGRESS})
+
+# Which tab owns which sub-tabs. A section under the wrong tab is a routing bug that
+# would land the user on the right screen with the wrong list selected.
+_SECTIONS_BY_TAB: Dict[str, frozenset] = {TAB_HOLDERS: _VALID_SECTIONS}
+
+
 @dataclass(frozen=True)
 class NotificationKind:
     """One notification type, fully specified.
@@ -134,8 +164,24 @@ class NotificationKind:
     respects_quiet_hours: bool
     # What the iOS router switches on to pick a destination screen.
     route_kind: str
+    # WHERE INSIDE that screen to land. Both are optional and both are pure hints.
+    #
+    # `route_kind` names a destination FAMILY (which screen); these name a location
+    # within it. They are deliberately NOT folded into `route_kind` — doing that would
+    # mean `ticker`, `ticker_holders`, `ticker_financials`, … one enum value per
+    # combination, and `test_every_registered_kind_is_nameable_by_the_ios_router`
+    # requires a matching literal in `NotificationRouter.swift` for every one of them.
+    #
+    # Only `TickerDetailTab` (the STOCK screen) has Financials and Holders; the crypto,
+    # ETF, index and commodity screens top out at Overview/News/Analysis. A tab an asset
+    # type does not have is ignored by iOS and lands on Overview, which is why these are
+    # hints rather than promises.
+    #
     # Human-readable label — used by the admin preview endpoint and in logs.
     label: str
+    route_tab: Optional[str] = None
+    # Sub-tab inside `route_tab` (Holders has Insiders / Institutions / Congress).
+    route_section: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Fail at IMPORT, not at send time. A typo'd level would otherwise surface as a
@@ -151,6 +197,27 @@ class NotificationKind:
                 f"entry in CATEGORY_DAILY_CAPS — an uncapped category by accident is "
                 f"how a user gets forty notifications in an afternoon"
             )
+        if self.route_tab is not None and self.route_tab not in _VALID_TABS:
+            raise ValueError(
+                f"NotificationKind {self.key!r}: route_tab {self.route_tab!r} is not a "
+                f"tab iOS knows (expected one of {sorted(_VALID_TABS)}). An unknown tab "
+                f"is not an error on the client — it silently lands on Overview — so it "
+                f"has to fail here instead."
+            )
+        if self.route_section is not None:
+            if self.route_tab is None:
+                raise ValueError(
+                    f"NotificationKind {self.key!r}: route_section "
+                    f"{self.route_section!r} with no route_tab. A sub-tab is meaningless "
+                    f"without the tab that contains it."
+                )
+            allowed = _SECTIONS_BY_TAB.get(self.route_tab, frozenset())
+            if self.route_section not in allowed:
+                raise ValueError(
+                    f"NotificationKind {self.key!r}: route_section "
+                    f"{self.route_section!r} does not belong to tab {self.route_tab!r} "
+                    f"(expected one of {sorted(allowed) or 'none — that tab has no sub-tabs'})"
+                )
         if not self.preference_key.startswith("notify_"):
             # `user_settings_service._KNOWN_KEY_PREFIXES` only accepts `notify_*`, so a
             # key without the prefix is silently dropped by `sanitize_preferences` and
@@ -218,6 +285,7 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Earnings coming up",
+            route_tab=TAB_FINANCIALS,
         ),
         NotificationKind(
             key=KIND_EARNINGS_RESULT,
@@ -230,6 +298,7 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Earnings results",
+            route_tab=TAB_FINANCIALS,
         ),
         # Smart-money kinds are PASSIVE and get apns-priority 5: a Form 4 filed this
         # evening is information, not an interruption. iOS is allowed to batch them for
@@ -245,6 +314,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Insider trades",
+            route_tab=TAB_HOLDERS,
+            route_section=SECTION_INSIDERS,
         ),
         # Ships OFF. 13F data is up to 45 days stale by the time it is public, so it is
         # the least time-critical signal in the app and the easiest to over-send (a
@@ -260,6 +331,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Institutional (13F) filings",
+            route_tab=TAB_HOLDERS,
+            route_section=SECTION_INSTITUTIONS,
         ),
         NotificationKind(
             key=KIND_CONGRESS_TRADE,
@@ -272,6 +345,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Congressional trades",
+            route_tab=TAB_HOLDERS,
+            route_section=SECTION_CONGRESS,
         ),
         # TIME-SENSITIVE and quiet-hours-exempt: the user typed this threshold in
         # themselves. A price alert that arrives after the move is over is worthless, so
@@ -404,6 +479,42 @@ def get_kind(key: str) -> NotificationKind:
             f"unknown notification kind {key!r}; "
             f"registered: {sorted(NOTIFICATION_KINDS)}"
         ) from None
+
+
+def ticker_route(
+    kind_key: str, ticker: str, *, asset_type: str = "stock"
+) -> Dict[str, str]:
+    """Build the `route` payload for a notification that opens an asset screen.
+
+    ONE builder, because the shape has drifted per-sender before and the failures are
+    invisible on the server:
+
+      * `ticker_move` emitted only `{kind, ticker}` — no `asset_type` — and the iOS
+        router's documented `.stock` fallback then sent every BTC and ETH price alert to
+        `TickerDetailView`, the STOCK screen, to render equity fundamentals for a coin.
+        That fallback exists for unknown values, not as the primary path for the app's
+        most common notification.
+      * `profile_match` set `kind` where it meant `route`, which `push_dispatch_service`
+        then overwrote. It worked only because the client defaults the family to
+        "ticker".
+
+    Both are the kind of bug that looks fine in every log and only shows up on a phone,
+    so the shape is built here from the registry instead of hand-written per sender.
+    `tests/test_notification_schema_parity.py` pins every sender to this function.
+    """
+    kind = get_kind(kind_key)
+    route: Dict[str, str] = {
+        "route": kind.route_kind,
+        "ticker": ticker.upper(),
+        "asset_type": (asset_type or "stock").strip().lower() or "stock",
+    }
+    # Omitted entirely when absent — an empty string would decode on iOS as a present-
+    # but-blank tab and defeat the `nil` check that falls back to Overview.
+    if kind.route_tab:
+        route["tab"] = kind.route_tab
+    if kind.route_section:
+        route["section"] = kind.route_section
+    return route
 
 
 def preference_defaults() -> Dict[str, bool]:

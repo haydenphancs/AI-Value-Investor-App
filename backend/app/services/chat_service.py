@@ -1442,8 +1442,22 @@ class ChatService:
             "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
             "everything you know — answer the specific question. Only expand into full detail if the "
             "user explicitly asks for more. Use plain, conversational language. "
-            "Keep the required "
-            "'educational, not financial advice' note to a single short line at the end."
+            # ── Disclaimer: CONDITIONAL on trade-action intent ──
+            # A note on every answer — including "Hi" — trains people to skip it. It
+            # earns its place on the turn where someone might act. `chat_security.
+            # finalize_disclaimer` is the code gate that GUARANTEES the line on a trade
+            # turn regardless of what the model does here, and strips a volunteered one
+            # otherwise; this instruction just keeps the prompt and the code from
+            # fighting each other (which is exactly what the old pair did).
+            #
+            # Governs the CLOSING NOTE ONLY. The ADVICE BOUNDARY below governs the
+            # answer's CONTENT and applies in full on every turn, without exception.
+            "DISCLAIMER: End with ONE short 'educational, not financial advice' line "
+            "ONLY when the user is asking whether to buy, sell, hold, short, trim, add "
+            "to, exit or otherwise trade something, how much to put into it, or whether "
+            "it suits them personally. For every other question — a definition, a metric, "
+            "a fundamentals, filing or news lookup, or small talk — write NO disclaimer, "
+            "no closing caveat and no 'this is not financial advice' sentence at all."
             # Shared with every report persona (persona_config.ADVICE_BOUNDARY) so the
             # two surfaces cannot drift. Supersedes the inline buy/sell line that used
             # to sit here, and additionally covers suitability ("right for me?").

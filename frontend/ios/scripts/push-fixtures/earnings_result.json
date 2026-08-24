@@ -14,5 +14,6 @@
   "route": "ticker",
   "ticker": "NVDA",
   "asset_type": "stock",
+  "tab": "financials",
   "Simulator Target Bundle": "com.phan.caydex"
 }

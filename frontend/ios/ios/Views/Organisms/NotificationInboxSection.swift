@@ -42,17 +42,30 @@ enum NotificationInboxSection {
         route: Binding<NotificationRoute?>
     ) -> some View {
         ForEach(viewModel.items) { item in
-            Button {
-                Task { await viewModel.markRead(item) }
-                // `.inbox` means the payload was unroutable — staying put is the
-                // honest outcome, and the row itself is already the content.
-                if item.destination != .inbox {
-                    route.wrappedValue = item.destination
+            // ONE row shape for the whole Alerts tab. This used to be a private
+            // `NotificationRow` — a full-bleed square slab with no icon and an 8pt dot,
+            // sitting beside the digest's rounded, tinted, shadowed cards. Same screen,
+            // same importance, two visual languages.
+            //
+            // Its `.background(AppColors.cardBackground)` was also a bare colour with no
+            // shape and no edge: #FFFFFF on the #F4F5F8 page in LIGHT mode, 1.09:1,
+            // invisible. Dark separates by fill, which is why it looked fine in review.
+            ActivityRow(
+                systemName: item.iconName,
+                iconColor: item.iconColor,
+                title: item.title,
+                subtitle: item.body,
+                footnote: footnote(for: item),
+                isNew: viewModel.showsUnreadDot(item),
+                onTap: {
+                    Task { await viewModel.markRead(item) }
+                    // `.inbox` means the payload was unroutable — staying put is the
+                    // honest outcome, and the row itself is already the content.
+                    if item.destination != .inbox {
+                        route.wrappedValue = item.destination
+                    }
                 }
-            } label: {
-                NotificationRow(item: item, isNew: viewModel.showsUnreadDot(item))
-            }
-            .buttonStyle(.plain)
+            )
             .task { await viewModel.loadMoreIfNeeded(currentItem: item) }
         }
 
@@ -61,6 +74,22 @@ enum NotificationInboxSection {
                 .tint(AppColors.textSecondary)
                 .padding(.vertical, AppSpacing.lg)
         }
+    }
+
+    /// Relative time, plus an explanation when the phone never buzzed.
+    ///
+    /// The delivery note is only shown when delivery did NOT happen — saying
+    /// "delivered" on every other row would be permanent chrome carrying no information.
+    private static func footnote(for item: NotificationEventDTO) -> String {
+        let note: String?
+        switch item.deliveryState {
+        case "deferred":  note = "held during quiet hours"
+        case "no_device": note = "not sent to this device"
+        case "failed":    note = "couldn't be delivered"
+        default:          note = nil
+        }
+        guard let note else { return item.relativeTime }
+        return item.relativeTime.isEmpty ? note : "\(item.relativeTime) · \(note)"
     }
 
     /// Nothing has ever been sent to this account.
@@ -81,74 +110,6 @@ enum NotificationInboxSection {
     @ViewBuilder
     static func errorNotice(_ message: String, onRetry: @escaping () -> Void) -> some View {
         InlineRetryNotice(message: message, onRetry: onRetry)
-    }
-}
-
-// MARK: - Row
-
-private struct NotificationRow: View {
-    let item: NotificationEventDTO
-    /// Whether to draw the "new" dot. NOT simply `!isRead`: the Alerts tab marks everything
-    /// read the moment you look at it (that is what clears the badge), so keying the dot off
-    /// read-state alone would blank every row exactly as it appeared. See
-    /// `NotificationInboxViewModel.showsUnreadDot(_:)`.
-    let isNew: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: AppSpacing.md) {
-            Circle()
-                .fill(isNew ? AppColors.primaryGraphic : Color.clear)
-                .frame(width: 8, height: 8)
-                .padding(.top, 6)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                Text(item.title)
-                    .font(isNew ? AppTypography.bodyEmphasis : AppTypography.body)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text(item.body)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: AppSpacing.xs) {
-                    Text(item.relativeTime)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-
-                    // Only shown when the phone did NOT buzz. Saying "delivered" on every
-                    // other row would be permanent chrome carrying no information.
-                    if let note = undeliveredNote {
-                        Text("· \(note)")
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
-                    }
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Image(systemName: "chevron.right")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-                .padding(.top, 2)
-        }
-        .padding(.horizontal, AppSpacing.lg)
-        .padding(.vertical, AppSpacing.md)
-        .background(AppColors.cardBackground)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(isNew ? "New. " : "")\(item.title). \(item.body)")
-    }
-
-    /// Explains a row the user is seeing here FIRST.
-    private var undeliveredNote: String? {
-        switch item.deliveryState {
-        case "deferred":  return "held during quiet hours"
-        case "no_device": return "not sent to this device"
-        case "failed":    return "couldn't be delivered"
-        default:          return nil
-        }
     }
 }
 

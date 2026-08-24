@@ -339,7 +339,12 @@ async def get_updates_feed(
         # the news the card summarises. With nothing in 48h, show NO card at all
         # (neither AI nor fallback); the timeline below still renders cached rows.
         recent, window_hours = select_recent_corpus(
-            raw_articles, datetime.now(timezone.utc)
+            raw_articles,
+            datetime.now(timezone.utc),
+            # Same subject filter the sweeper applies, so the endpoint's show/hide and
+            # badge agree with the card the sweeper actually generated. Diverging here
+            # would show a "24h" badge over a card built from a different corpus.
+            scope=None if scope == MARKET_SCOPE else scope,
         )
         if recent:
             try:

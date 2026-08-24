@@ -16,21 +16,23 @@
 import SwiftUI
 
 struct AlertsEventsSection: View {
+    var title: String = "Upcoming"
+    var emptyMessage: String = "Nothing scheduled for what you track."
+    var emptyIcon: String = "calendar"
     let alerts: [AppAlert]
     var onAlertTapped: ((AppAlert) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            SectionHeader(title: "Upcoming & Events")
+            SectionHeader(title: title)
                 .padding(.horizontal, AppSpacing.lg)
 
             if alerts.isEmpty {
                 // This section used to render its header unconditionally over nothing, which
                 // reads as a broken screen rather than a quiet week.
                 InlineRetryNotice(
-                    message: "Nothing coming up for what you track. Earnings dates, whale "
-                        + "trades and analyst changes will appear here.",
-                    systemImage: "calendar",
+                    message: emptyMessage,
+                    systemImage: emptyIcon,
                     iconColor: AppColors.textMuted
                 )
                 .padding(.horizontal, AppSpacing.lg)

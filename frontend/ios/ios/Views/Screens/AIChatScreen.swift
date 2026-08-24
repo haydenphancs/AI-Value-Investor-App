@@ -202,19 +202,20 @@ struct AIChatScreen: View {
                 errorBanner(error)
             }
 
-            // Disclaimer. This screen had NONE — the only major surface without one, and the
-            // one that answers free-form questions about specific securities. The first-run
-            // `DisclaimerAcknowledgementView` covers the same ground, but it is accepted once,
-            // long before anyone reads an answer here; a disclaimer carries weight where the
-            // reliance actually happens.
+            // Disclaimer. ONE form: the compact one-liner, and only once a conversation is
+            // under way — it stays on screen WHILE an answer is being read, which is where
+            // the reliance actually happens.
             //
-            // Two forms, never both: the empty state has room for the full wording and is the
-            // moment before anyone acts on anything, while an active conversation gets the
-            // one-liner so it stays on screen WHILE an answer is being read. Same gate as the
-            // suggestion pills below, so the two can never disagree about which state we're in.
-            if viewModel.messages.isEmpty && !viewModel.isAITyping {
-                emptyStateDisclaimer
-            } else {
+            // The empty state deliberately shows NOTHING. It used to carry a four-line
+            // paragraph that said, almost verbatim, what the user has already tapped through
+            // TWICE: `DisclaimerAcknowledgementView` at first run ("I Understand", not
+            // dismissible) and `AIDataConsentView` on the first send ("Allow and continue").
+            // A third copy, on a screen with no analysis on it yet, bought nothing and taught
+            // people to skip the notice that does matter.
+            //
+            // Same gate as the suggestion pills below, so the two can never disagree about
+            // which state we're in.
+            if !(viewModel.messages.isEmpty && !viewModel.isAITyping) {
                 InlineDisclaimerNotice(
                     text: "AI-generated · may be wrong · not financial advice",
                     linkLabel: "Details"
@@ -240,35 +241,6 @@ struct AIChatScreen: View {
                 isBusy: viewModel.isAITyping
             )
         }
-    }
-
-    // MARK: - Disclaimer
-
-    /// The fuller notice, shown in the empty state where there is room for it.
-    ///
-    /// ⚠️ Never name the model or the vendor in this copy — the agent is "Cay AI by Caydex"
-    /// (CLAUDE.md invariant #7). "AI-generated" is the phrasing; the consent screen says
-    /// "a third-party AI provider" and neither goes further than that.
-    private var emptyStateDisclaimer: some View {
-        VStack(spacing: AppSpacing.xs) {
-            Text("Cay AI can be wrong")
-                .font(AppTypography.captionEmphasis)
-                .foregroundColor(AppColors.textSecondary)
-
-            Text("Answers are AI-generated and may be inaccurate, incomplete, or out of date. "
-                 + "This is research, not financial advice, and Caydex is not a registered "
-                 + "investment adviser. Verify anything you act on.")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-
-            // Link-only variant: the wording above already says it, so repeating the sentence
-            // would say the same thing twice — see InlineDisclaimerNotice's note on `text: ""`.
-            InlineDisclaimerNotice(text: "", linkLabel: "Read the full disclaimers")
-        }
-        .padding(.horizontal, AppSpacing.xl)
-        .padding(.bottom, AppSpacing.md)
     }
 
     // MARK: - Conversation Area

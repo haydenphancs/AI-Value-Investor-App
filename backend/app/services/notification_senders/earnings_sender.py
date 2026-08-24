@@ -36,6 +36,7 @@ from app.services.notification_jobs import JOB_EARNINGS, claimed_job
 from app.services.notification_kinds import (
     KIND_EARNINGS_RESULT,
     KIND_EARNINGS_UPCOMING,
+    ticker_route,
 )
 from app.services.push_dispatch_service import get_push_dispatch_service
 from app.services.updates_materiality import finite
@@ -208,7 +209,9 @@ async def _dispatch(
         dedup_key=f"{kind}:{symbol}:{when}",
         kind=kind,
         # FLAT SCALARS ONLY (iOS AnyCodable yields "" for anything nested).
-        data={"ticker": symbol, "asset_type": "stock", "route": "ticker"},
+        # The registry supplies the tab, so `earnings_result` lands on Financials
+        # rather than making the user hunt for the numbers the alert is about.
+        data=ticker_route(kind, symbol),
     )
 
 

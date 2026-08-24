@@ -25,6 +25,14 @@ struct HomeDashboardView: View {
     @State private var showSearch = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
+    /// The destination a NOTIFICATION tap resolved to.
+    ///
+    /// Separate from `selectedTicker` (which Home's own tiles use) because a push route
+    /// carries a tab and a sub-tab, and `MarketTicker` has nowhere to put them — routing
+    /// through it silently dropped the deep link. This presents the SAME
+    /// `NotificationRouteDestination` the inbox rows use, so banner taps and in-app taps
+    /// cannot drift apart.
+    @State private var pushRoute: NotificationRouteBox?
     /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
     /// ANYWHERE outside the card (in the scroll content) collapses it.
     @State private var expandedScannerID: DailyScanner.ID?
@@ -151,36 +159,17 @@ struct HomeDashboardView: View {
                 appState.pendingPushRoute = nil
                 appState.pendingPushTicker = nil
             }
-            switch route {
-            case .ticker(let symbol, let assetType):
-                // ASSET TYPE FROM THE PAYLOAD. This used to be a hardcoded `.stock`,
-                // so a crypto or ETF alert opened TickerDetailView and rendered stock
-                // fundamentals for the wrong kind of asset.
-                //
-                // Only the symbol and type matter — the detail screen loads everything
-                // else. The placeholder numbers are never rendered.
-                selectedTicker = MarketTicker(
-                    name: symbol,
-                    symbol: symbol,
-                    type: assetType,
-                    price: 0,
-                    changePercent: 0,
-                    sparklineData: []
-                )
-            case .report(_, let ticker):
-                // A ticker-less report is `needsAlertsFallback` and was filtered out above,
-                // so this force-unwrap-shaped guard can only fall through on a future route
-                // shape — in which case doing nothing is correct, not a dropped tap.
-                guard let ticker, !ticker.isEmpty else { return }
-                selectedTicker = MarketTicker(
-                    name: ticker, symbol: ticker, type: .stock,
-                    price: 0, changePercent: 0, sparklineData: []
-                )
-            case .inbox:
-                // Unreachable: `needsAlertsFallback` is true for `.inbox`, so ContentView has
-                // already routed it to Tracking → Alerts.
-                break
-            }
+            // ONE dispatcher for both doors. This used to be a second copy of the
+            // `MarketTickerType` switch in `NotificationRouteDestination`, and the two
+            // had already drifted: this one rebuilt the route as a `MarketTicker`, which
+            // has no tab field, so an insider alert that asked for Holders → Insiders
+            // arrived here and lost it. A forked copy of a router is how "taps from the
+            // inbox go to the right place but taps from the banner don't" happens.
+            pushRoute = NotificationRouteBox(route: route)
+        }
+        .fullScreenCover(item: $pushRoute) { box in
+            NotificationRouteDestination(route: box.route)
+                .environment(appState)
         }
         .fullScreenCover(item: $selectedTicker) { ticker in
             NavigationStack {

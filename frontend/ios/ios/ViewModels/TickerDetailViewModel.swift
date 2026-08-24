@@ -52,6 +52,10 @@ class TickerDetailViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var selectedTab: TickerDetailTab = .overview
+
+    /// Which Recent Activities sub-tab to open on, when a deep link named one.
+    /// Read once by `RecentActivitiesSection`; `nil` means "use your own default".
+    let initialHoldersSection: RecentActivitiesTab?
     @Published var selectedChartRange: ChartTimeRange = .oneDay
     @Published var isFavorite: Bool = false
     /// Bumped on every star tap. `checkWatchlistStatus()` captures it before its GET and
@@ -116,9 +120,23 @@ class TickerDetailViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(tickerSymbol: String, stockRepository: StockRepository? = nil) {
+    /// `initialTab` / `initialHoldersSection` seed the screen for a NOTIFICATION DEEP
+    /// LINK — "Insider activity in ACHR" opens ACHR on Holders → Insiders instead of
+    /// making the user find it. Both default to the ordinary entry point, so the six
+    /// existing call sites are unchanged.
+    ///
+    /// Seeding here rather than in `.onAppear` matters: the tab bar reads `selectedTab`
+    /// on first render, so a later assignment shows Overview for a frame and then jumps.
+    init(
+        tickerSymbol: String,
+        stockRepository: StockRepository? = nil,
+        initialTab: TickerDetailTab = .overview,
+        initialHoldersSection: RecentActivitiesTab? = nil
+    ) {
         self.tickerSymbol = tickerSymbol
         self.stockRepository = stockRepository ?? .shared
+        self.selectedTab = initialTab
+        self.initialHoldersSection = initialHoldersSection
 
         // Observe chart range changes: auto-set default interval and fetch new chart data
         $selectedChartRange

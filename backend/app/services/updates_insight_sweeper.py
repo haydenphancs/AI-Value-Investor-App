@@ -374,6 +374,7 @@ class InsightSweeper:
         card: Dict[str, Any],
         now: datetime,
         quote: Optional[Dict[str, Any]] = None,
+        price_move: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Push a fresh insight to the people watching this ticker.
 
@@ -404,12 +405,35 @@ class InsightSweeper:
         if cp is None or round(cp, 2) == 0.0:
             return
         try:
+            from app.services.notification_kinds import KIND_TICKER_MOVE
             from app.services.push_dispatch_service import (
                 get_push_dispatch_service,
                 trading_date_et,
             )
 
-            headline = (card.get("headline") or "").strip()
+            # THE BODY MUST EXPLAIN THE MOVE THAT TRIGGERED THE ALERT.
+            #
+            # This used to send `card["headline"]` — a Gemini one-line synthesis of the
+            # ticker's whole 24-48h news corpus — which has no connection to why the
+            # price moved. Two failures came out of that, both observed in production:
+            #
+            #   * PLUG: "Plug Power beats Q2 estimates, raises revenue outlook" sent as
+            #     a price-move alert. True of REVENUE (+5.4%), while EPS missed by 80%,
+            #     so it read as a flat contradiction of the app's own earnings chart.
+            #   * PLUG again: a card built from ONE article — "FuelCell Energy Sinks 8%,
+            #     Bloom Energy Falls 3%, Plug Power Drops 3%..." — yielding the headline
+            #     "Hydrogen Stocks Face Selloff" on a day the trigger recorded PLUG
+            #     **up 4.16%**. A bearish sector claim attached to a bullish move.
+            #
+            # `price_move["reason"]` is the grounded, web-searched, CITED answer to
+            # exactly the question the alert raises, and it was already being computed
+            # in this same sweep — then dropped on the floor at the call site.
+            #
+            # The headline stays as the FALLBACK, because the catalyst is gated, day-
+            # capped and kill-switchable and legitimately yields None; a generic body
+            # beats no alert on a genuinely large move.
+            reason = ((price_move or {}).get("reason") or "").strip()
+            headline = reason or (card.get("headline") or "").strip()
             if not headline:
                 # No honest body to send. Silence beats a notification that says
                 # nothing — the card is still on the Updates tab either way.
@@ -422,7 +446,10 @@ class InsightSweeper:
                 dedup_key=f"move:{scope}:{trading_date_et()}",
                 preference_key="notify_watchlist_changes",
                 # Routes the tap straight to this ticker (AppDelegate → deep link).
-                data={"kind": "ticker_move", "ticker": scope},
+                # `asset_type` is backfilled from `watchlist_items` by
+                # `notify_watchers` — without it every BTC/ETH alert opened the
+                # equity screen via the client's `.stock` fallback.
+                data={"kind": KIND_TICKER_MOVE, "ticker": scope},
             )
         except Exception as e:
             logger.warning(
@@ -695,8 +722,14 @@ class InsightSweeper:
         # with fresh news summarises just the 24h corpus and is badged "24h". A
         # scope with no news in 48h yields an empty corpus → `no_corpus` → the
         # deterministic "Latest headlines" fallback, not an over-claiming AI card.
+        #
+        # `scope=` opts each TICKER corpus into the subject filter, so a sector wrap led
+        # by two peers can no longer be the sole input for this ticker's card. MARKET
+        # passes None — market coverage is about the market by definition.
         corpora = {
-            scope: select_recent_corpus(rows, now)[0]
+            scope: select_recent_corpus(
+                rows, now, scope=None if scope == MARKET_SCOPE else scope
+            )[0]
             for scope, rows in corpora.items()
         }
 
@@ -871,6 +904,9 @@ class InsightSweeper:
                     await self._notify_watchers(
                         scope, decision, card, now,
                         quote=quotes_by_symbol.get(scope),
+                        # The grounded "why it moved", computed above. Without this the
+                        # notification explains the move with unrelated news.
+                        price_move=price_move,
                     )
 
                 return card is not None

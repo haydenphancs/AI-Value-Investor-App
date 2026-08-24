@@ -145,6 +145,48 @@ report "every stored colour token is in TokenInventory AND auditManifest" \
   "the runtime audit cannot see a token you forgot to declare — it prints a green check anyway" \
   "$(printf '%s' "$TOKENS_MISSING")"
 
+# ── 9. No bare card fill ──────────────────────────────────────────────────────
+# `.background(AppColors.cardBackground)` paints a card's FILL with no shape, no
+# `cardEdge` and no shadow. In DARK that separates from the page on fill alone and
+# looks perfectly fine, which is why it passes review; in LIGHT it is #FFFFFF on the
+# #F4F5F8 page — 1.09:1 with no edge, i.e. an invisible card.
+#
+# This is exactly what `.cardSurface()` / `.cardFill()` exist to prevent, and the
+# notification rows shipped with it because no guard could see it: the runtime
+# ThemeContrastAudit resolves DECLARED tokens against DECLARED surfaces and has no
+# view of how a token is applied. Only a source scan can.
+#
+# `cardBackgroundNested` is exempt: it is the correct fill for a card inside a card,
+# and its call sites are already inside a shaped container.
+# Comment lines are stripped, and everything from the first `#Preview` to EOF is
+# skipped: a preview's own backdrop is not a card, and the comment next to this very
+# fix names the token it forbids.
+BARE_FILL="$(find Views -name '*.swift' -print0 2>/dev/null \
+  | xargs -0 awk '
+      FNR==1 { inpreview=0 }
+      /^[[:space:]]*#Preview/ { inpreview=1 }
+      inpreview { next }
+      /^[[:space:]]*\/\// { next }
+      /\.background\(AppColors\.cardBackground\)/ { print FILENAME ":" FNR ":" $0 }
+    ' || true)"
+# GATED on the alert surfaces, REPORTED elsewhere.
+#
+# 24 pre-existing sites live in settings screens and report sections. Some are rows
+# inside an already-shaped group and are therefore fine; each needs looking at in
+# light mode before it is touched, and turning them all red today would break the
+# gate for work nobody has reviewed. So the guard fails for the surfaces that have
+# been through it, and prints the rest as a backlog with a count.
+ALERT_SURFACES='Views/(Organisms/(Alerts|NotificationInbox)|Molecules/(ActivityRow|AlertCardView|PriceAlertRuleRow))'
+BARE_FILL_GATED="$(printf '%s' "$BARE_FILL" | grep -E "$ALERT_SURFACES" || true)"
+BARE_FILL_BACKLOG="$(printf '%s' "$BARE_FILL" | grep -vE "$ALERT_SURFACES" || true)"
+report "no bare .background(AppColors.cardBackground) on the alert surfaces" \
+  "a card fill with no shape or edge is invisible in light mode (1.09:1) — use .cardSurface()" \
+  "$BARE_FILL_GATED"
+if [ -n "$BARE_FILL_BACKLOG" ]; then
+  printf '\033[33m  note\033[0m %s other bare card fill(s) outside the alert surfaces — check each in LIGHT mode\n' \
+    "$(printf '%s\n' "$BARE_FILL_BACKLOG" | grep -c ':')"
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
   printf '\033[32mtheme-lint: clean\033[0m\n'

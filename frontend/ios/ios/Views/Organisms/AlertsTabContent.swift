@@ -73,8 +73,8 @@ struct AlertsTabContent: View {
             // THE one lazy stack. Do not add another inside any section below.
             LazyVStack(spacing: AppSpacing.lg) {
                 upcomingSection()
+                activitySection()
                 priceRulesSection()
-                notificationsSection()
             }
             .padding(.top, AppSpacing.sm)
             .padding(.bottom, AppSpacing.xxxl)
@@ -158,20 +158,99 @@ struct AlertsTabContent: View {
         await trackingViewModel.refresh()
     }
 
-    // MARK: - Section 1 — Upcoming & Events
+    // MARK: - Section 1 — Upcoming
 
+    /// Forward-looking digest items only: earnings dates and dated market events.
+    ///
+    /// `GET /tracking/assets` is guest-allowed, so this is the one section with content
+    /// for a signed-out user.
     @ViewBuilder
     private func upcomingSection() -> some View {
-        // Moved here from the Assets tab. It is a computed digest over the tracking feed
-        // (earnings, whale trades, analyst grades, insider transactions) — NOT notifications
-        // and NOT rules, which is why it needed a name that is not "Alerts".
-        //
-        // `GET /tracking/assets` is guest-allowed, so this is the one section that still has
-        // content for a signed-out user.
         AlertsEventsSection(
-            alerts: trackingViewModel.filteredAlerts,
+            title: "Upcoming",
+            emptyMessage: "Nothing scheduled for what you track. Earnings dates will "
+                + "appear here as they're confirmed.",
+            emptyIcon: "calendar",
+            alerts: trackingViewModel.filteredAlerts.filter(\.isUpcoming),
             onAlertTapped: { trackingViewModel.viewAlertDetail($0) }
         )
+    }
+
+    // MARK: - Section 2 — Activity
+
+    /// Everything that already HAPPENED, in one grammar: the digest's roll-ups first,
+    /// then the delivered notifications, newest first.
+    ///
+    /// ⚠️ NOT interleaved chronologically, and that is deliberate. The roll-up containers
+    /// (`WhaleTradeAlertData` / `AnalystRatingAlertData` / `InsiderTransactionAlertData`)
+    /// carry a `timeWindowLabel` like "this week" and NO date; their items have a day and
+    /// month with no year. Sorting them against `NotificationEventDTO.createdAt` would
+    /// mean fabricating a timestamp, and a feed that sorts on invented data is worse than
+    /// one that groups honestly. Roll-ups are this week's summary, so they lead.
+    @ViewBuilder
+    private func activitySection() -> some View {
+        let rollups = trackingViewModel.filteredAlerts.filter { !$0.isUpcoming }
+
+        SectionHeader(title: "Activity")
+            .padding(.horizontal, AppSpacing.lg)
+
+        ForEach(rollups) { alert in
+            AlertCardView(alert: alert) { trackingViewModel.viewAlertDetail(alert) }
+                .padding(.horizontal, AppSpacing.lg)
+        }
+
+        notificationRows(hasRollups: !rollups.isEmpty)
+    }
+
+    /// The notification half of Activity.
+    ///
+    /// `hasRollups` decides whether an EMPTY notification list is worth saying out loud:
+    /// with roll-ups above it, "No notifications yet" under a populated section reads as
+    /// a broken sub-list rather than a quiet inbox.
+    @ViewBuilder
+    private func notificationRows(hasRollups: Bool) -> some View {
+        switch notifications.state {
+        case .loading:
+            ProgressView()
+                .tint(AppColors.textSecondary)
+                .frame(maxWidth: .infinity)
+
+        case .empty:
+            if !hasRollups {
+                NotificationInboxSection.emptyNotice()
+                    .padding(.horizontal, AppSpacing.lg)
+            }
+
+        case .reconnecting:
+            InlineRetryNotice(
+                message: "Reconnecting your account…",
+                systemImage: "arrow.clockwise",
+                iconColor: AppColors.textMuted
+            )
+            .padding(.horizontal, AppSpacing.lg)
+
+        case .signedOut:
+            InlineRetryNotice(
+                message: "Sign in to see your notifications. They're kept on your account, so "
+                    + "an alert you miss on your lock screen is still here later.",
+                systemImage: "person.crop.circle.badge.checkmark",
+                iconColor: AppColors.textMuted,
+                retryTitle: "Sign In",
+                onRetry: { appState.requestSignIn(for: "see your notifications") }
+            )
+            .padding(.horizontal, AppSpacing.lg)
+
+        case .error(let message):
+            NotificationInboxSection.errorNotice(message) { notifications.load() }
+                .padding(.horizontal, AppSpacing.lg)
+
+        case .loaded:
+            // A bare `ForEach`, spliced DIRECTLY into the LazyVStack above — no wrapper
+            // stack. This is the only unbounded section (30 rows a page, infinite scroll)
+            // and the only reason the stack is lazy at all.
+            NotificationInboxSection.rows(viewModel: notifications, route: $route)
+                .padding(.horizontal, AppSpacing.lg)
+        }
     }
 
     // MARK: - Section 2 — Price Rules
@@ -225,7 +304,11 @@ struct AlertsTabContent: View {
                 .padding(.horizontal, AppSpacing.lg)
 
             case .loaded:
-                VStack(spacing: 1) {
+                // Separate cards, not a bordered GROUP with 1pt separators. Each row is
+                // its own `ActivityRow` now, and wrapping self-carded rows in another
+                // card is the nested-card trap: in dark the inner fill measures 1.00:1
+                // against the outer one and the rows vanish.
+                VStack(spacing: AppSpacing.md) {
                     ForEach(priceRules.rules) { rule in
                         PriceAlertRuleRow(
                             alert: rule,
@@ -237,8 +320,6 @@ struct AlertsTabContent: View {
                         )
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
-                .cardBorder(cornerRadius: AppCornerRadius.large)
                 .padding(.horizontal, AppSpacing.lg)
 
                 Text("\(priceRules.rules.count) of \(priceRules.maxPerUser) alerts")
@@ -246,54 +327,6 @@ struct AlertsTabContent: View {
                     .foregroundColor(AppColors.textMuted)
                     .padding(.horizontal, AppSpacing.lg)
             }
-        }
-    }
-
-    // MARK: - Section 3 — Notifications
-
-    @ViewBuilder
-    private func notificationsSection() -> some View {
-        SectionHeader(title: "Notifications")
-            .padding(.horizontal, AppSpacing.lg)
-
-        switch notifications.state {
-        case .loading:
-            ProgressView()
-                .tint(AppColors.textSecondary)
-                .frame(maxWidth: .infinity)
-
-        case .empty:
-            NotificationInboxSection.emptyNotice()
-                .padding(.horizontal, AppSpacing.lg)
-
-        case .reconnecting:
-            InlineRetryNotice(
-                message: "Reconnecting your account…",
-                systemImage: "arrow.clockwise",
-                iconColor: AppColors.textMuted
-            )
-            .padding(.horizontal, AppSpacing.lg)
-
-        case .signedOut:
-            InlineRetryNotice(
-                message: "Sign in to see your notifications. They're kept on your account, so "
-                    + "an alert you miss on your lock screen is still here later.",
-                systemImage: "person.crop.circle.badge.checkmark",
-                iconColor: AppColors.textMuted,
-                retryTitle: "Sign In",
-                onRetry: { appState.requestSignIn(for: "see your notifications") }
-            )
-            .padding(.horizontal, AppSpacing.lg)
-
-        case .error(let message):
-            NotificationInboxSection.errorNotice(message) { notifications.load() }
-                .padding(.horizontal, AppSpacing.lg)
-
-        case .loaded:
-            // A bare `ForEach`, spliced DIRECTLY into the LazyVStack above — no wrapper stack.
-            // This is the only unbounded section (30 rows a page, infinite scroll) and the only
-            // reason the stack is lazy at all.
-            NotificationInboxSection.rows(viewModel: notifications, route: $route)
         }
     }
 }

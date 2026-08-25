@@ -221,8 +221,66 @@ FMP-dependent features.
       - [ ] Set **App Store Server Notifications** URLs (Production + Sandbox) to `https://caydexinvest.com/api/v1/billing/app-store-notifications`
 
 - [ ] **DAYS 4–6 — Close FMP**
+      - [ ] **Send the reply in [`fmp-negotiation-reply.md`](fmp-negotiation-reply.md)** (drafted 2026-08-24 — see the negotiation state below)
       - [ ] Formal quote → confirm term → sign → pay
       - [ ] Flip `IAP_ENVIRONMENT` → `Production` and `APNS_ENV` → `production` on Railway *(both still read Sandbox/sandbox as of 2026-08-21 — an earlier attempt did not save)*
+
+#### 📨 FMP negotiation state — 2026-08-24
+
+Laith (account manager) has landed at **$600/mo, month-to-month**, transcripts droppable, and is
+asking: *"let me know … if we can drop the quote end point completely."*
+
+**What that sentence means.** Remove the **live-price entitlement** — `/stable/quote` and
+`/stable/batch-quote`. They carry live consolidated US exchange data (CTA/UTP SIP tapes), which is
+what triggers both the **$1,500–2,000/mo exchange fees** *and* the separate Data Display and
+Licensing Agreement. It does **not** mean dropping historical or intraday data — those are a
+different endpoint family, and that distinction is the whole deal.
+
+**Blast radius, traced.** `quote` has 16 backend callers, `batch-quote` 12. There is **no
+commodity, index or crypto price endpoint in the codebase at all** — all three ride the same two
+paths. Breaks with no fallback: Home Market Pulse + watchlist tiles + Most Shorted + themes,
+`GET /tracking/assets`, portfolio valuation, the price-alerts engine, the iOS widget, Updates pills
++ sweeper, Earnings Shockers' cap floor, related-ticker rows, the chat stock card, the WebSocket's
+change %, the whale return tile. **Unaffected:** every chart, sparkline, technical level, volatility
+σ and historical benchmark — those run on `historical-chart/{interval}` + `historical-price-eod`.
+
+**DECIDED 2026-08-24 — reply sent:** drop transcripts · **150 GB** bandwidth (not 100: 25.57 GB is
+a *pre-launch* figure, and a hard stop mid-month is an outage for every paying user) · drop
+real-time **and** streaming · **refuse to drop `quote`/`batch-quote`** pending three answers:
+(a) is "the quote endpoint" the same line item as "the real-time endpoint"? (b) can quote/batch-quote
+be served **15-min delayed** without exchange licences? (c) 🔴 **his email #2 waived the separate
+Data Display agreement *"provided we remove the quote endpoint"* — if we keep it, does that waiver
+come back?** (c) gates the Content Rights answer.
+
+| Option | Cost | Verdict |
+|---|---|---|
+| Real-time + exchange fees | ~$2,100–2,700/mo | **No** |
+| **15-min delayed quotes** | ≤$600 | ✅ **Primary ask — never priced, he answered only real-time** |
+| Drop quote, reconstruct from intraday + EOD + `profile.price` | ≤$600 | ✅ Fallback, **only** if those three survive; costs 2–4 dev-days and raises bandwidth |
+| EOD-only, or quote *and* intraday dropped | — | **Walk away** — kills 1D/1W charts, all sparklines, every day-change number, price alerts as a feature |
+
+**🔴 A correction we owe them, in the draft reply:** the previous email told Laith *"we don't
+consume a streaming feed at all."* That is **wrong** — `live_price_manager.py:30-31` opens
+`wss://websockets.financialmodelingprep.com` and `wss://crypto.financialmodelingprep.com`. It is
+inert today (key unentitled, both sockets 401) and every consumer falls back to REST, so conceding
+it is free — but shipping a streaming client under a package that excludes streaming is exactly the
+ToS **§2.10 monitor-and-terminate** trap.
+
+**Two things already true and worth not re-deriving:**
+- **Delayed needs no legal copy change.** `TermsOfUseView.swift:75`, `DisclaimersView.swift:95-96`,
+  `SupportView.swift:162`, `DataSourcesView.swift:109` and the App Store listing all already say
+  quotes may be delayed 15–20 minutes. **EOD-only has no covering copy at all.**
+- **Non-US is a dead ask.** He says no reduction, and the audit found **zero** non-US usage — no FX
+  pairs, no `.L`/`.TO`/`.HK` suffixes, no `exchange=`/`country=` params anywhere.
+
+**⚠️ Open question that could 403 in production:** he says Advanced Market Metrics *"were not
+included in the original scope."* The backend calls **five** of them today
+(`fmp.py:732, 827, 850, 859, 868`). If "not in scope" means *not entitled*, those start failing on
+the day we switch keys. Pinned in the reply.
+
+**Do not answer Content Rights** (§7) until he confirms **in writing** that the Enterprise Order
+Form alone grants end-user display rights for the remaining datasets, with no separate Data Display
+and Licensing Agreement.
 
 - [ ] **DAY 6 — Submit**
       - [ ] Answer **Content Rights** (now truthful for both FMP and CoinGecko)

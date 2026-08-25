@@ -77,6 +77,14 @@ from app.services.notification_inbox_service import (
     NotificationInboxUnavailable,
     get_notification_inbox_service,
 )
+from app.schemas.credit_history import CreditHistoryResponse
+from app.services.credit_history_service import (
+    # Aliased: this module already imports the inbox's DEFAULT_PAGE, and the two page
+    # sizes are independent knobs that happen to share a name.
+    DEFAULT_PAGE as CREDIT_HISTORY_DEFAULT_PAGE,
+    CreditHistoryUnavailable,
+    get_credit_history_service,
+)
 from app.utils.supabase_errors import is_unique_violation
 
 logger = logging.getLogger(__name__)
@@ -236,6 +244,43 @@ async def get_user_credits(
         )
 
     return credits_response_from_rows(result.data or [])
+
+
+# Registered AFTER /me/credits so the more specific path is not shadowed by it.
+@router.get("/me/credits/history", response_model=CreditHistoryResponse)
+async def list_my_credit_history(
+    limit: int = CREDIT_HISTORY_DEFAULT_PAGE,
+    before: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Newest-first page of this user's credit movements — the statement behind the balance.
+
+    `before` is a KEYSET cursor (the `id` of the last item on the previous page), not an
+    offset: rows arrive continuously at the head, so an offset page 2 would repeat or skip
+    whenever a charge landed between requests.
+
+    ⚠️ `get_current_user`, NOT `get_current_user_or_guest` — note the sibling
+    `GET /me/credits` above uses the latter and is flagged `# TEMP: guest fallback`. A
+    signed-out caller resolves to the SHARED `GUEST_USER_ID` sentinel, so serving its
+    ledger would hand every install one global pool's history. Guests are never metered
+    (`spend_credits` early-returns on the sentinel), so their statement is empty by
+    construction and 401 is the honest answer — the same argument /me/notifications makes.
+
+    A read failure is SYSTEM_BUSY, never an empty 200: an empty statement and a broken
+    statement look identical, and this is the screen a user opens when they already
+    believe their credits are wrong.
+    """
+    try:
+        return await asyncio.to_thread(
+            get_credit_history_service().list_for_user,
+            user["id"], limit=limit, before=before,
+        )
+    except CreditHistoryUnavailable as e:
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            message=f"credit history read failed: {e}",
+            user_message="Couldn't load your credit history right now. Please try again.",
+        )
 
 
 @router.get("/me/subscription", response_model=SubscriptionResponse)

@@ -120,6 +120,9 @@ enum APIEndpoint: Sendable {
     // MARK: - User
     case getCurrentUser
     case getUserCredits
+    /// The credit statement behind the balance: every spend, refund, grant and purchase.
+    /// `before` is a KEYSET cursor (the `id` of the last row of the previous page).
+    case listCreditHistory(limit: Int, before: String?)
     case updateProfile(displayName: String?)
     /// Set the profile picture. The JPEG travels base64-encoded in a JSON body because
     /// `APIClient.buildRequest` is a single JSON funnel; a 512x512 q0.8 photo is ~40-90 KB,
@@ -389,6 +392,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me"
         case .getUserCredits:
             return "/api/v1/users/me/credits"
+        case .listCreditHistory:
+            return "/api/v1/users/me/credits/history"
         case .updateProfile, .deleteAccount:
             return "/api/v1/users/me"
         case .updateAvatar, .deleteAvatar:
@@ -729,6 +734,12 @@ enum APIEndpoint: Sendable {
         case .listNotifications(let limit, let before):
             var q = ["limit": String(limit)]
             // Omitted on the first page so that request line stays byte-identical.
+            if let before, !before.isEmpty { q["before"] = before }
+            return q
+
+        case .listCreditHistory(let limit, let before):
+            var q = ["limit": String(limit)]
+            // Same first-page rule as the inbox above.
             if let before, !before.isEmpty { q["before"] = before }
             return q
 
@@ -1207,6 +1218,14 @@ enum APIEndpoint: Sendable {
         // auth.md §1a's tier test — the same tier as settings and devices.
         case .listNotifications, .markNotificationsRead,
              .listPriceAlerts, .createPriceAlert, .updatePriceAlert, .deletePriceAlert:
+            return .signInRequired
+
+        // NOT `.guestAllowed`, even though its sibling `.getUserCredits` above is. A
+        // signed-out caller resolves to the SHARED guest sentinel, so serving that
+        // account's ledger would hand every install one global pool's history. Guests are
+        // never metered, so their statement is empty by construction — the backend uses
+        // `get_current_user` here for the same reason.
+        case .listCreditHistory:
             return .signInRequired
 
         // Both take `get_current_user_id`. Short-circuiting a tokenless `signOut` is harmless —

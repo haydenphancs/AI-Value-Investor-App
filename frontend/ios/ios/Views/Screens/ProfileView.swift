@@ -387,6 +387,29 @@ struct ProfileView: View {
                         .cardFill()
                 )
 
+                // Credit History — the statement behind the number above.
+                //
+                // Slotted in CREDIT MANAGEMENT rather than the settings card below on
+                // purpose: this section is gated on `viewModel.isAuthenticated` while
+                // `settingsSection` renders for guests too, and the route is
+                // `.signInRequired`. It also belongs directly under the balance it explains.
+                //
+                // This section has no rows-card of its own, so the row carries its own
+                // one-row card chrome, mirroring the settings card below.
+                NavigationLink {
+                    CreditHistoryView()
+                } label: {
+                    ProfileSettingsRowContent(
+                        icon: "clock.arrow.circlepath",
+                        iconColor: AppColors.textSecondary,
+                        title: "Credit History",
+                        subtitle: "Where your credits went"
+                    )
+                }
+                .background(AppColors.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                .cardBorder(cornerRadius: AppCornerRadius.large)
+
                 // Upgrade CTA
                 if viewModel.userTier == .free {
                     Button(action: { showPaywall = true }) {

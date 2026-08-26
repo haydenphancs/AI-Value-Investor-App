@@ -94,29 +94,51 @@ struct SignalTickerDetailView: View {
 
     // MARK: - Header (tappable ticker → TickerDetailView)
 
+    /// The WHOLE card is the tap target, not just the symbol.
+    ///
+    /// The button used to wrap only the `AMZN ›` line, so the company name, the
+    /// "Funds accumulating" line, the price and the market cap were all dead
+    /// pixels inside a card that reads as one control — while every holder row
+    /// beneath it (`SignalHolderRow`) is tappable edge to edge. Reported from
+    /// TestFlight: "The first tap looks like it's clickable on everywhere within
+    /// the tap, but it isn't. The tabs under it are perfect."
+    ///
+    /// Same shape as `SignalHolderRow`: `Button` wrapping the whole card,
+    /// `.buttonStyle(.plain)` so the label keeps its own colours, and
+    /// `.contentShape` AFTER the padding so the padded area and the `Spacer`
+    /// gutter are hit-testable rather than just the glyphs.
     private func header(_ detail: SignalTickerDetail) -> some View {
+        Button {
+            selectedTicker = MarketTicker(
+                name: detail.companyName.isEmpty ? detail.symbol : detail.companyName,
+                symbol: detail.symbol,
+                type: .stock,
+                price: 0,
+                changePercent: 0,
+                sparklineData: []
+            )
+        } label: {
+            headerContent(detail)
+        }
+        .buttonStyle(.plain)
+        // One VoiceOver element instead of five, and it names the destination —
+        // the chevron that carries that meaning visually is decorative to a
+        // screen reader.
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens \(detail.symbol) details")
+    }
+
+    private func headerContent(_ detail: SignalTickerDetail) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Button {
-                    selectedTicker = MarketTicker(
-                        name: detail.companyName.isEmpty ? detail.symbol : detail.companyName,
-                        symbol: detail.symbol,
-                        type: .stock,
-                        price: 0,
-                        changePercent: 0,
-                        sparklineData: []
-                    )
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(detail.symbol)
-                            .font(AppTypography.title)
-                            .foregroundColor(AppColors.primaryBlue)
-                        Image(systemName: "chevron.right")
-                            .font(AppTypography.iconSmall)
-                            .foregroundColor(AppColors.primaryBlue)
-                    }
+                HStack(spacing: 4) {
+                    Text(detail.symbol)
+                        .font(AppTypography.title)
+                        .foregroundColor(AppColors.primaryBlue)
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconSmall)
+                        .foregroundColor(AppColors.primaryBlue)
                 }
-                .buttonStyle(.plain)
 
                 if !detail.companyName.isEmpty {
                     Text(detail.companyName)
@@ -148,6 +170,7 @@ struct SignalTickerDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
+        .contentShape(Rectangle())
     }
 
     // MARK: - Empty / error

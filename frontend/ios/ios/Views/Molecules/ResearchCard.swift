@@ -80,7 +80,19 @@ struct ResearchCard: View {
             .padding(AppSpacing.md)
             .background(AppColors.cardBackground)
         }
-        .frame(width: 260, height: 280)
+        // Height is a FLOOR, not a fixed size. See the header of RelatedTickerCard.swift
+        // for the full rationale: a `.frame(height:)` centres an oversized child, so text
+        // that outgrows the box bleeds off the top AND bottom edges. `maxHeight: .infinity`
+        // lets the card take the height the parent HStack resolves, which keeps interior
+        // Spacers working (so nothing moves at the default content size) and keeps every
+        // card in the row the same height. Parent uses `HStack(alignment: .top)` to match.
+        //
+        // `.top` is required, not cosmetic: the 80pt gradient header must stay flush to the
+        // card's top edge. Centring would float it down and open a gap inside the clip.
+        // The `.clipShape` below also means this card's overflow was silently MASKED rather
+        // than visibly overrunning — the same bug, just quieter.
+        .frame(minWidth: 260, maxWidth: 260,
+               minHeight: 280, maxHeight: .infinity, alignment: .top)
         .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
         // Card on the page background: an edge in light, nothing in dark.
         .cardBorder(cornerRadius: AppCornerRadius.large)

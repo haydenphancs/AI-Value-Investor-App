@@ -53,7 +53,7 @@ struct TickerNewsContent: View {
 
                 // Bottom spacing for AI bar
                 Spacer()
-                    .frame(height: 120)
+                    .frame(height: AppSpacing.aiBarReserve)
             }
         }
         .padding(.horizontal, AppSpacing.lg)
@@ -81,7 +81,7 @@ struct TickerNewsContent: View {
 
             // Bottom spacing for AI bar
             Spacer()
-                .frame(height: 120)
+                .frame(height: AppSpacing.aiBarReserve)
         }
     }
 

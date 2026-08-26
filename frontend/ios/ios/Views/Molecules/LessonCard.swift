@@ -53,7 +53,14 @@ struct LessonCard: View {
                 }
             }
             .padding(AppSpacing.md)
-            .frame(width: 160, height: 150)
+            // Height is a FLOOR, not a fixed size. See the header of RelatedTickerCard.swift
+            // for the full rationale: a `.frame(height:)` centres an oversized child, so text
+            // that outgrows the box bleeds off the top AND bottom edges. `maxHeight: .infinity`
+            // lets the card take the height the parent HStack resolves, which keeps interior
+            // Spacers working (so nothing moves at the default content size) and keeps every
+            // card in the row the same height. Parent uses `HStack(alignment: .top)` to match.
+            .frame(minWidth: 160, maxWidth: 160,
+                   minHeight: 150, maxHeight: .infinity, alignment: .topLeading)
             .cardSurface(cornerRadius: AppCornerRadius.large)
             .opacity(cardOpacity)
         }

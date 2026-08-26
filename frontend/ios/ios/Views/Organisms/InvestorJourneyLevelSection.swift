@@ -23,7 +23,10 @@ struct InvestorJourneyLevelSection: View {
 
             // Horizontal scrolling lesson cards
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.md) {
+                // `alignment: .top` pairs with the card's `minHeight`/`maxHeight: .infinity` frame:
+                // cards can now grow with the text, and a taller one must not vertically offset
+                // its neighbours. Without it the HStack centres them and the row looks ragged.
+                HStack(alignment: .top, spacing: AppSpacing.md) {
                     ForEach(levelProgress.lessons) { lesson in
                         LessonCard(lesson: lesson) {
                             onLessonTap?(lesson)

@@ -107,6 +107,16 @@ _GUARDED_SITES = [
      ["minimumScaleFactor"]),
     ("Views/Molecules/ScannerCard.swift", "Text(scanner.title)",
      ["lineLimit", "minimumScaleFactor"]),
+    # "People Also Check". The symbol, price and change had NO lineLimit at all, so under
+    # pressure they broke onto a second line and added a whole line of growth on top of the
+    # per-line growth. The price is the widest string in a 76pt box and the crypto screen
+    # reuses this card with an unseparated "$119332.11".
+    ("Views/Molecules/RelatedTickerCard.swift", "Text(ticker.symbol)",
+     ["lineLimit", "minimumScaleFactor"]),
+    ("Views/Molecules/RelatedTickerCard.swift", "Text(ticker.formattedPrice)",
+     ["lineLimit", "minimumScaleFactor", "allowsTightening"]),
+    ("Views/Molecules/RelatedTickerCard.swift", "Text(ticker.formattedChange)",
+     ["lineLimit", "minimumScaleFactor", "allowsTightening"]),
 ]
 
 
@@ -128,6 +138,147 @@ def test_market_pulse_tile_can_grow():
     src = _src("Views/Molecules/MarketPulseCard.swift")
     assert ".frame(minWidth: 88" in src
     assert ".frame(width: 88" not in src
+
+
+# ── 2b. Horizontal-scroller cards that were hard-boxed ───────────────────────
+#
+# A TestFlight tester on an ordinary (NON-accessibility) larger Text Size reported the
+# "People Also Check" card clipped at the top AND the bottom. `.frame(width:height:)`
+# CENTRES an oversized child, so the overflow splits evenly and bleeds off both edges —
+# and `.cardSurface()` is a background, not a clip, so it visibly overran the card.
+#
+# RelatedTickerCard measured 62pt of text into a 64pt budget at the default content size:
+# it fit by 2pt and overflowed at every step above default.
+#
+# The fix is three parts, all load-bearing: pin the width, make the height a FLOOR, and add
+# `maxHeight: .infinity` so the card accepts the height the parent HStack resolves (which
+# is what keeps interior Spacers working and every card in the row the same height).
+#
+# The width pin reads as `minWidth == maxWidth` rather than `width:` because `width:`
+# belongs to the OTHER `frame` overload and cannot be combined with `minHeight:` —
+# mixing them is `error: extra argument 'width' in call`, which is how this was found.
+#
+# (file, the width pin that must survive, the fixed height that must not come back).
+_SCROLLER_CARDS = [
+    ("Views/Molecules/RelatedTickerCard.swift", "minWidth: 100, maxWidth: 100", "height: 120)"),
+    ("Views/Molecules/PersonaCard.swift", "minHeight: cardHeight", "height: cardHeight)"),
+    ("Views/Molecules/LessonCard.swift", "minWidth: 160, maxWidth: 160", "height: 150)"),
+    ("Views/Molecules/ResearchCard.swift", "minWidth: 260, maxWidth: 260", "height: 280)"),
+    ("Views/Molecules/RelatedMoneyMoveCard.swift", "minWidth: 200, maxWidth: 200", "height: 200)"),
+]
+
+# Each card's one parent scroller.
+_SCROLLER_PARENTS = [
+    "Views/Organisms/TickerDetailRelatedSection.swift",
+    "Views/Organisms/PersonaSelectionSection.swift",
+    "Views/Organisms/RecentResearchSection.swift",
+    "Views/Organisms/InvestorJourneyLevelSection.swift",
+    "Views/Organisms/MoneyMoveRelatedArticlesSection.swift",
+]
+
+
+@pytest.mark.parametrize("rel,pin,forbidden", _SCROLLER_CARDS,
+                         ids=[Path(f).stem for f, _, _ in _SCROLLER_CARDS])
+def test_scroller_card_height_is_a_floor(rel, pin, forbidden):
+    """⚠️ Scans STRIPPED source. RelatedTickerCard's header comment quotes the old
+    `.frame(width: 100, height: 120)` verbatim while explaining why it was wrong, so an
+    un-stripped scan would report the bug as present forever — and, worse, would push the
+    next reader to delete the explanation to make the test pass."""
+    code = _strip_swift_comments(_src(rel))
+    assert pin in code, f"{rel}: lost the width pin / height floor ({pin!r})"
+    assert "maxHeight: .infinity" in code, (
+        f"{rel}: without `maxHeight: .infinity` the card sizes to its ideal height — interior "
+        "Spacers collapse and the row goes ragged the moment one card grows")
+    assert forbidden not in code, f"{rel}: the fixed height is back ({forbidden!r})"
+
+
+def test_the_ai_bar_reserve_scales():
+    """The bottom reserve that clears the floating "Ask Cay AI" bar must SCALE, because what
+    it clears is text.
+
+    It was a literal `120` in TWELVE places. Once the chips + input bar grew past 120pt the last
+    section of the page sat under the overlay with the scroll already at its end — the content
+    was simply unreachable. It was reported as "I can't scroll down", not as a layout bug,
+    which is why nothing caught it: scrolling itself works fine.
+    """
+    theme = _APPTHEME.read_text()
+    assert "static var aiBarReserve" in theme, "the scaling reserve token is gone"
+    block = _window_after(theme, "static var aiBarReserve", lines=3)
+    assert "scaledSize(120" in block and "readingCap" in block, \
+        f"aiBarReserve no longer scales:\n{block}"
+
+    # Every reserve site must use the token, not a number. Scans STRIPPED source because the
+    # token's own doc comment names the literal 120 while explaining it.
+    offenders = []
+    for path in sorted((_IOS / "Views").rglob("*.swift")):
+        lines = _strip_swift_comments(path.read_text()).splitlines()
+        for n, line in enumerate(lines):
+            if "AppSpacing.aiBarReserve" in line:
+                continue
+            # a bare 120pt Spacer in a detail tab is the shape we removed
+            if ".frame(height: 120)" in line and "Spacer" in "".join(lines[max(0, n - 2):n + 1]):
+                offenders.append(f"{path.relative_to(_IOS)}:{n + 1}")
+    assert not offenders, "fixed 120pt bottom reserve is back: " + ", ".join(offenders)
+
+    # ...and the token is actually used at the expected number of sites.
+    used = sum(_strip_swift_comments(p2.read_text()).count("AppSpacing.aiBarReserve")
+               for p2 in (_IOS / "Views").rglob("*.swift"))
+    assert used >= 12, f"only {used} sites use aiBarReserve; expected the full set of 12"
+
+
+def test_the_ai_bar_reserve_scan_is_not_vacuous():
+    """Mutation-tested by hand on 2026-08-25: a `.frame(height: 120)` was pasted back under a
+    Spacer in TickerDetailOverviewContent, the test was watched to FAIL, and it was restored."""
+    # comment stripping must remove the doc comment that names the literal
+    sample = "// .frame(height: 120)\nSpacer()\n    .frame(height: AppSpacing.aiBarReserve)\n"
+    stripped = _strip_swift_comments(sample)
+    assert ".frame(height: 120)" not in stripped, "comment stripping regressed"
+    assert "aiBarReserve" in stripped
+    # the offender pattern must be able to match at all
+    probe = "Spacer()\n    .frame(height: 120)\n".splitlines()
+    assert any(".frame(height: 120)" in l for l in probe)
+    # the token's doc comment really does contain the trap literal, so stripping is load-bearing
+    assert ".frame(height:" not in _APPTHEME.read_text() or "120" in _APPTHEME.read_text()
+
+
+def test_persona_tagline_is_no_longer_a_hard_28pt_box():
+    """Called out separately because it is a SECOND fixed frame nested inside a card that
+    already had one, and it is the more certain clip: `.lineLimit(2)` of `caption` needs
+    ~31pt at the 1.4x cap and the box was 28pt, so the second line was cut at any raised
+    size regardless of the outer frame."""
+    code = _strip_swift_comments(_src("Views/Molecules/PersonaCard.swift"))
+    assert ".frame(minHeight: 28" in code
+    assert ".frame(height: 28" not in code
+
+
+@pytest.mark.parametrize("rel", _SCROLLER_PARENTS,
+                         ids=[Path(f).stem for f in _SCROLLER_PARENTS])
+def test_scroller_row_top_aligns(rel):
+    """The other half of the frame change, and useless without it. An HStack centres its
+    children by default, so once cards size to content a taller one offsets every
+    neighbour. Reverting either half alone brings back a visible defect."""
+    code = _strip_swift_comments(_src(rel))
+    assert "HStack(alignment: .top" in code, f"{rel}: scroller row is not top-aligned"
+
+
+def test_scroller_card_scanner_is_not_vacuous():
+    """Mutation-tested by hand on 2026-08-25: each `forbidden` string was pasted back into
+    its own file, the matching parametrised case was watched to FAIL, and the file restored.
+
+    The controls below pin the two mechanisms that could silently disarm the scan."""
+    # 1. Comment stripping must actually strip — this is what the RelatedTickerCard case
+    #    depends on, so prove it removes a commented-out fixed frame and keeps real code.
+    sample = "// .frame(width: 100, height: 120)\nlet x = 1\n"
+    assert "height: 120" not in _strip_swift_comments(sample), "comment stripping regressed"
+    assert "let x = 1" in _strip_swift_comments(sample)
+    # 2. ...and that dependency is real: the trap string IS still in the unstripped file.
+    assert "height: 120)" in _src("Views/Molecules/RelatedTickerCard.swift"), \
+        "the header comment no longer quotes the old frame — this control is now moot"
+    # 3. A moved or emptied file must not read as a pass.
+    for rel, _, _ in _SCROLLER_CARDS:
+        assert len(_strip_swift_comments(_src(rel))) > 400, f"{rel}: suspiciously small"
+    for rel in _SCROLLER_PARENTS:
+        assert "ScrollView(.horizontal" in _src(rel), f"{rel}: no longer a horizontal scroller"
 
 
 def test_tab_bar_labels_are_guarded():

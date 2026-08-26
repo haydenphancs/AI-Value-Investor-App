@@ -100,7 +100,7 @@ struct TickerFinancialsContent: View {
 
             // Bottom spacing for AI bar
             Spacer()
-                .frame(height: 120)
+                .frame(height: AppSpacing.aiBarReserve)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)

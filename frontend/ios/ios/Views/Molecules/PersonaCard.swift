@@ -12,7 +12,7 @@ struct PersonaCard: View {
     var isSelected: Bool = false
     var onTap: (() -> Void)?
 
-    // Fixed card dimensions for consistent sizing
+    // Card dimensions. `cardHeight` is a FLOOR, not a fixed height — see the frame below.
     private let cardWidth: CGFloat = 100
     private let cardHeight: CGFloat = 120
 
@@ -53,17 +53,31 @@ struct PersonaCard: View {
                         .minimumScaleFactor(0.8)
                 }
 
-                // Tagline - fixed height area
+                // Tagline — reserves two lines so short taglines still align across cards
                 Text(persona.tagline)
                     .font(AppTypography.caption)
                     .foregroundColor(persona.accentColor)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
-                    .frame(height: 28) // Fixed height for tagline
+                    // Two lines of `caption` occupy 28pt at the default content size but
+                    // ~31pt at the 1.4x cap, so a hard `height: 28` clipped the second line
+                    // outright at any raised size. A floor keeps the reserved space (short
+                    // taglines still align across cards) without capping growth.
+                    .frame(minHeight: 28, alignment: .top)
 
                 Spacer(minLength: 0)
             }
-            .frame(width: cardWidth, height: cardHeight)
+            // Height is a FLOOR, not a fixed size. See the header of RelatedTickerCard.swift
+            // for the full rationale: a `.frame(height:)` centres an oversized child, so text
+            // that outgrows the box bleeds off the top AND bottom edges. `maxHeight: .infinity`
+            // lets the card take the height the parent HStack resolves, which keeps interior
+            // Spacers working (so nothing moves at the default content size) and keeps every
+            // card in the row the same height. Parent uses `HStack(alignment: .top)` to match.
+            //
+            // ⚠️ `.frame` deliberately comes BEFORE `.padding` on this card: the padding sits
+            // OUTSIDE the box, making the real card 116x144. Reordering would shrink it.
+            .frame(minWidth: cardWidth, maxWidth: cardWidth,
+                   minHeight: cardHeight, maxHeight: .infinity, alignment: .top)
             .padding(.vertical, AppSpacing.md)
             .padding(.horizontal, AppSpacing.sm)
             .background(

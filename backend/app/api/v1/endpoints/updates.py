@@ -333,20 +333,29 @@ async def get_updates_feed(
     # articles, i.e. a summary of yesterday's news replacing today's.
     insight: Optional[AIInsightCardResponse] = None
     if offset == 0:
-        # Only surface an Insights card when the scope actually has news within the
-        # badge window. Prefer the last 24h and fall back to 48h only when there is
-        # nothing in 24h — the SAME selector the sweeper uses — so the badge matches
-        # the news the card summarises. With nothing in 48h, show NO card at all
-        # (neither AI nor fallback); the timeline below still renders cached rows.
-        recent, window_hours = select_recent_corpus(
-            raw_articles,
-            datetime.now(timezone.utc),
-            # Same subject filter the sweeper applies, so the endpoint's show/hide and
-            # badge agree with the card the sweeper actually generated. Diverging here
-            # would show a "24h" badge over a card built from a different corpus.
+        now = datetime.now(timezone.utc)
+
+        # TWO windows over the SAME in-memory rows (no extra I/O), because they answer
+        # two different questions and conflating them is what made a tab show a feed
+        # full of today's news above no Insights card at all:
+        #
+        #   feed_recent — does this scope have ANY news in the badge window? That is
+        #     the show/hide question, and it is a property of the FEED the user is
+        #     looking at, not of the subject filter.
+        #   subject_recent — which of those articles are about THIS ticker? That is a
+        #     property of the AI card's corpus, and it only decides the badge here.
+        #
+        # The subject filter used to gate both. A ticker whose recent coverage is all
+        # peer/sector wraps (PLUG's hydrogen round-ups are the canonical case) filtered
+        # to empty and got NO card — while the timeline directly beneath it listed the
+        # very articles that had just been filtered out. Reported from TestFlight as
+        # "on PLUG it doesn't have Insight at all".
+        feed_recent, feed_window = select_recent_corpus(raw_articles, now)
+        subject_recent, subject_window = select_recent_corpus(
+            raw_articles, now,
             scope=None if scope == MARKET_SCOPE else scope,
         )
-        if recent:
+        if feed_recent:
             try:
                 cards = await insights.get_cards([scope])
                 card = cards.get(scope)
@@ -358,13 +367,29 @@ async def get_updates_feed(
                     # sweeper is actually awake to replace it — outside market
                     # hours it is not, and promising otherwise is what pinned the
                     # UI on "Catching up…" all weekend.
-                    card = insights.build_fallback_card(scope, recent)
+                    #
+                    # Built from the UNFILTERED window on purpose. The fallback makes
+                    # no claim of authorship — its bullets ARE the headlines, verbatim
+                    # and unsynthesised — so peer coverage in the list is something the
+                    # reader can see and judge. The Hydrogen-selloff incident this
+                    # filter exists to prevent was an AI card ASSERTING a peer wrap as
+                    # this ticker's story; a literal headline list asserts nothing.
+                    card = insights.build_fallback_card(scope, feed_recent)
                 if card is not None:
                     # AI card badge reflects the ACTUAL freshness window ("24h" if
                     # the scope has news in the last 24h, else "48h"). The
                     # deterministic fallback keeps its own "Latest headlines" label.
-                    if card.get("ai_generated", True):
-                        card = {**card, "badge": f"{window_hours}h"}
+                    #
+                    # Measured over the SUBJECT corpus, because that is what the
+                    # sweeper summarised. When that corpus is empty the card's own
+                    # inputs have aged out of the window entirely and we no longer
+                    # know what span it covers — so assert nothing and let the
+                    # schema default ("48h", the widest span we ever summarise over)
+                    # stand. Badging it from the FEED window instead would print
+                    # "24h" over a brief written days ago, on the strength of peer
+                    # articles that were never in it.
+                    if card.get("ai_generated", True) and subject_recent:
+                        card = {**card, "badge": f"{subject_window}h"}
                     insight = AIInsightCardResponse(**card)
             except Exception as e:
                 # An unavailable insight must never take down the timeline.

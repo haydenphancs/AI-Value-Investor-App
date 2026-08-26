@@ -23,7 +23,10 @@ struct RecentResearchSection: View {
 
             // Research Cards Carousel
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: AppSpacing.lg) {
+                // `alignment: .top` pairs with the card's `minHeight`/`maxHeight: .infinity` frame:
+                // cards can now grow with the text, and a taller one must not vertically offset
+                // its neighbours. Without it the HStack centres them and the row looks ragged.
+                HStack(alignment: .top, spacing: AppSpacing.lg) {
                     ForEach(reports) { report in
                         ResearchCard(report: report) {
                             onReportTapped?(report)

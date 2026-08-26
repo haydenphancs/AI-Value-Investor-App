@@ -170,6 +170,47 @@ class InsightSweeper:
         # must never be the one dropped by a cap.
         return [MARKET_SCOPE] + [t for t in tickers if t != MARKET_SCOPE]
 
+    def _company_names(self, scopes: List[str]) -> Dict[str, str]:
+        """``{TICKER: company name}`` for the swept universe, best-effort.
+
+        Feeds ``select_recent_corpus(company_name=…)``, which decides whether an
+        article is ABOUT this ticker. Without a name the subject filter can only
+        match the literal SYMBOL in a headline — and headlines print "Oracle", not
+        "ORCL" — so the parameter existed, was unit-tested, and was passed by NO
+        production caller. Every article about a company whose name is not its
+        ticker leaned entirely on FMP's tag ordering.
+
+        ``watchlist_items`` is the right source because it is where the universe
+        itself comes from (``get_top_watchlist_tickers``), so a swept ticker always
+        has a row. Rows repeat per watcher; the dict comprehension collapses them.
+        Never raises: a missing name degrades the filter to symbol + tag order,
+        which is exactly the pre-existing behaviour.
+        """
+        symbols = [s for s in scopes if s != MARKET_SCOPE]
+        if not symbols:
+            return {}
+        try:
+            result = (
+                self.supabase.table("watchlist_items")
+                .select("ticker, company_name")
+                .in_("ticker", symbols)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(
+                "Insight sweeper could not read company names (%s: %s) — the subject "
+                "filter falls back to symbol + tag order for this sweep",
+                type(e).__name__, e,
+            )
+            return {}
+        names: Dict[str, str] = {}
+        for row in (result.data or []):
+            ticker = str(row.get("ticker") or "").strip().upper()
+            name = str(row.get("company_name") or "").strip()
+            if ticker and name:
+                names.setdefault(ticker, name)
+        return names
+
     # ── State ─────────────────────────────────────────────────────────
 
     def _load_state(self, scopes: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -726,9 +767,15 @@ class InsightSweeper:
         # `scope=` opts each TICKER corpus into the subject filter, so a sector wrap led
         # by two peers can no longer be the sole input for this ticker's card. MARKET
         # passes None — market coverage is about the market by definition.
+        #
+        # `company_name` is what lets the filter recognise "Oracle" in a headline as
+        # ORCL. One extra query per sweep, shared by every scope.
+        names = await asyncio.to_thread(self._company_names, scopes)
         corpora = {
             scope: select_recent_corpus(
-                rows, now, scope=None if scope == MARKET_SCOPE else scope
+                rows, now,
+                scope=None if scope == MARKET_SCOPE else scope,
+                company_name=names.get(scope),
             )[0]
             for scope, rows in corpora.items()
         }

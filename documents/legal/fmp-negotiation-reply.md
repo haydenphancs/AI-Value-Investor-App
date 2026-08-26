@@ -1,4 +1,4 @@
-# FMP — reply to Laith (2026-08-24)
+# FMP — reply to Laith (sent 2026-08-25)
 
 Short version, sent in place of the longer draft. Full reasoning and call-site traces:
 `~/.claude/plans/check-launch-checklist-md-i-have-sprightly-tarjan.md`.
@@ -47,46 +47,113 @@ Thanks — that's clear, and month-to-month helps a lot.
 
 Confirming two of the three:
 
-1. Earnings call transcripts — yes, please remove them.
+1. Earnings call transcripts. Yes, please remove them.
 
-2. Bandwidth — yes, please reduce it. 150 GB / 30 days would suit me. My trailing 30-day usage is
-   25.57 GB today, but that's pre-launch, so I'd rather have headroom than the tightest number.
-   Could you tell me what happens if I hit the cap — throttle, overage charge, or hard stop? If
-   it's a hard stop I'd rather stay at 150; if there's an overage rate I could go lower.
+2. Bandwidth. Yes, please reduce it. 150 GB / 30 days would suit me. Could you tell me what
+   happens if I go over — throttle, overage charge, or hard stop?
 
-3. The quote endpoint — this is the one I can't agree to yet, and I think we may be talking about
-   two different things.
+3. The quote endpoint. This is the one I'm unclear on, and I'd appreciate a bit more detail before
+   I confirm.
 
-I don't need real-time, and I'm happy to drop the real-time entitlement and the exchange fees with
-it. But /stable/quote and /stable/batch-quote are load-bearing for my app: they are how I price
-everything on screen, and because indices (^GSPC), commodities (GCUSD) and crypto (BTCUSD) all come
-back from those same two endpoints, losing them would remove every current price in the product,
-not just stock prices.
+We'll remove the real-time endpoint. But end-of-day quotes would remove a lot of important
+features in my app — indices, commodities and crypto all come back from those same quote
+endpoints, so losing them takes out far more than stock prices.
 
-So before I confirm:
+So: can the quote endpoint be provided on a 15-minute delayed basis (or whatever delay you can
+offer), without the exchange licences? Delayed is completely fine for me — this is a research app,
+not a trading app, and my Terms of Use already disclose a 15–20 minute delay.
 
-  (a) Is "the quote endpoint" the same thing as "the real-time endpoint" in your pricing, or are
-      they separate line items?
+One related question, since it affects my App Store submission: in your earlier email you said a
+separate licensing agreement isn't required provided we remove the quote endpoint. If we keep it
+on a delayed basis, does that change?
 
-  (b) Can /stable/quote and /stable/batch-quote be provided on a 15-minute delayed basis, without
-      the exchange licences? My Terms of Use already disclose a 15–20 minute delay, so delayed is
-      fine for me — this is a research app, not a trading app.
+And one correction I owe you. I previously said we don't consume a streaming feed. That was wrong
+— my backend does have a WebSocket client for your streaming endpoints. It has never actually
+worked (my key isn't entitled, it returns 401) and I'm removing the code before launch, but I'd
+rather tell you now than have it come up later. Please leave streaming out of the package.
 
-  (c) In your earlier email you said a separate licensing agreement isn't required provided we
-      remove the quote endpoint. If we keep it on a delayed basis, does that change?
+Once that's clear I can confirm everything else and we can move to the formal quote.
 
-One correction I owe you: I said previously that we don't consume a streaming feed. That was wrong.
-My backend does have a WebSocket client for websockets.financialmodelingprep.com and
-crypto.financialmodelingprep.com. It is inert in practice — my current key isn't entitled and both
-sockets return 401 — but the code is there, and I'd rather tell you now than have it surface later.
-Please leave streaming out of the package and I'll remove the client before launch.
+Best regards,
+Hayden
 
-One last small thing: you mentioned advanced market metrics weren't in the original scope. I do
-call sector-performance-snapshot, industry-performance-snapshot, biggest-gainers, biggest-losers
-and most-actives today — are those entitled under the plan, or will they stop working? Happy to
-remove them if not.
+---
 
-Once (a)–(c) are clear I can confirm everything else and we can move to the formal quote.
+## Deferred to the next round — do not lose these
+
+- **Advanced Market Metrics entitlement.** He said they "were not included in the original scope."
+  The backend calls five today (`fmp.py:732, 827, 850, 859, 868`). If that means *not entitled*,
+  they 403 the day we switch keys.
+- **Order Form items:** notice period · access on cancellation · the ToS §6.3 "delete all cached
+  data on termination" vs exported PDFs on users' devices · index/commodity symbol pricing ·
+  mixed-batch 403 behaviour (`_fetch_chunk` swallows a chunk failure into `[]`, so a rejected
+  chunk silently blanks every quote in it).
+
+## WebSocket removal — verified 2026-08-25, safe to delete
+
+Probed live: both FMP sockets return **401 Unauthorized** on the real key, and Railway's
+`FMP_API_KEY` **hash-matches** the local one (`4e5bef790fa928bd`), so prod is the same unentitled
+key. Production's own `/ws/price/BTCUSD` connected and stayed **silent for 10s** on a 24/7 symbol.
+**No view anywhere reads `isConnected`** — nothing on screen reflects socket state. Every detail
+screen already runs a REST refresh (ticker 15s poll; ETF/index/commodity 30s `refreshLiveSlice`).
+
+Removal surface (~half a day): 5 ViewModels to unwire · delete `live_price_manager.py` (492),
+`live_price.py` (177), `LivePriceWebSocketManager.swift` (239), `LivePriceModels.swift` (25) ·
+unregister `api.py:26,67` + `main.py:29,311` · delete `test_live_price_previous_close.py` +
+`test_live_price_ws_routing.py` · drop the assert at `test_detail_screen_outliers.py:1225` (its
+real subject is `chartRefreshTask`, unaffected) · optional: `app/services/certs/fmp_ws_intermediates.pem`.
+
+Best done *after* his reply — a delayed-quote answer means touching those same five ViewModels for
+a delay badge, so it's one pass instead of two.
+
+---
+
+## Round 3 — sent 2026-08-25
+
+**His reply:** 15-min delayed, exchange-fee-free, available for **CBOE** and **IEX** exchanges
+only — and **WebSocket only, no REST**. Offered to include it in the quote.
+
+**Read:** CBOE (~8.6% of US volume) + IEX (~3.2%) are US *equity* exchanges. They carry stocks and
+ETFs. They cannot carry indices (`^GSPC`/`^IXIC` are calculated, not traded), commodity futures
+(COMEX/NYMEX), or crypto. A trade stream also cannot produce `yearHigh`/`yearLow`/`marketCap`/
+`avgVolume`/`priceAvg50/200` — no stream ever can.
+
+**Verdict: WebSocket ALONE is not viable. WebSocket + the historical REST endpoints IS.**
+`historical-price-eod` + `historical-chart` + `profile` are a *different endpoint family* from
+`quote`. Keep them and indices/commodities/crypto keep working unchanged, yearHigh/yearLow compute
+from EOD, and marketCap/beta come from `profile` (already wired as a fallback at
+`stock_overview_service.py:773-784, 885-895`). Lose them and nothing saves the app.
+
+⚠️ **He has now dodged the historical question twice.** Round 3 asks it alone, as a yes/no.
+
+**Not established, despite appearances:** it is NOT "WebSocket or no deal." He said delayed-
+*without-exchange-fees* is WS-only; he never said REST quote cannot be delayed at all.
+
+**Measured 2026-08-25:** live DB has only **15 distinct symbols** across all watchlists, holdings
+and alerts — but with ~4 users that says nothing about launch scale. The subscription count at
+1,000 users is what would decide whether a WS ingestion service is buildable, and it is unknown.
+
+### The email
+
+Hi Laith,
+
+Yes please — include the CBOE and IEX delayed WebSocket options in the quote so I can see what
+they add.
+
+One question I still need answered before I can confirm anything. I don't think it came through in
+my last two emails, so let me ask it on its own:
+
+If the REST quote endpoints are removed from my plan, do these two remain?
+
+  - /stable/historical-price-eod
+  - /stable/historical-chart/{1min, 5min, 15min, 30min, 1hour}
+
+That is the whole decision for me. I use them for every chart in the app, and also for indices
+(^GSPC), commodities (GCUSD, CLUSD) and crypto (BTCUSD) — none of which a CBOE or IEX equity feed
+would carry. If I keep those two endpoints I can make everything else work. If I lose them, the
+WebSocket doesn't help me.
+
+A simple yes or no is all I need.
 
 Best regards,
 Hayden

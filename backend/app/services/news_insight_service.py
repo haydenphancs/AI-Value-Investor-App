@@ -984,6 +984,68 @@ def articles_within_window(
 # "about" any one of them. FMP tags a sector wrap with every name it mentions.
 _ROUNDUP_TICKER_COUNT = 3
 
+# Legal-form tokens that carry no identifying signal. A headline writes "Oracle",
+# never "Oracle Corporation", so these have to come off before the name can be
+# matched against one.
+_CORPORATE_SUFFIXES = frozenset({
+    "inc", "inc.", "incorporated", "corp", "corp.", "corporation", "co", "co.",
+    "company", "ltd", "ltd.", "limited", "plc", "llc", "lp", "l.p.", "nv", "n.v.",
+    "sa", "s.a.", "ag", "ab", "as", "asa", "oyj", "spa", "se", "kgaa",
+    "holding", "holdings", "group", "technologies", "the",
+})
+
+# A one-token company name below this length is too generic to assert authorship
+# from ("Co", "AT&T" is fine, but a 3-letter fragment is noise).
+_MIN_NAME_TOKEN_CHARS = 4
+
+
+def company_name_variants(company_name: Optional[str]) -> List[str]:
+    """Lowercase forms of ``company_name`` that may plausibly appear in a headline.
+
+    Returns longest-first, so the most specific match is attempted first, and an
+    empty list when there is nothing usable.
+
+    WHY THIS IS NOT JUST ``name.lower()``: headlines drop the legal form. The old
+    code tried the full name and then its first TWO words, and its own docstring
+    example did not work — ``"Archer Aviation Inc."`` yields the lead ``"archer
+    aviation"``, which does not appear in a headline reading ``"Archer Jumps 9%"``.
+    So the name path only ever fired when a headline happened to print two or more
+    words of the registered name verbatim. Combined with no caller supplying a name
+    at all, it had never matched anything in production.
+    """
+    raw = (company_name or "").strip()
+    if not raw:
+        return []
+    # Trim a trailing parenthetical / share-class tail: "Alphabet Inc. (Class A)".
+    raw = re.split(r"[(\[]", raw, maxsplit=1)[0]
+    tokens = [t for t in re.split(r"[\s,]+", raw.lower()) if t]
+    # Dots removed, not stripped: "p.l.c." must reach "plc", and `.strip(".")` only
+    # takes them off the ends ("p.l.c").
+    while tokens and tokens[-1].replace(".", "") in _CORPORATE_SUFFIXES:
+        tokens.pop()
+    # A leading article too: "The Kroger Co." must reach "kroger", or the head token
+    # is "the" (below the length floor) and the name path yields nothing usable.
+    while tokens and tokens[0].strip(".") == "the":
+        tokens.pop(0)
+    if not tokens:
+        return []
+
+    variants: List[str] = []
+    # The full stripped name is specific enough to trust at any length — matching is
+    # whole-token, so "BP"/"GE"/"3M" hit the standalone word and nothing else. A length
+    # floor here would drop exactly the names that are ALWAYS written this way.
+    full = " ".join(tokens)
+    if len(full) >= 2:
+        variants.append(full)
+    # The distinguishing head of a multi-word name: "Plug Power Inc." → "plug power" →
+    # "plug"; "Archer Aviation Inc." → "archer". A DERIVED single token is the loosest
+    # signal here, so it keeps the length floor: it is an OR among stronger signals and
+    # is only ever tested inside THIS ticker's own feed.
+    head = tokens[0]
+    if len(head) >= _MIN_NAME_TOKEN_CHARS and head != full:
+        variants.append(head)
+    return variants
+
 
 def article_is_about(
     row: Dict[str, Any], scope: str, company_name: Optional[str] = None
@@ -1017,6 +1079,14 @@ def article_is_about(
     Deliberately reads the title only, never the body: a body mention is exactly the
     passing reference this exists to reject. Not applied to `MARKET_SCOPE`, which is
     about the market by definition.
+
+    ⚠️ `company_name` IS LOAD-BEARING — supply it. Without a name the only title signal
+    is the literal SYMBOL, and headlines print "Oracle", never "ORCL". It shipped as a
+    dead parameter (accepted, documented, unit-tested, passed by nobody), which starved
+    every non-eponymous ticker's corpus down to whatever FMP's tag ordering happened to
+    admit and froze those cards behind `fingerprint_unchanged`. The sweeper resolves it
+    from `watchlist_items`; `tests/test_updates_insight_subject_wiring.py` asserts the
+    call site, not just the lookup.
     """
     if not isinstance(row, dict) or not scope:
         return False
@@ -1033,43 +1103,70 @@ def article_is_about(
     if isinstance(related, list):
         tags = [str(t).strip().upper() for t in related if str(t or "").strip()]
 
+    # FMP lists the article's PRIMARY symbol first, so an article is "about" its lead
+    # tag. This is the only signal that works when the title names companies but the
+    # tags are symbols — "FuelCell Energy" in the title is unmatchable from "FCEL"
+    # unless a ticker→name map happens to be supplied.
+    #
+    # Applied at EVERY tag count, not only to round-ups. Restricting it to ≥3 tags left
+    # the two-tag case with no signal at all: "Oracle vs. Amazon: Which Is the Better AI
+    # Cloud Stock?" tagged ["ORCL","AMZN"] failed the symbol test ("orcl" is not in a
+    # headline that says "Oracle"), failed the name test (no caller supplied one), and
+    # failed `tags == [symbol]` — so a story that leads with the company's own name was
+    # dropped from its own corpus. Worse, it was PATH-DEPENDENT: enrichment merges
+    # Gemini's extracted symbols into `related_tickers`, so an article that qualified at
+    # ingest as ["ORCL"] silently stopped qualifying the moment it became
+    # ["ORCL","MSFT"] — the corpus shrank as the pipeline did more work.
+    #
+    # Still a soft signal (an OR, never a veto): the ordering is FMP convention rather
+    # than a contract, so the worst case is admitting one extra peer article among many
+    # — far better than starving a ticker's corpus, which is what froze the ORCL card.
+    # The pathology this filter exists to stop (a peer wrap as the SOLE input) is
+    # unaffected: it is rejected precisely because our symbol is NOT the lead tag.
+    #
+    # ⚠️ KNOW HOW WEAK THIS MAKES THE WHOLE FILTER before tuning it. Measured against
+    # 608 live articles across 14 per-ticker feeds (2026-08-26): the scope was the lead
+    # tag in 608 of 608, because `news/stock?symbols=X` returns `symbol: "X"` and
+    # enrichment only APPENDS Gemini's extra symbols. So on today's data this predicate
+    # is close to a tautology and almost nothing is dropped. The production incident
+    # below predates the create-only pre-pass in `news_cache_service`, when a
+    # sweeper-discovered row had EMPTY FMP tags and enrichment filled them in Gemini's
+    # (headline) order — which is how PLUG ended up third in its own feed. Tighten this
+    # only against freshly measured tag data, not against the docstring's intuition.
+    if tags and tags[0] == symbol:
+        return True
+
     # A wrap names several companies; a story names one. Above the threshold we demand
     # the lead clause, below it the whole title is fair game.
     is_roundup = len(tags) >= _ROUNDUP_TICKER_COUNT
     haystack = title.lower()
     if is_roundup:
-        # FMP lists the article's PRIMARY symbol first, so a wrap is "about" its lead
-        # tag. This is the only signal that works when the title names companies but
-        # the tags are symbols — we have no ticker→name map, so "FuelCell Energy" in
-        # the title is unmatchable from "FCEL".
-        #
-        # Without it the lead-clause rule below rejects a wrap for EVERY member, which
-        # is the wrong over-correction: FuelCell's own readers should get that card.
-        # Treated as a soft signal (an OR, never a veto) because the ordering is FMP's
-        # convention rather than a contract — worst case we admit one extra member of a
-        # wrap, which is far better than dropping it for all of them.
-        if tags and tags[0] == symbol:
-            return True
         haystack = re.split(r"[,:—–-]", haystack, maxsplit=1)[0]
 
-    if symbol and symbol.lower() in haystack:
+    # Whole-token match, NOT a substring. A naive `in` makes every short ticker a
+    # wildcard: "F" (Ford) matches the "f" inside any word, and "BE" (Bloom Energy)
+    # matches "Beyond Meat" / "Best Buy" — admitting peer coverage on the strength of a
+    # letter. Lookarounds rather than `\b` because a symbol may start or end with a
+    # non-word character (`^GSPC`, `BRK.B`), where `\b` asserts against the wrong side
+    # and silently never matches.
+    if symbol and re.search(
+        rf"(?<![A-Za-z0-9]){re.escape(symbol.lower())}(?![A-Za-z0-9])", haystack
+    ):
         return True
 
-    name = (company_name or "").strip()
-    if name:
-        if name.lower() in haystack:
-            return True
-        # "Plug Power Inc." must match a title saying "Plug Power"; "Archer Aviation
-        # Inc." one saying "Archer".
-        lead = " ".join(name.split()[:2]).lower()
-        if len(lead) >= 4 and lead in haystack:
+    for variant in company_name_variants(company_name):
+        if re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(variant)}(?![A-Za-z0-9])", haystack
+        ):
             return True
 
-    # No title match. Accept only when the article is tagged with OUR SYMBOL ALONE —
-    # then an oblique headline ("Hydrogen maker lands 5MW order") is still plausibly
-    # about us. Two or more tags with no title mention means the piece is about the
-    # other one.
-    return tags == [symbol]
+    # No title match, and we are not the lead tag. The piece is about somebody else.
+    #
+    # The old final clause here was `return tags == [symbol]` — "accept an oblique
+    # headline ('Hydrogen maker lands 5MW order') when nobody else is tagged". That case
+    # is now decided earlier and identically by the lead-tag rule (a lone tag IS the lead
+    # tag), so keeping it would be dead code that reads like a live guard.
+    return False
 
 
 def filter_to_subject(

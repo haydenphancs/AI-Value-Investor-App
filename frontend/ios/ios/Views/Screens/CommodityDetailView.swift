@@ -335,8 +335,10 @@ struct CommodityDetailView: View {
                     }
                 }
 
+                // Clears the floating Ask Cay AI bar. Token, not a literal: the bar and its
+                // chips are text and grow with the content size (see AppSpacing.aiBarReserve).
                 Spacer()
-                    .frame(height: 120)
+                    .frame(height: AppSpacing.aiBarReserve)
             }
             .padding(.horizontal, AppSpacing.lg)
             .padding(.top, AppSpacing.lg)

@@ -875,6 +875,24 @@ struct AppSpacing {
     static let xl: CGFloat = 20
     static let xxl: CGFloat = 24
     static let xxxl: CGFloat = 32
+
+    /// Bottom reserve on a scrollable detail tab, clearing the floating "Ask Cay AI" bar.
+    ///
+    /// SCALES, because what it reserves space for is TEXT — the suggestion chips and the
+    /// input bar both grow with the content size while a hard number does not.
+    ///
+    /// This was a literal `120` duplicated in TWELVE places (every detail tab of Ticker, ETF,
+    /// Crypto, Commodity and Index). Once the overlay grew past 120pt the last section of
+    /// the page sat underneath it and could not be brought into view: the scroll had
+    /// already reached its end, so the content was simply unreachable. That reads to a user
+    /// as **"I can't scroll down"** rather than as a layout bug, which is exactly how it
+    /// was reported.
+    ///
+    /// Scaled off `body` at `readingCap`, the same tier the chips and the bar use, so the
+    /// reserve grows in step with the thing it is clearing (120 → 168 at the cap).
+    static var aiBarReserve: CGFloat {
+        AppTypography.scaledSize(120, .body, maxScale: AppTypography.readingCap)
+    }
 }
 
 // MARK: - App Corner Radius

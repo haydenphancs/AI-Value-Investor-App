@@ -78,7 +78,16 @@ struct RelatedMoneyMoveCard: View {
                 }
                 .padding(AppSpacing.md)
             }
-            .frame(width: 200, height: 200)
+            // Height is a FLOOR, not a fixed size. See the header of RelatedTickerCard.swift
+            // for the full rationale: a `.frame(height:)` centres an oversized child, so text
+            // that outgrows the box bleeds off the top AND bottom edges. `maxHeight: .infinity`
+            // lets the card take the height the parent HStack resolves, which keeps interior
+            // Spacers working (so nothing moves at the default content size) and keeps every
+            // card in the row the same height. Parent uses `HStack(alignment: .top)` to match.
+            //
+            // `.top` is required: the 80pt cover-image header must stay flush to the top edge.
+            .frame(minWidth: 200, maxWidth: 200,
+                   minHeight: 200, maxHeight: .infinity, alignment: .top)
             .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())

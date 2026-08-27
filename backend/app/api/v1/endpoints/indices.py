@@ -23,7 +23,11 @@ from app.api.error_response import (
     upstream_error_response,
 )
 from app.services.index_service import get_index_service
-from app.schemas.index import IndexDetailResponse, IndexQuoteResponse
+from app.schemas.index import (
+    IndexCoreResponse,
+    IndexDetailResponse,
+    IndexQuoteResponse,
+)
 from app.schemas.news import (
     MAX_ENRICH_ARTICLE_IDS,
     EnrichNewsResponse,
@@ -167,6 +171,44 @@ def _normalize_index_symbol(symbol: str) -> str:
     if not symbol.startswith("^") and not symbol.startswith("%5E"):
         symbol = f"^{symbol}"
     return symbol.replace("%5E", "^").upper()
+
+
+@router.get("/{symbol}/core", response_model=IndexCoreResponse)
+async def get_index_core(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """FIRST-PAINT slice — the price header, plus the chart when it is already cached.
+
+    Additive and zero blast radius: `/{symbol}` and `IndexDetailResponse` are untouched.
+    The client fires this in PARALLEL with the full detail and paints whichever lands
+    first, so the screen stops shimmering in ~0.3s instead of the 5.6s a cold `^GSPC`
+    build measured. Same shape as `GET /stocks/{ticker}/overview/core`.
+
+    NOT the same thing as `/quote`: that one is a PROJECTION of the full build and is
+    therefore exactly as slow on a cold cache. This one is assembled from the two cheap
+    sections and never pulls the daily history.
+
+    Declared ABOVE the catch-all `/{symbol}`, which the comment above requires.
+    """
+    symbol = _normalize_index_symbol(symbol)
+    try:
+        service = get_index_service()
+        return await service.get_index_core(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Index core failed for %s: %s: %s", symbol, type(e).__name__, e, exc_info=True
+        )
+        return error_response_from_exception(e, ticker=symbol, step="index_core")
 
 
 @router.get("/{symbol}/quote", response_model=IndexQuoteResponse)

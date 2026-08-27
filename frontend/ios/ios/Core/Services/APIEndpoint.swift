@@ -200,11 +200,25 @@ enum APIEndpoint: Sendable {
     /// `snapshots_data`, a deep required object graph of AI-written stories that a
     /// 30-second refresh cannot change.
     case getIndexQuote(symbol: String, range: String?, interval: String?)
+    /// FIRST-PAINT slice — the header line, plus the chart when the server already had
+    /// it cached. Fired in PARALLEL with the full detail; whichever lands first paints.
+    ///
+    /// NOT the same thing as `getIndexQuote`: that one is a PROJECTION of the full build and
+    /// is therefore exactly as slow on a cold cache. This is assembled from the cheap
+    /// sections only. Measured cold: `^GSPC` full 5.63s vs core ~0.3s.
+    case getIndexCore(symbol: String, range: String, interval: String? = nil)
     case getIndexNews(symbol: String, limit: Int)
     case enrichIndexNews(symbol: String, articleIds: [String])
 
     // MARK: - Crypto
     case getCryptoDetail(symbol: String, range: String, interval: String? = nil)
+    /// FIRST-PAINT slice — the header line, plus the chart when the server already had
+    /// it cached. Fired in PARALLEL with the full detail; whichever lands first paints.
+    ///
+    /// NOT the same thing as `getCryptoDetail`: that one is a PROJECTION of the full build and
+    /// is therefore exactly as slow on a cold cache. This is assembled from the cheap
+    /// sections only. Measured cold: `^GSPC` full 5.63s vs core ~0.3s.
+    case getCryptoCore(symbol: String, range: String, interval: String? = nil)
     case getCryptoNews(symbol: String, limit: Int)
     case enrichCryptoNews(symbol: String, articleIds: [String])
     case getCryptoFearGreed
@@ -223,6 +237,13 @@ enum APIEndpoint: Sendable {
     /// `range` is optional on purpose: the 30s loop asks for bars only on an intraday
     /// chart, where omitting them cuts the payload to a fraction of the detail monolith.
     case getETFQuote(symbol: String, range: String?, interval: String?)
+    /// FIRST-PAINT slice — the header line, plus the chart when the server already had
+    /// it cached. Fired in PARALLEL with the full detail; whichever lands first paints.
+    ///
+    /// NOT the same thing as `getETFQuote`: that one is a PROJECTION of the full build and
+    /// is therefore exactly as slow on a cold cache. This is assembled from the cheap
+    /// sections only. Measured cold: `^GSPC` full 5.63s vs core ~0.3s.
+    case getETFCore(symbol: String, range: String, interval: String? = nil)
 
     // MARK: - Commodities
     case getCommodityDetail(symbol: String, range: String, interval: String? = nil)
@@ -230,6 +251,13 @@ enum APIEndpoint: Sendable {
     /// `range` is optional on purpose: the 30s loop asks for bars only on an intraday
     /// chart, where omitting them cuts the payload from ~11.9 KB to ~1.2 KB.
     case getCommodityQuote(symbol: String, range: String?, interval: String?)
+    /// FIRST-PAINT slice — the header line, plus the chart when the server already had
+    /// it cached. Fired in PARALLEL with the full detail; whichever lands first paints.
+    ///
+    /// NOT the same thing as `getCommodityQuote`: that one is a PROJECTION of the full build and
+    /// is therefore exactly as slow on a cold cache. This is assembled from the cheap
+    /// sections only. Measured cold: `^GSPC` full 5.63s vs core ~0.3s.
+    case getCommodityCore(symbol: String, range: String, interval: String? = nil)
     case getCommodityNews(symbol: String, limit: Int)
     case enrichCommodityNews(symbol: String, articleIds: [String])
 
@@ -480,6 +508,8 @@ enum APIEndpoint: Sendable {
         // Crypto
         case .getCryptoDetail(let symbol, _, _):
             return "/api/v1/crypto/\(symbol)"
+        case .getCryptoCore(let symbol, _, _):
+            return "/api/v1/crypto/\(symbol)/core"
         case .getCryptoNews(let symbol, _):
             return "/api/v1/crypto/\(symbol)/news"
         case .enrichCryptoNews(let symbol, _):
@@ -498,6 +528,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/indices/\(symbol)"
         case .getIndexQuote(let symbol, _, _):
             return "/api/v1/indices/\(symbol)/quote"
+        case .getIndexCore(let symbol, _, _):
+            return "/api/v1/indices/\(symbol)/core"
         case .getIndexNews(let symbol, _):
             return "/api/v1/indices/\(symbol)/news"
         case .enrichIndexNews(let symbol, _):
@@ -508,6 +540,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/etfs/\(symbol)"
         case .getETFQuote(let symbol, _, _):
             return "/api/v1/etfs/\(symbol)/quote"
+        case .getETFCore(let symbol, _, _):
+            return "/api/v1/etfs/\(symbol)/core"
         case .getETFDividends(let symbol):
             return "/api/v1/etfs/\(symbol)/dividends"
         case .getETFHoldingsRisk(let symbol):
@@ -524,6 +558,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/commodities/\(symbol)"
         case .getCommodityQuote(let symbol, _, _):
             return "/api/v1/commodities/\(symbol)/quote"
+        case .getCommodityCore(let symbol, _, _):
+            return "/api/v1/commodities/\(symbol)/core"
         case .getCommodityNews(let symbol, _):
             return "/api/v1/commodities/\(symbol)/news"
         case .enrichCommodityNews(let symbol, _):
@@ -807,6 +843,14 @@ enum APIEndpoint: Sendable {
             if let interval = interval { params["interval"] = interval }
             return params
 
+        case .getIndexCore(_, let range, let interval),
+             .getETFCore(_, let range, let interval),
+             .getCommodityCore(_, let range, let interval),
+             .getCryptoCore(_, let range, let interval):
+            var params = ["range": range]
+            if let interval = interval { params["interval"] = interval }
+            return params
+
         case .getCommodityQuote(_, let range, let interval),
              .getETFQuote(_, let range, let interval),
              .getIndexQuote(_, let range, let interval):
@@ -1060,7 +1104,12 @@ enum APIEndpoint: Sendable {
              .getETFDetail, .getETFDividends, .getETFHoldingsRisk, .getETFProfile, .getETFNews,
              .enrichETFNews, .getETFQuote, .getIndexQuote,
              .getCommodityDetail, .getCommodityQuote, .getCommodityNews,
-             .enrichCommodityNews:
+             .enrichCommodityNews,
+             // The fast-core first-paint slices. Same audience and same data as the
+             // detail routes above — market data, not the caller's own — so the same
+             // policy. `authPolicy` has no `default:` arm on purpose, so omitting these
+             // would be a compile error rather than an assumption.
+             .getIndexCore, .getETFCore, .getCommodityCore, .getCryptoCore:
             return .public
 
         // Updates: /feed and /news/enrich are plain market data (/tabs is not — see below).
@@ -1256,8 +1305,9 @@ enum APIEndpoint: Sendable {
             return 45 // 45 seconds for technical indicator computation
         case .getStockOverview:
             return 60 // 1 minute for aggregated overview (many FMP calls)
-        case .getStockOverviewCore:
-            return 20 // fast subset (quote + chart + profile); surface a hang quickly
+        case .getStockOverviewCore,
+             .getIndexCore, .getETFCore, .getCommodityCore, .getCryptoCore:
+            return 20 // fast subset (quote + cached chart); surface a hang quickly
         case .getCryptoDetail, .getIndexDetail, .getETFDetail, .getCommodityDetail:
             return 60 // 1 minute for aggregated detail
         case .getCryptoSentiment:

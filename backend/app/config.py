@@ -577,6 +577,15 @@ class Settings(BaseSettings):
     SCANNER_PREWARM_ENABLED: bool = True
     SCANNER_PREWARM_INTERVAL_SECONDS: int = 900
 
+    # Index detail pre-warm. Only THREE symbols are reachable (`_INDEX_PROFILES`), and
+    # they are the ones Home Market Pulse links to, so this is a bounded ~3-call pass.
+    # It exists because the index screen's expensive sections are process-local on a 12h
+    # Tier-2 / 1h Tier-1 cadence: every Railway redeploy left the first viewer of each
+    # index paying a cold build (measured 5.63s for ^GSPC, 11.42s for ^DJI).
+    INDEX_PREWARM_ENABLED: bool = True
+    INDEX_PREWARM_INTERVAL_SECONDS: int = 1800  # 30 min — under the 45s assembled TTL is
+    # pointless; what matters is keeping the 12h SECTIONS and the AI stories warm.
+
     # On-view report pre-warm: when a user opens a ticker's detail view, iOS
     # fires POST /stocks/{ticker}/prewarm-report, which warms the persona-neutral
     # ticker_data_cache so a later Generate Analysis skips the ~20-call FMP

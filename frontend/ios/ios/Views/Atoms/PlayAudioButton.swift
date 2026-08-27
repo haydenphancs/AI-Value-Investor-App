@@ -160,18 +160,32 @@ struct LargePlayButton: View {
                         .offset(x: isPlaying ? 0 : 2)
                 }
 
+                // The playing indicator lives HERE, immediately right of the button, rather
+                // than as a second row underneath. The hero used to render both: this label
+                // already says "Now Playing", and a separate `[bars] Now Playing` line sat
+                // below it saying the same thing again.
+                if isPlaying {
+                    NowPlayingBars()
+                }
+
                 if showLabel {
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                        // Sits on the article hero gradient, not on the page — so this is
-                        // on-accent ink, constant in both appearances.
+                        // ⚠️ `textPrimary`, NOT `textOnAccent`. The comment here used to read
+                        // "sits on the article hero gradient" — that stopped being true when
+                        // the headline moved off the artwork, and `NowPlayingBars` right above
+                        // already records the move. `textOnAccent` is #FFFFFF in BOTH
+                        // appearances, so on the #F4F5F8 light page this label measured ~1.05:1
+                        // — the Listen Now / Now Playing row was invisible in light mode. The
+                        // button's own circle keeps `textOnMediaSurface`: that IS on a filled
+                        // white disc, so it is the one part that really is on-accent.
                         Text(entitlement.isLocked(episode)
                              ? "Listen with Pro" : (isPlaying ? "Now Playing" : "Listen Now"))
                             .font(AppTypography.bodyEmphasis)
-                            .foregroundColor(AppColors.textOnAccent)
+                            .foregroundColor(AppColors.textPrimary)
 
                         Text(episode.formattedDuration)
                             .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textOnAccent.opacity(0.8))
+                            .foregroundColor(AppColors.textSecondary)
                     }
                 }
             }

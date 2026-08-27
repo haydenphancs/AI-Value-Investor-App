@@ -164,7 +164,8 @@ _SCROLLER_CARDS = [
     ("Views/Molecules/PersonaCard.swift", "minHeight: cardHeight", "height: cardHeight)"),
     ("Views/Molecules/LessonCard.swift", "minWidth: 160, maxWidth: 160", "height: 150)"),
     ("Views/Molecules/ResearchCard.swift", "minWidth: 260, maxWidth: 260", "height: 280)"),
-    ("Views/Molecules/RelatedMoneyMoveCard.swift", "minWidth: 200, maxWidth: 200", "height: 200)"),
+    ("Views/Molecules/RelatedMoneyMoveCard.swift",
+     "minWidth: Self.coverWidth, maxWidth: Self.coverWidth", "height: 220)"),
 ]
 
 # Each card's one parent scroller.
@@ -522,3 +523,198 @@ def test_the_sparkle_scan_is_not_vacuous():
     sample = "// .symbolEffect(.breathe, isActive: !reduceMotion)\nlet x = 1"
     assert "breathe" not in _strip_swift_comments(sample), "comment stripping regressed"
     assert "let x = 1" in _strip_swift_comments(sample)
+
+
+def test_the_related_money_move_cover_plate_cannot_bleed_over_the_title():
+    """⚠️ `.clipped()` is LOAD-BEARING here, and its absence shipped as a TestFlight report.
+
+    `MoneyMoveCoverImage`'s inner image is `.aspectRatio(contentMode: .fill)`, which reports a
+    layout size that COVERS its proposal — ~200x112 for 16:9 artwork asked for 200x80. The
+    atom's own `clipShape` clips to THAT bound and so does nothing, because
+    `.aspectRatio(_:contentMode:)` reports its child's size rather than the ratio-derived one.
+    A bare `.frame(height:)` then merely CENTRES the oversized plate, letting it bleed ~16pt
+    past both edges. The bottom bleed lands under the title, which draws on top of it — so the
+    headline was legible over a dark plate and INVISIBLE over a light one ("The Home Depot vs.
+    Lowe's" vanished; "AMD vs. Intel" did not), which is why it was reported as the title being
+    cut off rather than as an overlap.
+
+    The other callers of this atom pass 16/9 for 16:9 artwork, where the overflow is zero. This
+    is the only one cropping to a different ratio, so it is the only one that must clip.
+    """
+    code = _strip_swift_comments(_src("Views/Molecules/RelatedMoneyMoveCard.swift"))
+
+    # The geometry the parametrized width-pin above used to carry as a literal.
+    assert "coverWidth: CGFloat = 200" in code, "the 200pt width pin is no longer 200"
+    assert "coverHeight: CGFloat = 80" in code, "the cover plate is no longer an 80pt band"
+
+    plate = code[code.index("MoneyMoveCoverImage("):]
+    plate = plate[: plate.index("VStack")]
+    assert ".frame(width: Self.coverWidth, height: Self.coverHeight)" in plate, (
+        "the cover plate lost its definite frame — `.aspectRatio` alone is flexible, so the "
+        "card's ideal height comes from the image's INTRINSIC size and the interior Spacer "
+        "opens a dead gap above the meta row")
+    assert ".clipped()" in plate, (
+        "the cover plate lost `.clipped()` — the `.fill` image overflows its 80pt band and "
+        "paints over the headline below it")
+
+
+def test_the_cover_plate_scan_is_not_vacuous():
+    """Anti-vacuity: prove the window above is really the plate, and that stripping happens —
+    this file's own rationale names every token the test greps for."""
+    src = _src("Views/Molecules/RelatedMoneyMoveCard.swift")
+    code = _strip_swift_comments(src)
+    assert len(code) < len(src), "comment stripping removed nothing"
+    assert "struct RelatedMoneyMoveCard: View" in code, "scan drifted — not the card"
+    # `.clipped()` must be found in the PLATE window, not merely somewhere in the file.
+    plate = code[code.index("MoneyMoveCoverImage("):]
+    plate = plate[: plate.index("VStack")]
+    assert len(plate) < len(code), "the plate window is the whole file — brace bounding failed"
+    assert "Text(article.title)" not in plate, "the window leaked into the title block"
+
+
+_ARTICLE_DETAIL = "Views/Screens/MoneyMoveArticleDetailView.swift"
+
+
+def test_following_a_related_article_opens_it_at_the_top():
+    """The identity must sit on the SCROLL VIEW, not on the VStack inside it.
+
+    Tapping a Related Articles card SWAPS the article in place (this screen is itself a
+    fullScreenCover, so it must not push another). Re-identifying the CONTENT rebuilds the
+    subtree while the ScrollView survives and keeps its own contentOffset — so the reader was
+    dropped into the new article at the previous one's offset, i.e. still at the bottom looking
+    at Related Articles, never seeing the headline they just tapped. It shipped that way with a
+    comment claiming the opposite, which is why this is pinned rather than trusted.
+
+    Positional, because both spellings are the same token: `.id(shown.id)` must come AFTER
+    `.onScrollGeometryChange`, which is a modifier ON the ScrollView. Inside the content it
+    would appear before it.
+    """
+    code = _strip_swift_comments(_src(_ARTICLE_DETAIL))
+    assert code.count(".id(shown.id)") == 1, (
+        "expected exactly one `.id(shown.id)`; two would make the scan ambiguous")
+    geometry = code.index(".onScrollGeometryChange")
+    identity = code.index(".id(shown.id)")
+    assert identity > geometry, (
+        "`.id(shown.id)` is back INSIDE the ScrollView's content. That refreshes the content "
+        "but not the scroll container, so following a Related Articles card lands the reader "
+        "at the previous article's offset instead of at the top.")
+
+
+def test_the_article_swap_resets_the_reading_progress_bar():
+    """`scrollOffset` is @State on the screen and SURVIVES the swap, while the ScrollView is
+    rebuilt — so without an explicit reset the progress bar sits at 100% over the top of a
+    brand-new article until the first geometry callback lands. A card is always followed from
+    the BOTTOM, so this is the guaranteed case, not the rare one."""
+    body = _src(_ARTICLE_DETAIL)
+    start = body.index("private func openRelated(")
+    window = _strip_swift_comments(body[start : body.index("\n    }", start)])
+    assert "scrollOffset = 0" in window, (
+        "openRelated no longer resets scrollOffset — the reading-progress bar will show the "
+        "outgoing article's progress on the incoming one")
+    for sentinel in ("heroNavBottom", "heroTitleBottom"):
+        assert sentinel in window, f"openRelated lost its {sentinel} reset"
+
+
+def test_the_article_swap_scan_is_not_vacuous():
+    """Both halves: the window must really be `openRelated`, and stripping must strip."""
+    src = _src(_ARTICLE_DETAIL)
+    assert len(_strip_swift_comments(src)) < len(src), "comment stripping removed nothing"
+    start = src.index("private func openRelated(")
+    window = src[start : src.index("\n    }", start)]
+    assert "current = next" in window, "window is not openRelated"
+    assert "var body: some View" not in window, "window ran past the function"
+
+
+# ── Mini player / tab bar clearance ──────────────────────────────────────────────
+
+
+def test_the_mini_player_clears_the_tab_bar_by_derivation_not_a_magic_number():
+    """A bare `.padding(.bottom, 58)` left a MEASURED 3pt gap and was reported from TestFlight.
+
+    The arithmetic that matters: `GlobalMiniPlayer` adds its OWN `bottomSpacing` below the
+    capsule, so the padding at the call site only has to cover the bar plus the gap wanted
+    above it. Counting the player's 12pt, `58` resolved to 58 + 12 = 70 against a 73pt bar —
+    i.e. the capsule sat 3pt off the tab bar and read as welded to it.
+
+    Pinned as a DERIVATION rather than a number so the two cannot drift apart again.
+    """
+    tab_bar = _strip_swift_comments(_src("Views/Organisms/CustomTabBar.swift"))
+    assert "static let approximateHeight: CGFloat = 73" in tab_bar, (
+        "CustomTabBar no longer publishes its height — the mini player's clearance has nothing "
+        "to derive from and will go back to being a magic number")
+
+    root = _strip_swift_comments(_src("Views/Screens/RootContainerView.swift"))
+    assert "CustomTabBar.approximateHeight" in root, (
+        "RootContainerView stopped deriving the mini player's clearance from the tab bar")
+    assert not re.search(r"\.padding\(\.bottom,\s*\d+\)", root), (
+        "a hardcoded bottom padding is back under the mini player — that is exactly the "
+        "shape that shipped a 3pt gap")
+
+
+def test_the_detail_screens_keep_their_tighter_player_spacing():
+    """The player-above-chat-bar gap was explicitly signed off as correct, so it must NOT be
+    swept along by the tab-bar fix. Three screens stack the player on the Ask Cay AI bar and
+    pass the tighter value; the tab-bar case is the only one that changed."""
+    for rel in ("Views/Screens/MoneyMoveArticleDetailView.swift",
+                "Views/Screens/BookDetailView.swift",
+                "Views/Screens/BookCoreDetailView.swift"):
+        code = _strip_swift_comments(_src(rel))
+        assert "GlobalMiniPlayer(bottomSpacing: AppSpacing.md / 2)" in code, (
+            f"{rel}: the chat-bar-stacked player lost its tighter bottomSpacing")
+
+
+# ── The single "Now Playing" indicator ───────────────────────────────────────────
+
+
+def test_now_playing_is_announced_once_beside_the_play_button():
+    """The hero rendered the state TWICE: `LargePlayButton`'s own label already says "Now
+    Playing", and a second `[bars] Now Playing` row sat underneath repeating it. The bars now
+    live inside the button, immediately right of the play/pause disc."""
+    button = _strip_swift_comments(_src("Views/Atoms/PlayAudioButton.swift"))
+    assert "NowPlayingBars()" in button, (
+        "LargePlayButton lost its playing indicator — the bars belong beside the label")
+    # The bars must precede the label block, i.e. sit right of the disc.
+    assert button.index("NowPlayingBars()") < button.index('"Now Playing"'), (
+        "the bars moved after the label; they belong immediately right of the play disc")
+
+    hero = _strip_swift_comments(_src("Views/Organisms/MoneyMoveArticleHeroHeader.swift"))
+    assert "NowPlayingBars()" not in hero, (
+        "the hero header renders the playing indicator again — that is the duplicate row")
+    assert '"Now Playing"' not in hero, (
+        "the hero header says \"Now Playing\" again; LargePlayButton already does")
+
+
+def test_the_listen_row_is_inked_for_the_page_not_for_an_accent():
+    """⚠️ A CONTRAST guard. `LargePlayButton`'s label sits on the PAGE background — the hero's
+    own code says so ("now that it sits on the page background rather than on a saturated
+    gradient"). `textOnAccent` is #FFFFFF in BOTH appearances, so while that comment was stale
+    the Listen Now / Now Playing row measured ~1.05:1 on the #F4F5F8 light page and was simply
+    invisible in light mode.
+
+    `textOnMediaSurface` is the one on-accent ink that is CORRECT here: it inks the glyph on
+    the filled white disc, which really is a fill."""
+    code = _strip_swift_comments(_src("Views/Atoms/PlayAudioButton.swift"))
+    large = code[code.index("struct LargePlayButton"):]
+    assert "AppColors.textOnAccent" not in large, (
+        "LargePlayButton is inking page-background text with `textOnAccent` (white in BOTH "
+        "appearances) — that row disappears on the light page")
+    assert "AppColors.textPrimary" in large and "AppColors.textSecondary" in large, (
+        "LargePlayButton's label/duration lost their page inks")
+    assert "AppColors.textOnMediaSurface" in large, (
+        "the play glyph lost the ink meant for its filled white disc")
+
+
+def test_the_now_playing_scans_are_not_vacuous():
+    """Controls: the windows must be the real declarations, and stripping must strip."""
+    src = _src("Views/Atoms/PlayAudioButton.swift")
+    code = _strip_swift_comments(src)
+    assert len(code) < len(src), "comment stripping removed nothing"
+    assert "struct LargePlayButton" in code, "scan drifted — LargePlayButton is gone"
+    large = code[code.index("struct LargePlayButton"):]
+    assert len(large) < len(code), "the LargePlayButton window is the whole file"
+    # The hero assertions would pass trivially on an empty/renamed file.
+    hero = _strip_swift_comments(_src("Views/Organisms/MoneyMoveArticleHeroHeader.swift"))
+    assert "struct MoneyMoveArticleHeroHeader: View" in hero, "hero scan drifted"
+    assert "LargePlayButton(" in hero, (
+        "the hero no longer hosts the play button, so asserting the absence of a duplicate "
+        "indicator there proves nothing")

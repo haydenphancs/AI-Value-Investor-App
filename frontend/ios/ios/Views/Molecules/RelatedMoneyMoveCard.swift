@@ -11,6 +11,11 @@ struct RelatedMoneyMoveCard: View {
     let article: RelatedArticle
     var onTap: (() -> Void)?
 
+    /// The card is a fixed 200pt wide, so the cover plate's ratio is derivable rather than
+    /// guessed — and the two can never drift, which is what makes passing a ratio safe below.
+    private static let coverWidth: CGFloat = 200
+    private static let coverHeight: CGFloat = 80
+
     var body: some View {
         Button(action: { onTap?() }) {
             VStack(alignment: .leading, spacing: 0) {
@@ -18,12 +23,33 @@ struct RelatedMoneyMoveCard: View {
                 // (stamped from a title -> card-url map across every article, so no runtime
                 // lookup here), otherwise the gradient + category glyph this always drew.
                 ZStack(alignment: .topLeading) {
+                    // ⚠️ `.frame(...)` ALONE IS NOT ENOUGH HERE — `.clipped()` is load-bearing,
+                    // and leaving it off is what shipped as "the title got cut off".
+                    //
+                    // The plate's inner image is `.aspectRatio(contentMode: .fill)`, which
+                    // reports a layout size that COVERS its proposal — 200x112 for a 16:9
+                    // source asked for 200x80. The atom's own `clipShape` then clips to THAT
+                    // oversized bound, i.e. does nothing, because `.aspectRatio(_:contentMode:)`
+                    // reports its CHILD's size rather than the ratio-derived one. A bare
+                    // `.frame(height:)` then merely CENTRES the oversized plate in the 80pt
+                    // slot, so it bleeds ~16pt past both edges.
+                    //
+                    // The bottom bleed lands under the title, which draws on top of it — so the
+                    // headline was legible over a dark plate and invisible over a light one.
+                    // "The Home Depot vs. Lowe's" (white paint cans) vanished; "AMD vs. Intel"
+                    // (dark CPU photo) did not, which is exactly why it read as a truncation
+                    // bug rather than an overlap.
+                    //
+                    // `.clipped()` cuts to the frame's real 200x80 whatever the child reports.
+                    // The other four callers of this atom get away without it only because they
+                    // ask for 16/9 from 16:9 artwork, where the overflow happens to be zero.
                     MoneyMoveCoverImage(
                         url: article.imageCardUrl,
                         gradientColors: article.gradientColors,
                         cornerRadius: 0
                     )
-                    .frame(height: 80)
+                    .frame(width: Self.coverWidth, height: Self.coverHeight)
+                    .clipped()
 
                     // The glyph is redundant once there is a picture, and its white-on-
                     // white.opacity(0.2) circle is unreadable over a light-ground plate.
@@ -86,8 +112,15 @@ struct RelatedMoneyMoveCard: View {
             // card in the row the same height. Parent uses `HStack(alignment: .top)` to match.
             //
             // `.top` is required: the 80pt cover-image header must stay flush to the top edge.
-            .frame(minWidth: 200, maxWidth: 200,
-                   minHeight: 200, maxHeight: .infinity, alignment: .top)
+            // 220, not 200. The floor is what the row actually resolves to — the horizontal
+            // ScrollView proposes a definite height rather than nil, so the card sits ON the
+            // minimum instead of growing to its ideal. At 200 the interior had 96pt for a
+            // 2-line title + 2-line subtitle + the meta row, which needs ~102pt, so SwiftUI
+            // truncated the TITLE to one line: "The Home Depot vs. Lo…". That is the second
+            // half of the same TestFlight report — the headline was clipped by the plate AND
+            // cut short by the box.
+            .frame(minWidth: Self.coverWidth, maxWidth: Self.coverWidth,
+                   minHeight: 220, maxHeight: .infinity, alignment: .top)
             .cardSurface(cornerRadius: AppCornerRadius.large)
         }
         .buttonStyle(PlainButtonStyle())

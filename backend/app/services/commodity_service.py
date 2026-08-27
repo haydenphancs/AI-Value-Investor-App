@@ -434,6 +434,95 @@ class CommodityService:
         finally:
             _inflight.pop(cache_key, None)
 
+    async def get_commodity_core(
+        self,
+        symbol: str,
+        chart_range: str = "3M",
+        interval: Optional[str] = None,
+    ) -> "CommodityCoreResponse":
+        """FIRST PAINT: the header line and, when it is free, the chart.
+
+        Deliberately NOT a projection of the full build — that is what
+        `get_commodity_quote` is, and it is why `/quote` cannot serve first paint: on a
+        cold cache it pays the entire assembly. This calls the SAME per-section builders,
+        just two of them, so there is still exactly one code path per number.
+
+        Never touches `_get_derived` (the daily history plus the S&P benchmark leg) or the
+        related-quote fan-out.
+        """
+        from app.schemas.commodity import CommodityCoreResponse
+
+        # Strip only a TRAILING "USD" pair suffix — a global replace is the bug the crypto
+        # endpoint was fixed for (it turned USDT into T). Same three lines as the full
+        # build, deliberately: a core that resolved a symbol differently would be a
+        # different asset.
+        symbol = symbol.upper().strip()
+        if len(symbol) > 3 and symbol.endswith("USD"):
+            symbol = symbol[:-3]
+        fmp_symbol = _resolve_fmp_symbol(symbol)
+        commodity_name = _resolve_name(symbol)
+
+        quote, chart_points = await asyncio.gather(
+            self._get_quote(fmp_symbol),
+            self._get_chart(fmp_symbol, chart_range, interval, fast_only=True),
+            return_exceptions=True,
+        )
+        if isinstance(chart_points, BaseException) or not isinstance(chart_points, list):
+            logger.warning(
+                "Commodity core chart failed for %s: %r — serving the header alone",
+                fmp_symbol, chart_points,
+            )
+            chart_points = []
+        if isinstance(quote, BaseException) or not isinstance(quote, dict):
+            quote = {}
+
+        price = _finite_or_none(quote.get("price")) or 0
+        if price <= 0:
+            # A zero-price core would paint "$0.00" as the FIRST thing on screen. Refuse:
+            # the client fetches core with `try?`, so the skeleton simply stays up.
+            raise ValueError(f"commodity core has no usable price for {symbol}")
+
+        change = _finite_or_none(quote.get("change")) or 0
+        change_pct = (_finite_or_none(quote.get("changePercentage"))
+                      or _finite_or_none(quote.get("changesPercentage")) or 0)
+        prev_close = _finite_or_none(quote.get("previousClose")) or 0
+        if not change_pct and change and prev_close:
+            try:
+                change_pct = round((float(change) / float(prev_close)) * 100, 4)
+            except (ValueError, TypeError, ZeroDivisionError):
+                change_pct = 0
+
+        chart_data = []
+        for row in chart_points:
+            # Defensive on BOTH required fields. `close` is a required float on the
+            # response model, so a NaN or a missing key here serialises to an invalid
+            # JSON token and 500s the screen from inside Starlette — where this method's
+            # caller cannot catch it.
+            if not isinstance(row, dict):
+                continue
+            date = row.get("date")
+            close = _finite_or_none(row.get("close") or row.get("adjClose"))
+            if not date or close is None or close <= 0:
+                continue
+            chart_data.append(CommodityChartPointResponse(
+                date=date,
+                open=_finite_or_none(row.get("open")),
+                high=_finite_or_none(row.get("high")),
+                low=_finite_or_none(row.get("low")),
+                close=close,
+                volume=_finite_or_none(row.get("volume")),
+            ))
+
+        return CommodityCoreResponse(
+            symbol=symbol,
+            name=commodity_name,
+            current_price=round(price, 2),
+            price_change=round(change, 2),
+            price_change_percent=round(change_pct, 2),
+            market_status=_commodity_market_status(),
+            chart_data=chart_data,
+        )
+
     async def get_commodity_quote(
         self,
         symbol: str,
@@ -794,6 +883,7 @@ class CommodityService:
         fmp_symbol: str,
         chart_range: str,
         interval: Optional[str],
+        fast_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """Chart bars for one range, derived from `historical` wherever possible.
 
@@ -803,6 +893,13 @@ class CommodityService:
           * 5Y/ALL    -> aggregate    (`_aggregate_prices`, which `fetch_chart_data`
                                        was already calling — after re-fetching the very
                                        history we are holding)
+
+        `fast_only` is the first-paint contract for the `/core` endpoint: serve bars from
+        Tier-2, or from a single intraday fetch, but NEVER pull the daily history to make
+        them. That pull is the one thing standing between core and a sub-second answer;
+        returning `[]` is honest and cheap, because the full response is already in flight
+        and fills the chart a moment later. Mirrors `_get_volatile(fast_only=...)` in
+        `stock_overview_service`.
         """
         from app.services.chart_helper import (
             AGGREGATED_INTERVALS,
@@ -826,6 +923,15 @@ class CommodityService:
             if db:
                 logger.info("Commodity chart tier-2 HIT for %s", tier2_key)
                 return db
+
+        if fast_only and resolved not in INTRADAY_INTERVALS:
+            # Every remaining path needs `historical`. Under `fast_only` that pull is
+            # exactly what we are here to avoid.
+            logger.info(
+                "Commodity core chart skipped for %s — cold section, would need the "
+                "daily history", tier2_key,
+            )
+            return []
 
         historical = (
             [] if resolved in INTRADAY_INTERVALS else await self._get_history(fmp_symbol)

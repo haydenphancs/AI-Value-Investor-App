@@ -201,6 +201,10 @@ async def lifespan(app: FastAPI):
         # first Home load after each 20-min cache expiry isn't a cold build.
         _spawn(_run_scanner_pre_warmer(), "run_scanner_pre_warmer")
 
+        # Start background index pre-warmer: three symbols, keeping the index detail
+        # screens off the cold path after a redeploy. See the docstring for the numbers.
+        _spawn(_run_index_pre_warmer(), "run_index_pre_warmer")
+
         # NOTE: the old weekly sector-only benchmark job was RETIRED here.
         # Sector + industry medians are now computed together by the
         # industry-benchmark recompute chained into the quarterly batch
@@ -586,6 +590,67 @@ async def _run_scanner_pre_warmer():
             logger.error(f"Scanner pre-warmer failed: {e}", exc_info=True)
 
         await asyncio.sleep(settings.SCANNER_PREWARM_INTERVAL_SECONDS)
+
+
+async def _run_index_pre_warmer():
+    """Background task: keep the three index detail screens hot.
+
+    `_INDEX_PROFILES` holds exactly three symbols (^GSPC / ^IXIC / ^DJI) and they are the
+    ones Home Market Pulse links to, so this is a ~3-call pass, not a fan-out.
+
+    It exists because a cold index build measured **5.63s (^GSPC) and 11.42s (^DJI)**
+    against production while the same build with its caches warm is 0.36s — and a Railway
+    redeploy empties the in-process tier every time. The AI stories now persist to
+    `index_cache` and no longer block the response, so this is the last piece: it means no
+    real user is the one who pays for the first build after a deploy.
+
+    `get_index_detail` serves its own cache first and dedups in flight, so this is a no-op
+    when a user already warmed it. Deliberately NOT gated on market hours: the expensive
+    sections here are the daily history, the constituent count and the AI stories, none of
+    which care whether the session is open, and the screen is reachable at any hour.
+    """
+    if not settings.INDEX_PREWARM_ENABLED:
+        return
+
+    # Stagger past the news (30s), report (45s) and scanner (120s) pre-warmers so the
+    # startup bursts don't pile onto the shared 20-connection FMP pool at once.
+    await asyncio.sleep(150)
+
+    from app.services.index_service import _INDEX_PROFILES, get_index_service
+
+    while True:
+        try:
+            service = get_index_service()
+            # The DEFAULT open: iOS opens these screens on 3M/daily. Warming a range the
+            # client never requests would warm a cache key nobody reads.
+            results = await asyncio.gather(
+                *(
+                    service.get_index_detail(sym, chart_range="3M", interval="daily")
+                    for sym in _INDEX_PROFILES
+                ),
+                return_exceptions=True,
+            )
+            failed = [
+                (sym, r) for sym, r in zip(_INDEX_PROFILES, results)
+                if isinstance(r, BaseException)
+            ]
+            if failed:
+                # Best-effort work, but never silent: a pre-warm that has been failing
+                # since boot is invisible except here, and the symptom users report is
+                # only ever "the screen is slow".
+                for sym, exc in failed:
+                    logger.warning(
+                        "Index pre-warm failed for %s: %s: %s",
+                        sym, type(exc).__name__, exc,
+                    )
+            logger.info(
+                "Index pre-warm: pass complete (%d/%d warm)",
+                len(_INDEX_PROFILES) - len(failed), len(_INDEX_PROFILES),
+            )
+        except Exception as e:
+            logger.error(f"Index pre-warmer failed: {e}", exc_info=True)
+
+        await asyncio.sleep(settings.INDEX_PREWARM_INTERVAL_SECONDS)
 
 
 async def _run_subscription_expiry_sweep():

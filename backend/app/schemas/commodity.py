@@ -110,6 +110,29 @@ class CommodityQuoteResponse(BaseModel):
     related_commodities: List[RelatedCommodityResponse] = []
 
 
+class CommodityCoreResponse(BaseModel):
+    """FIRST-PAINT slice: the header line and, when it is free, the chart.
+
+    Not a light version of the refresh slice — a different job. `CommodityQuoteResponse`
+    is a PROJECTION of the assembled build, so on a cold cache it costs exactly what the
+    full detail costs and cannot serve first paint. This is assembled from the two CHEAP
+    per-section builders only (`_get_quote` + `_get_chart`).
+
+    Field names and types match the same-named fields on `CommodityDetailResponse`, so
+    the client decodes them with DTOs it already has.
+    """
+
+    symbol: str
+    name: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: str
+    # Empty when the bars would have cost a multi-thousand-row history pull — see
+    # `CommodityService._get_chart(fast_only=True)`. The full response fills them in.
+    chart_data: List[CommodityChartPointResponse] = []
+
+
 class CommodityDetailResponse(BaseModel):
     symbol: str
     name: str

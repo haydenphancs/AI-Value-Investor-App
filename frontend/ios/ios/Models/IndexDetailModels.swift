@@ -296,6 +296,27 @@ struct IndexProfile {
 // MARK:   INDEX DETAIL DATA
 // MARK: - ──────────────────────────────────────────────
 
+/// The header's price formatting, in ONE place.
+///
+/// `IndexDetailData` and `IndexCoreData` both render the same header — the fast-core
+/// slice paints first and the full response supersedes it in the same view — so two
+/// copies of these rules would let the price visibly reformat mid-swap.
+enum IndexHeaderFormat {
+    static func price(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
+
+    static func change(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", value))"
+    }
+
+    static func changePercent(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "(\(sign)\(String(format: "%.2f", value))%)"
+    }
+}
+
 struct IndexDetailData: Identifiable {
     let id = UUID()
     let symbol: String
@@ -326,18 +347,10 @@ struct IndexDetailData: Identifiable {
         currentPrice - priceChange
     }
 
-    var formattedPrice: String {
-        String(format: "$%.2f", currentPrice)
-    }
-
-    var formattedChange: String {
-        let sign = priceChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", priceChange))"
-    }
-
+    var formattedPrice: String { IndexHeaderFormat.price(currentPrice) }
+    var formattedChange: String { IndexHeaderFormat.change(priceChange) }
     var formattedChangePercent: String {
-        let sign = priceChangePercent >= 0 ? "+" : ""
-        return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+        IndexHeaderFormat.changePercent(priceChangePercent)
     }
 }
 

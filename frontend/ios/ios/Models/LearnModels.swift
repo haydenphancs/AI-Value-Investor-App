@@ -913,7 +913,7 @@ extension LibraryBook {
                 BookKeyHighlight(title: "Index Funds Win", description: "Most active managers underperform the market over time.", iconName: "chart.line.uptrend.xyaxis", iconColor: "22C55E"),
                 BookKeyHighlight(title: "Costs Matter", description: "Every dollar paid in fees is a dollar less in returns.", iconName: "dollarsign.circle.fill", iconColor: "F59E0B"),
                 BookKeyHighlight(title: "Stay the Course", description: "Time in the market beats timing the market.", iconName: "clock.arrow.circlepath", iconColor: "3B82F6"),
-                BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: "sparkles.2", iconColor: "8B5CF6")
+                BookKeyHighlight(title: "Simple is Best", description: "A total market index fund is all most investors need.", iconName: AppSymbols.ai, iconColor: "8B5CF6")
             ],
             coreChapters: BookCoreChapter.listsByOrder[6] ?? [],
             discussions: []

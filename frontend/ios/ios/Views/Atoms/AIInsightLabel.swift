@@ -4,7 +4,7 @@
 //
 //  Atom: the "✨ Insight" header that marks AI-written prose.
 //
-//  This exact HStack — `sparkles.2` in indigo, the word in an indigo→cyan
+//  This exact HStack — `AppSymbols.ai` in indigo, the word in an indigo→cyan
 //  gradient — is inlined identically in 12 places across the report sections
 //  (ReportPriceMovementSection, ReportFundamentalsSection, ReportMoatCompetition
 //  Section, ReportMacroGeopoliticalSection, ReportRevenueEngineSection,
@@ -30,7 +30,7 @@ struct AIInsightLabel: View {
 
     var body: some View {
         HStack(spacing: AppSpacing.xs) {
-            Image(systemName: "sparkles.2")
+            Image(systemName: AppSymbols.ai)
                 // Flat, NOT `AppGradients.ai` — deliberate, and it is what the
                 // report sections render. A two-stop ramp across a glyph this
                 // small reads as muddy rather than as a gradient.

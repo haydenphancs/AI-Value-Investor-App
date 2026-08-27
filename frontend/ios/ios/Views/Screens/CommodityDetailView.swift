@@ -76,7 +76,11 @@ struct CommodityDetailView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                         // Content above tab bar (scrolls away)
-                        if let commodityData = viewModel.commodityData {
+                        // `headerData` is the full model once it lands and the fast-core
+                        // slice until then — the header and chart are the only things
+                        // core can fill, so ONLY this gate takes it. The tabs below keep
+                        // waiting for the full response, exactly as the stock screen does.
+                        if let commodityData = viewModel.headerData {
                             // Commodity Price Header
                             CommodityPriceHeader(
                                 commodityName: commodityData.name,

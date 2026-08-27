@@ -49,6 +49,12 @@ protocol StockRepositoryProtocol {
     func getCommodityQuote(symbol: String, range: String?, interval: String?) async throws -> CommodityQuoteResponseDTO
     func getETFQuote(symbol: String, range: String?, interval: String?) async throws -> ETFQuoteResponseDTO
     func getIndexQuote(symbol: String, range: String?, interval: String?) async throws -> IndexQuoteResponse
+    // Fast-core first paint — see the implementations for why these are NOT the
+    // `*Quote` slices, which are projections of the full build.
+    func getIndexCore(symbol: String, range: String, interval: String?) async throws -> IndexCoreResponseDTO
+    func getETFCore(symbol: String, range: String, interval: String?) async throws -> ETFCoreResponseDTO
+    func getCommodityCore(symbol: String, range: String, interval: String?) async throws -> CommodityCoreResponseDTO
+    func getCryptoCore(symbol: String, range: String, interval: String?) async throws -> CryptoCoreResponseDTO
 }
 
 // MARK: - Stock Repository
@@ -275,6 +281,83 @@ final class StockRepository: StockRepositoryProtocol {
         let response = try await apiClient.request(
             endpoint: .getIndexQuote(symbol: symbol, range: range, interval: interval),
             responseType: IndexQuoteResponse.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    // MARK: - Fast-core first paint
+    //
+    // These exist because the four sibling detail screens gated their ENTIRE first paint
+    // on one aggregated response: `^GSPC` measured 5.63s cold against 0.14s warm, and a
+    // TestFlight tester reported the screen as "very slow at first time open it".
+    //
+    // Deliberately NOT the `*Quote` slices above: those are projections of the full
+    // build, so on a cold cache they cost exactly what the full detail costs.
+    //
+    // `CacheTTL.chart` (25s), the same short TTL the `*Quote` slices use: these carry a
+    // LIVE price, and a first-paint accelerator holding one for minutes would paint a
+    // stale number on re-entry — the exact failure the cache-decomposition pass undid.
+
+    func getIndexCore(symbol: String, range: String, interval: String?) async throws -> IndexCoreResponseDTO {
+        let cacheKey = "index_core_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: IndexCoreResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getIndexCore(symbol: symbol, range: range, interval: interval),
+            responseType: IndexCoreResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    func getETFCore(symbol: String, range: String, interval: String?) async throws -> ETFCoreResponseDTO {
+        let cacheKey = "etf_core_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: ETFCoreResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getETFCore(symbol: symbol, range: range, interval: interval),
+            responseType: ETFCoreResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    func getCommodityCore(symbol: String, range: String, interval: String?) async throws -> CommodityCoreResponseDTO {
+        let cacheKey = "commodity_core_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: CommodityCoreResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCommodityCore(symbol: symbol, range: range, interval: interval),
+            responseType: CommodityCoreResponseDTO.self
+        )
+
+        setCache(cacheKey, value: response)
+        return response
+    }
+
+    func getCryptoCore(symbol: String, range: String, interval: String?) async throws -> CryptoCoreResponseDTO {
+        let cacheKey = "crypto_core_\(symbol)_\(range)_\(interval ?? "default")"
+
+        if let cached: CryptoCoreResponseDTO = getCached(cacheKey, maxAge: CacheTTL.chart) {
+            return cached
+        }
+
+        let response = try await apiClient.request(
+            endpoint: .getCryptoCore(symbol: symbol, range: range, interval: interval),
+            responseType: CryptoCoreResponseDTO.self
         )
 
         setCache(cacheKey, value: response)
@@ -2822,6 +2905,22 @@ final class MockStockRepository: StockRepositoryProtocol {
     }
 
     func getIndexQuote(symbol: String, range: String?, interval: String?) async throws -> IndexQuoteResponse {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getIndexCore(symbol: String, range: String, interval: String?) async throws -> IndexCoreResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getETFCore(symbol: String, range: String, interval: String?) async throws -> ETFCoreResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getCommodityCore(symbol: String, range: String, interval: String?) async throws -> CommodityCoreResponseDTO {
+        throw APIError.networkError(NSError(domain: "Mock", code: 0))
+    }
+
+    func getCryptoCore(symbol: String, range: String, interval: String?) async throws -> CryptoCoreResponseDTO {
         throw APIError.networkError(NSError(domain: "Mock", code: 0))
     }
 

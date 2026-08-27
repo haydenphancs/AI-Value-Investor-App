@@ -79,12 +79,16 @@ struct MoneyMoveArticleDetailView: View {
         // and `readAlongActiveTime` already returns nil once the episode no longer matches,
         // so the new article simply renders without read-along highlighting.
         current = next
-        // ⚠️ Reset both hero edges to the offscreen sentinel. `.id(shown.id)` rebuilds the
-        // scroll view so the new article opens at the top, but THIS screen's @State survives
+        // ⚠️ Reset both hero edges to the offscreen sentinel. `.id(shown.id)` on the ScrollView
+        // rebuilds it so the new article opens at the top, but THIS screen's @State survives
         // the swap — without the reset, the outgoing article's (already scrolled past)
         // measurements would flash the mini header over the incoming article's hero.
         heroNavBottom = .greatestFiniteMagnitude
         heroTitleBottom = .greatestFiniteMagnitude
+        // Same reasoning for the reading-progress bar: it is driven by surviving @State, and
+        // a card is followed from the BOTTOM of the article, so the bar would otherwise sit at
+        // 100% over the top of a brand-new article until the first geometry callback lands.
+        scrollOffset = 0
     }
 
     /// The narration playhead (seconds) when THIS article's audio is the active episode, else nil
@@ -179,10 +183,6 @@ struct MoneyMoveArticleDetailView: View {
                         Color.clear
                             .frame(height: audioManager.hasActiveEpisode ? 120 : 40)
                     }
-                    // Changing identity on swap gives the new article a FRESH scroll view, so it
-                    // opens at the top instead of inheriting the previous article's offset
-                    // mid-paragraph. Also rebinds read-along and the completion toggle.
-                    .id(shown.id)
                 }
                 // Drive the sticky header + reading-progress bar straight from the scroll
                 // view's live geometry (iOS 18+). More reliable than a GeometryReader +
@@ -198,6 +198,18 @@ struct MoneyMoveArticleDetailView: View {
                     contentHeight = metrics.contentHeight
                     viewportHeight = metrics.viewportHeight
                 }
+                // ⚠️ The identity belongs on the SCROLL VIEW, not on the VStack inside it.
+                // It used to sit on the content, with a comment claiming that gave the new
+                // article "a FRESH scroll view" — it did not. Re-identifying the CONTENT
+                // swaps the subtree while the ScrollView survives and keeps its own
+                // contentOffset, so following a Related Articles card dropped the reader into
+                // the new article at the previous one's offset — i.e. at the bottom, looking
+                // at Related Articles again, never seeing the headline they just tapped.
+                //
+                // Identifying the ScrollView itself (with the geometry observer inside the
+                // identified subtree, so it re-registers too) rebuilds the scroll container
+                // and its offset along with the content.
+                .id(shown.id)
 
                 // Sticky mini header (appears on scroll)
                 if chromeOpacity > 0 {

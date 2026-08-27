@@ -61,7 +61,7 @@ struct ReportPriceMovementSection: View {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 // Header: sparkles icon + "Insight"
                 HStack(spacing: AppSpacing.xs) {
-                    Image(systemName: "sparkles.2")
+                    Image(systemName: AppSymbols.ai)
                         .foregroundStyle(
                             AppColors.aiRampStart
                         )

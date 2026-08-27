@@ -53,6 +53,14 @@ _INFLIGHT_MODULES = [
     # viewers of a cold SPY each ran the whole ~10-call fan-out including the 1.1 MB history.
     "etf_service.py",
     "index_service.py",
+    # Added 2026-08-26 when index/ETF stopped awaiting Gemini inline and adopted crypto's
+    # background-refresh shape. Crypto's own `create_task` had no owner and no done
+    # callback at all, so a collected task left the snapshot defaults cached with nothing
+    # logged. It is Task-based, not Future-based: `_ai_refresh_inflight` holds SYMBOLS, no
+    # caller ever awaits the task, so the join/resolve arms below are trivially satisfied
+    # and the arm that matters is `add_done_callback` — the in-flight entry must clear
+    # from the task's own completion, which is what its `finally` does.
+    "crypto_service.py",
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.

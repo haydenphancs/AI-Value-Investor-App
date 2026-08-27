@@ -121,7 +121,7 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         case "congress_trade":    return "building.columns.fill"
         case "price_alert":       return "bell.badge"
         case "research_complete": return "sparkles"
-        case "profile_match":     return "sparkles.2"
+        case "profile_match":     return AppSymbols.ai
         default:                  return "app.badge.fill"
         }
     }

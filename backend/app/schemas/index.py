@@ -150,6 +150,33 @@ class IndexQuoteResponse(BaseModel):
     key_statistics_groups: List[KeyStatisticsGroupResponse] = []
 
 
+class IndexCoreResponse(BaseModel):
+    """FIRST-PAINT slice: the header line and, when it is free, the chart.
+
+    Not a light version of the refresh slice — a different job. `IndexQuoteResponse` is a
+    PROJECTION of the assembled build, so on a cold cache it costs exactly what the full
+    detail costs and cannot serve first paint. This is assembled from the two CHEAP
+    per-section builders only (`_get_quote` + `_get_chart`), so it answers in ~0.3s while
+    the full response is still gathering.
+
+    Every field name and type is identical to the same-named field on
+    `IndexDetailResponse`, so the client decodes them with DTOs it already has and the
+    core -> full swap is seamless. `previous_close` is deliberately absent: iOS derives it
+    as `currentPrice - priceChange` (IndexDetailModels.swift), so shipping it would be a
+    second source for one number.
+    """
+
+    symbol: str
+    index_name: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: MarketStatusResponse
+    # Empty when the bars would have cost a multi-thousand-row history pull — see
+    # `IndexService._get_chart(fast_only=True)`. The full response fills them in.
+    chart_data: List[ChartDataPointResponse] = []
+
+
 class IndexDetailResponse(BaseModel):
     symbol: str
     index_name: str

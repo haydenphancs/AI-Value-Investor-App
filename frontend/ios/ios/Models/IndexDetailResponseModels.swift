@@ -477,3 +477,114 @@ extension IndexDetailResponse {
         }
     }
 }
+
+// MARK: - ──────────────────────────────────────────────
+// MARK:   FAST-CORE FIRST PAINT
+// MARK: - ──────────────────────────────────────────────
+//
+// `GET /api/v1/indices/{{symbol}}/core` — the header line, and the chart when it was
+// already cached server-side.
+//
+// Why this exists, measured against production on 2026-08-26: a cold `^GSPC` detail
+// build took 5.63s (^DJI 11.42s, SCHD 5.89s) while the same build with its caches warm
+// took 0.36s — and the whole screen sat behind that ONE response, so a TestFlight tester
+// reported "It's very slow at first time open it." The stock screen never had that
+// problem despite the SLOWEST full build of the lot (DECK, 7.94s), because it paints a
+// core slice in 0.32s first.
+//
+// NOT the same thing as the `/quote` light slice: that one is a PROJECTION of the full
+// build, so on a cold cache it costs exactly what the full detail costs and cannot serve
+// first paint. Core is assembled from the two cheap sections only.
+
+/// Fast-core payload for the indices detail screen. Field names mirror the full detail
+/// DTO and reuse its nested types, so `full ?? core` is a drop-in swap in the view.
+struct IndexCoreResponseDTO: Decodable {
+    let symbol: String
+    let indexName: String
+    let currentPrice: Double
+    let priceChange: Double
+    let priceChangePercent: Double
+    let marketStatus: MarketStatusDTO
+    /// Empty when the server could only have produced bars by pulling the multi-thousand
+    /// row daily history. The full response fills them in a moment later.
+    let chartData: [StockOverviewPricePointDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case symbol
+        case indexName = "index_name"
+        case currentPrice = "current_price"
+        case priceChange = "price_change"
+        case priceChangePercent = "price_change_percent"
+        case marketStatus = "market_status"
+        case chartData = "chart_data"
+    }
+
+    func toCoreData() -> IndexCoreData {
+        IndexCoreData(
+            symbol: symbol,
+            indexName: indexName,
+            currentPrice: currentPrice,
+            priceChange: priceChange,
+            priceChangePercent: priceChangePercent,
+            marketStatus: marketStatus.resolvedMarketStatus,
+            chartPricePoints: chartData.map {
+                StockPricePoint(date: $0.date ?? "", close: $0.close,
+                                open: $0.open, high: $0.high, low: $0.low,
+                                volume: $0.volume)
+            }
+        )
+    }
+}
+
+/// The header-only side model the screen paints until the full response lands.
+///
+/// Every formatted string delegates to `IndexHeaderFormat`, the SAME helper the full display model
+/// uses — so nothing visibly reformats when core is superseded.
+struct IndexCoreData {
+    let symbol: String
+    let indexName: String
+    var currentPrice: Double
+    var priceChange: Double
+    var priceChangePercent: Double
+    var marketStatus: MarketStatus
+    /// `var`: the range pill is interactive before the full response lands, and the live
+    /// socket merges ticks into the core header the same way it merges into the full one.
+    var chartPricePoints: [StockPricePoint]
+
+    var chartData: [Double] { chartPricePoints.map { $0.close } }
+    var isPositive: Bool { priceChange >= 0 }
+    /// Prior close, for the chart's dashed baseline — derived exactly as the full display
+    /// model derives it, not shipped by the server, so there is one source for it.
+    var previousClose: Double { currentPrice - priceChange }
+
+    var formattedPrice: String { IndexHeaderFormat.price(currentPrice) }
+    var formattedChange: String { IndexHeaderFormat.change(priceChange) }
+    var formattedChangePercent: String {
+        IndexHeaderFormat.changePercent(priceChangePercent)
+    }
+}
+
+/// What the price header and chart need, and nothing else.
+///
+/// The full display model and the fast-core model BOTH conform, which is what lets the
+/// screen render `full ?? core` from one block of view code instead of two — two copies
+/// of the header is how a core slice ends up rendering subtly differently from the model
+/// that replaces it a second later.
+///
+/// Deliberately per-asset rather than one shared protocol: `marketStatus` is a different
+/// enum on each screen, and flattening that to a String to share a protocol would throw
+/// away the exhaustive switches the header views rely on.
+protocol IndexHeaderRenderable {
+    var symbol: String { get }
+    var indexName: String { get }
+    var formattedPrice: String { get }
+    var formattedChange: String { get }
+    var formattedChangePercent: String { get }
+    var isPositive: Bool { get }
+    var marketStatus: MarketStatus { get }
+    var chartPricePoints: [StockPricePoint] { get }
+    var previousClose: Double { get }
+}
+
+extension IndexDetailData: IndexHeaderRenderable {}
+extension IndexCoreData: IndexHeaderRenderable {}

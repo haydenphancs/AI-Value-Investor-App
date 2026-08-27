@@ -28,6 +28,7 @@ struct FilterButton: View {
                         .offset(x: 2, y: -2)
                 }
             }
+            .hitSlop(reaching: 32)
         }
         .buttonStyle(PlainButtonStyle())
     }

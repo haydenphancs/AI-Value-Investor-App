@@ -120,6 +120,25 @@ def _safe_float(record: Dict[str, Any], key: str, default: float = 0.0) -> float
         return default
 
 
+def _safe_float_opt(record: Dict[str, Any], key: str) -> Optional[float]:
+    """Like `_safe_float`, but returns None instead of a substitute value.
+
+    Used for the composition fields (`netIncome`, `revenue`). Their whole purpose is to
+    replace a wrong DERIVED number with a reported one, so "upstream did not report it"
+    has to stay distinguishable from "upstream reported zero" — a 0.0 default here would
+    render a company as having earned exactly nothing, which is precisely the class of
+    fabricated-number bug this change exists to remove.
+    """
+    val = record.get(key)
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else None
+    except (ValueError, TypeError):
+        return None
+
+
 # Keys that are metadata, not segment names, in FMP segmentation response
 _SEGMENT_META_KEYS = {"date", "symbol", "reportedCurrency", "cik", "fillingDate",
                       "acceptedDate", "calendarYear", "period", "link", "finalLink",
@@ -431,10 +450,36 @@ class RevenueBreakdownService:
             income = income_raw[0] if income_raw else {}
 
         cost_of_sales = _safe_float(income, "costOfRevenue")
+        # ⚠️ FMP's `operatingExpenses` is legitimately NEGATIVE for some filers, and it is
+        # NOT an error to pass through. It is SG&A + R&D + otherExpenses, so a company that
+        # books most SG&A inside cost of sales and carries a large other-income credit nets
+        # below zero — LMT FY2025 is exactly 50M + 2,000M + (-2,162M) = -112M. A negative
+        # cost is a CREDIT; iOS relabels it rather than pretending it is an expense. Do not
+        # clamp it here: clamping would silently move 112M into net profit.
         operating_expense = _safe_float(income, "operatingExpenses")
         tax = _safe_float(income, "incomeTaxExpense")
         total_revenue_income = _safe_float(income, "revenue")
         fiscal_year = _record_year(income)
+
+        # ── The composition (see RevenueBreakdownResponse's docstring) ──
+        # Optional on purpose: absent must stay distinguishable from zero.
+        net_income = _safe_float_opt(income, "netIncome")
+        reported_revenue = _safe_float_opt(income, "revenue")
+
+        # The plug that closes the waterfall: interest, non-operating items, minority
+        # interest, discontinued ops. Only computable when BOTH ends are reported —
+        # deriving it from a substituted zero would recreate the bug being fixed.
+        other_expense: Optional[float] = None
+        if net_income is not None and reported_revenue is not None:
+            other_expense = (
+                reported_revenue - cost_of_sales - operating_expense - tax - net_income
+            )
+        else:
+            logger.info(
+                "revenue_breakdown %s: netIncome=%s revenue=%s — composition omitted, "
+                "iOS will fall back to the derived residual",
+                ticker, net_income, reported_revenue,
+            )
 
         # Fallback: if no segments, use total revenue from income statement
         if not revenue_sources and total_revenue_income > 0:
@@ -458,6 +503,9 @@ class RevenueBreakdownService:
             cost_of_sales=cost_of_sales,
             operating_expense=operating_expense,
             tax=tax,
+            net_income=net_income,
+            reported_revenue=reported_revenue,
+            other_expense=other_expense,
         )
 
         return response, next_earnings

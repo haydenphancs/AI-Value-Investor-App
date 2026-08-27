@@ -28,6 +28,7 @@ struct SearchHeader: View {
                     .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 32, height: 32)
+                    .hitSlop(reaching: 32)
             }
             .buttonStyle(PlainButtonStyle())
 

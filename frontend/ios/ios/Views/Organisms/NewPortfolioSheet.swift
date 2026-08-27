@@ -19,7 +19,7 @@ struct NewPortfolioSheet: View {
     @FocusState private var nameFocused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 AppColors.background.ignoresSafeArea()
 
@@ -50,7 +50,7 @@ struct NewPortfolioSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") { close() }
                         .disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -60,8 +60,33 @@ struct NewPortfolioSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        // `.large` is not decoration. `.onAppear` focuses the field, so the keyboard
+        // comes up during the presentation animation and forces the sheet taller than
+        // its only detent — the reporter's screenshot shows it at FULL height with the
+        // toolbar at the top of the screen, not at the .medium position where this code
+        // puts it. A sheet driven past its only legal detent leaves the presentation
+        // controller resolving a height it was never given, and taps stop landing where
+        // the chrome is drawn. Giving it somewhere legal to go is the fix; `.medium`
+        // stays first so the sheet still opens compact.
+        .presentationDetents([.medium, .large])
         .onAppear { nameFocused = true }
+    }
+
+    /// The ONE way this sheet closes.
+    ///
+    /// Resigning focus first collapses the keyboard so the sheet is back at a legal
+    /// detent before it animates away. Clearing the view-model flag is what actually
+    /// dismisses it — `showNewPortfolioSheet` is only ever set to `true`
+    /// (`TrackingViewModel:1057`), so until now closing relied entirely on SwiftUI
+    /// writing `false` back through the `isPresented` binding via
+    /// `@Environment(\.dismiss)`. That is one indirection too many for a control the
+    /// user is reporting as dead; `AddAssetSheet` and `SortOptionsSheet` in
+    /// `TrackingView.swift` already clear their own flags for the same reason.
+    /// `dismiss()` stays as the belt-and-braces half — calling both is idempotent.
+    private func close() {
+        nameFocused = false
+        viewModel.showNewPortfolioSheet = false
+        dismiss()
     }
 
     private var trimmedName: String {
@@ -87,7 +112,7 @@ struct NewPortfolioSheet: View {
             do {
                 _ = try await viewModel.createPortfolio(named: candidate)
                 isSubmitting = false
-                dismiss()
+                close()
             } catch {
                 isSubmitting = false
                 errorMessage = "Couldn't create the portfolio. Try again."

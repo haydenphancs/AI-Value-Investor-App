@@ -2556,3 +2556,89 @@ async def test_index_a_stale_constituents_row_does_not_break_the_profile(monkeyp
     resp = await svc.get_index_detail("^GSPC", chart_range="3M")
     # Falls through to a live fetch rather than rendering "0 constituents".
     assert resp.index_profile.number_of_constituents == 503
+
+
+# ── 21. "How X Makes Money": the composition must be REPORTED, not derived ─────
+#
+# A tester asked why LMT's Op. Expense was negative and showed "0%". The negative was
+# genuine FMP data, but checking it exposed the real defect: iOS derived Net Profit as
+# `totalRevenue - (costOfSales + operatingExpense + tax)`, which omits interest expense
+# and every non-operating item. Across 12 large caps sampled live, 9 were off by >10% and
+# two INVERTED the sign of profitability — Ford rendered +$6.2bn in a year it lost $8.2bn.
+#
+# These are brace-bounded and scan STRIPPED source, because the fix is documented by
+# comments that quote the very expressions being forbidden.
+
+_REV_MODELS = "Models/RevenueBreakdownModels.swift"
+
+
+def test_net_profit_comes_from_the_backend_not_a_residual():
+    """`revenue - costs` is operating profit after tax wearing a "Net Profit" label."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    body = _func_body(code, "var netProfit: Double")
+    assert "reportedNetIncome" in body, \
+        "netProfit no longer reads the reported bottom line — the residual is back"
+    # The residual may survive ONLY as the nil fallback, never as the sole expression.
+    assert "if let reportedNetIncome" in body, \
+        "the reported value must take precedence, not be a fallback"
+
+
+def test_percentages_divide_by_reported_revenue():
+    """The segment sum is not revenue (LMT: 74.4B of segments vs 75.06B reported), so
+    dividing by it ran every percentage on the card high."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    basis = _func_body(code, "var revenueBasis: Double")
+    assert "reportedRevenue" in basis
+    legend = _swift_code(_IOS / "Views" / "Molecules" / "RevenueBreakdownLegendView.swift")
+    assert "of: data.revenueBasis" in legend, "the legend divides by the segment sum again"
+    assert "of: data.totalRevenue" not in legend
+
+
+def test_cost_percentage_keeps_its_sign_and_does_not_floor_to_zero():
+    """`abs()` reported a credit as a positive share of revenue, and `%.0f` printed "0%"
+    beside a non-zero amount — which is literally what was reported."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    # ⚠️ Scope to CostItem FIRST. `RevenueSource` declares an identically-signed
+    # `percentage(of:)`, and it is the earlier one in the file — bounding straight to the
+    # signature silently asserted against the wrong type, which a mutation caught.
+    cost_item = _func_body(code, "struct CostItem: Identifiable")
+    pct = _func_body(cost_item, "func percentage(of total: Double) -> Double")
+    assert "abs(" not in pct, "the sign is being stripped again"
+
+    share = _func_body(_func_body(code, "enum PercentShare"),
+                       "static func string(_ pct: Double) -> String")
+    assert "0.05" in share and "<0.1%" in share, \
+        "the sub-0.1% floor is gone; small shares will claim 0% again"
+
+
+def test_a_negative_cost_is_relabelled_as_a_credit():
+    """FMP reports LMT's operatingExpenses as -112M and Ford's tax as -3.67B. A negative
+    cost is income; the legend, the percentage and the bar must agree about that."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    body = _func_body(code, "private func costLine(")
+    assert "isCredit: true" in body and "value < 0" in body
+    for label in ("Other Operating Income", "Tax Benefit"):
+        assert label in code, f"credit label {label!r} is gone"
+
+
+def test_cost_bar_is_driven_by_the_same_items_as_the_legend():
+    """The bar used three hardcoded lines with `max(h, 0)`, so a credit vanished from the
+    chart while the legend still printed it — one number, three readings."""
+    chart = _swift_code(_IOS / "Views" / "Molecules" / "RevenueBreakdownChartView.swift")
+    body = _func_body(chart, "private func costWaterfallBar(")
+    assert "data.costItems" in body, "the bar hardcodes its segments again"
+    assert "!$0.isCredit" in body, "a credit is being drawn as a cost"
+
+
+def test_revenue_composition_scan_is_not_vacuous():
+    """Mutation-tested by hand on 2026-08-25: each asserted token was removed from its
+    declaration, the matching test was watched to FAIL, and the file restored."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    # Comment stripping is load-bearing here — the file explains the old expression.
+    raw = (_IOS / _REV_MODELS).read_text()
+    assert "totalRevenue - totalCosts" in raw, \
+        "the rationale comment naming the old residual is gone; this control is moot"
+    # ...and the brace-bounding must really bound.
+    assert len(_func_body(code, "var netProfit: Double")) < len(code) / 4
+    # A body that genuinely lacks a token must not report it.
+    assert "reportedNetIncome" not in _func_body(code, "var isProfit: Bool")

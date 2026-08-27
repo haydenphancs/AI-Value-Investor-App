@@ -33,6 +33,7 @@ struct SearchHistoryRow: View {
                         .frame(width: 36, height: 36)
                         .background(AppColors.cardBackgroundLight)
                         .clipShape(Circle())
+                        .hitSlop(reaching: 36)
 
                     VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                         Text(entry.text)
@@ -65,7 +66,7 @@ struct SearchHistoryRow: View {
                     .font(AppTypography.caption).fontWeight(.semibold)
                     .foregroundColor(AppColors.textMuted)
                     .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                    .hitSlop(reaching: 32)
             }
             .buttonStyle(PlainButtonStyle())
             .accessibilityLabel("Remove \(entry.text) from recent searches")

@@ -116,6 +116,7 @@ struct MoneyMoveArticleHeroHeader: View {
                             .foregroundColor(isBookmarked ? AppColors.primaryBlue : AppColors.textPrimary)
                             .frame(width: 36, height: 36)
                             .background(Circle().fill(AppColors.cardBackground))
+                            .hitSlop(reaching: 36)
                     }
                     .buttonStyle(PlainButtonStyle())
                     .accessibilityLabel(isBookmarked ? "Remove saved topic" : "Save this topic")
@@ -127,6 +128,7 @@ struct MoneyMoveArticleHeroHeader: View {
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 36, height: 36)
                         .background(Circle().fill(AppColors.cardBackground))
+                        .hitSlop(reaching: 36)
                 }
                 .buttonStyle(PlainButtonStyle())
             }

@@ -33,11 +33,10 @@ struct SignalTickerDetailView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.left")
-                        .font(AppTypography.iconSmall).fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                }
+                NavBackButton(
+                    font: AppTypography.iconSmall,
+                    accessibilityText: "Close \(viewModel.ticker) holders"
+                ) { dismiss() }
             }
             ToolbarItem(placement: .principal) {
                 Text(viewModel.ticker)

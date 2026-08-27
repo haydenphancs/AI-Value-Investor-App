@@ -113,6 +113,7 @@ struct GlobalMiniPlayer: View {
                 .font(AppTypography.iconSmall).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 28, height: 28)
+                .hitSlop(reaching: 28)
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -157,6 +158,7 @@ struct GlobalMiniPlayer: View {
                 .font(AppTypography.iconMedium).fontWeight(.semibold)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 32, height: 32)
+                .hitSlop(reaching: 32)
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -191,6 +193,7 @@ struct GlobalMiniPlayer: View {
                 .font(AppTypography.labelSmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
                 .frame(width: 36, height: 28)
+                .hitSlop(reaching: 28)
         }
         .buttonStyle(PlainButtonStyle())
     }

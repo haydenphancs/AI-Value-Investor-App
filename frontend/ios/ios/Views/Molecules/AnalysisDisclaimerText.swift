@@ -29,7 +29,16 @@ struct AnalysisDisclaimerText: View {
 
     /// Default wording is deliberately true of EVERY surface this appears on.
     /// Pass `text:` for anything more specific — see `.aiGenerated` and `.rating` below.
-    init(text: String = "For educational purposes only · not financial advice · not tailored to you") {
+    ///
+    /// ⚠️ "· not tailored to you" was REMOVED here on a TestFlight tester's request. It is a
+    /// deliberate trim of the SUMMARY, not of the disclosure: `DisclaimersView`'s Financial
+    /// Disclaimer card still carries the impersonal-advice posture in full ("Everything here
+    /// is general and impersonal… not tailored to your portfolio, holdings, or circumstances",
+    /// "not registered investment advisors", "creates no fiduciary or advisory relationship"),
+    /// and the "Details" link below reaches it from every one of these surfaces. Shortening
+    /// the strip is safe precisely BECAUSE that page is intact — do not delete the clause
+    /// there to "match" this line.
+    init(text: String = "For educational purposes only · not financial advice") {
         self.text = text
     }
 

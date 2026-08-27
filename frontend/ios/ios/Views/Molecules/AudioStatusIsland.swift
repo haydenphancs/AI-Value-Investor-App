@@ -39,6 +39,11 @@ struct AudioStatusIsland: View {
                     .font(AppTypography.iconTiny).fontWeight(.bold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 20, height: 20)
+                    // CAPPED, not solved: this sits in a pill hard-coded to
+                    // `pillHeight = 36`, so the parent clips any slop past 36pt
+                    // vertically and 44 is unreachable without growing visible
+                    // floating chrome. 20 -> 36 is still nearly a 4x area gain.
+                    .hitSlop(reaching: 20, maxInset: AppSpacing.sm)
             }
             .buttonStyle(PlainButtonStyle())
         }

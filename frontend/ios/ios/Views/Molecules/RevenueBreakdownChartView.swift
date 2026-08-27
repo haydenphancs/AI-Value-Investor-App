@@ -263,9 +263,13 @@ struct RevenueBreakdownChartView: View {
             return h.isFinite ? max(h, 0) : 0
         }
 
-        let costOfSalesHeight = barHeight(data.costOfSales)
-        let opExpenseHeight = barHeight(data.operatingExpense)
-        let taxHeight = barHeight(data.tax)
+        // Driven by `data.costItems` rather than three hardcoded lines, so the bar and the
+        // legend cannot disagree about what the segments ARE. Two consequences:
+        //   • "Interest & Other" appears once the backend sends the composition;
+        //   • a CREDIT is excluded — it is income, not a cost, so it has no business in a
+        //     cost bar. The `max(h, 0)` clamp above used to be the only thing hiding it,
+        //     which silently made the drawn bar disagree with the totals.
+        let costSegments = data.costItems.filter { !$0.isCredit }
 
         // Top of cost bar aligns with top of revenue bar
         let rawRevenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit
@@ -277,20 +281,11 @@ struct RevenueBreakdownChartView: View {
 
             // Cost segments descending from revenue top
             VStack(spacing: 0) {
-                // Cost of Sales (starts at top, where revenue ends)
-                Rectangle()
-                    .fill(AppColors.lossGraphic)
-                    .frame(width: barWidth, height: costOfSalesHeight)
-
-                // Operating Expense
-                Rectangle()
-                    .fill(AppColors.alertOrange)
-                    .frame(width: barWidth, height: opExpenseHeight)
-
-                // Tax
-                Rectangle()
-                    .fill(AppColors.caution)
-                    .frame(width: barWidth, height: taxHeight)
+                ForEach(costSegments) { item in
+                    Rectangle()
+                        .fill(item.chartColor)
+                        .frame(width: barWidth, height: barHeight(item.value))
+                }
             }
             .clipShape(
                 UnevenRoundedRectangle(

@@ -51,10 +51,8 @@ struct TrendingAnalysisDetailView: View {
 
     private var headerSection: some View {
         HStack {
-            Button(action: { dismiss() }) {
-                Image(systemName: "chevron.left")
-                    .font(AppTypography.iconDefault).fontWeight(.semibold)
-                    .foregroundColor(AppColors.textPrimary)
+            NavBackButton(font: AppTypography.iconDefault, alignment: .leading) {
+                dismiss()
             }
 
             Spacer()
@@ -66,10 +64,12 @@ struct TrendingAnalysisDetailView: View {
 
             Spacer()
 
-            // Invisible spacer to balance the back button
-            Image(systemName: "chevron.left")
-                .font(AppTypography.iconDefault).fontWeight(.semibold)
-                .foregroundColor(.clear)
+            // Invisible spacer to balance the back button. It has to match the
+            // button's 44pt BOX, not the glyph inside it — a bare glyph here
+            // would be ~17pt narrower and pull the centred title off-centre.
+            Color.clear
+                .frame(width: NavBackButton.hitTarget, height: NavBackButton.hitTarget)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.vertical, AppSpacing.md)

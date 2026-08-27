@@ -348,6 +348,7 @@ struct MoneyMoveArticleDetailView: View {
                             Circle()
                                 .fill(AppColors.textPrimary.opacity(0.15))
                         )
+                        .hitSlop(reaching: 36)
                 }
                 .buttonStyle(PlainButtonStyle())
                 .accessibilityLabel(isBookmarked ? "Remove saved topic" : "Save this topic")
@@ -362,6 +363,7 @@ struct MoneyMoveArticleDetailView: View {
                         Circle()
                             .fill(AppColors.textPrimary.opacity(0.15))
                     )
+                    .hitSlop(reaching: 36)
             }
             .buttonStyle(PlainButtonStyle())
         }

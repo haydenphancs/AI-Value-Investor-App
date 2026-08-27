@@ -158,7 +158,8 @@ struct TickerLiveSearchSheet: View {
                     Image(systemName: inList ? "star.fill" : "star")
                         .font(AppTypography.iconMedium)
                         .foregroundColor(inList ? AppColors.neutral : AppColors.textPrimary)
-                        .frame(width: 32, height: 32)
+                        .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                        .hitSlop(reaching: HitSlop.minimumTarget, maxInset: AppSpacing.xs)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(inList ? "On watchlist" : "Add to watchlist")

@@ -18,6 +18,7 @@ struct ManageAssetsButton: View {
                 .frame(width: 36, height: 36)
                 .background(AppColors.cardBackgroundLight)
                 .clipShape(Circle())
+                .hitSlop(reaching: 36)
         }
         .buttonStyle(PlainButtonStyle())
     }

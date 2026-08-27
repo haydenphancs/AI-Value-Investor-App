@@ -28,7 +28,7 @@ struct NewsDetailHeader: View {
                     .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                    .hitSlop(reaching: 32)
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -52,7 +52,7 @@ struct NewsDetailHeader: View {
                         .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
+                        .hitSlop(reaching: 32)
                 }
                 .buttonStyle(PlainButtonStyle())
                 .accessibilityLabel("Share article")

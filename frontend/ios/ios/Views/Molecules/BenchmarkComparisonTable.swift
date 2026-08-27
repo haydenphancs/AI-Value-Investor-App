@@ -59,12 +59,31 @@ struct BenchmarkComparisonTable: View {
     /// At the accessibility sizes four columns stop fitting on a 402pt screen, so the
     /// delta moves under the benchmark value instead of truncating. Measured against
     /// `AppTypography.dataCap` (1.25x) — the point where the header row starts to wrap.
+    ///
+    /// Re-checked after the column gaps widened below. Worst case for the four-column
+    /// layout is the largest NON-accessibility size (`stacksDelta` takes over above it):
+    /// the three numeric columns measure ~142pt at the caps, plus 44pt of gaps, plus a
+    /// wrapped label column ~60pt = ~246pt inside the 338pt a 402pt screen gives us
+    /// (402 − 2×16 screen − 2×16 card). Still comfortable, so the threshold is unchanged.
     private var stacksDelta: Bool { dynamicTypeSize >= .accessibility1 }
 
     private var hasAnyDelta: Bool { rows.contains { $0.delta != nil } }
 
+    /// Extra air before the delta column, on top of the grid's own spacing.
+    ///
+    /// The asset and the benchmark are PEERS — equal weight, equal treatment, read as a
+    /// pair. The delta is derived FROM them, so it wants to sit slightly apart rather than
+    /// read as a third peer in the same run of digits. `Grid` has a single
+    /// `horizontalSpacing`, so the separation has to come from the cell.
+    private let deltaGutter = AppSpacing.sm
+
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: AppSpacing.sm, verticalSpacing: 0) {
+        // `md`, not `sm`. At `sm` the three numeric columns ran together as one block of
+        // digits ("10.1% 11.2% −1.1") with no room to breathe — reported as the right-hand
+        // side reading dense. There is ~130pt of unused width at the default content size,
+        // so the gaps cost nothing: the label column is `maxWidth: .infinity` and simply
+        // gives some back.
+        Grid(alignment: .leading, horizontalSpacing: AppSpacing.md, verticalSpacing: 0) {
             header
 
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -101,6 +120,7 @@ struct BenchmarkComparisonTable: View {
                 Text("vs")
                     .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textMuted)
+                    .padding(.leading, deltaGutter)
                     .gridColumnAlignment(.trailing)
             }
         }
@@ -167,6 +187,8 @@ struct BenchmarkComparisonTable: View {
                             .foregroundColor(AppColors.textMuted)
                     }
                 }
+                // Must match the header's gutter exactly or the column edges disagree.
+                .padding(.leading, deltaGutter)
                 .gridColumnAlignment(.trailing)
             }
         }

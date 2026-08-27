@@ -569,6 +569,7 @@ struct AIChatScreen: View {
                     // and reads as a button in both appearances.
                     .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.medium)
+                    .hitSlop(reaching: 36)
             }
             .buttonStyle(.plain)
         }

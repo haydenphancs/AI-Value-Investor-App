@@ -184,13 +184,7 @@ private struct BookLibraryHeader: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Navigation bar
             HStack {
-                Button(action: {
-                    onBackTapped?()
-                }) {
-                    Image(systemName: "chevron.left")
-                        .font(AppTypography.iconMedium).fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                }
+                NavBackButton(alignment: .leading) { onBackTapped?() }
 
                 Spacer()
             }

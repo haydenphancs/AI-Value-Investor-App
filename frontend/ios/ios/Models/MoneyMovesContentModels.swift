@@ -416,8 +416,20 @@ struct ArticleHighlightDTO: Decodable {
     }
 
     func toHighlight() -> ArticleHighlight {
-        ArticleHighlight(icon: icon, title: title, description: description)
+        // Clamped, not trusted. Money Moves content is served from Supabase and editable without
+        // an app release, so `icon` can name a symbol THIS OS has never heard of — which
+        // `Image(systemName:)` renders as blank space with no error anywhere. Exactly how four
+        // `sparkles.2` (iOS 26) section icons went invisible for every tester below iOS 26.
+        ArticleHighlight(
+            icon: AppSymbols.validated(icon, fallback: Self.iconFallback),
+            title: title,
+            description: description
+        )
     }
+
+    /// Neutral and ancient (iOS 14) — the same fallback the callout block below already uses, so
+    /// an unusable icon degrades to one recognisable shape rather than a second mystery.
+    static let iconFallback = "info.circle.fill"
 }
 
 struct ArticleSectionDTO: Decodable {
@@ -450,7 +462,9 @@ struct ArticleSectionDTO: Decodable {
         }
         return ArticleSection(
             title: title,
-            icon: icon,
+            // Optional stays optional: a section with no icon renders none, which is a valid
+            // authored state. Only a PRESENT-but-undrawable name is corrected.
+            icon: icon.flatMap { AppSymbols.resolved($0) ?? ArticleHighlightDTO.iconFallback },
             content: blocks,
             hasGlowEffect: hasGlowEffect ?? false,
             readAlong: timings
@@ -497,7 +511,7 @@ struct ArticleSectionContentDTO: Decodable {
         case "callout":
             guard let text else { return nil }
             return .callout(
-                icon: icon ?? "info.circle.fill",
+                icon: AppSymbols.validated(icon, fallback: ArticleHighlightDTO.iconFallback),
                 text: text,
                 style: ArticleSectionContentDTO.calloutStyle(from: style)
             )

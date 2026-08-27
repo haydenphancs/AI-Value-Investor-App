@@ -59,7 +59,7 @@ struct AIDataConsentView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: AppSpacing.xl) {
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                            Image(systemName: "sparkles.2")
+                            Image(systemName: AppSymbols.ai)
                                 .font(AppTypography.iconXXL)
                                 .foregroundColor(AppColors.primaryBlue)
 

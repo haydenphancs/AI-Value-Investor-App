@@ -832,7 +832,7 @@ struct RecentTradesInfoSheet: View {
                                 text: "Identify emerging trends and conviction changes"
                             )
                             WhaleBulletPoint(
-                                icon: "sparkles.2",
+                                icon: AppSymbols.ai,
                                 text: "Discover new opportunities they're exploring"
                             )
                             WhaleBulletPoint(

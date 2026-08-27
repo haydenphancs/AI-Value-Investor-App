@@ -131,7 +131,7 @@ final class NotificationSettingsViewModel: ObservableObject {
             id: "match",
             title: "Topics You Follow",
             subtitle: "Based on the interests you picked",
-            icon: "sparkles.2",
+            icon: AppSymbols.ai,
             masterKey: nil,
             rows: [
                 NotificationToggleSpec(

@@ -33,7 +33,10 @@ enum MoneyMoveArticleSpace {
 }
 
 struct MoneyMoveArticleHeroHeader: View {
-    @EnvironmentObject private var audioManager: AudioManager
+    // No `@EnvironmentObject AudioManager` here any more. The playing state moved into
+    // `LargePlayButton`, which reads it itself — and an unused `@EnvironmentObject` is not
+    // free: SwiftUI still hard-requires the object to be in the environment and traps if a
+    // caller (or a preview) renders this header without it.
 
     let article: MoneyMoveArticle
     var audioEpisode: AudioEpisode?
@@ -56,11 +59,6 @@ struct MoneyMoveArticleHeroHeader: View {
     /// are ~250pt apart, and tying the back button to the title would leave a long stretch
     /// of the article with no back affordance at all.
     var onTitleBottomChange: ((CGFloat) -> Void)?
-
-    private var isCurrentlyPlaying: Bool {
-        guard let episode = audioEpisode else { return false }
-        return audioManager.currentEpisode?.id == episode.id && audioManager.isPlaying
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -197,49 +195,9 @@ struct MoneyMoveArticleHeroHeader: View {
                         .foregroundColor(AppColors.textMuted)
                 }
             }
-
-            if isCurrentlyPlaying {
-                HStack(spacing: AppSpacing.sm) {
-                    NowPlayingBars()
-                    Text("Now Playing")
-                        .font(AppTypography.captionEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-                }
-                .padding(.top, AppSpacing.xs)
-            }
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.lg)
-    }
-}
-
-// MARK: - Now Playing Animation Bars
-/// The four bouncing bars beside "Now Playing".
-///
-/// Filled with `textPrimary`, not `textOnAccent`: this sits on the page background now that
-/// the headline moved off the artwork, and `textOnAccent` is white in both appearances —
-/// invisible on the #F4F5F8 light page. Its only caller is the hero header directly above.
-struct NowPlayingBars: View {
-    @State private var isAnimating = false
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<4) { index in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(AppColors.textPrimary)
-                    .frame(width: 3, height: isAnimating ? CGFloat.random(in: 8...16) : 4)
-                    .animation(
-                        .easeInOut(duration: 0.4)
-                            .repeatForever()
-                            .delay(Double(index) * 0.1),
-                        value: isAnimating
-                    )
-            }
-        }
-        .frame(height: 16)
-        .onAppear {
-            isAnimating = true
-        }
     }
 }
 

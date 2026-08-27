@@ -79,7 +79,11 @@ struct CryptoDetailView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                         // Content above tab bar (scrolls away)
-                        if let cryptoData = viewModel.cryptoData {
+                        // `headerData` is the full model once it lands and the fast-core
+                        // slice until then — the header and chart are the only things
+                        // core can fill, so ONLY this gate takes it. The tabs below keep
+                        // waiting for the full response, exactly as the stock screen does.
+                        if let cryptoData = viewModel.headerData {
                             // Crypto Price Header
                             CryptoPriceHeader(
                                 cryptoName: cryptoData.name,

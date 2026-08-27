@@ -626,21 +626,35 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
+        thinking_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate text using Gemini.  Results are cached by (prompt, system_instruction,
-        model, output cap) for GEMINI_CACHE_TTL seconds to avoid duplicate API calls.
+        model, output cap, thinking budget) for GEMINI_CACHE_TTL seconds to avoid
+        duplicate API calls.
 
         `max_output_tokens` defaults to the global `GEMINI_MAX_TOKENS`. Chat passes
         `CHAT_MAX_OUTPUT_TOKENS`; report generation deliberately does not.
 
-        ⚠️ The cap is part of the CACHE KEY. Without it a capped chat call and an uncapped
-        one for the same prompt collide, and whichever ran first serves the other — so a
-        report could be handed a 1,200-token-truncated answer, or a chat turn could return
-        a full-length one straight past its own ceiling.
+        `thinking_budget` defaults to None = leave the model's own default alone, so every
+        pre-existing caller is byte-identical. Pass **0** to disable thinking for a call
+        whose output is a short, highly-constrained string — a template fill-in or a
+        one-line hook — where the reasoning tokens buy nothing. Measured on the index
+        story prompt against the live API: 3.91s / 4.26s with default (dynamic) thinking
+        and 689 / 779 thought tokens, versus 1.21s / 1.47s and zero thought tokens at 0.
+        Those thought tokens bill at the OUTPUT rate (see SYSTEM_DESIGN_GUIDELINES §9b.7).
+
+        ⚠️ Both caps are part of the CACHE KEY. Without them a capped chat call and an
+        uncapped one for the same prompt collide, and whichever ran first serves the other
+        — so a report could be handed a 1,200-token-truncated answer, or a chat turn could
+        return a full-length one straight past its own ceiling. `thinking_budget` is in the
+        key for the same reason: a no-thinking answer and a reasoned one to the same prompt
+        are different answers, and the cheap one must not be served to the caller that
+        asked for the reasoned one.
         """
         key = _cache_key(
-            prompt, system_instruction or "", model_name or "", str(max_output_tokens or "")
+            prompt, system_instruction or "", model_name or "", str(max_output_tokens or ""),
+            "" if thinking_budget is None else f"tb={thinking_budget}",
         )
         cached = self._response_cache.get(key)
         if cached is not None:
@@ -655,6 +669,10 @@ class GeminiClient:
                     config=self._config(
                         system_instruction=system_instruction,
                         max_output_tokens=max_output_tokens,
+                        thinking_config=(
+                            None if thinking_budget is None
+                            else types.ThinkingConfig(thinking_budget=thinking_budget)
+                        ),
                     ),
                 ),
                 what="generate_text",

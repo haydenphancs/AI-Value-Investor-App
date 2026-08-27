@@ -32,6 +32,33 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
+# ── Payload version: invalidate rows written before a FORMATTING change ──────
+#
+# `snapshot_cache` stores `result.model_dump()`, i.e. the FORMATTED STRINGS — so a change
+# to how a value is RENDERED does not reach a user until that row ages out, and the 24h
+# window is long enough to be seen.
+#
+# It was seen. The "Neg." vs "—" fix rebuilt Key Statistics live while the Price card on
+# the SAME SCREEN kept serving a pre-fix row, so one screen said both things about one
+# company at once — the exact self-contradiction the bug report was about. Measured while
+# fixing it: MRNA's row (written 16:22 UTC) still read "—" beside a Key Statistics
+# "Neg.", while a cold RIVN rebuilt correctly.
+#
+# A VERSION, not a timestamp floor like `ticker_report_cache.CACHE_SCHEMA_FLOOR`. That
+# pattern needs its literal to equal the deploy instant: set it earlier and rows the old
+# build writes between the bump and the deploy survive; set it later and it is
+# future-dated, which rejects even fresh rows and turns the cache permanently cold. A
+# version has no such window — a row is either the current shape or it is not, whenever
+# it was written. **Bump it whenever these strings change shape.**
+#
+# Forward-safe in both directions: an OLD build reading a NEW row passes the extra key
+# into `SnapshotItemResponse(**json_data)`, which raises, and the surrounding `except`
+# turns that into a rebuild. Nothing crashes; the worst case is one recomputation.
+#
+# 2 (2026-08-26): negative multiples render "Neg." (undefined) instead of "—" (unknown).
+_SNAPSHOT_PAYLOAD_VERSION = 2
+_VERSION_KEY = "_schema_v"
+
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
@@ -88,9 +115,34 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
 
 
 def _fmt_ratio(val: Optional[float]) -> str:
-    """Format a valuation ratio for display."""
-    if val is None or val <= 0:
+    """Format a valuation ratio for display. THREE outcomes, not two.
+
+    A price multiple is undefined when its denominator is negative — a company losing
+    money has no meaningful P/E, and one with negative book equity has no meaningful P/B.
+    But "undefined" and "we could not fetch it" are different facts, and this used to
+    collapse both to "—".
+
+    That cost a TestFlight report ("Data is missing? Double check for me", MRNA): FMP
+    returns `priceToEarningsRatioTTM = -18.75` for Moderna, we knew the number, and the
+    card said the same thing it says when the upstream is down. Worse, the SAME card
+    rendered `P/FCF = "Neg."` two rows below, because `_fmt_pfcf` had already worked this
+    out and the rule was never generalised.
+
+      None → "—"      genuinely unknown
+      < 0  → "Neg."   known, and the multiple is undefined because earnings/book/etc.
+                      are negative — which is itself the useful signal
+      0    → "—"      FMP uses 0 for absent on these fields; a true zero multiple is not
+                      a real quantity either way
+      > 0  → the number
+
+    ⚠️ DISPLAY ONLY. `_valuation_score` and `_sector_ctx` take the float and already treat
+    `<= 0` as "no comparison" — do not route scoring through here, or a loss-maker's star
+    rating would move as a side effect of a copy change.
+    """
+    if val is None or val == 0:
         return "—"
+    if val < 0:
+        return "Neg."
     return f"{val:.2f}"
 
 
@@ -105,8 +157,13 @@ def _fmt_pfcf(
     `freeCashFlowYield` field which carries the sign of FCF; falls back to
     the cash-flow statement's `freeCashFlow` when TTM yield is absent.
     """
-    if pfcf is not None and pfcf > 0:
-        return f"{pfcf:.2f}"
+    # The ratio itself carries the sign when we have it, so `_fmt_ratio` now answers the
+    # whole question — this function exists only for the case FMP leaves the ratio absent
+    # (MRNA: `priceToFreeCashFlowsRatioTTM` is null) and the SIGN has to be recovered from
+    # a sibling field. `!= 0` keeps the old fall-through for a zero ratio, which on these
+    # fields means "absent" rather than "zero".
+    if pfcf is not None and pfcf != 0:
+        return _fmt_ratio(pfcf)
     fcf_yield = _safe_float(km, "freeCashFlowYield")
     if fcf_yield is not None and fcf_yield < 0:
         return "Neg."
@@ -296,8 +353,17 @@ class ValuationSnapshotService:
             if age > timedelta(hours=24):
                 logger.info(f"Valuation snapshot Supabase STALE (age={age}) for {ticker}")
                 return None
-
-            json_data = entry["response_json"]
+            json_data = dict(entry["response_json"] or {})
+            version = json_data.pop(_VERSION_KEY, 1)
+            if version != _SNAPSHOT_PAYLOAD_VERSION:
+                # Written by a build that formatted these strings differently — see the
+                # version's comment. Rebuild rather than serve a row that disagrees with
+                # the rest of the screen.
+                logger.info(
+                    "Valuation snapshot payload v%s != v%s for %s — rebuilding",
+                    version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
+                )
+                return None
             return SnapshotItemResponse(**json_data)
 
         except Exception as e:
@@ -310,7 +376,10 @@ class ValuationSnapshotService:
                 {
                     "ticker": ticker,
                     "category": "Price",
-                    "response_json": result.model_dump(),
+                    "response_json": {
+                        **result.model_dump(),
+                        _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,category",

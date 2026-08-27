@@ -88,7 +88,11 @@ struct IndexDetailView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                         // Content above tab bar (scrolls away)
-                        if let indexData = viewModel.indexData {
+                        // `headerData` is the full model once it lands and the fast-core
+                        // slice until then — the header and chart are the only things
+                        // core can fill, so ONLY this gate takes it. The tabs below keep
+                        // waiting for the full response, exactly as the stock screen does.
+                        if let indexData = viewModel.headerData {
                             // Full Price Header
                             TickerPriceHeader(
                                 companyName: indexData.indexName,

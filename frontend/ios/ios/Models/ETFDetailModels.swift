@@ -178,6 +178,24 @@ struct ETFProfile {
 }
 
 // MARK: - ETF Detail Data
+/// The header's price formatting, in ONE place — shared by `ETFDetailData` and the
+/// fast-core `ETFCoreData`, which render the same header one after the other.
+enum ETFHeaderFormat {
+    static func price(_ value: Double) -> String {
+        String(format: "$%.2f", value)
+    }
+
+    static func change(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", value))"
+    }
+
+    static func changePercent(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "(\(sign)\(String(format: "%.2f", value))%)"
+    }
+}
+
 struct ETFDetailData: Identifiable {
     let id = UUID()
     let symbol: String
@@ -215,18 +233,10 @@ struct ETFDetailData: Identifiable {
         currentPrice - priceChange
     }
 
-    var formattedPrice: String {
-        String(format: "$%.2f", currentPrice)
-    }
-
-    var formattedChange: String {
-        let sign = priceChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", priceChange))"
-    }
-
+    var formattedPrice: String { ETFHeaderFormat.price(currentPrice) }
+    var formattedChange: String { ETFHeaderFormat.change(priceChange) }
     var formattedChangePercent: String {
-        let sign = priceChangePercent >= 0 ? "+" : ""
-        return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+        ETFHeaderFormat.changePercent(priceChangePercent)
     }
 
     var formattedChangePill: String {

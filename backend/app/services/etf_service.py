@@ -63,6 +63,10 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple] = {}
 _CACHE_TTL_SECONDS = 300  # default when a writer declares nothing
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated snapshots
+# A template fallback is cheap to regenerate but must not re-call Gemini on every
+# request; short enough that a transient quota failure does not pin it for an hour,
+# and short enough that it cannot outlive the background refresh that supersedes it.
+_AI_FALLBACK_TTL_SECONDS = 300
 # 12h, not 1h: the S&P history is daily EOD bars shared by every ETF on the platform, and
 # it only changes at a close. At 1h it was re-pulled ~11x a day for no new data.
 _SP_HIST_CACHE_TTL = 43_200
@@ -98,6 +102,64 @@ def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Background AI refresh: task ownership + per-symbol dedup ─────────
+#
+# See the long note in `index_service`. Short version: the ETF "hook" is ONE plain-English
+# sentence with a deterministic fallback that is computed BEFORE Gemini is called, and
+# awaiting it put a 90s-timeout upstream on the critical path of a screen measured at
+# 5.89s cold (SCHD) against 0.14s warm. It now answers with the fallback and fills in
+# behind the response, exactly as crypto has always done.
+#
+# `asyncio.create_task` keeps only a WEAK reference, so the handle has to be held or the
+# task can be collected mid-flight; and an exception nobody retrieves is silent until GC.
+_background_tasks: set = set()
+# Keyed on the SYMBOL: `_inflight` below is keyed on the range, so viewers on different
+# range pills of one cold ETF would each spawn their own Gemini call.
+_ai_refresh_inflight: set = set()
+
+
+def _hook_from_tier2(payload: Any, symbol: str) -> Optional[str]:
+    """The persisted hook, or None if the row is unusable.
+
+    Re-validated rather than trusted: a Tier-2 row is JSON a PREVIOUS deploy wrote, and a
+    bad one raising out of the middle of a build 500s the whole ETF screen for the life of
+    the row. Drop it loudly and let the caller rebuild.
+    """
+    if not isinstance(payload, dict):
+        return None
+    hook = payload.get("hook")
+    if not isinstance(hook, str) or not hook.strip():
+        logger.warning(
+            "ETF ai_hook tier-2 row for %s is unusable (%r) — rebuilding", symbol, hook,
+        )
+        return None
+    return hook[:120]
+
+
+def _on_background_done(task) -> None:
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "ETF background task %r failed (hook stays on the template fallback): %s: %s",
+            task.get_name(), type(exc).__name__, exc,
+        )
+
+
+def _spawn_background(coro, *, name: str) -> None:
+    """Own a fire-and-forget task: strong ref + a loud death."""
+    try:
+        task = asyncio.create_task(coro, name=name)
+    except RuntimeError as e:
+        logger.warning("ETF background spawn skipped for %s: %s", name, e)
+        coro.close()
+        return
+    _background_tasks.add(task)
+    task.add_done_callback(_on_background_done)
 
 
 # Thundering-herd guard, keyed on the FULL request shape because the assembled response is
@@ -609,7 +671,8 @@ class ETFService:
         return derived
 
     async def _get_chart(
-        self, symbol: str, chart_range: str, interval: Optional[str]
+        self, symbol: str, chart_range: str, interval: Optional[str],
+        fast_only: bool = False,
     ) -> List[Dict]:
         """Chart bars for one range, derived from the shared history wherever possible.
 
@@ -620,6 +683,13 @@ class ETFService:
                                    already calling — after re-fetching the very history we
                                    are holding, and for ALL that meant up to 5 paged calls
                                    on every single request)
+
+        `fast_only` is the first-paint contract for the `/core` endpoint: serve bars from
+        Tier-2, or from a single intraday fetch, but NEVER pull the daily history to make
+        them. That pull is the one thing standing between core and a sub-second answer;
+        returning `[]` is honest and cheap, because the full response is already in flight
+        and fills the chart a moment later. Mirrors `_get_volatile(fast_only=...)` in
+        `stock_overview_service`.
         """
         from app.services.chart_helper import (
             AGGREGATED_INTERVALS,
@@ -654,6 +724,15 @@ class ETFService:
                     "ETF chart tier-2 row for %s/%s had no usable bars — rebuilding",
                     symbol, category,
                 )
+
+        if fast_only and resolved not in INTRADAY_INTERVALS:
+            # Every remaining path needs `historical`. Under `fast_only` that pull is
+            # exactly what we are here to avoid.
+            logger.info(
+                "ETF core chart skipped for %s/%s — cold section, would need the daily "
+                "history", symbol, category,
+            )
+            return []
 
         historical = (
             [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
@@ -772,6 +851,72 @@ class ETFService:
             raise
         finally:
             _inflight.pop(cache_key, None)
+
+    async def get_etf_core(
+        self,
+        symbol: str,
+        chart_range: str = "3M",
+        interval: Optional[str] = None,
+    ) -> "ETFCoreResponse":
+        """FIRST PAINT: the header line and, when it is free, the chart.
+
+        Deliberately NOT a projection of the full build — that is what `get_etf_quote` is,
+        and it is why `/quote` cannot serve first paint: on a cold cache it pays the entire
+        assembly. This calls the SAME per-section builders, just two of them, so there is
+        still exactly one code path per number and nothing can drift.
+
+        What it must never touch, because each is seconds on a cold symbol:
+          * `_get_fundamentals` — profile + etf-info + holders + sector weights + dividends
+          * `_get_derived`      — the symbol history AND the SPY benchmark history
+          * `_build_strategy`   — the Gemini hook
+
+        SCHD measured 5.89s cold against 0.14s warm before this existed.
+        """
+        from app.schemas.etf import ETFCoreResponse
+
+        symbol = symbol.upper()
+        quote, chart_data = await asyncio.gather(
+            self._get_quote(symbol),
+            self._get_chart(symbol, chart_range, interval, fast_only=True),
+            return_exceptions=True,
+        )
+        if isinstance(chart_data, BaseException) or not isinstance(chart_data, list):
+            logger.warning(
+                "ETF core chart failed for %s: %r — serving the header alone",
+                symbol, chart_data,
+            )
+            chart_data = []
+        if isinstance(quote, BaseException) or not isinstance(quote, dict):
+            quote = {}
+
+        price = _finite_num(quote.get("price"))
+        if price <= 0:
+            # A zero-price core would paint "$0.00" under a live badge as the FIRST thing
+            # on screen. Refuse: the client fetches core with `try?`, so this simply
+            # leaves the skeleton up until the full response lands.
+            raise ValueError(f"ETF core has no usable price for {symbol}")
+
+        change = _finite_num(quote.get("change"))
+        change_pct = _finite_num(
+            quote.get("changePercentage") or quote.get("changesPercentage")
+        )
+        prev_close = _finite_num(quote.get("previousClose"))
+        if not change_pct and change and prev_close > 0:
+            change_pct = round((change / prev_close) * 100, 4)
+
+        name = quote.get("name")
+        if not isinstance(name, str) or not name.strip():
+            name = symbol
+
+        return ETFCoreResponse(
+            symbol=symbol,
+            name=name,
+            current_price=price,
+            price_change=change,
+            price_change_percent=change_pct,
+            market_status=_get_market_status(),
+            chart_data=chart_data,
+        )
 
     async def get_etf_quote(
         self,
@@ -2136,27 +2281,78 @@ class ETFService:
         top_sectors: List[ETFSectorWeightResponse],
         fallback: str,
     ) -> str:
-        """
-        Use Gemini to generate ONLY the hook text — one punchy sentence.
-        All structured data (score, tags) comes from FMP.
-        Cached for 1 hour. Returns fallback on any failure.
+        """The one-sentence plain-English hook, WITHOUT ever blocking on Gemini.
+
+        Lookup order:
+          1. Tier-1 in-process dict (1h)
+          2. Tier-2 `etf_snapshot_cache` category `ai_hook` (12h) — NEW; the hook used to
+             live in the process dict alone, so every redeploy and every hour made the
+             next viewer pay for it *inline*
+          3. The deterministic `fallback` the caller already built, returned IMMEDIATELY,
+             with Gemini fired behind the response
+
+        The fallback is the same sentence a Gemini failure has always produced, so nothing
+        regresses by not waiting — and SCHD's cold detail build stops carrying a Gemini
+        round trip (measured 5.89s cold vs 0.14s warm) that a stall could stretch to
+        `GEMINI_REQUEST_TIMEOUT_SECONDS` (90s).
         """
         cache_key = f"etf_hook_{symbol}"
         cached = _cache_get(cache_key, _AI_CACHE_TTL_SECONDS)
         if cached:
             return cached
 
+        db = await asyncio.to_thread(self._tier2_get, symbol, "ai_hook")
+        restored = _hook_from_tier2(db, symbol)
+        if restored:
+            logger.info("ETF ai_hook tier-2 HIT for %s", symbol)
+            _cache_set(cache_key, restored, _AI_CACHE_TTL_SECONDS)
+            return restored
+
+        # SHORT TTL on the fallback: the long one belongs to real AI prose, and pinning
+        # the template for an hour would both outlive and hide the refresh below.
+        _cache_set(cache_key, fallback, _AI_FALLBACK_TTL_SECONDS)
+
+        if symbol not in _ai_refresh_inflight:
+            _ai_refresh_inflight.add(symbol)
+            _spawn_background(
+                self._refresh_hook_text(
+                    symbol=symbol, name=name, description=description,
+                    asset_class=asset_class, index_tracked=index_tracked,
+                    holdings_count=holdings_count, top_holdings=top_holdings,
+                    top_sectors=top_sectors, fallback=fallback,
+                ),
+                name=f"etf-ai-hook:{symbol}",
+            )
+
+        return fallback
+
+    async def _refresh_hook_text(
+        self, *, symbol: str, name: str, description: str,
+        asset_class: str, index_tracked: str, holdings_count: int,
+        top_holdings: List[ETFTopHoldingResponse],
+        top_sectors: List[ETFSectorWeightResponse],
+        fallback: str,
+    ) -> None:
+        """Background: ask Gemini for the hook and write BOTH tiers.
+
+        Nobody awaits this, so it must never raise into the void — `_spawn_background`
+        gives it a strong reference and a done-callback, and the `except` below keeps a
+        Gemini failure at WARNING with the symbol attached. On failure the short-TTL
+        fallback entry simply expires and the next viewer retries.
+        """
+        cache_key = f"etf_hook_{symbol}"
         try:
-            gemini = get_gemini_client()
+            try:
+                gemini = get_gemini_client()
 
-            holdings_text = ", ".join(
-                f"{h.symbol} ({h.weight}%)" for h in top_holdings[:5]
-            )
-            sectors_text = ", ".join(
-                f"{s.name} ({s.weight}%)" for s in top_sectors[:3]
-            )
+                holdings_text = ", ".join(
+                    f"{h.symbol} ({h.weight}%)" for h in top_holdings[:5]
+                )
+                sectors_text = ", ".join(
+                    f"{s.name} ({s.weight}%)" for s in top_sectors[:3]
+                )
 
-            prompt = f"""Write ONE sentence (max 120 characters) that explains what this ETF does in plain English for a beginner investor.
+                prompt = f"""Write ONE sentence (max 120 characters) that explains what this ETF does in plain English for a beginner investor.
 
 ETF: {symbol} — {name}
 Asset Class: {asset_class}
@@ -2173,31 +2369,44 @@ RULES:
 - Do NOT start with "This ETF" or "This fund"
 - Output ONLY the sentence, nothing else"""
 
-            ai_response = await gemini.generate_text(
-                prompt=prompt,
-                # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
-                system_instruction=neutral_system_instruction(
-                    "You are a concise financial writer. Output only the requested sentence."
-                ),
-                model_name="gemini-2.5-flash",
-            )
+                ai_response = await gemini.generate_text(
+                    prompt=prompt,
+                    # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
+                    system_instruction=neutral_system_instruction(
+                        "You are a concise financial writer. Output only the requested sentence."
+                    ),
+                    model_name="gemini-2.5-flash",
+                    # No thinking — the output is ONE sentence of at most 120 characters.
+                    # See index_service for the measurement behind this.
+                    thinking_budget=0,
+                )
 
-            text = ai_response.get("text", "").strip().strip('"').strip("'")
-            # Remove any markdown or extra content
-            text = text.split("\n")[0].strip()
+                text = ai_response.get("text", "").strip().strip('"').strip("'")
+                # Remove any markdown or extra content
+                text = text.split("\n")[0].strip()
 
-            if text and len(text) <= 140:
-                hook = text[:120]
-                _cache_set(cache_key, hook)
-                logger.info(f"Generated Gemini hook for ETF {symbol}: {hook}")
-                return hook
-            else:
-                logger.warning(f"Gemini hook too long or empty for {symbol}, using fallback")
-                return fallback
+                if text and len(text) <= 140:
+                    hook = text[:120]
+                    _cache_set(cache_key, hook, _AI_CACHE_TTL_SECONDS)
+                    # Persist so a redeploy, a new Railway instance or the next hour does
+                    # not re-pay for this. 12h via `_TIER2_TTL_HOURS`.
+                    await asyncio.to_thread(
+                        self._tier2_put, symbol, "ai_hook", {"hook": hook}
+                    )
+                    logger.info("ETF hook refreshed for %s: %s", symbol, hook)
+                else:
+                    logger.warning(
+                        "Gemini hook too long or empty for %s — the fallback stands", symbol
+                    )
 
-        except Exception as e:
-            logger.warning(f"Gemini hook failed for {symbol}, using fallback: {e}")
-            return fallback
+            except Exception as e:
+                logger.warning(
+                    "ETF hook refresh failed for %s (%s: %s) — the fallback stands",
+                    symbol, type(e).__name__, e,
+                )
+
+        finally:
+            _ai_refresh_inflight.discard(symbol)
 
 
 # ── Singleton ────────────────────────────────────────────────────

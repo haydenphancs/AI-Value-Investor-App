@@ -157,6 +157,109 @@ def _cache_set(key: str, value: Any, ttl: Optional[float] = None):
             _cache.pop(_old, None)
 
 
+# ── Background AI refresh: task ownership + per-symbol dedup ─────────
+#
+# The AI stories are DECORATIVE prose wrapped around numbers the response already
+# carries, and every one of them has a deterministic template fallback that is built
+# BEFORE Gemini is ever called. Awaiting Gemini therefore bought nothing and cost
+# everything: measured against production, a cold `^GSPC` build was 5.63s and the same
+# assembly with these caches warm was 0.36s — ~5.3s of a user-visible shimmer spent on
+# text we already had a version of. `^DJI` was 11.4s. Crypto has fired this in the
+# background since it shipped; index and ETF never did.
+#
+# Two hazards, both of which the codebase has already been bitten by:
+#
+#  * `asyncio.create_task` keeps only a WEAK reference, so a fire-and-forget task can be
+#    garbage-collected mid-flight (the documented CPython caveat that `main.py`'s
+#    `background_tasks` list exists for). `_background_tasks` holds the strong ref.
+#  * A task whose exception nobody retrieves is silent until GC, if ever. The done
+#    callback logs it. WARNING, not ERROR: this work is best-effort and the user already
+#    has readable prose — but per CLAUDE.md a deliberately non-fatal failure still gets a
+#    marker, because silent degradation is the hardest bug to find.
+_background_tasks: set = set()
+
+# Keyed on the SYMBOL, deliberately not on the assembled request. `_inflight` below is
+# keyed on the full (symbol, range, interval) shape, so ten cold viewers sitting on ten
+# different range pills of one index would each spawn their own Gemini call. This is the
+# same class of hole `_get_history` needed its own dedup for.
+_ai_refresh_inflight: set = set()
+
+
+def _on_background_done(task) -> None:
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "Index background task %r failed (prose stays on the template fallback): "
+            "%s: %s", task.get_name(), type(exc).__name__, exc,
+        )
+
+
+def _spawn_background(coro, *, name: str) -> None:
+    """Own a fire-and-forget task: strong ref + a loud death."""
+    try:
+        task = asyncio.create_task(coro, name=name)
+    except RuntimeError as e:
+        # No running loop (a sync test harness). Close the coroutine so Python does not
+        # emit "coroutine was never awaited" and move on — the caller already has its
+        # fallback.
+        logger.warning("Index background spawn skipped for %s: %s", name, e)
+        coro.close()
+        return
+    _background_tasks.add(task)
+    task.add_done_callback(_on_background_done)
+
+
+# ── AI stories <-> Tier-2 JSON ───────────────────────────────────────
+#
+# The AI text is the one expensive index section that was never persisted: it lived in
+# the process dict alone on a 1h TTL, so every Railway restart, every redeploy and every
+# hour handed the next viewer the full Gemini bill. `index_cache` already holds `derived`,
+# `constituents` and `chart:*` through the generic `_tier2_get`/`_tier2_put` pair, so this
+# needs a new CATEGORY and no migration.
+
+def _ai_stories_to_tier2(result) -> Dict[str, Any]:
+    valuation, sector, macro, indicators = result
+    return {
+        "valuation": valuation,
+        "sector": sector,
+        "macro": macro,
+        "indicators": [i.model_dump() for i in indicators],
+    }
+
+
+def _ai_stories_from_tier2(payload: Any, symbol: str):
+    """Rebuild the story tuple from a persisted row, or None if it is unusable.
+
+    Re-validated rather than trusted: a Tier-2 row is JSON that a PREVIOUS deploy wrote,
+    and a `Model(**row)` raising out of the middle of a build 500s the whole screen for
+    the life of the row. Drop it loudly and let the caller rebuild instead.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        valuation = payload["valuation"]
+        sector = payload["sector"]
+        macro = payload["macro"]
+        raw = payload.get("indicators") or []
+        if not (isinstance(valuation, str) and isinstance(sector, str) and isinstance(macro, str)):
+            raise TypeError("story fields must be strings")
+        if not (valuation and sector and macro):
+            raise ValueError("empty story field")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("no macro indicators")
+        indicators = [MacroForecastItemResponse(**i) for i in raw]
+    except Exception as e:
+        logger.warning(
+            "Index ai_stories tier-2 row for %s is unusable (%s: %s) — rebuilding",
+            symbol, type(e).__name__, e,
+        )
+        return None
+    return (valuation, sector, macro, indicators)
+
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 
@@ -678,7 +781,8 @@ class IndexService:
         return pe or 0
 
     async def _get_chart(
-        self, symbol: str, chart_range: str, interval: Optional[str]
+        self, symbol: str, chart_range: str, interval: Optional[str],
+        fast_only: bool = False,
     ) -> List[ChartDataPointResponse]:
         """Chart bars for one range, derived from the shared history wherever possible.
 
@@ -687,6 +791,14 @@ class IndexService:
           * 3M/6M/1Y -> slice     (`_extract_chart_data`, warm-up included)
           * 5Y/ALL   -> aggregate (`_aggregate_prices` + `window_by_range`)
         Pre-fix, ALL re-ran the paged `_fetch_all_daily` on every single request.
+
+        `fast_only` is the first-paint contract for `get_index_core`: serve bars from
+        Tier-2, or from a single intraday fetch, but NEVER pull the daily history to make
+        them. `_get_history` is `_fetch_all_daily` — up to five paged calls for 10-14k
+        rows — and it is the one thing standing between core and a sub-second answer.
+        Returning `[]` is honest and cheap: the full response is already in flight and
+        fills the chart in a moment. Mirrors `_get_volatile(fast_only=...)` in
+        `stock_overview_service`, which exists for exactly this reason.
         """
         from app.services.chart_helper import (
             AGGREGATED_INTERVALS,
@@ -730,6 +842,15 @@ class IndexService:
             if isinstance(db, list) and db:
                 logger.info("Index chart tier-2 HIT for %s/%s", symbol, category)
                 return _points(db)
+
+        if fast_only and resolved not in INTRADAY_INTERVALS:
+            # Every remaining path below needs `historical`. Under `fast_only` that pull
+            # is exactly what we are here to avoid.
+            logger.info(
+                "Index core chart skipped for %s/%s — cold section, would need the "
+                "daily history", symbol, category,
+            )
+            return []
 
         historical = (
             [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
@@ -864,6 +985,94 @@ class IndexService:
             # daily chart, where nothing below the last candle can have moved.
             chart_data=full.chart_data if chart_range else [],
             key_statistics_groups=full.key_statistics_groups,
+        )
+
+    async def get_index_core(
+        self,
+        symbol: str,
+        chart_range: str = "3M",
+        interval: Optional[str] = None,
+    ) -> "IndexCoreResponse":
+        """FIRST PAINT: the header line and, when it is free, the chart.
+
+        Deliberately NOT a projection of the full build — that is what `get_index_quote`
+        is, and it is why `/quote` cannot serve first paint: on a cold cache it pays the
+        entire assembly. This calls the SAME per-section builders, just two of them, so
+        there is still exactly one code path per number and nothing can drift.
+
+        What it must never touch, because each is seconds on a cold symbol:
+          * `_get_derived`      — the daily history (`_fetch_all_daily`, 10-14k rows)
+          * `_get_constituent_count`, `_get_pe`  — Supabase reads / a 503-row fetch
+          * `_build_snapshots`  — the Gemini stories
+
+        Measured motivation: the stock screen's full `/overview` is 7.94s cold on DECK and
+        the screen still feels instant, because `/overview/core` answers in 0.32s. Index
+        was 5.63s cold with no such split, so the whole screen shimmered — which is the
+        TestFlight report this exists to fix.
+
+        No assembled cache of its own: both sections are already cached at their own
+        cadence (quote 45s, chart Tier-1/Tier-2 12h) and the assembly is free, so a second
+        cache here would only be another thing to invalidate.
+        """
+        from app.schemas.index import IndexCoreResponse
+
+        profile_meta = _INDEX_PROFILES.get(symbol.upper()) or {}
+        index_name = profile_meta.get("name") or symbol.upper()
+
+        quote, chart_data = await asyncio.gather(
+            self._get_quote(symbol),
+            self._get_chart(symbol, chart_range, interval, fast_only=True),
+            return_exceptions=True,
+        )
+        if isinstance(chart_data, BaseException) or not isinstance(chart_data, list):
+            logger.warning(
+                "Index core chart failed for %s: %r — serving the header alone",
+                symbol, chart_data,
+            )
+            chart_data = []
+        if isinstance(quote, BaseException) or not isinstance(quote, dict):
+            quote = {}
+
+        from app.services.chart_helper import _finite_or_none
+
+        def _q(key: str, default: float = 0.0) -> float:
+            v = _finite_or_none(quote.get(key))
+            return v if v is not None else default
+
+        price = _q("price")
+        if price <= 0:
+            # A zero-price core would paint "$0.00" under a live badge and, being the
+            # FIRST thing on screen, would look authoritative. Refuse instead: the client
+            # fetches core with `try?`, so this simply leaves the skeleton up until the
+            # full response lands. Same judgement as the degraded-build gate in
+            # `get_index_detail`, one step earlier.
+            raise ValueError(f"index core has no usable price for {symbol}")
+
+        change = _q("change")
+        # `changePercentage` (singular) is the /stable spelling; `changesPercentage` is
+        # the dead /api/v3 one. Reading only the plural is what pinned "+0.00%" on every
+        # index for a whole release — keep both, in this order, exactly as the full build.
+        change_pct = _finite_or_none(quote.get("changePercentage"))
+        if change_pct is None:
+            change_pct = _finite_or_none(quote.get("changesPercentage"))
+        if change_pct is None:
+            prev_close = _q("previousClose")
+            if change and prev_close:
+                try:
+                    change_pct = round((change / prev_close) * 100, 4)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    change_pct = None
+        if change_pct is None:
+            change_pct = 0.0
+
+        return IndexCoreResponse(
+            symbol=symbol.upper(),
+            index_name=index_name,
+            current_price=price,
+            price_change=change,
+            price_change_percent=change_pct,
+            market_status=_get_market_status(),
+            chart_data=chart_data,
         )
 
     async def _build_index_detail(
@@ -1258,10 +1467,22 @@ class IndexService:
         self, *, symbol, index_name, pe, forward_pe, earnings_yield,
         val_label, historical_avg_pe, historical_period, sectors,
     ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
-        """
-        Try Gemini for AI-generated stories. Fall back to templates on failure.
-        Macro forecast is cached in Supabase for 7 days (changes weekly).
-        Valuation + Sector stories refresh on every cache miss (data-driven).
+        """Story templates for this index, WITHOUT ever blocking on Gemini.
+
+        Lookup order — the crypto `_build_snapshots` shape, which has always done this:
+          1. Tier-1 in-process dict
+          2. Tier-2 `index_cache` (category `ai_stories`, 12h) — NEW; this text used to
+             live only in the process dict, so every restart and every hour made the next
+             viewer pay the full Gemini call *inline*
+          3. Deterministic templates, returned IMMEDIATELY, with Gemini fired behind them
+
+        Nothing is lost by not waiting. The templates are built before Gemini is called
+        and are what the user saw on every failure anyway; the AI version supersedes them
+        for the next viewer and for the following 12 hours. What IS gained: the measured
+        cold `^GSPC` detail build drops from 5.63s to roughly where crypto and commodity
+        already sit, and a Gemini stall can no longer hold the screen for up to
+        `GEMINI_REQUEST_TIMEOUT_SECONDS` (90s) waiting for prose we already have.
+
         Returns (valuation_story, sector_story, macro_story, macro_indicators).
         """
         cache_key = f"ai_stories_{symbol}"
@@ -1269,10 +1490,60 @@ class IndexService:
         if cached:
             return cached
 
+        db = await asyncio.to_thread(self._tier2_get, symbol, "ai_stories")
+        restored = _ai_stories_from_tier2(db, symbol)
+        if restored is not None:
+            logger.info("Index ai_stories tier-2 HIT for %s", symbol)
+            _cache_set(cache_key, restored, _AI_CACHE_TTL_SECONDS)
+            return restored
+
         # ── Check macro cache (7-day TTL in Supabase) ────────────
-        macro_cached = self._check_macro_cache(symbol)
+        # `to_thread`, not a bare call: the supabase-py client is synchronous, and this
+        # now sits on the FAST path that every cold index view waits behind. Same fix
+        # `_get_pe` already carries for `_compute_index_pe_from_sectors`.
+        macro_cached = await asyncio.to_thread(self._check_macro_cache, symbol)
         has_macro = macro_cached is not None
 
+        result = self._build_story_templates(
+            pe=pe,
+            forward_pe=forward_pe,
+            historical_avg_pe=historical_avg_pe,
+            sectors=sectors,
+            macro_cached=macro_cached,
+        )
+
+        # SHORT TTL on the fallback, on purpose. The long `_AI_CACHE_TTL_SECONDS` belongs
+        # to real AI prose; pinning a template for an hour would mean a Gemini blip costs
+        # an hour of it, and it would also outlive the refresh below and hide its result.
+        _cache_set(cache_key, result, _AI_FALLBACK_TTL_SECONDS)
+
+        # One refresh per SYMBOL in flight. See `_ai_refresh_inflight`.
+        if symbol not in _ai_refresh_inflight:
+            _ai_refresh_inflight.add(symbol)
+            _spawn_background(
+                self._refresh_ai_stories(
+                    symbol=symbol,
+                    pe=pe,
+                    forward_pe=forward_pe,
+                    earnings_yield=earnings_yield,
+                    val_label=val_label,
+                    historical_avg_pe=historical_avg_pe,
+                    historical_period=historical_period,
+                    sectors=sectors,
+                    has_macro=has_macro,
+                    fallback=result,
+                ),
+                name=f"index-ai-stories:{symbol}",
+            )
+
+        return result
+
+    @staticmethod
+    def _build_story_templates(
+        *, pe, forward_pe, historical_avg_pe, sectors, macro_cached,
+    ) -> Tuple[str, str, str, List[MacroForecastItemResponse]]:
+        """The deterministic prose. Pure, no I/O, always works — which is what makes it
+        safe to answer with while Gemini runs behind the response."""
         # ── Build default templates (always work) ─────────────────
         valuation_template = (
             f"The market is trading at {{PE_RATIO}} earnings, "
@@ -1326,11 +1597,26 @@ class IndexService:
         )
 
         # Use cached macro if available
-        if has_macro:
+        if macro_cached is not None:
             macro_template, default_macro_indicators = macro_cached
 
-        result = (valuation_template, sector_template, macro_template, default_macro_indicators)
+        return (valuation_template, sector_template, macro_template, default_macro_indicators)
 
+    async def _refresh_ai_stories(
+        self, *, symbol, pe, forward_pe, earnings_yield, val_label,
+        historical_avg_pe, historical_period, sectors, has_macro, fallback,
+    ) -> None:
+        """Background: ask Gemini for the stories and write BOTH tiers.
+
+        Nobody awaits this. It must therefore never raise into the void — `_spawn_background`
+        gives it a strong reference and a done-callback, and the `except` below keeps a
+        Gemini failure at WARNING with the symbol attached. On any failure the short-TTL
+        template entry written by the caller simply expires and the next viewer retries.
+        """
+        cache_key = f"ai_stories_{symbol}"
+        valuation_template, sector_template, macro_template, default_macro_indicators = fallback
+        advancing = sum(1 for s in sectors if s.change_percent >= 0)
+        result = fallback
         # ── Try Gemini for stories ────────────────────────────────
         try:
             gemini = get_gemini_client()
@@ -1417,6 +1703,12 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                     "Keep stories to 2-3 sentences. Use the placeholder tokens exactly as given."
                 ),
                 model_name="gemini-2.5-flash",
+                # No thinking. The output is two 2-3 sentence templates whose every
+                # number is a placeholder token the caller substitutes — there is
+                # nothing here to reason about. Measured on this exact prompt:
+                # 3.91s/4.26s and ~700 thought tokens (billed at the OUTPUT rate) with
+                # the default dynamic budget, versus 1.21s/1.47s and zero at 0.
+                thinking_budget=0,
             )
 
             text = ai_response.get("text", "")
@@ -1482,21 +1774,23 @@ Write in a conversational, confident tone. Be specific and data-driven."""
 
                 result = (valuation_template, sector_template, macro_template, default_macro_indicators)
                 _cache_set(cache_key, result, _AI_CACHE_TTL_SECONDS)
-                logger.info(f"Generated AI stories for {symbol} (macro={'cached' if has_macro else 'fresh'})")
+                # Persist so a redeploy, a new Railway instance or the next hour does
+                # not re-pay for this. 12h via `_TIER2_TTL_HOURS`, up from 1h in-process.
+                await asyncio.to_thread(
+                    self._tier2_put, symbol, "ai_stories", _ai_stories_to_tier2(result)
+                )
+                logger.info(
+                    "Index AI stories refreshed for %s (macro=%s) — persisted",
+                    symbol, "cached" if has_macro else "fresh",
+                )
 
         except Exception as e:
-            logger.warning(f"Gemini story generation failed for {symbol}, using templates: {e}")
-
-        # Cache the TEMPLATE fallback too, on a short TTL.
-        #
-        # `_cache_set` above sits inside the Gemini-success branch, so every request that
-        # fell back re-called Gemini — during a quota outage that is one wasted call per
-        # request per index, and Gemini failures cluster. A short TTL means a transient
-        # failure costs 5 minutes of template prose, not an hour of it.
-        if _cache_get(cache_key) is None:
-            _cache_set(cache_key, result, _AI_FALLBACK_TTL_SECONDS)
-
-        return result
+            logger.warning(
+                "Index AI story refresh failed for %s (%s: %s) — templates stand",
+                symbol, type(e).__name__, e,
+            )
+        finally:
+            _ai_refresh_inflight.discard(symbol)
 
     # ── News builder ─────────────────────────────────────────────
 

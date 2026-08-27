@@ -16,6 +16,24 @@ class ETFDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var etfData: ETFDetailData?
+    /// Fast-core first paint. Populated by `/etfs/{symbol}/core`, which answers in
+    /// ~0.3s from the cheap cached sections, and rendered by the header/chart gate as
+    /// `etfData ?? coreData`.
+    ///
+    /// Written ONLY while `etfData` is still nil (see `loadCore`), so a slow core
+    /// response can never overwrite the full model. Mirrors `TickerDetailViewModel`.
+    @Published var coreData: ETFCoreData?
+
+    /// What the header + chart render: the full model when it has landed, the fast-core
+    /// slice until then.
+    ///
+    /// Written as an `if let` rather than `etfData ?? coreData` on purpose — the two
+    /// sides are different concrete types and only share the protocol, so the coalescing
+    /// form depends on contextual coercion that is easy to break by accident.
+    var headerData: (any ETFHeaderRenderable)? {
+        if let etfData { return etfData }
+        return coreData
+    }
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var isNewsLoading: Bool = false
     @Published var hasMoreNews: Bool = false
@@ -166,10 +184,12 @@ class ETFDetailViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
+            // Fast core, in parallel with the full detail: whichever lands first paints.
+            async let coreTask: () = self.loadCore()
             async let detailTask: () = self.fetchETFDetail()
             async let newsTask: () = self.fetchETFNews()
             async let watchlistTask: () = self.checkWatchlistStatus()
-            _ = await (detailTask, newsTask, watchlistTask)
+            _ = await (coreTask, detailTask, newsTask, watchlistTask)
         }
     }
 
@@ -330,6 +350,33 @@ class ETFDetailViewModel: ObservableObject {
               MarketHoursUtil.shouldStreamLivePrice(for: status) else { return }
         connectLivePrice()
         startChartRefreshTimer()
+    }
+
+
+    /// Fetch the fast-core slice in parallel with the full detail and paint it the moment
+    /// it lands.
+    ///
+    /// Why: the whole screen used to sit behind ONE aggregated response — `^GSPC`
+    /// measured 5.63s cold against 0.14s warm — which is the "very slow at first time
+    /// open it" TestFlight report this fixes. The stock screen never had that problem
+    /// despite the slowest full build of the lot, because it paints a core slice first.
+    ///
+    /// `try?` on purpose: core is an accelerator, so a core failure must be invisible —
+    /// the full response is already in flight and owns the error path. It also
+    /// deliberately does NOT touch `errorMessage` or bump any request token, both of
+    /// which belong to the full fetch.
+    private func loadCore() async {
+        guard let core = try? await StockRepository.shared.getETFCore(
+            symbol: etfSymbol,
+            range: selectedChartRange.rawValue,
+            interval: chartSettings.selectedInterval.rawValue
+        ) else { return }
+        // The race guard. A core response landing AFTER the full one must be dropped, or
+        // the screen would visibly step backwards from the complete model to the
+        // header-only one.
+        guard etfData == nil else { return }
+        coreData = core.toCoreData()
+        chartDataVersion += 1
     }
 
     // MARK: - Fallback Data

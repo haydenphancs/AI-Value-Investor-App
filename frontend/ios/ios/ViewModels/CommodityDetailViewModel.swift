@@ -20,6 +20,24 @@ class CommodityDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var commodityData: CommodityDetailData?
+    /// Fast-core first paint. Populated by `/commodities/{symbol}/core`, which answers in
+    /// ~0.3s from the cheap cached sections, and rendered by the header/chart gate as
+    /// `commodityData ?? coreData`.
+    ///
+    /// Written ONLY while `commodityData` is still nil (see `loadCore`), so a slow core
+    /// response can never overwrite the full model. Mirrors `TickerDetailViewModel`.
+    @Published var coreData: CommodityCoreData?
+
+    /// What the header + chart render: the full model when it has landed, the fast-core
+    /// slice until then.
+    ///
+    /// Written as an `if let` rather than `commodityData ?? coreData` on purpose — the two
+    /// sides are different concrete types and only share the protocol, so the coalescing
+    /// form depends on contextual coercion that is easy to break by accident.
+    var headerData: (any CommodityHeaderRenderable)? {
+        if let commodityData { return commodityData }
+        return coreData
+    }
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var technicalAnalysisData: TechnicalAnalysisData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
@@ -136,11 +154,13 @@ class CommodityDetailViewModel: ObservableObject {
             // no 30s refresh. Both the socket and the timer self-gate, so this is cheap
             // when the market for this symbol is shut.
             self.connectLivePrice()
+            // Fast core, in parallel with the full detail: whichever lands first paints.
+            async let coreTask: () = self.loadCore()
             async let detailTask: () = self.fetchCommodityDetail()
             async let newsTask: () = self.fetchCommodityNews()
             async let technicalTask: () = self.fetchTechnicalAnalysis()
             async let watchlistTask: () = self.checkWatchlistStatus()
-            _ = await (detailTask, newsTask, technicalTask, watchlistTask)
+            _ = await (coreTask, detailTask, newsTask, technicalTask, watchlistTask)
         }
     }
 
@@ -164,6 +184,33 @@ class CommodityDetailViewModel: ObservableObject {
         // See IndexDetailViewModel.refresh — the technical failure path is terminal, so
         // refresh is the only thing that can un-stick a blank Analysis tab.
         await retryTechnicalAnalysis()
+    }
+
+
+    /// Fetch the fast-core slice in parallel with the full detail and paint it the moment
+    /// it lands.
+    ///
+    /// Why: the whole screen used to sit behind ONE aggregated response — `^GSPC`
+    /// measured 5.63s cold against 0.14s warm — which is the "very slow at first time
+    /// open it" TestFlight report this fixes. The stock screen never had that problem
+    /// despite the slowest full build of the lot, because it paints a core slice first.
+    ///
+    /// `try?` on purpose: core is an accelerator, so a core failure must be invisible —
+    /// the full response is already in flight and owns the error path. It also
+    /// deliberately does NOT touch `errorMessage` or bump any request token, both of
+    /// which belong to the full fetch.
+    private func loadCore() async {
+        guard let core = try? await StockRepository.shared.getCommodityCore(
+            symbol: commoditySymbol,
+            range: selectedChartRange.rawValue,
+            interval: chartSettings.selectedInterval.rawValue
+        ) else { return }
+        // The race guard. A core response landing AFTER the full one must be dropped, or
+        // the screen would visibly step backwards from the complete model to the
+        // header-only one.
+        guard commodityData == nil else { return }
+        coreData = core.toCoreData()
+        chartDataVersion += 1
     }
 
     // MARK: - Detail Fetch

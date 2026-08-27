@@ -19,6 +19,10 @@ from app.integrations.fmp import (
     get_fmp_client,
 )
 from app.integrations.finra_short_interest import get_short_interest
+# The one definition of "undefined multiple" (Neg.) vs "unknown" (—). Shared with
+# the Price snapshot card so the two halves of the SAME screen cannot disagree —
+# they did, visibly: P/FCF read "Neg." two rows below a P/E reading "—".
+from app.services.valuation_snapshot_service import _fmt_ratio
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
     KeyStatisticItem,
@@ -1012,33 +1016,61 @@ class StockOverviewService:
                       or _safe_float(shares_float_data or {}, "outstandingShares"))
 
         # ── EPS (TTM): sum diluted EPS from last 4 quarterly income statements ──
+        #
+        # ⚠️ A NEGATIVE EPS IS DATA, NOT A MISSING VALUE. This used to end in
+        # `if ttm_eps > 0`, so a loss-making company had its EPS computed correctly from
+        # four real quarterly statements and then thrown away — the card rendered the same
+        # "—" it uses when the upstream is down. A TestFlight tester photographed exactly
+        # that on MRNA ("Data is missing? Double check for me") whose TTM EPS is -7.98,
+        # and it applied to EVERY loss-maker: measured on one basket, 8 of 10 tickers,
+        # including PLUG, which that same tester holds. For a company losing money, "we
+        # lose $7.98 a share" is the single most important number on the screen.
         eps = None
         pe = None
         if income_quarterly and len(income_quarterly) >= 4:
             try:
                 eps_vals = []
                 for q in income_quarterly[:4]:
-                    val = q.get("epsDiluted") or q.get("eps")
+                    # Presence, not truthiness. `q.get("epsDiluted") or q.get("eps")`
+                    # discards a BREAK-EVEN quarter: a real 0.0 is falsy, so it fell
+                    # through to `eps`, and when that key was absent the quarter was
+                    # dropped entirely — taking the whole TTM sum with it (four values
+                    # are required below). Same family as the negative-EPS bug this
+                    # block exists to fix: a number treated as an absence.
+                    val = q.get("epsDiluted")
+                    if val is None:
+                        val = q.get("eps")
                     if val is not None:
                         eps_vals.append(float(val))
                 if len(eps_vals) == 4:
                     ttm_eps = sum(eps_vals)
-                    if ttm_eps > 0:
+                    if math.isfinite(ttm_eps):
                         eps = round(ttm_eps, 2)
             except (ValueError, TypeError):
                 pass
 
-        # Fallback: try quote fields, then key_metrics earningsYield
-        if not eps:
-            eps = _safe_float(quote, "eps")
-        if not eps and price and price > 0:
+        # Fallback: try quote fields, then key_metrics earningsYield.
+        #
+        # `is None`, NOT `not eps`: a genuine EPS of exactly 0.00 (a break-even company)
+        # is falsy, and the old test sent it down the fallback path to be overwritten by
+        # whatever the quote happened to hold.
+        if eps is None:
+            eps = _finite(quote.get("eps"))
+        if eps is None and price and price > 0:
             km_latest = key_metrics[0] if key_metrics else {}
-            earnings_yield = _safe_float(km_latest, "earningsYield")
-            if earnings_yield and earnings_yield > 0:
+            earnings_yield = _finite(km_latest.get("earningsYield"))
+            # Negative yield allowed through for the same reason as the EPS above — it is
+            # the loss, expressed differently. Zero is excluded: it is FMP's "absent".
+            if earnings_yield:
                 eps = round(earnings_yield * price, 2)
 
         # ── P/E (TTM): price / EPS ──
-        if eps and eps > 0 and price and price > 0:
+        #
+        # Computed for a NEGATIVE eps too, so the formatter can tell "undefined because
+        # the company loses money" ("Neg.") from "we don't have it" ("—"). The old
+        # `eps > 0` guard destroyed that distinction three lines before it was needed.
+        # `eps != 0` guards the division, not the sign.
+        if eps and price and price > 0:
             pe = round(price / eps, 2)
 
         # ── Forward P/E: use nearest future fiscal year estimate ──
@@ -1057,7 +1089,9 @@ class StockOverviewService:
                 future_ests.sort(key=lambda x: x.get("date") or "")
                 nearest = future_ests[0]
                 fwd_eps = _safe_float(nearest, "epsAvg") or _safe_float(nearest, "estimatedEpsAvg")
-                if fwd_eps and fwd_eps > 0:
+                # Negative forward EPS is a real analyst estimate, not a gap: MRNA's
+                # nearest future year (2027) is -4.90. Let the formatter render "Neg.".
+                if fwd_eps:
                     pe_fwd = round(price / fwd_eps, 2)
 
         # Ownership from shares-float and institutional ownership endpoints
@@ -1083,11 +1117,26 @@ class StockOverviewService:
                 inst_pct = _safe_float(km, "institutionPercentage") or _safe_float(km, "institutionalOwnership")
 
         # Dividend yield
-        div_str = "—"
+        # ── Dividends ──
+        #
+        # Three answers, not two. `_safe_float` defaults a MISSING key to 0.0, so a failed
+        # profile fetch and a company that genuinely pays no dividend both arrived here as
+        # `0` and both rendered "—". On MRNA — which pays nothing — that read as broken
+        # data sitting next to three other dashes.
+        #
+        # A profile we actually received IS the evidence: if it carries either dividend
+        # key, a 0 means "pays none". No profile at all means we do not know.
+        _has_div_field = isinstance(profile, dict) and (
+            profile.get("lastDiv") is not None or profile.get("lastDividend") is not None
+        )
         if last_div > 0 and price > 0:
             annual_div = last_div  # FMP lastDiv is already annualized
             div_yield = (annual_div / price) * 100
             div_str = f"{annual_div:.2f} ({div_yield:.2f}%)"
+        elif _has_div_field:
+            div_str = "None"
+        else:
+            div_str = "—"
 
         # Flat list
         flat_stats = [
@@ -1100,9 +1149,10 @@ class StockOverviewService:
             KeyStatisticItem(label="Market Cap", value=_fmt(market_cap) if market_cap else "—"),
             KeyStatisticItem(label="52-Week High", value=f"{year_high:.2f}" if year_high else "—"),
             KeyStatisticItem(label="52-Week Low", value=f"{year_low:.2f}" if year_low else "—"),
-            KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
-            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd and pe_fwd > 0 else "—"),
-            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
+            KeyStatisticItem(label="P/E (TTM)", value=_fmt_ratio(pe)),
+            KeyStatisticItem(label="P/E (FWD)", value=_fmt_ratio(pe_fwd)),
+            # `is not None`, not truthiness: a break-even company's 0.00 is a real EPS.
+            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps is not None else "—"),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ]
@@ -1130,9 +1180,10 @@ class StockOverviewService:
         ])
 
         group3 = KeyStatisticsGroupResponse(statistics=[
-            KeyStatisticItem(label="P/E (TTM)", value=f"{pe:.2f}" if pe and pe > 0 else "—"),
-            KeyStatisticItem(label="P/E (FWD)", value=f"{pe_fwd:.2f}" if pe_fwd and pe_fwd > 0 else "—"),
-            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps else "—"),
+            KeyStatisticItem(label="P/E (TTM)", value=_fmt_ratio(pe)),
+            KeyStatisticItem(label="P/E (FWD)", value=_fmt_ratio(pe_fwd)),
+            # `is not None`, not truthiness: a break-even company's 0.00 is a real EPS.
+            KeyStatisticItem(label="EPS (TTM)", value=f"{eps:.2f}" if eps is not None else "—"),
             KeyStatisticItem(label="Dividends", value=div_str),
             KeyStatisticItem(label="Beta", value=f"{beta:.2f}" if beta else "—"),
         ])

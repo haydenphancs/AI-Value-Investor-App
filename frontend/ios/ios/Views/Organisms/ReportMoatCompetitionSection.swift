@@ -276,7 +276,7 @@ struct ReportMoatCompetitionSection: View {
     private var durabilityInsight: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "sparkles.2")
+                Image(systemName: AppSymbols.ai)
                     .foregroundStyle(
                         AppColors.aiRampStart
                     )
@@ -323,7 +323,7 @@ struct ReportMoatCompetitionSection: View {
     private var competitiveInsightSection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.xs) {
-                Image(systemName: "sparkles.2")
+                Image(systemName: AppSymbols.ai)
                     .foregroundStyle(
                         AppColors.aiRampStart
                     )

@@ -102,6 +102,32 @@ struct CommodityProfile {
 }
 
 // MARK: - Commodity Detail Data
+/// The header's price formatting, in ONE place — shared by `CommodityDetailData` and
+/// the fast-core `CommodityCoreData`.
+enum CommodityHeaderFormat {
+    static func price(_ value: Double) -> String {
+        // The >=100 and >=1 arms are deliberately identical; kept as written so this
+        // extraction changes no rendered string.
+        if value >= 100 {
+            return String(format: "$%.2f", value)
+        } else if value >= 1 {
+            return String(format: "$%.2f", value)
+        } else {
+            return String(format: "$%.4f", value)
+        }
+    }
+
+    static func change(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "\(sign)\(String(format: "%.2f", value))"
+    }
+
+    static func changePercent(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "(\(sign)\(String(format: "%.2f", value))%)"
+    }
+}
+
 struct CommodityDetailData: Identifiable {
     let id = UUID()
     let symbol: String
@@ -137,24 +163,10 @@ struct CommodityDetailData: Identifiable {
         currentPrice - priceChange
     }
 
-    var formattedPrice: String {
-        if currentPrice >= 100 {
-            return String(format: "$%.2f", currentPrice)
-        } else if currentPrice >= 1 {
-            return String(format: "$%.2f", currentPrice)
-        } else {
-            return String(format: "$%.4f", currentPrice)
-        }
-    }
-
-    var formattedChange: String {
-        let sign = priceChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.2f", priceChange))"
-    }
-
+    var formattedPrice: String { CommodityHeaderFormat.price(currentPrice) }
+    var formattedChange: String { CommodityHeaderFormat.change(priceChange) }
     var formattedChangePercent: String {
-        let sign = priceChangePercent >= 0 ? "+" : ""
-        return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+        CommodityHeaderFormat.changePercent(priceChangePercent)
     }
 }
 

@@ -23,6 +23,7 @@ from app.api.error_response import (
 )
 from app.services.commodity_service import get_commodity_service
 from app.schemas.commodity import (
+    CommodityCoreResponse,
     CommodityDetailResponse,
     CommodityQuoteResponse,
 )
@@ -177,6 +178,42 @@ async def enrich_commodity_news(
 
 
 # ── Main detail endpoint (catch-all /{symbol} MUST be last) ──
+
+
+@router.get("/{symbol}/core", response_model=CommodityCoreResponse)
+async def get_commodity_core(
+    symbol: str,
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    interval: Optional[str] = Query(
+        None,
+        alias="interval",
+        pattern="^(1min|5min|15min|30min|1hour|4hour|daily|weekly|monthly|quarterly)$",
+    ),
+):
+    """FIRST-PAINT slice — the price header, plus the chart when it is already cached.
+
+    Additive and zero blast radius: `/{{symbol}}` and the full detail response are
+    untouched. The client fires this in PARALLEL with the full detail and paints whichever
+    lands first, so the screen stops shimmering in ~0.3s. Same shape as
+    `GET /stocks/{{ticker}}/overview/core`.
+
+    NOT the same thing as `/quote`: that one is a PROJECTION of the full build and is
+    therefore exactly as slow on a cold cache. This one is assembled from the cheap
+    sections only and never pulls the daily history.
+    """
+    try:
+        service = get_commodity_service()
+        return await service.get_commodity_core(
+            symbol, chart_range=chart_range, interval=interval
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Commodity core failed for %s: %s: %s", symbol, type(e).__name__, e,
+            exc_info=True,
+        )
+        return error_response_from_exception(e, ticker=symbol, step="commodity_core")
 
 
 @router.get("/{symbol}/quote", response_model=CommodityQuoteResponse)

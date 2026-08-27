@@ -50,12 +50,17 @@ struct AskCayAIButton: View {
             // `primaryBlue` is a TEXT-role token (4.52:1) already audited on this
             // `.cardSurface()`. Not a `*Graphic` token: those clear 3:1 only and must never be
             // the sole carrier of meaning, which here it is — there is no label beside it.
-            Image(systemName: "sparkles.2")
+            Image(systemName: AppSymbols.ai)
                 // `iconLarge` (20pt), NOT `iconDefault` (16pt). The neighbouring logo and avatar
                 // are full-bleed art filling their whole 36pt tile; a 16pt glyph fills 0.44 of
                 // this one — the lowest ratio in the app (IconTile 0.50, CayAIAvatar 0.52) — so
                 // the tile read as SMALLER than the avatar even though both measure 36.0pt. 20pt
                 // puts it at 0.56.
+                //
+                // The 0.56 was measured against `sparkles.2`. `AppSymbols.ai` resolves to the
+                // wider classic `sparkles` below iOS 26, which fills marginally more of the tile
+                // at the same point size — closer to its neighbours, not further, so the sizing
+                // holds for both. Re-measure here if the token ever gains a third glyph.
                 //
                 // A scaling token is safe here despite the fixed tile, which is the opposite of
                 // IconTile's call: `iconLarge` is `scaledTight`, capped at `dataCap` 1.25×, so the
@@ -66,9 +71,10 @@ struct AskCayAIButton: View {
                 // Idle: a slow whole-symbol scale, so the app's one AI entry point reads as live.
                 //
                 // `.breathe` rather than `.variableColor` deliberately — variable colour needs the
-                // symbol to ship layered variants, and if `sparkles.2` lacks them the effect is a
+                // symbol to ship layered variants, and if the glyph lacks them the effect is a
                 // SILENT no-op that looks identical to never having added it. Breathe scales the
-                // whole symbol and cannot fail that way.
+                // whole symbol and cannot fail that way — which matters doubly now that
+                // `AppSymbols.ai` is TWO glyphs, so any effect chosen here has to be safe on both.
                 //
                 // ⚠️ `.plain` IS LOAD-BEARING — do not "simplify" it to a bare `.breathe`.
                 // The default variant is `.pulse`, which animates OPACITY as well as scale.

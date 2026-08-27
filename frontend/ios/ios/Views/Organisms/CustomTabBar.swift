@@ -8,6 +8,16 @@
 import SwiftUI
 
 struct CustomTabBar: View {
+    /// The bar's own height, excluding the bottom safe area: `AppSpacing.md` top padding +
+    /// a ~41pt item (a 20pt `iconLarge` glyph, `AppSpacing.xs`, an 11pt `caption` label) +
+    /// `AppSpacing.xl` bottom padding.
+    ///
+    /// Published because `RootContainerView` parks the floating mini player above this bar and
+    /// had been doing it with a bare `58`, which left a MEASURED 3pt gap — the capsule sat
+    /// visually welded to the tab bar and was reported from TestFlight. Deriving it here means
+    /// the two move together instead of drifting.
+    static let approximateHeight: CGFloat = 73
+
     @Binding var selectedTab: HomeTab
     /// Unread notifications, badged on **Tracking**, whose "Alerts" segment shows them.
     ///

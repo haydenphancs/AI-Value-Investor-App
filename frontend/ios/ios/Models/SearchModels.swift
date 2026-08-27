@@ -108,7 +108,7 @@ struct SearchHistoryEntry: Identifiable, Codable, Equatable {
     var iconName: String {
         switch kind {
         case .ticker: return "magnifyingglass"
-        case .question: return "sparkles.2"
+        case .question: return AppSymbols.ai
         }
     }
 }

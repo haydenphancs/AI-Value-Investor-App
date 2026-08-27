@@ -521,6 +521,48 @@ def _cache_get(key: str, ttl: Optional[float] = None) -> Optional[Any]:
     return value
 
 
+# ── Background AI refresh: task ownership + per-symbol dedup ─────────
+#
+# Crypto has fired its snapshot generation in the background since it shipped — which is
+# WHY this screen measures 1.27s cold while index (5.63s) and ETF (5.89s) awaited Gemini
+# inline. Two hazards it did not cover, added here because index/ETF now copy this shape:
+#
+#  * `asyncio.create_task` keeps only a WEAK reference, so a fire-and-forget task can be
+#    garbage-collected mid-execution — the documented CPython caveat that `main.py`'s
+#    `background_tasks` list exists for. If that happened here the defaults stayed cached
+#    and nothing said so.
+#  * An exception nobody retrieves is silent until GC, if ever.
+_background_tasks: set = set()
+# One generation per SYMBOL. `_build_snapshots` caches the defaults BEFORE spawning, so a
+# second viewer within the same process is already covered — but two viewers arriving in
+# the same tick, or a cache expiry mid-flight, would otherwise each spawn a Gemini run.
+_ai_refresh_inflight: set = set()
+
+
+def _on_background_done(task) -> None:
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "Crypto background task %r failed (snapshots stay on defaults): %s: %s",
+            task.get_name(), type(exc).__name__, exc,
+        )
+
+
+def _spawn_background(coro, *, name: str) -> None:
+    """Own a fire-and-forget task: strong ref + a loud death."""
+    try:
+        task = asyncio.create_task(coro, name=name)
+    except RuntimeError as e:
+        logger.warning("Crypto background spawn skipped for %s: %s", name, e)
+        coro.close()
+        return
+    _background_tasks.add(task)
+    task.add_done_callback(_on_background_done)
+
+
 def _cache_set(key: str, value: Any):
     _cache.pop(key, None)
     _cache[key] = (time.time(), value)
@@ -704,6 +746,73 @@ class CryptoService:
             ).execute()
         except Exception as e:
             logger.warning(f"Crypto DB cache write failed for {symbol}: {e}")
+
+    async def get_crypto_core(
+        self,
+        symbol: str,
+        chart_range: str = "3M",
+        interval: Optional[str] = None,
+    ) -> "CryptoCoreResponse":
+        """FIRST PAINT: the header line, from the cached CoinGecko fundamentals alone.
+
+        The full build gathers CoinGecko fundamentals + a 15-YEAR FMP history + news +
+        six related quotes. Only the first of those is needed to paint the header, and it
+        is already two-tier cached (5 min memory / 6h Supabase), so this answers well
+        inside the 1.27s the full build measured cold.
+
+        `chart_range` / `interval` are accepted for call-site symmetry with the other
+        three core endpoints and are deliberately unused: crypto has no cached chart
+        section to serve from, and pulling the history is the very thing core exists to
+        skip. The full response owns the chart.
+        """
+        from app.schemas.crypto import CryptoCoreResponse
+        # Local, matching every other call site in this module: `_finite_or_none` is not
+        # imported at module scope here.
+        from app.services.chart_helper import _finite_or_none
+
+        symbol = symbol.upper()
+        profile_meta = _CRYPTO_PROFILES.get(symbol, {})
+
+        coin_data = await self._get_coin_fundamentals(symbol)
+        md = coin_data.get("market_data", {}) if isinstance(coin_data, dict) else {}
+
+        def _usd(field: str, default: float = 0) -> float:
+            # CoinGecko returns some fields as JSON null (not absent), so a plain
+            # `md.get(f, {}).get("usd")` does None.get(...) and 500s the response.
+            sub = md.get(field)
+            if not isinstance(sub, dict):
+                return default
+            v = sub.get("usd")
+            return v if v is not None else default
+
+        price = _finite_or_none(_usd("current_price")) or 0
+        if price <= 0:
+            # The full build can fall back to the last finite FMP close here; core has no
+            # history to fall back to, and a "$0.00" header is worse than a skeleton. The
+            # client fetches core with `try?`, so this just leaves the shimmer up.
+            raise ValueError(f"crypto core has no usable price for {symbol}")
+
+        change = _finite_or_none(md.get("price_change_24h")) or 0
+        change_pct = _finite_or_none(md.get("price_change_percentage_24h")) or 0
+
+        # Prefer the curated profile name, then CoinGecko's, then the symbol.
+        name = profile_meta.get("name")
+        if not name and isinstance(coin_data, dict):
+            cg_name = coin_data.get("name")
+            if isinstance(cg_name, str) and cg_name.strip():
+                name = cg_name
+        if not name:
+            name = symbol
+
+        return CryptoCoreResponse(
+            symbol=symbol,
+            name=name,
+            current_price=price,
+            price_change=change,
+            price_change_percent=change_pct,
+            market_status="24/7 Trading",
+            chart_data=[],
+        )
 
     async def get_crypto_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -1410,12 +1519,17 @@ class CryptoService:
         defaults = self._default_snapshots(symbol, crypto_name, profile_meta)
         _cache_set(cache_key, defaults)
 
-        asyncio.create_task(self._generate_ai_snapshots(
-            symbol=symbol,
-            crypto_name=crypto_name,
-            profile_meta=profile_meta,
-            cache_key=cache_key,
-        ))
+        if symbol not in _ai_refresh_inflight:
+            _ai_refresh_inflight.add(symbol)
+            _spawn_background(
+                self._generate_ai_snapshots(
+                    symbol=symbol,
+                    crypto_name=crypto_name,
+                    profile_meta=profile_meta,
+                    cache_key=cache_key,
+                ),
+                name=f"crypto-ai-snapshots:{symbol}",
+            )
 
         return defaults
 
@@ -1538,7 +1652,12 @@ Separate each category with "===CATEGORY===" followed by the category name.
                 logger.info(f"Background: AI snapshots generated and saved for {symbol}")
 
         except Exception as e:
-            logger.warning(f"Background Gemini failed for {symbol}: {e}")
+            logger.warning(
+                "Crypto snapshot refresh failed for %s (%s: %s) — defaults stand",
+                symbol, type(e).__name__, e,
+            )
+        finally:
+            _ai_refresh_inflight.discard(symbol)
 
     def _parse_ai_snapshots(self, text: str) -> List[CryptoSnapshotResponse]:
         """Parse Gemini's response into structured snapshots."""

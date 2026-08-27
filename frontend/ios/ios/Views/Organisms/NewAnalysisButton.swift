@@ -15,7 +15,7 @@ struct NewAnalysisButton: View {
             onTap?()
         }) {
             HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "sparkles.2")
+                Image(systemName: AppSymbols.ai)
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
 
                 Text("New Analysis")

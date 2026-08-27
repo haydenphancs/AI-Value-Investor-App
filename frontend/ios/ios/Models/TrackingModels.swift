@@ -408,7 +408,7 @@ enum AnalystRatingAction: String {
         switch self {
         case .upgrade: return "arrow.up.right"
         case .downgrade: return "arrow.down.right"
-        case .initiate: return "sparkles.2"
+        case .initiate: return AppSymbols.ai
         case .maintain: return "equal"
         }
     }

@@ -1299,7 +1299,7 @@
         },
         {
           "title": "From Cigar Butts to Wonderful Companies",
-          "icon": "sparkles.2",
+          "icon": "sparkles",
           "content": [
             {
               "type": "paragraph",
@@ -2096,7 +2096,7 @@
         },
         {
           "title": "The Treasure Hunt",
-          "icon": "sparkles.2",
+          "icon": "sparkles",
           "content": [
             {
               "type": "paragraph",
@@ -3578,7 +3578,7 @@
       "sections": [
         {
           "title": "The Story",
-          "icon": "sparkles.2",
+          "icon": "sparkles",
           "hasGlowEffect": true,
           "content": [
             {
@@ -5394,7 +5394,7 @@
       "sections": [
         {
           "title": "An Accident, Then a Decade of Work",
-          "icon": "sparkles.2",
+          "icon": "sparkles",
           "hasGlowEffect": true,
           "content": [
             {

@@ -15,6 +15,28 @@ class CryptoDetailViewModel: ObservableObject {
     // MARK: - Published Properties
 
     @Published var cryptoData: CryptoDetailData?
+    /// Fast-core first paint. Populated by `/crypto/{symbol}/core`, which answers from
+    /// the two-tier-cached CoinGecko fundamentals alone, and rendered by the header gate
+    /// as `cryptoData ?? coreData`.
+    ///
+    /// Crypto's core carries NO chart: its history is a single 15-year FMP pull made
+    /// inside the full build, so there is no cached section to serve bars from. The
+    /// header (name, price, 24h move) paints immediately and the chart follows.
+    ///
+    /// Written ONLY while `cryptoData` is still nil (see `loadCore`), so a slow core
+    /// response can never overwrite the full model.
+    @Published var coreData: CryptoCoreData?
+
+    /// What the header + chart render: the full model when it has landed, the fast-core
+    /// slice until then.
+    ///
+    /// Written as an `if let` rather than `cryptoData ?? coreData` on purpose — the two
+    /// sides are different concrete types and only share the protocol, so the coalescing
+    /// form depends on contextual coercion that is easy to break by accident.
+    var headerData: (any CryptoHeaderRenderable)? {
+        if let cryptoData { return cryptoData }
+        return coreData
+    }
     @Published var newsArticles: [TickerNewsArticle] = []
     @Published var isNewsLoading: Bool = false
     @Published var hasMoreNews: Bool = false
@@ -174,9 +196,15 @@ class CryptoDetailViewModel: ObservableObject {
             // refresh. Only the cryptoData paint stays gen-guarded (mirrors Commodity VM).
             self.connectLivePrice()
             self.startChartRefreshTimer()
+            // Fast core, in parallel with the full detail below: whichever lands
+            // first paints. Deliberately NOT gen-guarded on its own — `loadCore`
+            // drops itself the moment `cryptoData` exists, which is the stronger
+            // check here (a superseded load still leaves cryptoData nil).
+            async let coreTask: () = self.loadCore()
             async let newsTask: () = self.fetchCryptoNews()
             async let analysisTask: () = self.fetchCryptoAnalysis()
             async let watchlistTask: () = self.checkWatchlistStatus()
+            _ = await coreTask
 
             do {
                 print("🪙 [CryptoDetail] Fetching data for \(self.cryptoSymbol) range=\(self.selectedChartRange.rawValue)")
@@ -263,6 +291,27 @@ class CryptoDetailViewModel: ObservableObject {
             guard gen == self.detailRequestGen else { return }
             handleLoadError(error)
         }
+    }
+
+    /// Fetch the fast-core slice in parallel with the full detail and paint it the
+    /// moment it lands.
+    ///
+    /// Crypto is the least affected of the four screens (1.27s cold against index's
+    /// 5.63s) because its Gemini snapshots have always been generated in the background —
+    /// but its header still waited on a 15-year history pull it does not need.
+    ///
+    /// `try?` on purpose: core is an accelerator, so a core failure must be invisible;
+    /// the full response is already in flight and owns the error path.
+    private func loadCore() async {
+        guard let core = try? await StockRepository.shared.getCryptoCore(
+            symbol: cryptoSymbol,
+            range: selectedChartRange.rawValue,
+            interval: chartSettings.selectedInterval.rawValue
+        ) else { return }
+        // The race guard: a core response landing after the full one must be dropped, or
+        // the screen would step backwards from the complete model to the header-only one.
+        guard cryptoData == nil else { return }
+        coreData = core.toCoreData()
     }
 
     // MARK: - Chart Range Change

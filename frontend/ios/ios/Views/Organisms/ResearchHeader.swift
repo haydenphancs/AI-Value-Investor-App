@@ -42,7 +42,7 @@ struct ResearchHeader: View {
                 // four tabs opens Cay AI chat, so this one is kept visually distinct (bare
                 // glyph, centred, no tile) and hidden from VoiceOver rather than announcing
                 // itself as something to tap.
-                Image(systemName: "sparkles.2")
+                Image(systemName: AppSymbols.ai)
                     .font(AppTypography.iconLarge).fontWeight(.medium)
                     .foregroundColor(AppColors.primaryBlue)
                     .frame(maxWidth: .infinity)

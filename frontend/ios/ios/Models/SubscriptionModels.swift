@@ -210,10 +210,11 @@ struct PlanFeature: Identifiable, Equatable, Sendable {
     /// Validate at the MODEL boundary, not in the view — the same discipline the theme
     /// rules impose on server-supplied colour. `Image(systemName:)` on an unknown name
     /// draws a placeholder box, which reads as a broken screen.
+    ///
+    /// The implementation moved to `AppSymbols.resolved` so the Money Moves decoder can share
+    /// it — this stays as the named entry point the plan-feature path already reads.
     static func validatedSymbol(_ name: String) -> String? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, UIImage(systemName: trimmed) != nil else { return nil }
-        return trimmed
+        AppSymbols.resolved(name)
     }
 
     init(from dto: PlanFeatureDTO) {
@@ -517,7 +518,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
 
     var symbol: String {
         switch self {
-        case .general:          return "sparkles.2"
+        case .general:          return AppSymbols.ai
         case .moreCredits:      return "creditcard.fill"
         case .updatesTickers:   return "chart.bar.doc.horizontal"
         case .signals:          return "antenna.radiowaves.left.and.right"

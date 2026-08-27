@@ -40,7 +40,16 @@ struct RootContainerView: View {
                     VStack {
                         Spacer()
                         GlobalMiniPlayer()
-                            .padding(.bottom, 58) // Clear the tab bar with a little breathing room
+                            // Three terms, none of them a magic number:
+                            //   + the tab bar's own height,
+                            //   + the visual gap we want above it,
+                            //   - the spacing GlobalMiniPlayer already adds below its capsule.
+                            // The old bare `58` resolved to a 3pt gap once the player's own
+                            // 12pt was counted, so the capsule read as welded to the tab bar.
+                            // `AppSpacing.lg` matches the player-to-chat-bar gap on the detail
+                            // screens, which is the spacing this one is being matched to.
+                            .padding(.bottom, CustomTabBar.approximateHeight
+                                     + AppSpacing.lg - AppSpacing.md)
                     }
                     .transition(.asymmetric(
                         insertion: .move(edge: .bottom).combined(with: .opacity),

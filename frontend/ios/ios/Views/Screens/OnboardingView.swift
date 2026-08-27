@@ -281,7 +281,7 @@ struct OnboardingView: View {
     private var readyPage: some View {
         VStack(spacing: AppSpacing.lg) {
             Spacer()
-            Image(systemName: "sparkles.2")
+            Image(systemName: AppSymbols.ai)
                 .font(.system(size: 52))
                 .foregroundColor(AppColors.primaryBlue)
 

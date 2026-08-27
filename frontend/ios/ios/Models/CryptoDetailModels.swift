@@ -147,6 +147,30 @@ struct CryptoProfile {
 }
 
 // MARK: - Crypto Detail Data
+/// The header's price formatting, in ONE place — shared by `CryptoDetailData` and the
+/// fast-core `CryptoCoreData`. The sub-$1 precision rules here are exactly why this must
+/// not be duplicated: a core that rounded a $0.000042 token to `$0.00` and then swapped
+/// to the real value would read as a bug.
+enum CryptoHeaderFormat {
+    static func price(_ value: Double) -> String {
+        value >= 1
+            ? String(format: "$%.2f", value)
+            : String(format: "$%.6f", value)
+    }
+
+    static func change(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return abs(value) >= 1
+            ? "\(sign)\(String(format: "%.2f", value))"
+            : "\(sign)\(String(format: "%.6f", value))"
+    }
+
+    static func changePercent(_ value: Double) -> String {
+        let sign = value >= 0 ? "+" : ""
+        return "(\(sign)\(String(format: "%.2f", value))%)"
+    }
+}
+
 struct CryptoDetailData: Identifiable {
     let id = UUID()
     let symbol: String
@@ -178,26 +202,10 @@ struct CryptoDetailData: Identifiable {
         currentPrice - priceChange
     }
 
-    var formattedPrice: String {
-        if currentPrice >= 1 {
-            return String(format: "$%.2f", currentPrice)
-        } else {
-            return String(format: "$%.6f", currentPrice)
-        }
-    }
-
-    var formattedChange: String {
-        let sign = priceChange >= 0 ? "+" : ""
-        if abs(priceChange) >= 1 {
-            return "\(sign)\(String(format: "%.2f", priceChange))"
-        } else {
-            return "\(sign)\(String(format: "%.6f", priceChange))"
-        }
-    }
-
+    var formattedPrice: String { CryptoHeaderFormat.price(currentPrice) }
+    var formattedChange: String { CryptoHeaderFormat.change(priceChange) }
     var formattedChangePercent: String {
-        let sign = priceChangePercent >= 0 ? "+" : ""
-        return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
+        CryptoHeaderFormat.changePercent(priceChangePercent)
     }
 }
 

@@ -83,6 +83,27 @@ class CryptoNewsArticleResponse(BaseModel):
     article_url: Optional[str] = None
 
 
+class CryptoCoreResponse(BaseModel):
+    """FIRST-PAINT slice: the header line.
+
+    Crypto is the one of the four with no per-section chart cache — its history is a
+    single 15-year FMP pull made inside the build — so there is nothing free to serve
+    bars from and `chart_data` is always empty here. That is deliberate and honest: the
+    header (name, price, 24h move) paints immediately from the two-tier-cached CoinGecko
+    fundamentals, and the full response fills the chart a moment later.
+
+    Field names and types match the same-named fields on `CryptoDetailResponse`.
+    """
+
+    symbol: str
+    name: str
+    current_price: float
+    price_change: float
+    price_change_percent: float
+    market_status: str
+    chart_data: List[Dict[str, Any]] = []
+
+
 class CryptoDetailResponse(BaseModel):
     symbol: str
     name: str

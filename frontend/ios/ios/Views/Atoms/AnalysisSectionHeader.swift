@@ -65,7 +65,19 @@ struct AnalysisSectionHeader: View {
                     Image(systemName: iconType == .info ? "info.circle" : "ellipsis")
                         .font(AppTypography.iconDefault).fontWeight(.medium)
                         .foregroundColor(AppColors.textSecondary)
-                        .frame(width: 24, height: 24)
+                        // 24pt was barely half the minimum target. Widen the BOX to
+                        // 44 and leave its height alone: this row is
+                        // `HStack(alignment: .top)` against a ~20pt title, so a 44pt
+                        // SQUARE would both drop the glyph ~10pt and pad every section
+                        // header out to 44pt tall. `.trailing` keeps the glyph exactly
+                        // where it renders today and grows the box leftward into the
+                        // Spacer, where there is nothing to collide with.
+                        //
+                        // The vertical axis stays bounded by the row — the same parent
+                        // -clipping limit documented in HitSlop.swift — so this is a
+                        // 44x24 target plus slop, not a 44x44 one.
+                        .frame(width: HitSlop.minimumTarget, height: 24, alignment: .trailing)
+                        .hitSlop()
                 }
             }
         }

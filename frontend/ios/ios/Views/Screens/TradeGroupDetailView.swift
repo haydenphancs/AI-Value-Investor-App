@@ -155,13 +155,7 @@ struct TradeGroupDetailView: View {
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(AppTypography.iconMedium).fontWeight(.medium)
-                        .foregroundColor(AppColors.textPrimary)
-                }
+                NavBackButton(weight: .medium) { dismiss() }
             }
 
             ToolbarItem(placement: .principal) {

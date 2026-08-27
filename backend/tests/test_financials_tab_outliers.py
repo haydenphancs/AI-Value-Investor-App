@@ -430,3 +430,125 @@ def test_revenue_breakdown_no_year_match_degrades_to_total_revenue():
     )
     assert [s.name for s in r.revenue_sources] == ["Total Revenue"]
     assert r.fiscal_year == "2024"
+
+
+# ── Revenue breakdown: the COMPOSITION ────────────────────────────────────────
+#
+# Reported by a TestFlight tester as "why is op. Expense a negative number? And we have
+# 0%?" on LMT. The negative turned out to be genuine FMP data, but verifying it exposed a
+# much worse defect underneath: iOS derived Net Profit as
+#     revenue - (costOfRevenue + operatingExpenses + incomeTaxExpense)
+# which omits interest expense and every non-operating item. Measured against live FMP
+# across 12 large caps, 9 were off by >10% and TWO INVERTED THE SIGN OF PROFITABILITY.
+#
+# The fix sends `net_income`, `reported_revenue` and a derived `other_expense` plug. The
+# fixtures below are the real FY2025 shapes for the four companies that break it.
+
+def _lmt_income():
+    """LMT FY2025 — genuinely NEGATIVE operatingExpenses (SG&A 50M + R&D 2.0B + other
+    income -2.162B = -112M). LMT books most SG&A inside cost of sales."""
+    return {"fiscalYear": 2025, "calendarYear": "2025", "date": "2025-12-31",
+            "revenue": 75_057e6, "costOfRevenue": 67_429e6,
+            "operatingExpenses": -112e6, "incomeTaxExpense": 905e6,
+            "netIncome": 5_017e6}
+
+
+def _seg(year=2025, date="2025-12-31"):
+    return [{"fiscalYear": year, "date": date, "data": {"Aeronautics": 30e9, "Space": 13e9}}]
+
+
+def _reconciles(r):
+    """The invariant that stops this drifting again: the five buckets must add back up to
+    reported revenue. If they don't, the card is telling a story that doesn't balance."""
+    total = (r.cost_of_sales + r.operating_expense + r.tax
+             + r.other_expense + r.net_income)
+    return abs(total - r.reported_revenue) < 1.0
+
+
+def test_revenue_breakdown_negative_operating_expense_survives_with_its_sign():
+    """A negative cost is a CREDIT and must not be clamped: clamping would silently move
+    112M into net profit, which is the fabricated-number class this card keeps hitting."""
+    r = _build_rev(_seg(), [_lmt_income()])
+    assert r.operating_expense == -112e6
+    assert r.net_income == 5_017e6
+    assert _reconciles(r)
+
+
+def test_revenue_breakdown_net_profit_is_reported_not_derived():
+    """The whole point. The old residual would have produced 6.835B (9.1% margin) for LMT;
+    the reported bottom line is 5.017B (6.7%)."""
+    r = _build_rev(_seg(), [_lmt_income()])
+    residual = r.reported_revenue - r.cost_of_sales - r.operating_expense - r.tax
+    assert abs(residual - 6_835e6) < 1e6          # the old, wrong number
+    assert r.net_income == 5_017e6                 # what we now send
+    assert r.net_income < residual                 # and it is materially lower
+
+
+def test_revenue_breakdown_loss_making_year_is_not_reported_as_a_profit():
+    """🔴 THE REGRESSION THAT MATTERS. Ford FY2025: the residual is +6.2B, so the card
+    showed a company that lost $8.2bn as PROFITABLE. Net profit must be negative."""
+    ford = {"fiscalYear": 2025, "calendarYear": "2025", "date": "2025-12-31",
+            "revenue": 187_318e6, "costOfRevenue": 164_500e6,
+            "operatingExpenses": 20_280e6, "incomeTaxExpense": -3_670e6,
+            "netIncome": -8_180e6}
+    r = _build_rev(_seg(), [ford])
+    residual = r.reported_revenue - r.cost_of_sales - r.operating_expense - r.tax
+    assert residual > 0                # the old maths said "profitable"
+    assert r.net_income < 0            # the truth
+    assert _reconciles(r)
+    # Ford's tax is also negative (a benefit) — the second negative-cost shape.
+    assert r.tax < 0
+
+
+def test_revenue_breakdown_profitable_year_is_not_reported_as_a_loss():
+    """The inverse, from Boeing FY2025: the residual is -5.8B against +2.2B reported."""
+    boeing = {"fiscalYear": 2025, "calendarYear": "2025", "date": "2025-12-31",
+              "revenue": 89_500e6, "costOfRevenue": 85_200e6,
+              "operatingExpenses": 9_710e6, "incomeTaxExpense": 400e6,
+              "netIncome": 2_230e6}
+    r = _build_rev(_seg(), [boeing])
+    residual = r.reported_revenue - r.cost_of_sales - r.operating_expense - r.tax
+    assert residual < 0                # the old maths said "loss-making"
+    assert r.net_income > 0            # the truth
+    assert r.other_expense < 0         # non-operating income closes the gap
+    assert _reconciles(r)
+
+
+def test_revenue_breakdown_other_expense_may_be_negative():
+    """MSFT: net non-operating INCOME, so the plug is negative. That is correct, not a bug
+    to clamp — iOS relabels a negative bucket as income."""
+    msft = {"fiscalYear": 2026, "calendarYear": "2026", "date": "2026-06-30",
+            "revenue": 331_800e6, "costOfRevenue": 106_400e6,
+            "operatingExpenses": 70_230e6, "incomeTaxExpense": 32_190e6,
+            "netIncome": 133_750e6}
+    r = _build_rev(_seg(2026, "2026-06-30"), [msft])
+    assert r.other_expense < 0
+    assert _reconciles(r)
+
+
+def test_revenue_breakdown_composition_omitted_rather_than_faked():
+    """Missing or non-finite netIncome/revenue must leave the fields None so iOS degrades
+    to its old behaviour. A 0.0 default here would render the company as having earned
+    exactly nothing — a worse lie than the bug being fixed."""
+    no_ni = dict(_lmt_income())
+    no_ni.pop("netIncome")
+    r = _build_rev(_seg(), [no_ni])
+    assert r.net_income is None
+    assert r.other_expense is None
+    # ...and the fields that always existed are unaffected.
+    assert r.cost_of_sales == 67_429e6
+
+    nan_ni = dict(_lmt_income())
+    nan_ni["netIncome"] = float("nan")
+    r2 = _build_rev(_seg(), [nan_ni])
+    assert r2.net_income is None
+    assert r2.other_expense is None
+
+
+def test_revenue_breakdown_reported_revenue_is_not_the_segment_sum():
+    """The denominator fix. Segments need not add up to revenue — LMT's sum to 43B in this
+    fixture against 75.06B reported — so percentages must divide by the reported figure."""
+    r = _build_rev(_seg(), [_lmt_income()])
+    segment_sum = sum(s.value for s in r.revenue_sources)
+    assert r.reported_revenue == 75_057e6
+    assert segment_sum != r.reported_revenue

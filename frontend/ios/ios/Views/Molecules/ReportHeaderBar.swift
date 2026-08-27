@@ -29,6 +29,7 @@ struct ReportHeaderBar: View {
                     .font(AppTypography.iconMedium).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
+                    .hitSlop(reaching: 36)
             }
 
             // Company logo placeholder + info
@@ -93,6 +94,7 @@ struct ReportHeaderBar: View {
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textPrimary)
                     .frame(width: 36, height: 36)
+                    .hitSlop(reaching: 36)
             }
         }
         .padding(.horizontal, AppSpacing.lg)

@@ -164,7 +164,7 @@ struct LessonTopicCardView: View {
                     .font(AppTypography.iconDefault).fontWeight(.semibold)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                    .hitSlop(reaching: 32)
             }
             .buttonStyle(.plain) // Ensure no interference from default button style
         }

@@ -29,7 +29,9 @@ struct RevenueSource: Identifiable {
     }
 
     func formattedPercentage(of total: Double) -> String {
-        String(format: "%.0f%%", percentage(of: total))
+        // Same formatter as the cost column, so a tiny segment says "<0.1%" instead of
+        // claiming "0%" beside a non-zero amount.
+        PercentShare.string(percentage(of: total))
     }
 
     private func formatLargeNumber(_ number: Double) -> String {
@@ -46,38 +48,70 @@ struct CostItem: Identifiable {
     let name: String
     let value: Double
     let color: Color
+    /// True when the underlying line came back NEGATIVE and has been flipped into a credit.
+    ///
+    /// A negative "cost" is not an expense, it is income — FMP reports LMT's
+    /// `operatingExpenses` as −112M (SG&A 50M + R&D 2.0B + other income −2.16B) and Ford's
+    /// `incomeTaxExpense` as −3.67B (a tax benefit). The legend used to print the signed
+    /// value, compute its percentage with `abs()`, and let the bar clamp it to zero — three
+    /// different readings of one number in one row, which is what got reported. Credits now
+    /// carry a positive magnitude, an income colour and their own label; see
+    /// `RevenueBreakdownData.costLine`.
+    let isCredit: Bool
+    /// Fill for the stacked bar. Deliberately separate from `color`: the legend dot is read
+    /// as meaningful content and takes a TEXT-role token (4.5:1), while a chart fill takes
+    /// the 3:1 `*Graphic` variant. Keeping both on the item is what lets the bar iterate
+    /// these items without a text token leaking into the chart layer.
+    let chartColor: Color
 
+    init(name: String, value: Double, color: Color, chartColor: Color? = nil, isCredit: Bool = false) {
+        self.name = name
+        self.value = value
+        self.color = color
+        self.chartColor = chartColor ?? color
+        self.isCredit = isCredit
+    }
+
+    /// Share of revenue, **signed**. The `abs()` that used to live here silently reported a
+    /// credit as a positive share of revenue.
     func percentage(of total: Double) -> Double {
         guard total > 0 else { return 0 }
-        let pct = (abs(value) / total) * 100
-        // Cap at 999% to prevent display overflow in edge cases
-        return min(pct, 999)
+        let pct = (value / total) * 100
+        // Cap to prevent display overflow in edge cases.
+        return min(max(pct, -999), 999)
     }
 
     var formattedValue: String {
-        formatLargeNumber(value)
+        CompactNumberFormat.string(value)
     }
 
     func formattedPercentage(of total: Double) -> String {
-        let pct = percentage(of: total)
-        if pct >= 100 {
-            return String(format: "%.0f%%", pct)
+        PercentShare.string(percentage(of: total))
+    }
+}
+
+// MARK: - Percentage formatting
+
+/// Share-of-revenue formatting for this card.
+///
+/// ⚠️ `String(format: "%.0f%%", …)` was the whole of the old implementation, and it printed
+/// **"0%" next to a non-zero amount** — LMT's −112M is 0.15% of revenue, which floors to
+/// zero. A percentage that contradicts the number beside it is worse than no percentage, and
+/// a tester reported exactly that. Below 1% the value keeps a decimal; below 0.1% it says so
+/// rather than claiming zero. At 1% and above the output is byte-identical to before, so the
+/// rest of the card looks untouched.
+enum PercentShare {
+    static func string(_ pct: Double) -> String {
+        guard pct.isFinite else { return "—" }
+        let magnitude = abs(pct)
+        if magnitude < 0.05 {
+            // Genuinely zero reads as "0%"; a rounding artefact must not.
+            return magnitude == 0 ? "0%" : (pct < 0 ? "<-0.1%" : "<0.1%")
+        }
+        if magnitude < 1 {
+            return String(format: "%.1f%%", pct)
         }
         return String(format: "%.0f%%", pct)
-    }
-
-    private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        if absNumber >= 1_000_000_000_000 {
-            return String(format: "%.1fT", number / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
-            return String(format: "%.0fB", number / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
-            return String(format: "%.1fM", number / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return String(format: "%.1fK", number / 1_000)
-        }
-        return String(format: "%.0f", number)
     }
 }
 
@@ -90,18 +124,71 @@ struct RevenueBreakdownData {
     let operatingExpense: Double
     let tax: Double
 
+    // ── Server-supplied composition. nil ⇒ pre-fix backend or a stale cached row. ──
+    /// FMP `netIncome`. See `netProfit`.
+    let reportedNetIncome: Double?
+    /// FMP `revenue`. See `revenueBasis`.
+    let reportedRevenue: Double?
+    /// Interest, non-operating items, minority interest, discontinued ops.
+    let otherExpense: Double?
+
+    init(tickerSymbol: String,
+         fiscalYear: String,
+         revenueSources: [RevenueSource],
+         costOfSales: Double,
+         operatingExpense: Double,
+         tax: Double,
+         reportedNetIncome: Double? = nil,
+         reportedRevenue: Double? = nil,
+         otherExpense: Double? = nil) {
+        self.tickerSymbol = tickerSymbol
+        self.fiscalYear = fiscalYear
+        self.revenueSources = revenueSources
+        self.costOfSales = costOfSales
+        self.operatingExpense = operatingExpense
+        self.tax = tax
+        self.reportedNetIncome = reportedNetIncome
+        self.reportedRevenue = reportedRevenue
+        self.otherExpense = otherExpense
+    }
+
     // MARK: - Computed Properties
 
+    /// Sum of the revenue SEGMENTS — the height of the revenue bar.
     var totalRevenue: Double {
         revenueSources.reduce(0) { $0 + $1.value }
     }
 
-    var totalCosts: Double {
-        costOfSales + operatingExpense + tax
+    /// Denominator for every percentage on the card.
+    ///
+    /// ⚠️ NOT `totalRevenue`. Segments do not have to add up to revenue — LMT FY2025 reports
+    /// 75.06B while its segments sum to 74.4B — so dividing by the segment sum ran every
+    /// percentage ~0.9% high, and further wherever segment coverage is thinner. Falls back to
+    /// the segment sum only when the backend did not send reported revenue.
+    var revenueBasis: Double {
+        if let reportedRevenue, reportedRevenue > 0 { return reportedRevenue }
+        return totalRevenue
     }
 
+    var totalCosts: Double {
+        costOfSales + operatingExpense + tax + (otherExpense ?? 0)
+    }
+
+    /// The bottom line.
+    ///
+    /// 🔴 THIS IS REPORTED, NOT DERIVED — do not "simplify" it back to `revenue - costs`.
+    /// That residual omits interest expense and every non-operating item, so it is operating
+    /// profit after tax under a "Net Profit" label. Measured against live FMP data across 12
+    /// large caps, 9 were off by more than 10% and **two inverted the sign of profitability**:
+    /// the card showed Ford at +$6.2bn in a year it lost $8.2bn, and Boeing loss-making in a
+    /// year it earned $2.2bn. `otherExpense` is the bucket that makes the rest reconcile.
+    ///
+    /// The fallback is the old residual, used only when the backend sent no `net_income`
+    /// (an older deploy, or a cache row written before this shipped). Wrong in the same way it
+    /// always was, but never worse — and never a fabricated zero.
     var netProfit: Double {
-        totalRevenue - totalCosts
+        if let reportedNetIncome { return reportedNetIncome }
+        return totalRevenue - totalCosts
     }
 
     var isProfit: Bool {
@@ -116,16 +203,43 @@ struct RevenueBreakdownData {
         isProfit ? AppColors.gain : AppColors.loss
     }
 
+    /// Builds one legend line, flipping a negative cost into a credit.
+    ///
+    /// A line that comes back below zero is income, not expense, so it gets the credit label,
+    /// a positive magnitude and the gain colour. Everything downstream — percentage, legend,
+    /// bar — then agrees on it, instead of the legend showing a minus sign, the percentage
+    /// showing `abs()` and the bar clamping it away.
+    private func costLine(_ label: String,
+                          credit creditLabel: String,
+                          value: Double,
+                          color: Color,
+                          chartColor: Color? = nil) -> CostItem {
+        value < 0
+            ? CostItem(name: creditLabel, value: -value, color: AppColors.gain,
+                       chartColor: AppColors.gainGraphic, isCredit: true)
+            : CostItem(name: label, value: value, color: color, chartColor: chartColor)
+    }
+
     // Cost items for display
     var costItems: [CostItem] {
-        [
+        var items: [CostItem] = [
             // A 3-step tonal ramp that stays separable in BOTH modes. The old
             // frozen tints (#F87171 2.77:1, #FCA5A5 1.90:1) collapsed against a
             // light card, so the bar rendered as two segments instead of three.
-            CostItem(name: "Cost of Sales", value: costOfSales, color: AppColors.loss),
-            CostItem(name: "Op. Expense", value: operatingExpense, color: AppColors.alertOrange),
-            CostItem(name: "Tax", value: tax, color: AppColors.caution)
+            costLine("Cost of Sales", credit: "Cost of Sales", value: costOfSales,
+                     color: AppColors.loss, chartColor: AppColors.lossGraphic),
+            costLine("Op. Expense", credit: "Other Operating Income", value: operatingExpense, color: AppColors.alertOrange),
+            costLine("Tax", credit: "Tax Benefit", value: tax, color: AppColors.caution)
         ]
+        // Only present once the backend sends the composition. Without it the waterfall
+        // silently dropped interest and every non-operating item into "Net Profit".
+        if let otherExpense {
+            items.append(costLine("Interest & Other",
+                                  credit: "Other Income, net",
+                                  value: otherExpense,
+                                  color: AppColors.growthSectorGray))
+        }
+        return items
     }
 
     // Net profit/loss as a cost item (for legend)
@@ -139,12 +253,13 @@ struct RevenueBreakdownData {
 
     // Formatted values
     var formattedTotalRevenue: String {
-        formatLargeNumber(totalRevenue)
+        CompactNumberFormat.string(revenueBasis)
     }
 
     var formattedNetProfit: String {
-        let prefix = isProfit ? "" : "-"
-        return prefix + formatLargeNumber(abs(netProfit))
+        // `CompactNumberFormat` already carries the sign; the old code hand-prefixed "-"
+        // onto an `abs()` value using its own duplicate formatter.
+        CompactNumberFormat.string(netProfit)
     }
 
     /// Net margin as a percentage of revenue, **signed**.
@@ -154,9 +269,14 @@ struct RevenueBreakdownData {
     /// the "Net Loss" label — a reader scanning the percentage column saw a
     /// positive-looking figure for a loss. The sign is the whole point here.
     func netProfitPercentage() -> Double {
-        guard totalRevenue > 0 else { return 0 }
-        let pct = (netProfit / totalRevenue) * 100
+        guard revenueBasis > 0 else { return 0 }
+        let pct = (netProfit / revenueBasis) * 100
         return min(max(pct, -999), 999) // Cap to prevent display overflow
+    }
+
+    /// Net margin, formatted the same way every other share on the card is.
+    var formattedNetProfitPercentage: String {
+        PercentShare.string(netProfitPercentage())
     }
 
     // MARK: - Chart Calculations
@@ -191,21 +311,10 @@ struct RevenueBreakdownData {
         return (start, end)
     }
 
-    // MARK: - Private Helpers
-
-    private func formatLargeNumber(_ number: Double) -> String {
-        let absNumber = abs(number)
-        if absNumber >= 1_000_000_000_000 {
-            return String(format: "%.1fT", number / 1_000_000_000_000)
-        } else if absNumber >= 1_000_000_000 {
-            return String(format: "%.0fB", number / 1_000_000_000)
-        } else if absNumber >= 1_000_000 {
-            return String(format: "%.1fM", number / 1_000_000)
-        } else if absNumber >= 1_000 {
-            return String(format: "%.1fK", number / 1_000)
-        }
-        return String(format: "%.0f", number)
-    }
+    // NB: the private `formatLargeNumber` that used to live here is gone — it was the third
+    // byte-identical copy of a formatter whose millions tier was hardcoded `%.1f`, which is
+    // why a legend could print "67B" beside "-112.0M". Everything routes through
+    // `CompactNumberFormat` now, which is the migration its own header comment asked for.
 }
 
 // MARK: - Revenue Source Colors

@@ -18,6 +18,7 @@ struct AddTickerButton: View {
                 .frame(width: 32, height: 32)
                 .background(AppColors.cardBackgroundLight)
                 .clipShape(Circle())
+                .hitSlop(reaching: 32)
         }
         .buttonStyle(PlainButtonStyle())
     }

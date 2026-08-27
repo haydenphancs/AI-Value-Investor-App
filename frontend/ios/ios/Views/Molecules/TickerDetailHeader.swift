@@ -31,7 +31,8 @@ struct TickerDetailHeader: View {
                     Image(systemName: "chevron.left")
                         .font(AppTypography.iconMedium).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 40, height: 40)
+                        .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                        .hitSlop()
                 }
                 .buttonStyle(PlainButtonStyle())
 
@@ -60,7 +61,8 @@ struct TickerDetailHeader: View {
                     Image(systemName: "magnifyingglass")
                         .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 40, height: 40)
+                        .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                        .hitSlop()
                 }
                 .buttonStyle(PlainButtonStyle())
 
@@ -74,7 +76,8 @@ struct TickerDetailHeader: View {
                         Image(systemName: "bell")
                             .font(AppTypography.iconMedium)
                             .foregroundColor(AppColors.textPrimary)
-                            .frame(width: 40, height: 40)
+                            .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                            .hitSlop()
                     }
                     .buttonStyle(PlainButtonStyle())
                 }
@@ -86,7 +89,8 @@ struct TickerDetailHeader: View {
                     Image(systemName: isFavorite ? "star.fill" : "star")
                         .font(AppTypography.iconMedium)
                         .foregroundColor(isFavorite ? AppColors.neutral : AppColors.textPrimary)
-                        .frame(width: 40, height: 40)
+                        .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                        .hitSlop()
                 }
                 .buttonStyle(PlainButtonStyle())
 
@@ -97,7 +101,8 @@ struct TickerDetailHeader: View {
                     Image(systemName: "square.and.arrow.up")
                         .font(AppTypography.iconMedium)
                         .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 40, height: 40)
+                        .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                        .hitSlop()
                 }
                 .buttonStyle(PlainButtonStyle())
             }

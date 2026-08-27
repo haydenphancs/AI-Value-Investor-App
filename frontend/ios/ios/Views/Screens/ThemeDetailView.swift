@@ -177,6 +177,7 @@ struct ThemeDetailView: View {
                 // and put this chevron at 2.44:1. `mediaScrim` is 0.60 — 5.74:1 on
                 // white, better on anything darker.
                 .background(Circle().fill(AppColors.mediaScrim))
+                .hitSlop(reaching: 36)
         }
         .padding(.horizontal, AppSpacing.lg)
         .padding(.top, AppSpacing.sm)

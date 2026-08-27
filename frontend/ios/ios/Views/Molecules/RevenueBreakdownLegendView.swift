@@ -24,7 +24,7 @@ struct RevenueBreakdownLegendView: View {
                         color: source.color,
                         name: source.name,
                         value: source.formattedValue,
-                        percentage: source.formattedPercentage(of: data.totalRevenue)
+                        percentage: source.formattedPercentage(of: data.revenueBasis)
                     )
                 }
             }
@@ -37,12 +37,14 @@ struct RevenueBreakdownLegendView: View {
                     .foregroundColor(AppColors.textPrimary)
                     .padding(.bottom, AppSpacing.xs)
 
+                // `revenueBasis`, not `totalRevenue`: percentages divide by REPORTED revenue,
+                // which the segment sum does not have to equal.
                 ForEach(data.costItems) { item in
                     RevenueBreakdownLegendItem(
                         color: item.color,
                         name: item.name,
                         value: item.formattedValue,
-                        percentage: item.formattedPercentage(of: data.totalRevenue)
+                        percentage: item.formattedPercentage(of: data.revenueBasis)
                     )
                 }
 
@@ -51,7 +53,7 @@ struct RevenueBreakdownLegendView: View {
                     color: data.netProfitColor,
                     name: data.netProfitLabel,
                     value: data.formattedNetProfit,
-                    percentage: String(format: "%.0f%%", data.netProfitPercentage())
+                    percentage: data.formattedNetProfitPercentage
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)

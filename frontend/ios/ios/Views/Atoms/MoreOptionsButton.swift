@@ -18,7 +18,8 @@ struct MoreOptionsButton: View {
                 .font(AppTypography.iconDefault).fontWeight(.medium)
                 .foregroundColor(AppColors.textMuted)
                 .rotationEffect(.degrees(90))
-                .frame(width: 24, height: 24)
+                .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
+                .hitSlop()
         }
         .buttonStyle(PlainButtonStyle())
     }

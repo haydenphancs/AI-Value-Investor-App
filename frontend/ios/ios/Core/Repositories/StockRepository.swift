@@ -2059,6 +2059,22 @@ struct RevenueBreakdownDTO: Codable {
     let operatingExpense: Double
     let tax: Double
 
+    // ── The composition, sent by the backend so the client stops deriving it ──
+    //
+    // ⚠️ Optional, and that is load-bearing in BOTH directions. A response cached before
+    // this change carries none of them, and they must arrive as nil so the model can fall
+    // back to the old derived residual — decoding a missing field as 0 would render the
+    // company as having earned exactly nothing, which is a worse lie than the bug.
+
+    /// The real bottom line (FMP `netIncome`). nil ⇒ fall back to the derived residual.
+    let netIncome: Double?
+    /// Reported revenue — the correct percentage denominator. The SUM OF SEGMENTS is not
+    /// revenue (LMT FY2025: 74.4B of segments vs 75.06B reported).
+    let reportedRevenue: Double?
+    /// Interest, non-operating items, minority interest, discontinued ops — the plug that
+    /// closes the waterfall. Legitimately negative when non-operating income exceeds them.
+    let otherExpense: Double?
+
     enum CodingKeys: String, CodingKey {
         case symbol
         case fiscalYear = "fiscal_year"
@@ -2066,6 +2082,9 @@ struct RevenueBreakdownDTO: Codable {
         case costOfSales = "cost_of_sales"
         case operatingExpense = "operating_expense"
         case tax
+        case netIncome = "net_income"
+        case reportedRevenue = "reported_revenue"
+        case otherExpense = "other_expense"
     }
 
     func toDisplayModel() -> RevenueBreakdownData {
@@ -2086,7 +2105,7 @@ struct RevenueBreakdownDTO: Codable {
         // for the "Other" bucket. It used to be the 6th entry, so a 6th real
         // segment was coloured identically to "Other".
 
-        let sources = revenueSources.enumerated().map { index, source in
+        var sources = revenueSources.enumerated().map { index, source in
             // If segment is "Other", always use gray; otherwise use palette
             let color: Color
             if source.name == "Other" {
@@ -2097,13 +2116,38 @@ struct RevenueBreakdownDTO: Codable {
             return RevenueSource(name: source.name, value: source.value, color: color)
         }
 
+        // Segments do not have to add up to reported revenue — LMT FY2025 reports 75.06B
+        // against 74.4B of segments. Percentages now divide by REPORTED revenue, so without
+        // this the revenue bar would come up visibly short of 100% and the two columns would
+        // stop agreeing. Fold the unallocated remainder into "Other" (merging with an
+        // existing "Other" rather than drawing two identically-coloured grey segments).
+        if let reportedRevenue, reportedRevenue > 0 {
+            let segmentSum = sources.reduce(0) { $0 + $1.value }
+            let remainder = reportedRevenue - segmentSum
+            // 0.5% floor: below that it is rounding noise and a sliver nobody can read.
+            if remainder > reportedRevenue * 0.005 {
+                if let idx = sources.firstIndex(where: { $0.name == "Other" }) {
+                    sources[idx] = RevenueSource(name: "Other",
+                                                 value: sources[idx].value + remainder,
+                                                 color: AppColors.growthSectorGray)
+                } else {
+                    sources.append(RevenueSource(name: "Other",
+                                                 value: remainder,
+                                                 color: AppColors.growthSectorGray))
+                }
+            }
+        }
+
         return RevenueBreakdownData(
             tickerSymbol: symbol,
             fiscalYear: fiscalYear,
             revenueSources: sources,
             costOfSales: costOfSales,
             operatingExpense: operatingExpense,
-            tax: tax
+            tax: tax,
+            reportedNetIncome: netIncome,
+            reportedRevenue: reportedRevenue,
+            otherExpense: otherExpense
         )
     }
 }

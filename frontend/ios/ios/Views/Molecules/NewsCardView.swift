@@ -153,7 +153,16 @@ struct NewsCardView: View {
                     if isExpanded && hasExpandableContent {
                         TickerNewsExpandedContent(bullets: bullets)
                             .padding(.top, AppSpacing.xs)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            // ⚠️ `.opacity` ALONE — do not put `.move(edge: .top)` back.
+                            // This content is revealed at the BOTTOM of a clipped container, so a top-edge move
+                            // starts it offset UPWARD by its own height and slides it down THROUGH everything
+                            // above it, translucent the whole way. On the Daily Scanners card that meant the
+                            // leaderboard swept across the card's own header, hero and CTA, and was reported from
+                            // TestFlight as "words coming from the background ... looks like a bug".
+                            // A fade moves nothing and cannot overlap anything.
+                            // (Genuinely top-anchored things — the audio status island, a banner pinned to the top
+                            // of a screen — are the opposite case and keep their `.move(edge: .top)`.)
+                            .transition(.opacity)
                     } else if isExpanded && isSummarizing {
                         summarizingRow
                             .padding(.top, AppSpacing.xs)

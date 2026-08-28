@@ -22,12 +22,29 @@ from app.services.ticker_report_cache import (
 )
 from app.services.agents.ticker_report_data_collector import _latest_completed_close
 
-# 2026-07-06 is a Monday. All dates are AFTER CACHE_SCHEMA_FLOOR (2026-07-04 01:00
-# UTC) so freshness isn't gated by the schema floor — shifted forward when the floor
-# was bumped for the Future Forecast window (same dance as the prior bumps).
-_MON_PRE_CLOSE = datetime(2026, 7, 6, 19, 30, tzinfo=timezone.utc)    # ~3:30pm ET Mon
-_MON_POST_CLOSE = datetime(2026, 7, 7, 0, 30, tzinfo=timezone.utc)    # ~8:30pm ET Mon
-_MON_AFTERNOON = datetime(2026, 7, 6, 18, 0, tzinfo=timezone.utc)     # ~2pm ET Mon
+# Every instant below must sit AFTER CACHE_SCHEMA_FLOOR, or the floor — not the close
+# cycle — is what marks a row stale and these tests stop testing what they name.
+#
+# DERIVED from the floor rather than hardcoded. They were hardcoded, and the header here
+# used to read "shifted forward when the floor was bumped (same dance as the prior
+# bumps)" — i.e. every floor bump silently broke five tests until someone hand-edited six
+# datetimes. Anchoring to the floor makes the next bump a no-op.
+def _first_monday_after_floor() -> datetime:
+    """The first Monday strictly after the schema floor, at 00:00 UTC."""
+    d = (CACHE_SCHEMA_FLOOR + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    while d.weekday() != 0:                     # 0 = Monday
+        d += timedelta(days=1)
+    return d
+
+
+_MON = _first_monday_after_floor()
+# UTC offsets chosen to hold in BOTH EST and EDT, so the derived week can land in any
+# season: the close boundary is 6pm ET, i.e. 22:00 UTC (EDT) or 23:00 UTC (EST).
+_MON_PRE_CLOSE = _MON + timedelta(hours=19, minutes=30)   # 2:30–3:30pm ET Mon, pre-close
+_MON_POST_CLOSE = _MON + timedelta(days=1, minutes=30)    # 7:30–8:30pm ET Mon, post-close
+_MON_AFTERNOON = _MON + timedelta(hours=18)               # 1–2pm ET Mon
 
 
 def test_cycle_start_is_at_or_before_now_and_a_weekday():
@@ -56,10 +73,12 @@ def test_weekend_holds_fridays_close():
     # Saturday: the boundary is Friday's close (no Sat/Sun boundary), so a
     # Friday-evening report stays fresh through the weekend. Dates must sit
     # AFTER CACHE_SCHEMA_FLOOR (else the floor, not the cycle, marks it stale).
-    sat = datetime(2026, 7, 11, 18, 0, tzinfo=timezone.utc)  # ~2pm ET Sat
+    sat = _MON + timedelta(days=5, hours=18)  # 1–2pm ET Sat
     cycle = current_close_cycle_start(sat)
     assert cycle.weekday() == 4  # Friday
-    fri_eve = datetime(2026, 7, 10, 23, 0, tzinfo=timezone.utc)  # ~7pm ET Fri
+    # 23:30 UTC, not 23:00: in EST that is 6:30pm ET, still clear of the 6pm
+    # boundary. At 23:00 it would land exactly ON it in winter.
+    fri_eve = _MON + timedelta(days=4, hours=23, minutes=30)  # 6:30–7:30pm ET Fri
     assert is_cache_fresh(fri_eve, now=sat)
 
 
@@ -79,7 +98,7 @@ def test_schema_floor_not_in_future():
 def test_row_written_now_is_fresh():
     # The load-bearing invariant the future-dated-floor bug violated: a row written at
     # a post-floor instant, within the current close cycle, must be considered fresh.
-    now = datetime(2026, 7, 9, 14, 0, tzinfo=timezone.utc)  # Thursday, after the floor
+    now = _MON + timedelta(days=3, hours=14)  # Thursday, after the floor
     assert now >= CACHE_SCHEMA_FLOOR
     assert is_cache_fresh(now, now) is True
 

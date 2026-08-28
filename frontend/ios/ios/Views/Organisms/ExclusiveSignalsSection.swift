@@ -59,29 +59,44 @@ struct ExclusiveSignalsSection: View {
             }
         }
         .padding(16)
+        // ⚠️ The glow is drawn on this background SHAPE, never on the card itself.
+        //
+        // `.shadow()` is derived from the alpha of everything beneath it, so a `.shadow`
+        // applied to the card would force SwiftUI to render the ENTIRE section — title,
+        // badge, subtitle, all three rows — into an offscreen layer to compute an 18pt
+        // blur. A row expanding animates this section's height, so that layer would be
+        // re-allocated and re-rasterized every frame at a new size. That is the classic
+        // whole-card flicker, and it was reported as "the title and the whole card is
+        // blinking when I expand".
+        //
+        // Shadowing a filled RoundedRectangle instead rasterizes one shape and leaves the
+        // content out of the offscreen pass entirely. Same glow, nothing to re-raster.
+        //
+        // This is the second half of a problem this file already fixed once: a perpetual
+        // `.repeatForever` glow drove stroke/shadow here, entangled with a row's expand
+        // `withAnimation` transaction, and hard-froze the main thread on tap-to-expand.
+        // The ANIMATED half was removed then; the shadow-over-content half was left.
+        // (If a breathing glow is ever wanted back, drive it on a sibling overlay that is
+        // NOT an ancestor of the expandable rows.)
         .background(
-            LinearGradient(
-                // Premium banner. Adaptive so the (now theme-aware) text inside stays
-                // readable in Light: a soft blue-tinted light gradient in Light, the
-                // original deep navy in Dark.
-                colors: [Color(lightHex: "FFFFFF", darkHex: "1B2233"),
-                         Color(lightHex: "EEF2FA", darkHex: "161B29")],
-                startPoint: .top, endPoint: .bottom
-            )
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        // Premium banner. Adaptive so the (now theme-aware) text inside
+                        // stays readable in Light: a soft blue-tinted light gradient in
+                        // Light, the original deep navy in Dark.
+                        colors: [Color(lightHex: "FFFFFF", darkHex: "1B2233"),
+                                 Color(lightHex: "EEF2FA", darkHex: "161B29")],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+                .shadow(color: accent.opacity(0.22), radius: 18, x: 0, y: 0)
         )
-        // STATIC glow — deliberately NOT animated. A perpetual .repeatForever glow
-        // (previously driving stroke/shadow) entangled with a row's expand
-        // `withAnimation` transaction: the two animations compounded on the resizing
-        // card and hard-froze the main thread on tap-to-expand. A fixed stroke +
-        // fixed-radius shadow gives the same premium glow with ZERO animation to
-        // conflict with the expand. (If a breathing glow is wanted back, drive it on
-        // a sibling overlay that is NOT an ancestor of the expandable rows.)
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(accent.opacity(0.38), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: accent.opacity(0.22), radius: 18, x: 0, y: 0)
         // Taps on the card body (padding / title / row gaps) count as "outside the
         // expanded row" → collapse it. Still swallows the tap so it doesn't bubble
         // to the Home scroll's collapse .onTapGesture — but forwards it via
@@ -90,7 +105,9 @@ struct ExclusiveSignalsSection: View {
         .contentShape(Rectangle())
         .onTapGesture {
             if expandedSignalID != nil {
-                withAnimation(.easeInOut(duration: 0.25)) { expandedSignalID = nil }
+                // Unanimated, to match the expand above — an animated COLLAPSE resizes
+                // the section every frame just as an animated expand does.
+                expandedSignalID = nil
             }
             onBodyTap?()
         }

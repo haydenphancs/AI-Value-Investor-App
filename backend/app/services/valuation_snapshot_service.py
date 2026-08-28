@@ -56,7 +56,10 @@ _CACHE_TTL = 300  # 5 minutes
 # turns that into a rebuild. Nothing crashes; the worst case is one recomputation.
 #
 # 2 (2026-08-26): negative multiples render "Neg." (undefined) instead of "—" (unknown).
-_SNAPSHOT_PAYLOAD_VERSION = 2
+# 3 (2026-08-26): EV/EBITDA reads `enterpriseValueMultipleTTM` — the key `/stable`
+#     actually populates — instead of falling through to a current-EV ÷ ANNUAL-EBITDA
+#     reconstruction. Changes the number on every cached ticker (AAPL 32.19 → 27.59).
+_SNAPSHOT_PAYLOAD_VERSION = 3
 _VERSION_KEY = "_schema_v"
 
 
@@ -463,7 +466,24 @@ class ValuationSnapshotService:
             _safe_float(km, "pfcfRatioTTM"),
             _safe_float(km, "pfcfRatio"),
         )
+        # ⚠️ `enterpriseValueMultipleTTM` FIRST — it is the only one of these `/stable`
+        # actually populates. Measured across AAPL, MSFT, KO, NVDA, JPM, XOM, MRNA, PLUG,
+        # RIVN and UBER: `enterpriseValueOverEBITDATTM` is None for EVERY one, so the
+        # primary lookup always failed and the reconstruction ladder below ran instead —
+        # dividing a CURRENT enterprise value by the LAST FISCAL YEAR's EBITDA, because
+        # `inc` is fetched `period="annual", limit=1`.
+        #
+        # For AAPL that read 4648.51B / 144.43B = 32.19 against a true TTM 4648.51B /
+        # 168.49B = 27.59: we overstated it by ~17%, and EV/EBITDA was the only annual
+        # metric on a card whose P/E, P/B, P/S and P/FCF are all TTM. Verified that
+        # `enterpriseValueMultipleTTM` equals EV(TTM)/EBITDA(TTM) exactly.
+        #
+        # The older names stay behind it so an upstream rename back still works.
         ev_ebitda = _first_valid(
+            _safe_float(fr, "enterpriseValueMultipleTTM"),
+            _safe_float(fr, "enterpriseValueMultiple"),
+            _safe_float(km, "enterpriseValueMultipleTTM"),
+            _safe_float(km, "enterpriseValueMultiple"),
             _safe_float(fr, "enterpriseValueOverEBITDATTM"),
             _safe_float(fr, "enterpriseValueOverEBITDA"),
             _safe_float(km, "enterpriseValueOverEBITDATTM"),
@@ -473,6 +493,12 @@ class ValuationSnapshotService:
         # Market-cap fallback chain — FMP sometimes omits it from key_metrics
         # for less-covered tickers. Profile.mktCap and key_metrics.marketCap
         # are typically identical; profile is the more reliable surface.
+        #
+        # `mktCap` is safe despite `/stable` having renamed the raw field to `marketCap`:
+        # `fmp._normalize_profile` aliases it back on BOTH profile paths (single and
+        # batch), precisely so this class of rename cannot silently zero out
+        # market-cap-driven logic. Do not "fix" this to read `marketCap` — it is already
+        # handled one layer down, and duplicating it here just implies the shim is absent.
         mcap = _safe_float(km, "marketCap") or _safe_float(profile, "mktCap")
 
         # Fallback: compute P/FCF from marketCap / freeCashFlow. When FCF is
@@ -498,7 +524,11 @@ class ValuationSnapshotService:
             ebitda = _safe_float(inc, "ebitda")
             ebitda_source = "inc.ebitda"
 
-            if ebitda is None or ebitda <= 0:
+            # `!= 0`, not `> 0`: a negative EBITDA is a real (if undefined-as-a-multiple)
+            # denominator, and `_fmt_ratio` now renders the resulting negative as "Neg.".
+            # Gating it out here is what left loss-makers on "—" even when the numbers
+            # were all present. Zero stays excluded — it would divide by zero.
+            if ebitda is None or ebitda == 0:
                 op_income = _safe_float(inc, "operatingIncome")
                 d_and_a = (
                     _safe_float(cf, "depreciationAndAmortization")
@@ -508,7 +538,7 @@ class ValuationSnapshotService:
                     ebitda = op_income + d_and_a
                     ebitda_source = "operatingIncome + D&A"
 
-            if ebitda is None or ebitda <= 0:
+            if ebitda is None or ebitda == 0:
                 # Last resort: EBITDA ≈ NI + interest + tax + D&A
                 ni = _safe_float(inc, "netIncome")
                 interest = _safe_float(inc, "interestExpense")
@@ -532,7 +562,12 @@ class ValuationSnapshotService:
                     ev = mcap + total_debt - (cash or 0)
                     ev_source = "mcap + totalDebt − cash"
 
-            if ev and ev > 0 and ebitda and ebitda > 0:
+            # `ebitda != 0`, not `> 0` — the final gate, and the one that actually kept
+            # loss-makers on "—" even when every input above resolved. A negative ratio
+            # now flows out and `_fmt_ratio` renders it "Neg.". `ev > 0` is left alone: a
+            # negative enterprise value (net cash above market cap) is a different and far
+            # rarer condition, and not what this change is about.
+            if ev and ev > 0 and ebitda:
                 ev_ebitda = round(ev / ebitda, 2)
                 logger.info(
                     "EV/EBITDA reconstructed for %s via ev=%s, ebitda=%s, ratio=%.2f",

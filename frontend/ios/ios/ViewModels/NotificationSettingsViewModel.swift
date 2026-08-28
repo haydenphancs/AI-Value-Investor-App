@@ -156,6 +156,16 @@ final class NotificationSettingsViewModel: ObservableObject {
                     title: "Report Ready",
                     subtitle: "When an AI analysis you started finishes"
                 ),
+                // The mirror of the row above, and the one the user needs MORE. A failed
+                // report is refunded silently: no report, no explanation, and a balance
+                // that quietly went back up. This toggle exists because the registry
+                // requires one — a kind with no visible switch is an alert with no in-app
+                // opt-out, which shipped once for a week.
+                NotificationToggleSpec(
+                    key: "notify_research_failed",
+                    title: "Report Didn't Finish",
+                    subtitle: "When an analysis fails and your credits are returned"
+                ),
             ]
         ),
     ]

@@ -86,19 +86,39 @@ struct AlertsTabContent: View {
     // See `NotificationInboxViewModel.shared`.
     @ObservedObject private var notifications = NotificationInboxViewModel.shared
 
-    /// Activity chip selection. Multi-select, empty = show everything.
+    /// Activity chip selection, PERSISTED across launches. Multi-select, empty = show all.
     ///
-    /// View-local `@State` on purpose: the parent's `switch` tears this view down when the
-    /// segment changes, so the filter clears on every visit. A filter that SURVIVED would be an
-    /// invisible mode — the user returns to a short list with no memory of narrowing it.
-    @State private var activityFilters: Set<ActivityFilter> = []
+    /// ⚠️ This deliberately reverses the first shipped behaviour, so do not "restore" it. The
+    /// original comment argued that a surviving filter would be an invisible mode — a user
+    /// returning to a short list with no memory of narrowing it. A tester asked for the
+    /// opposite, and they are right: the chips are ON SCREEN and highlighted whenever a filter
+    /// is applied, so the narrowing is never hidden. There is no invisible mode to protect
+    /// against; there was only work being thrown away on every visit.
+    ///
+    /// Stored as a comma-joined string because `@AppStorage` carries scalars — see
+    /// `ActivityFilter.encode/decode`, which own the format, and `ActivityFilter.storageKey`,
+    /// which `AppState.discardDataForEndedSession` clears (auth.md §7: a UserDefaults key with
+    /// no user id in it, or the next account inherits this one's filter).
+    ///
+    /// NOT in `SettingsSyncManager`: that manifest round-trips to the server, and a chip
+    /// selection has no business crossing devices or costing a request.
+    @AppStorage(ActivityFilter.storageKey) private var activityFiltersRaw: String = ""
+
+    /// The stored selection as a Set, writable by the chip bar.
+    private var activityFilters: Binding<Set<ActivityFilter>> {
+        Binding(
+            get: { ActivityFilter.decode(activityFiltersRaw) },
+            set: { activityFiltersRaw = ActivityFilter.encode($0) }
+        )
+    }
     // The SHARED store, not a local view model: the detail-header bell reads the same
     // array, so a rule created behind the bell shows up here with no refetch and no
     // staleness window. See PriceAlertStore.
     @ObservedObject private var priceAlerts = PriceAlertStore.shared
 
-    /// Set when a notification row is tapped; drives the same detail presentation Home uses.
-    @State private var route: NotificationRoute?
+    /// Set when a notification row is tapped. Carries the whole collapsed group, because the
+    /// detail screen lists every member and works out the destinations itself.
+    @State private var selectedNotification: NotificationInboxSection.CollapsedGroup?
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -112,14 +132,17 @@ struct AlertsTabContent: View {
             .padding(.bottom, AppSpacing.xxxl)
         }
         .refreshable { await refreshAll() }
-        // One tap opens one screen: the route is cleared by the presentation, matching
-        // how the push deep-link chain consumes `pendingPushRoute`.
-        .fullScreenCover(item: Binding(
-            get: { route.map(NotificationRouteBox.init) },
-            set: { route = $0?.route }
-        )) { box in
-            NotificationRouteDestination(route: box.route)
-                .environment(appState)
+        // The DETAIL first, then the user picks where to go.
+        //
+        // This used to be a `fullScreenCover` presenting `NotificationRouteDestination`, i.e. a
+        // tap dropped the user onto the ticker screen with the alert's own text left behind. A
+        // sheet is the right container now: the screen is a detail, and its destinations push
+        // within it so Back returns here rather than to the feed.
+        .sheet(item: $selectedNotification) { group in
+            NavigationStack {
+                NotificationDetailView(group: group)
+            }
+            .environment(appState)
         }
         // auth.md §7 — this tab shows three lists of the CALLER'S OWN data on device-global
         // view models. Without this the next account to sign in on the phone inherits the
@@ -222,20 +245,30 @@ struct AlertsTabContent: View {
     @ViewBuilder
     private func activitySection() -> some View {
         let rollups = trackingViewModel.filteredAlerts.filter { !$0.isUpcoming }
-        let available = availableFilters(rollups: rollups)
+        let upcomingTickers = Set(
+            trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(upcomingTicker)
+        )
+        // Everything this section COULD show, before the chips narrow it. The available
+        // chip set and the visible list must both derive from this same array — deriving
+        // the chips from the unsuppressed list would offer an Earnings chip whose only row
+        // is hidden, i.e. a chip that filters to nothing on its first tap.
+        let candidates = notifications.items.filter {
+            !duplicatesUpcomingCard($0, upcomingTickers: upcomingTickers)
+        }
+        let available = availableFilters(rollups: rollups, items: candidates)
         // Intersect on EVERY read rather than trusting the stored set. A pull-to-refresh can
         // empty the bucket a chip was filtering on; without this the list would go blank with
         // no chip left on screen to explain why, and no way to undo it.
-        let selection = activityFilters.intersection(available)
+        let selection = activityFilters.wrappedValue.intersection(available)
         let visibleRollups = rollups.filter { ActivityFilter.admits(selection, rollup: $0) }
-        let visibleItems = notifications.items.filter {
+        let visibleItems = candidates.filter {
             ActivityFilter.admits(selection, category: $0.category)
         }
 
         ActivityFilterBar(
             title: "Activity",
             available: available,
-            selection: $activityFilters
+            selection: activityFilters
         )
         .padding(.horizontal, AppSpacing.lg)
 
@@ -251,17 +284,59 @@ struct AlertsTabContent: View {
         )
     }
 
+    /// The ticker an Upcoming card is about, or nil when it carries none.
+    ///
+    /// Only `.earnings` does in practice — `.market` is the decoder's catch-all for a `type`
+    /// string this build does not know, and the backend emits no such row today.
+    private func upcomingTicker(_ alert: AppAlert) -> String? {
+        if case .earnings(let data) = alert {
+            let symbol = data.ticker.uppercased()
+            return symbol.isEmpty ? nil : symbol
+        }
+        return nil
+    }
+
+    /// Is this notification row a strictly poorer copy of a card already on screen above it?
+    ///
+    /// THE DUPLICATE IS REAL, and a tester spotted it: *"Earnings seems redundancy? because we
+    /// already have Upcoming"*. Two independent producers read the same FMP calendar —
+    /// `tracking_service._get_earnings_alerts` (today .. +14d) builds the Upcoming card, and
+    /// `earnings_sender.select_upcoming` (tomorrow only) sends the notification. Since
+    /// "tomorrow" is always inside "today +14d", essentially every `earnings_upcoming` row is
+    /// a second, WEAKER telling of a card sitting ~40pt above it: the card carries the EPS and
+    /// revenue consensus, the row is a one-liner.
+    ///
+    /// ⚠️ FAILS OPEN. Suppression requires the twin to be genuinely on screen, so if the
+    /// tracking feed is empty or failed to load, the row stays and the user still learns their
+    /// ticker reports tomorrow. Hiding it unconditionally would delete the information on
+    /// exactly the request where it is the only copy left.
+    ///
+    /// The badge is unaffected: `markAllReadOnView()` runs over the view model's full `items`,
+    /// not this filtered view, so a suppressed row is still marked read and still counted.
+    private func duplicatesUpcomingCard(
+        _ item: NotificationEventDTO,
+        upcomingTickers: Set<String>
+    ) -> Bool {
+        guard item.kind == "earnings_upcoming" else { return false }
+        let ticker = (item.route["ticker"] ?? "").uppercased()
+        guard !ticker.isEmpty else { return false }
+        return upcomingTickers.contains(ticker)
+    }
+
     /// The buckets that have at least one row on screen right now, in a stable order.
     ///
     /// Derived from the data rather than hardcoded to `allCases`, so a chip can never filter to
     /// an empty list on its first tap — an account that has never had an earnings notification
     /// is not offered an Earnings chip.
-    private func availableFilters(rollups: [AppAlert]) -> [ActivityFilter] {
+    private func availableFilters(
+        rollups: [AppAlert],
+        items: [NotificationEventDTO]
+    ) -> [ActivityFilter] {
         var present: Set<ActivityFilter> = []
         for alert in rollups {
             if let bucket = ActivityFilter.bucket(forRollup: alert) { present.insert(bucket) }
         }
-        for item in notifications.items {
+        for item in items {
             if let bucket = ActivityFilter.bucket(forCategory: item.category) {
                 present.insert(bucket)
             }
@@ -330,7 +405,7 @@ struct AlertsTabContent: View {
                         systemImage: "line.3.horizontal.decrease.circle",
                         iconColor: AppColors.textMuted,
                         retryTitle: "Clear",
-                        onRetry: { activityFilters.removeAll() }
+                        onRetry: { activityFiltersRaw = "" }
                     )
                     .padding(.horizontal, AppSpacing.lg)
                 }
@@ -341,7 +416,7 @@ struct AlertsTabContent: View {
                 NotificationInboxSection.rows(
                     viewModel: notifications,
                     items: items,
-                    route: $route
+                    selection: $selectedNotification
                 )
                 .padding(.horizontal, AppSpacing.lg)
             }

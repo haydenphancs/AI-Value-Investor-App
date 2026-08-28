@@ -40,13 +40,26 @@ enum NotificationInboxSection {
     /// `items` is passed in rather than read off the view model because the Activity section
     /// filters it. Read state, paging and the unread count still come from `viewModel`, which
     /// remains the single owner of all three.
+    ///
+    /// `selection` receives the whole `CollapsedGroup`, not a route: the detail screen needs
+    /// every member to list them, and it derives the destinations itself.
     @ViewBuilder
     static func rows(
         viewModel: NotificationInboxViewModel,
         items: [NotificationEventDTO],
-        route: Binding<NotificationRoute?>
+        selection: Binding<CollapsedGroup?>
     ) -> some View {
-        ForEach(items) { item in
+        let groups = collapse(items)
+        // Paging is decided from the FLAT list, never from the collapsed groups.
+        //
+        // The trigger is "is this row near the end of what we fetched". Measuring that on
+        // the groups is wrong twice over: a page that collapses heavily produces fewer rows
+        // than the trigger window, so nothing ever satisfies it and the list silently stops —
+        // the same failure as the model-tail trigger this replaced, one level up.
+        let pagingTrigger = Set(items.suffix(3).map(\.id))
+
+        ForEach(groups) { group in
+            let item = group.newest
             // ONE row shape for the whole Alerts tab. This used to be a private
             // `NotificationRow` — a full-bleed square slab with no icon and an 8pt dot,
             // sitting beside the digest's rounded, tinted, shadowed cards. Same screen,
@@ -61,22 +74,36 @@ enum NotificationInboxSection {
                 title: item.title,
                 subtitle: item.body,
                 footnote: footnote(for: item),
-                isNew: viewModel.showsUnreadDot(item),
+                // ANY unread member lights the dot. A collapsed row that looked read while
+                // hiding an unread one would be a notification the user can never find.
+                isNew: group.items.contains { viewModel.showsUnreadDot($0) },
                 onTap: {
-                    Task { await viewModel.markRead(item) }
-                    // `.inbox` means the payload was unroutable — staying put is the
-                    // honest outcome, and the row itself is already the content.
-                    if item.destination != .inbox {
-                        route.wrappedValue = item.destination
+                    // EVERY member, not just the one on screen. The others have no row of
+                    // their own any more, so marking only the newest would strand them
+                    // unread forever and hold the badge up with nothing to clear it.
+                    Task {
+                        for member in group.items { await viewModel.markRead(member) }
+                    }
+                    // The DETAIL screen, not the destination. A tap used to land straight on
+                    // the ticker, which meant the alert's own text existed nowhere but this
+                    // row — clamped to three lines. `NotificationDetailView` shows it whole
+                    // and then offers where to go.
+                    //
+                    // Opened even for an unroutable payload. The old code stayed put on
+                    // `.inbox` because "the row itself is already the content"; that stopped
+                    // being true the moment the row started truncating.
+                    selection.wrappedValue = group
+                },
+                trailing: {
+                    if group.count > 1 {
+                        TintedTagBadge(text: "×\(group.count)", color: AppColors.textSecondary)
                     }
                 }
             )
-            // Paging is driven by the rows actually RENDERED, not by the view model's own
-            // tail. With an Activity filter on, the last decoded rows can all be hidden, and
-            // keying off the model's tail meant the list simply stopped — on a feature whose
-            // entire purpose is making a long list navigable.
             .task {
-                guard items.suffix(3).contains(item) else { return }
+                guard group.items.contains(where: { pagingTrigger.contains($0.id) }) else {
+                    return
+                }
                 await viewModel.loadNextPage()
             }
         }
@@ -86,6 +113,55 @@ enum NotificationInboxSection {
                 .tint(AppColors.textSecondary)
                 .padding(.vertical, AppSpacing.lg)
         }
+    }
+
+    // MARK: - Collapsing repeats
+
+    /// One rendered row: a single notification, or several ADJACENT ones saying the same
+    /// thing about the same ticker.
+    struct CollapsedGroup: Identifiable {
+        /// Newest first, matching the feed order. Never empty.
+        let items: [NotificationEventDTO]
+        var id: String { items[0].id }
+        var newest: NotificationEventDTO { items[0] }
+        var count: Int { items.count }
+    }
+
+    /// Merge CONSECUTIVE rows that share a ticker and a kind.
+    ///
+    /// WHY. A tester read two `ticker_move` alerts for CRM on consecutive days as one
+    /// duplicate. They were two genuinely separate >=2-sigma sessions — the dedup key is
+    /// `move:{TICKER}:{ET-date}` — but the title was the bare ticker on both and the bodies
+    /// were two Gemini paraphrases of the same earnings story, so they read as a repeat.
+    /// The server now puts the percentage in the title, which fixes it going forward; this
+    /// fixes the rows already in the inbox, and any future run of genuinely repetitive
+    /// alerts about one ticker.
+    ///
+    /// ⚠️ ADJACENT ONLY, and the feed is never reordered. Grouping globally by ticker would
+    /// pull a week-old row up next to today's and silently rewrite the chronology, which is
+    /// the same "sorting on invented data" the Upcoming/Activity split exists to avoid.
+    ///
+    /// A row with no ticker in its route is never collapsed — `groupKey` returns nil and it
+    /// starts its own group. Two unroutable rows are not evidence of the same event.
+    static func collapse(_ items: [NotificationEventDTO]) -> [CollapsedGroup] {
+        var groups: [CollapsedGroup] = []
+        for item in items {
+            if let key = groupKey(item),
+               let last = groups.last,
+               key == groupKey(last.newest) {
+                groups[groups.count - 1] = CollapsedGroup(items: last.items + [item])
+            } else {
+                groups.append(CollapsedGroup(items: [item]))
+            }
+        }
+        return groups
+    }
+
+    /// `nil` = never collapse this row.
+    private static func groupKey(_ item: NotificationEventDTO) -> String? {
+        let ticker = (item.route["ticker"] ?? "").uppercased()
+        guard !ticker.isEmpty else { return nil }
+        return "\(item.kind)|\(ticker)"
     }
 
     /// Relative time, plus an explanation when the phone never buzzed.

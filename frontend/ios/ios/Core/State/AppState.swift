@@ -1049,6 +1049,10 @@ final class AppState {
         // Same reason: the price alerts in this store are the signed-out user's own
         // data, and the detail-header bell renders straight off it.
         PriceAlertStore.shared.reset()
+        // The Activity chip selection. Not the caller's DATA, but the same bug class: a
+        // UserDefaults key with no user id in it, so the next account to sign in on this
+        // phone would open Alerts onto a list already narrowed by someone else's filter.
+        UserDefaults.standard.removeObject(forKey: ActivityFilter.storageKey)
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()
 

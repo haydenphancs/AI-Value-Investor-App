@@ -93,7 +93,12 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
     /// `.onChange(of:)`, so every associated value has to be.
     case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
     /// A generated research report.
-    case report(id: String, ticker: String?)
+    ///
+    /// `persona` decides WHICH report. A ticker holds one report per persona — six PLUG rows
+    /// in one tester's feed — so the id alone is not enough for a screen keyed by
+    /// (ticker, persona). Optional because rows written before the backend sent it have none;
+    /// those fall back to the report screen's own default persona.
+    case report(id: String, ticker: String?, persona: String?)
     /// The in-app notification inbox — the fallback for anything unroutable.
     case inbox
 
@@ -119,7 +124,11 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
         let family = string("route") ?? "ticker"
 
         if family == "report", let reportID = string("report_id") {
-            self = .report(id: reportID, ticker: string("ticker")?.uppercased())
+            self = .report(
+                id: reportID,
+                ticker: string("ticker")?.uppercased(),
+                persona: string("persona")
+            )
             return
         }
 
@@ -170,7 +179,7 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
     var symbol: String? {
         switch self {
         case .ticker(let symbol, _, _): return symbol
-        case .report(_, let ticker): return ticker
+        case .report(_, let ticker, _): return ticker
         case .inbox: return nil
         }
     }
@@ -187,7 +196,7 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
     var needsAlertsFallback: Bool {
         switch self {
         case .inbox: return true
-        case .report(_, let ticker): return ticker?.isEmpty != false
+        case .report(_, let ticker, _): return ticker?.isEmpty != false
         case .ticker: return false
         }
     }

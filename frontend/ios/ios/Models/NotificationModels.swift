@@ -125,7 +125,15 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         case "whale_13f":         return "building.columns.fill"
         case "congress_trade":    return "building.columns.fill"
         case "price_alert":       return "bell.badge"
-        case "research_complete": return "sparkles"
+        // The RESEARCH TAB'S OWN GLYPH, read from `HomeTab` rather than written here a
+        // second time — that is what makes "the same icon as the navigator" true by
+        // construction instead of by coincidence. A tester asked for this directly.
+        //
+        // It also frees `sparkles` for `profile_match` alone, which sharpens the
+        // vocabulary rather than blurring it: sparkles = an AI topic match the app
+        // derived, magnifier = a report you asked for.
+        case "research_complete": return HomeTab.research.systemIconName
+        case "research_failed":   return "exclamationmark.arrow.circlepath"
         case "profile_match":     return AppSymbols.ai
         default:                  return "app.badge.fill"
         }
@@ -149,6 +157,11 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
         case "profile_match":
             return AppColors.alertPurple
         case "price_alert":
+            return AppColors.caution
+        // A failure the user paid for. `caution` and not `loss`: the credits came back,
+        // so this is something to look at, not a loss to mourn — and `loss` in a feed of
+        // market rows would read as a price move.
+        case "research_failed":
             return AppColors.caution
         default:
             return AppColors.primaryBlue
@@ -419,6 +432,29 @@ enum ActivityFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .earnings:                                        return .earnings
         case .market:                                          return nil
         }
+    }
+
+    /// UserDefaults key for the persisted chip selection.
+    ///
+    /// Declared HERE, beside the values it encodes, so the writer (`AlertsTabContent`) and the
+    /// clearer (`AppState.discardDataForEndedSession`) cannot drift apart on a string literal.
+    static let storageKey = "activity_filters"
+
+    /// Encode a selection for `@AppStorage`.
+    ///
+    /// Iterates `allCases` rather than the Set so the order is STABLE. A `Set`'s iteration
+    /// order is not, and joining it directly would rewrite the stored string — and wake every
+    /// `@AppStorage` reader — on writes that changed nothing.
+    static func encode(_ selection: Set<ActivityFilter>) -> String {
+        allCases.filter { selection.contains($0) }.map(\.rawValue).joined(separator: ",")
+    }
+
+    /// Decode a persisted selection, dropping anything this build no longer knows.
+    ///
+    /// Tolerant on purpose: a bucket renamed or removed in a later version must degrade to
+    /// "not selected", never to a crash or to a filter nobody can clear.
+    static func decode(_ raw: String) -> Set<ActivityFilter> {
+        Set(raw.split(separator: ",").compactMap { ActivityFilter(rawValue: String($0)) })
     }
 
     /// Does `selection` admit a notification in `category`? Empty selection admits everything.

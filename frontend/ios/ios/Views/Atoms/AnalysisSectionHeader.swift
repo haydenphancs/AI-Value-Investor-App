@@ -101,7 +101,7 @@ struct AnalysisSectionHeader: View {
 
             AnalysisSectionHeader(
                 title: "Technical Analysis",
-                actionText: "Detail",
+                actionText: "Details",
                 onAction: {}
             )
         }

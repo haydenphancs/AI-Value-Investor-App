@@ -91,111 +91,81 @@ struct TickerDetailView: View {
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
                 )
 
-                // Scrollable Content with pinned tab bar
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        // Content above tab bar (scrolls away). Prefer the full
-                        // tickerData; fall back to the fast `coreData` (price+chart)
-                        // the instant it lands; else an instant shimmer skeleton —
-                        // so the screen never shows a blank/blocking state.
-                        if let tickerData = viewModel.tickerData {
-                            // Full Ticker Price Header
-                            TickerPriceHeader(
-                                companyName: tickerData.companyName,
-                                symbol: tickerData.symbol,
-                                price: tickerData.formattedPrice,
-                                priceChange: tickerData.formattedChange,
-                                priceChangePercent: tickerData.formattedChangePercent,
-                                isPositive: tickerData.isPositive,
-                                marketStatus: tickerData.marketStatus
-                            )
+                // Eager container + an overlay-pinned tab bar. The LazyVStack that used
+                // to be here re-walked its predecessors every frame to place the pinned
+                // section header, and a live-price tick resizes its first child — so the
+                // walk restarted continuously while scrolling. See DetailScrollContainer.
+                DetailScrollContainer(
+                    isTabBarPinned: $isTabBarPinned,
+                    onRefresh: { await viewModel.refresh() }
+                ) {
+                    // Content above tab bar (scrolls away). Prefer the full
+                    // tickerData; fall back to the fast `coreData` (price+chart)
+                    // the instant it lands; else an instant shimmer skeleton —
+                    // so the screen never shows a blank/blocking state.
+                    if let tickerData = viewModel.tickerData {
+                        // Full Ticker Price Header
+                        TickerPriceHeader(
+                            companyName: tickerData.companyName,
+                            symbol: tickerData.symbol,
+                            price: tickerData.formattedPrice,
+                            priceChange: tickerData.formattedChange,
+                            priceChangePercent: tickerData.formattedChangePercent,
+                            isPositive: tickerData.isPositive,
+                            marketStatus: tickerData.marketStatus
+                        )
+                        .padding(.top, AppSpacing.sm)
+
+                        // Chart
+                        TickerChartView(
+                            pricePoints: tickerData.chartPricePoints,
+                            isPositive: tickerData.isPositive,
+                            selectedRange: $viewModel.selectedChartRange,
+                            chartSettings: viewModel.chartSettings,
+                            assetContext: .stock,
+                            chartDataVersion: viewModel.chartDataVersion,
+                            chartEventDates: viewModel.chartEventDates,
+                            previousClose: viewModel.stockQuote?.previousClose
+                        )
+                        .padding(.top, AppSpacing.lg)
+                    } else if let core = viewModel.coreData {
+                        // Fast core: real price + chart, before the full overview lands.
+                        TickerPriceHeader(
+                            companyName: core.companyName,
+                            symbol: core.symbol,
+                            price: core.formattedPrice,
+                            priceChange: core.formattedChange,
+                            priceChangePercent: core.formattedChangePercent,
+                            isPositive: core.isPositive,
+                            marketStatus: core.marketStatus
+                        )
+                        .padding(.top, AppSpacing.sm)
+
+                        TickerChartView(
+                            pricePoints: core.chartPricePoints,
+                            isPositive: core.isPositive,
+                            selectedRange: $viewModel.selectedChartRange,
+                            chartSettings: viewModel.chartSettings,
+                            assetContext: .stock,
+                            chartDataVersion: viewModel.chartDataVersion,
+                            chartEventDates: viewModel.chartEventDates,
+                            previousClose: viewModel.stockQuote?.previousClose
+                        )
+                        .padding(.top, AppSpacing.lg)
+                    } else if let errorMessage = viewModel.errorMessage {
+                        DetailLoadFailureCard(
+                            message: errorMessage,
+                            isRetrying: viewModel.isLoading,
+                            onRetry: { viewModel.loadTickerData() }
+                        )
+                    } else {
+                        DetailHeaderChartSkeleton(symbol: tickerSymbol)
                             .padding(.top, AppSpacing.sm)
-
-                            // Chart
-                            TickerChartView(
-                                pricePoints: tickerData.chartPricePoints,
-                                isPositive: tickerData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange,
-                                chartSettings: viewModel.chartSettings,
-                                assetContext: .stock,
-                                chartDataVersion: viewModel.chartDataVersion,
-                                chartEventDates: viewModel.chartEventDates,
-                                previousClose: viewModel.stockQuote?.previousClose
-                            )
-                            .padding(.top, AppSpacing.lg)
-                        } else if let core = viewModel.coreData {
-                            // Fast core: real price + chart, before the full overview lands.
-                            TickerPriceHeader(
-                                companyName: core.companyName,
-                                symbol: core.symbol,
-                                price: core.formattedPrice,
-                                priceChange: core.formattedChange,
-                                priceChangePercent: core.formattedChangePercent,
-                                isPositive: core.isPositive,
-                                marketStatus: core.marketStatus
-                            )
-                            .padding(.top, AppSpacing.sm)
-
-                            TickerChartView(
-                                pricePoints: core.chartPricePoints,
-                                isPositive: core.isPositive,
-                                selectedRange: $viewModel.selectedChartRange,
-                                chartSettings: viewModel.chartSettings,
-                                assetContext: .stock,
-                                chartDataVersion: viewModel.chartDataVersion,
-                                chartEventDates: viewModel.chartEventDates,
-                                previousClose: viewModel.stockQuote?.previousClose
-                            )
-                            .padding(.top, AppSpacing.lg)
-                        } else if let errorMessage = viewModel.errorMessage {
-                            DetailLoadFailureCard(
-                                message: errorMessage,
-                                isRetrying: viewModel.isLoading,
-                                onRetry: { viewModel.loadTickerData() }
-                            )
-                        } else {
-                            DetailHeaderChartSkeleton()
-                                .padding(.top, AppSpacing.sm)
-                        }
-
-                        // Section with pinned tab bar header
-                        Section {
-                            // Tab Content
-                            tabContent
-                        } header: {
-                            // Tab Bar - this will stick at the top when scrolling
-                            VStack(spacing: 0) {
-                                TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
-                                    .padding(.top, AppSpacing.lg)
-
-                                // Divider
-                                Rectangle()
-                                    .fill(AppColors.cardBackgroundLight)
-                                    .frame(height: 1)
-                            }
-                            .background(AppColors.background)
-                            .background(
-                                GeometryReader { geometry in
-                                    Color.clear
-                                        .preference(
-                                            key: TabBarPositionPreferenceKey.self,
-                                            value: geometry.frame(in: .named("scroll")).minY
-                                        )
-                                }
-                            )
-                        }
                     }
-                }
-                .coordinateSpace(name: "scroll")
-                .onPreferenceChange(TabBarPositionPreferenceKey.self) { position in
-                    // Tab bar is pinned when it reaches the top
-                    let shouldPin = position <= 0
-                    if shouldPin != isTabBarPinned {
-                        isTabBarPinned = shouldPin
-                    }
-                }
-                .refreshable {
-                    await viewModel.refresh()
+                } tabs: {
+                    TickerDetailTabBar(selectedTab: $viewModel.selectedTab)
+                } content: {
+                    tabContent
                 }
             }
 
@@ -235,15 +205,7 @@ struct TickerDetailView: View {
                 viewModel.connectLivePrice()
             }
         }
-        .gesture(
-            DragGesture()
-                .onEnded { value in
-                    // Swipe right to dismiss
-                    if value.translation.width > 100 {
-                        handleBackTapped()
-                    }
-                }
-        )
+        .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(items: shareItems)
         }
@@ -507,12 +469,6 @@ struct TickerDetailView: View {
 }
 
 // MARK: - Tab Bar Position Preference Key
-struct TabBarPositionPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .infinity
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
 
 // MARK: - Preview
 #Preview {

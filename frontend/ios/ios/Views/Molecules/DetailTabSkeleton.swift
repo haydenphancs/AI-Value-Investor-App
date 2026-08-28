@@ -48,6 +48,10 @@ struct DetailTabSkeleton: View {
         .padding(.top, AppSpacing.lg)
         .padding(.bottom, 120)
         .shimmer()
+        // `children: .ignore` matters: without it the label is attached to a container
+        // whose shimmer bars stay individually reachable, so VoiceOver still walks them.
+        // TrackedAssetsSkeleton pairs the two for the same reason.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading")
     }
 }

@@ -446,6 +446,26 @@ class StockOverviewService:
             ipo_price_data=ipo_price_data,
         )
 
+        # Cache the formatted profile for chat AI context. Same write, same best-effort
+        # semantics (the method swallows and warns), just off the event loop — see the
+        # note where it used to live, inside the synchronous `_build_full_response`.
+        await asyncio.to_thread(
+            self._upsert_company_profile_db,
+            ticker,
+            {
+                "description": response.company_profile.description,
+                "ceo": response.company_profile.ceo,
+                "founded": response.company_profile.founded,
+                "employees": response.company_profile.employees,
+                "headquarters": response.company_profile.headquarters,
+                "website": response.company_profile.website,
+                "sector": response.sector_industry.sector,
+                "industry": response.sector_industry.industry,
+                "sector_performance": response.sector_industry.sector_performance,
+                "industry_rank": response.sector_industry.industry_rank,
+            },
+        )
+
         # Related tickers (async call, uses its own caching)
         response.related_tickers = await self._build_related_tickers(ticker)
 
@@ -471,7 +491,11 @@ class StockOverviewService:
             return cached
 
         # Tier 2: Supabase
-        db_data = self._check_fundamentals_db(ticker)
+        # `to_thread`: the Supabase SDK is SYNCHRONOUS (app/database.py), Railway runs a
+        # single uvicorn worker, and this call sits on the cold /overview path — so run
+        # on the loop it stalls every OTHER in-flight request, including the
+        # /overview/core "fast paint" the detail screen fires alongside it.
+        db_data = await asyncio.to_thread(self._check_fundamentals_db, ticker)
         if db_data is not None:
             _cache_set(mem_key, db_data)
             return db_data
@@ -509,7 +533,10 @@ class StockOverviewService:
             )
         else:
             _cache_set(mem_key, data)
-            self._upsert_fundamentals_db(ticker, data)
+            # The heaviest of the three: `response_json` carries `stock_historical` AND
+            # `spy_historical`, up to 5,000 rows each, so this is a multi-MB serialize +
+            # HTTP POST. Off the loop.
+            await asyncio.to_thread(self._upsert_fundamentals_db, ticker, data)
 
         return data
 
@@ -894,19 +921,11 @@ class StockOverviewService:
         # Company profile (includes sector/industry data)
         company_profile = self._build_company_profile(profile, sector_industry=sector_industry)
 
-        # Cache formatted profile for chat AI context
-        self._upsert_company_profile_db(ticker, {
-            "description": company_profile.description,
-            "ceo": company_profile.ceo,
-            "founded": company_profile.founded,
-            "employees": company_profile.employees,
-            "headquarters": company_profile.headquarters,
-            "website": company_profile.website,
-            "sector": sector_industry.sector,
-            "industry": sector_industry.industry,
-            "sector_performance": sector_industry.sector_performance,
-            "industry_rank": sector_industry.industry_rank,
-        })
+        # The formatted profile is cached for chat AI context by the CALLER, not here.
+        # This builder is synchronous, so the Supabase write it used to do ran blocking
+        # on the event loop — on EVERY /overview cache miss, even when fundamentals came
+        # back warm from tier 1 or 2. `get_overview` now does the same write via
+        # asyncio.to_thread once this returns; both fields it needs are on the response.
 
         benchmark_summary = self._build_benchmark_summary(
             stock_historical, spy_historical, ipo_price_data=ipo_price_data,

@@ -75,90 +75,61 @@ struct CryptoDetailView: View {
                     tickerPrice: isTabBarPinned ? viewModel.cryptoData?.formattedPrice : nil
                 )
 
-                // Scrollable Content with pinned tab bar
-                ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                        // Content above tab bar (scrolls away)
-                        // `headerData` is the full model once it lands and the fast-core
-                        // slice until then — the header and chart are the only things
-                        // core can fill, so ONLY this gate takes it. The tabs below keep
-                        // waiting for the full response, exactly as the stock screen does.
-                        if let cryptoData = viewModel.headerData {
-                            // Crypto Price Header
-                            CryptoPriceHeader(
-                                cryptoName: cryptoData.name,
-                                symbol: cryptoData.symbol,
-                                price: cryptoData.formattedPrice,
-                                priceChange: cryptoData.formattedChange,
-                                priceChangePercent: cryptoData.formattedChangePercent,
-                                isPositive: cryptoData.isPositive,
-                                marketStatus: cryptoData.marketStatus
-                            )
+                // Eager container + an overlay-pinned tab bar. The LazyVStack that used
+                // to be here re-walked its predecessors every frame to place the pinned
+                // section header, and a live-price tick resizes its first child — so the
+                // walk restarted continuously while scrolling. See DetailScrollContainer.
+                DetailScrollContainer(
+                    isTabBarPinned: $isTabBarPinned,
+                    onRefresh: { await viewModel.refresh() }
+                ) {
+                    // Content above tab bar (scrolls away)
+                    // `headerData` is the full model once it lands and the fast-core
+                    // slice until then — the header and chart are the only things
+                    // core can fill, so ONLY this gate takes it. The tabs below keep
+                    // waiting for the full response, exactly as the stock screen does.
+                    if let cryptoData = viewModel.headerData {
+                        // Crypto Price Header
+                        CryptoPriceHeader(
+                            cryptoName: cryptoData.name,
+                            symbol: cryptoData.symbol,
+                            price: cryptoData.formattedPrice,
+                            priceChange: cryptoData.formattedChange,
+                            priceChangePercent: cryptoData.formattedChangePercent,
+                            isPositive: cryptoData.isPositive,
+                            marketStatus: cryptoData.marketStatus
+                        )
+                        .padding(.top, AppSpacing.sm)
+
+                        // Chart
+                        TickerChartView(
+                            pricePoints: cryptoData.chartPricePoints,
+                            isPositive: cryptoData.isPositive,
+                            selectedRange: $viewModel.selectedChartRange,
+                            chartSettings: viewModel.chartSettings,
+                            assetContext: .crypto,
+                            chartDataVersion: viewModel.chartDataVersion,
+                            previousClose: cryptoData.previousClose
+                        )
+                        .padding(.top, AppSpacing.lg)
+                    } else if let errorMessage = viewModel.errorMessage {
+                        // The ViewModel has been writing this message all along and
+                        // nothing rendered it: on failure the screen fell through to
+                        // a skeleton that never resolved, so the user sat on a
+                        // permanent shimmer with no error and no retry.
+                        DetailLoadFailureCard(
+                            message: errorMessage,
+                            isRetrying: viewModel.isLoading,
+                            onRetry: { viewModel.loadCryptoData() }
+                        )
+                    } else {
+                        DetailHeaderChartSkeleton(symbol: cryptoSymbol)
                             .padding(.top, AppSpacing.sm)
-
-                            // Chart
-                            TickerChartView(
-                                pricePoints: cryptoData.chartPricePoints,
-                                isPositive: cryptoData.isPositive,
-                                selectedRange: $viewModel.selectedChartRange,
-                                chartSettings: viewModel.chartSettings,
-                                assetContext: .crypto,
-                                chartDataVersion: viewModel.chartDataVersion,
-                                previousClose: cryptoData.previousClose
-                            )
-                            .padding(.top, AppSpacing.lg)
-                        } else if let errorMessage = viewModel.errorMessage {
-                            // The ViewModel has been writing this message all along and
-                            // nothing rendered it: on failure the screen fell through to
-                            // a skeleton that never resolved, so the user sat on a
-                            // permanent shimmer with no error and no retry.
-                            DetailLoadFailureCard(
-                                message: errorMessage,
-                                isRetrying: viewModel.isLoading,
-                                onRetry: { viewModel.loadCryptoData() }
-                            )
-                        } else {
-                            DetailHeaderChartSkeleton()
-                                .padding(.top, AppSpacing.sm)
-                        }
-
-                        // Section with pinned tab bar header
-                        Section {
-                            // Tab Content
-                            tabContent
-                        } header: {
-                            // Tab Bar - sticks at top when scrolling
-                            VStack(spacing: 0) {
-                                CryptoDetailTabBar(selectedTab: $viewModel.selectedTab)
-                                    .padding(.top, AppSpacing.lg)
-
-                                // Divider
-                                Rectangle()
-                                    .fill(AppColors.cardBackgroundLight)
-                                    .frame(height: 1)
-                            }
-                            .background(AppColors.background)
-                            .background(
-                                GeometryReader { geometry in
-                                    Color.clear
-                                        .preference(
-                                            key: TabBarPositionPreferenceKey.self,
-                                            value: geometry.frame(in: .named("scroll")).minY
-                                        )
-                                }
-                            )
-                        }
                     }
-                }
-                .coordinateSpace(name: "scroll")
-                .onPreferenceChange(TabBarPositionPreferenceKey.self) { position in
-                    let shouldPin = position <= 0
-                    if shouldPin != isTabBarPinned {
-                        isTabBarPinned = shouldPin
-                    }
-                }
-                .refreshable {
-                    await viewModel.refresh()
+                } tabs: {
+                    CryptoDetailTabBar(selectedTab: $viewModel.selectedTab)
+                } content: {
+                    tabContent
                 }
             }
 
@@ -187,14 +158,7 @@ struct CryptoDetailView: View {
         .onDisappear {
             viewModel.disconnectLivePrice()
         }
-        .gesture(
-            DragGesture()
-                .onEnded { value in
-                    if value.translation.width > 100 {
-                        handleBackTapped()
-                    }
-                }
-        )
+        .backSwipe { handleBackTapped() }
         .confirmationDialog("Options", isPresented: $showMoreOptions) {
             Button("Share") {
                 handleShare()

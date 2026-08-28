@@ -24,6 +24,28 @@ from app.services.home_dashboard_service import HomeDashboardService
 _DEFAULT_TITLE = "Your Watchlist"
 
 
+@pytest.fixture(autouse=True)
+def _restore_module_globals():
+    """`_service()` rebinds three names on `home_dashboard_service`. It did so with raw
+    assignment and never restored them, so the stubs leaked into every later test in the
+    session — latent today, but it silently voids any downstream test that means to
+    exercise the real functions, and makes a single-file run differ from a full-suite run.
+
+    Snapshot/restore here rather than threading `monkeypatch` through all 21 `_service()`
+    call sites: same guarantee, no churn. `_service` keeps its `hasattr` assertions, which
+    are the separate (and correct) defence against patching a name that does not exist.
+    """
+    import app.services.home_dashboard_service as mod
+
+    names = ("get_supabase", "get_active_group", "fetch_ticker_metadata")
+    saved = {n: getattr(mod, n) for n in names}
+    try:
+        yield
+    finally:
+        for n, v in saved.items():
+            setattr(mod, n, v)
+
+
 def _service(
     rows=None,
     quotes=None,
@@ -73,6 +95,10 @@ def _service(
     assert hasattr(mod, "get_active_group"), (
         "home_dashboard_service does not import get_active_group at module level — "
         "the strip would never follow the active group"
+    )
+    assert hasattr(mod, "fetch_ticker_metadata"), (
+        "home_dashboard_service does not import fetch_ticker_metadata at module level — "
+        "the strip would carry no company names or logos"
     )
     mod.get_supabase = lambda: type("S", (), {"table": lambda self, n: _Tbl()})()
 

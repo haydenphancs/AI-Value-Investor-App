@@ -445,6 +445,33 @@ class _FakeFMP:
         ]
 
 
+class _NoSupabase:
+    """The themes section reads Supabase; nothing here is about themes."""
+
+    def table(self, _n): return self
+    def select(self, *a, **k): return self
+    def eq(self, *a, **k): return self
+    def order(self, *a, **k): return self
+    def limit(self, *a, **k): return self
+    def execute(self): return type("R", (), {"data": []})()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_supabase(monkeypatch):
+    """`get_dashboard()` builds EVERY section, including themes → `_read_theme_rows` →
+    `get_supabase()`. Three live calls to production per run, swallowed by the section's
+    fail-safe handler so the tests stayed green."""
+    import app.services.home_dashboard_service as mod
+    import app.database as db
+
+    monkeypatch.setattr(mod, "get_supabase", lambda: _NoSupabase())
+    # `_read_theme_rows` does a FUNCTION-LOCAL `from app.database import get_supabase`
+    # ("avoids a load-time cycle"), so it resolves from the SOURCE module every call and
+    # the module-level stub above never sees it. Patch both — which binding a caller uses
+    # is not visible from the call site.
+    monkeypatch.setattr(db, "get_supabase", lambda: _NoSupabase())
+
+
 def _fresh_service(monkeypatch, *, short_pct=33.0, short_delay=0.0):
     HomeDashboardService._scanner_cache.clear()
     HomeDashboardService._scanner_inflight.clear()

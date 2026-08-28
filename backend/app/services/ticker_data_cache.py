@@ -49,6 +49,7 @@ from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.schemas.growth import GrowthResponse
+from app.schemas.profit_power import ProfitPowerResponse
 from app.services.sector_aggregates_service import SectorAggregates
 from app.services.industry_tam_service import IndustryTAM
 
@@ -59,6 +60,24 @@ TABLE_NAME = "ticker_data_cache"
 
 # Pydantic fields → model class (reconstructed via model_validate; model_dump
 # (mode="json") handles any nested dates/enums on write).
+#
+# ⚠️ EVERY Pydantic-typed field on CollectedTickerData MUST be listed here, and the
+# omission is SILENT until it ships. `_serialize` checks `if val is None` BEFORE this
+# lookup, so an unregistered field only breaks once it is actually populated; it then
+# falls to the `else` branch, the `json.dumps` guard raises, `_serialize` returns None
+# and `store_collection` skips the write. The request still succeeds — the cache is
+# simply dead.
+#
+# That happened. `profit_power` was added to CollectedTickerData on 2026-06-23 (e21d5b6e)
+# and never registered here, so this ENTIRE tier wrote nothing for ~2 months: the service
+# that populates it never returns None for a normal ticker, so every write failed. Note
+# the author DID bump CACHE_SCHEMA_FLOOR that day for this very field — the floor was
+# remembered and the registry forgotten. `growth_chart`, added two days earlier in
+# e615bd21, was registered correctly, which is what makes this a slip rather than intent.
+#
+# `tests/test_ticker_data_cache.py::test_every_pydantic_field_is_registered` now fails
+# the build on the next omission — the INVERSE of the older registry test, which only
+# checked that entries present here are models and so could never see a missing one.
 _PYDANTIC_FIELDS: Dict[str, Any] = {
     "analyst_analysis": AnalystAnalysisResponse,
     "holders_response": HoldersResponse,
@@ -70,6 +89,7 @@ _PYDANTIC_FIELDS: Dict[str, Any] = {
     "snap_growth": SnapshotItemResponse,
     "snap_valuation": SnapshotItemResponse,
     "growth_chart": GrowthResponse,
+    "profit_power": ProfitPowerResponse,
 }
 
 # Flat dataclass fields → (class, [datetime field names needing ISO round-trip]).
@@ -144,8 +164,15 @@ def _serialize(out: Any) -> Optional[Dict[str, Any]]:
         json.dumps(result)
         return result
     except Exception as e:
-        logger.warning(
-            "ticker_data_cache serialize failed: %s: %s", type(e).__name__, e
+        # ERROR, not warning, and it says what the CONSEQUENCE is. The old line named
+        # neither the ticker nor the effect, so a reader could not tell that the whole
+        # 24h tier was dead — which is exactly how the profit_power omission survived
+        # two months while this fired on every single write.
+        logger.error(
+            "ticker_data_cache serialize failed — CACHE WRITE SKIPPED, this tier is "
+            "returning nothing: %s: %s. A field on CollectedTickerData is missing from "
+            "_PYDANTIC_FIELDS/_DATACLASS_FIELDS.",
+            type(e).__name__, e, exc_info=True,
         )
         return None
 
@@ -252,6 +279,11 @@ async def store_collection(ticker: str, out: Any) -> None:
     ticker = ticker.upper().strip()
     payload = await asyncio.to_thread(_serialize, out)
     if payload is None:
+        logger.warning(
+            "ticker_data_cache write SKIPPED for %s (serialize failed) — every "
+            "subsequent read for this ticker will MISS and re-run the full collection",
+            ticker,
+        )
         return
 
     def _upsert() -> None:
@@ -367,7 +399,14 @@ async def warm_ticker_collection(ticker: str) -> None:
             # get_or_collect re-checks freshness + _INFLIGHT inside the slot
             # (handles the race where it became fresh while we queued).
             await get_or_collect(ticker, lambda: collector._collect_fresh(ticker))
-        logger.info("ticker_data_cache WARMED (prewarm) for %s", ticker)
+        # Says only what it KNOWS. This used to read "ticker_data_cache WARMED
+        # (prewarm)", which is emitted after the collection runs and claims nothing
+        # about whether the write landed — so while the tier was dead (see
+        # _PYDANTIC_FIELDS) this line reported success on every one of the ~24 wasted
+        # cold collections per ticker per day. The write outcome is logged where it is
+        # actually known: `ticker_data_cache UPSERTED` on success, or the SKIPPED
+        # warning in store_collection. Do not reintroduce a success claim here.
+        logger.info("ticker_data_cache collection COMPLETE (prewarm) for %s", ticker)
     except Exception as e:
         logger.warning(
             "warm_ticker_collection failed for %s: %s: %s",

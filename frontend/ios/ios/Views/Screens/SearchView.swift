@@ -79,15 +79,7 @@ struct SearchView: View {
             }
         }
         .navigationBarHidden(true)
-        .gesture(
-            DragGesture()
-                .onEnded { gesture in
-                    // Swipe right to go back
-                    if gesture.translation.width > 100 {
-                        handleBackTapped()
-                    }
-                }
-        )
+        .backSwipe { handleBackTapped() }
         .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
             NavigationStack {
                 AssetDetailRouter(selection: selection)

@@ -73,22 +73,33 @@ def test_sdk_still_rewrites_the_auth_header_on_sign_in():
     assert c._postgrest is None, "the SDK no longer resets postgrest on sign-in"
 
 
-def test_the_isolated_client_is_a_different_object():
+# ⚠️ Both tests below use `monkeypatch`, NOT raw assignment.
+#
+# They used to do `db._supabase_client = object()` directly, with no restore. 58 test
+# files sort after this one, and for every one of them `app.database.get_supabase()`
+# then returned a bare `object()` for the rest of the session. Nothing depends on it
+# today, so the suite stayed green — but it silently voids any later test that means to
+# exercise real client wiring, and it makes a single-file run behave differently from a
+# full-suite run. The sibling file `test_admin_client_not_demoted.py` already resets
+# these same three globals via monkeypatch; this now matches it.
+
+
+def test_the_isolated_client_is_a_different_object(monkeypatch):
     """Isolation is the SEPARATE INSTANCE. If both names returned one client, signing in would
     demote the very client every `.table()` call uses."""
     import app.database as db
 
-    db._supabase_client = object()
-    db._auth_client = object()
+    monkeypatch.setattr(db, "_supabase_client", object())
+    monkeypatch.setattr(db, "_auth_client", object())
     assert db.get_supabase() is not db.get_auth_client()
 
 
-def test_auth_client_is_memoized():
+def test_auth_client_is_memoized(monkeypatch):
     """A new client per request would leak sockets and a refresh thread each time."""
     import app.database as db
 
     sentinel = object()
-    db._auth_client = sentinel
+    monkeypatch.setattr(db, "_auth_client", sentinel)
     assert db.get_auth_client() is sentinel
 
 

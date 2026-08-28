@@ -78,6 +78,94 @@ from app.services.agents.ticker_report_data_collector import (
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
+# ── Hermeticity: this file must not touch production Supabase ────────────────
+#
+# WHY. `_make_collected_data` drives the REAL collector, and three of its paths reach
+# `sector_benchmark_lookup`, which queries Supabase: `_build_sections` (peer-group level),
+# `assemble_report`'s moat scoring, and its competitor sector medians. Measured before this
+# fixture existed: this one file made **204 live calls to the production database per suite
+# run**, each retried through `retry_idempotent_sync` — roughly half the whole suite's wall
+# clock, and it coupled the backend↔iOS contract guard to whatever rows production happened
+# to hold. `.claude/rules/testing.md` forbids exactly this.
+#
+# The lookup is fail-safe (every caller wraps it), so the tests passed either way — they were
+# asserting the DEGRADED path. Stubbing it makes them assert the intended one, deterministically.
+
+
+def _no_supabase():
+    raise AssertionError(
+        "a test reached get_supabase() — stub the service, do not query production"
+    )
+
+
+class _StubBenchmarkLookup:
+    """Deterministic stand-in for SectorBenchmarkLookup. No network."""
+
+    def get_current_benchmarks(self, industry, sector, metrics):
+        # {metric: {"value": float, "level": "industry"|"sector"}} — `level` drives the
+        # peer-group label, so return a stable one rather than an empty dict.
+        return {m: {"value": 20.0, "level": "industry"} for m in metrics}
+
+    def get_current_benchmark_values(self, industry, sector, metrics):
+        return {m: 20.0 for m in metrics}
+
+    def get_sector_benchmarks(self, sector, metrics, period="annual"):
+        return {}
+
+    def get_benchmarks(self, *a, **k):
+        return {}
+
+    def get_benchmark_values(self, *a, **k):
+        return {}
+
+
+@pytest.fixture(autouse=True)
+def _no_live_benchmark_lookup(monkeypatch):
+    """Autouse so a test added later cannot silently reopen the hole.
+
+    ⚠️ Patch the SOURCE module, not the collector. All three call sites do a
+    FUNCTION-SCOPED `from app.services.sector_benchmark_lookup import
+    get_sector_benchmark_lookup` (collector lines 1202 / 1697 / 1998), so the name is
+    resolved fresh from the source module on every call and never exists as a
+    collector-module attribute. Patching the collector raises AttributeError — which is
+    the correct, loud outcome, and precisely why `raising=False` must never be used to
+    silence it: that is the bug this suite already shipped once.
+    """
+    import app.services.sector_benchmark_lookup as lookup_mod
+    import app.services.moat_scoring_service as moat_mod
+
+    monkeypatch.setattr(
+        lookup_mod, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup()
+    )
+    # `moat_scoring_service` binds BOTH names at MODULE level (its lines 42/44), so it
+    # captured them at import time and patching the source module above does not reach
+    # it. Measured: that alone left 54 of the original 204 live calls in place, via
+    # `assemble_report` → `score_moat_dimensions`. Two bindings of one function need two
+    # patches — there is no single choke point.
+    monkeypatch.setattr(
+        moat_mod, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup()
+    )
+    monkeypatch.setattr(moat_mod, "get_supabase", _no_supabase)
+    # …and a THIRD binding shape: `MoatScoringService.__init__` captures
+    # `self._lookup = get_sector_benchmark_lookup()` at CONSTRUCTION, and the service is
+    # a module-level singleton. Once any earlier test has built it, it holds the real
+    # lookup forever and patching the factory is inert. Reset the singleton so it is
+    # rebuilt against the stub; monkeypatch restores it afterwards.
+    monkeypatch.setattr(moat_mod, "_service_singleton", None)
+
+    # Fourth binding, same shape: `IndustryMoatBenchmarkLookup.__init__` calls
+    # `get_supabase()` and is ALSO a module singleton, reached from
+    # `assemble_report` → `get_industry_moat_benchmark_lookup()`. Replace the singleton
+    # outright rather than the factory, so construction never happens.
+    import app.services.industry_moat_benchmark_service as imb_mod
+
+    class _StubIndustryMoatLookup:
+        def get_pillar_benchmarks(self, industry):
+            return {}
+
+    monkeypatch.setattr(imb_mod, "_lookup_singleton", _StubIndustryMoatLookup())
+
+
 def _make_collected_data(
     *, ticker: str = "AAPL", persona: str = "warren_buffett"
 ) -> CollectedTickerData:

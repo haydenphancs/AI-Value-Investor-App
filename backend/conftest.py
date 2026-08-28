@@ -24,11 +24,103 @@ Sentry ever activates under pytest).
 
 import gc
 import os
+import socket
 
 import pytest
 
 # Force Sentry inert for tests regardless of what backend/.env contains.
 os.environ["SENTRY_DSN"] = ""
+
+# ---------------------------------------------------------------------------
+# Block outbound network for the whole session.
+#
+# `.claude/rules/testing.md` forbids hitting live FMP / Gemini / CoinGecko / FRED /
+# Supabase from the suite, but nothing ENFORCED it — and the suite was quietly ignoring
+# it. Measured by denying `getaddrinfo` and counting attempts: **214 live calls to the
+# production Supabase project per run**, from three places:
+#
+#   * 204 from test_ticker_report_schema_parity.py, whose fixtures drive the real
+#     collector into `sector_benchmark_lookup` — so the backend↔iOS contract guard, the
+#     one whose failure means a decode crash in production, was asserting against
+#     whatever rows prod happened to hold, and retrying each call through
+#     `retry_idempotent_sync` (roughly half the suite's wall clock).
+#   * 6 from test_chat_credits.py reaching the real `claim_free_followup` — a
+#     SECURITY DEFINER function with `row_security = off` that UPDATEs `chat_sessions`.
+#     It was harmless ONLY because `session_id="sess-1"` fails the UUID cast, so the RPC
+#     errored and the code fell back to "charge". One `"sess-1"` → real-UUID edit away
+#     from mutating production, and meanwhile those money-path assertions were only ever
+#     exercising the error branch.
+#   * a handful from a home_dashboard_service teardown path.
+#
+# Every one of those call sites is fail-safe, so the tests passed either way. That is
+# what made this invisible: a live call that succeeds and a live call that is blocked
+# both produce a green suite, and only the FIRST one couples the result to prod data.
+#
+# Loopback stays open (nothing needs it today, but blocking it would break any future
+# local fixture server for no benefit). The error names the host so a new offender is
+# immediately diagnosable rather than appearing as a generic DNS failure.
+#
+# Verified by `tests/test_no_network_in_tests.py`. Proven safe BEFORE it was written:
+# the full suite already passed with all outbound sockets denied (7,917 passed).
+_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "", None}
+
+# Reserved-for-documentation addresses (RFC 5737 / RFC 2606) that `tests/
+# test_no_network_in_tests.py` probes on purpose to prove the block still bites. They
+# must still RAISE — that is what the guard's own tests assert — but must not be counted,
+# or the guard would fail every run because of its own verification.
+_SELFTEST_HOSTS = {"guard-selftest.invalid", "192.0.2.1"}
+_real_getaddrinfo = socket.getaddrinfo
+_real_connect = socket.socket.connect
+
+
+class NetworkCallInTests(RuntimeError):
+    """Raised when a test tries to reach the network.
+
+    It is a `RuntimeError`, so the fail-safe `except Exception` blocks that wrap most
+    upstream calls DO still swallow it. That is deliberate — the point is to stop the
+    packet, not to break a degradation path — but it means raising ALONE is not enough
+    to make a new offender visible: swallowed is exactly how the original 214 hid. So
+    every block is also RECORDED, and `pytest_sessionfinish` fails the run on any
+    non-empty record. Raise for the packet, count for the visibility.
+    """
+
+
+#: (host, test-id) of every blocked attempt. Read by pytest_sessionfinish.
+#: The test id comes from PYTEST_CURRENT_TEST, which pytest maintains per test — without
+#: it a violation reports only a hostname, and the offender can be in any of 330 files
+#: (worse, it is often ORDER-DEPENDENT: a singleton built by one file, used by another).
+BLOCKED_NETWORK_CALLS: list[tuple[str, str]] = []
+
+
+def _current_test() -> str:
+    return os.environ.get("PYTEST_CURRENT_TEST", "(outside a test)").split(" (")[0]
+
+
+def _blocked_getaddrinfo(host, port, *args, **kwargs):
+    if host in _ALLOWED_HOSTS:
+        return _real_getaddrinfo(host, port, *args, **kwargs)
+    if str(host) not in _SELFTEST_HOSTS:
+        BLOCKED_NETWORK_CALLS.append((str(host), _current_test()))
+    raise NetworkCallInTests(
+        f"outbound network call to {host!r}:{port} from the test suite. "
+        f"Stub the client/service instead — see .claude/rules/testing.md."
+    )
+
+
+def _blocked_connect(self, address, *args, **kwargs):
+    host = address[0] if isinstance(address, tuple) else address
+    if host in _ALLOWED_HOSTS:
+        return _real_connect(self, address, *args, **kwargs)
+    if str(host) not in _SELFTEST_HOSTS:
+        BLOCKED_NETWORK_CALLS.append((str(host), "connect"))
+    raise NetworkCallInTests(
+        f"outbound socket connect to {host!r} from the test suite. "
+        f"Stub the client/service instead — see .claude/rules/testing.md."
+    )
+
+
+socket.getaddrinfo = _blocked_getaddrinfo
+socket.socket.connect = _blocked_connect
 
 # ---------------------------------------------------------------------------
 # Stop the cyclic collector for the session.
@@ -81,4 +173,25 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001 - pytest hook sig
     """
     gc.enable()
     gc.collect()
+
+    # A blocked call is swallowed by app-level `except Exception`, so the run can be
+    # GREEN while a test still tried to reach production. Counting is the only thing
+    # that makes a new offender visible — raising is not.
+    if BLOCKED_NETWORK_CALLS:
+        hosts = sorted({host for host, _ in BLOCKED_NETWORK_CALLS})
+        culprits = sorted({test for _, test in BLOCKED_NETWORK_CALLS})
+        print(
+            "\n"
+            f"NETWORK: {len(BLOCKED_NETWORK_CALLS)} outbound call(s) were attempted and "
+            f"blocked during this run: {', '.join(hosts)}.\n"
+            "  from: " + "\n        ".join(culprits) + "\n"
+            "The suite must be hermetic (.claude/rules/testing.md). These were stopped, "
+            "so nothing reached production — but the test that made them is exercising a "
+            "degraded path, not the one it means to. Stub the service at the binding the "
+            "caller actually uses.\n"
+            "If a test above is clean when run ALONE, the cause is a module SINGLETON "
+            "that captured a real client in __init__ during an earlier test — reset the "
+            "singleton, not just the factory."
+        )
+        session.exitstatus = 1
 

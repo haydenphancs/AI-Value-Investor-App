@@ -79,7 +79,13 @@ logger = logging.getLogger(__name__)
 # v3: the sentiment instruction was retuned to commit to the NET lean instead of
 # defaulting to neutral (the market roll-up read "Neutral" on genuinely-mixed but
 # net-directional days). Prompt-output contract changed → one controlled regen wave.
-PROMPT_VERSION = 3
+# v4: the "why it moved" catalyst is now handed TO the roll-up prompt, which is
+# told the line is already shown to the reader and must not restate it. Before
+# this the bullets and the catalyst were two independent model calls over the same
+# day's evidence with no shared context, so on an earnings day both wrote the same
+# story and the user read it twice. Every cached card predates the instruction and
+# still carries the duplicate bullets, so the bump is what actually ships the fix.
+PROMPT_VERSION = 4
 
 
 # ── Thresholds ────────────────────────────────────────────────────────

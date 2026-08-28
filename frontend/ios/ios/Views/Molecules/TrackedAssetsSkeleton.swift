@@ -10,8 +10,10 @@
 //  screen stating something false about the user's own money. (Captured on device before this
 //  change, under the LoadingOverlay that has since been removed.)
 //
-//  Mirrors `AssetRow`'s geometry — 80pt ticker block, sparkline, trailing price — so the real
-//  rows replace these without the list jumping.
+//  Mirrors `AssetRow`'s geometry — flexible ticker block, pinned sparkline, trailing price —
+//  so the real rows replace these without the list jumping. The two widths are READ FROM
+//  `AssetRow` rather than copied: this file previously carried a literal duplicate of its
+//  hardcoded 80, and diverged the moment the row was rebalanced.
 //
 
 import SwiftUI
@@ -37,13 +39,21 @@ struct TrackedAssetsSkeleton: View {
         HStack(spacing: AppSpacing.lg) {
             VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                 bar(width: 52, height: 14)
-                bar(width: 70, height: 10)
+                // nil => fills the column. A fixed 96 was WIDER than the ~80pt the
+                // column actually resolves to, so the name placeholder ran straight
+                // into the sparkline placeholder -- same fill colour, so the two read
+                // as one continuous bar, and then visibly split apart when data landed.
+                bar(width: nil, height: 10)
             }
-            .frame(width: 80, alignment: .leading)
+            // Mirrors AssetRow's flexible column and pinned chart — both read from
+            // AssetRow's own constants so this can never drift from the row it stands in for.
+            .frame(minWidth: AssetRow.tickerColumnMinWidth,
+                   maxWidth: .infinity,
+                   alignment: .leading)
 
-            bar(width: nil, height: 32)
+            bar(width: AssetRow.sparklineWidth, height: 32)
 
-            Spacer(minLength: AppSpacing.md)
+            Spacer(minLength: AppSpacing.sm)
 
             VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                 bar(width: 64, height: 14)

@@ -100,6 +100,14 @@ struct AssetsListSection: View {
     private var rowHeightProbe: some View {
         AssetRow(asset: assets.first ?? Self.measurementSample,
                  changeDisplayMode: changeDisplayMode)
+            // The probe lives in the List's `.background`, which spans the FULL
+            // width -- the real rows are inset by `listRowInsets` on both sides.
+            // That 32pt did not matter while the ticker column was a hard 80pt
+            // box, because the row's height could not depend on its width. It
+            // does now: the column is flexible, so a wider probe can fit a long
+            // symbol on one line that the real row has to shrink or wrap, and
+            // the List would then be hard-sized from a height no row has.
+            .padding(.horizontal, AppSpacing.lg)
             .fixedSize(horizontal: false, vertical: true)
             .background(
                 GeometryReader { proxy in

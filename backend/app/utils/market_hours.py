@@ -188,6 +188,44 @@ def previous_trading_day(d: date) -> date:
     return probe
 
 
+def last_completed_close(now: datetime | None = None) -> datetime:
+    """UTC instant of the most recent regular-session close that has ALREADY happened.
+
+    Answers "when did the tape last finish a session", which is a different and
+    more useful question than "is it a weekday". Counting calendar weekend days
+    is the intuitive rule and it is wrong: 48 hours back from a Tuesday afternoon
+    lands on a Sunday in a perfectly ordinary week, so a weekend-counting rule
+    fires on days the market never closed at all.
+
+    Half-days are honoured via ``_close_minute`` — on Christmas Eve the session
+    that completed at 13:00 ET is the one being described, and calling it 16:00
+    would place the close three hours in the future.
+
+    ``now`` is injectable so callers and tests stay clock-independent. A naive
+    value is read as UTC for the same reason ``session_phase`` does:
+    ``astimezone()`` would read it as LOCAL, and the identical input would then
+    resolve differently on Railway than on a dev machine.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    et_now = now.astimezone(ET)
+
+    d = et_now.date()
+    minute_of_day = et_now.hour * 60 + et_now.minute
+    if not (is_trading_day(d) and minute_of_day >= _close_minute(d)):
+        # Today has not closed yet (or never opens) — the last completed session
+        # is the previous trading day's.
+        d = previous_trading_day(d)
+
+    close_minute = _close_minute(d)
+    close_et = datetime(
+        d.year, d.month, d.day, close_minute // 60, close_minute % 60, tzinfo=ET
+    )
+    return close_et.astimezone(timezone.utc)
+
+
 def session_trading_date(now: datetime | None = None) -> date:
     """The ET calendar date of the session the current numbers describe.
 

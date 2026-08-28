@@ -45,6 +45,16 @@ struct InsightsDetailView: View {
 
     // MARK: - Summary
 
+    /// Mirrors `InsightsSummaryCard` so the card and its tap-through cannot show
+    /// a different body for the same summary.
+    private var catalyst: InsightPriceMove? {
+        summary.isAIGenerated ? summary.priceMove : nil
+    }
+
+    private var visibleBullets: ArraySlice<String> {
+        summary.bulletPoints.prefix(catalyst == nil ? 5 : 4)
+    }
+
     private var summarySection: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             HStack {
@@ -66,9 +76,18 @@ struct InsightsDetailView: View {
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Same one-body composition as the card: catalyst first, then the
+            // bullets. The tap-through used to render NO price move at all, so
+            // opening Sources silently dropped the "why it moved" explanation —
+            // the one piece of content on this screen that actually has cited
+            // sources to open.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { index, point in
-                    let isLast = index == summary.bulletPoints.count - 1
+                if let move = catalyst {
+                    InsightCatalystBullet(move: move)
+                }
+
+                ForEach(Array(visibleBullets.enumerated()), id: \.offset) { index, point in
+                    let isLast = index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Circle()
                             .fill(AppColors.textSecondary)

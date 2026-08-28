@@ -31,25 +31,21 @@ struct TabBarItem: View {
                 Image(systemName: tab.systemIconName)
                     .font(AppTypography.iconLarge).fontWeight(isSelected ? .semibold : .regular)
                     .foregroundColor(iconColor)
+                    // The badge recipe lives in `UnreadCountBadge` — the Tracking → Alerts
+                    // segment shows the SAME count and is on screen at the same time, so one
+                    // atom is what stops one number rendering in two colours.
+                    //
+                    // It is RED now (`lossFill` + `textOnFill`), not blue. The old comment here
+                    // rejected "red badges" on the strength of `lossFill` + `textOnAccent` being
+                    // 2.77:1 in dark — true, and `textOnFill` is the ink that solves it. The
+                    // reasoning is kept in full on the atom.
+                    //
+                    // An OVERLAY, never a layout sibling: the label below already needs
+                    // `minimumScaleFactor` to survive five columns, and a badge that took layout
+                    // width would shrink every one of them.
                     .overlay(alignment: .topTrailing) {
-                        if badgeCount > 0 {
-                            Text(badgeCount > 99 ? "99+" : "\(badgeCount)")
-                                .font(AppTypography.captionSmallEmphasis)
-                                // Ink and fill change TOGETHER. `lossFill` was the
-                                // obvious "badges are red" choice and it is WRONG here:
-                                // its dark arm is a light red (#F87171), which puts
-                                // `textOnAccent` at 2.77:1 — the theme guard caught it.
-                                // `primaryFill` is frozen across both appearances, so
-                                // white-on-it holds in each.
-                                .foregroundColor(AppColors.textOnAccent)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(
-                                    Capsule().fill(AppColors.primaryFill)
-                                )
-                                .offset(x: 10, y: -6)
-                                .accessibilityHidden(true)
-                        }
+                        UnreadCountBadge(count: badgeCount)
+                            .offset(x: 10, y: -6)
                     }
 
                 // Five equal columns of ~78pt on a 393pt phone, and there is no `TabView`
@@ -67,6 +63,11 @@ struct TabBarItem: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(PlainButtonStyle())
+        // The badge itself is `accessibilityHidden`, so the count has to be said HERE or it is
+        // said nowhere — which is what happened before: a purely visual unread indicator.
+        .accessibilityLabel(
+            badgeCount > 0 ? "\(tab.rawValue), \(badgeCount) new" : tab.rawValue
+        )
     }
 }
 

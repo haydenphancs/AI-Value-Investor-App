@@ -35,48 +35,21 @@ struct InsightsSummaryCard: View {
         return "\(summary.timeAgo) · up to date"
     }
 
-    /// The grounded "why it moved" block: tier + session change + catalyst reason,
-    /// visually inset and separated from the AI news bullets (distinct provenance).
-    @ViewBuilder
-    private func whyItMovedRow(_ move: InsightPriceMove) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            HStack(spacing: AppSpacing.sm) {
-                Image(systemName: "bolt.fill")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.primaryBlue)
-                Text("Why it moved")
-                    .font(AppTypography.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(AppColors.textSecondary)
-
-                Spacer(minLength: AppSpacing.sm)
-
-                if let change = move.formattedChange {
-                    Text(change)
-                        .font(AppTypography.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(move.isPositive ? AppColors.bullish : AppColors.bearish)
-                }
-            }
-
-            Text(catalystLine(move))
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(AppSpacing.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppColors.background)
-        .cornerRadius(AppCornerRadius.medium)
+    /// How many model-written bullets fit beside the catalyst.
+    ///
+    /// The catalyst occupies the first bullet slot when there is one, so the
+    /// budget shrinks by one and the card can never grow past five rows. The
+    /// backend still validates 2-5 bullets for every card, catalyst or not — a
+    /// calm ticker is unaffected, so the cap lives here rather than in the
+    /// shared MAX_BULLETS every scope is generated against.
+    private var visibleBullets: ArraySlice<String> {
+        summary.bulletPoints.prefix(catalyst == nil ? 5 : 4)
     }
 
-    /// "<Catalyst Tag> — <reason>", or just the reason when there is no clear
-    /// company catalyst (a broad-market / sector move).
-    private func catalystLine(_ move: InsightPriceMove) -> String {
-        if let tag = move.catalystTag, !tag.isEmpty {
-            return "\(tag) — \(move.reason)"
-        }
-        return move.reason
+    /// The "why it moved" catalyst, when this card has one. Never on the
+    /// deterministic fallback card — nothing there is model-written or cited.
+    private var catalyst: InsightPriceMove? {
+        summary.isAIGenerated ? summary.priceMove : nil
     }
 
     var body: some View {
@@ -95,6 +68,29 @@ struct InsightsSummaryCard: View {
                         font: AppTypography.bodyEmphasis,
                         iconFont: AppTypography.iconSmall
                     )
+
+                    // Signposts the catalyst bullet directly below. Shown only
+                    // when there IS one — most tickers never move enough to earn
+                    // a catalyst, and their header stays a plain "Insights".
+                    // The label shrinks before the sentiment/window badges do:
+                    // it is the one header element whose meaning survives being
+                    // read at a glance from the bolt alone.
+                    if catalyst != nil {
+                        HStack(spacing: AppSpacing.xs) {
+                            Image(systemName: "bolt.fill")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.primaryBlue)
+
+                            Text("Why it moved")
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(AppColors.textSecondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
+                        .layoutPriority(-1)
+                        .accessibilityElement(children: .combine)
+                    }
                 } else {
                     HStack(spacing: AppSpacing.sm) {
                         Image(systemName: "newspaper")
@@ -136,14 +132,23 @@ struct InsightsSummaryCard: View {
                 .foregroundColor(AppColors.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Bullet Points
+            // Bullet Points — ONE body. The catalyst leads when there is one,
+            // then the model's bullets, which the prompt has been told not to
+            // restate it. It used to sit in its own inset box BELOW these, which
+            // read as a second card and repeated whatever the bullets already said.
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                if let move = catalyst {
+                    InsightCatalystBullet(move: move)
+                }
+
                 // Index-keyed, not `id: \.self` — two identical bullet lines
                 // would collide and one would be dropped/glitched.
-                ForEach(Array(summary.bulletPoints.enumerated()), id: \.offset) { index, point in
+                ForEach(Array(visibleBullets.enumerated()), id: \.offset) { index, point in
                     // Final bullet = the takeaway; render its lead-in colon as a
                     // comma so it reads as a sentence, matching the article cards.
-                    let isLast = index == summary.bulletPoints.count - 1
+                    // Measured against the TRUNCATED list, so a card whose tail was
+                    // dropped by the cap does not comma-splice a mid-list bullet.
+                    let isLast = index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
                         Circle()
                             .fill(AppColors.textSecondary)
@@ -156,13 +161,6 @@ struct InsightsSummaryCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            }
-
-            // "Why it moved" — the grounded price-move explanation, shown only
-            // for a big move (Unusual/Extreme). A SEPARATE, cited block from the
-            // news bullets above; never on the deterministic fallback card.
-            if summary.isAIGenerated, let move = summary.priceMove {
-                whyItMovedRow(move)
             }
 
             // Footer: the timestamp on the LEFT, the sources affordance on the

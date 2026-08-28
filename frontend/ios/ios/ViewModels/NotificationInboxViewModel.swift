@@ -32,11 +32,35 @@ final class NotificationInboxViewModel: ObservableObject {
     @Published private(set) var unreadCount: Int = 0
     @Published private(set) var isLoadingMore = false
 
+    /// The ONE instance.
+    ///
+    /// It used to be a `@StateObject` private to `AlertsTabContent`, which meant the unread count
+    /// only ever refreshed while the Alerts segment was on screen — and that screen marks
+    /// everything read on sight. So the number behind the tab-bar badge was updated exclusively by
+    /// the surface that immediately zeroes it; on Assets or Whales it was whatever the last push
+    /// tap left, and for a user whose pushes are not arriving at all, permanently `0`.
+    ///
+    /// Shared so `refreshUnreadCount()` can run from launch and foreground, and so the badge on
+    /// the Alerts segment has something true to draw. Same shape and the same reason as
+    /// `PriceAlertStore.shared`.
+    ///
+    /// ⚠️ This keeps the ONE-WRITER rule that `AlertsTabContent` documents at the top of the file
+    /// intact: every count still leaves through `AppState.notificationUnreadDidChange(_:)` from
+    /// this object. A separate refresher object would have been a second writer, which is exactly
+    /// the bug that comment exists to prevent.
+    @MainActor static let shared = NotificationInboxViewModel()
+
     private let repository: NotificationRepositoryProtocol
     private let log = Logger(subsystem: "com.phan.caydex", category: "notifications")
     /// Keyset cursor. `nil` after a load means there is no next page.
     private var nextCursor: String?
     private var loadTask: Task<Void, Never>?
+    /// True for the duration of `performLoad`. `loadTask != nil` cannot answer this — a completed
+    /// Task is neither nil nor cancelled, so that test would be true forever after the first load.
+    private var isFullLoadInFlight = false
+    /// Bumped by every change to read state. `refreshUnreadCount` captures it before its await and
+    /// discards its answer if it moved — see there for the race.
+    private var readEpoch = 0
 
     /// Optional + nil-coalesce, matching the codebase's injection idiom (`SearchViewModel`,
     /// `HomeDashboardViewModel`). `NotificationRepository.init` is MainActor-isolated, and a
@@ -71,6 +95,8 @@ final class NotificationInboxViewModel: ObservableObject {
     }
 
     private func performLoad() async {
+        isFullLoadInFlight = true
+        defer { isFullLoadInFlight = false }
         // THREE outcomes, not two. `GET /users/me/notifications` is `.signInRequired`, so a
         // signed-out caller is refused PRE-FLIGHT by APIClient and the raw failure would render
         // as a generic error blob. Worse, "not armed right now" is not "signed out": at launch
@@ -117,10 +143,15 @@ final class NotificationInboxViewModel: ObservableObject {
     }
 
     /// Append the next page. No-op when there is none, or one is already in flight.
-    func loadMoreIfNeeded(currentItem item: NotificationEventDTO) async {
+    ///
+    /// The "am I near the end?" decision is the CALLER'S, and that is not incidental. This used to
+    /// take the current row and check it against `items.suffix(5)` — the model's own tail — which
+    /// silently stops working the moment the view renders a SUBSET: with an Activity filter on,
+    /// the last five decoded rows can all be hidden, so no visible row ever satisfies the test and
+    /// the list just ends, with matching rows unfetched on the next page. The view knows what it
+    /// actually drew; this does not.
+    func loadNextPage() async {
         guard let cursor = nextCursor, !isLoadingMore else { return }
-        // Trigger a page ahead of the true end so the list does not visibly stall.
-        guard items.suffix(5).contains(item) else { return }
 
         isLoadingMore = true
         defer { isLoadingMore = false }
@@ -140,6 +171,42 @@ final class NotificationInboxViewModel: ObservableObject {
             AppActions.shared.reportMutationFailure(
                 AppError.from(error), action: "load more notifications"
             )
+        }
+    }
+
+    /// Refresh ONLY the unread count. Leaves `items` and `state` exactly as they are.
+    ///
+    /// This is what makes the badge mean something away from the Alerts tab. Called on
+    /// authentication (cold launch of a signed-in user, and a fresh sign-in) and on every
+    /// foreground — see `AppState.onAuthenticated` and `iosApp`.
+    ///
+    /// No new endpoint: `GET /users/me/notifications` already takes `limit` and already returns
+    /// `unread_count`, so one row answers the question. (`notification_inbox_service.unread_count`
+    /// exists un-exposed if a count-only route is ever worth a backend deploy; it would save a
+    /// single row.)
+    ///
+    /// ⚠️ Publishes NOTHING when signed out or restoring — a read that never happened proves
+    /// nothing about what is unread, and zeroing the badge here would be the second-writer bug in
+    /// different clothes.
+    func refreshUnreadCount() async {
+        guard AppActions.shared.isSignedIn else { return }
+        // A full page load is authoritative and already publishes; racing it buys nothing.
+        guard !isFullLoadInFlight else { return }
+
+        let epoch = readEpoch
+        do {
+            let page = try await repository.fetchNotifications(limit: 1, before: nil)
+            // The race this closes: a refresh in flight when the user opens Alerts lands AFTER
+            // `markAllReadOnView()` and puts the badge back on a list they just read.
+            guard epoch == readEpoch, !isFullLoadInFlight else { return }
+            unreadCount = page.unreadCount
+            AppState.notificationUnreadDidChange(unreadCount)
+        } catch {
+            // Deliberately non-fatal and NOT routed to `reportMutationFailure`: nobody asked for
+            // this, it is a background badge refresh. Still said out loud — a badge that quietly
+            // stops updating is the bug this method exists to fix.
+            let appError = AppError.from(error)
+            log.warning("unread count refresh failed (badge may be stale): \(String(describing: type(of: error))): \(appError.message, privacy: .public)")
         }
     }
 
@@ -188,6 +255,7 @@ final class NotificationInboxViewModel: ObservableObject {
     private func applyOptimisticRead(ids: [String]) {
         guard !ids.isEmpty else { return }
         let marked = Set(ids)
+        readEpoch &+= 1
         locallyRead.formUnion(marked)
         unreadCount = max(0, unreadCount - marked.count)
         AppState.notificationUnreadDidChange(unreadCount)
@@ -233,6 +301,7 @@ final class NotificationInboxViewModel: ObservableObject {
     /// the next account to sign in on this device inherits the previous user's rows.
     func reset() {
         loadTask?.cancel()
+        readEpoch &+= 1
         items = []
         unreadCount = 0
         nextCursor = nil

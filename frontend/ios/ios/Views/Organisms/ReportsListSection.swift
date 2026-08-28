@@ -220,26 +220,20 @@ struct ReportsListSection: View {
 
     // Persona filter chip — tinted with the persona's accent color. Selected =
     // solid accent + white text; unselected = faint accent tint + accent text.
+    //
+    // The body lives in `AccentFilterChip` (Atoms) because the Alerts tab's Activity filters
+    // must look identical — a TestFlight tester asked for them "just like in the Report tab",
+    // and two copies of this closure is the drift that request is made of. `accentFill` is the
+    // clamped `.fill`-role colour, `accentColor` the `.text`-role one; the atom pairs each with
+    // the correct ink, so do not pass the same colour twice.
     private func personaTagChip(_ persona: AnalysisPersona) -> some View {
-        let isOn = selectedPersonaKeys.contains(persona.key)
-        return Button {
-            onTogglePersonaTag?(persona)
-        } label: {
-            Text(persona.shortName)
-                .font(AppTypography.caption).fontWeight(.semibold)
-                .foregroundColor(isOn ? AppColors.textOnAccent : persona.accentColor)
-                .padding(.horizontal, AppSpacing.sm)
-                .padding(.vertical, AppSpacing.xs)
-                .background(
-                    // Selected = `accentFill` (clamped so `textOnAccent` clears 4.5 on it);
-                    // unselected = the text-safe accent at 0.15, which carries no ink.
-                    // Both halves of the selected pair must move together.
-                    Capsule().fill(isOn ? persona.accentFill
-                                        : persona.accentColor.opacity(0.15))
-                )
-                .fixedSize(horizontal: true, vertical: false)   // keep natural width in the scroll
-        }
-        .buttonStyle(PlainButtonStyle())
+        AccentFilterChip(
+            label: persona.shortName,
+            accent: persona.accentColor,
+            accentFill: persona.accentFill,
+            isSelected: selectedPersonaKeys.contains(persona.key),
+            action: { onTogglePersonaTag?(persona) }
+        )
     }
 
     private var searchReveal: some View {

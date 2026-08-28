@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -44,7 +45,7 @@ from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
-from app.utils.market_hours import is_market_active
+from app.utils.market_hours import is_market_active, last_completed_close
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,15 @@ MAX_CORPUS_ARTICLES = 25
 # change these constants there, not by hand.
 PRIMARY_WINDOW_HOURS = 24
 CORPUS_WINDOW_HOURS = 48
+# Third tier, used ONLY when 24h and 48h are both empty AND the market was shut
+# for long enough to explain it (see ``_closed_market_window_hours``). Without it
+# a quiet ticker whose last story was Friday has an empty 48h window every Monday
+# morning, and the endpoint's `if feed_recent:` gate renders NO card at all --
+# even though a perfectly good one is sitting unexpired in the cache, because the
+# 96h hard TTL below was raised for exactly this reason and the gate overrides it.
+# 96h is the same number and the same rationale as _HARD_TTL_*: it spans a
+# Thursday-close-to-Monday-open holiday weekend.
+MAX_WINDOW_HOURS = 96
 # Small tolerance for clock skew / same-minute stamping so a legitimately
 # just-published article isn't dropped, while genuinely future-dated rows are.
 _FUTURE_SKEW_HOURS = 2
@@ -447,7 +457,9 @@ class NewsInsightService:
             logger.warning("Insight generation skipped for %s: empty corpus", scope)
             return None
 
-        prompt = self._build_prompt(scope, articles, inputset_id, price_band, quote)
+        prompt = self._build_prompt(
+            scope, articles, inputset_id, price_band, quote, price_move
+        )
 
         started = time.monotonic()
         try:
@@ -682,7 +694,18 @@ class NewsInsightService:
         inputset_id: str,
         price_band: Optional[str],
         quote: Optional[Dict[str, Any]],
+        price_move: Optional[Dict[str, Any]] = None,
     ) -> str:
+        """Build the roll-up prompt.
+
+        ``price_move`` is the "why it moved" catalyst, when one was produced for
+        this scope THIS cycle. It exists here for one reason: the catalyst and
+        these bullets used to be two independent model calls over the same day's
+        evidence, with no shared context and no cross-de-dup, so on any earnings
+        day both independently wrote the same story and the reader saw it twice.
+        Passing it in is what makes the bullets additive instead of a second
+        telling. See ``_catalyst_block``.
+        """
         is_market = scope.startswith("__")
         subject = "the overall US stock market" if is_market else scope
 
@@ -694,8 +717,15 @@ class NewsInsightService:
             when = str(a.get("published_at") or "")[:16]
             lines.append(f"[{i}] ({when}) {title}" + (f"\n     {text}" if text else ""))
 
-        price_line = ""
-        if quote:
+        # A catalyst SUPERSEDES the generic price line -- never both.
+        #
+        # `price_line` states the exact session move and then says "mention this
+        # ONLY if the articles explain it". On precisely the days a catalyst
+        # exists, the articles DO explain it, so that sentence invites the model
+        # to write the very explanation the catalyst already carries. Emitting
+        # both re-creates the duplication this block exists to remove.
+        price_line = _catalyst_block(price_move)
+        if not price_line and quote:
             pct = finite(quote.get("changePercentage"))
             if pct is not None:
                 price_line = (
@@ -739,6 +769,48 @@ Articles:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+def catalyst_display_line(price_move: Optional[Dict[str, Any]]) -> str:
+    """The "why it moved" text exactly as the iOS card renders it, or "".
+
+    Kept here, next to the prompt that must describe it, because the prompt tells
+    the model this line is ALREADY shown to the reader. If the two drift the
+    instruction becomes a lie and the de-dup quietly stops working -- the model
+    would be told not to repeat a sentence the user never sees. iOS builds the
+    same string in ``InsightPriceMove.displayLine``; a source-scan guard pins the
+    two together.
+    """
+    if not isinstance(price_move, dict):
+        return ""
+    reason = str(price_move.get("reason") or "").strip()
+    if not reason:
+        return ""
+    tag = str(price_move.get("catalyst_tag") or "").strip()
+    return f"{tag} — {reason}" if tag else reason
+
+
+def _catalyst_block(price_move: Optional[Dict[str, Any]]) -> str:
+    """Prompt fragment telling the model the move is already explained for it.
+
+    Returns "" when there is no usable catalyst, which is the common case -- only
+    non-market scopes on an Unusual/Extreme move ever get one -- so a calm
+    ticker's prompt is byte-identical to what it was before this existed.
+    """
+    shown = catalyst_display_line(price_move)
+    if not shown:
+        return ""
+    return (
+        "\nALREADY EXPLAINED -- DO NOT REPEAT IT. The reason for the current move is\n"
+        "shown to the reader directly above your bullets, on its own line, as:\n"
+        f'    "{shown}"\n'
+        "That line comes from a separate web-cited step. It is not yours to restate,\n"
+        "re-explain, summarise or paraphrase, and no bullet may open with that event.\n"
+        "Write only what it does NOT already say. If the articles hold nothing beyond\n"
+        f"it, write FEWER bullets -- {MIN_BULLETS} is fine -- rather than padding with a\n"
+        "reworded version of it. The headline may name the event; the bullets may not\n"
+        "re-explain it."
+    )
+
 
 def _clip(text: str, limit: int) -> str:
     """Trim to AT MOST ``limit`` characters, cutting on a word boundary if possible.
@@ -1231,7 +1303,46 @@ def select_recent_corpus(
     fallback = articles_within_window(
         rows, now - timedelta(hours=CORPUS_WINDOW_HOURS), upper
     )
-    return fallback, CORPUS_WINDOW_HOURS
+    if fallback:
+        return fallback, CORPUS_WINDOW_HOURS
+
+    # Both standard windows are empty. Stretch ONLY across a market that was
+    # actually shut -- a quiet ticker in a normal trading week keeps the 48h
+    # answer and therefore keeps getting no card, which is the honest outcome.
+    extended_hours = _closed_market_window_hours(now)
+    if extended_hours <= CORPUS_WINDOW_HOURS:
+        return [], CORPUS_WINDOW_HOURS
+    extended = articles_within_window(
+        rows, now - timedelta(hours=extended_hours), upper
+    )
+    return extended, extended_hours
+
+
+def _closed_market_window_hours(now: datetime) -> int:
+    """How far back to look once 24h AND 48h have both come back empty.
+
+    Rounds the gap since the last completed session close UP to a whole day and
+    clamps it to [CORPUS_WINDOW_HOURS, MAX_WINDOW_HOURS], so the badge is always
+    one of "48h" / "72h" / "96h" rather than an odd number nobody can read.
+
+    Anchoring on the last CLOSE is the whole trick. The intuitive rule -- "extend
+    across weekend days" -- fires on an ordinary Tuesday, because 48h back from a
+    Tuesday afternoon lands on a Sunday. Asking instead "has the tape finished a
+    session since the cutoff?" stretches on a Monday morning (last close: Friday)
+    and on the Tuesday after a Monday holiday (96h), while leaving a merely quiet
+    ticker mid-week at 48h. Returning CORPUS_WINDOW_HOURS means "do not stretch".
+
+    A naive ``now`` is read as UTC, matching every other caller in this module.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    gap_hours = (now - last_completed_close(now)).total_seconds() / 3600.0
+    if not math.isfinite(gap_hours) or gap_hours <= 0:
+        # Clock skew, or a `now` that predates the last close. Never widen on
+        # a number we cannot explain.
+        return CORPUS_WINDOW_HOURS
+    whole_days = int(math.ceil(gap_hours / 24.0)) * 24
+    return max(CORPUS_WINDOW_HOURS, min(whole_days, MAX_WINDOW_HOURS))
 
 
 # ── Singleton ─────────────────────────────────────────────────────────

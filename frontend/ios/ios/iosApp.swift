@@ -217,6 +217,16 @@ struct iosApp: App {
                     appState.unreadNotificationCount = count
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                    // Re-read the unread count on every foreground.
+                    //
+                    // ONE request, one row (`limit=1`), signed-in only — and deliberate, not the
+                    // duplicate-fan-out pattern `test_ios_launch_cost_guards.py` exists to stop.
+                    // Without it the badge is only as fresh as the last push tap or the last
+                    // visit to the Alerts tab, and the Alerts tab clears it on sight. Returning
+                    // to the app after a few hours is precisely when "you have something to
+                    // check" needs to be true.
+                    Task { await NotificationInboxViewModel.shared.refreshUnreadCount() }
+
                     #if DEBUG
                     AppearanceProbe.dump("foreground")
                     #endif

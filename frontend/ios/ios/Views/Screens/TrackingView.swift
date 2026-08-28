@@ -358,6 +358,12 @@ struct AssetsTabContent: View {
                     // holding four tickers was told "No tickers yet — Add a ticker to start
                     // tracking prices" for the whole first load.
                     TrackedAssetsSkeleton()
+                        // Every sibling in this LazyVStack self-pads (PortfolioHeaderBar,
+                        // AssetsPlaceholderCard, PortfolioInsightsSection) and the real list
+                        // insets via listRowInsets. Without this the placeholder cards were
+                        // 32pt WIDER than the rows replacing them, so the list snapped inward
+                        // on load — the exact jump this skeleton exists to prevent.
+                        .padding(.horizontal, AppSpacing.lg)
                 } else if viewModel.filteredAssets.isEmpty {
                     AssetsPlaceholderCard(
                         errorMessage: viewModel.assetsErrorMessage,

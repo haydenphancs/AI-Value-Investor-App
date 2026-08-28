@@ -354,11 +354,32 @@ def _ev_metric(snapshot):
     return next(m.value for m in snapshot.metrics if m.name.startswith("EV/EBITDA"))
 
 
-async def _compute_with(ratios_ttm, monkeypatch):
+class _StubLookup:
+    """Stands in for SectorBenchmarkLookup so tests never touch Supabase."""
+
+    def __init__(self, bench=None):
+        self._bench = bench or {}
+
+    def get_current_benchmark_values(self, industry, sector, metrics):
+        return dict(self._bench)
+
+
+async def _compute_with(ratios_ttm, monkeypatch, bench=None, fmp=None):
+    """Drive the REAL `_compute` with no network of any kind.
+
+    ⚠️ This used to `monkeypatch.setattr(mod, "get_current_benchmarks", ...,
+    raising=False)`. That name does not exist in the module — production calls
+    `get_sector_benchmark_lookup().get_current_benchmark_values(...)` — so
+    `raising=False` made the patch a SILENT NO-OP and every test here ran
+    against the live Supabase-backed lookup. Verified by spying on the real
+    symbol: it was invoked, and the P/E label carried a real sector median.
+    Patch the factory, not a name that was never there.
+    """
     import app.services.valuation_snapshot_service as mod
-    monkeypatch.setattr(mod, "get_current_benchmarks", lambda *a, **k: {}, raising=False)
+    monkeypatch.setattr(mod, "get_sector_benchmark_lookup",
+                        lambda: _StubLookup(bench))
     svc = mod.ValuationSnapshotService.__new__(mod.ValuationSnapshotService)
-    svc.fmp = _RatiosFMP(ratios_ttm)
+    svc.fmp = fmp or _RatiosFMP(ratios_ttm)
     svc.supabase = None
     return await svc._compute("AAPL")
 
@@ -559,3 +580,266 @@ def test_the_ai_context_labels_each_statement_with_a_year():
     assert "[2025]" in ctx
     assert "[2024]" in ctx, "the date fallback did not supply a year"
     assert "[?]" not in ctx, "a statement reached the model with no year label"
+
+
+# ── 9. Two P/E values on one screen, deliberately ────────────────────────────
+#
+# "P/E (TTM)" in Key Statistics and "P/E (1.63x sector avg 22)" on the Price
+# snapshot card render in the SAME scroll view and can disagree (AAPL 35.90 vs
+# 35.78). That is the design. These tests are the executable form of the
+# why-comments in both services, so a future "fix" fails here with a message
+# saying why rather than shipping.
+#
+# The invariant is NARROWER than "the persisted row carries no price-derived
+# multiple" — that claim is false: `mcap` (price × shares) legitimately feeds
+# the P/FCF, EV/EBITDA and earnings-yield fallbacks, and FMP's own
+# `priceToEarningsRatioTTM` is a price ÷ earnings. What must hold is:
+# never read the LIVE-QUOTE endpoint, and never persist an ABSOLUTE price.
+
+
+class _AllowListFMP(_RatiosFMP):
+    """Serves ONLY the six endpoints `_compute` legitimately uses; records the rest.
+
+    ⚠️ `__getattr__` RECORDS and returns an async no-op rather than raising.
+    `_compute` fetches inside `asyncio.gather(..., return_exceptions=True)`,
+    which SWALLOWS anything raised inside a coroutine and quietly degrades the
+    snapshot — a raising fake would have made this test assert nothing. The
+    assertion is on the recorded names instead.
+    """
+
+    def __init__(self, ratios_ttm, price=999.0):
+        super().__init__(ratios_ttm)
+        self.extra_calls: list = []
+        self._price = price
+
+    async def get_company_profile(self, t):
+        prof = await super().get_company_profile(t)
+        prof["price"] = self._price
+        return prof
+
+    def __getattr__(self, name):
+        # Only reached for attributes the class does NOT define.
+        async def _recorder(*a, **k):
+            self.extra_calls.append(name)
+            return []
+        self.extra_calls.append(name)
+        return _recorder
+
+
+@pytest.mark.asyncio
+async def test_the_persisted_snapshot_never_reads_the_live_quote(monkeypatch):
+    """The load-bearing guard. A live quote in this row would be a live price
+    inside a 24-hour Supabase cache — the bug class the ETF/index/commodity
+    decomposition removed."""
+    fmp = _AllowListFMP({"priceToEarningsRatioTTM": 35.54})
+    snap = await _compute_with(None, monkeypatch, fmp=fmp)
+
+    assert "get_stock_price_quote" not in fmp.extra_calls
+    assert not any("quote" in name for name in fmp.extra_calls), fmp.extra_calls
+    # Anti-vacuity control: a `_compute` that stopped calling FMP entirely, or a
+    # fake that was never wired in, must FAIL here rather than pass silently.
+    assert snap.metrics, "no metrics built — the fake was not exercised"
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_pe_is_fmps_ttm_ratio_not_price_over_eps(monkeypatch):
+    """The companion the allow-list cannot give: `profile["price"]` is already in
+    hand inside `_compute`, so a `price / eps` implementation would never trip a
+    banned-endpoint check. The fixture price is chosen to be visibly different."""
+    fmp = _AllowListFMP({"priceToEarningsRatioTTM": 35.54}, price=999.0)
+    snap = await _compute_with(None, monkeypatch, fmp=fmp)
+
+    pe = next(m.value for m in snap.metrics if m.metric_key == "pe")
+    assert pe == "35.54"
+    assert pe != "999.00"
+
+
+@pytest.mark.asyncio
+async def test_the_two_pe_values_are_allowed_to_differ(monkeypatch):
+    """One scenario, both producers, each pinned to ITS OWN stated source.
+
+    Live: price 313.40 / TTM EPS 8.73 = 35.90 — internally consistent with the
+    header price. Cached: FMP's ratio 35.78, priced at FMP's timestamp. The
+    inequality is documentation; the two equalities are the mechanism.
+    """
+    built = _build(
+        eps_quarters=[{"epsDiluted": q} for q in (2.18, 2.18, 2.18, 2.19)],
+        price=313.40,
+    )
+    live = _stats(built)["P/E (TTM)"]
+
+    fmp = _AllowListFMP({"priceToEarningsRatioTTM": 35.78}, price=313.40)
+    snap = await _compute_with(None, monkeypatch, fmp=fmp)
+    cached = next(m.value for m in snap.metrics if m.metric_key == "pe")
+
+    assert live == "35.90"      # 313.40 / 8.73, the live quote
+    assert cached == "35.78"    # FMP's own TTM ratio
+    assert live != cached, (
+        "the two P/E values collapsed to one — if you unified them, read the "
+        "comments in stock_overview_service._build_key_statistics and "
+        "valuation_snapshot_service.build_price_snapshot first"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_persisted_payload_carries_no_absolute_price(monkeypatch):
+    """A schema TRIPWIRE, not the main guard — be honest about which.
+
+    `SnapshotItemResponse` has a fixed field set, so no banned key can appear
+    today and this cannot fail as written. Its value is the day someone adds
+    `current_price` to the card "to show what the ratio was priced off": that is
+    the change that would put a live price in a 24-hour row, and this goes red.
+    The real guard is test_the_persisted_snapshot_never_reads_the_live_quote.
+    """
+    fmp = _AllowListFMP({"priceToEarningsRatioTTM": 35.54})
+    snap = await _compute_with(None, monkeypatch, fmp=fmp)
+
+    banned = {"price", "current_price", "changes", "change", "changePercentage",
+              "previousClose", "dayHigh", "dayLow", "yearHigh", "yearLow"}
+
+    def _walk(node, path="root"):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                assert key not in banned, f"{path}.{key} is a live-price field"
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                _walk(value, f"{path}[{i}]")
+
+    payload = snap.model_dump()
+    _walk(payload)
+    assert payload["metrics"], "walked an empty payload — the tripwire proved nothing"
+
+
+# ── 10. The degraded fallback Price card ─────────────────────────────────────
+#
+# `stock_overview_service._build_valuation_snapshot` renders the SAME card when
+# `get_valuation_snapshot` raised. It had its own copy of everything and had
+# zero test coverage — which is exactly how the "Neg." fix missed it.
+
+
+def _fallback(fr, km=None, bench=None, sector="Technology"):
+    from app.services.stock_overview_service import StockOverviewService
+    import app.services.stock_overview_service as sos
+
+    svc = StockOverviewService.__new__(StockOverviewService)
+    lookup = _StubLookup(bench)
+    original = sos.get_sector_benchmark_lookup
+    sos.get_sector_benchmark_lookup = lambda: lookup
+    try:
+        return svc._build_valuation_snapshot(
+            fr, km or {}, {}, {}, {}, {"sector": sector}, sector, "Software",
+        )
+    finally:
+        sos.get_sector_benchmark_lookup = original
+
+
+def _pe_of(snapshot):
+    """Keyed on `metric_key`, NOT the label. `_metric_name` emits a bare "P/E"
+    with no parentheses when the benchmark is missing — a `startswith("P/E (")`
+    helper raises StopIteration on precisely the degraded case under test."""
+    return next(m.value for m in snapshot.metrics if m.metric_key == "pe")
+
+
+def test_the_fallback_card_says_neg_for_a_loss_maker_not_dash():
+    """The regression this path shipped: a `pe > 0` guard rendered "—" (unknown)
+    where the primary renders "Neg." (undefined because the company loses money)
+    — the exact distinction a TestFlight tester photographed on MRNA."""
+    snap = _fallback({"priceToEarningsRatioTTM": -18.75})
+    assert _pe_of(snap) == "Neg."
+
+
+def test_the_fallback_card_uses_real_sector_benchmarks():
+    """It scored against a hardcoded table (Technology 30.0) while the primary
+    used `sector_benchmarks`. A wrong median is a wrong star rating on a card the
+    user cannot tell apart from the real one."""
+    snap = _fallback({"priceToEarningsRatioTTM": 35.54}, bench={"pe_ratio": 22.0})
+    name = next(m.name for m in snap.metrics if m.metric_key == "pe")
+    assert "sector avg 22" in name
+    assert "sector avg 30" not in name
+
+
+def test_the_fallback_card_degrades_honestly_with_no_benchmark():
+    """No benchmark must mean NO sector claim — not a fabricated average."""
+    snap = _fallback({"priceToEarningsRatioTTM": 35.54}, bench={})
+    name = next(m.name for m in snap.metrics if m.metric_key == "pe")
+    assert "sector avg" not in name
+    assert _pe_of(snap) == "35.54"
+
+
+def test_the_fallback_card_survives_a_benchmark_lookup_failure():
+    """This is already the degraded path; it must not be able to fail the
+    whole overview."""
+    from app.services.stock_overview_service import StockOverviewService
+    import app.services.stock_overview_service as sos
+
+    class _Exploding:
+        def get_current_benchmark_values(self, *a, **k):
+            raise RuntimeError("supabase down")
+
+    svc = StockOverviewService.__new__(StockOverviewService)
+    original = sos.get_sector_benchmark_lookup
+    sos.get_sector_benchmark_lookup = lambda: _Exploding()
+    try:
+        snap = svc._build_valuation_snapshot(
+            {"priceToEarningsRatioTTM": 35.54}, {}, {}, {}, {},
+            {"sector": "Technology"}, "Technology", "Software",
+        )
+    finally:
+        sos.get_sector_benchmark_lookup = original
+
+    assert _pe_of(snap) == "35.54"
+
+
+def test_both_price_card_paths_are_the_same_code():
+    """Parity by construction, not by convention: the fallback must go through
+    the primary's builder. Two implementations is what let them drift into four
+    divergences, three of which were wrong numbers rather than missing ones."""
+    from app.services.valuation_snapshot_service import build_price_snapshot
+
+    fr = {"priceToEarningsRatioTTM": -18.75}
+    bench = {"pe_ratio": 22.0}
+    direct = build_price_snapshot(
+        fr=fr, km={}, cf={}, inc={}, bs={}, profile={"sector": "Technology"},
+        bench=bench,
+    )
+    via_fallback = _fallback(fr, bench=bench)
+
+    assert [m.value for m in direct.metrics] == [m.value for m in via_fallback.metrics]
+    assert [m.name for m in direct.metrics] == [m.name for m in via_fallback.metrics]
+    assert direct.rating == via_fallback.rating
+
+
+def test_the_fallback_is_wired_into_build_snapshots():
+    """Covers the SEAM, not just the helper. `_build_snapshots` selects the
+    fallback when `valuation_snapshot=None` and must hand it the payloads the
+    shared builder needs — a signature the direct-call tests above cannot check.
+    A wrong argument here is a 500 on the whole overview, not a wrong number.
+    """
+    from app.services.stock_overview_service import StockOverviewService
+    import app.services.stock_overview_service as sos
+
+    class _Stub:
+        def get_current_benchmark_values(self, industry, sector, metrics):
+            return {"pe_ratio": 22.0}
+
+    svc = StockOverviewService.__new__(StockOverviewService)
+    original = sos.get_sector_benchmark_lookup
+    sos.get_sector_benchmark_lookup = lambda: _Stub()
+    try:
+        snapshots = svc._build_snapshots(
+            key_metrics=[{}],
+            fin_ratios=[{"priceToEarningsRatioTTM": -18.75}],
+            income_annual=[{}], balance_annual=[{}], cashflow_annual=[{}],
+            price=100.0, market_cap=1e12, sector="Technology",
+            profile={"sector": "Technology", "industry": "Software"},
+            industry="Software",
+        )
+    finally:
+        sos.get_sector_benchmark_lookup = original
+
+    price = next(s for s in snapshots if s.category == "Price")
+    assert _pe_of(price) == "Neg."                       # not the old "—"
+    assert "sector avg 22" in next(
+        m.name for m in price.metrics if m.metric_key == "pe")   # not the old 30
+    assert len(price.metrics) == 6                       # was 4: no P/B, no yield

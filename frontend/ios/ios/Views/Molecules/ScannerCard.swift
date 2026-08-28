@@ -14,10 +14,16 @@ import SwiftUI
 struct ScannerCard: View {
     let scanner: DailyScanner
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
-    /// Fired when a tap lands on the card BODY (not a child control). The card
-    /// swallows the tap so it can't bubble to the Home collapse gesture and close
-    /// THIS card — but that tap is still "outside" every OTHER expandable, so the
-    /// Home screen uses this to collapse the expanded App-Exclusive Signals row.
+    /// Fired when a tap lands on the card BODY (not a child control).
+    ///
+    /// ⚠️ The SWALLOW is the load-bearing part, not this closure. `.onTapGesture` below
+    /// consumes the tap so it cannot bubble to the Home screen's collapse gesture and close
+    /// the very card you just touched — that holds whether or not a handler is supplied.
+    ///
+    /// The closure itself is currently UNWIRED. It used to carry the cross-section collapse
+    /// ("this tap is outside the OTHER section, so close it"), which was the machinery
+    /// enforcing one-open-at-a-time. Every card can now be expanded at once, so Home passes
+    /// nothing. Kept because the hook is the natural place for a future caller to react.
     var onBodyTap: (() -> Void)? = nil
 
     @State private var moversMode: MoversMode = .gainers

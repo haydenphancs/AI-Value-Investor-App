@@ -47,20 +47,29 @@ class _FakeGemini:
         self.deleted = 0
         self.cached_prompts: list[str] = []
         self.inline_prompts: list[str] = []
+        # Thinking budgets, recorded per path. The parameters below are declared
+        # EXPLICITLY rather than swallowed by **kwargs on purpose: a fake that
+        # accepts anything cannot catch a call site that stopped passing the
+        # budget, which is exactly the regression these lists exist to detect.
+        self.cached_budgets: list = []
+        self.inline_budgets: list = []
 
     async def create_narrative_cache(self, system_instruction, evidence,
                                      ttl_minutes=None):
         self.created += 1
         return self._cache_handle
 
-    async def generate_text_cached(self, prompt, handle):
+    async def generate_text_cached(self, prompt, handle, thinking_budget=None):
         self.cached_prompts.append(prompt)
+        self.cached_budgets.append(thinking_budget)
         if self._cached_raises:
             raise RuntimeError("simulated cache-path failure")
         return {"text": self._text}
 
-    async def generate_text(self, prompt, system_instruction=None):
+    async def generate_text(self, prompt, system_instruction=None,
+                            thinking_budget=None):
         self.inline_prompts.append(prompt)
+        self.inline_budgets.append(thinking_budget)
         if self._inline_raises:
             raise RuntimeError("simulated inline-path failure")
         return {"text": self._text}
@@ -410,3 +419,127 @@ async def test_research_agent_path_forwards_evidence(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0]["evidence"] == _SENTINEL_EVIDENCE
+
+
+# ── Thinking budget on the Stage-B path (SYSTEM_DESIGN_GUIDELINES 9b.7) ──────
+#
+# gemini-2.5-flash thinks by default and those tokens bill at the OUTPUT rate.
+# Stage B is ~14-18 word-capped jobs per report, measured at ~391 thought tokens
+# each for ~100 tokens of prose — so the cap is real money on the 20-credit
+# product. What these tests actually defend is the SYMMETRY of the two paths:
+# `run_narrative_jobs` is fail-open by design, and the inline path is not an
+# exotic error branch. `create_narrative_cache` returns None for evidence below
+# the model's ~1024-token floor, on quota, and on a hung SDK — on any of those
+# EVERY job takes the inline path. Capping only the cached call is therefore not
+# a partial fix on those tickers, it is a ZERO fix, silently, with normal logs.
+
+from app.config import settings  # noqa: E402
+from app.services.agents.narrative_prompts import (  # noqa: E402
+    _resolve_budget,
+    narrative_thinking_budget,
+    stage_a_thinking_budget,
+)
+
+_HANDLE = {"cache": object(), "model": object()}
+
+
+@pytest.mark.asyncio
+async def test_the_cached_stage_b_call_carries_the_thinking_budget():
+    persona = get_persona_config("warren_buffett")
+    gemini = _FakeGemini(cache_handle=_HANDLE)
+    job, _ = _job()
+
+    await run_narrative_jobs([job], gemini, persona, evidence=_EVIDENCE)
+
+    assert gemini.cached_budgets == [narrative_thinking_budget()]
+
+
+@pytest.mark.asyncio
+async def test_the_inline_fallback_carries_the_same_thinking_budget():
+    """THE regression this pair exists for. A cache-path hiccup falls back
+    inline; if that call is uncapped the saving evaporates precisely under quota
+    pressure, and nothing says so."""
+    persona = get_persona_config("warren_buffett")
+    gemini = _FakeGemini(cache_handle=_HANDLE, cached_raises=True)
+    job, _ = _job()
+
+    await run_narrative_jobs([job], gemini, persona, evidence=_EVIDENCE)
+
+    assert len(gemini.inline_prompts) == 1          # it really took the fallback
+    assert gemini.inline_budgets == [narrative_thinking_budget()]
+    assert gemini.cached_budgets == [narrative_thinking_budget()]
+
+
+@pytest.mark.asyncio
+async def test_the_no_cache_path_still_caps_thinking():
+    """Evidence below the model's cache floor => cache_handle is None => EVERY
+    job is inline. This is the common case that makes a cached-only cap a zero."""
+    persona = get_persona_config("warren_buffett")
+    gemini = _FakeGemini(cache_handle=None)
+    job, _ = _job()
+
+    await run_narrative_jobs([job], gemini, persona, evidence=_EVIDENCE)
+
+    assert gemini.cached_prompts == []
+    assert gemini.inline_budgets == [narrative_thinking_budget()]
+
+
+@pytest.mark.asyncio
+async def test_every_job_gets_the_budget_not_just_the_first():
+    persona = get_persona_config("warren_buffett")
+    gemini = _FakeGemini(cache_handle=_HANDLE)
+    jobs = [_job()[0] for _ in range(3)]
+
+    await run_narrative_jobs(jobs, gemini, persona, evidence=_EVIDENCE)
+
+    assert gemini.cached_budgets == [narrative_thinking_budget()] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_negative_setting_restores_the_model_default(monkeypatch):
+    """The rollback path. A negative value maps to None — send NO thinking_config
+    at all, byte-identical to a pre-cap request — rather than passing Gemini's
+    own `-1` ("dynamic thinking") through, which is a different wire message and
+    a different assumption."""
+    monkeypatch.setattr(settings, "REPORT_NARRATIVE_THINKING_BUDGET", -1)
+    persona = get_persona_config("warren_buffett")
+    gemini = _FakeGemini(cache_handle=_HANDLE, cached_raises=True)
+    job, _ = _job()
+
+    await run_narrative_jobs([job], gemini, persona, evidence=_EVIDENCE)
+
+    assert gemini.cached_budgets == [None]
+    assert gemini.inline_budgets == [None]
+
+
+def test_the_resolver_maps_negatives_to_none_and_keeps_zero():
+    """0 and None are NOT interchangeable: 0 disables thinking, None leaves the
+    model's default alone. Collapsing them would make the cap unrollbackable."""
+    assert _resolve_budget(0) == 0
+    assert _resolve_budget(512) == 512
+    assert _resolve_budget(-1) is None
+    assert _resolve_budget(-9999) is None
+
+
+def test_the_stage_b_cap_is_actually_a_cap():
+    """A later 'let's be safe' bump would silently restore the whole cost.
+    Measured: 391 thought tokens at default, and outputs were substantively
+    identical at 0 / 512 / 1024 / default."""
+    budget = narrative_thinking_budget()
+    assert budget is not None and 0 <= budget <= 1024
+
+
+def test_stage_a_and_stage_b_budgets_are_independent_knobs(monkeypatch):
+    """Stage A is the one with quality risk (it decides thesis/pros/cons/moat/
+    valuation), so it must be revertable on its own WITHOUT giving up the
+    risk-free Stage B saving."""
+    monkeypatch.setattr(settings, "REPORT_STAGE_A_THINKING_BUDGET", 777)
+    monkeypatch.setattr(settings, "REPORT_NARRATIVE_THINKING_BUDGET", 111)
+    assert stage_a_thinking_budget() == 777
+    assert narrative_thinking_budget() == 111
+
+    # …and reverting ONE must not revert the other. That independence is the
+    # whole point of two settings.
+    monkeypatch.setattr(settings, "REPORT_STAGE_A_THINKING_BUDGET", -1)
+    assert stage_a_thinking_budget() is None
+    assert narrative_thinking_budget() == 111

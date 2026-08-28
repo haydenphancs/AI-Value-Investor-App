@@ -378,3 +378,161 @@ def test_the_expand_movement_scans_are_not_vacuous():
     assert "withAnimation" in _read(_SIGNAL_ROW), (
         "SignalDisclosureRow no longer explains why the expand is unanimated")
     assert "withAnimation" not in _strip_comments(_read(_SIGNAL_ROW)), "comment stripping regressed"
+
+
+# ── 7. Several cards may be expanded at once ──────────────────────────────────
+
+_HOME_VIEW = _IOS / "Views/Screens/HomeDashboardView.swift"
+
+
+def test_both_home_sections_allow_more_than_one_card_open():
+    """Daily Scanners and App-Exclusive Signals were one-open-at-a-time: each section held a
+    single optional id, so expanding one card closed the others. Readers asked to be able to
+    open all three. The state is a SET on both sides.
+
+    Asserting the Set on the SECTIONS and on the Home screen that owns them, because a single
+    `ID?` anywhere in that chain reimposes the limit.
+    """
+    for rel, prop in (("Views/Organisms/DailyScannersSection.swift", "expandedCardIDs"),
+                      ("Views/Organisms/ExclusiveSignalsSection.swift", "expandedSignalIDs")):
+        code = _strip_comments(_read(_IOS / rel))
+        assert f"@Binding var {prop}: Set<" in code, (
+            f"{rel}: `{prop}` is not a Set — a single optional id means one card open at a time")
+        assert f"{prop}.contains(" in code and f"{prop}.insert(" in code and f"{prop}.remove(" in code, (
+            f"{rel}: the per-card binding no longer toggles set membership")
+
+    home = _strip_comments(_read(_HOME_VIEW))
+    for prop in ("expandedScannerIDs", "expandedSignalIDs"):
+        assert f"@State private var {prop}: Set<" in home, (
+            f"HomeDashboardView.{prop} is not a Set — the sections cannot hold more than one "
+            "card open if the state that owns them cannot")
+
+
+def test_expanding_one_home_section_does_not_collapse_the_other():
+    """The cross-section collapse was the machinery enforcing one-open-at-a-time: a tap
+    swallowed by a scanner card was forwarded as "outside the signals section, so close it".
+    With every card expandable that would close a reader's signals rows the instant they
+    touched a scanner card.
+
+    The tap is still SWALLOWED — that is `.onTapGesture`'s doing inside the card, not this
+    wiring — so a tap on a card still cannot bubble up and collapse the card you just touched.
+    """
+    home = _strip_comments(_read(_HOME_VIEW))
+    for wiring in ("onBodyTap: collapseExpandedSignal", "onBodyTap: collapseExpandedScanner"):
+        assert wiring not in home, (
+            f"`{wiring}` is back. That is the cross-section auto-collapse, i.e. "
+            "one-open-at-a-time by another name.")
+    # The swallow must survive, in both molecules.
+    for rel in ("Views/Molecules/ScannerCard.swift", "Views/Molecules/SignalDisclosureRow.swift"):
+        code = _strip_comments(_read(_IOS / rel))
+        assert "onTapGesture { onBodyTap?() }" in code, (
+            f"{rel}: lost the body-tap swallow — a tap on the card will now bubble to Home's "
+            "collapse gesture and close the very card the reader touched")
+
+
+def test_home_does_not_re_animate_the_signals_collapse():
+    """`collapseExpandedSignal` is reachable from the tap-outside gesture and the pre-paywall
+    path. It must stay unanimated: an animated resize of that card is what was reported as the
+    whole card blinking, and the two collapses used to share one `withAnimation` here."""
+    body = _read(_HOME_VIEW)
+    start = body.index("private func collapseExpandedSignal()")
+    window = _strip_comments(body[start : body.index("\n    }", start)])
+    assert "expandedSignalIDs.removeAll()" in window, "the signals collapse no longer clears"
+    assert "withAnimation" not in window, (
+        "`withAnimation` is back around the signals collapse in HomeDashboardView. The signals "
+        "card is deliberately unanimated (see SignalDisclosureRow); animating it from the "
+        "outside reintroduces exactly the resize that was reported as blinking.")
+
+
+def test_the_multi_expand_scans_are_not_vacuous():
+    """Absence assertions above pass on an empty or renamed file; presence ones pass on the
+    wrong declaration. Pin both ends."""
+    home = _read(_HOME_VIEW)
+    assert "struct HomeDashboardView" in home, "Home scan drifted"
+    assert "DailyScannersSection(" in home and "ExclusiveSignalsSection(" in home, (
+        "Home no longer hosts both sections, so asserting the absence of cross-collapse "
+        "wiring between them proves nothing")
+    # `onBodyTap` must still EXIST as a parameter — the absence check above is about the
+    # cross-section handler, not about deleting the hook.
+    for rel in ("Views/Molecules/ScannerCard.swift", "Views/Molecules/SignalDisclosureRow.swift"):
+        assert "var onBodyTap:" in _read(_IOS / rel), f"{rel}: the onBodyTap hook is gone"
+    # The collapse-window helper must really be bounded to the function.
+    start = home.index("private func collapseExpandedSignal()")
+    window = home[start : home.index("\n    }", start)]
+    assert "collapseExpandedScanner" not in window, "the window ran into the sibling helper"
+
+
+# ── 8. The expanded leader list's scroll affordance ───────────────────────────
+
+
+def test_the_leader_list_uses_its_own_always_visible_indicator():
+    """⚠️ `.scrollIndicators(.visible)` does NOT mean "always visible" — do not go back to it.
+
+    It means "do not suppress them"; UIKit still fades the indicator once scrolling stops. A
+    reader who has not touched the list therefore sees no bar and cannot tell there is more
+    below, which is exactly what was reported ("Always show the scroll bar, so users can know
+    there are more"). Measured on the simulator: no indicator at rest right after expanding.
+
+    There is no API to pin the system one, so it is hidden and a custom capsule is drawn from
+    `onScrollGeometryChange`.
+    """
+    code = _strip_comments(_read(_SIGNAL_ROW))
+    assert ".scrollIndicators(.hidden)" in code, (
+        "the system scroll indicator is back. `.visible` fades when idle, so the list stops "
+        "advertising that it has more rows — use the custom indicator.")
+    assert "onScrollGeometryChange" in code, "the custom indicator lost its geometry source"
+    assert "scrollIndicator" in code, "the custom indicator view is gone"
+
+
+def test_the_custom_indicator_is_bounded_and_inert():
+    """Length is clamped (the system bar ran ~137pt and was reported as long) and the overlay
+    must never steal a tap from the leader row underneath it."""
+    code = _strip_comments(_read(_SIGNAL_ROW))
+    # Both the DECLARATIONS and the clamp EXPRESSION. Grepping the bare names is not enough:
+    # deleting a `private static let` leaves the name behind at its use site, so the token check
+    # stayed green on a build that no longer compiles. A mutation test caught that.
+    for token in ("thumbMinHeight: CGFloat =", "thumbMaxHeight: CGFloat ="):
+        assert token in code, f"the indicator lost its `{token.split(':')[0]}` declaration"
+    block = _decl_block(_read(_SIGNAL_ROW), "private var scrollIndicator: some View")
+    assert re.search(r"min\(\s*max\(.*thumbMinHeight\s*\)\s*,\s*Self\.thumbMaxHeight\s*\)", block), (
+        "the thumb length is no longer clamped between the two bounds — it can run the full "
+        "track again, which is the ~137pt bar that was reported as long.\nblock was:\n" + block)
+    assert "allowsHitTesting(false)" in block, (
+        "the scroll indicator can absorb taps meant for the leader row beneath it")
+    assert "accessibilityHidden(true)" in block, "decoration must not be announced"
+    # The divide-by-zero guard on the fraction maths.
+    assert "max(m.content - m.viewport, 1)" in code, (
+        "the scrollable-height guard is gone; content == viewport would divide by zero and put "
+        "NaN into a frame height")
+
+
+def test_the_leader_stat_clears_the_scroll_indicator():
+    """The stat sat ~4pt clear of the indicator and read as covered. Trailing inset is wider
+    than leading on purpose; measured clearance after the fix is ~17pt."""
+    block = _decl_block(_read(_SIGNAL_ROW), "private func leaderRow(_ leader: SignalLeader)")
+    assert ".padding(.leading, 11)" in block and ".padding(.trailing, 22)" in block, (
+        "the leader row went back to an even horizontal inset, which puts the 'N buys' stat "
+        "back under the scroll indicator")
+    assert ".padding(.horizontal," not in block, (
+        "an even horizontal padding is back — that is what put the stat under the indicator")
+
+
+def test_the_scroll_threshold_tracks_the_list_height():
+    """A leader row is ~43pt + 7pt spacing, so ~4 fit in 200pt. If the threshold drifts above
+    that, a SHORTER list renders unbounded and taller than a LONGER capped one — at the old
+    6/260 pairing a six-item list was ~300pt while a seven-item list was capped at 260."""
+    code = _strip_comments(_read(_SIGNAL_ROW))
+    assert "scrollThreshold = 4" in code, "the scroll threshold no longer matches the 200pt cap"
+    assert "expandedListMaxHeight: CGFloat = 200" in code, "the list height moved without the threshold"
+
+
+def test_the_scroll_affordance_scans_are_not_vacuous():
+    src = _read(_SIGNAL_ROW)
+    code = _strip_comments(src)
+    assert len(code) < len(src), "comment stripping removed nothing"
+    # The fix's own comments name `.scrollIndicators(.visible)` while explaining why it is gone.
+    assert "scrollIndicators(.visible)" in src, "the explanation for hiding the system bar is gone"
+    assert "scrollIndicators(.visible)" not in code, "comment stripping regressed"
+    block = _decl_block(src, "private func leaderRow(_ leader: SignalLeader)")
+    assert "leader.stat" in block, "the leaderRow window no longer renders the stat"
+    assert "scrollIndicator" not in block, "the leaderRow window leaked into the indicator"

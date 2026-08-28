@@ -1276,6 +1276,29 @@ extension APIService {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**What may go into Tier 2 — the rule the diagram cannot show.** Tier 2 holds only
+sections that **cannot contain a live price**. A live price belongs in Tier 1 or in no
+cache at all. This is not a style preference: the ETF, index and commodity services were
+each decomposed for it (`etf_service.py`, `index_service.py`, `commodity_service.py`,
+and the `etf_snapshot_cache` table COMMENT all state it), because a monolithic payload
+froze `current_price` into a 24-hour row and a cache hit then served a day-old price
+beside quote-derived key statistics.
+
+A consequence that looks like a bug and is not: **the same quantity may legitimately
+render twice on one screen at two freshnesses.** The worked example is the ticker
+detail P/E — `stock_overview_service._build_key_statistics` computes it from the live
+quote (120 s, never persisted) while `valuation_snapshot_service.build_price_snapshot`
+serves FMP's own `priceToEarningsRatioTTM` (24 h in `snapshot_cache`). Measured drift:
+KO identical, AAPL $1.07 of price, UBER 1.8%. Unifying them is what would put a live
+price back into a 24-hour row. Both call sites carry the full reasoning; a third
+producer — an unreachable-by-most degraded fallback with its own annual ratios and
+hardcoded sector averages — was folded into the same builder rather than documented.
+
+Note the invariant is narrower than "no price-derived value": market cap (price ×
+shares) legitimately feeds the P/FCF, EV/EBITDA and earnings-yield fallbacks. It is a
+slow, daily-cadence upstream field on the same clock as FMP's TTM ratios, inside the
+24-hour staleness budget by construction. A live quote is not.
+
 ### 7.2 Cache Invalidation Strategy
 
 ```swift
@@ -1937,13 +1960,58 @@ in place of a price, plus a banner carrying the reason — it never blanks the s
 server-authoritative and true regardless of StoreKit; the USD `price_cents` is display-only config
 and is deliberately *not* shown there, because it is not what Apple would charge.
 
-> **Open item, tracked here because it moves the margin floor:** the tier allocations were sized
-> against "~17 Gemini calls per report", a figure still repeated in five source files. The real
-> count is **20–26**, and `thinking_budget` is never set on the report path, so thinking tokens bill
-> uncapped at the output rate. Worst-case report COGS is closer to **$0.09–0.15** than the
-> documented $0.05–0.06, pulling Pro's worst-case margin from ~72% toward ~30–47%. The pack ladder
-> is unaffected (packs stay higher-margin by construction); the **subscription** allocations need a
-> re-check, and capping `thinking_budget` is the cheapest lever.
+> **Thinking budgets — CLOSED, measured (2026-08-27).** `thinking_budget` used to be unset
+> everywhere on the report path, so reasoning tokens billed uncapped at the **output** rate while
+> producing nothing the user reads. Both stages are now capped, via two independent settings in
+> `config.py`: `REPORT_NARRATIVE_THINKING_BUDGET` (Stage B) and `REPORT_STAGE_A_THINKING_BUDGET`
+> (Stage A), both defaulting to **0**. A **negative** value restores the model's own default —
+> mapped to "send no `thinking_config` at all", which is byte-identical on the wire to a pre-cap
+> request, rather than passing Gemini's `-1` ("dynamic thinking") through.
+>
+> Measured with `backend/scripts/eval_report_thinking.py` on the real prompts
+> (MSFT / warren_buffett, `gemini-2.5-flash`), per report:
+>
+> | budget | Stage A | Stage B | thinking | $/report |
+> |---|---|---|---|---|
+> | default | 1,715 | 14,672 | 16,387 | $0.0618 |
+> | **0** | 0 | 0 | **0** | **$0.0210 (−66%)** |
+> | 512 | 408 | 5,569 | 5,977 | $0.0361 (−42%) |
+> | 1024 | 847 | 9,927 | 10,774 | $0.0480 (−22%) |
+>
+> Two corrections fell out of measuring rather than estimating. **Stage B is ~3× the earlier
+> estimate** (14,672 vs ~5,470): per-job thinking runs 259–2,767 across the 12–18 jobs, not a flat
+> ~391. And **`candidates_token_count` EXCLUDES thoughts** — settled by the arithmetic
+> `total − prompt − candidates − thoughts == 0` on a real uncapped call. The claim in `config.py`
+> that "gemini-2.5-flash counts thinking in `output_tok`" was wrong and is corrected there;
+> `GEMINI_USAGE` now carries `thoughts_tok` beside `output_tok`, and is emitted from the three
+> non-streaming helpers so the report path is visible in production at all (it previously logged
+> only from the two chat streaming methods).
+>
+> ⚠️ **The cap is not free, and the earlier "outputs substantively identical at 0/512/1024/default"
+> claim rested on ONE job.** Across all of them a no-thinking model writes *longer* and does not
+> self-compress (revenue_forecast_insight: 79–81 output tokens uncapped vs 130–163 at budget 0), so
+> `_post_process`'s word cap hard-cuts it mid-sentence with an ellipsis. In two runs, 2–3 of 12
+> narratives truncated at budget 0 that did not truncate uncapped, plus a few ungrounded numerals;
+> **512 and 1024 truncate too**, so no budget eliminates it, and which jobs trip varies run to run.
+> 0 ships because the saving is large and the failure mode is a clipped sentence rather than a
+> wrong number — but moving to 512 keeps 42% of the saving for one env-var change.
+>
+> **Deliberately UNCAPPED**, and pinned by `tests/test_report_thinking_budget.py` so a later blanket
+> edit is a conscious act: the two post-assembly syntheses (`synthesize_core_thesis`,
+> `synthesize_critical_factors` — they write the bull/bear thesis and the risk factors), the
+> agentic-fallback single-pass analysis, and report chat.
+>
+> Verified against the live API: `cached_content` and `thinking_config` compose — a real
+> CachedContent served `cached_tok=2543` identically at budget `None` and `0`. The Stage-B context
+> cache is not lost to the cap.
+
+> **Still open:** the tier allocations were sized against "~17 Gemini calls per report", a figure
+> repeated in **18 places across 15 files** (not "five source files" as previously stated here) —
+> 4 backend app files, 7 test files, 2 migrations, 2 Swift files. The real count is **20–26**.
+> With thinking capped the measured cost is ~$0.021/report against the documented $0.05–0.06, so
+> the margin pressure this item described is relieved rather than confirmed; the **call-count**
+> figure is still wrong everywhere and the subscription allocations still deserve a re-check
+> against the measured number rather than the estimate.
 
 ### 9b.8 Why chat is a flat 1 credit, permanently
 

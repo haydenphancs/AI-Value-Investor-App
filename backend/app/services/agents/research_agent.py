@@ -51,6 +51,7 @@ from app.services.agents.narrative_prompts import (
     parse_stage_a_response,
     run_narrative_jobs,
     stage_a_fallback,
+    stage_a_thinking_budget,
     synthesize_core_thesis,
     synthesize_critical_factors,
 )
@@ -406,9 +407,22 @@ class ResearchAgent:
         )
 
         try:
+            # Stage A runs with a thinking cap (SYSTEM_DESIGN_GUIDELINES 9b.7).
+            # MEASURED on MSFT/warren_buffett via scripts/eval_report_thinking.py
+            # (2026-08-27): default 1,715-2,295 thought tokens and 18.1s, versus
+            # 0 and 6.9s at budget 0 — same 11 top-level keys, parseable at every
+            # budget. Thought tokens bill at the OUTPUT rate.
+            #
+            # Its OWN setting, separate from Stage B's, because this is the call
+            # that decides thesis / pros / cons / moat / valuation on a 20-credit
+            # product and "valid JSON with 11 keys" does not certify that the
+            # judgement survived. Set REPORT_STAGE_A_THINKING_BUDGET negative in
+            # the environment to restore the model default without touching
+            # Stage B, and re-run the eval before trusting either way.
             result = await self.gemini.generate_json(
                 prompt=prompt,
                 system_instruction=self.persona.system_prompt,
+                thinking_budget=stage_a_thinking_budget(),
             )
             shell = parse_stage_a_response(result.get("text") or "")
             if shell is None:

@@ -452,11 +452,23 @@ def _response_text(response: Any) -> str:
 # clears the model's floor, and `cached_content_token_count` is the ONLY signal
 # that it happened. Without it, "is our system instruction being cached?" is
 # unanswerable and every prompt-cost decision is guesswork.
+#
+# `thoughts_token_count` was added for the report thinking-budget work
+# (SYSTEM_DESIGN_GUIDELINES 9b.7). Thinking bills at the OUTPUT rate, so an
+# uncapped reasoning step is a real cost line — and without this field there is
+# no way to confirm from production logs that a cap actually took effect. It is
+# reported SEPARATELY from `candidates_token_count` — MEASURED, not assumed:
+# `total - prompt - candidates - thoughts == 0` on a real uncapped call
+# (scripts/eval_report_thinking.py prints the verdict). So `output` is the
+# visible answer and `total` is the bill; neither contains the other. Every consumer (_EMPTY_USAGE, _response_usage, _StreamUsage) derives
+# from this tuple, so adding a field is additive, and _coerce_token_count
+# already degrades a model that does not report it to None.
 _USAGE_FIELDS: tuple[tuple[str, str], ...] = (
     ("total", "total_token_count"),
     ("prompt", "prompt_token_count"),
     ("cached", "cached_content_token_count"),
     ("output", "candidates_token_count"),
+    ("thoughts", "thoughts_token_count"),
 )
 _EMPTY_USAGE: Dict[str, Optional[int]] = {key: None for key, _ in _USAGE_FIELDS}
 
@@ -512,10 +524,10 @@ def _log_gemini_usage(
         cached_pct = round(100.0 * cached / prompt, 1) if prompt > 0 else 0.0
         logger.info(
             "GEMINI_USAGE call_site=%s model=%s tag=%s prompt_tok=%s cached_tok=%s "
-            "cached_pct=%s output_tok=%s total_tok=%s",
+            "cached_pct=%s output_tok=%s thoughts_tok=%s total_tok=%s",
             call_site, model, tag or "-",
             usage.get("prompt"), usage.get("cached"), cached_pct,
-            usage.get("output"), usage.get("total"),
+            usage.get("output"), usage.get("thoughts"), usage.get("total"),
         )
     except Exception as e:  # pragma: no cover — telemetry must never break a call
         logger.warning("GEMINI_USAGE log failed (%s: %s)", type(e).__name__, e)
@@ -555,6 +567,17 @@ class _StreamUsage:
         """Commit any open round and return the accumulated counts."""
         self.commit_round()
         return dict(self._committed)
+
+
+def _thinking_config(budget: Optional[int]) -> Optional[Any]:
+    """Encode a thinking budget as a ThinkingConfig, or None to send NONE at all.
+
+    ONE encoder for all three generation helpers so they are provably identical.
+    `None` means "attach no thinking_config", which is byte-identical on the wire
+    to a pre-cap request — that is what makes it a safe rollback value. `0`
+    disables thinking; a positive value is a ceiling in tokens.
+    """
+    return None if budget is None else types.ThinkingConfig(thinking_budget=budget)
 
 
 def _response_finish(response: Any) -> Optional[str]:
@@ -669,18 +692,19 @@ class GeminiClient:
                     config=self._config(
                         system_instruction=system_instruction,
                         max_output_tokens=max_output_tokens,
-                        thinking_config=(
-                            None if thinking_budget is None
-                            else types.ThinkingConfig(thinking_budget=thinking_budget)
-                        ),
+                        thinking_config=_thinking_config(thinking_budget),
                     ),
                 ),
                 what="generate_text",
             )
+            usage = _response_usage(response)
+            _log_gemini_usage(
+                usage, call_site="generate_text", model=model_name or self.model_name,
+            )
             result = {
                 "text": _response_text(response),
                 "model": self.model_name,
-                "tokens_used": _response_tokens(response),
+                "tokens_used": usage["total"],
                 "finish_reason": _response_finish(response),
             }
             self._response_cache.set(key, result)
@@ -814,26 +838,43 @@ class GeminiClient:
 
     @async_retry(max_attempts=2, delay=2.0)
     async def generate_text_cached(
-        self, prompt: str, handle: Dict[str, Any]
+        self,
+        prompt: str,
+        handle: Dict[str, Any],
+        thinking_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """generate_text variant that runs against a CachedContent prefix.
 
         The shared evidence + system instruction live in the cache; `prompt` is
         only the per-field instruction. Same timeout + quota path as generate_text.
+
+        `thinking_budget` mirrors `generate_text`'s: None leaves the model's own
+        default alone, 0 disables thinking. Unlike `generate_text` there is NO
+        response cache here, so the budget needs no cache-key segment — but the
+        caller MUST pass the same value to both this method and the inline
+        `generate_text` fallback, or a cache hiccup silently un-caps the call
+        (see `narrative_prompts.run_narrative_jobs`).
         """
         cache = handle["cache"]
         response = await _call_with_timeout(
             self._client.aio.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
-                config=self._config(cached_content=cache.name),
+                config=self._config(
+                    cached_content=cache.name,
+                    thinking_config=_thinking_config(thinking_budget),
+                ),
             ),
             what="generate_text_cached",
+        )
+        usage = _response_usage(response)
+        _log_gemini_usage(
+            usage, call_site="generate_text_cached", model=self.model_name,
         )
         return {
             "text": _response_text(response),
             "model": self.model_name,
-            "tokens_used": _response_tokens(response),
+            "tokens_used": usage["total"],
             "finish_reason": _response_finish(response),
         }
 
@@ -860,13 +901,29 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
         response_schema: Optional[Any] = None,
+        thinking_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
         Optionally enforce a response_schema for guaranteed output shape.
         Results are cached.
+
+        `thinking_budget` behaves exactly as in `generate_text` (None = the
+        model's own default, 0 = no thinking) and is part of the CACHE KEY for
+        the same reason: a no-thinking answer and a reasoned one to the same
+        prompt are different answers, and the cheap one must not be served to
+        the caller that asked for the reasoned one.
+
+        `response_schema` is in the key too. It was not, so two callers issuing
+        the same prompt under different schemas would have collided and the
+        first one's shape served to the second. No such pair exists today; the
+        key is fixed rather than the hazard documented.
         """
-        key = _cache_key("json", prompt, system_instruction or "", model_name or "")
+        key = _cache_key(
+            "json", prompt, system_instruction or "", model_name or "",
+            "" if response_schema is None else f"schema={response_schema!r}",
+            "" if thinking_budget is None else f"tb={thinking_budget}",
+        )
         cached = self._response_cache.get(key)
         if cached is not None:
             logger.debug("Gemini generate_json cache HIT")
@@ -881,14 +938,19 @@ class GeminiClient:
                         system_instruction=system_instruction,
                         response_mime_type="application/json",
                         response_schema=response_schema,
+                        thinking_config=_thinking_config(thinking_budget),
                     ),
                 ),
                 what="generate_json",
             )
+            usage = _response_usage(response)
+            _log_gemini_usage(
+                usage, call_site="generate_json", model=model_name or self.model_name,
+            )
             result = {
                 "text": _response_text(response),
                 "model": self.model_name,
-                "tokens_used": _response_tokens(response),
+                "tokens_used": usage["total"],
                 "finish_reason": _response_finish(response),
             }
             self._response_cache.set(key, result)

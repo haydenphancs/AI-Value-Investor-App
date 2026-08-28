@@ -14,9 +14,16 @@ struct SignalDisclosureRow: View {
     // (kind, leader) — kind routes the tap (whale/congress → per-ticker detail,
     // earnings → TickerDetailView).
     var onLeaderTap: ((String, SignalLeader) -> Void)? = nil
-    /// Fired when a tap lands on the row BODY (gaps between leader rows, padding).
-    /// The row swallows it so it can't bubble up and collapse THIS row — but the
-    /// Home screen still collapses the expanded Daily Scanner card with it.
+    /// Fired when a tap lands on the row BODY (not a child control).
+    ///
+    /// ⚠️ The SWALLOW is the load-bearing part, not this closure. `.onTapGesture` below
+    /// consumes the tap so it cannot bubble to the Home screen's collapse gesture and close
+    /// the very row you just touched — that holds whether or not a handler is supplied.
+    ///
+    /// The closure itself is currently UNWIRED. It used to carry the cross-section collapse
+    /// ("this tap is outside the OTHER section, so close it"), which was the machinery
+    /// enforcing one-open-at-a-time. Every card can now be expanded at once, so Home passes
+    /// nothing. Kept because the hook is the natural place for a future caller to react.
     var onBodyTap: (() -> Void)? = nil
     /// Fired INSTEAD of expanding when the signal is locked (Free/guest). Carries the
     /// kind so the Home screen can attribute the upsell.
@@ -27,11 +34,31 @@ struct SignalDisclosureRow: View {
     /// same pattern as `ScannerCard.isExpanded`.
     @Binding var isExpanded: Bool
 
+    /// Scroll position 0...1 and the visible share of the list, driving the custom indicator
+    /// below. Read from `onScrollGeometryChange` — the same mechanism the article screen uses
+    /// for its reading-progress bar.
+    @State private var scrollFraction: CGFloat = 0
+    @State private var visibleFraction: CGFloat = 1
+
     // Past this many leaders, the expanded list scrolls INSIDE a bounded box
     // (mirrors the report's Insider "Recent Transactions") so the user scrolls the
     // list, not the whole Home screen. At or below it, the list renders inline.
-    private static let scrollThreshold = 6
-    private static let expandedListMaxHeight: CGFloat = 260
+    /// Above this many leaders the list scrolls inside a bounded box.
+    ///
+    /// Tied to `expandedListMaxHeight`: a leader row is ~43pt plus 7pt of spacing, so ~4 fit in
+    /// 200pt. Keeping the two in step matters — at the old 6/260 pairing a SIX-item list
+    /// rendered unbounded at ~300pt while a SEVEN-item list was capped at 260, i.e. more data
+    /// produced a SHORTER box. Dropping the cap to 200 would have widened that to 300 vs 200,
+    /// so the threshold moves with it and every list is now either fully shown or capped.
+    private static let scrollThreshold = 4
+    /// Bounds the scrolling list. 200, not 260: the scroll indicator's length is
+    /// viewport² / content, so it was ~137pt — reported as "the scroll bar is long". At 200 it
+    /// is ~81pt. This is the only honest lever, since the length is what tells a reader how
+    /// much more there is; shortening the bar without shortening the viewport would lie.
+    private static let expandedListMaxHeight: CGFloat = 200
+    /// Thumb bounds for the custom indicator. The upper bound is what makes it read as short.
+    private static let thumbMinHeight: CGFloat = 22
+    private static let thumbMaxHeight: CGFloat = 56
 
     /// Enough to make 2–5 glyphs unreadable at `dataMedium` without smearing so far
     /// that the chip stops reading as "a ticker is here".
@@ -121,8 +148,27 @@ struct SignalDisclosureRow: View {
                                 ForEach(signal.leaders) { leaderRow($0) }
                             }
                         }
-                        .scrollIndicators(.visible)
+                        // ⚠️ The SYSTEM indicator is hidden and replaced, because
+                        // `.scrollIndicators(.visible)` does NOT mean "always visible".
+                        // It means "do not suppress them"; UIKit still fades them out when
+                        // scrolling stops, so a reader who has not touched the list sees no
+                        // bar and cannot tell there is more below. That was the TestFlight
+                        // report, and there is no API to pin the system one.
+                        .scrollIndicators(.hidden)
                         .frame(maxHeight: Self.expandedListMaxHeight)
+                        .onScrollGeometryChange(for: SignalListMetrics.self) { geo in
+                            SignalListMetrics(offset: geo.contentOffset.y,
+                                              content: geo.contentSize.height,
+                                              viewport: geo.containerSize.height)
+                        } action: { _, m in
+                            guard m.content > 0, m.viewport > 0 else { return }
+                            visibleFraction = min(1, m.viewport / m.content)
+                            // `max(..., 1)` guards the divide: content == viewport means
+                            // nothing scrolls, and 0/0 would put NaN into a frame height.
+                            let scrollable = max(m.content - m.viewport, 1)
+                            scrollFraction = min(max(m.offset / scrollable, 0), 1)
+                        }
+                        .overlay(alignment: .trailing) { scrollIndicator }
                     } else {
                         VStack(spacing: 7) {
                             ForEach(signal.leaders) { leaderRow($0) }
@@ -196,6 +242,28 @@ struct SignalDisclosureRow: View {
     // One drill-down leader row — shared by the inline and the bounded-scroll list
     // so both render identically. Tapping routes to the ticker via `onLeaderTap`.
     @ViewBuilder
+    /// Always-on scroll indicator for the expanded leader list.
+    ///
+    /// Length is proportional to how much of the list is visible, but CLAMPED — the system bar
+    /// ran ~137pt on this list and was reported as "long". A clamped thumb still says "there is
+    /// more" by existing, and still says "where you are" by moving; it just stops reporting the
+    /// exact ratio once the list is short. That trade is deliberate.
+    private var scrollIndicator: some View {
+        GeometryReader { geo in
+            let track = geo.size.height
+            let thumb = min(max(track * visibleFraction, Self.thumbMinHeight), Self.thumbMaxHeight)
+            Capsule()
+                .fill(AppColors.textPrimary.opacity(0.28))
+                .frame(width: 3, height: thumb)
+                .offset(y: (track - thumb) * scrollFraction)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        // Decoration only — it must never eat a tap meant for a leader row beneath it.
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .padding(.trailing, 3)
+    }
+
     private func leaderRow(_ leader: SignalLeader) -> some View {
         Button { onLeaderTap?(signal.kind, leader) } label: {
             HStack {
@@ -215,7 +283,18 @@ struct SignalDisclosureRow: View {
                     .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
             }
-            .padding(.horizontal, 11)
+            .padding(.leading, 11)
+            // ⚠️ Trailing is WIDER than leading (22 vs 11), and that asymmetry is the point.
+            //
+            // When the list scrolls, the scroll indicator is drawn at the row's trailing edge
+            // and is ~7pt wide. At an even 11pt inset the "5 buys" stat ended just ~4pt clear
+            // of it, which reads as the bar sitting on the numbers — reported from TestFlight.
+            // 22 puts ~15pt of air between them.
+            //
+            // Applied to EVERY leader row, not just the ones inside a ScrollView: several
+            // signals can be expanded at once now, so a scrolling list and a non-scrolling one
+            // are often on screen together and their stat columns must line up.
+            .padding(.trailing, 22)
             .padding(.vertical, 8)
             .background(AppColors.textPrimary.opacity(0.03))
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -253,4 +332,12 @@ private struct SignalDisclosureRowPreviewHost: View {
         }
         .background(Color(lightHex: "F5F7FC", darkHex: "1B2233"))
     }
+}
+
+
+/// Scroll geometry for the expanded leader list's custom indicator.
+private struct SignalListMetrics: Equatable {
+    let offset: CGFloat
+    let content: CGFloat
+    let viewport: CGFloat
 }

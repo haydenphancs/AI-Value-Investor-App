@@ -21,12 +21,17 @@ import SwiftUI
 struct DailyScannersSection: View {
     let scanners: [DailyScanner]
     var onEntryTap: ((ScannerEntry) -> Void)? = nil
-    /// Forwarded from each card's body-tap swallow (see `ScannerCard.onBodyTap`) —
-    /// the Home screen collapses the expanded App-Exclusive Signals row with it.
+    /// Forwarded from each card's body-tap swallow (see `ScannerCard.onBodyTap`).
+    /// Currently unwired — the cross-section collapse it used to carry was the
+    /// one-open-at-a-time machinery, and every card can now be expanded at once.
     var onBodyTap: (() -> Void)? = nil
     /// Which card is expanded (nil = none). Lifted to the Home screen so a tap
     /// ANYWHERE outside the card collapses it; also enforces one-open-at-a-time.
-    @Binding var expandedCardID: DailyScanner.ID?
+    /// A SET, not a single optional id — every card can be open at once. It was one-at-a-time
+    /// (an `ID?`, where expanding one card closed the others); readers asked to be able to open
+    /// all three. Tap-outside-collapses-everything is unchanged and still owned by the Home
+    /// screen, which is why this stays a binding rather than local state.
+    @Binding var expandedCardIDs: Set<DailyScanner.ID>
 
     @State private var activeIndex: Int = 0
     @State private var viewportWidth: CGFloat = 0
@@ -56,8 +61,11 @@ struct DailyScannersSection: View {
                                     onEntryTap: onEntryTap,
                                     onBodyTap: onBodyTap,
                                     isExpanded: Binding(
-                                        get: { expandedCardID == scanner.id },
-                                        set: { expandedCardID = $0 ? scanner.id : nil }
+                                        get: { expandedCardIDs.contains(scanner.id) },
+                                        set: { isOn in
+                                            if isOn { expandedCardIDs.insert(scanner.id) }
+                                            else { expandedCardIDs.remove(scanner.id) }
+                                        }
                                     )
                                 )
                                     // ~86% of the container width so the next card peeks.
@@ -143,7 +151,7 @@ private struct ScannerActiveCardKey: PreferenceKey {
 
 /// Stateful host so the carousel preview can actually expand/collapse a card.
 private struct DailyScannersSectionPreviewHost: View {
-    @State private var expandedID: DailyScanner.ID?
+    @State private var expandedIDs: Set<DailyScanner.ID> = []
     var body: some View {
         DailyScannersSection(
             scanners: [
@@ -151,7 +159,7 @@ private struct DailyScannersSectionPreviewHost: View {
                 MockHomeRepository.heavyTraffic,
                 MockHomeRepository.skepticalMoney
             ],
-            expandedCardID: $expandedID
+            expandedCardIDs: $expandedIDs
         )
         .padding(.vertical)
         .background(AppColors.background)

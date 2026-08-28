@@ -37,12 +37,13 @@ class _Resp:
         self.usage_metadata = usage_metadata
 
 
-def _full(total=100, prompt=80, cached=60, output=20):
+def _full(total=100, prompt=80, cached=60, output=20, thoughts=0):
     return _Resp(_Usage(
         total_token_count=total,
         prompt_token_count=prompt,
         cached_content_token_count=cached,
         candidates_token_count=output,
+        thoughts_token_count=thoughts,
     ))
 
 
@@ -80,15 +81,16 @@ def test_coerce_survives_non_finite_floats():
 
 # ── _response_usage ───────────────────────────────────────────────
 
-def test_usage_extracts_all_four_fields():
+def test_usage_extracts_all_five_fields():
     assert _response_usage(_full()) == {
-        "total": 100, "prompt": 80, "cached": 60, "output": 20,
+        "total": 100, "prompt": 80, "cached": 60, "output": 20, "thoughts": 0,
     }
 
 
 def test_usage_missing_metadata_yields_all_none():
     assert _response_usage(_Resp(None)) == {
         "total": None, "prompt": None, "cached": None, "output": None,
+        "thoughts": None,
     }
 
 
@@ -96,6 +98,7 @@ def test_usage_on_object_without_the_attribute_at_all():
     """Stream chunks routinely carry no usage_metadata attribute whatsoever."""
     assert _response_usage(object()) == {
         "total": None, "prompt": None, "cached": None, "output": None,
+        "thoughts": None,
     }
     assert _response_usage(None)["total"] is None
 
@@ -103,7 +106,9 @@ def test_usage_on_object_without_the_attribute_at_all():
 def test_usage_partial_metadata_keeps_present_fields():
     """A chunk carrying only prompt+cached must not blank them out."""
     usage = _response_usage(_Resp(_Usage(prompt_token_count=80, cached_content_token_count=60)))
-    assert usage == {"total": None, "prompt": 80, "cached": 60, "output": None}
+    assert usage == {
+        "total": None, "prompt": 80, "cached": 60, "output": None, "thoughts": None,
+    }
 
 
 def test_usage_never_returns_the_shared_empty_dict():
@@ -133,7 +138,9 @@ def test_response_tokens_none_when_absent():
 # ── _StreamUsage ──────────────────────────────────────────────────
 
 def test_stream_usage_empty_stream_is_all_zero():
-    assert _StreamUsage().totals() == {"total": 0, "prompt": 0, "cached": 0, "output": 0}
+    assert _StreamUsage().totals() == {
+        "total": 0, "prompt": 0, "cached": 0, "output": 0, "thoughts": 0,
+    }
 
 
 def test_stream_usage_takes_last_reading_within_a_round_not_the_sum():
@@ -143,7 +150,9 @@ def test_stream_usage_takes_last_reading_within_a_round_not_the_sum():
     usage.observe(_full(total=10, prompt=8, cached=4, output=2))
     usage.observe(_full(total=30, prompt=8, cached=4, output=22))
     usage.observe(_full(total=50, prompt=8, cached=4, output=42))
-    assert usage.totals() == {"total": 50, "prompt": 8, "cached": 4, "output": 42}
+    assert usage.totals() == {
+        "total": 50, "prompt": 8, "cached": 4, "output": 42, "thoughts": 0,
+    }
 
 
 def test_stream_usage_sums_across_rounds():
@@ -153,7 +162,9 @@ def test_stream_usage_sums_across_rounds():
     usage.commit_round()
     usage.observe(_full(total=70, prompt=60, cached=30, output=10))
     usage.commit_round()
-    assert usage.totals() == {"total": 120, "prompt": 100, "cached": 60, "output": 20}
+    assert usage.totals() == {
+        "total": 120, "prompt": 100, "cached": 60, "output": 20, "thoughts": 0,
+    }
 
 
 def test_stream_usage_ignores_chunks_with_no_usage():
@@ -191,7 +202,35 @@ def test_stream_usage_tolerates_garbage_fields():
         cached_content_token_count=None,
         candidates_token_count=True,
     )))
-    assert usage.totals() == {"total": 0, "prompt": 0, "cached": 0, "output": 0}
+    assert usage.totals() == {
+        "total": 0, "prompt": 0, "cached": 0, "output": 0, "thoughts": 0,
+    }
+
+
+# ── thoughts_token_count (the report thinking-budget work) ────────
+
+def test_thoughts_tokens_are_captured():
+    """Thinking bills at the OUTPUT rate, so an uncapped reasoning step is a real
+    cost line. Without this field there is no way to confirm from production logs
+    that a cap took effect — see SYSTEM_DESIGN_GUIDELINES 9b.7."""
+    assert _response_usage(_full(thoughts=391))["thoughts"] == 391
+
+
+def test_thoughts_absent_degrades_to_none_not_zero():
+    """A model that does not report the field must read None ('not reported'),
+    never 0 ('measured, and it did not think') — collapsing them would make an
+    uncapped call indistinguishable from a capped one."""
+    usage = _response_usage(_Resp(_Usage(candidates_token_count=20)))
+    assert usage["thoughts"] is None
+    assert usage["output"] == 20
+
+
+def test_thoughts_accumulate_across_agentic_rounds():
+    usage = _StreamUsage()
+    usage.observe(_full(thoughts=30))
+    usage.commit_round()
+    usage.observe(_full(thoughts=12))
+    assert usage.totals()["thoughts"] == 42
 
 
 # ── _log_gemini_usage ─────────────────────────────────────────────

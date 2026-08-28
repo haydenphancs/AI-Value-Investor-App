@@ -403,6 +403,56 @@ class Settings(BaseSettings):
     GEMINI_CONTEXT_CACHE_ENABLED: bool = True
     GEMINI_CONTEXT_CACHE_TTL_MINUTES: int = 10
 
+    # ── Report thinking budgets (SYSTEM_DESIGN_GUIDELINES 9b.7) ──────────────
+    #
+    # gemini-2.5-flash thinks by default, and those thought tokens bill at the
+    # OUTPUT rate ($2.50/1M) while producing nothing the user reads. Nothing on
+    # the report path ever set a budget, which is what pulled worst-case report
+    # COGS from a documented $0.05-0.06 toward $0.09-0.15.
+    #
+    # MEASURED, not estimated — scripts/eval_report_thinking.py against the real
+    # prompts (MSFT / warren_buffett, gemini-2.5-flash, 2026-08-27), per report:
+    #
+    #   budget    Stage A    Stage B    thinking    $/report
+    #   default     1,715     14,672      16,387     $0.0618
+    #        0          0          0           0     $0.0210   (-66%)
+    #      512        408      5,569       5,977     $0.0361   (-42%)
+    #     1024        847      9,927      10,774     $0.0480   (-22%)
+    #
+    # An earlier estimate put Stage B at ~5,470; it is ~3x that. Per-job thinking
+    # ranges 259-2,767 across the 12-18 jobs, not a flat ~391.
+    #
+    # ⚠️ THE CAP IS NOT FREE, and the earlier "outputs substantively identical at
+    # 0/512/1024/default" claim was based on ONE job. Across all of them, a
+    # no-thinking model writes LONGER and does not self-compress: measured
+    # revenue_forecast_insight at 79-81 output tokens uncapped vs 130-163 at
+    # budget 0. `_post_process`'s word cap then HARD-CUTS it mid-sentence with an
+    # ellipsis. In two runs, 2-3 of 12 narratives truncated at budget 0 that did
+    # not truncate uncapped — and 512 and 1024 also truncate, so no budget
+    # eliminates it. A handful of ungrounded numerals appeared too. Which jobs
+    # trip varies run to run, so treat it as a rate, not a fixed list.
+    #
+    # 0 is shipped because the saving is large and the failure mode is a clipped
+    # sentence rather than a wrong number. If that reads badly in the product,
+    # 512 keeps 42% of the saving for one env-var change — which is exactly why
+    # this is a setting. Re-run the eval before moving it.
+    #
+    # SEPARATE knobs on purpose: Stage A decides thesis / pros / cons / moat /
+    # valuation on a 20-credit product, so it must be revertable on its own.
+    #
+    # A NEGATIVE value restores the model's own default (the resolver maps it to
+    # None, reproducing the pre-change code path exactly). That is deliberately
+    # not a pass-through of Gemini's own `-1` = "dynamic thinking": mapping to
+    # None needs no assumption about SDK semantics and cannot be broken by an
+    # SDK change. Resolved by `narrative_prompts.{narrative,stage_a}_thinking_budget()`.
+    #
+    # NOT capped, and that is a decision rather than an oversight: the two
+    # post-assembly syntheses (`synthesize_core_thesis`,
+    # `synthesize_critical_factors`), the agentic-fallback single-pass analysis,
+    # and report chat.
+    REPORT_NARRATIVE_THINKING_BUDGET: int = 0
+    REPORT_STAGE_A_THINKING_BUDGET: int = 0
+
     # Multi-agent chat (Phase 3): a cheap router classifies each question and routes to a topic
     # specialist (valuation/technicals/macro/…); genuinely cross-domain questions run several
     # specialists in parallel + a synthesizer. Kill switch → the plain single-agent streaming path.
@@ -469,8 +519,17 @@ class Settings(BaseSettings):
     # `ChatService._DEEP_DIVE_STYLE`). The 1200 ceiling above assumes the brevity directive,
     # and it is not a style control — so under it the brief was cut off MID-SENTENCE, leaving
     # a dangling `**` rendered as literal asterisks. Measured on a live SPY tap: 683 output
-    # tokens went to the agentic round's thinking + tool calls before the prose even started
-    # (gemini-2.5-flash counts thinking in `output_tok`), so the answer had no room left.
+    # tokens went to the agentic round's thinking + tool calls before the prose even started,
+    # so the answer had no room left.
+    #
+    # ⚠️ CORRECTION (measured 2026-08-27 via scripts/eval_report_thinking.py): this used to
+    # say "gemini-2.5-flash counts thinking in `output_tok`". It does NOT.
+    # `candidates_token_count` EXCLUDES thoughts — settled by the arithmetic on a real
+    # uncapped call, `total - prompt - candidates - thoughts == 0`. Two consequences:
+    # `GEMINI_USAGE output_tok` under-reported billed output until `thoughts_tok` was added
+    # beside it, and the mechanism above is thinking competing for the same GENERATION
+    # ceiling rather than being counted inside `candidates` — the observed truncation is
+    # real either way, but do not reason from the wrong model of the counters.
     #
     # Applies ONLY when `is_deep_dive`, which is button-only and cached for 24h — so this
     # raises the ceiling on a rare turn, not on the per-turn cost base.

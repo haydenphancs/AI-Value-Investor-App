@@ -432,171 +432,6 @@ class ValuationSnapshotService:
         inc = _parse_first(results[4]) if not isinstance(results[4], Exception) else {}
         bs = _parse_first(results[5]) if not isinstance(results[5], Exception) else {}
 
-        # Extract valuation metrics. /ratios-ttm uses a `TTM` suffix on field
-        # names; /key-metrics-ttm uses a different convention. Cover both
-        # plus the legacy names so a quiet FMP rename doesn't NULL out the
-        # whole card.
-        def _first_valid(*vals) -> Optional[float]:
-            for v in vals:
-                if v is not None:
-                    return v
-            return None
-
-        pe = _first_valid(
-            _safe_float(fr, "priceToEarningsRatioTTM"),
-            _safe_float(fr, "priceToEarningsRatio"),
-            _safe_float(km, "peRatioTTM"),
-            _safe_float(km, "peRatio"),
-        )
-        ps = _first_valid(
-            _safe_float(fr, "priceToSalesRatioTTM"),
-            _safe_float(fr, "priceToSalesRatio"),
-            _safe_float(km, "priceToSalesRatioTTM"),
-            _safe_float(km, "priceToSalesRatio"),
-        )
-        pb = _first_valid(
-            _safe_float(fr, "priceToBookRatioTTM"),
-            _safe_float(fr, "priceToBookRatio"),
-            _safe_float(km, "pbRatioTTM"),
-            _safe_float(km, "pbRatio"),
-        )
-        pfcf = _first_valid(
-            _safe_float(fr, "priceToFreeCashFlowsRatioTTM"),
-            _safe_float(fr, "priceToFreeCashFlowsRatio"),
-            _safe_float(km, "pfcfRatioTTM"),
-            _safe_float(km, "pfcfRatio"),
-        )
-        # ⚠️ `enterpriseValueMultipleTTM` FIRST — it is the only one of these `/stable`
-        # actually populates. Measured across AAPL, MSFT, KO, NVDA, JPM, XOM, MRNA, PLUG,
-        # RIVN and UBER: `enterpriseValueOverEBITDATTM` is None for EVERY one, so the
-        # primary lookup always failed and the reconstruction ladder below ran instead —
-        # dividing a CURRENT enterprise value by the LAST FISCAL YEAR's EBITDA, because
-        # `inc` is fetched `period="annual", limit=1`.
-        #
-        # For AAPL that read 4648.51B / 144.43B = 32.19 against a true TTM 4648.51B /
-        # 168.49B = 27.59: we overstated it by ~17%, and EV/EBITDA was the only annual
-        # metric on a card whose P/E, P/B, P/S and P/FCF are all TTM. Verified that
-        # `enterpriseValueMultipleTTM` equals EV(TTM)/EBITDA(TTM) exactly.
-        #
-        # The older names stay behind it so an upstream rename back still works.
-        ev_ebitda = _first_valid(
-            _safe_float(fr, "enterpriseValueMultipleTTM"),
-            _safe_float(fr, "enterpriseValueMultiple"),
-            _safe_float(km, "enterpriseValueMultipleTTM"),
-            _safe_float(km, "enterpriseValueMultiple"),
-            _safe_float(fr, "enterpriseValueOverEBITDATTM"),
-            _safe_float(fr, "enterpriseValueOverEBITDA"),
-            _safe_float(km, "enterpriseValueOverEBITDATTM"),
-            _safe_float(km, "enterpriseValueOverEBITDA"),
-        )
-
-        # Market-cap fallback chain — FMP sometimes omits it from key_metrics
-        # for less-covered tickers. Profile.mktCap and key_metrics.marketCap
-        # are typically identical; profile is the more reliable surface.
-        #
-        # `mktCap` is safe despite `/stable` having renamed the raw field to `marketCap`:
-        # `fmp._normalize_profile` aliases it back on BOTH profile paths (single and
-        # batch), precisely so this class of rename cannot silently zero out
-        # market-cap-driven logic. Do not "fix" this to read `marketCap` — it is already
-        # handled one layer down, and duplicating it here just implies the shim is absent.
-        mcap = _safe_float(km, "marketCap") or _safe_float(profile, "mktCap")
-
-        # Fallback: compute P/FCF from marketCap / freeCashFlow. When FCF is
-        # negative the ratio is meaningless (negative multiples don't compare),
-        # so we leave pfcf as None and the renderer shows "—".
-        if pfcf is None:
-            fcf = _safe_float(cf, "freeCashFlow")
-            if mcap and mcap > 0 and fcf and fcf > 0:
-                pfcf = round(mcap / fcf, 2)
-
-        # Fallback chain for EV/EBITDA when both /ratios-ttm and /key-metrics-ttm
-        # return null:
-        #   1. Reconstruct EV/EBITDA from key_metrics.enterpriseValue ÷ inc.ebitda
-        #   2. EBITDA fallback: operatingIncome + D&A from cf or inc
-        #   3. EBITDA last resort: netIncome + interestExpense + incomeTaxExpense + D&A
-        #   4. EV fallback: mcap + totalDebt − cash from latest quarterly balance sheet
-        # Logs which rung succeeded so the next time a ticker drops to "—" we can
-        # see why without rerunning instrumentation.
-        if ev_ebitda is None:
-            ev = _safe_float(km, "enterpriseValue")
-            ev_source = "key_metrics.enterpriseValue"
-
-            ebitda = _safe_float(inc, "ebitda")
-            ebitda_source = "inc.ebitda"
-
-            # `!= 0`, not `> 0`: a negative EBITDA is a real (if undefined-as-a-multiple)
-            # denominator, and `_fmt_ratio` now renders the resulting negative as "Neg.".
-            # Gating it out here is what left loss-makers on "—" even when the numbers
-            # were all present. Zero stays excluded — it would divide by zero.
-            if ebitda is None or ebitda == 0:
-                op_income = _safe_float(inc, "operatingIncome")
-                d_and_a = (
-                    _safe_float(cf, "depreciationAndAmortization")
-                    or _safe_float(inc, "depreciationAndAmortization")
-                )
-                if op_income is not None and d_and_a is not None:
-                    ebitda = op_income + d_and_a
-                    ebitda_source = "operatingIncome + D&A"
-
-            if ebitda is None or ebitda == 0:
-                # Last resort: EBITDA ≈ NI + interest + tax + D&A
-                ni = _safe_float(inc, "netIncome")
-                interest = _safe_float(inc, "interestExpense")
-                tax = _safe_float(inc, "incomeTaxExpense")
-                d_and_a = (
-                    _safe_float(cf, "depreciationAndAmortization")
-                    or _safe_float(inc, "depreciationAndAmortization")
-                )
-                if ni is not None and d_and_a is not None:
-                    ebitda = ni + (interest or 0) + (tax or 0) + d_and_a
-                    ebitda_source = "NI + interest + tax + D&A"
-
-            if (ev is None or ev <= 0) and mcap and mcap > 0:
-                # Reconstruct EV from balance sheet: mcap + totalDebt − cash.
-                total_debt = _safe_float(bs, "totalDebt")
-                cash = (
-                    _safe_float(bs, "cashAndShortTermInvestments")
-                    or _safe_float(bs, "cashAndCashEquivalents")
-                )
-                if total_debt is not None:
-                    ev = mcap + total_debt - (cash or 0)
-                    ev_source = "mcap + totalDebt − cash"
-
-            # `ebitda != 0`, not `> 0` — the final gate, and the one that actually kept
-            # loss-makers on "—" even when every input above resolved. A negative ratio
-            # now flows out and `_fmt_ratio` renders it "Neg.". `ev > 0` is left alone: a
-            # negative enterprise value (net cash above market cap) is a different and far
-            # rarer condition, and not what this change is about.
-            if ev and ev > 0 and ebitda:
-                ev_ebitda = round(ev / ebitda, 2)
-                logger.info(
-                    "EV/EBITDA reconstructed for %s via ev=%s, ebitda=%s, ratio=%.2f",
-                    ticker, ev_source, ebitda_source, ev_ebitda,
-                )
-            else:
-                logger.warning(
-                    "EV/EBITDA unavailable for %s — ev=%s (source=%s), ebitda=%s (source=%s)",
-                    ticker, ev, ev_source, ebitda, ebitda_source,
-                )
-
-        # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
-        #   1. ratios.earningsYield (TTM-suffixed first, then bare name)
-        #   2. key_metrics.earningsYield (TTM and legacy)
-        #   3. 1/PE  (matches the canonical formula)
-        #   4. netIncome / marketCap
-        ey = _first_valid(
-            _safe_float(fr, "earningsYieldTTM"),
-            _safe_float(fr, "earningsYield"),
-            _safe_float(km, "earningsYieldTTM"),
-            _safe_float(km, "earningsYield"),
-        )
-        if ey is None and pe is not None and pe > 0:
-            ey = round(1.0 / pe, 4)
-        if ey is None:
-            ni = _safe_float(inc, "netIncome")
-            if ni is not None and ni > 0 and mcap and mcap > 0:
-                ey = round(ni / mcap, 4)
-
         # Get sector for benchmark comparison
         raw_sector = profile.get("sector", "")
         sector = _normalize_sector(raw_sector) if raw_sector else ""
@@ -617,80 +452,323 @@ class ValuationSnapshotService:
             except Exception as e:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
-        sector_pe = cur_bench.get("pe_ratio")
-        sector_ps = cur_bench.get("ps_ratio")
-        sector_pb = cur_bench.get("pb_ratio")
-        sector_pfcf = cur_bench.get("pfcf_ratio")
-        sector_ev = cur_bench.get("ev_ebitda")
-        sector_ey = cur_bench.get("earnings_yield")
 
-        # Score each metric against sector median (lower = better)
-        score_pe = _valuation_score(pe, sector_pe)
-        score_ps = _valuation_score(ps, sector_ps)
-        score_pb = _valuation_score(pb, sector_pb)
-        score_pfcf = _valuation_score(pfcf, sector_pfcf)
-        score_ev = _valuation_score(ev_ebitda, sector_ev)
-
-        # Weighted average: P/E 25%, P/B 15%, P/S 15%, P/FCF 20%, EV/EBITDA 25%
-        weighted = (
-            score_pe * 0.25
-            + score_pb * 0.15
-            + score_ps * 0.15
-            + score_pfcf * 0.20
-            + score_ev * 0.25
-        )
-        rating = max(1, min(5, round(weighted)))
-
-        metrics = [
-            SnapshotMetricResponse(
-                name=_metric_name("P/E", pe, sector_pe),
-                value=_fmt_ratio(pe),
-                metric_key="pe",
-                score=score_pe if pe is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_metric_name("P/B", pb, sector_pb),
-                value=_fmt_ratio(pb),
-                metric_key="pb",
-                score=score_pb if pb is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_metric_name("P/S", ps, sector_ps),
-                value=_fmt_ratio(ps),
-                metric_key="ps",
-                score=score_ps if ps is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_metric_name("P/FCF", pfcf, sector_pfcf),
-                value=_fmt_pfcf(pfcf, km, cf),
-                metric_key="pfcf",
-                score=score_pfcf if pfcf is not None else None,
-            ),
-            SnapshotMetricResponse(
-                name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),
-                value=_fmt_ratio(ev_ebitda),
-                metric_key="ev_ebitda",
-                score=score_ev if ev_ebitda is not None else None,
-            ),
-            # Earnings Yield: informational — not part of the composite
-            # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
-            # to keep historical ratings comparable. score=None → not a verdict driver.
-            SnapshotMetricResponse(
-                name=_metric_name_pct("Earnings Yield", ey, sector_ey),
-                value=_fmt_pct(ey),
-                metric_key="earnings_yield",
-                score=None,
-            ),
-        ]
-
-        return SnapshotItemResponse(
-            category="Price",
-            rating=rating,
-            metrics=metrics,
-            full_report_available=True,
-            weighted_score=round(weighted, 3),
+        return build_price_snapshot(
+            fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
+            bench=cur_bench, ticker=ticker,
         )
 
+
+
+def build_price_snapshot(
+    *,
+    fr: Dict[str, Any],
+    km: Dict[str, Any],
+    cf: Dict[str, Any],
+    inc: Dict[str, Any],
+    bs: Dict[str, Any],
+    profile: Dict[str, Any],
+    bench: Dict[str, Optional[float]],
+    ticker: str = "?",
+) -> SnapshotItemResponse:
+    """Ratios + benchmark medians -> the "Price" snapshot card.
+
+    Extracted from `_compute` so the DEGRADED fallback in
+    `stock_overview_service._build_valuation_snapshot` renders the same card
+    through the same code. It used to have its own copy: annual ratios instead
+    of TTM, a hardcoded sector-average table instead of `sector_benchmarks`, a
+    `pe > 0` guard that printed "—" for a loss-maker (re-introducing the exact
+    bug the "Neg." fix removed), and four metrics where this emits six. Three of
+    those are silently WRONG numbers rather than missing ones, on a card the
+    user cannot tell apart from the real thing.
+
+    `bench` is `{metric_key: median | None}` from `sector_benchmark_lookup`; an
+    empty dict is fine and degrades each label to a bare name — which is the
+    honest rendering, and the reason the hardcoded averages could be deleted.
+
+    Takes the parsed FMP payloads rather than fetching, so it is pure and the
+    caller owns the I/O and the caching policy. `ticker` is diagnostics only —
+    it names the symbol in the EV/EBITDA reconstruction log lines, which are the
+    only way to see WHY a ticker fell to "—" without re-instrumenting.
+    """
+    # Extract valuation metrics. /ratios-ttm uses a `TTM` suffix on field
+    # names; /key-metrics-ttm uses a different convention. Cover both
+    # plus the legacy names so a quiet FMP rename doesn't NULL out the
+    # whole card.
+    def _first_valid(*vals) -> Optional[float]:
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    # ── Why there are TWO P/E values on the ticker detail screen ────────────
+    #
+    # This card's "P/E (1.63x sector avg 22)" and Key Statistics' "P/E (TTM)"
+    # render in the SAME scroll view (TickerDetailOverviewContent.swift:19 and
+    # :30) and can disagree. That is the design, not a bug.
+    #
+    # Both use the same TTM EPS basis. Only the PRICE TIMESTAMP differs:
+    #   • Key Statistics (stock_overview_service._build_key_statistics) is
+    #     live quote price ÷ our own 4-quarter epsDiluted sum, in-memory for
+    #     120s and never persisted.
+    #   • This row is FMP's own `priceToEarningsRatioTTM`, priced at FMP's
+    #     timestamp, then held up to 24h in `snapshot_cache`.
+    # Measured drift: KO identical, AAPL $1.07 of price, UBER 1.8% (the worst
+    # observed).
+    #
+    # ⚠️ DO NOT UNIFY THEM. If you are here because they disagree:
+    #   • Recomputing THIS row from a live quote bakes a live price into a
+    #     24-hour Supabase row — the exact bug class the ETF/index/commodity
+    #     cache decomposition removed ("Only sections that CANNOT contain a
+    #     live price are persisted" — etf_service.py, index_service.py,
+    #     commodity_service.py, and the etf_snapshot_cache table COMMENT).
+    #   • Making Key Statistics read THIS cached ratio stales a number that is
+    #     internally consistent on screen: 35.90 × 8.73 = $313.40, the price
+    #     shown directly above it.
+    # They also answer different questions — "what is it trading at right now"
+    # versus "how does that compare to its industry", the latter against a
+    # median on a much slower clock. Mixing a 120-second numerator into a
+    # daily-median comparison is false precision.
+    #
+    # The invariant this row MUST keep is narrower than "no price-derived
+    # multiple" — every multiple here is price-derived at some timestamp, and
+    # `mcap` (price × shares) legitimately feeds the P/FCF, EV/EBITDA and
+    # earnings-yield fallbacks below. The rule is:
+    #
+    #     never read the LIVE-QUOTE endpoint, and never persist an ABSOLUTE
+    #     price. Profile / key-metrics market cap is a slow, daily-cadence
+    #     upstream field on the same clock as FMP's own TTM ratios — inside the
+    #     24-hour staleness budget by construction. A live quote is not.
+    #
+    # Pinned by test_negative_earnings_display.py, section 9.
+    pe = _first_valid(
+        _safe_float(fr, "priceToEarningsRatioTTM"),
+        _safe_float(fr, "priceToEarningsRatio"),
+        _safe_float(km, "peRatioTTM"),
+        _safe_float(km, "peRatio"),
+    )
+    ps = _first_valid(
+        _safe_float(fr, "priceToSalesRatioTTM"),
+        _safe_float(fr, "priceToSalesRatio"),
+        _safe_float(km, "priceToSalesRatioTTM"),
+        _safe_float(km, "priceToSalesRatio"),
+    )
+    pb = _first_valid(
+        _safe_float(fr, "priceToBookRatioTTM"),
+        _safe_float(fr, "priceToBookRatio"),
+        _safe_float(km, "pbRatioTTM"),
+        _safe_float(km, "pbRatio"),
+    )
+    pfcf = _first_valid(
+        _safe_float(fr, "priceToFreeCashFlowsRatioTTM"),
+        _safe_float(fr, "priceToFreeCashFlowsRatio"),
+        _safe_float(km, "pfcfRatioTTM"),
+        _safe_float(km, "pfcfRatio"),
+    )
+    # ⚠️ `enterpriseValueMultipleTTM` FIRST — it is the only one of these `/stable`
+    # actually populates. Measured across AAPL, MSFT, KO, NVDA, JPM, XOM, MRNA, PLUG,
+    # RIVN and UBER: `enterpriseValueOverEBITDATTM` is None for EVERY one, so the
+    # primary lookup always failed and the reconstruction ladder below ran instead —
+    # dividing a CURRENT enterprise value by the LAST FISCAL YEAR's EBITDA, because
+    # `inc` is fetched `period="annual", limit=1`.
+    #
+    # For AAPL that read 4648.51B / 144.43B = 32.19 against a true TTM 4648.51B /
+    # 168.49B = 27.59: we overstated it by ~17%, and EV/EBITDA was the only annual
+    # metric on a card whose P/E, P/B, P/S and P/FCF are all TTM. Verified that
+    # `enterpriseValueMultipleTTM` equals EV(TTM)/EBITDA(TTM) exactly.
+    #
+    # The older names stay behind it so an upstream rename back still works.
+    ev_ebitda = _first_valid(
+        _safe_float(fr, "enterpriseValueMultipleTTM"),
+        _safe_float(fr, "enterpriseValueMultiple"),
+        _safe_float(km, "enterpriseValueMultipleTTM"),
+        _safe_float(km, "enterpriseValueMultiple"),
+        _safe_float(fr, "enterpriseValueOverEBITDATTM"),
+        _safe_float(fr, "enterpriseValueOverEBITDA"),
+        _safe_float(km, "enterpriseValueOverEBITDATTM"),
+        _safe_float(km, "enterpriseValueOverEBITDA"),
+    )
+
+    # Market-cap fallback chain — FMP sometimes omits it from key_metrics
+    # for less-covered tickers. Profile.mktCap and key_metrics.marketCap
+    # are typically identical; profile is the more reliable surface.
+    #
+    # `mktCap` is safe despite `/stable` having renamed the raw field to `marketCap`:
+    # `fmp._normalize_profile` aliases it back on BOTH profile paths (single and
+    # batch), precisely so this class of rename cannot silently zero out
+    # market-cap-driven logic. Do not "fix" this to read `marketCap` — it is already
+    # handled one layer down, and duplicating it here just implies the shim is absent.
+    mcap = _safe_float(km, "marketCap") or _safe_float(profile, "mktCap")
+
+    # Fallback: compute P/FCF from marketCap / freeCashFlow. When FCF is
+    # negative the ratio is meaningless (negative multiples don't compare),
+    # so we leave pfcf as None and the renderer shows "—".
+    if pfcf is None:
+        fcf = _safe_float(cf, "freeCashFlow")
+        if mcap and mcap > 0 and fcf and fcf > 0:
+            pfcf = round(mcap / fcf, 2)
+
+    # Fallback chain for EV/EBITDA when both /ratios-ttm and /key-metrics-ttm
+    # return null:
+    #   1. Reconstruct EV/EBITDA from key_metrics.enterpriseValue ÷ inc.ebitda
+    #   2. EBITDA fallback: operatingIncome + D&A from cf or inc
+    #   3. EBITDA last resort: netIncome + interestExpense + incomeTaxExpense + D&A
+    #   4. EV fallback: mcap + totalDebt − cash from latest quarterly balance sheet
+    # Logs which rung succeeded so the next time a ticker drops to "—" we can
+    # see why without rerunning instrumentation.
+    if ev_ebitda is None:
+        ev = _safe_float(km, "enterpriseValue")
+        ev_source = "key_metrics.enterpriseValue"
+
+        ebitda = _safe_float(inc, "ebitda")
+        ebitda_source = "inc.ebitda"
+
+        # `!= 0`, not `> 0`: a negative EBITDA is a real (if undefined-as-a-multiple)
+        # denominator, and `_fmt_ratio` now renders the resulting negative as "Neg.".
+        # Gating it out here is what left loss-makers on "—" even when the numbers
+        # were all present. Zero stays excluded — it would divide by zero.
+        if ebitda is None or ebitda == 0:
+            op_income = _safe_float(inc, "operatingIncome")
+            d_and_a = (
+                _safe_float(cf, "depreciationAndAmortization")
+                or _safe_float(inc, "depreciationAndAmortization")
+            )
+            if op_income is not None and d_and_a is not None:
+                ebitda = op_income + d_and_a
+                ebitda_source = "operatingIncome + D&A"
+
+        if ebitda is None or ebitda == 0:
+            # Last resort: EBITDA ≈ NI + interest + tax + D&A
+            ni = _safe_float(inc, "netIncome")
+            interest = _safe_float(inc, "interestExpense")
+            tax = _safe_float(inc, "incomeTaxExpense")
+            d_and_a = (
+                _safe_float(cf, "depreciationAndAmortization")
+                or _safe_float(inc, "depreciationAndAmortization")
+            )
+            if ni is not None and d_and_a is not None:
+                ebitda = ni + (interest or 0) + (tax or 0) + d_and_a
+                ebitda_source = "NI + interest + tax + D&A"
+
+        if (ev is None or ev <= 0) and mcap and mcap > 0:
+            # Reconstruct EV from balance sheet: mcap + totalDebt − cash.
+            total_debt = _safe_float(bs, "totalDebt")
+            cash = (
+                _safe_float(bs, "cashAndShortTermInvestments")
+                or _safe_float(bs, "cashAndCashEquivalents")
+            )
+            if total_debt is not None:
+                ev = mcap + total_debt - (cash or 0)
+                ev_source = "mcap + totalDebt − cash"
+
+        # `ebitda != 0`, not `> 0` — the final gate, and the one that actually kept
+        # loss-makers on "—" even when every input above resolved. A negative ratio
+        # now flows out and `_fmt_ratio` renders it "Neg.". `ev > 0` is left alone: a
+        # negative enterprise value (net cash above market cap) is a different and far
+        # rarer condition, and not what this change is about.
+        if ev and ev > 0 and ebitda:
+            ev_ebitda = round(ev / ebitda, 2)
+            logger.info(
+                "EV/EBITDA reconstructed for %s via ev=%s, ebitda=%s, ratio=%.2f",
+                ticker, ev_source, ebitda_source, ev_ebitda,
+            )
+        else:
+            logger.warning(
+                "EV/EBITDA unavailable for %s — ev=%s (source=%s), ebitda=%s (source=%s)",
+                ticker, ev, ev_source, ebitda, ebitda_source,
+            )
+
+    # Earnings Yield (decimal form, e.g. 0.0425 for 4.25%). Fallback chain:
+    #   1. ratios.earningsYield (TTM-suffixed first, then bare name)
+    #   2. key_metrics.earningsYield (TTM and legacy)
+    #   3. 1/PE  (matches the canonical formula)
+    #   4. netIncome / marketCap
+    ey = _first_valid(
+        _safe_float(fr, "earningsYieldTTM"),
+        _safe_float(fr, "earningsYield"),
+        _safe_float(km, "earningsYieldTTM"),
+        _safe_float(km, "earningsYield"),
+    )
+    if ey is None and pe is not None and pe > 0:
+        ey = round(1.0 / pe, 4)
+    if ey is None:
+        ni = _safe_float(inc, "netIncome")
+        if ni is not None and ni > 0 and mcap and mcap > 0:
+            ey = round(ni / mcap, 4)
+
+    sector_pe = bench.get("pe_ratio")
+    sector_ps = bench.get("ps_ratio")
+    sector_pb = bench.get("pb_ratio")
+    sector_pfcf = bench.get("pfcf_ratio")
+    sector_ev = bench.get("ev_ebitda")
+    sector_ey = bench.get("earnings_yield")
+
+    # Score each metric against sector median (lower = better)
+    score_pe = _valuation_score(pe, sector_pe)
+    score_ps = _valuation_score(ps, sector_ps)
+    score_pb = _valuation_score(pb, sector_pb)
+    score_pfcf = _valuation_score(pfcf, sector_pfcf)
+    score_ev = _valuation_score(ev_ebitda, sector_ev)
+
+    # Weighted average: P/E 25%, P/B 15%, P/S 15%, P/FCF 20%, EV/EBITDA 25%
+    weighted = (
+        score_pe * 0.25
+        + score_pb * 0.15
+        + score_ps * 0.15
+        + score_pfcf * 0.20
+        + score_ev * 0.25
+    )
+    rating = max(1, min(5, round(weighted)))
+
+    metrics = [
+        SnapshotMetricResponse(
+            name=_metric_name("P/E", pe, sector_pe),
+            value=_fmt_ratio(pe),
+            metric_key="pe",
+            score=score_pe if pe is not None else None,
+        ),
+        SnapshotMetricResponse(
+            name=_metric_name("P/B", pb, sector_pb),
+            value=_fmt_ratio(pb),
+            metric_key="pb",
+            score=score_pb if pb is not None else None,
+        ),
+        SnapshotMetricResponse(
+            name=_metric_name("P/S", ps, sector_ps),
+            value=_fmt_ratio(ps),
+            metric_key="ps",
+            score=score_ps if ps is not None else None,
+        ),
+        SnapshotMetricResponse(
+            name=_metric_name("P/FCF", pfcf, sector_pfcf),
+            value=_fmt_pfcf(pfcf, km, cf),
+            metric_key="pfcf",
+            score=score_pfcf if pfcf is not None else None,
+        ),
+        SnapshotMetricResponse(
+            name=_metric_name("EV/EBITDA", ev_ebitda, sector_ev),
+            value=_fmt_ratio(ev_ebitda),
+            metric_key="ev_ebitda",
+            score=score_ev if ev_ebitda is not None else None,
+        ),
+        # Earnings Yield: informational — not part of the composite
+        # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
+        # to keep historical ratings comparable. score=None → not a verdict driver.
+        SnapshotMetricResponse(
+            name=_metric_name_pct("Earnings Yield", ey, sector_ey),
+            value=_fmt_pct(ey),
+            metric_key="earnings_yield",
+            score=None,
+        ),
+    ]
+
+    return SnapshotItemResponse(
+        category="Price",
+        rating=rating,
+        metrics=metrics,
+        full_report_available=True,
+        weighted_score=round(weighted, 3),
+    )
 
 # ── Singleton ─────────────────────────────────────────────────────
 

@@ -12,17 +12,25 @@ struct ExclusiveSignalsSection: View {
     let signals: [ExclusiveSignal]
     var accent: Color = AppColors.primaryBlue
     var onLeaderTap: ((String, SignalLeader) -> Void)? = nil
-    /// Fired when a tap lands on the panel or a row BODY (swallowed here so it
-    /// can't bubble to the Home collapse gesture) — the Home screen collapses the
-    /// expanded Daily Scanner card with it, since that tap is outside the carousel.
+    /// Fired when a tap lands on the panel or row BODY (not a child control).
+    ///
+    /// ⚠️ The SWALLOW is the load-bearing part, not this closure. `.onTapGesture` below
+    /// consumes the tap so it cannot bubble to the Home screen's collapse gesture and close
+    /// the very row you just touched — that holds whether or not a handler is supplied.
+    ///
+    /// The closure itself is currently UNWIRED. It used to carry the cross-section collapse
+    /// ("this tap is outside the OTHER section, so close it"), which was the machinery
+    /// enforcing one-open-at-a-time. Every card can now be expanded at once, so Home passes
+    /// nothing. Kept because the hook is the natural place for a future caller to react.
     var onBodyTap: (() -> Void)? = nil
     /// Fired when a LOCKED row is tapped (Free/guest) — carries the signal kind. The row
     /// does not expand; the Home screen answers this with the paywall.
     var onLockedTap: ((String) -> Void)? = nil
     /// Which signal row is expanded (nil = none). Lifted to the Home screen so a
     /// tap outside the row collapses it; also enforces one-open-at-a-time.
-    /// Same pattern as `DailyScannersSection.expandedCardID`.
-    @Binding var expandedSignalID: ExclusiveSignal.ID?
+    /// A SET, not a single optional id — every row can be open at once. Same change, and the
+    /// same reason, as `DailyScannersSection.expandedCardIDs`.
+    @Binding var expandedSignalIDs: Set<ExclusiveSignal.ID>
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -51,8 +59,11 @@ struct ExclusiveSignalsSection: View {
                         onBodyTap: onBodyTap,
                         onLockedTap: onLockedTap,
                         isExpanded: Binding(
-                            get: { expandedSignalID == signal.id },
-                            set: { expandedSignalID = $0 ? signal.id : nil }
+                            get: { expandedSignalIDs.contains(signal.id) },
+                            set: { isOn in
+                                if isOn { expandedSignalIDs.insert(signal.id) }
+                                else { expandedSignalIDs.remove(signal.id) }
+                            }
                         )
                     )
                 }
@@ -104,10 +115,10 @@ struct ExclusiveSignalsSection: View {
         // are swallowed inside SignalDisclosureRow; its buttons win their hit area.
         .contentShape(Rectangle())
         .onTapGesture {
-            if expandedSignalID != nil {
+            if !expandedSignalIDs.isEmpty {
                 // Unanimated, to match the expand above — an animated COLLAPSE resizes
                 // the section every frame just as an animated expand does.
-                expandedSignalID = nil
+                expandedSignalIDs.removeAll()
             }
             onBodyTap?()
         }
@@ -121,12 +132,12 @@ struct ExclusiveSignalsSection: View {
 
 /// Stateful host so the preview can actually expand/collapse a row.
 private struct ExclusiveSignalsSectionPreviewHost: View {
-    @State private var expandedID: ExclusiveSignal.ID?
+    @State private var expandedIDs: Set<ExclusiveSignal.ID> = []
     var body: some View {
         ScrollView {
             ExclusiveSignalsSection(
                 signals: MockHomeRepository.signals,
-                expandedSignalID: $expandedID
+                expandedSignalIDs: $expandedIDs
             )
             .padding(.vertical)
         }

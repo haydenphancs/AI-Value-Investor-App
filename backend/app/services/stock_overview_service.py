@@ -22,7 +22,11 @@ from app.integrations.finra_short_interest import get_short_interest
 # The one definition of "undefined multiple" (Neg.) vs "unknown" (—). Shared with
 # the Price snapshot card so the two halves of the SAME screen cannot disagree —
 # they did, visibly: P/FCF read "Neg." two rows below a P/E reading "—".
-from app.services.valuation_snapshot_service import _fmt_ratio
+from app.services.valuation_snapshot_service import (
+    _fmt_ratio,
+    build_price_snapshot,
+)
+from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
     KeyStatisticItem,
@@ -86,64 +90,13 @@ def _cache_set(key: str, value: Any):
             _cache.pop(_old, None)
 
 
-# ── Sector P/E averages (approximate, for valuation context) ─────
-
-_SECTOR_PE_AVG: Dict[str, float] = {
-    "Technology": 30.0,
-    "Healthcare": 22.0,
-    "Financial Services": 15.0,
-    "Consumer Cyclical": 22.0,
-    "Consumer Defensive": 23.0,
-    "Industrials": 21.0,
-    "Energy": 12.0,
-    "Utilities": 18.0,
-    "Real Estate": 35.0,
-    "Basic Materials": 16.0,
-    "Communication Services": 20.0,
-}
-
-_SECTOR_PS_AVG: Dict[str, float] = {
-    "Technology": 7.0,
-    "Healthcare": 4.5,
-    "Financial Services": 3.0,
-    "Consumer Cyclical": 2.5,
-    "Consumer Defensive": 2.0,
-    "Industrials": 2.5,
-    "Energy": 1.5,
-    "Utilities": 2.5,
-    "Real Estate": 6.0,
-    "Basic Materials": 2.0,
-    "Communication Services": 4.0,
-}
-
-_SECTOR_PFCF_AVG: Dict[str, float] = {
-    "Technology": 30.0,
-    "Healthcare": 25.0,
-    "Financial Services": 15.0,
-    "Consumer Cyclical": 22.0,
-    "Consumer Defensive": 20.0,
-    "Industrials": 22.0,
-    "Energy": 12.0,
-    "Utilities": 15.0,
-    "Real Estate": 30.0,
-    "Basic Materials": 16.0,
-    "Communication Services": 22.0,
-}
-
-_SECTOR_EV_EBITDA_AVG: Dict[str, float] = {
-    "Technology": 22.0,
-    "Healthcare": 16.0,
-    "Financial Services": 12.0,
-    "Consumer Cyclical": 14.0,
-    "Consumer Defensive": 15.0,
-    "Industrials": 14.0,
-    "Energy": 8.0,
-    "Utilities": 12.0,
-    "Real Estate": 20.0,
-    "Basic Materials": 10.0,
-    "Communication Services": 14.0,
-}
-
+# The four hardcoded _SECTOR_*_AVG tables that used to live here were DELETED.
+# Their only consumer was `_build_valuation_snapshot`, the degraded fallback for
+# the Price card, which now shares `valuation_snapshot_service`'s real
+# `sector_benchmarks` medians. Made-up averages are worse than no average: the
+# star rating they produced was a confident wrong verdict on a card the user
+# cannot tell apart from the real one (Technology 30.0 where the live benchmark
+# reads 22).
 
 # ── Number formatting helpers ────────────────────────────────────
 
@@ -926,6 +879,8 @@ class StockOverviewService:
             cashflow_annual, price,
             _safe_float(profile, "mktCap") or _safe_float(quote, "marketCap"),
             sector_name,
+            profile=profile,
+            industry=profile.get("industry", "") if isinstance(profile, dict) else "",
             profitability_snapshot=profitability_snapshot,
             growth_snapshot=growth_snapshot,
             valuation_snapshot=valuation_snapshot,
@@ -1064,6 +1019,36 @@ class StockOverviewService:
             if earnings_yield:
                 eps = round(earnings_yield * price, 2)
 
+        # ── Why there are TWO P/E values on this screen ────────────────────
+        #
+        # This "P/E (TTM)" and the Snapshots "Price" card's
+        # "P/E (1.63x sector avg 22)" render in the SAME scroll view
+        # (TickerDetailOverviewContent.swift:19 and :30) and can disagree.
+        # That is the design, not a bug.
+        #
+        # Both use the same TTM EPS basis; only the PRICE TIMESTAMP differs.
+        # This one is the live quote (in-memory 120s, never persisted); the
+        # other is FMP's own `priceToEarningsRatioTTM`, priced at FMP's
+        # timestamp and held up to 24h in `snapshot_cache`. Measured drift:
+        # KO identical, AAPL $1.07 of price, UBER 1.8% (worst observed).
+        #
+        # ⚠️ DO NOT UNIFY THEM — see the long form at
+        # valuation_snapshot_service.build_price_snapshot, which carries the
+        # full reasoning and the invariant the cached row must keep. Short
+        # version: making that row live bakes a live price into a 24-hour
+        # Supabase row, and making this one read that row stales a number that
+        # is internally consistent on screen (35.90 × 8.73 = $313.40, the price
+        # shown directly above it).
+        #
+        # ⚠️ ONE QUALIFICATION on "this is the live one": `price` at :889 is
+        # `quote.price` OR `profile.price`, and `profile` comes from
+        # `company_profile_cache` (24h). `_get_volatile` degrades `quote` to {}
+        # on any exception — so when the live quote FAILS, this P/E is computed
+        # from a price up to 24 hours old, and the header price above it is the
+        # same stale value, so it still LOOKS internally consistent. That is a
+        # separate defect from the one documented here; do not read this comment
+        # as a claim that the quote always succeeded.
+        #
         # ── P/E (TTM): price / EPS ──
         #
         # Computed for a NEGATIVE eps too, so the formatter can tell "undefined because
@@ -1293,6 +1278,7 @@ class StockOverviewService:
         cashflow_annual: List[Dict], price: float, market_cap: float,
         sector: str, profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
+        profile: Optional[Dict] = None, industry: str = "",
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -1321,7 +1307,13 @@ class StockOverviewService:
         if valuation_snapshot is not None:
             snapshots.append(valuation_snapshot)
         else:
-            snapshots.append(self._build_valuation_snapshot(fr, km, sector))
+            # NOTE: the fallback normalizes `sector` itself (the primary does
+            # too) — the raw FMP string keyed the old hardcoded tables, but
+            # `sector_benchmarks` rows are stored normalized.
+            snapshots.append(self._build_valuation_snapshot(
+                fr, km, cf0, inc0, bs, profile or {},
+                _normalize_sector(sector) if sector else "", industry,
+            ))
 
         # 4. Financial Health (use cached sector-relative snapshot if available)
         if health_snapshot is not None:
@@ -1435,72 +1427,45 @@ class StockOverviewService:
         )
 
     def _build_valuation_snapshot(
-        self, fr: Dict, km: Dict, sector: str
+        self, fr: Dict, km: Dict, cf: Dict, inc: Dict, bs: Dict,
+        profile: Dict, sector: str, industry: str,
     ) -> SnapshotItemResponse:
-        pe = _safe_float(fr, "priceEarningsRatio") or _safe_float(km, "peRatio")
-        ps = _safe_float(fr, "priceToSalesRatio") or _safe_float(km, "priceToSalesRatio")
-        pfcf = _safe_float(fr, "priceToFreeCashFlowsRatio") or _safe_float(km, "pfcfRatio")
-        ev_ebitda = _safe_float(fr, "enterpriseValueOverEBITDA") or _safe_float(km, "enterpriseValueOverEBITDA")
+        """DEGRADED fallback for the Price card.
 
-        sector_pe = _SECTOR_PE_AVG.get(sector, 20.0)
-        sector_ps = _SECTOR_PS_AVG.get(sector, 3.0)
-        sector_pfcf = _SECTOR_PFCF_AVG.get(sector, 25.0)
-        sector_ev_ebitda = _SECTOR_EV_EBITDA_AVG.get(sector, 18.0)
+        Reached ONLY when `get_valuation_snapshot` raised (see `_build_snapshots`);
+        the primary is `valuation_snapshot_service.get_valuation_snapshot`.
 
-        # Rating: lower multiples = better (inverted)
-        def _val_score(val: float, avg: float) -> int:
-            if val <= 0:
-                return 3  # can't rate negative
-            ratio = val / avg
-            if ratio <= 0.8:
-                return 5
-            if ratio <= 1.2:
-                return 4
-            if ratio <= 1.5:
-                return 3
-            if ratio <= 2.0:
-                return 2
-            return 1
+        This used to be a private second implementation, and every one of its
+        divergences was a silently WRONG number on a card indistinguishable from
+        the real one: ANNUAL ratios instead of TTM (up to 24 months stale), a
+        hardcoded sector-average table instead of `sector_benchmarks`, four
+        metrics instead of six, and `pe > 0` guards that rendered "—" for a
+        loss-maker — re-introducing on this path the exact bug the "Neg." fix
+        removed, which a TestFlight tester had photographed.
 
-        scores = []
-        if pe > 0:
-            scores.append(_val_score(pe, sector_pe))
-        if ps > 0:
-            scores.append(_val_score(ps, sector_ps))
-        if pfcf > 0:
-            scores.append(_val_score(pfcf, sector_pfcf))
-        if ev_ebitda > 0:
-            scores.append(_val_score(ev_ebitda, sector_ev_ebitda))
+        It now calls the SAME builder as the primary, so the two cannot drift
+        again. The only remaining difference is freshness: no Supabase snapshot
+        row, computed inline from the overview's own already-fetched payloads.
+        """
+        bench: Dict[str, Optional[float]] = {}
+        if sector:
+            try:
+                bench = get_sector_benchmark_lookup().get_current_benchmark_values(
+                    industry, sector,
+                    ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio",
+                     "ev_ebitda", "earnings_yield"],
+                )
+            except Exception as e:
+                # Non-fatal by design: an empty `bench` degrades each label to a
+                # bare metric name, which is honest. This is already the degraded
+                # path — it must not be able to fail the whole overview.
+                logger.warning(
+                    f"Sector benchmark lookup failed on the fallback Price card: "
+                    f"{type(e).__name__}: {e}"
+                )
 
-        rating = round(sum(scores) / len(scores)) if scores else 3
-
-        # Format with sector context
-        def _val_ctx(val: float, avg: float, label: str) -> str:
-            if val <= 0:
-                return "—"
-            ratio = val / avg if avg > 0 else 0
-            return f"{ratio:.2f}x sector avg {avg:.0f}"
-
-        metrics = [
-            SnapshotMetricResponse(
-                name=f"P/E ({_val_ctx(pe, sector_pe, 'P/E')})",
-                value=f"{pe:.2f}" if pe > 0 else "—"
-            ),
-            SnapshotMetricResponse(
-                name=f"P/S ({_val_ctx(ps, sector_ps, 'P/S')})",
-                value=f"{ps:.2f}" if ps > 0 else "—"
-            ),
-            SnapshotMetricResponse(
-                name=f"P/FCF ({_val_ctx(pfcf, sector_pfcf, 'P/FCF')})",
-                value=f"{pfcf:.2f}" if pfcf > 0 else "—"
-            ),
-            SnapshotMetricResponse(
-                name=f"EV/EBITDA ({_val_ctx(ev_ebitda, sector_ev_ebitda, 'EV/EBITDA')})",
-                value=f"{ev_ebitda:.2f}" if ev_ebitda > 0 else "—"
-            ),
-        ]
-        return SnapshotItemResponse(
-            category="Price", rating=rating, metrics=metrics
+        return build_price_snapshot(
+            fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench=bench,
         )
 
     def _build_health_snapshot(

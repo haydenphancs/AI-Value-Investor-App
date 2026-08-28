@@ -33,12 +33,15 @@ struct HomeDashboardView: View {
     /// `NotificationRouteDestination` the inbox rows use, so banner taps and in-app taps
     /// cannot drift apart.
     @State private var pushRoute: NotificationRouteBox?
-    /// Which Daily Scanner card is expanded (nil = none). Owned here so a tap
-    /// ANYWHERE outside the card (in the scroll content) collapses it.
-    @State private var expandedScannerID: DailyScanner.ID?
-    /// Which App-Exclusive Signals row is expanded (nil = none). Same
-    /// tap-outside-collapses ownership as `expandedScannerID`.
-    @State private var expandedSignalID: ExclusiveSignal.ID?
+    /// Which Daily Scanner cards are expanded. Owned here so a tap ANYWHERE outside a card
+    /// (in the scroll content) collapses them.
+    ///
+    /// A SET, and there is no longer any auto-collapse between cards or between sections:
+    /// readers asked to be able to open all three at once. What remains is the one EXPLICIT
+    /// dismissal — a tap on the scroll background — plus the pre-paywall collapse below.
+    @State private var expandedScannerIDs: Set<DailyScanner.ID> = []
+    /// Which App-Exclusive Signals rows are expanded. Same ownership and same set semantics.
+    @State private var expandedSignalIDs: Set<ExclusiveSignal.ID> = []
     /// A tapped whale/congress signal ticker → the per-ticker drill-down screen.
     @State private var signalDetailTarget: SignalDetailTarget?
     /// A tapped Emerging Frontiers theme → its detail screen (hero + companies).
@@ -307,10 +310,14 @@ struct HomeDashboardView: View {
                         DailyScannersSection(
                             scanners: data.scanners,
                             onEntryTap: openStock,
-                            // A tap swallowed by a scanner card's body is still
-                            // OUTSIDE the signals section → collapse its row.
-                            onBodyTap: collapseExpandedSignal,
-                            expandedCardID: $expandedScannerID
+                            // No cross-section collapse any more. This used to pass
+                            // `collapseExpandedSignal`, on the reasoning that a tap swallowed
+                            // by a scanner card is still "outside" the signals section. That is
+                            // true, but it was the machinery enforcing one-open-at-a-time — with
+                            // every card expandable at once it would close a reader's signals
+                            // rows the moment they touched a scanner card. The tap is still
+                            // swallowed (that is `.onTapGesture`'s doing, not this closure's).
+                            expandedCardIDs: $expandedScannerIDs
                         )
                     }
 
@@ -318,18 +325,19 @@ struct HomeDashboardView: View {
                         ExclusiveSignalsSection(
                             signals: data.signals,
                             onLeaderTap: openLeader,
-                            // A tap swallowed by the signals panel/row body is
-                            // still OUTSIDE the carousel → collapse its card.
-                            onBodyTap: collapseExpandedScanner,
+                            // No cross-section collapse — see the scanners section above.
                             onLockedTap: { _ in
                                 // Collapse whatever else is open first: the paywall is a
                                 // sheet, and returning from it to a still-expanded card
-                                // reads as the tap having done two things.
+                                // reads as the tap having done two things. Kept deliberately
+                                // even now that several cards can be open, because this is
+                                // also the path a main-thread freeze once surfaced on
+                                // (see project_home_feed_lazyvstack_hang).
                                 collapseExpandedSignal()
                                 collapseExpandedScanner()
                                 showSignalsPaywall = true
                             },
-                            expandedSignalID: $expandedSignalID
+                            expandedSignalIDs: $expandedSignalIDs
                         )
                     }
 
@@ -363,12 +371,13 @@ struct HomeDashboardView: View {
             // triggers it; guarded so it's a no-op when nothing is expanded.
             .contentShape(Rectangle())
             .onTapGesture {
-                if expandedScannerID != nil || expandedSignalID != nil {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        expandedScannerID = nil
-                        expandedSignalID = nil
-                    }
-                }
+                // ⚠️ The two halves are collapsed SEPARATELY, and only the scanners half is
+                // animated. They used to share one `withAnimation`, which is now wrong: the
+                // signals expand/collapse is deliberately unanimated (an animated resize of
+                // that card is what was reported as blinking), and wrapping it here would
+                // animate it again from the outside.
+                collapseExpandedSignal()
+                collapseExpandedScanner()
             }
         }
         .refreshable {
@@ -393,18 +402,22 @@ struct HomeDashboardView: View {
         .padding(.top, AppSpacing.xs)
     }
 
-    // MARK: - Cross-section collapse (taps swallowed by one section's body are
-    // still "outside" the other section's expandable — see onBodyTap wiring).
+    // MARK: - Collapse helpers
+    //
+    // Used by the tap-outside gesture and by the pre-paywall collapse. They are NOT used to
+    // enforce one-open-at-a-time any more — every card may be expanded at once.
 
     private func collapseExpandedScanner() {
-        if expandedScannerID != nil {
-            withAnimation(.easeInOut(duration: 0.25)) { expandedScannerID = nil }
+        if !expandedScannerIDs.isEmpty {
+            withAnimation(.easeInOut(duration: 0.25)) { expandedScannerIDs.removeAll() }
         }
     }
 
+    /// ⚠️ Unanimated on purpose — see `SignalDisclosureRow`. Animating this card's resize is
+    /// what was reported as the whole card blinking, so it must not be re-animated from here.
     private func collapseExpandedSignal() {
-        if expandedSignalID != nil {
-            withAnimation(.easeInOut(duration: 0.25)) { expandedSignalID = nil }
+        if !expandedSignalIDs.isEmpty {
+            expandedSignalIDs.removeAll()
         }
     }
 

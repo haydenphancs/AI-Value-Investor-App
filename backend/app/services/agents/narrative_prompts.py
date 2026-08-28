@@ -244,6 +244,37 @@ class NarrativeJob:
 _EVIDENCE_POINTER = "[see FINANCIAL EVIDENCE provided above]"
 
 
+# ── Thinking budgets for the report path (SYSTEM_DESIGN_GUIDELINES 9b.7) ─────
+#
+# These live here, not in the two services that use them, because this module is
+# the only one of the three that already imports `settings` — and both
+# `ticker_report_service` and `research_agent` already import several names from
+# here, so it adds no coupling.
+#
+# FUNCTIONS, resolved at call time — never module-level constants. A constant
+# computed at import time cannot be monkeypatched, which would silently make the
+# "a negative setting restores the model default" test assert nothing.
+
+
+def _resolve_budget(value: int) -> Optional[int]:
+    """Negative -> None (leave the model's own default alone). 0 -> no thinking.
+
+    Mapping negative to None reproduces the pre-cap code path byte for byte,
+    rather than relying on Gemini's own `-1` = "dynamic thinking" convention.
+    """
+    return None if value < 0 else value
+
+
+def narrative_thinking_budget() -> Optional[int]:
+    """Stage B — the ~14-18 word-capped narrative jobs."""
+    return _resolve_budget(settings.REPORT_NARRATIVE_THINKING_BUDGET)
+
+
+def stage_a_thinking_budget() -> Optional[int]:
+    """Stage A — the structural JSON shell."""
+    return _resolve_budget(settings.REPORT_STAGE_A_THINKING_BUDGET)
+
+
 async def run_narrative_jobs(
     jobs: List[NarrativeJob],
     gemini: GeminiClient,
@@ -275,6 +306,14 @@ async def run_narrative_jobs(
         if use_cache else None
     )
 
+    # ⚠️ BOTH paths below take the SAME budget. The inline call is the fail-safe
+    # this function promises ("a per-call cache hiccup falls back to the inline
+    # path (full quality)") — cap only the cached one and a single cache hiccup
+    # silently restores uncapped thinking for that job, under exactly the
+    # conditions (quota pressure, cache-create failure) where the saving matters
+    # most, with nothing in the logs to say so.
+    thinking_budget = narrative_thinking_budget()
+
     async def _one(job: NarrativeJob) -> None:
         try:
             raw: Optional[str] = None
@@ -282,7 +321,9 @@ async def run_narrative_jobs(
                 try:
                     # Drop the inline evidence — it's the cached prefix now.
                     slim = job.prompt.replace(evidence, _EVIDENCE_POINTER)
-                    result = await gemini.generate_text_cached(slim, cache_handle)
+                    result = await gemini.generate_text_cached(
+                        slim, cache_handle, thinking_budget=thinking_budget,
+                    )
                     raw = result.get("text") or ""
                 except Exception as ce:
                     # Cache-path hiccup → inline retry preserves full quality.
@@ -295,6 +336,7 @@ async def run_narrative_jobs(
                 result = await gemini.generate_text(
                     prompt=job.prompt,
                     system_instruction=persona.system_prompt,
+                    thinking_budget=thinking_budget,
                 )
                 raw = result.get("text") or ""
 

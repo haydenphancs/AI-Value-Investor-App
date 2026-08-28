@@ -40,16 +40,19 @@ struct RootContainerView: View {
                     VStack {
                         Spacer()
                         GlobalMiniPlayer()
-                            // Three terms, none of them a magic number:
-                            //   + the tab bar's own height,
-                            //   + the visual gap we want above it,
-                            //   - the spacing GlobalMiniPlayer already adds below its capsule.
-                            // The old bare `58` resolved to a 3pt gap once the player's own
-                            // 12pt was counted, so the capsule read as welded to the tab bar.
-                            // `AppSpacing.lg` matches the player-to-chat-bar gap on the detail
-                            // screens, which is the spacing this one is being matched to.
-                            .padding(.bottom, CustomTabBar.approximateHeight
-                                     + AppSpacing.lg - AppSpacing.md)
+                            // Clear the bar exactly, and let the player's OWN `bottomSpacing`
+                            // (AppSpacing.md) be the visual gap — 12pt.
+                            //
+                            // The old bare `58` ignored that the player already pads itself, so
+                            // it resolved to 58 + 12 = 70 against a 73pt bar: a 3pt gap, with
+                            // the capsule reading as welded to the tab bar.
+                            //
+                            // Deliberately NOT `+ AppSpacing.lg - AppSpacing.md` (a 16pt gap).
+                            // That matched the player-to-chat-bar spacing on the detail screens,
+                            // but the tab bar carries far more internal padding of its own
+                            // (12 top + 20 bottom), so the same number reads as a hole above it.
+                            // Equal spacing, unequal surroundings — measured, then reduced.
+                            .padding(.bottom, CustomTabBar.approximateHeight)
                     }
                     .transition(.asymmetric(
                         insertion: .move(edge: .bottom).combined(with: .opacity),

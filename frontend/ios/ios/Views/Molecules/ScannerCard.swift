@@ -68,7 +68,16 @@ struct ScannerCard: View {
             // what deadlocked SwiftUI when a card resized inside the carousel.
             if isExpanded {
                 leaderboard
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    // ⚠️ `.opacity` ALONE — do not put `.move(edge: .top)` back.
+                    // This content is revealed at the BOTTOM of a clipped container, so a top-edge move
+                    // starts it offset UPWARD by its own height and slides it down THROUGH everything
+                    // above it, translucent the whole way. On the Daily Scanners card that meant the
+                    // leaderboard swept across the card's own header, hero and CTA, and was reported from
+                    // TestFlight as "words coming from the background ... looks like a bug".
+                    // A fade moves nothing and cannot overlap anything.
+                    // (Genuinely top-anchored things — the audio status island, a banner pinned to the top
+                    // of a screen — are the opposite case and keep their `.move(edge: .top)`.)
+                    .transition(.opacity)
             }
         }
         .padding(15)
@@ -108,6 +117,23 @@ struct ScannerCard: View {
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(2)
                         .minimumScaleFactor(0.85)
+                        // ⚠️ Load-bearing, and NOT a duplicate of `lineLimit`. Without it this
+                        // title SHAKES on every expand.
+                        //
+                        // `.animation(_:value: isExpanded)` on the card body animates the whole
+                        // subtree, so the VStack's height is interpolated. Mid-flight the card is
+                        // shorter than its own content, and SwiftUI resolves the shortfall by
+                        // compressing whichever child is compressible — which is exactly this
+                        // Text, because `minimumScaleFactor` lets it scale and `lineLimit(2)`
+                        // lets it drop to one line. Measured at 60fps on Today's Top Movers, the
+                        // title went 79px -> 32px (one squeezed line) -> 81px in 250ms, and the
+                        // ~26pt the header lost dragged the hero, CTA and leaderboard with it —
+                        // reported as "the whole card is shaking".
+                        //
+                        // `fixedSize(vertical:)` makes it report and occupy its IDEAL height, so
+                        // a short proposal can no longer reflow it. The two modifiers above stay:
+                        // they handle Dynamic Type, which is driven by WIDTH and is unaffected.
+                        .fixedSize(horizontal: false, vertical: true)
 
                     // Tappable info affordance — shown only when this card carries
                     // an explainer. Tapping pops over the note instead of always

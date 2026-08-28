@@ -259,21 +259,31 @@ def _compress_financial_data(
         return {"data": []}
 
     # Select key fields based on statement type
+    # ⚠️ These are SELECT lists — `{k: item[k] for k in fields if k in item}` below — so a
+    # name `/stable` no longer returns is not an error, it is a FIELD THAT SILENTLY
+    # VANISHES from what the model is handed. Verified against a live AAPL payload:
+    # `calendarYear` → `fiscalYear` (all three statements), `epsdiluted` → `epsDiluted`,
+    # `dividendsPaid` → `netDividendsPaid`. So Cay AI asked for an income statement and
+    # got back no EPS and no year label at all.
+    #
+    # BOTH spellings are listed rather than swapped: the select is presence-based, so the
+    # dead name costs nothing and an upstream revert keeps working.
     key_fields = {
         "income": [
-            "date", "calendarYear", "period", "revenue", "grossProfit",
-            "operatingIncome", "netIncome", "epsdiluted", "operatingExpenses",
+            "date", "fiscalYear", "calendarYear", "period", "revenue", "grossProfit",
+            "operatingIncome", "netIncome", "epsDiluted", "epsdiluted", "eps",
+            "operatingExpenses",
         ],
         "balance_sheet": [
-            "date", "calendarYear", "period", "totalAssets", "totalLiabilities",
-            "totalStockholdersEquity", "cashAndCashEquivalents", "totalDebt",
-            "netDebt", "totalCurrentAssets", "totalCurrentLiabilities",
+            "date", "fiscalYear", "calendarYear", "period", "totalAssets",
+            "totalLiabilities", "totalStockholdersEquity", "cashAndCashEquivalents",
+            "totalDebt", "netDebt", "totalCurrentAssets", "totalCurrentLiabilities",
             "retainedEarnings",
         ],
         "cash_flow": [
-            "date", "calendarYear", "period", "operatingCashFlow",
-            "capitalExpenditure", "freeCashFlow", "dividendsPaid",
-            "commonStockRepurchased",
+            "date", "fiscalYear", "calendarYear", "period", "operatingCashFlow",
+            "capitalExpenditure", "freeCashFlow", "netDividendsPaid",
+            "commonDividendsPaid", "dividendsPaid", "commonStockRepurchased",
         ],
     }
 

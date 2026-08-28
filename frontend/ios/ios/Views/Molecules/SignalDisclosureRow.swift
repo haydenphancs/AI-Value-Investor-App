@@ -46,7 +46,22 @@ struct SignalDisclosureRow: View {
                 if signal.isLocked {
                     onLockedTap?(signal.kind)
                 } else {
-                    withAnimation(.easeInOut(duration: 0.25)) { isExpanded.toggle() }
+                    // ⚠️ Deliberately NOT wrapped in `withAnimation`.
+                    //
+                    // Animating this resizes the whole App-Exclusive Signals section every
+                    // frame, and the section was reported as "the title and the whole card is
+                    // blinking when I expand". I could NOT reproduce that on the simulator —
+                    // an A/B of the shadow change measured 1 direction-reversal vs 0 in the
+                    // stationary band, i.e. no flicker either way — but offscreen raster cost
+                    // is wildly different on a phone than on a Mac GPU, so a device-only
+                    // flicker is entirely plausible and unmeasurable here.
+                    //
+                    // With no animation there is no per-frame re-render at all, so there is
+                    // nothing left that CAN blink. This also removes the last `withAnimation`
+                    // transaction on this section — the one a `.repeatForever` glow entangled
+                    // with and hard-froze the main thread on, per the header comment in
+                    // ExclusiveSignalsSection.swift.
+                    isExpanded.toggle()
                 }
             } label: {
                 HStack(spacing: 12) {
@@ -118,7 +133,16 @@ struct SignalDisclosureRow: View {
                 .padding(.trailing, 12)
                 .padding(.bottom, 12)
                 .padding(.top, 2)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                // ⚠️ `.opacity` ALONE — do not put `.move(edge: .top)` back.
+                // This content is revealed at the BOTTOM of a clipped container, so a top-edge move
+                // starts it offset UPWARD by its own height and slides it down THROUGH everything
+                // above it, translucent the whole way. On the Daily Scanners card that meant the
+                // leaderboard swept across the card's own header, hero and CTA, and was reported from
+                // TestFlight as "words coming from the background ... looks like a bug".
+                // A fade moves nothing and cannot overlap anything.
+                // (Genuinely top-anchored things — the audio status island, a banner pinned to the top
+                // of a screen — are the opposite case and keep their `.move(edge: .top)`.)
+                .transition(.opacity)
             }
         }
         .background(AppColors.textPrimary.opacity(0.03))

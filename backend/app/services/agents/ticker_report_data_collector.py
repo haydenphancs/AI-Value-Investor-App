@@ -277,6 +277,16 @@ class CollectedTickerData:
     cash_flow: List[Dict[str, Any]] = field(default_factory=list)
     key_metrics: List[Dict[str, Any]] = field(default_factory=list)
     ratios: List[Dict[str, Any]] = field(default_factory=list)
+    # TTM ratios — the CURRENT valuation multiples. The `ratios` list above is ANNUAL and
+    # stays annual: it drives the 10-year tap-to-expand history charts, where a fiscal
+    # series is exactly right.
+    #
+    # They are not interchangeable for a HEADLINE number. FMP's annual ratios are priced
+    # at the FISCAL YEAR CLOSE — proven arithmetically: MSFT's annual P/E 20.72 × its FY
+    # epsDiluted 17.95 implies a price of 371.98, and MSFT actually closed at 373.02 on
+    # its FY end 2026-06-30, against 496.37 today. Feeding that to the narrative had Cay
+    # AI writing about a 20.7x multiple while the screen showed 27.6x.
+    ratios_ttm: List[Dict[str, Any]] = field(default_factory=list)
     estimates: List[Dict[str, Any]] = field(default_factory=list)
     historical: Dict[str, Any] = field(default_factory=dict)
     news: List[Dict[str, Any]] = field(default_factory=list)
@@ -642,6 +652,9 @@ class TickerReportDataCollector:
             ("cash_flow", self.fmp.get_cash_flow_statement(ticker, "annual", 10), []),
             ("key_metrics", self.fmp.get_key_metrics(ticker, "annual", 10), []),
             ("ratios", self.fmp.get_financial_ratios(ticker, "annual", 10), []),
+            # Current (TTM) multiples for the headline values + the AI context. Same
+            # endpoint the peer fan-out already uses, so no new client surface.
+            ("ratios_ttm", self.fmp.get_ratios_ttm(ticker), []),
             # Quarterly counterparts — TRANSIENT. These attrs are NOT declared
             # dataclass fields, so the ticker_data_cache serializer (which
             # iterates dataclasses.fields) skips them and the cache stays
@@ -1320,6 +1333,8 @@ class TickerReportDataCollector:
         profile, quote = out.profile, out.quote
         income, balance, cash_flow = out.income, out.balance, out.cash_flow
         ratios, estimates = out.ratios, out.estimates
+        # ANNUAL (history) and TTM (current) are both needed — see `_cur` below.
+        ratios_ttm = getattr(out, "ratios_ttm", []) or []
         key_metrics = out.key_metrics
 
         # ── Current price ─────────────────────────────────────────────
@@ -1363,37 +1378,65 @@ class TickerReportDataCollector:
         # debt/equity, interest coverage) and moved ROE/ROA to /key-metrics.
         # We try the new name first, then the legacy name as fallback so this
         # keeps working if the upstream reverts.
-        if ratios:
-            r0 = ratios[0]
+        if ratios or ratios_ttm:
+            r0 = ratios[0] if ratios else {}
+            t0 = ratios_ttm[0] if ratios_ttm else {}
             km0 = key_metrics[0] if key_metrics else {}
-            c["gross_margin"] = _pct_or_none(r0.get("grossProfitMargin"))
-            c["net_margin"] = _pct_or_none(r0.get("netProfitMargin"))
-            c["operating_margin"] = _pct_or_none(r0.get("operatingProfitMargin"))
+
+            def _cur(*names):
+                """The CURRENT value: TTM first, then the annual fiscal-year figure.
+
+                These are the headline numbers — they reach `build_financial_context`
+                (the Gemini prompt) and `_scoring_inputs._style_signals`. The annual
+                `ratios` list is priced at the FISCAL YEAR CLOSE, so on the annual path
+                MSFT read a P/E of 20.72 (its 2026-06-30 close of 373.02 over FY EPS
+                17.95) while the screen showed 27.58 — the app stating two different
+                things about one company.
+
+                `/ratios-ttm` suffixes every field with `TTM`; try both spellings of each
+                name so an upstream rename does not silently drop back to annual.
+                """
+                for n in names:
+                    v = t0.get(f"{n}TTM")
+                    if v is None:
+                        v = t0.get(n)
+                    if v is not None:
+                        return v
+                for n in names:
+                    v = r0.get(n)
+                    if v is not None:
+                        return v
+                return None
+
+            c["gross_margin"] = _pct_or_none(_cur("grossProfitMargin"))
+            c["net_margin"] = _pct_or_none(_cur("netProfitMargin"))
+            c["operating_margin"] = _pct_or_none(_cur("operatingProfitMargin"))
             c["roe"] = _pct_or_none(
-                r0.get("returnOnEquity") or km0.get("returnOnEquity")
+                _cur("returnOnEquity") or km0.get("returnOnEquity")
             )
             c["roa"] = _pct_or_none(
-                r0.get("returnOnAssets") or km0.get("returnOnAssets")
+                _cur("returnOnAssets") or km0.get("returnOnAssets")
             )
             c["pe_ratio"] = _num_or_none(
-                r0.get("priceToEarningsRatio") or r0.get("priceEarningsRatio")
+                _cur("priceToEarningsRatio", "priceEarningsRatio")
             )
-            c["pb_ratio"] = _num_or_none(r0.get("priceToBookRatio"))
-            c["ps_ratio"] = _num_or_none(r0.get("priceToSalesRatio"))
+            c["pb_ratio"] = _num_or_none(_cur("priceToBookRatio"))
+            c["ps_ratio"] = _num_or_none(_cur("priceToSalesRatio"))
             c["pfcf_ratio"] = _num_or_none(
-                r0.get("priceToFreeCashFlowRatio")
-                or r0.get("priceToFreeCashFlowsRatio")
+                _cur("priceToFreeCashFlowRatio", "priceToFreeCashFlowsRatio")
             )
+            # `enterpriseValueMultiple` is the name `/stable` populates —
+            # `enterpriseValueOverEBITDA` is None for every ticker tested. Same finding
+            # that fixed the detail screen's Price card.
             c["ev_ebitda"] = _num_or_none(
-                r0.get("enterpriseValueMultiple")
-                or r0.get("enterpriseValueOverEBITDA")
+                _cur("enterpriseValueMultiple", "enterpriseValueOverEBITDA")
             )
             c["debt_equity"] = _num_or_none(
-                r0.get("debtToEquityRatio") or r0.get("debtEquityRatio")
+                _cur("debtToEquityRatio", "debtEquityRatio")
             )
-            c["current_ratio"] = _num_or_none(r0.get("currentRatio"))
+            c["current_ratio"] = _num_or_none(_cur("currentRatio"))
             c["interest_coverage"] = _num_or_none(
-                r0.get("interestCoverageRatio") or r0.get("interestCoverage")
+                _cur("interestCoverageRatio", "interestCoverage")
             )
         else:
             for k in (
@@ -7704,7 +7747,9 @@ def build_financial_context(out: CollectedTickerData) -> str:
     """
     c = out.computed
     profile, quote = out.profile, out.quote
-    income, ratios, estimates = out.income, out.ratios, out.estimates
+    # `out.ratios` (ANNUAL) is deliberately not bound here any more: the multiples
+    # below now come from `out.computed`, which resolves TTM-first.
+    income, estimates = out.income, out.estimates
     balance, cash_flow = out.balance, out.cash_flow
 
     parts: List[str] = []
@@ -7756,7 +7801,15 @@ def build_financial_context(out: CollectedTickerData) -> str:
 
     if income:
         for stmt in income[:3]:
-            yr = stmt.get("calendarYear", "?")
+            # `/stable` renamed `calendarYear` → `fiscalYear`, so this printed a literal
+            # "?" for every year and the model could not tell the three statements apart.
+            # Fall through to the date's year rather than back to "?".
+            yr = (
+                stmt.get("fiscalYear")
+                or stmt.get("calendarYear")
+                or (stmt.get("date") or "")[:4]
+                or "?"
+            )
             parts.append(
                 f"\n[{yr}] Revenue: {_format_money_compact(stmt.get('revenue', 0))} | "
                 f"Net Income: {_format_money_compact(stmt.get('netIncome', 0))}"
@@ -7774,14 +7827,21 @@ def build_financial_context(out: CollectedTickerData) -> str:
         parts.append(f"Free CF: {_format_money_compact(cf.get('freeCashFlow', 0))}")
         parts.append(f"Buybacks: {_format_money_compact(cf.get('commonStockRepurchased', 0))}")
 
-    if ratios:
-        r0 = ratios[0]
-        pe = r0.get("priceToEarningsRatio") or r0.get("priceEarningsRatio") or "N/A"
-        ev = r0.get("enterpriseValueMultiple") or r0.get("enterpriseValueOverEBITDA") or "N/A"
-        pfcf = r0.get("priceToFreeCashFlowRatio") or r0.get("priceToFreeCashFlowsRatio") or "N/A"
-        parts.append(f"\nP/E: {pe}")
-        parts.append(f"EV/EBITDA: {ev}")
-        parts.append(f"P/FCF: {pfcf}")
+    # The multiples the MODEL is told must be the ones the USER is shown. `out.computed`
+    # already resolves TTM-first (see `_cur` in `_compute_metrics`), so read it rather
+    # than re-deriving from the ANNUAL `ratios` list — which is priced at the fiscal year
+    # close and had Cay AI describing MSFT as a 20.7x business while its screen said 27.6x.
+    _cm = out.computed or {}
+    _pe, _ev, _pfcf = _cm.get("pe_ratio"), _cm.get("ev_ebitda"), _cm.get("pfcf_ratio")
+    if _pe is not None or _ev is not None or _pfcf is not None:
+        def _mult(v):
+            # "N/A" for absent. A NEGATIVE value is passed through, not hidden: telling
+            # the model a loss-maker has no P/E and telling it the P/E is -18.75 lead to
+            # different prose, and only the second is true.
+            return "N/A" if v is None else f"{v:.2f}"
+        parts.append(f"\nP/E: {_mult(_pe)}")
+        parts.append(f"EV/EBITDA: {_mult(_ev)}")
+        parts.append(f"P/FCF: {_mult(_pfcf)}")
 
     if estimates:
         parts.append("\nAnalyst Estimates:")

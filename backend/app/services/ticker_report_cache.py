@@ -154,7 +154,15 @@ TABLE_NAME = "ticker_report_cache"
 #     to a recent PAST instant (01:00 UTC) so the cache stays warm on restart while
 #     still invalidating every pre-rollout cached report. (Guarded by
 #     test_cache_freshness.test_schema_floor_not_in_future.)
-CACHE_SCHEMA_FLOOR = datetime(2026, 7, 4, 1, 0, 0, tzinfo=timezone.utc)
+# 2026-08-26: bumped for the TTM-current-multiples change. `CollectedTickerData` gained
+#     `ratios_ttm`, and `computed`'s P/E / P/B / P/S / P/FCF / EV/EBITDA now resolve
+#     TTM-first instead of from the ANNUAL ratios (which FMP prices at the FISCAL YEAR
+#     CLOSE — MSFT read 20.72 against a real 27.58). An older cached collection has no
+#     `ratios_ttm`, so it deserializes to the field DEFAULT and silently falls back to
+#     the annual values — the "additive field laundered stale rows into a confident wrong
+#     value" trap. The floor forces a fresh collect so the fix is not invisible on every
+#     already-cached ticker. Kept a recent PAST instant, per the paragraph above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 8, 26, 1, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

@@ -370,7 +370,9 @@ struct AssetsTabContent: View {
                         assets: viewModel.filteredAssets,
                         onAssetTapped: { asset in viewModel.viewAssetDetail(asset) },
                         onRemoveAsset: { asset in viewModel.removeAsset(asset) },
-                        onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) }
+                        onRemoveFromAll: { asset in viewModel.removeAssetFromAll(asset) },
+                        changeDisplayMode: viewModel.changeDisplayMode,
+                        onToggleChangeDisplay: { viewModel.toggleChangeDisplayMode() }
                     )
                 }
 

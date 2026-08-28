@@ -25,7 +25,10 @@ _CONTENT = _IOS / "ContentView.swift"
 _ROUTER = _IOS / "Core" / "Services" / "NotificationRouter.swift"
 _PUSH_MGR = _IOS / "Core" / "Services" / "PushNotificationManager.swift"
 _INBOX_VM = _IOS / "ViewModels" / "NotificationInboxViewModel.swift"
-_RULES_VM = _IOS / "ViewModels" / "PriceAlertRulesViewModel.swift"
+# The cross-ticker list was promoted out of a view model into the shared store, so the
+# detail-header bell could read the same array. The invariants below are unchanged;
+# only their address moved. See PriceAlertStore.
+_RULES_VM = _IOS / "Core" / "Services" / "PriceAlertStore.swift"
 
 
 def _code_only(src: str) -> str:

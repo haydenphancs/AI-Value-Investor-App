@@ -1031,6 +1031,9 @@ final class AppState {
         pendingTrackingTab = nil
         pendingResearchTicker = nil
         PortfolioStore.shared.reset()
+        // Same reason: the price alerts in this store are the signed-out user's own
+        // data, and the detail-header bell renders straight off it.
+        PriceAlertStore.shared.reset()
         // Consent is per person and must never be inherited — see the note on the method.
         AIConsentStore.shared.resetForEndedSession()
 

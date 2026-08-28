@@ -291,7 +291,7 @@ struct MoneyMoveArticleDetailView: View {
             audioCompletionCancellable = nil
         }
         .sheet(isPresented: $showShareSheet) {
-            ShareSheet(items: [shown.title, shown.subtitle])
+            ShareSheet(items: ShareContent.items("\(shown.title)\n\(shown.subtitle)"))
         }
         // Narration is Pro/Max: the audio ENGINE refuses a locked episode and asks for
         // an upgrade, so this presenter is what turns that into the plan sheet. Needed on

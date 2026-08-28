@@ -12,6 +12,9 @@ struct TickerDetailView: View {
     /// is non-nil. Every detail screen passed `nil`, so it had never rendered —
     /// this is what it was waiting for.
     @State private var showPriceAlerts = false
+    /// Shared with Tracking → Alerts and the bell sheet, so the bell badges the
+    /// moment a rule exists anywhere. See PriceAlertStore.
+    @ObservedObject private var priceAlerts = PriceAlertStore.shared
 
     @StateObject private var viewModel: TickerDetailViewModel
     @Environment(\.dismiss) private var dismiss
@@ -47,25 +50,21 @@ struct TickerDetailView: View {
         ))
     }
     
-    // Share sheet items
+    // Share sheet items.
+    //
+    // The body is built OUTSIDE the data binding on purpose. This used to return an EMPTY
+    // array while the screen was still loading, which presents UIActivityViewController
+    // with zero activity items — a blank share sheet. The symbol alone is a poor share but
+    // an honest one, and the download link ShareContent appends is the part that matters.
     private var shareItems: [Any] {
-        var items: [Any] = []
-        
-        // Share text
-        if let tickerData = viewModel.tickerData {
-            let shareText = """
-            \(tickerData.companyName) (\(tickerData.symbol))
-            \(tickerData.formattedPrice) \(tickerData.formattedChange) \(tickerData.formattedChangePercent)
-            
-            Check it out on Caydex!
-            """
-            items.append(shareText)
+        guard let tickerData = viewModel.tickerData else {
+            return ShareContent.items(tickerSymbol)
         }
-        
-        // You can add more items like URLs, images, etc.
-        // items.append(URL(string: "https://yourapp.com/stock/\(tickerSymbol)")!)
-        
-        return items
+        let body = """
+        \(tickerData.companyName) (\(tickerData.symbol))
+        \(tickerData.formattedPrice) \(tickerData.formattedChange) \(tickerData.formattedChangePercent)
+        """
+        return ShareContent.items(body)
     }
 
     var body: some View {
@@ -81,12 +80,13 @@ struct TickerDetailView: View {
                 TickerDetailHeader(
                     onBackTapped: handleBackTapped,
                     onSearchTapped: handleSearchTapped,
-                    // nil until price alerts ship — hides the bell rather than
-                    // showing a control whose handler was a print().
+                    // Bell glyph must stay identical to PriceAlertRuleRow — see
+                    // TickerDetailHeader.hasActiveAlerts.
                     onNotificationTapped: { showPriceAlerts = true },
                     onFavoriteTapped: { viewModel.toggleFavorite() },
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: tickerSymbol),
                     tickerSymbol: tickerSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
                 )
@@ -192,6 +192,10 @@ struct TickerDetailView: View {
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
             viewModel.loadTickerData()
+            // Lazy on purpose. Hooking AppState.onAuthenticated would add a request
+            // to every cold launch of a signed-in user for a feature most never use;
+            // one ≤40-row response here serves the bell on every screen for 5 min.
+            Task { await priceAlerts.loadIfStale() }
         }
         .onDisappear {
             viewModel.disconnectLivePrice()

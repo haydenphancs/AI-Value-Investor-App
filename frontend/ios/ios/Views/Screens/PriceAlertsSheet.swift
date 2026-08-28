@@ -9,15 +9,19 @@
 //  `time-sensitive` (it pierces Focus) and the only one exempt from quiet hours: an alert
 //  that arrives after the move is over is worthless.
 //
-//  The bell existed in `TickerDetailHeader` from the start and every one of the five
-//  detail screens passed it `nil`, so it never rendered. This is what it was waiting for.
+//  The list here and the "Price Alerts" section in Tracking → Alerts are the SAME rows, read
+//  from the same `PriceAlertStore` — so creating one here shows up there immediately, and the
+//  bell that opened this sheet badges the moment it exists.
 //
 
 import SwiftUI
 
 struct PriceAlertsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    /// The draft form only.
     @StateObject private var viewModel: PriceAlertsViewModel
+    /// The rows, shared with Tracking → Alerts and with the header bell.
+    @ObservedObject private var store = PriceAlertStore.shared
 
     init(ticker: String, assetType: String = "stock") {
         _viewModel = StateObject(
@@ -145,7 +149,8 @@ struct PriceAlertsSheet: View {
 
     @ViewBuilder
     private var existingSection: some View {
-        switch viewModel.state {
+        let alerts = store.alerts(for: viewModel.ticker)
+        switch store.state {
         case .loading:
             ProgressView().tint(AppColors.textSecondary)
                 .frame(maxWidth: .infinity)
@@ -155,7 +160,19 @@ struct PriceAlertsSheet: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.caution)
 
-        case .loaded where viewModel.alerts.isEmpty:
+        // Inherited from the store rather than reimplemented: a guest tapping the bell used to
+        // get `AppError`'s raw string, because this sheet had no auth guard of its own.
+        case .signedOut:
+            Text("Sign in to set price alerts.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+
+        case .reconnecting:
+            Text("Reconnecting…")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+
+        case .loaded where alerts.isEmpty:
             Text("No alerts on \(viewModel.ticker) yet.")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
@@ -169,7 +186,7 @@ struct PriceAlertsSheet: View {
                 // Self-carded rows (`ActivityRow`), so no group wrapper — nesting a
                 // card in a card measures 1.00:1 in dark and the rows disappear.
                 VStack(spacing: AppSpacing.md) {
-                    ForEach(viewModel.alerts) { alert in
+                    ForEach(alerts) { alert in
                         PriceAlertRuleRow(
                             alert: alert,
                             onToggle: { Task { await viewModel.toggleActive(alert) } },
@@ -177,6 +194,12 @@ struct PriceAlertsSheet: View {
                         )
                     }
                 }
+
+                // Answers the question the tester actually asked — "how do users know they
+                // are the same?" The bell badge is the implicit signal; this is the stated one.
+                Text("These also show in Tracking → Alerts.")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
             }
         }
     }

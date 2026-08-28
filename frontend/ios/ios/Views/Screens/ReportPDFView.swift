@@ -45,7 +45,11 @@ struct ReportPDFView: View {
                     }
                 }
                 .sheet(item: $sharePayload) { payload in
-                    ShareSheet(items: [payload.url])
+                    // The PDF leads. UIActivityViewController picks the activity from the
+                    // first item's type, so "Save to Files" and AirDrop still see a file
+                    // rather than a text share.
+                    ShareSheet(items: ShareContent.items("Detailed Analysis",
+                                                         attaching: [payload.url]))
                 }
         }
         .task { await viewModel.load() }

@@ -13,6 +13,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.services.news_insight_service import (
     MAX_BULLETS,
@@ -412,6 +414,123 @@ def test_market_scope_prompt_describes_the_market_not_the_key(svc):
     prompt = svc._build_prompt("__MARKET__", [{"headline": "A"}], "x", None, None)
     assert "__MARKET__" not in prompt
     assert "US stock market" in prompt
+
+
+# ── the catalyst must reach the prompt (the de-duplication fix) ────────
+#
+# The card's bullets and its "Why it moved" line used to be two INDEPENDENT model
+# calls over the same day's evidence, with no shared context and no cross-de-dup.
+# On an earnings day both wrote the same story and the user read it twice. These
+# pin the half of the fix that lives on this side: the catalyst is handed to the
+# roll-up prompt, and the prompt tells the model it is already on screen.
+#
+# A prompt that says the right thing but is never REACHED fixes nothing, so the
+# call site is asserted too — `_build_prompt` grew an optional parameter, and an
+# optional parameter that nobody passes is the silent failure mode here.
+
+_MOVE = {
+    "tier": "Extreme",
+    "change_percent": 20.4,
+    "catalyst_tag": "Q2 Earnings Beat",
+    "reason": "Shares surged after Q2 EPS of $5.90 beat estimates of $3.27.",
+}
+
+
+def test_the_catalyst_is_quoted_to_the_model_and_ring_fenced(svc):
+    rows = [{"headline": "A", "summary": "s"}]
+    prompt = svc._build_prompt("CRM", rows, "x", "Extreme", {"changePercentage": 20.4}, _MOVE)
+
+    assert "Q2 Earnings Beat — Shares surged after Q2 EPS of $5.90 beat estimates of $3.27." in prompt, (
+        "the model must see the catalyst VERBATIM as the reader sees it; a paraphrase would "
+        "let it 'add' a bullet that is the same sentence reworded"
+    )
+    assert "ALREADY EXPLAINED" in prompt and "DO NOT REPEAT" in prompt
+
+
+def test_a_catalyst_suppresses_the_generic_price_line(svc):
+    """`price_line` is what invited the duplication — never emit both."""
+    rows = [{"headline": "A", "summary": "s"}]
+    quote = {"changePercentage": 20.4}
+    assert "Price context" not in svc._build_prompt("CRM", rows, "x", "Extreme", quote, _MOVE)
+    # ...and it is still there for the ~99% of cards that have no catalyst.
+    assert "Price context" in svc._build_prompt("CRM", rows, "x", "Extreme", quote, None)
+
+
+def test_a_calm_tickers_prompt_is_unchanged(svc):
+    """No catalyst ⇒ byte-identical to the prompt before this existed."""
+    rows = [{"headline": "A", "summary": "s"}]
+    quote = {"changePercentage": 1.0}
+    assert svc._build_prompt("AAPL", rows, "x", "notable", quote) == svc._build_prompt(
+        "AAPL", rows, "x", "notable", quote, None
+    )
+
+
+@pytest.mark.parametrize(
+    "move",
+    [None, {}, {"reason": "   "}, {"catalyst_tag": "T"}, "not a dict", {"reason": ""}],
+)
+def test_an_unusable_catalyst_never_produces_an_empty_instruction(svc, move):
+    """A block quoting an empty line would tell the model not to repeat nothing."""
+    prompt = svc._build_prompt("AAPL", [{"headline": "A"}], "x", None, None, move)
+    assert "ALREADY EXPLAINED" not in prompt
+
+
+def test_a_tagless_catalyst_renders_the_bare_reason(svc):
+    """`catalyst_tag` is None for a broad-market move — no dangling em dash."""
+    move = {"tier": "Unusual", "reason": "A sector-wide selloff on rising rates."}
+    prompt = svc._build_prompt("AAPL", [{"headline": "A"}], "x", None, None, move)
+    assert '"A sector-wide selloff on rising rates."' in prompt
+    assert "— A sector-wide" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_and_store_actually_forwards_the_catalyst_to_the_prompt():
+    """The call site. An optional argument nobody passes fixes nothing.
+
+    Runs the real `generate_and_store` rather than scanning source: the failure
+    mode being guarded against is precisely a correct prompt that is never
+    reached, which a source scan cannot tell apart from a correct one.
+    """
+    seen = {}
+
+    class _Spy(NewsInsightService):
+        def __init__(self):
+            self.supabase = None
+            self._cache = {}
+            self._inflight = {}
+            self.gemini = SimpleNamespace(
+                generate_json=AsyncMock(
+                    return_value={
+                        "text": (
+                            '{"headline": "H", "bullets": ["one thing", "another"],'
+                            ' "sentiment": "bullish"}'
+                        )
+                    }
+                )
+            )
+
+        def _build_prompt(self, *args, **kwargs):
+            seen["price_move"] = args[5] if len(args) > 5 else kwargs.get("price_move")
+            return super()._build_prompt(*args, **kwargs)
+
+        def _store(self, *args, **kwargs):
+            return True
+
+    card = await _Spy().generate_and_store(
+        scope="CRM",
+        corpus=[{"headline": "A", "summary": "s"}],
+        inputset_id="x",
+        price_band="Extreme",
+        trigger_reason="t",
+        quote={"changePercentage": 20.4},
+        market_active=True,
+        price_move=_MOVE,
+    )
+    assert card is not None, "the fake generation path itself broke — fix the test, not the code"
+    assert seen.get("price_move") == _MOVE, (
+        "generate_and_store no longer forwards price_move into _build_prompt — the prompt "
+        "would go back to being catalyst-blind with every other test still green"
+    )
 
 
 # ── regressions found by the adversarial review ───────────────────────

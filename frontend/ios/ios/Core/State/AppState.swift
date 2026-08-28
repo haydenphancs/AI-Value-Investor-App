@@ -675,6 +675,15 @@ final class AppState {
         PushNotificationManager.shared.flushPendingToken()
         hydrateLearnStores()
 
+        // The unread badge, for an identity that now exists.
+        //
+        // This hook was deliberately NOT used for `PriceAlertStore` — it fetches 40 rows for a
+        // screen the user may never open, and `lastAuthenticatedUserId` is an in-memory guard, so
+        // the fan-out runs on every cold launch of a signed-in user. That property is exactly what
+        // this call wants: one row, every launch, which is the only way the badge is right before
+        // the user has opened anything. Fire-and-forget — a badge must never delay sign-in.
+        Task { await NotificationInboxViewModel.shared.refreshUnreadCount() }
+
         // Rebuild the Home Screen widget for the identity that just settled.
         //
         // This is the RELIABLE trigger. The cold-launch call in `iosApp` races
@@ -1026,6 +1035,12 @@ final class AppState {
         // on this phone the previous user's unread count, and possibly opening a screen
         // they never asked for. Same reasoning as the Learn stores above.
         unreadNotificationCount = 0
+        // And the object that PRODUCES that count. It is a singleton now (so the badge can be
+        // refreshed away from the Alerts tab), which means it no longer dies with the view —
+        // `AlertsTabContent`'s own `.reloadOnIdentityChange` reset is no longer sufficient on
+        // its own, and the ended session's notification rows would otherwise sit in memory for
+        // the next account to open the tab and read.
+        NotificationInboxViewModel.shared.reset()
         pendingPushRoute = nil
         pendingPushTicker = nil
         pendingTrackingTab = nil

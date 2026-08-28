@@ -117,6 +117,18 @@ _GUARDED_SITES = [
      ["lineLimit", "minimumScaleFactor", "allowsTightening"]),
     ("Views/Molecules/RelatedTickerCard.swift", "Text(ticker.formattedChange)",
      ["lineLimit", "minimumScaleFactor", "allowsTightening"]),
+    # Tracking -> Assets -> Holdings. This row missed the sweep above entirely, and its
+    # ticker column then became FLEXIBLE (it was a hard 80pt box), which made row HEIGHT
+    # depend on width for the first time — and `AssetsListSection` hard-sizes the whole
+    # List from one measured row with scrolling disabled, so a single wrapped symbol
+    # clips the holdings at the bottom. The column carries FMP pair forms (BTCUSD,
+    # DOGEUSD) and index keys (^GSPC), not just 3-4 letter equities.
+    ("Views/Molecules/AssetRow.swift", "Text(asset.ticker)",
+     ["lineLimit", "minimumScaleFactor"]),
+    ("Views/Molecules/AssetRow.swift", "Text(asset.companyName)",
+     ["lineLimit", "minimumScaleFactor"]),
+    ("Views/Molecules/AssetRow.swift", "Text(asset.formattedPrice)",
+     ["lineLimit", "minimumScaleFactor"]),
 ]
 
 

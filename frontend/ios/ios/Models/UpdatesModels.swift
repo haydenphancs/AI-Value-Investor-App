@@ -227,6 +227,22 @@ struct InsightPriceMove {
     }
 
     var isPositive: Bool { (changePercent ?? 0) >= 0 }
+
+    /// "<Catalyst Tag> — <reason>", or just the reason when there is no clear
+    /// company catalyst (a broad-market / sector move).
+    ///
+    /// The backend builds the SAME string in
+    /// `news_insight_service.catalyst_display_line`, because the roll-up prompt
+    /// quotes it back to the model and tells it this line is already on screen so
+    /// the bullets must not restate it. If the two ever drift, that instruction
+    /// starts describing a sentence the reader never sees and the de-duplication
+    /// silently stops working. `test_ios_insights_card_merge.py` pins them together.
+    var displayLine: String {
+        if let tag = catalystTag, !tag.isEmpty {
+            return "\(tag) — \(reason)"
+        }
+        return reason
+    }
 }
 
 // MARK: - Insight Source

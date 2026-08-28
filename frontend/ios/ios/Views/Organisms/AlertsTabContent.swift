@@ -54,6 +54,19 @@
 //  `AppState.notificationUnreadDidChange(_:)` (load, next page, mark-read, mark-all), which
 //  `iosApp` observes. One writer, and it only ever fires on data that exists.
 //
+//  That rule is why the badge fix hoisted the view model to a SINGLETON instead of adding a
+//  small refresher object beside it: `refreshUnreadCount()` is a fifth path through the same
+//  writer, not a second writer. The Alerts segment in `TrackingHeader` now carries the same
+//  count as the tab bar, and it is only ever visible from Assets/Whales — because arriving here
+//  marks everything read.
+//
+//  ACTIVITY IS FILTERABLE. A tester: *"Activity is a very long list. Should add tags on the top
+//  (same row as Activity), just like in the Report tab."* The chips key off
+//  `NotificationEventDTO.category` — a field that had been decoded and read by NOTHING — plus a
+//  small mapping for the roll-up cards, so one chip means the same thing across both families.
+//  See `ActivityFilter`. Only buckets with rows on screen are offered, and an unrecognised
+//  category fails OPEN so a newer backend cannot make rows invisible in an older build.
+//
 
 import SwiftUI
 
@@ -67,7 +80,18 @@ struct AlertsTabContent: View {
     /// hang off this, so it must be the SAME instance the Assets tab uses, not a new one.
     @ObservedObject var trackingViewModel: TrackingViewModel
 
-    @StateObject private var notifications = NotificationInboxViewModel()
+    // The SHARED inbox, not a local view model. It owns `AppState.unreadNotificationCount`, and
+    // while it lived and died with THIS view that count could only ever be refreshed by the one
+    // screen that marks everything read on sight — so the badge was blank everywhere it mattered.
+    // See `NotificationInboxViewModel.shared`.
+    @ObservedObject private var notifications = NotificationInboxViewModel.shared
+
+    /// Activity chip selection. Multi-select, empty = show everything.
+    ///
+    /// View-local `@State` on purpose: the parent's `switch` tears this view down when the
+    /// segment changes, so the filter clears on every visit. A filter that SURVIVED would be an
+    /// invisible mode — the user returns to a short list with no memory of narrowing it.
+    @State private var activityFilters: Set<ActivityFilter> = []
     // The SHARED store, not a local view model: the detail-header bell reads the same
     // array, so a rule created behind the bell shows up here with no refetch and no
     // staleness window. See PriceAlertStore.
@@ -198,16 +222,51 @@ struct AlertsTabContent: View {
     @ViewBuilder
     private func activitySection() -> some View {
         let rollups = trackingViewModel.filteredAlerts.filter { !$0.isUpcoming }
+        let available = availableFilters(rollups: rollups)
+        // Intersect on EVERY read rather than trusting the stored set. A pull-to-refresh can
+        // empty the bucket a chip was filtering on; without this the list would go blank with
+        // no chip left on screen to explain why, and no way to undo it.
+        let selection = activityFilters.intersection(available)
+        let visibleRollups = rollups.filter { ActivityFilter.admits(selection, rollup: $0) }
+        let visibleItems = notifications.items.filter {
+            ActivityFilter.admits(selection, category: $0.category)
+        }
 
-        SectionHeader(title: "Activity")
-            .padding(.horizontal, AppSpacing.lg)
+        ActivityFilterBar(
+            title: "Activity",
+            available: available,
+            selection: $activityFilters
+        )
+        .padding(.horizontal, AppSpacing.lg)
 
-        ForEach(rollups) { alert in
+        ForEach(visibleRollups) { alert in
             AlertCardView(alert: alert) { trackingViewModel.viewAlertDetail(alert) }
                 .padding(.horizontal, AppSpacing.lg)
         }
 
-        notificationRows(hasRollups: !rollups.isEmpty)
+        notificationRows(
+            items: visibleItems,
+            hasRollups: !visibleRollups.isEmpty,
+            isFiltered: !selection.isEmpty
+        )
+    }
+
+    /// The buckets that have at least one row on screen right now, in a stable order.
+    ///
+    /// Derived from the data rather than hardcoded to `allCases`, so a chip can never filter to
+    /// an empty list on its first tap — an account that has never had an earnings notification
+    /// is not offered an Earnings chip.
+    private func availableFilters(rollups: [AppAlert]) -> [ActivityFilter] {
+        var present: Set<ActivityFilter> = []
+        for alert in rollups {
+            if let bucket = ActivityFilter.bucket(forRollup: alert) { present.insert(bucket) }
+        }
+        for item in notifications.items {
+            if let bucket = ActivityFilter.bucket(forCategory: item.category) {
+                present.insert(bucket)
+            }
+        }
+        return ActivityFilter.allCases.filter { present.contains($0) }
     }
 
     /// The notification half of Activity.
@@ -216,7 +275,11 @@ struct AlertsTabContent: View {
     /// with roll-ups above it, "No notifications yet" under a populated section reads as
     /// a broken sub-list rather than a quiet inbox.
     @ViewBuilder
-    private func notificationRows(hasRollups: Bool) -> some View {
+    private func notificationRows(
+        items: [NotificationEventDTO],
+        hasRollups: Bool,
+        isFiltered: Bool
+    ) -> some View {
         switch notifications.state {
         case .loading:
             ProgressView()
@@ -253,11 +316,35 @@ struct AlertsTabContent: View {
                 .padding(.horizontal, AppSpacing.lg)
 
         case .loaded:
-            // A bare `ForEach`, spliced DIRECTLY into the LazyVStack above — no wrapper
-            // stack. This is the only unbounded section (30 rows a page, infinite scroll)
-            // and the only reason the stack is lazy at all.
-            NotificationInboxSection.rows(viewModel: notifications, route: $route)
+            if items.isEmpty {
+                // `.loaded` with nothing to draw can only mean the filter excluded every row —
+                // a genuinely empty inbox is `.empty`. Say so and offer the way out, rather
+                // than leaving a gap under a row of chips.
+                //
+                // Suppressed when roll-ups DID match: the section is not empty, only its
+                // notification half is, and a "nothing matches" notice under visible cards
+                // reads as a broken sub-list.
+                if isFiltered && !hasRollups {
+                    InlineRetryNotice(
+                        message: "Nothing in Activity matches that filter right now.",
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        iconColor: AppColors.textMuted,
+                        retryTitle: "Clear",
+                        onRetry: { activityFilters.removeAll() }
+                    )
+                    .padding(.horizontal, AppSpacing.lg)
+                }
+            } else {
+                // A bare `ForEach`, spliced DIRECTLY into the LazyVStack above — no wrapper
+                // stack. This is the only unbounded section (30 rows a page, infinite scroll)
+                // and the only reason the stack is lazy at all.
+                NotificationInboxSection.rows(
+                    viewModel: notifications,
+                    items: items,
+                    route: $route
+                )
                 .padding(.horizontal, AppSpacing.lg)
+            }
         }
     }
 

@@ -708,7 +708,11 @@ struct TrackedAssetDTO: Codable, Identifiable {
     func toTrackedAsset() -> TrackedAsset {
         TrackedAsset(
             ticker: ticker,
-            companyName: companyName,
+            // Display-only: strips legal-entity suffixes so the row shows "Oracle" rather
+            // than "Oracle Corpo…". Applied HERE, at the DTO->display-model boundary, exactly
+            // as CompanyNameFormatter's header prescribes — the raw legal name stays in the
+            // DTO so search and matching still see the original.
+            companyName: CompanyNameFormatter.clean(companyName),
             price: price,
             changePercent: changePercent,
             sparklineData: sparklineData,

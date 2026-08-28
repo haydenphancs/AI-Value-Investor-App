@@ -11,6 +11,8 @@ timestamps degrade) and the 24h→48h fallback selection.
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.services.news_insight_service import (
     CORPUS_WINDOW_HOURS,
     PRIMARY_WINDOW_HOURS,
@@ -182,3 +184,100 @@ def test_articles_within_window_upper_bound_drops_future_rows_directly():
     # backward-compatible; the future filter only applies via select_recent_corpus.
     kept_no_upper = {r["id"] for r in articles_within_window(rows, CUTOFF)}
     assert kept_no_upper == {"recent", "future"}
+
+
+# ── the third tier: stretch ONLY across a market that was actually shut ───────
+#
+# Two tiers meant the card VANISHED on a Monday morning: a ticker whose last
+# story was Friday has an empty 24h AND 48h window, the endpoint's `if
+# feed_recent:` gate then renders no card at all, and it does so even though a
+# perfectly good card is sitting unexpired in the cache (the 96h hard TTL exists
+# for exactly this weekend, and the gate overrode it).
+#
+# The rule anchors on the last completed SESSION CLOSE, not on counting weekend
+# days. The intuitive weekend-counting version fires on an ordinary Tuesday,
+# because 48h back from a Tuesday afternoon lands on a Sunday — it would stretch
+# the window on days the market never closed, which is how a merely quiet ticker
+# starts presenting 4-day-old news as current.
+
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from app.services.news_insight_service import (  # noqa: E402
+    MAX_WINDOW_HOURS,
+    _closed_market_window_hours,
+)
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _at(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=_ET)
+
+
+@pytest.mark.parametrize(
+    "label,now,expected",
+    [
+        # No stretch — the tape closed since the cutoff, so an empty window means
+        # the ticker is genuinely quiet and the honest answer is still "no card".
+        ("Wed 10:00, normal week", _at(2026, 8, 26, 10), CORPUS_WINDOW_HOURS),
+        ("Tue 14:00, normal week", _at(2026, 7, 21, 14), CORPUS_WINDOW_HOURS),
+        ("Sat 10:00 (Fri close is 18h back)", _at(2026, 8, 22, 10), CORPUS_WINDOW_HOURS),
+        ("Sun 10:00 (Fri close is 42h back)", _at(2026, 8, 23, 10), CORPUS_WINDOW_HOURS),
+        # Stretch — no session has finished since the 48h cutoff.
+        ("Sun 20:00", _at(2026, 8, 23, 20), 72),
+        ("Mon 10:00", _at(2026, 8, 24, 10), 72),
+        ("Mon 08:00 premarket", _at(2026, 8, 24, 8), 72),
+        ("Tue 10:00 after Labor Day", _at(2026, 9, 8, 10), 96),
+    ],
+)
+def test_the_window_stretches_only_across_a_closed_market(label, now, expected):
+    assert _closed_market_window_hours(now) == expected, label
+
+
+def test_the_stretch_is_capped():
+    """A malformed calendar must not walk the window back indefinitely."""
+    # Christmas 2026 falls on a Friday; the following Monday is the longest real
+    # gap this calendar produces. Assert the cap holds for a whole week of them.
+    for day in range(26, 32):
+        got = _closed_market_window_hours(_at(2026, 12, day, 10))
+        assert CORPUS_WINDOW_HOURS <= got <= MAX_WINDOW_HOURS, day
+
+
+def test_a_naive_now_is_read_as_utc_not_local():
+    """The suite runs under TZ=UTC and TZ=America/Denver; both must agree."""
+    naive = datetime(2026, 8, 24, 14, 0)
+    aware = datetime(2026, 8, 24, 14, 0, tzinfo=timezone.utc)
+    assert _closed_market_window_hours(naive) == _closed_market_window_hours(aware)
+
+
+def test_monday_recovers_a_card_that_two_tiers_would_have_hidden():
+    """The user-visible point of the whole change."""
+    now = _at(2026, 8, 24, 10)                      # Monday morning
+    friday = _at(2026, 8, 21, 15)                   # 67h back — outside 48h
+    rows = [_row(friday.isoformat())]
+
+    kept, hours = select_recent_corpus(rows, now)
+    assert kept, "the Monday card is still hidden — the third tier is not being reached"
+    assert hours == 72, "the badge must state the window it actually used"
+
+
+def test_a_quiet_ticker_in_a_full_trading_week_is_still_hidden():
+    """The other half. Stretching here would age-launder 3-day-old news."""
+    now = _at(2026, 8, 26, 10)                      # Wednesday
+    sunday = _at(2026, 8, 23, 15)                   # 67h back, but Mon+Tue traded
+    kept, hours = select_recent_corpus([_row(sunday.isoformat())], now)
+    assert kept == []
+    assert hours == CORPUS_WINDOW_HOURS
+
+
+def test_fresh_news_is_untouched_by_the_third_tier():
+    now = _at(2026, 8, 24, 10)                      # a Monday, where the tier IS armed
+    kept, hours = select_recent_corpus([_row((now - timedelta(hours=3)).isoformat())], now)
+    assert len(kept) == 1
+    assert hours == PRIMARY_WINDOW_HOURS, "a 24h scope must never be badged wider"
+
+
+def test_an_empty_result_reports_the_widest_window_tried():
+    """The int is not evidence of freshness — it used to be a flat 48 either way."""
+    assert select_recent_corpus([], _at(2026, 8, 26, 10))[1] == CORPUS_WINDOW_HOURS
+    assert select_recent_corpus([], _at(2026, 8, 24, 10))[1] == 72

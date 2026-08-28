@@ -36,12 +36,17 @@ enum NotificationInboxSection {
     ///
     /// Returns a `ForEach` (not a stack) so the caller's `LazyVStack` sees each row as its own
     /// subview and can virtualize them. Do NOT wrap this in a `VStack` at the call site.
+    ///
+    /// `items` is passed in rather than read off the view model because the Activity section
+    /// filters it. Read state, paging and the unread count still come from `viewModel`, which
+    /// remains the single owner of all three.
     @ViewBuilder
     static func rows(
         viewModel: NotificationInboxViewModel,
+        items: [NotificationEventDTO],
         route: Binding<NotificationRoute?>
     ) -> some View {
-        ForEach(viewModel.items) { item in
+        ForEach(items) { item in
             // ONE row shape for the whole Alerts tab. This used to be a private
             // `NotificationRow` — a full-bleed square slab with no icon and an 8pt dot,
             // sitting beside the digest's rounded, tinted, shadowed cards. Same screen,
@@ -66,7 +71,14 @@ enum NotificationInboxSection {
                     }
                 }
             )
-            .task { await viewModel.loadMoreIfNeeded(currentItem: item) }
+            // Paging is driven by the rows actually RENDERED, not by the view model's own
+            // tail. With an Activity filter on, the last decoded rows can all be hidden, and
+            // keying off the model's tail meant the list simply stopped — on a feature whose
+            // entire purpose is making a long list navigable.
+            .task {
+                guard items.suffix(3).contains(item) else { return }
+                await viewModel.loadNextPage()
+            }
         }
 
         if viewModel.isLoadingMore {

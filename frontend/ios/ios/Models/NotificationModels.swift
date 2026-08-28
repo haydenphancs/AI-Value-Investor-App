@@ -28,7 +28,12 @@ struct NotificationEventDTO: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     /// `NotificationKind` key — `ticker_move`, `earnings_upcoming`, `price_alert`, …
     let kind: String
-    /// Cap bucket: `watchlist` | `earnings` | `smart_money` | `price_alert` | `app`.
+    /// Cap bucket: `watchlist` | `earnings` | `smart_money` | `price_alert` | `app` | `match`.
+    ///
+    /// SIX values, not five — `profile_match` is `CATEGORY_MATCH`. The list was wrong here from
+    /// the day it was written, and nothing noticed because nothing read `category` at all until
+    /// `ActivityFilter` below. `test_ios_alerts_badge_and_filters.py` now pins it against
+    /// `notification_kinds.py`.
     let category: String
     let title: String
     let body: String
@@ -325,4 +330,108 @@ struct PriceAlertListDTO: Decodable, Sendable {
 
 struct DeletePriceAlertDTO: Decodable, Sendable {
     let deleted: Bool
+}
+
+// MARK: - Activity filtering
+
+/// The chip buckets on Tracking → Alerts → Activity.
+///
+/// WHY. A TestFlight tester: *"Activity is a very long list. Should add tags on the top (same row
+/// as Activity), just like in the Report tab."* Activity is two concatenated families — roll-up
+/// `AppAlert` cards and delivered `NotificationEventDTO` rows — so a chip has to mean something on
+/// BOTH, which is what the two `bucket(for:)` overloads below are for.
+///
+/// Buckets key off `category`, not `kind`: `category` is the coarse grouping the backend already
+/// maintains (it is the daily-cap bucket), so a NEW kind lands in the right chip with no client
+/// change. `kind` would need an entry per kind, added by hand, every time.
+enum ActivityFilter: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case prices
+    case earnings
+    case smartMoney
+    case reports
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .prices:     return "Prices"
+        case .earnings:   return "Earnings"
+        case .smartMoney: return "Smart Money"
+        case .reports:    return "Reports"
+        }
+    }
+
+    /// Text-role accent (4.5:1) — the chip's ink when unselected, and its resting tint at 0.15.
+    ///
+    /// These are chosen for legibility as a set, the way the Reports tab's persona accents are.
+    /// They are deliberately NOT claimed to equal `NotificationEventDTO.iconColor` for every row
+    /// in the bucket, because two buckets contain kinds that disagree: `.prices` holds
+    /// `price_alert` (caution) alongside `ticker_move` (primaryBlue), and `.reports` holds
+    /// `profile_match` (alertPurple) alongside `research_complete` (primaryBlue). Asserting a
+    /// parity that only holds for half the rows would be a guard that lies.
+    var accent: Color {
+        switch self {
+        case .prices:     return AppColors.caution
+        case .earnings:   return AppColors.primaryBlue
+        case .smartMoney: return AppColors.alertOrange
+        case .reports:    return AppColors.alertPurple
+        }
+    }
+
+    /// Fill-role colour for the SELECTED state, carrying `AppColors.textOnAccent`.
+    ///
+    /// ⚠️ Must always be a `*Fill` token, never the `accent` above. A text-role token used as a
+    /// saturated fill puts white ink at ~2.3–2.8:1 in dark — see the fill/ink table in
+    /// `AppTheme.swift`. The two halves move together.
+    var accentFill: Color {
+        switch self {
+        case .prices:     return AppColors.cautionFill
+        case .earnings:   return AppColors.primaryFill
+        case .smartMoney: return AppColors.alertOrangeFill
+        case .reports:    return AppColors.alertPurpleFill
+        }
+    }
+
+    /// Bucket for a delivered notification, or `nil` when its category is unknown to this build.
+    ///
+    /// ⚠️ Every `CATEGORY_*` in `backend/app/services/notification_kinds.py` must appear here;
+    /// `test_ios_alerts_badge_and_filters.py` fails the build otherwise. `nil` therefore only
+    /// happens when the BACKEND is ahead of the client — and `admits` fails OPEN on it, so an
+    /// unrecognised row stays visible under every filter rather than silently disappearing.
+    static func bucket(forCategory category: String) -> ActivityFilter? {
+        switch category {
+        case "price_alert", "watchlist": return .prices
+        case "earnings":                 return .earnings
+        case "smart_money":              return .smartMoney
+        case "app", "match":             return .reports
+        default:                         return nil
+        }
+    }
+
+    /// Bucket for a digest roll-up card.
+    ///
+    /// `.earnings` and `.market` are `isUpcoming`, so they render in the Upcoming section and
+    /// never reach a filtered list — mapped anyway so the switch stays exhaustive and a future
+    /// re-split of the sections cannot silently drop them.
+    static func bucket(forRollup alert: AppAlert) -> ActivityFilter? {
+        switch alert {
+        case .whaleTrade, .analystRating, .insiderTransaction: return .smartMoney
+        case .earnings:                                        return .earnings
+        case .market:                                          return nil
+        }
+    }
+
+    /// Does `selection` admit a notification in `category`? Empty selection admits everything.
+    static func admits(_ selection: Set<ActivityFilter>, category: String) -> Bool {
+        guard !selection.isEmpty else { return true }
+        guard let bucket = bucket(forCategory: category) else { return true }
+        return selection.contains(bucket)
+    }
+
+    /// Does `selection` admit this roll-up? Empty selection admits everything.
+    static func admits(_ selection: Set<ActivityFilter>, rollup: AppAlert) -> Bool {
+        guard !selection.isEmpty else { return true }
+        guard let bucket = bucket(forRollup: rollup) else { return true }
+        return selection.contains(bucket)
+    }
 }

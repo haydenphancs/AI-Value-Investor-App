@@ -12,6 +12,11 @@ struct AlertDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var navigateToWhaleId: String?
 
+    /// A ticker/tab destination picked from an item card. Separate from `navigateToWhaleId`
+    /// because the whale row is a DATA row that happens to navigate, while these are pure
+    /// destinations — see `AlertDestinationRow`.
+    @State private var pushedDestination: AlertDestination?
+
     var body: some View {
         ZStack {
             AppColors.background
@@ -55,6 +60,39 @@ struct AlertDetailView: View {
         }
         .navigationDestination(item: $navigateToWhaleId) { whaleId in
             WhaleProfileView(whaleId: whaleId)
+        }
+        // ⚠️ `NotificationRouteContent`, never `NotificationRouteDestination` — that one wraps
+        // itself in a `NavigationStack` and nesting it here would double-stack.
+        .navigationDestination(item: $pushedDestination) { destination in
+            if let route = destination.route {
+                NotificationRouteContent(route: route)
+            }
+        }
+        // Chrome this screen was missing. It was the documented outlier: presented via
+        // `.sheet(item:)` with no Done button, no detents and no drag indicator, so the only way
+        // out was a swipe nothing on screen advertised. Matched to the ~19-site convention, and
+        // to `NotificationDetailView`, so both halves of Activity dismiss the same way.
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+        }
+    }
+
+    /// The "go here" rows for one item of a roll-up.
+    ///
+    /// Per ITEM, not one action for the card: a roll-up spans several tickers ("AAPL, CRM and 2
+    /// more"), so a single button at the bottom could only ever mean one of them.
+    @ViewBuilder
+    private func destinationRows(for ticker: String) -> some View {
+        ForEach(AlertDestination.destinations(forRollupItem: ticker, in: alert)) { destination in
+            AlertDestinationRow(destination: destination) {
+                pushedDestination = destination
+            }
         }
     }
 
@@ -103,6 +141,7 @@ struct AlertDetailView: View {
                 detailRow(label: "Consensus", value: data.consensus)
             }
             detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
+            destinationRows(for: data.ticker)
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
@@ -140,6 +179,7 @@ struct AlertDetailView: View {
                         leadWhaleRow(name: lead, firm: item.leadWhaleFirm, whaleId: item.leadWhaleId)
                     }
                     detailRow(label: "Amount", value: item.amount)
+                    destinationRows(for: item.ticker)
                 }
             }
         }
@@ -210,6 +250,7 @@ struct AlertDetailView: View {
                     if item.day > 0 {
                         detailRow(label: "Date", value: "\(item.formattedMonth) \(item.formattedDay)")
                     }
+                    destinationRows(for: item.ticker)
                 }
             }
         }
@@ -235,6 +276,7 @@ struct AlertDetailView: View {
                     if item.day > 0 {
                         detailRow(label: "Date", value: "\(item.formattedMonth) \(item.formattedDay)")
                     }
+                    destinationRows(for: item.ticker)
                 }
             }
         }

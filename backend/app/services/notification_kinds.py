@@ -232,6 +232,7 @@ class NotificationKind:
 
 KIND_TICKER_MOVE = "ticker_move"
 KIND_RESEARCH_COMPLETE = "research_complete"
+KIND_RESEARCH_FAILED = "research_failed"
 KIND_EARNINGS_UPCOMING = "earnings_upcoming"
 KIND_EARNINGS_RESULT = "earnings_result"
 KIND_INSIDER_TRADE = "insider_trade"
@@ -273,6 +274,36 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=False,
             route_kind="report",
             label="Report ready",
+        ),
+        # The mirror of the above, and the only event in the whole registry where the
+        # user SPENT MONEY AND GOT SILENCE.
+        #
+        # A report that fails is stamped `status='failed'` and its 20 credits are
+        # refunded — correctly, atomically, and completely invisibly. The client polls
+        # for at most 3 minutes and then gives up, so a user who backgrounded the app
+        # learns nothing: no report, no explanation, and a credit balance that quietly
+        # went back up. Every other kind here announces something that happened TO the
+        # market; this one announces the failure of something they asked for and paid
+        # for, which is the strongest claim on attention in the file.
+        #
+        # `route_kind="ticker"`, NOT "report": there is no report to open. The ticker
+        # screen is where they would start again.
+        #
+        # Uncapped (CATEGORY_APP) and quiet-hours-exempt for the same reason
+        # `research_complete` is — this answers a question the user is actively holding
+        # open, and holding it to 07:00 means they find the empty result themselves
+        # first, which is the failure this exists to prevent.
+        NotificationKind(
+            key=KIND_RESEARCH_FAILED,
+            preference_key="notify_research_failed",
+            master_preference_key=None,
+            default_on=True,
+            category=CATEGORY_APP,
+            interruption_level=LEVEL_ACTIVE,
+            thread_id="app",
+            respects_quiet_hours=False,
+            route_kind="ticker",
+            label="Report didn't finish",
         ),
         NotificationKind(
             key=KIND_EARNINGS_UPCOMING,
@@ -482,7 +513,11 @@ def get_kind(key: str) -> NotificationKind:
 
 
 def ticker_route(
-    kind_key: str, ticker: str, *, asset_type: str = "stock"
+    kind_key: str,
+    ticker: str,
+    *,
+    asset_type: str = "stock",
+    whale_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the `route` payload for a notification that opens an asset screen.
 
@@ -514,6 +549,21 @@ def ticker_route(
         route["tab"] = kind.route_tab
     if kind.route_section:
         route["section"] = kind.route_section
+    # The investor this alert is ABOUT, when there is one.
+    #
+    # The whale senders have always held this id — it is in their dedup key and it selects
+    # half their audience (`followers_of_whale`) — and then dropped it, so a 13F alert could
+    # only ever offer "open the ticker". Someone who follows an investor and is told that
+    # investor filed has one obvious next question, and the client could not answer it.
+    #
+    # An ADDITIVE key on an open JSONB dict: the iOS decoder is a tolerant
+    # `[String: RouteScalar]` map that ignores names it does not know (`alert_id` has ridden
+    # along unread for months), so no migration and no older-client breakage. Kept in THIS
+    # builder rather than merged into a dict at the call site because a hand-written route is
+    # what shipped `ticker_move` with no `asset_type` and sent every crypto alert to the
+    # equity screen.
+    if whale_id:
+        route["whale_id"] = str(whale_id)
     return route
 
 

@@ -71,6 +71,7 @@ struct NotificationsSettingsView: View {
 
         // App activity
         "notify_research_complete": true,
+        "notify_research_failed": true,
 
         // Quiet hours ship OFF: a delivery schedule the user never asked for is a
         // notification silently withheld, and "why didn't I get it?" is the hardest

@@ -213,7 +213,85 @@ async def claim_and_mark_failed(
             report_id, user_id,
             outcome.get("outcome") if isinstance(outcome, dict) else "legacy_int",
         )
+
+    await _notify_report_failed(
+        report_id=report_id,
+        user_id=user_id,
+        ticker=ticker,
+        refunded=not failed,
+        amount=amount,
+    )
     return True
+
+
+async def _notify_report_failed(
+    *,
+    report_id: str,
+    user_id: str,
+    ticker: Optional[str],
+    refunded: bool,
+    amount: int,
+) -> None:
+    """Tell the user the report they paid for did not finish.
+
+    ⚠️ CALLED FROM EXACTLY ONE PLACE, and that placement IS the correctness argument —
+    the same argument `research_service._notify_report_ready` makes in mirror image.
+
+    This sits after the compare-and-set has been WON. `claim_and_mark_failed` is the one
+    atomic claim: PostgREST folds the `is_refunded=False` guard into a single UPDATE, so
+    of the worker's own `except` and the reconciliation sweep, exactly one caller ever
+    reaches this line for a given report. Adding a second send from
+    `research_service`'s `except` would double-notify on the ordinary failure path,
+    because BOTH paths run — only one of them wins the claim.
+
+    The BODY states the refund. That is the whole reason this notification earns its
+    place: "it failed" without "you have your credits back" leaves the user checking
+    their balance, which is the anxiety the alert was supposed to remove. When the
+    refund did NOT happen (the REFUND LEAK branch above) we say nothing about credits
+    rather than claiming a refund that did not land — a false reassurance here is worse
+    than silence, and the leak is already logged for manual correction.
+
+    Informational, never directive — this copy is a surface a regulator reads, the same
+    standard the report-ready body is written to.
+
+    Never raises. A push failure must not escape into the sweep and kill the rest of the
+    pass, and it must never turn a completed refund into an exception.
+    """
+    if not user_id:
+        return
+    try:
+        from app.services.notification_kinds import KIND_RESEARCH_FAILED, ticker_route
+        from app.services.push_dispatch_service import get_push_dispatch_service
+
+        symbol = (ticker or "").upper()
+        if refunded:
+            body = (
+                f"We couldn't finish this analysis. Your {amount} credits have been "
+                "returned — you can try again."
+            )
+        else:
+            body = "We couldn't finish this analysis. Please try again."
+
+        await get_push_dispatch_service().notify_users(
+            [user_id],
+            kind=KIND_RESEARCH_FAILED,
+            title=f"{symbol} analysis didn't finish" if symbol else "Analysis didn't finish",
+            body=body,
+            # A report id is unique, so this is once-EVER with no date component —
+            # mirroring `report:{report_id}` on the success side. A regenerated report is
+            # a different row and legitimately notifies again.
+            dedup_key=f"reportfail:{report_id}",
+            # The ONE route builder. A hand-written `{"route": "ticker"}` dict in a sender
+            # is what shipped `ticker_move` without an `asset_type` and sent every crypto
+            # alert to the equity screen; a test forbids it now.
+            route=ticker_route(KIND_RESEARCH_FAILED, symbol) if symbol else None,
+        )
+    except Exception as e:
+        logger.warning(
+            "report-failed push failed for report=%s user=%s (%s: %s) — the refund itself "
+            "completed normally",
+            report_id, user_id, type(e).__name__, e,
+        )
 
 
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:

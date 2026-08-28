@@ -82,6 +82,24 @@ class TickerReportViewModel: ObservableObject {
         loadReport()
     }
 
+    /// Init from a NOTIFICATION route — the same three fields `init(report:)` carries, but
+    /// from a `route` dict rather than a list row.
+    ///
+    /// "PLUG analysis is ready" used to open `TickerDetailView`, so the body's promise ("tap
+    /// to read the full report") was never kept. Routing it to this screen needs the persona:
+    /// a ticker holds one report per persona, so `init(ticker:)`'s `warren_buffett` default
+    /// would have opened the wrong one for five of the six PLUG notifications in one feed.
+    ///
+    /// `reportId` reaches the cached `ticker_report_data` JSONB directly. Both are optional
+    /// because rows written before the backend sent `persona` have neither — that path
+    /// degrades to the default persona rather than failing.
+    init(ticker: String, persona: String?, reportId: String?) {
+        self.ticker = ticker
+        self.persona = persona ?? "warren_buffett"
+        self.reportId = reportId
+        loadReport()
+    }
+
     /// Preview-only initializer: sets data synchronously, no async Task.
     init(ticker: String, preloadedReport: TickerReportData) {
         self.ticker = ticker

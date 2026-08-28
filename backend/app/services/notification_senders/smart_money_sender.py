@@ -420,7 +420,9 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
             title=title,
             body=body,
             dedup_key=f"whale:{whale_id}:{action}:{group['latest_date'] or 'nodate'}",
-            route=ticker_route(group["kind"], route_ticker),
+            # `whale_id` rides along so the client can offer the investor's profile, not
+            # just the ticker. Half this audience follows the WHALE rather than the ticker.
+            route=ticker_route(group["kind"], route_ticker, whale_id=whale_id),
         )
 
     return sent, _max_created_at(raw, since)

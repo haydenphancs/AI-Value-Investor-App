@@ -475,6 +475,11 @@ class ResearchService:
                     # FLAT SCALARS ONLY — iOS AnyCodable yields "" for anything nested.
                     "route": "report",
                     "report_id": str(report_id),
+                    # WHICH report. A ticker can hold one report per persona — six PLUG rows
+                    # in the tester's feed — so `report_id` alone is not enough for the
+                    # client, whose report screen is keyed by (ticker, persona). Without this
+                    # every one of those six opened the same default persona's report.
+                    "persona": persona_key,
                     "ticker": symbol,
                     "asset_type": "stock",
                 },

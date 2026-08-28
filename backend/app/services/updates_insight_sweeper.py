@@ -482,7 +482,21 @@ class InsightSweeper:
 
             await get_push_dispatch_service().notify_watchers(
                 ticker=scope,
-                title=scope,
+                # The MOVE goes in the title, not just the ticker.
+                #
+                # A TestFlight tester read two CRM alerts on consecutive days as one
+                # duplicate. They were not: the dedup key is `move:{TICKER}:{ET-date}`,
+                # so those were two separate >=2-sigma sessions. What made them look
+                # identical is that the title was the bare ticker on both, while the
+                # bodies were two Gemini paraphrases of the same earnings story —
+                # `price_catalyst_service` caches for 24h, so day two re-runs the
+                # grounded search and writes fresh prose about the same news.
+                #
+                # The percentage is the one field that always differs between two
+                # distinct moves, and it is the fact the alert is actually about. It
+                # also makes the lock-screen banner answer "how much?" without opening
+                # the app. `cp` is validated non-None and non-zero above.
+                title=f"{scope} {cp:+.1f}%",
                 body=headline[:180],
                 dedup_key=f"move:{scope}:{trading_date_et()}",
                 preference_key="notify_watchlist_changes",

@@ -37,6 +37,14 @@ struct TickerReportView: View {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(report: report))
     }
 
+    /// Open the report a notification is about. See `TickerReportViewModel`'s matching init
+    /// for why the persona is required and what happens without it.
+    init(ticker: String, persona: String?, reportId: String?) {
+        _viewModel = StateObject(wrappedValue: TickerReportViewModel(
+            ticker: ticker, persona: persona, reportId: reportId
+        ))
+    }
+
     /// Preview-only initializer: skips async loading for faster previews.
     fileprivate init(preloadedReport: TickerReportData) {
         _viewModel = StateObject(wrappedValue: TickerReportViewModel(

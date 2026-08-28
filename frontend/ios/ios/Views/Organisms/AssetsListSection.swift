@@ -23,6 +23,10 @@ struct AssetsListSection: View {
     /// Long-press path that fully removes the ticker from the master watchlist
     /// and every portfolio (vs the swipe path which is portfolio-only).
     var onRemoveFromAll: ((TrackedAsset) -> Void)?
+    /// Percent vs dollars for every row's change. One value for the whole list — tapping any
+    /// row's price block switches all of them, which is what makes the column comparable.
+    var changeDisplayMode: ChangeDisplayMode = .percent
+    var onToggleChangeDisplay: (() -> Void)?
 
     // A `List` has no intrinsic height inside the outer ScrollView's LazyVStack,
     // so the section must size itself explicitly. Instead of a magic per-row
@@ -44,9 +48,12 @@ struct AssetsListSection: View {
         List {
             Section {
                 ForEach(Array(assets.enumerated()), id: \.element.id) { index, asset in
-                    AssetRow(asset: asset) {
-                        onAssetTapped?(asset)
-                    }
+                    AssetRow(
+                        asset: asset,
+                        onTap: { onAssetTapped?(asset) },
+                        changeDisplayMode: changeDisplayMode,
+                        onToggleChangeDisplay: onToggleChangeDisplay
+                    )
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
                             onRemoveAsset?(asset)
@@ -91,7 +98,8 @@ struct AssetsListSection: View {
     /// One hidden AssetRow at its natural height, reported via a preference.
     /// Lives in `.background`, so it never affects the List's own layout.
     private var rowHeightProbe: some View {
-        AssetRow(asset: assets.first ?? Self.measurementSample)
+        AssetRow(asset: assets.first ?? Self.measurementSample,
+                 changeDisplayMode: changeDisplayMode)
             .fixedSize(horizontal: false, vertical: true)
             .background(
                 GeometryReader { proxy in

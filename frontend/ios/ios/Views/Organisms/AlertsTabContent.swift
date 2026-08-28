@@ -16,8 +16,13 @@
 //  That copy is gone: it showed the identical list through the identical view model, while the
 //  tab-bar badge pointed HERE, so it was the one surface the badge could not lead you to.
 //
-//  The three sections are titled so that nothing inside a tab called "Alerts" is also called
-//  "Alerts": Upcoming & Events / Price Rules / Notifications.
+//  The three sections are titled: Upcoming / Activity / Price Alerts.
+//
+//  ⚠️ The third section was called "Price Rules" on the reasoning that nothing inside a tab
+//  called "Alerts" should also be called "Alerts". A TestFlight tester read the two surfaces
+//  as unrelated features because of it, and the name was the outlier rather than the rule:
+//  the backend router is tagged "Price Alerts", Settings says "My Price Alerts", and this
+//  section's own footer and empty state already said "alerts". Do not rename it back.
 //
 //  THE FIX FOR THE ORIGINAL REPORTED BUG, preserved here because it explains the read
 //  semantics below. The tab-bar badge counts unread `notification_events`, and it used to sit
@@ -63,7 +68,10 @@ struct AlertsTabContent: View {
     @ObservedObject var trackingViewModel: TrackingViewModel
 
     @StateObject private var notifications = NotificationInboxViewModel()
-    @StateObject private var priceRules = PriceAlertRulesViewModel()
+    // The SHARED store, not a local view model: the detail-header bell reads the same
+    // array, so a rule created behind the bell shows up here with no refetch and no
+    // staleness window. See PriceAlertStore.
+    @ObservedObject private var priceAlerts = PriceAlertStore.shared
 
     /// Set when a notification row is tapped; drives the same detail presentation Home uses.
     @State private var route: NotificationRoute?
@@ -74,7 +82,7 @@ struct AlertsTabContent: View {
             LazyVStack(spacing: AppSpacing.lg) {
                 upcomingSection()
                 activitySection()
-                priceRulesSection()
+                priceAlertsSection()
             }
             .padding(.top, AppSpacing.sm)
             .padding(.bottom, AppSpacing.xxxl)
@@ -94,7 +102,7 @@ struct AlertsTabContent: View {
         // previous user's notifications and price rules.
         .reloadOnIdentityChange { isActive in
             notifications.reset()
-            priceRules.reset()
+            priceAlerts.reset()
             guard isActive else { return }
             await loadAll()
         }
@@ -133,7 +141,7 @@ struct AlertsTabContent: View {
     private var isAuthBlocked: Bool {
         let blockedNotifications = notifications.state == .reconnecting
             || notifications.state == .signedOut
-        let blockedRules = priceRules.state == .reconnecting || priceRules.state == .signedOut
+        let blockedRules = priceAlerts.state == .reconnecting || priceAlerts.state == .signedOut
         return blockedNotifications || blockedRules
     }
 
@@ -145,7 +153,7 @@ struct AlertsTabContent: View {
         // is nothing to mark until the page lands.
         await notifications.loadAndWait()
         await notifications.markAllReadOnView()
-        await priceRules.loadIfStale()
+        await priceAlerts.loadIfStale()
     }
 
     /// Pull-to-refresh. AWAITED, unlike the fire-and-forget `load()` this replaced — an
@@ -154,7 +162,7 @@ struct AlertsTabContent: View {
     private func refreshAll() async {
         await notifications.loadAndWait()
         await notifications.markAllReadOnView()
-        await priceRules.load()
+        await priceAlerts.load()
         await trackingViewModel.refresh()
     }
 
@@ -253,15 +261,15 @@ struct AlertsTabContent: View {
         }
     }
 
-    // MARK: - Section 2 — Price Rules
+    // MARK: - Section 3 — Price Alerts
 
     @ViewBuilder
-    private func priceRulesSection() -> some View {
+    private func priceAlertsSection() -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            SectionHeader(title: "Price Rules")
+            SectionHeader(title: "Price Alerts")
                 .padding(.horizontal, AppSpacing.lg)
 
-            switch priceRules.state {
+            switch priceAlerts.state {
             case .loading:
                 ProgressView()
                     .tint(AppColors.textSecondary)
@@ -290,14 +298,16 @@ struct AlertsTabContent: View {
 
             case .error(let message):
                 InlineRetryNotice(message: message) {
-                    Task { await priceRules.load() }
+                    Task { await priceAlerts.load() }
                 }
                 .padding(.horizontal, AppSpacing.lg)
 
-            case .loaded where priceRules.isEmpty:
+            case .loaded where priceAlerts.isEmpty:
                 InlineRetryNotice(
-                    message: "No price alerts yet. Open any stock, crypto or ETF and tap the "
-                        + "bell to be told when it hits your number.",
+                    // Names every asset class that actually has a bell — the previous
+                    // copy omitted indexes and commodities, which do.
+                    message: "No price alerts yet. Open any ticker and tap the bell to be "
+                        + "told when it hits your number.",
                     systemImage: "bell.badge",
                     iconColor: AppColors.textMuted
                 )
@@ -309,20 +319,23 @@ struct AlertsTabContent: View {
                 // card is the nested-card trap: in dark the inner fill measures 1.00:1
                 // against the outer one and the rows vanish.
                 VStack(spacing: AppSpacing.md) {
-                    ForEach(priceRules.rules) { rule in
+                    ForEach(priceAlerts.alerts) { rule in
                         PriceAlertRuleRow(
                             alert: rule,
                             // The only place in the app that lists rules across tickers, so
                             // the ticker is the field that tells two rows apart.
                             showsTicker: true,
-                            onToggle: { Task { await priceRules.toggleActive(rule) } },
-                            onDelete: { Task { await priceRules.delete(rule) } }
+                            onToggle: { Task { await priceAlerts.toggleActive(rule) } },
+                            onDelete: { Task { await priceAlerts.delete(rule) } }
                         )
                     }
                 }
                 .padding(.horizontal, AppSpacing.lg)
 
-                Text("\(priceRules.rules.count) of \(priceRules.maxPerUser) alerts")
+                // ACTIVE only, matching `price_alert_service._count_for_user`, which filters
+                // `is_active = True`. Counting every row showed "20 of 20" while a 21st
+                // was still creatable.
+                Text("\(priceAlerts.activeCount()) of \(priceAlerts.maxPerUser) alerts")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
                     .padding(.horizontal, AppSpacing.lg)

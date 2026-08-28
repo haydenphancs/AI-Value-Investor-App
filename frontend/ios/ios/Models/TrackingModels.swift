@@ -43,6 +43,19 @@ enum AssetSortOption: String, CaseIterable {
     var displayName: String { rawValue }
 }
 
+// MARK: - Change Display Mode
+
+/// Whether a holdings row shows its day move as a percentage or in dollars.
+///
+/// `String`-backed so it round-trips through `UserDefaults` the same way
+/// ``AssetSortOption`` does — `TrackingViewModel` persists the user's choice.
+enum ChangeDisplayMode: String, CaseIterable {
+    case percent
+    case amount
+
+    var toggled: ChangeDisplayMode { self == .percent ? .amount : .percent }
+}
+
 // MARK: - Tracked Asset
 struct TrackedAsset: Identifiable {
     /// Stable identity = ticker (unique within a watchlist). A per-instance
@@ -99,6 +112,48 @@ struct TrackedAsset: Identifiable {
         let factor = 1 + changePercent / 100
         guard factor != 0 else { return nil }
         return price / factor
+    }
+
+    /// The day move in dollars — what the row shows in ``ChangeDisplayMode/amount``.
+    ///
+    /// Derived rather than fetched: the backend drops FMP's raw `change` field, but it does
+    /// send `previous_close`, and both sides are rounded to 2dp server-side, so this is exact
+    /// to the cent. Adding `change` to the wire would cost a schema-parity update and a
+    /// client rollout for a value we already hold.
+    ///
+    /// Nil only when `previousClose` is nil — which needs `backendPreviousClose` absent AND
+    /// a move of exactly -100% (the `factor != 0` guard above) — or when either side is
+    /// non-finite. The label renders "—" in that case rather than quietly falling back to the
+    /// percentage, which would put a wrong number in a column of dollars.
+    var changeAmount: Double? {
+        guard let prev = previousClose, prev.isFinite, price.isFinite else { return nil }
+        let delta = price - prev
+        return delta.isFinite ? delta : nil
+    }
+
+    /// Shared with ``PriceChangeLabel``'s dollar mode: grouped like `formattedPrice`, so a
+    /// four-figure move reads "+$1,234.56" rather than "+$1234.56".
+    static func formatSignedCurrency(_ value: Double) -> String {
+        // Signed zero collapsed for the same reason as `normalizedChange`: `String(format:)`
+        // and NumberFormatter both preserve the sign bit, so -0.0 would print "-$0.00"
+        // beside an UP arrow.
+        let normalized = value == 0 ? 0 : value
+        let sign = normalized >= 0 ? "+" : "-"
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencySymbol = "$"
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        let magnitude = abs(normalized)
+        let body = formatter.string(from: NSNumber(value: magnitude))
+            ?? String(format: "$%.2f", magnitude)
+        return "\(sign)\(body)"
+    }
+
+    /// `+$1.23` / `-$0.05`. The sign leads so a loss cannot read as `$-0.05`.
+    var formattedChangeAmount: String? {
+        guard let amount = changeAmount else { return nil }
+        return TrackedAsset.formatSignedCurrency(amount)
     }
 
     /// `true` when this ticker is opted into Portfolio Insights — i.e. the

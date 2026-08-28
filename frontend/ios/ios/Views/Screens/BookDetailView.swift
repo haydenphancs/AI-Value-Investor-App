@@ -171,9 +171,10 @@ struct BookDetailView: View {
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .sheet(isPresented: $showShareSheet) {
-            if let url = URL(string: "https://app.example.com/book/\(book.id)") {
-                ShareSheet(items: [book.title, "by \(book.author)", url])
-            }
+            // Was `https://app.example.com/book/\(book.id)` — a dead host that shipped, so
+            // every recipient got a broken link. There is no per-book web page to point at,
+            // so the share carries the book and the app link, and nothing invented.
+            ShareSheet(items: ShareContent.items("\(book.title)\nby \(book.author)"))
         }
         // Player "Read" → open the reading view for the currently-narrated core.
         .fullScreenCover(item: $playerTargetCore, onDismiss: {

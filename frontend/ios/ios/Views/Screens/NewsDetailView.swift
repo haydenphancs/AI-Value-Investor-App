@@ -92,8 +92,10 @@ struct NewsDetailView: View {
         }
         .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {
-            if let url = viewModel.articleDetail?.articleURL {
-                ShareSheet(items: [url])
+            if let detail = viewModel.articleDetail, let url = detail.articleURL {
+                // Publisher URL leads: it is what the recipient is being sent to read, and
+                // UIActivityViewController picks the activity from the first item's type.
+                ShareSheet(items: ShareContent.items(detail.headline, attaching: [url]))
             }
         }
         // In-app reader. `UIApplication.shared.open` used to hand the article to

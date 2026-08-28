@@ -55,6 +55,16 @@ enum AppInfo {
     /// This is a NUMBER, not the bundle id. Digits only.
     static let appStoreAppID = ""
 
+    /// The App Store product page, or nil until `appStoreAppID` is set.
+    ///
+    /// One digits-only guard for every App Store link in the app — `reviewURL` and
+    /// `downloadURL` both build on this rather than repeating it.
+    static var appStoreURL: URL? {
+        let id = appStoreAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id.allSatisfy(\.isNumber) else { return nil }
+        return URL(string: "https://apps.apple.com/app/id\(id)")
+    }
+
     /// Deep link to the App Store review sheet, or nil until `appStoreAppID` is set.
     ///
     /// Why this exists at all: `requestReview()` is rate-limited by iOS to three prompts per
@@ -63,10 +73,27 @@ enum AppInfo {
     /// a button that silently does nothing. `SKStoreReviewController` is for moments the APP
     /// chooses; a user asking to leave a review should be taken there.
     static var reviewURL: URL? {
-        let id = appStoreAppID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty, id.allSatisfy(\.isNumber) else { return nil }
-        return URL(string: "https://apps.apple.com/app/id\(id)?action=write-review")
+        guard let base = appStoreURL else { return nil }
+        return URL(string: base.absoluteString + "?action=write-review")
     }
+
+    /// The marketing site.
+    ///
+    /// MEASURED 2026-08-28: `https://caydexinvest.com` answers 200, while `/app`,
+    /// `/download`, `/get` and `/ios` all 404 — the root is the only path that resolves, so
+    /// do not "tidy" this into a prettier download path without checking it first.
+    static let websiteURL = URL(string: "https://caydexinvest.com")!
+
+    /// Where a share tells the recipient to go to get the app.
+    ///
+    /// Prefers the App Store once `appStoreAppID` lands and falls back to the site until
+    /// then, so **launch day is a one-constant flip**: fill in the id and every share in the
+    /// app switches over at once, along with the "Rate the App" row.
+    ///
+    /// It deliberately does NOT hardcode the known id (6759525689, see
+    /// documents/legal/LAUNCH_CHECKLIST.md). That record 404s until the app is approved —
+    /// measured 2026-08-28 — so setting it early would ship a dead link to every recipient.
+    static var downloadURL: URL { appStoreURL ?? websiteURL }
 
     static var osVersion: String {
         "iOS \(UIDevice.current.systemVersion)"

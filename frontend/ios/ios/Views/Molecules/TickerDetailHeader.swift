@@ -15,6 +15,15 @@ struct TickerDetailHeader: View {
     var onMoreTapped: (() -> Void)?
     var isFavorite: Bool = false
 
+    /// Whether this ticker has at least one ACTIVE price alert. Drives the bell exactly as
+    /// `isFavorite` drives the star — one Bool, glyph and colour.
+    ///
+    /// Passed IN rather than read from a store: this is a Molecule, so it takes values and
+    /// never reaches for `@Environment(AppState.self)` or a singleton
+    /// (`.claude/rules/ios-swiftui.md`). The Screen does the lookup against `PriceAlertStore`.
+    /// Defaulted so an un-updated call site renders today's behaviour instead of failing.
+    var hasActiveAlerts: Bool = false
+
     // Ticker symbol - always shown in header
     var tickerSymbol: String
 
@@ -75,20 +84,30 @@ struct TickerDetailHeader: View {
                 }
                 .buttonStyle(PlainButtonStyle())
 
-                // Notification bell — rendered ONLY when a handler exists. Price
-                // alerts aren't built yet, so all five detail screens pass nil and the
-                // bell is hidden. A visible control that does nothing reads as a bug
-                // (and is an App Review 2.1 risk); the repo already handles the six
-                // ticker-analysis "Details" buttons the same way.
+                // Price-alert bell — rendered ONLY when a handler exists. A visible control
+                // that does nothing reads as a bug (and is an App Review 2.1 risk); the repo
+                // handles the six ticker-analysis "Details" buttons the same way.
+                //
+                // ⚠️ The glyph and colour MUST stay identical to `PriceAlertRuleRow` — that
+                // parity is the whole point. A TestFlight tester held an active rule on ORCL
+                // and read the amber `bell.badge` in Tracking → Alerts and this grey outline
+                // as two unrelated features, because this bell had no state at all.
+                //
+                // ⚠️ ONE `Image` with ternaries, never an `if`/`else` with two.
+                // `test_ios_tap_target_guards.py` counts `Image(systemName:` in this file and
+                // asserts it equals the `.frame`/`.hitSlop()` counts; a second Image is a red
+                // build. Same shape as the star below.
                 if let onNotificationTapped {
                     Button(action: onNotificationTapped) {
-                        Image(systemName: "bell")
+                        Image(systemName: hasActiveAlerts ? "bell.badge" : "bell")
                             .font(AppTypography.iconMedium)
-                            .foregroundColor(AppColors.textPrimary)
+                            .foregroundColor(hasActiveAlerts ? AppColors.caution : AppColors.textPrimary)
                             .frame(width: HitSlop.minimumTarget, height: HitSlop.minimumTarget)
                             .hitSlop()
                     }
                     .buttonStyle(PlainButtonStyle())
+                    // Glyph + colour is the entire signal, so it has to be said out loud too.
+                    .accessibilityLabel(hasActiveAlerts ? "Price alerts, active" : "Price alerts")
                 }
 
                 // Favorite star

@@ -38,7 +38,22 @@ class TrackingViewModel: ObservableObject {
             UserDefaults.standard.set(isInsightsEnabled, forKey: Self.insightsEnabledKey)
         }
     }
+    /// Percent vs dollars for the Holdings rows' change column. One value for the whole
+    /// list: tapping any row's price block switches every row, which is what makes the column
+    /// comparable at a glance.
+    ///
+    /// Local-only, like `sortOption` and `isInsightsEnabled` next to it, and deliberately NOT
+    /// in `SettingsSyncManager` — that allow-list costs a full-blob replace, a sign-out
+    /// clearing path and a network round trip per write, and its own precedents (App Lock,
+    /// chart type, this screen's sort) keep cosmetic display choices on the device.
+    @Published var changeDisplayMode: ChangeDisplayMode = .percent {
+        didSet {
+            UserDefaults.standard.set(changeDisplayMode.rawValue, forKey: Self.changeDisplayModeKey)
+        }
+    }
+
     private static let insightsEnabledKey = "TrackingView.isInsightsEnabled"
+    private static let changeDisplayModeKey = "TrackingView.changeDisplayMode"
     private static let sortOptionKey = "TrackingView.sortOption"
     private static let sortAscendingKey = "TrackingView.sortAscending"
 
@@ -147,6 +162,11 @@ class TrackingViewModel: ObservableObject {
         if UserDefaults.standard.object(forKey: Self.sortAscendingKey) != nil {
             self.sortAscending = UserDefaults.standard.bool(forKey: Self.sortAscendingKey)
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.changeDisplayModeKey),
+           let restored = ChangeDisplayMode(rawValue: raw) {
+            self.changeDisplayMode = restored
+        }
+        
 
         NotificationCenter.default.publisher(for: .whaleFollowStateChanged)
             .receive(on: RunLoop.main)
@@ -1106,6 +1126,12 @@ class TrackingViewModel: ObservableObject {
     }
 
     // MARK: - Navigation
+
+    /// Tapping any holdings row's price block flips the whole column.
+    func toggleChangeDisplayMode() {
+        changeDisplayMode = changeDisplayMode.toggled
+        Haptics.selection()
+    }
 
     func viewAssetDetail(_ asset: TrackedAsset) {
         selectedAssetNavigation = SearchSelection(symbol: asset.ticker, type: asset.assetType)

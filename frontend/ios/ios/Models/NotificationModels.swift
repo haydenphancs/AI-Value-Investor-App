@@ -285,6 +285,30 @@ struct PriceAlertDTO: Decodable, Identifiable, Hashable, Sendable {
         guard armed else { return "Already triggered — re-arms when the price moves back" }
         return nil
     }
+
+    /// A copy with `isActive` flipped, for `PriceAlertStore`'s optimistic toggle.
+    ///
+    /// The properties stay `let` deliberately — this is a decoded server row, and the only
+    /// legitimate reason to change one locally is the brief optimistic window before the
+    /// server's own row replaces it. An explicit copy makes that window visible at the call
+    /// site instead of letting any holder mutate a DTO in place.
+    func withIsActive(_ newValue: Bool) -> PriceAlertDTO {
+        PriceAlertDTO(
+            id: id,
+            ticker: ticker,
+            assetType: assetType,
+            kind: kind,
+            threshold: threshold,
+            repeatMode: repeatMode,
+            isActive: newValue,
+            armed: armed,
+            lastPrice: lastPrice,
+            lastTriggeredAt: lastTriggeredAt,
+            triggerCount: triggerCount,
+            note: note,
+            createdAt: createdAt
+        )
+    }
 }
 
 struct PriceAlertListDTO: Decodable, Sendable {

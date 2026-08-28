@@ -41,11 +41,20 @@ struct TickerDetailHeader: View {
                     .font(AppTypography.heading)
                     .foregroundColor(AppColors.textPrimary)
 
-                // Price (shown when pinned/scrolled)
+                // Price (shown when pinned/scrolled).
+                //
+                // MUST stay one line. An index quote is five digits plus decimals
+                // ("$26541.35" on ^IXIC, vs "$771.10" for an ETF), which wrapped onto a second
+                // line and pushed the header taller than the ticker symbol beside it. It only
+                // became visible once the pin state was made reliable — before that this label
+                // was mostly never shown. Shrink-to-fit rather than truncate: a clipped price
+                // is a wrong number, and a wrong number is worse than a small one.
                 if let price = tickerPrice {
                     Text(price)
                         .font(AppTypography.body)
                         .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
@@ -70,7 +79,7 @@ struct TickerDetailHeader: View {
                 // alerts aren't built yet, so all five detail screens pass nil and the
                 // bell is hidden. A visible control that does nothing reads as a bug
                 // (and is an App Review 2.1 risk); the repo already handles the six
-                // ticker-analysis "Detail" buttons the same way.
+                // ticker-analysis "Details" buttons the same way.
                 if let onNotificationTapped {
                     Button(action: onNotificationTapped) {
                         Image(systemName: "bell")

@@ -35,6 +35,37 @@ AUTHED = {"id": "authed-user-1"}
 GUEST = {"id": "1cd2b2c4-288b-5c9b-bfe1-154c70266a3f", "is_guest": True}
 
 
+@pytest.fixture(autouse=True)
+def _no_live_free_followup_claim(monkeypatch):
+    """`_claim_chat_quota` calls the REAL `claim_free_followup` unless it is stubbed.
+
+    WHY THIS IS AUTOUSE AND NOT OPTIONAL. That method issues
+    `supabase.rpc("claim_free_followup", ...)` — a SECURITY DEFINER function with
+    `row_security = off` that UPDATEs `chat_sessions` (migration 154). Every test in
+    this file was reaching it against PRODUCTION on each run, and passing only because
+    `session_id="sess-1"` is not a UUID: Postgres rejected the cast, the RPC errored,
+    and `claim_free_followup` fails CLOSED to "charge this turn". So the money-path
+    assertions below were exercising the ERROR branch, not the intended one — and a
+    single `"sess-1"` → real-UUID edit would have started mutating production rows.
+
+    Default False = "no free allowance", which is the state every existing test here
+    assumes. `_grant_free_followup` below opts a test into the True branch explicitly.
+    """
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = False
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    return budget
+
+
+def _grant_free_followup(monkeypatch):
+    """Opt into the earned-free-turn branch — the one the live call could never reach
+    deterministically. Returns the stub so callers can assert on it."""
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = True
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    return budget
+
+
 def _patch_credit(monkeypatch, *, precharge_return=100, precharge_raises=False):
     inst = MagicMock()
     if precharge_raises:
@@ -369,3 +400,50 @@ def test_refund_balance_uses_the_rpc_spendable(monkeypatch):
     quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
     quota.refund_once("chat_undelivered")
     assert quota.cost_frame()["balance"] == 8
+
+
+# ── The earned-free-turn branch, finally tested ──────────────────────────────
+#
+# Until the autouse stub above landed, `claim_free_followup` was a LIVE call to
+# production, so this branch could only be reached by chance and was never asserted.
+# These two pin it deterministically.
+
+def test_an_earned_free_followup_is_not_charged(monkeypatch):
+    """The whole point of the free follow-up: no credit is spent."""
+    budget = _grant_free_followup(monkeypatch)
+    credit = _patch_credit(monkeypatch)
+
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+
+    assert err is None and quota is not None
+    assert quota.outcome == "free_followup"
+    credit.precharge.assert_not_called()          # the assertion that matters
+    budget.claim_free_followup.assert_called_once_with("sess-1")
+
+
+def test_a_free_followup_bypasses_the_insufficient_credits_gate(monkeypatch):
+    """Documented intent: the turn was paid for by the PREVIOUS one, so a user who has
+    since hit 0 still gets the answer they are already owed — no 402."""
+    _grant_free_followup(monkeypatch)
+    credit = _patch_credit(monkeypatch, precharge_return=None)   # wallet empty
+
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+
+    assert err is None
+    assert quota.outcome == "free_followup"
+    credit.precharge.assert_not_called()
+
+
+def test_a_claim_failure_charges_normally(monkeypatch):
+    """Fails CLOSED. A DB blip must charge, never hand out a free turn we cannot
+    record as spent — a sustained outage would otherwise make chat free for everyone."""
+    budget = MagicMock()
+    budget.claim_free_followup.return_value = False       # what the real one returns on error
+    monkeypatch.setattr(chat, "get_chat_budget_service", lambda: budget)
+    credit = _patch_credit(monkeypatch, precharge_return=100)
+
+    quota, err = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+
+    assert err is None
+    assert quota.outcome == "charged"
+    credit.precharge.assert_called_once()

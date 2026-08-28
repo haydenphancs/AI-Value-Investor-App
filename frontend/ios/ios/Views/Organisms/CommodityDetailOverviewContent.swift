@@ -12,7 +12,11 @@ struct CommodityDetailOverviewContent: View {
     var onRelatedCommodityTap: ((RelatedTicker) -> Void)?
 
     var body: some View {
-        LazyVStack(spacing: AppSpacing.lg) {
+        // Eager, matching its four siblings. This was the only Overview content that
+        // nested a lazy stack inside the screen's lazy stack — two placement caches to
+        // invalidate instead of one — and its four sections are all in-memory with no
+        // AsyncImage, so the laziness bought nothing. See DetailScrollContainer.
+        VStack(spacing: AppSpacing.lg) {
             // Key Statistics (reuses TickerDetailKeyStatsSection)
             TickerDetailKeyStatsSection(statisticsGroups: commodityData.keyStatisticsGroups)
 

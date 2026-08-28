@@ -31,8 +31,10 @@ _PAGES = ["privacy", "terms", "support"]
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:
-        yield c
+    # NOT `with TestClient(app)`. The context manager runs the app LIFESPAN, whose
+    # startup jobs reach Supabase — one live call to production per run, just to serve
+    # a static HTML page. These routes need no startup state, so skip it.
+    yield TestClient(app)
 
 
 # ── The pages serve ───────────────────────────────────────────────────────────

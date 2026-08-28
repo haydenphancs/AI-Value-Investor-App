@@ -46,15 +46,17 @@ AI Value Investor is a sophisticated investment research and portfolio tracking 
 
 ### Key Stats
 
+*Counts as of 2026-08-27. Indicative only — they drift every sprint; nothing depends on them.*
+
 | Metric | Count |
 |--------|-------|
-| Total Swift files | ~535 |
-| View Atoms | 128 |
-| View Molecules | 183 |
-| View Organisms | 102 |
-| Screens | 37 |
-| ViewModels | 19 |
-| Data Models | 38 |
+| Total Swift files | ~740 |
+| View Atoms | 155 |
+| View Molecules | 251 |
+| View Organisms | 115 |
+| Screens | 62 |
+| ViewModels | 32 |
+| Data Models | 54 |
 | Core Infrastructure | 11 |
 
 ---
@@ -69,10 +71,10 @@ AI Value Investor is a sophisticated investment research and portfolio tracking 
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  Views (Atomic Design)          ViewModels (MVVM)                  │
-│  ├─ Atoms (128)                ├─ Screen VMs (19)                  │
-│  ├─ Molecules (183)            ├─ BaseViewModel                    │
-│  ├─ Organisms (102)            └─ Local @Published state           │
-│  └─ Screens (37)                                                   │
+│  ├─ Atoms                ├─ Screen VMs                  │
+│  ├─ Molecules            ├─ BaseViewModel                    │
+│  ├─ Organisms            └─ Local @Published state           │
+│  └─ Screens                                                   │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
@@ -153,7 +155,7 @@ frontend/ios/
 │   │   │   ├── SparklineView.swift
 │   │   │   ├── PriceChangeLabel.swift
 │   │   │   ├── SentimentBadge.swift
-│   │   │   └── ... (128 files)
+│   │   │   └── ...
 │   │   ├── Molecules/                        # Composed components
 │   │   │   ├── TickerCard.swift
 │   │   │   ├── ChatInputBar.swift
@@ -162,13 +164,13 @@ frontend/ios/
 │   │   │   ├── Chart/                        # Chart components
 │   │   │   │   ├── EarningsChartView.swift
 │   │   │   │   └── SmartMoneyFlowChart.swift
-│   │   │   └── ... (183 files)
+│   │   │   └── ...
 │   │   ├── Organisms/                        # Full sections
 │   │   │   ├── CustomTabBar.swift            # 5-tab navigation bar
 │   │   │   ├── ChatHistoryList.swift
 │   │   │   ├── LiveNewsTimeline.swift
 │   │   │   ├── TickerFinancialsContent.swift
-│   │   │   └── ... (102 files)
+│   │   │   └── ...
 │   │   └── Screens/                          # Full-page views
 │   │       ├── HomeView.swift
 │   │       ├── UpdatesView.swift
@@ -180,7 +182,7 @@ frontend/ios/
 │   │       ├── SearchView.swift
 │   │       ├── ContentView.swift             # Tab container
 │   │       ├── RootContainerView.swift       # Root layout
-│   │       └── ... (37 files)
+│   │       └── ...
 │   │
 │   ├── ViewModels/                           # Screen-specific ViewModels
 │   │   ├── HomeViewModel.swift
@@ -202,7 +204,7 @@ frontend/ios/
 │   │   ├── PriceActionViewModel.swift
 │   │   └── TradeGroupDetailViewModel.swift
 │   │
-│   ├── Models/                               # Data models & DTOs (38 files)
+│   ├── Models/                               # Data models & DTOs
 │   │   ├── TickerDetailModels.swift          # Stock detail, key stats
 │   │   ├── TickerReportModels.swift          # AI report structure
 │   │   ├── UpdatesModels.swift               # News feed, sentiment
@@ -650,7 +652,7 @@ class MyViewModel: BaseViewModel {
 
 ## Data Models
 
-**Location:** `Models/` (38 files)
+**Location:** `Models/`
 
 ### Major Model Categories
 
@@ -684,7 +686,7 @@ All models use explicit `CodingKeys` to map snake_case JSON to camelCase Swift p
 
 ## ViewModels
 
-**Location:** `ViewModels/` (19 files)
+**Location:** `ViewModels/`
 
 | ViewModel | Screen | Key Responsibilities |
 |-----------|--------|---------------------|
@@ -713,14 +715,14 @@ All models use explicit `CodingKeys` to map snake_case JSON to camelCase Swift p
 
 The app follows **Atomic Design** methodology for UI composition:
 
-### Atoms (128 files) — Smallest reusable units
+### Atoms — Smallest reusable units
 
 Badges, labels, indicators, tiny charts:
 - `AIBadge`, `CreditsBadge`, `SentimentBadge`, `AnalystActionBadge`
 - `DonutChartView`, `SparklineView`, `GradientProgressBar`
 - `PriceChangeLabel`, toggle buttons, progress indicators
 
-### Molecules (183 files) — Composed of atoms
+### Molecules — Composed of atoms
 
 Cards, bars, rows, headers:
 - `TickerCard`, `ReportCard`, `CreditsBalanceCard`
@@ -728,7 +730,7 @@ Cards, bars, rows, headers:
 - `CommunityInsightRow`, `AnalystActionCard`
 - Chart components: `EarningsChartView`, `SmartMoneyFlowChart`
 
-### Organisms (102 files) — Full sections
+### Organisms — Full sections
 
 Complex, self-contained sections:
 - `CustomTabBar` — 5-tab navigation
@@ -737,7 +739,7 @@ Complex, self-contained sections:
 - `SmartMoneySection`, `EarningsSectionCard`
 - `HealthCheckSectionCard`, `GrowthSectionCard`
 
-### Screens (37 files) — Full-page views
+### Screens — Full-page views
 
 Complete screens with their own ViewModel, listed in [Navigation & Routing](#navigation--routing).
 

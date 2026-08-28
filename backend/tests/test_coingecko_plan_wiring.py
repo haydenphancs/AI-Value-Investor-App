@@ -71,7 +71,7 @@ def test_the_rate_limit_is_configurable_and_bounds_the_window(monkeypatch):
     """
     from app.integrations import coingecko as mod
 
-    monkeypatch.setattr(mod.settings, "COINGECKO_MAX_CALLS_PER_MINUTE", 137, raising=False)
+    monkeypatch.setattr(mod.settings, "COINGECKO_MAX_CALLS_PER_MINUTE", 137)
     client = CoinGeckoClient()
     assert client._max_calls_per_minute == 137, "the limit ignores the setting"
     assert client._rate_window.maxlen == 137, (

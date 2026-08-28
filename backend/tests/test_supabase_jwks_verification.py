@@ -61,7 +61,7 @@ def _claims(**over):
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     security._reset_jwks_cache_for_tests()
-    monkeypatch.setattr(settings, "SUPABASE_JWT_SECRET", _LEGACY_SECRET, raising=False)
+    monkeypatch.setattr(settings, "SUPABASE_JWT_SECRET", _LEGACY_SECRET)
     yield
     security._reset_jwks_cache_for_tests()
 
@@ -216,5 +216,5 @@ async def test_an_es256_token_with_no_kid_is_refused():
 async def test_hs256_is_refused_when_no_legacy_secret_is_configured(monkeypatch):
     """After the legacy key is revoked and the env var removed, an HS256 token must fail
     closed rather than fall through to some other key."""
-    monkeypatch.setattr(settings, "SUPABASE_JWT_SECRET", None, raising=False)
+    monkeypatch.setattr(settings, "SUPABASE_JWT_SECRET", None)
     assert await security.verify_supabase_token(_hs256()) is None

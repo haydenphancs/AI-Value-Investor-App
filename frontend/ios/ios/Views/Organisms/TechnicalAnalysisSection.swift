@@ -16,7 +16,7 @@ struct TechnicalAnalysisSection: View {
             // Header
             AnalysisSectionHeader(
                 title: "Technical Analysis",
-                actionText: "Detail",
+                actionText: "Details",
                 onAction: { onDetailTapped?() },
                 showMoreButton: false
             )

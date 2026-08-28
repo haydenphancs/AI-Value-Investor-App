@@ -314,6 +314,57 @@ class _NoQuotesFMP:
         return []
 
 
+class _NoSupabase:
+    """Every table read returns empty. The dashboard sections under test here are
+    pre-seeded into their caches; the rest must not reach out."""
+
+    def table(self, _name):
+        return self
+
+    def select(self, *_a, **_k):
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def in_(self, *_a, **_k):
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": []})()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_supabase(monkeypatch):
+    """`get_dashboard()` builds EVERY section. Only `fmp` was stubbed, so the sections
+    this file does not pre-seed (watchlist, themes) queried production Supabase — 8 live
+    calls per run, swallowed by their fail-safe handlers so the tests stayed green.
+    Autouse so a test added later cannot reopen it."""
+    import app.services.home_dashboard_service as mod
+
+    monkeypatch.setattr(mod, "get_supabase", lambda: _NoSupabase())
+
+    # The endpoint test passes a `user_id`, which the other tests here do not — that
+    # turns ON the watchlist strip, and its two helpers are imported INTO this module
+    # from elsewhere, so each carries its own `get_supabase` binding. Stubbing only
+    # `mod.get_supabase` leaves them live. Same lesson as the collector/moat pair: one
+    # function, one name, several bindings.
+    async def _no_group(_user_id):
+        return None
+
+    async def _no_meta(_user_id, tickers):
+        return {}
+
+    monkeypatch.setattr(mod, "get_active_group", _no_group)
+    monkeypatch.setattr(mod, "fetch_ticker_metadata", _no_meta)
+
+
 def _service():
     from app.services.home_dashboard_service import HomeDashboardService
 

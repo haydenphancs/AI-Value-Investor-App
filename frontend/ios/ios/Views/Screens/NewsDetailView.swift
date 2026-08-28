@@ -90,15 +90,7 @@ struct NewsDetailView: View {
         .task {
             await viewModel.load()
         }
-        .gesture(
-            DragGesture()
-                .onEnded { value in
-                    // Swipe right to dismiss
-                    if value.translation.width > 100 {
-                        handleBackTapped()
-                    }
-                }
-        )
+        .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {
             if let url = viewModel.articleDetail?.articleURL {
                 ShareSheet(items: [url])

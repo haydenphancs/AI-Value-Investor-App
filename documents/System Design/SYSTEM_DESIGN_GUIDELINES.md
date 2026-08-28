@@ -1,14 +1,41 @@
-# AI Value Investor - System Design Guidelines
+# AI Value Investor — System Design Guidelines
 
-**Version:** 1.2
-**Author:** Principal Architect
-**Date:** June 2026 (Updated)
-**Status:** CURRENT — §7 (Caching) + Appendix B updated June 2026 for the industry-relative / TTM peer-benchmark subsystem; verified against codebase
+**Version:** 2.0
+**Date:** 2026-08-27
+**Status:** CURRENT
+
+---
+
+## 0. How to read this document
+
+This describes **architecture that has shipped**, and the reasoning behind it. Where a past shape was
+wrong, the reason is kept — that is the half of this document a reader cannot reconstruct from the
+code.
+
+It does **not** prescribe patterns. Enforceable, path-scoped detail lives in `.claude/rules/*.md`,
+which auto-load by path and are the authority:
+`backend-python`, `integrations`, `agents`, `database`, `testing`, `auth`, `ios-swiftui`,
+`learn-content`, `system-design`. **If you are about to add a code sample here, it belongs in a rule
+file instead.**
+
+That split is not stylistic. Version 1.x of this document carried ~770 lines of illustrative Swift
+and Python that were never reconciled with the code, and readers reasonably took them as
+descriptions. It asserted `APIService`, `CacheManager`, `PersistenceManager`, `ResearchRepository`,
+`RetryPolicy`, Core Data, a `{success, data, meta}` envelope and a `deep_research_reports` table —
+none of which have ever existed. Duplicating detail here is what let it drift.
+
+Every "X exists" claim below is pinned by `backend/tests/test_system_design_doc_parity.py`, which
+also asserts the negative claims (no Core Data, no Redis, no `BackgroundTasks`, no ORM). If you
+change one of those facts in the code, that test tells you this document needs a line changed too.
+
+**Section numbers are stable and load-bearing** — ~24 production source comments cite §9, §9.3,
+§9b.7, §9b.8 and §11.7 by number. `4b` / `9b` / `9c` exist to avoid renumbering. Do not renumber.
 
 ---
 
 ## Table of Contents
 
+0. [How to read this document](#0-how-to-read-this-document)
 1. [Executive Summary](#1-executive-summary)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Data Flow Architecture](#3-data-flow-architecture)
@@ -21,7 +48,10 @@
 9. [Security Architecture](#9-security-architecture)
 9b. [Monetization — Credits, Entitlements & In-App Purchase](#9b-monetization--credits-entitlements--in-app-purchase)
 9c. [Personalized Explanations — Pedagogy, Never Analysis](#9c-personalized-explanations--pedagogy-never-analysis)
-10. [Recommendations & Critique](#10-recommendations--critique)
+10. [Known gaps and accepted trade-offs](#10-known-gaps-and-accepted-trade-offs)
+11. [Notification System](#11-notification-system-implemented-2026-08-08)
+- [Appendix A: Where things live](#appendix-a-where-things-live)
+- [Appendix B: Decision Log](#appendix-b-decision-log)
 
 ---
 
@@ -34,19 +64,30 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Backend Pattern | Clean Architecture (Layered) | Separation of concerns, testability |
-| iOS Pattern | MVVM + Repository | SwiftUI native, reactive state |
-| AI Orchestration | Task Queue + Polling | Long-running tasks without blocking |
+| Backend Pattern | Layered: API → Service → Integration | Endpoints never import integrations; integrations never cache. Enforced by review, not by DI — there is no container and no inversion |
+| iOS Pattern | MVVM + one repository | SwiftUI native, reactive state. No protocol layer, no DI container — see §3.2 |
+| AI Orchestration | Supervised `asyncio` tasks + polling | Long-running work without blocking the request. **Not** a task queue — see §5.3 for what that costs and what compensates |
 | State Management | Centralized App State | Consistent UX across screens |
 | Error Strategy | Domain-Specific Errors | User-friendly, actionable messages |
 | Peer Benchmarks | Pre-computed industry medians (fiscal history + TTM current snapshot) | Apples-to-apples "vs avg"; point-in-time, no per-request peer fan-out |
 
 ### Architecture Principles
 
-1. **Offline-First Mindset**: Cache aggressively, degrade gracefully
-2. **Optimistic UI**: Show expected results, reconcile on confirmation
-3. **Fail Fast, Fail Informatively**: Errors should guide users to solutions
-4. **Progressive Disclosure**: Load essential data first, details on demand
+1. **Degrade per section, never per screen.** A failed sub-build empties its own section; the
+   surrounding screen still renders (§3.4). This is the single most load-bearing principle here —
+   the aggregation endpoints are only safe because of it.
+2. **Optimistic UI, pessimistic persistence.** Show the expected result immediately, but write it to
+   disk only once the server confirms; otherwise a kill mid-request makes a mutation the server never
+   received durable. Every user-initiated mutation reports its failure — a silent revert is banned
+   (`.claude/rules/auth.md` §6).
+3. **Fail loudly and legibly.** Assume every failure is diagnosed later from logs alone, with no
+   repro. A known failure mode gets a typed exception and an `ErrorCode`, never a bare 500.
+4. **Progressive disclosure.** Paint the cheap core first, supersede it with the full aggregation
+   (§3.5).
+
+Note what is deliberately *not* here: "offline-first". The client cache is in-memory and empty on
+cold launch (§7.2). The app requires a network connection, and §10 records that as an accepted gap
+rather than an unfinished feature.
 
 ---
 
@@ -60,28 +101,29 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                        PRESENTATION LAYER                             │   │
 │  │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐      │   │
-│  │   │     Views       │  │    ViewModels   │  │    Coordinators │      │   │
-│  │   │ (Atomic Design) │◄─│   (per-screen)  │◄─│   (navigation)  │      │   │
+│  │   │     Views       │  │    ViewModels   │  │  NavigationStack│      │   │
+│  │   │ (Atomic Design) │◄─│ (ObservableObj) │◄─│  + .sheet/.cover│      │   │
 │  │   └─────────────────┘  └────────┬────────┘  └─────────────────┘      │   │
 │  └──────────────────────────────────┼───────────────────────────────────┘   │
 │                                     │                                        │
 │  ┌──────────────────────────────────▼───────────────────────────────────┐   │
 │  │                         DOMAIN LAYER                                  │   │
 │  │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐      │   │
-│  │   │   App State     │  │   Repositories  │  │   Use Cases     │      │   │
-│  │   │  (Observable)   │◄─│  (Protocols)    │◄─│  (Business)     │      │   │
+│  │   │   AppState      │  │   Repositories  │  │   Services/     │      │   │
+│  │   │  (@Observable)  │◄─│  (5, protocols) │◄─│  (Learn, audio) │      │   │
 │  │   └─────────────────┘  └────────┬────────┘  └─────────────────┘      │   │
 │  └──────────────────────────────────┼───────────────────────────────────┘   │
 │                                     │                                        │
 │  ┌──────────────────────────────────▼───────────────────────────────────┐   │
 │  │                          DATA LAYER                                   │   │
 │  │   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐      │   │
-│  │   │  API Service    │  │  Cache Manager  │  │  Persistence    │      │   │
-│  │   │  (URLSession)   │  │  (Memory+Disk)  │  │  (Core Data)    │      │   │
+│  │   │  APIClient      │  │ StockRepository │  │  Keychain +     │      │   │
+│  │   │  (actor)        │  │ (in-memory dict)│  │  UserDefaults   │      │   │
 │  │   └─────────────────┘  └─────────────────┘  └─────────────────┘      │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │ HTTPS/JSON
+                                      │ HTTPS/JSON · SSE (chat)
+                                      │ WSS /api/v1/ws/price/{ticker}
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           FASTAPI BACKEND                                    │
@@ -110,7 +152,7 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 │  ┌────────────▼─────────────────────▼────────────────────▼──────────────┐   │
 │  │                      INTEGRATION LAYER                                │   │
 │  │   ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │   │
-│  │   │   Gemini   │  │    FMP     │  │  NewsAPI   │  │  Supabase  │     │   │
+│  │   │   Gemini   │  │    FMP     │  │ CoinGecko  │  │  + 8 more  │     │   │
 │  │   └────────────┘  └────────────┘  └────────────┘  └────────────┘     │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────┬───────────────────────────────────────┘
@@ -118,199 +160,99 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
          ┌────────────────────────────┼────────────────────────────┐
          ▼                            ▼                            ▼
 ┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-│    Supabase     │        │   Google Gemini │        │      FMP        │
-│   (Postgres +   │        │   1.5 Pro+      │        │ (Financial Data)│
-│    Auth + RLS)  │        │                 │        │                 │
+│    Supabase     │        │  Google Gemini  │        │      FMP        │
+│   (Postgres +   │        │ 2.5-flash /     │        │ (market data +  │
+│    Auth + RLS)  │        │ -flash-lite     │        │  news)          │
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
+
+**Integrations** (`backend/app/integrations/`, **11** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+`finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`.
+Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
+`get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top. Supabase
+is reached through `app/database.py`, not through an integration module.
 
 ---
 
 ## 3. Data Flow Architecture
 
-### 3.1 Standard Request Flow (Synchronous)
-
-**Example: Fetching Stock Details**
+### 3.1 Standard request flow (synchronous)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              iOS CLIENT                                      │
-│                                                                              │
-│  1. User taps stock → TickerDetailViewModel.loadStock(ticker)               │
-│                               │                                              │
-│  2. ViewModel calls           ▼                                              │
-│     StockRepository.fetchStock(ticker)                                       │
-│                               │                                              │
-│  3. Repository checks         ▼                                              │
-│     ┌─────────────────────────────────────────┐                             │
-│     │ Cache.get(key: "stock_\(ticker)")       │                             │
-│     │   ├── HIT → Return cached, trigger      │                             │
-│     │   │         background refresh if stale │                             │
-│     │   └── MISS → Continue to API ──────────►│                             │
-│     └─────────────────────────────────────────┘                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼ GET /api/v1/stocks/{ticker}
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              BACKEND                                         │
-│                                                                              │
-│  4. API Endpoint receives request                                            │
-│     stocks.py: get_stock_detail()                                            │
-│                               │                                              │
-│  5. Validates auth            ▼                                              │
-│     dependencies.py: get_current_user()                                      │
-│                               │                                              │
-│  6. Service layer             ▼                                              │
-│     ┌─────────────────────────────────────────┐                             │
-│     │ Check Supabase DB cache (e.g. news)      │                             │
-│     │   ├── HIT → Return cached response      │                             │
-│     │   └── MISS → Query external APIs ──────►│                             │
-│     └─────────────────────────────────────────┘                             │
-│                               │                                              │
-│  7. Data aggregation          ▼                                              │
-│     ┌─────────────────────────────────────────┐                             │
-│     │ Parallel fetch:                          │                             │
-│     │   - supabase.table("stocks").select()   │                             │
-│     │   - fmp.get_company_profile()           │                             │
-│     │   - fmp.get_quote()                     │                             │
-│     └─────────────────────────────────────────┘                             │
-│                               │                                              │
-│  8. Transform to schema       ▼                                              │
-│     schemas/stock.py: StockDetailResponse                                    │
-│                               │                                              │
-│  9. Return JSON              ▼                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼ JSON Response
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              iOS CLIENT                                      │
-│                                                                              │
-│  11. APIService.decode()      │                                              │
-│      → StockDetail model      ▼                                              │
-│                                                                              │
-│  12. Repository caches        │                                              │
-│      locally & returns        ▼                                              │
-│                                                                              │
-│  13. ViewModel updates        │                                              │
-│      @Published stock         ▼                                              │
-│                                                                              │
-│  14. SwiftUI re-renders       │                                              │
-│      TickerDetailView         ▼                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+  iOS                                          Backend
+  ───                                          ───────
+
+  1  View → ViewModel.load(ticker)
+  2  → StockRepository.fetch(ticker)
+  3  in-memory dict, still within TTL?
+       ├─ HIT  → return; no request is made
+       └─ MISS → APIClient.request(endpoint)
+                        │
+                        │  HTTPS / JSON
+                        ▼
+                                          4  Endpoint (api/v1/endpoints/)
+                                               ├─ resolve identity: public /
+                                               │  guestAllowed / signInRequired
+                                               └─ dispatch to a service
+                                                          │
+                                          5  Service      ▼
+                                               ├─ Tier 1: in-process dict
+                                               ├─ _inflight dedup (herd guard)
+                                               ├─ Tier 2: Supabase *_cache
+                                               └─ MISS → upstream in parallel
+                                                         (asyncio.gather)
+                                                          │
+                                          6  Merge; a failed leg degrades ONE
+                                               section, not the response
+                                                          │
+                                          7  Serialize the Pydantic model
+                        ┌─────────────────────  (no envelope — see §8.1)
+                        ▼
+  8  APIClient decodes it
+       ├─ failure → AppError.from(_:)
+       └─ success → Repository caches, returns
+  9  ViewModel @Published fires → SwiftUI re-renders
 ```
 
-### 3.2 Repository Pattern Implementation (iOS)
+There is no background-refresh-on-stale path: a stale entry is a miss, and the request is made.
 
-```swift
-// MARK: - Protocol Definition
-protocol StockRepositoryProtocol {
-    func fetchStock(_ ticker: String) async throws -> Stock
-    func fetchFundamentals(_ ticker: String) async throws -> [Fundamental]
-    func searchStocks(_ query: String) async throws -> [StockSearchResult]
-    func addToWatchlist(_ stockId: String) async throws
-}
+### 3.2 Repositories (iOS)
 
-// MARK: - Implementation
-final class StockRepository: StockRepositoryProtocol {
-    private let apiService: APIServiceProtocol
-    private let cacheManager: CacheManagerProtocol
-    private let persistenceManager: PersistenceManagerProtocol
+There is **one** repository that matters — `Core/Repositories/StockRepository.swift`, a `@MainActor`
+class behind a wide protocol covering every detail-screen fetch. Four others
+(`HomeRepository`, `AccountRepository`, `CreditHistoryRepository`, `NotificationRepository`) are thin
+pass-throughs holding no cache at all — verified: zero cache references between them.
 
-    init(
-        apiService: APIServiceProtocol = APIService.shared,
-        cacheManager: CacheManagerProtocol = CacheManager.shared,
-        persistenceManager: PersistenceManagerProtocol = PersistenceManager.shared
-    ) {
-        self.apiService = apiService
-        self.cacheManager = cacheManager
-        self.persistenceManager = persistenceManager
-    }
+Its only dependency is `APIClient`. The flow is `getCached` → `apiClient.request` → `setCache` —
+a single in-memory tier, no disk, no protocol-per-collaborator, no injected cache or persistence
+manager. §7.1 and §7.2 describe the cache; §10 records that "offline support" is a cold-launch-empty
+in-memory cache and not offline support.
 
-    func fetchStock(_ ticker: String) async throws -> Stock {
-        let cacheKey = "stock_\(ticker)"
+The Jan 2026 decision to adopt the repository pattern is recorded in Appendix B and stands; what
+shipped is a much smaller version of it than that entry implies, which is why the shape is spelled
+out here.
 
-        // 1. Check memory cache (instant)
-        if let cached: Stock = cacheManager.get(cacheKey), !cached.isStale {
-            return cached
-        }
+### 3.3 Backend service layer
 
-        // 2. Check disk cache (fast)
-        if let persisted: Stock = try? await persistenceManager.fetch(cacheKey) {
-            // Trigger background refresh if stale
-            if persisted.isStale {
-                Task { try? await refreshStock(ticker) }
-            }
-            return persisted
-        }
+A service owns caching, `_inflight` dedup, multi-source aggregation and business decisions.
+Endpoints never import from `integrations/`; integrations never cache.
 
-        // 3. Fetch from API
-        let stock = try await apiService.request(
-            endpoint: .stockDetail(ticker),
-            responseType: Stock.self
-        )
+The two-tier cache-aside pattern (CLAUDE.md invariant #4) — **not Redis**:
 
-        // 4. Cache the result
-        cacheManager.set(cacheKey, value: stock, ttl: .minutes(5))
-        try? await persistenceManager.save(stock, key: cacheKey)
+- **Tier 1** — a per-service in-process Python dict, typical 5-minute TTL, fronted by an
+  `_inflight` `asyncio.Future` map that deduplicates concurrent misses. That map is the
+  thundering-herd guard: without it, a cold popular ticker fans out one upstream call per
+  concurrent request.
+- **Tier 2** — Supabase `*_cache` tables, 24 h or close-aligned via `expires_at`, which survive a
+  restart. §7.1 states the rule for what may go in here; the short version is that **a live price may
+  not**.
 
-        return stock
-    }
-}
-```
+Reference implementation to copy: `app/services/profit_power_service.py`. Parallel upstream calls go
+through `asyncio.gather(..., return_exceptions=True)`, and every result is checked with
+`isinstance(r, Exception)` before it is unwrapped — a partial FMP failure degrades one section rather
+than the response.
 
-### 3.3 Backend Service Layer Pattern
-
-```python
-# services/stock_service.py
-
-class StockService:
-    """
-    Service layer for stock-related operations.
-    Handles caching, data aggregation, and business logic.
-    """
-
-    def __init__(
-        self,
-        supabase: Client,
-        fmp_client: FMPClient,
-    ):
-        self.supabase = supabase
-        self.fmp = fmp_client
-
-    async def get_stock_detail(self, ticker: str) -> StockDetail:
-        """
-        Get comprehensive stock details.
-
-        Data Flow:
-        1. Check Supabase DB cache (for applicable data like news)
-        2. Parallel fetch from Supabase + FMP
-        3. Aggregate and transform
-        4. Return result
-
-        Note: Backend uses the two-tier cache-aside pattern (CLAUDE.md
-        invariant #4), NOT Redis: Tier 1 = a per-service in-process Python
-        dict (typical 5-min TTL) fronted by an `_inflight` asyncio.Future to
-        dedup concurrent misses (thundering-herd guard); Tier 2 = Supabase
-        `*_cache` tables (24h / close-aligned via `expires_at`). Reference
-        implementation: services/profit_power_service.py.
-        """
-
-        # Parallel fetch
-        db_stock, profile, quote = await asyncio.gather(
-            self._get_from_db(ticker),
-            self.fmp.get_company_profile(ticker),
-            self.fmp.get_quote(ticker),
-            return_exceptions=True
-        )
-
-        # Handle partial failures gracefully
-        stock = self._merge_stock_data(db_stock, profile, quote)
-
-        # Cache for 5 minutes
-        await self.cache.set(cache_key, stock.dict(), ttl=300)
-
-        return stock
-```
+Cache on success only. Never cache an exception.
 
 ### 3.4 Live Home Dashboard — single-response aggregation (added 2026)
 
@@ -354,194 +296,64 @@ supersedes it with every Overview section. The core endpoint is additive — the
 
 ## 4. State Management Strategy (iOS)
 
-### 4.1 Centralized App State Architecture
+### 4.1 Centralized app state
 
-**Problem with Current Approach:**
-Your current ViewModels each manage their own state independently, leading to:
-- Duplicate data across screens (e.g., user credits)
-- Inconsistent state after mutations
-- No shared state between related screens
-
-**Recommended Architecture:**
+One injected `AppState` holds what more than one screen needs; everything screen-local lives in that
+screen's ViewModel. The problem it solves is concrete: credits are read by Home, Research, Chat and
+Account, and four independent copies drift the moment one of them spends.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          APP STATE (Single Source of Truth)                  │
+│                  AppState  (@Observable, @MainActor)                         │
 │                                                                              │
-│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
-│   │ AuthState   │  │ UserState   │  │ StockState  │  │ ResearchState│       │
-│   │ ─────────── │  │ ─────────── │  │ ─────────── │  │ ───────────  │       │
-│   │ isLoggedIn  │  │ profile     │  │ watchlist   │  │ reports      │       │
-│   │ token       │  │ credits     │  │ recentViews │  │ generating   │       │
-│   │ refreshToken│  │ tier        │  │ searchCache │  │ personas     │       │
-│   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘       │
-│          │                │                │                │               │
-│          └────────────────┴────────────────┴────────────────┘               │
-│                                   │                                          │
-│                                   ▼                                          │
-│                        ┌──────────────────┐                                 │
-│                        │   AppState       │                                 │
-│                        │   @Observable    │                                 │
-│                        └────────┬─────────┘                                 │
-│                                 │                                            │
-└─────────────────────────────────┼────────────────────────────────────────────┘
-                                  │
-           ┌──────────────────────┼──────────────────────┐
-           │                      │                      │
-           ▼                      ▼                      ▼
-    ┌─────────────┐        ┌─────────────┐        ┌─────────────┐
-    │HomeViewModel│        │ResearchVM   │        │TickerVM     │
-    │ @Bindable   │        │ @Bindable   │        │ @Bindable   │
-    │ appState    │        │ appState    │        │ appState    │
-    └─────────────┘        └─────────────┘        └─────────────┘
+│   ┌─────────────┐  ┌─────────────┐  ┌───────────────┐  ┌──────────────┐     │
+│   │ AuthState   │  │ UserState   │  │ WatchlistState│  │ ResearchState│     │
+│   │ ─────────── │  │ ─────────── │  │ ───────────── │  │ ──────────── │     │
+│   │ status      │  │ profile     │  │ items         │  │ reports      │     │
+│   │ accessToken │  │ credits     │  │               │  │ generating   │     │
+│   │             │  │ tier        │  │               │  │ selectedPersona│   │
+│   └─────────────┘  └─────────────┘  └───────────────┘  └──────────────┘     │
+│                                                                              │
+│   globals: isOnline · isLoading · currentError · toastMessage ·              │
+│            signInPrompt · pendingPushRoute · unreadNotificationCount         │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │  @Environment(AppState.self)
+           ┌───────────────────────┼───────────────────────┐
+           ▼                       ▼                       ▼
+    ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+    │HomeViewModel │       │ResearchVM    │       │TickerDetailVM│
+    │ObservableObj │       │ObservableObj │       │ObservableObj │
+    │ + @Published │       │ + @Published │       │ + @Published │
+    └──────────────┘       └──────────────┘       └──────────────┘
 ```
 
-### 4.2 Implementation
+`AuthState.status` is an enum, not a boolean, because `.restoring` — "we hold a credential we could
+not validate" — renders like a guest but keeps retrying. Collapsing it into `.unauthenticated` is
+what left signed-in users running as guests for a whole app run (`.claude/rules/auth.md` §5).
 
-```swift
-// MARK: - App State Container (iOS 17+ Observation)
-@Observable
-final class AppState {
-    // Sub-states
-    var auth = AuthState()
-    var user = UserState()
-    var stocks = StockState()
-    var research = ResearchState()
-    var news = NewsState()
+### 4.2 The Observation asymmetry — and it is deliberate
 
-    // Global UI state
-    var isOnline: Bool = true
-    var globalError: AppError?
+**`AppState` and its sub-states use `@Observable`. All 32 ViewModels use `ObservableObject` +
+`@Published`. `@Bindable` appears zero times in the iOS tree.**
 
-    // Dependencies
-    private let authRepository: AuthRepositoryProtocol
-    private let userRepository: UserRepositoryProtocol
+That split is not drift, and it is the single most useful thing to know before writing a new screen:
 
-    init(
-        authRepository: AuthRepositoryProtocol = AuthRepository(),
-        userRepository: UserRepositoryProtocol = UserRepository()
-    ) {
-        self.authRepository = authRepository
-        self.userRepository = userRepository
-    }
-}
+- `AppState` is **injected**, read by many screens, and must invalidate only the views that touch the
+  property that changed — which is exactly what `@Observable` gives and `ObservableObject` does not.
+- A ViewModel is **owned by one screen** (`@StateObject`) and its whole point is to publish that
+  screen's state, so per-property invalidation buys nothing and `@Published` is clearer about intent.
 
-// MARK: - Sub-State: User
-@Observable
-final class UserState {
-    var profile: UserProfile?
-    var credits: CreditBalance?
-    var tier: UserTier = .free
-    var isLoading: Bool = false
+Mixing them in one layer is what `.claude/rules/ios-swiftui.md` forbids; it is the authority on the
+pattern, and a new ViewModel should copy an existing one rather than this document.
 
-    var canGenerateResearch: Bool {
-        guard let credits = credits else { return false }
-        return credits.remaining > 0
-    }
-}
+Sub-states owned by `AppState` (`Core/State/AppState.swift`): `auth` (`AuthState` — `status` +
+`accessToken`, not a bare `isLoggedIn`/`token` pair, because `.restoring` is a third state that
+renders as guest while holding a credential), `user` (`UserState`), `watchlist` (`WatchlistState`),
+`research` (`ResearchState`). Globals include `isOnline`, `isLoading`, `currentError`,
+`toastMessage`, `signInPrompt`, and the pending-route fields that carry a push tap into the
+navigation tree.
 
-// MARK: - Sub-State: Research
-@Observable
-final class ResearchState {
-    var reports: [ResearchReport] = []
-    var generatingReports: Set<String> = []  // Report IDs being generated
-    var selectedPersona: InvestorPersona = .buffett
-
-    func isGenerating(_ reportId: String) -> Bool {
-        generatingReports.contains(reportId)
-    }
-}
-
-// MARK: - ViewModel Using Shared State
-@MainActor
-final class ResearchViewModel {
-    // Shared state (read/write)
-    @Bindable var appState: AppState
-
-    // Local state (screen-specific)
-    var searchText: String = ""
-    var selectedTab: ResearchTab = .research
-    var isSearching: Bool = false
-
-    private let researchRepository: ResearchRepositoryProtocol
-
-    init(
-        appState: AppState,
-        researchRepository: ResearchRepositoryProtocol = ResearchRepository()
-    ) {
-        self.appState = appState
-        self.researchRepository = researchRepository
-    }
-
-    func generateAnalysis(stockId: String) async {
-        // Check shared state for credits
-        guard appState.user.canGenerateResearch else {
-            appState.globalError = .insufficientCredits
-            return
-        }
-
-        do {
-            // Optimistic UI update
-            let tempId = UUID().uuidString
-            appState.research.generatingReports.insert(tempId)
-
-            // Call API
-            let report = try await researchRepository.generate(
-                stockId: stockId,
-                persona: appState.research.selectedPersona
-            )
-
-            // Update shared state
-            appState.research.generatingReports.remove(tempId)
-            appState.research.reports.insert(report, at: 0)
-            appState.user.credits?.used += 1
-
-        } catch {
-            appState.globalError = .fromError(error)
-        }
-    }
-}
-```
-
-### 4.3 State Flow Diagram
-
-```
-User Action: "Generate Analysis"
-           │
-           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    ResearchViewModel                              │
-│                                                                   │
-│  1. Validate: appState.user.canGenerateResearch                  │
-│       │                                                           │
-│       ▼ (false) → Set appState.globalError = .insufficientCredits│
-│       │                                                           │
-│       ▼ (true)                                                    │
-│  2. Optimistic: appState.research.generatingReports.insert(id)   │
-│       │                                                           │
-│       ▼                                                           │
-│  3. API Call: researchRepository.generate()                       │
-│       │                                                           │
-│       ├── Success:                                                │
-│       │     - appState.research.reports.insert(report)           │
-│       │     - appState.user.credits.used += 1                    │
-│       │                                                           │
-│       └── Failure:                                                │
-│             - appState.research.generatingReports.remove(id)     │
-│             - appState.globalError = .fromError(error)           │
-└──────────────────────────────────────────────────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│              SwiftUI Automatic Re-render                          │
-│                                                                   │
-│  - ResearchView: Shows generating indicator                       │
-│  - HomeView: Credits badge updates                                │
-│  - ProfileView: Usage stats update                                │
-│                                                                   │
-│  (All views observe the same AppState)                            │
-└──────────────────────────────────────────────────────────────────┘
-```
+There is no `StockState` and no `NewsState`; the error property is `currentError`, not `globalError`.
 
 ---
 
@@ -608,627 +420,273 @@ out to the lint) on every edit under `Theme/ Views/ Models/ Core/ ViewModels/
 Services/` or `Assets.xcassets/**/Contents.json`, so all three fire at the moment a
 mistake is made rather than when someone remembers to check.
 
+---
+
 ## 5. Agent Orchestration Pattern
 
-> **Implementation status (updated 2026-07-30): BOTH report paths now share one
-> set of concurrency guards.** There are two pipelines that run Gemini agent work:
-> the async `/research/generate` (deep, fire-and-forget + polling, described
-> below) and the synchronous `GET /stocks/{ticker}/report` (direct, shallower).
-> The direct path previously bypassed the guards entirely — an earnings-day herd
-> on one ticker spawned a full Gemini pipeline **per request** there, while the
-> identical herd on the deep path collapsed to one. It now routes through the same
-> `research_service._run_agent_deduped`:
->
-> | Guard | Scope | Effect |
-> |---|---|---|
-> | `_AGENT_SEMAPHORE` | process-wide, `MAX_CONCURRENT_AGENT_RUNS` (8) | pins total Gemini/FMP load to the API tier; followers hold no slot |
-> | `_AGENT_INFLIGHT` | per `(key_prefix, ticker, persona)` | concurrent same-key callers share ONE run; followers get a deep copy |
-> | `REPORT_GET_MAX_INFLIGHT` (24) | direct path only | admission gate → `409 SYSTEM_BUSY` past a safe backlog |
-> | `ReportRateLimit` (3/min) | per user, **per install** for guests | the only per-caller control on the direct path |
->
-> **`key_prefix` is a correctness requirement, not a nicety.** The two pipelines
-> produce *different* reports for the same `(ticker, persona)`. The direct path
-> passes `"direct"`; the deep path passes `""` and keeps its historical key format
-> byte-for-byte. Sharing one namespace would let a deep-research caller attach to a
-> direct-path leader and receive the shallow report — while being charged
-> `DEEP_RESEARCH_COST` and having it written to `research_reports` as a deep
-> analysis. Pinned by `tests/test_agent_dedup_concurrency.py`.
->
-> Admission-gate placement on the direct path is also load-bearing: **after** both
-> free cache paths (shedding a cache hit turns a capacity blip into an outage on
-> already-generated reports), **before** the credit precharge (a rejected request
-> must never burn credits), and released in a `finally` that also runs on
-> `CancelledError` (a leaked slot is permanent). Pinned by
-> `tests/test_ticker_report_admission.py`.
->
-> `caydex-report-architecture.svg` predates this and understates the direct path's
-> protections — re-export it when that diagram is next touched.
+**Both report paths share one set of concurrency guards** (unified 2026-07-30). Two pipelines run
+Gemini agent work: the async `POST /research/generate` (deep, fire-and-forget + polling, §5.2–§5.4)
+and the synchronous `GET /stocks/{ticker}/report` (direct, shallower). Both route through
+`research_service::_run_agent_deduped`.
 
-### 5.1 The Challenge
+| Guard | Scope | Effect |
+|---|---|---|
+| `_AGENT_SEMAPHORE` | process-wide, `MAX_CONCURRENT_AGENT_RUNS` (8) | pins total Gemini/FMP load to the API tier; followers hold no slot |
+| `_AGENT_INFLIGHT` | per `(key_prefix, ticker, persona)` | concurrent same-key callers share ONE run; followers get a deep copy |
+| `REPORT_GET_MAX_INFLIGHT` (24) | direct path only | admission gate → `409 SYSTEM_BUSY` past a safe backlog |
+| `ReportRateLimit` (3/min) | per user, **per install** for guests | the only per-caller control on the direct path |
 
-Deep Research reports take ~30 seconds to generate. HTTP requests shouldn't block for this long because:
-- Mobile connections are unreliable
-- Users expect responsive UI
-- iOS may terminate long-running requests
+*Why the direct path was brought under the same guards:* it previously bypassed them entirely, so an
+earnings-day herd on one ticker spawned a full Gemini pipeline **per request** there, while the
+identical herd on the deep path collapsed to one.
 
-### 5.2 Recommended Pattern: Task Queue + Polling
+**`key_prefix` is a correctness requirement, not a nicety.** The two pipelines produce *different*
+reports for the same `(ticker, persona)`. The direct path passes `"direct"`; the deep path passes
+`""` and keeps its historical key format byte-for-byte. Sharing one namespace would let a
+deep-research caller attach to a direct-path leader and receive the shallow report — while being
+charged `DEEP_RESEARCH_COST` and having it written to `research_reports` as a deep analysis. Pinned
+by `tests/test_agent_dedup_concurrency.py`.
+
+**Admission-gate placement is load-bearing:** **after** both free cache paths (shedding a cache hit
+turns a capacity blip into an outage on already-generated reports), **before** the credit precharge
+(a rejected request must never burn credits), and released in a `finally` that also runs on
+`CancelledError` (a leaked slot is permanent). Pinned by `tests/test_ticker_report_admission.py`.
+
+### 5.1 The challenge
+
+A report is a long job: the server tells the client to expect **90 seconds**
+(`ResearchJobResponse.estimated_seconds`), the client stops polling at **300 s**, and the
+reconciliation sweeper only presumes a run dead after **900 s** past the moment work started. An HTTP
+request must not block for any of those durations —
+
+- mobile connections drop mid-request,
+- iOS suspends a backgrounded app's URLSession tasks, and
+- the user must be able to leave the screen without killing a run they paid 20 credits for.
+
+Those three thresholds are deliberately far apart, and confusing them is the recurring bug: the
+client deadline is a *display* decision, the sweeper threshold is a *money* decision, and only the
+sweeper's expiry means the report is actually gone.
+
+### 5.2 The pattern: pre-charge, spawn, poll
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         ASYNC TASK PATTERN                                   │
+│                         ASYNC REPORT GENERATION                              │
 │                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        iOS CLIENT                                     │   │
-│  │                                                                        │   │
-│  │  1. POST /research/generate → Returns immediately with report_id      │   │
-│  │                                                                        │   │
-│  │  2. Poll GET /research/reports/{id}/status every 3s                   │   │
-│  │     └── Response: { status: "processing", progress: 45 }              │   │
-│  │                                                                        │   │
-│  │  3. When status == "completed"                                         │   │
-│  │     └── GET /research/reports/{id} → Full report                      │   │
-│  │                                                                        │   │
-│  │  Alternative: WebSocket for real-time updates (optional)              │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
+│  CLIENT                                                                      │
+│    1. POST /research/generate  ──►  returns { report_id } immediately        │
+│    2. poll GET /research/reports/{id}/status every 3 s                       │
+│    3. status == "completed"    ──►  GET /research/reports/{id}               │
 │                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        BACKEND                                         │   │
-│  │                                                                        │   │
-│  │  POST /research/generate:                                              │   │
-│  │    1. Pre-charge (402)                                                 │   │
-│  │    2. Create report record (status: "pending")                         │   │
-│  │    3. Enqueue background task                                          │   │
-│  │    4. Return { report_id, status: "pending" } ← IMMEDIATE              │   │
-│  │                                                                        │   │
-│  │  Background Worker:                                                    │   │
-│  │    1. Update status: "processing"                                      │   │
-│  │    2. Gather financial data (parallel FMP calls)                       │   │
-│  │    3. Generate AI analysis (Gemini)                                    │   │
-│  │    4. Update status: "completed" + store results                       │   │
-│  │    5. Refund on failure (charged upfront)                              │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
+│    Client deadline 300 s. Hitting it stops the POLL, not the REPORT —        │
+│    the server keeps generating and a 5 s list poll reconciles later.         │
+│                                                                              │
+│  BACKEND — POST /research/generate                                           │
+│    1. Pre-charge 20 credits (402 INSUFFICIENT_CREDITS if short)              │
+│    2. Admission gate → 409 SYSTEM_BUSY past a safe backlog                   │
+│         (after the cache paths, BEFORE the charge — see §5 preamble)         │
+│    3. INSERT research_reports (status "pending", credits_charged stamped)    │
+│    4. _spawn a supervised asyncio.Task  ← NOT BackgroundTasks, NOT Celery    │
+│    5. Return { report_id, status, poll_url }                                 │
+│                                                                              │
+│  BACKEND — worker                                                            │
+│    Stage A collect  →  score  →  Stage B narrate  →  conditional write       │
+│    Any failure  →  CAS on is_refunded  →  refund with the CHARGE's ref_id    │
+│    Worker died silently  →  reconciliation sweeper refunds it later          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.3 Backend Implementation
+### 5.3 Backend implementation
 
-```python
-# endpoints/research.py
+`POST /api/v1/research/generate` (`app/api/v1/endpoints/research.py`) does five things, in this order,
+and the order is the design:
 
-@router.post("/generate")
-async def generate_research_report(
-    request: ResearchRequest,
-    background_tasks: BackgroundTasks,
-    user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
-) -> ResearchJobResponse:
-    """
-    Initiate research report generation.
-    Returns immediately with job ID for polling.
-    """
-    # 1. Pre-check credits (fail fast)
-    user_service = UserService(supabase)
-    if not await user_service.check_credits(user["id"]):
-        raise HTTPException(403, "Insufficient credits")
+1. **Pre-charge** `CreditService.DEEP_RESEARCH_COST` (20) via `CreditService::precharge` — atomic,
+   before any work. Insufficient balance → **402** `INSUFFICIENT_CREDITS`.
+2. **Insert** a `pending` row into `research_reports`, stamping `credits_charged` explicitly.
+3. **Spawn** the worker with a supervised `asyncio.create_task`, retaining a strong handle.
+4. **Return immediately** with `report_id` and a `poll_url`.
+5. **Refund on any non-delivery**, guarded by a one-shot compare-and-set on
+   `research_reports.is_refunded`.
 
-    # 2. Create pending report
-    report = supabase.table("deep_research_reports").insert({
-        "user_id": user["id"],
-        "stock_id": request.stock_id,
-        "investor_persona": request.investor_persona,
-        "status": "pending",
-        "progress": 0
-    }).execute()
+Corrections to what this section used to claim, each of which was wrong in a way that matters:
 
-    report_id = report.data[0]["id"]
+| Was | Is |
+|---|---|
+| table `deep_research_reports` | **`research_reports`** — dual-purpose task queue + content store |
+| credits decremented **on success** | credits are **pre-charged**, then refunded on non-delivery. Charging on success loses the race with a client that retries |
+| `BackgroundTasks.add_task` | **`BackgroundTasks` is used zero times in this codebase.** Work is dispatched with `asyncio.create_task` through `app/main.py::_spawn`, which retains the handle and attaches a done-callback so a dying loop logs loudly |
+| one refund path | **four** — insert failed after charging; pipeline raised; user deleted an in-flight report; and the reconciliation sweeper catching a worker that died without writing either outcome |
+| one billable door | **two** — `POST /research/generate` and `GET /stocks/{ticker}/report` (`app/api/v1/endpoints/ticker_report.py`) pre-charge the same cost on a cache miss. Both must stay account-gated or the gate is cosmetic (`.claude/rules/auth.md` §1a) |
 
-    # 3. Enqueue background task
-    background_tasks.add_task(
-        execute_research_generation,
-        report_id=report_id,
-        stock_id=request.stock_id,
-        persona=request.investor_persona,
-        user_id=user["id"]
-    )
+**Every refund must pass the `ref_id` its charge used** — the ticker, not the report id. A mismatch
+is a silent non-refund the user is still owed (§9b.2).
 
-    # 4. Return immediately
-    return ResearchJobResponse(
-        report_id=report_id,
-        status="pending",
-        estimated_seconds=30,
-        poll_url=f"/api/v1/research/reports/{report_id}/status"
-    )
+No Celery, RQ, or Dramatiq. The accepted cost is that in-flight work does not survive a restart; the
+compensating control is `research_reconciliation_service`, a lifespan loop that finds rows stuck in
+`processing` past two thresholds and refunds them.
 
+### 5.4 Client-side polling
 
-@router.get("/reports/{report_id}/status")
-async def get_report_status(
-    report_id: str,
-    user: dict = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase)
-) -> ReportStatusResponse:
-    """
-    Get current status of report generation.
-    Designed for polling (lightweight response).
-    """
-    result = supabase.table("deep_research_reports").select(
-        "status, progress, error_message, completed_at"
-    ).eq("id", report_id).eq("user_id", user["id"]).single().execute()
+`TaskPollingManager` (an `actor`) owns the generate-then-poll loop and exposes it as an
+`AsyncThrowingStream<TaskProgress<ResearchReportDetail>, Error>`. Two entry points:
+`generateAndMonitorResearch(stockId:persona:)` starts a new report;
+`monitorResearch(reportId:)` re-attaches to one already in flight — which is what makes a
+backgrounded app recover rather than orphan a paid report.
 
-    if not result.data:
-        raise HTTPException(404, "Report not found")
+- **Poll interval: 3 s** (`APIConfig.researchPollInterval`).
+- **Client deadline: 300 s wall-clock** (`APIConfig.researchPollTimeout`) — a deadline, not an
+  attempt counter.
 
-    return ReportStatusResponse(**result.data)
+**Hitting the deadline is not a failure, and must never be rendered as one.** The client stops
+polling; the *server keeps generating*. `ResearchViewModel`'s 5-second reports-list poll picks up the
+finished report whenever it lands. An earlier revision of this section showed the client throwing a
+timeout error at 3 minutes, which — if anyone had implemented it — would have told a user their paid
+report had failed while it was still being written.
 
-
-# Background task with progress updates
-async def execute_research_generation(
-    report_id: str,
-    stock_id: str,
-    persona: str,
-    user_id: str
-):
-    """
-    Background worker for research generation.
-    Updates progress throughout for polling.
-    """
-    supabase = get_supabase()
-
-    def update_progress(progress: int, step: str):
-        supabase.table("deep_research_reports").update({
-            "progress": progress,
-            "current_step": step,
-            "status": "processing"
-        }).eq("id", report_id).execute()
-
-    try:
-        update_progress(10, "Fetching company data")
-
-        # Step 1: Gather financial data
-        financial_data = await gather_financial_data(stock_id)
-        update_progress(30, "Analyzing fundamentals")
-
-        # Step 2: Generate AI analysis
-        agent = ResearchAgent()
-        analysis = await agent.generate_research_report(
-            ticker=financial_data["ticker"],
-            persona=persona,
-            financial_data=financial_data
-        )
-        update_progress(80, "Formatting report")
-
-        # Step 3: Store results
-        supabase.table("deep_research_reports").update({
-            "status": "completed",
-            "progress": 100,
-            **analysis,
-            "completed_at": datetime.utcnow().isoformat()
-        }).eq("id", report_id).execute()
-
-        # Step 4: Decrement credits (only on success)
-        await UserService(supabase).decrement_credits(user_id, 1)
-
-    except Exception as e:
-        logger.error(f"Research generation failed: {e}")
-        supabase.table("deep_research_reports").update({
-            "status": "failed",
-            "error_message": str(e),
-            "progress": 0
-        }).eq("id", report_id).execute()
-        # NOTE: No credit decrement on failure
-```
-
-### 5.4 iOS Polling Implementation
-
-```swift
-// MARK: - Research Generation with Polling
-final class ResearchRepository: ResearchRepositoryProtocol {
-
-    func generateAndAwaitReport(
-        stockId: String,
-        persona: InvestorPersona
-    ) -> AsyncThrowingStream<ReportProgress, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    // 1. Initiate generation
-                    let job = try await apiService.request(
-                        endpoint: .generateResearch(stockId: stockId, persona: persona),
-                        responseType: ResearchJobResponse.self
-                    )
-
-                    continuation.yield(.started(reportId: job.reportId))
-
-                    // 2. Poll for status
-                    var attempts = 0
-                    let maxAttempts = 60  // 3 minutes max (3s * 60)
-
-                    while attempts < maxAttempts {
-                        try await Task.sleep(nanoseconds: 3_000_000_000)  // 3 seconds
-
-                        let status = try await apiService.request(
-                            endpoint: .reportStatus(job.reportId),
-                            responseType: ReportStatusResponse.self
-                        )
-
-                        switch status.status {
-                        case "processing":
-                            continuation.yield(.progress(
-                                reportId: job.reportId,
-                                percent: status.progress,
-                                step: status.currentStep
-                            ))
-
-                        case "completed":
-                            let report = try await fetchReport(job.reportId)
-                            continuation.yield(.completed(report))
-                            continuation.finish()
-                            return
-
-                        case "failed":
-                            throw ResearchError.generationFailed(status.errorMessage)
-
-                        default:
-                            break
-                        }
-
-                        attempts += 1
-                    }
-
-                    throw ResearchError.timeout
-
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - ViewModel Usage
-@MainActor
-final class ResearchViewModel {
-
-    func generateAnalysis(stockId: String) {
-        generationTask = Task {
-            do {
-                for try await progress in researchRepository.generateAndAwaitReport(
-                    stockId: stockId,
-                    persona: appState.research.selectedPersona
-                ) {
-                    switch progress {
-                    case .started(let reportId):
-                        currentReportId = reportId
-                        generationProgress = 0
-
-                    case .progress(_, let percent, let step):
-                        generationProgress = percent
-                        generationStep = step
-
-                    case .completed(let report):
-                        appState.research.reports.insert(report, at: 0)
-                        generationProgress = 100
-                        showCompletionAnimation()
-                    }
-                }
-            } catch {
-                appState.globalError = .fromError(error)
-            }
-        }
-    }
-}
-```
+The ViewModel owns the `TaskPollingManager` directly; there is no repository in between.
 
 ---
 
 ## 6. Error Handling Strategy
 
-### 6.1 Error Classification
+### 6.1 Error classification
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         ERROR TAXONOMY                                       │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    NETWORK ERRORS                                    │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │    │
-│  │  │  Offline    │  │  Timeout    │  │  Server     │                  │    │
-│  │  │  (no conn)  │  │  (slow)     │  │  (5xx)      │                  │    │
-│  │  │             │  │             │  │             │                  │    │
-│  │  │ Retry: No   │  │ Retry: Yes  │  │ Retry: Yes  │                  │    │
-│  │  │ Action: Wait│  │ Action: Auto│  │ Action: Auto│                  │    │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    BUSINESS ERRORS                                   │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │    │
-│  │  │ Auth Failed │  │ No Credits  │  │ Not Found   │                  │    │
-│  │  │  (401)      │  │  (403)      │  │  (404)      │                  │    │
-│  │  │             │  │             │  │             │                  │    │
-│  │  │ Action:     │  │ Action:     │  │ Action:     │                  │    │
-│  │  │ Re-login    │  │ Upgrade     │  │ Go back     │                  │    │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                    VALIDATION ERRORS                                 │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │    │
-│  │  │ Invalid     │  │ Missing     │  │ Rate        │                  │    │
-│  │  │ Input (422) │  │ Field       │  │ Limited(429)│                  │    │
-│  │  │             │  │             │  │             │                  │    │
-│  │  │ Action:     │  │ Action:     │  │ Action:     │                  │    │
-│  │  │ Show inline │  │ Highlight   │  │ Wait + retry│                  │    │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+Errors are grouped by **what the client should do**, not by where they came from. That is the axis
+that matters: two errors with the same HTTP status can need opposite handling (see §6.2 on why
+`AUTH_REQUIRED` and `AUTH_SESSION_EXPIRED` are both 401 but only one may clear a token).
+
+| Class | Example | Auto-retry? | Client action |
+|---|---|---|---|
+| Offline | no route to host | no | wait for `NetworkMonitor`; the session heals itself (§9.1) |
+| Timeout | slow upstream | no | show Retry — deliberately not auto-retried |
+| Server (5xx) | upstream 502 | **GET only**, ≤2×, fixed 1 s | see §6.4 — the method guard is a money guard |
+| Auth — no credential | `AUTH_REQUIRED` | no | prompt sign-in; **never** clear a stored token |
+| Auth — bad credential | `AUTH_TOKEN_INVALID` | refresh once | retry after single-flight refresh |
+| Auth — dead session | `AUTH_SESSION_EXPIRED` | no | clear the token, discard session data |
+| Forbidden | `AUTH_FORBIDDEN` (403) | no | not an auth failure — do not refresh, do not sign out |
+| Credits | `INSUFFICIENT_CREDITS` (**402**) | no | route to Buy Credits, not the paywall (§9b.7) |
+| Capacity | `SYSTEM_BUSY` (409) | yes, backoff | transient by construction; never burns credits (§5) |
+| Not found | `TICKER_NOT_FOUND` | no | go back |
+| Validation | 422 | no | inline field error |
+| Rate limited | 429 + `Retry-After` | after the header's delay | show the wait |
+
+The full code list is `app/api/error_response.py::ErrorCode`; the iOS half is
+`Core/Utilities/AppError.swift`.
 
 ### 6.2 Backend Error Response Standard
 
-> **Implementation status (updated 2026-07):** The structured error contract IS
-> implemented in `backend/app/api/error_response.py` — a flat
-> `{error_code, message, user_message, action, details}` body plus a central
-> `ErrorCode → HTTP status` map, consumed by the iOS `AppError` layer. NOTE the
-> shipped codes are flat strings (e.g. `INSUFFICIENT_CREDITS`, `SYSTEM_BUSY`,
-> `INVALID_PERSONA`), **not** the `BIZ_2001`-style codes sketched below (which are
-> illustrative only). **Credits:** `INSUFFICIENT_CREDITS` returns **HTTP 402
-> (Payment Required)** with `action="upgrade"`; a transient charge-RPC failure
-> returns `SYSTEM_BUSY` (409, retryable), never 402. **Credit lifecycle** is
-> charge-**UPFRONT** (atomic, pre-flight) + refund on any non-delivery + an
-> append-only `credit_transactions` ledger (migrations 100/101; the unified
-> `CreditService.precharge` / `refund_ledgered` gate) — not "decrement only on
-> success". Chat = 1 credit, report = 20; guests (shared sentinel) are a credit
-> no-op governed by the daily-turn budget + rate limits. The `BIZ_*` enum below is
-> retained only as an illustrative sketch.
->
-> **Updated 2026-08-22 (migration 154):** chat's 1 credit is now a **permanent** price
-> and the cost variance is bounded on the cost side instead (`CHAT_MAX_SPECIALISTS`);
-> a charged turn earns the session **one free follow-up**; and the charge `ref_id` is
-> **per turn**, not per session, so refund pairing is exact. See [§9b.8](#9b8-why-chat-is-a-flat-1-credit-permanently).
->
-> **Updated 2026-08-08 (migrations 117/118, applied):** the balance is now **two pools** —
-> granted (monthly, expires) and purchased (consumable IAP, never expires per App Store
-> Guideline 3.1.1). `spend_credits` drains granted first; `refund_credits` reverses the
-> **recorded split** of the original spend, so **a refund must pass the same `ref_id` its
-> charge used**. (Before migration 139 a mismatch silently destroyed paid credits; it is now a
-> no-op that refunds nothing, and since 142 it reports `outcome='no_matching_debit'` so the
-   > caller can log a REFUND LEAK — still a bug, but neither theft nor silent. §9b.2.) The 402's `action="upgrade"` now opens
-> **Buy Credits**, not the subscription paywall. Full model in **[§9b](#9b-monetization--credits-entitlements--in-app-purchase)**.
+The contract is a flat body — `{error_code, message, user_message, action?, details?}` — built in
+`app/api/error_response.py` and consumed by the iOS `AppError` layer. `error_code` values are
+**symbolic strings** (`INSUFFICIENT_CREDITS`, `SYSTEM_BUSY`, `INVALID_PERSONA`), and a central
+`ErrorCode → HTTP status` map decides the status.
 
-> **Auth errors — IMPLEMENTED 2026-08-02.** The `AUTH_*` codes and the central exception
-> handler sketched below as "recommended" now exist, with flat string names like the rest of
-> the shipped contract. Six codes, deliberately distinct because each maps to a *different*
-> client action and only two may cost the user their stored credential:
-> `AUTH_REQUIRED` (401, no credential — never clears a token), `AUTH_TOKEN_INVALID` (401,
-> credential present but unverifiable → refresh then retry), `AUTH_SESSION_EXPIRED` (401,
-> evicted by a password change), `AUTH_ACCOUNT_NOT_FOUND` (401), `AUTH_FORBIDDEN` (403,
-> authenticated but not permitted — explicitly *not* an auth error on the client), and
-> `AUTH_UNAVAILABLE` (503, identity store transiently unreadable, retryable).
->
-> Raised via `auth_error()` in `api/error_response.py`, which puts the contract body in
-> `HTTPException.detail`; a `StarletteHTTPException` handler in `main.py` emits a dict detail
-> verbatim and leaves a string detail as `{"detail": ...}` — narrow on purpose so the ~100
-> existing string raises are byte-identical. `HTTPBearer` is now `auto_error=False`: FastAPI's
-> default answered a **missing** credential with 403, which iOS never treats as recoverable.
->
-> See [.claude/rules/auth.md](../../.claude/rules/auth.md) for the full invariant set.
+**Credits.** `INSUFFICIENT_CREDITS` returns **402 Payment Required** with `action="upgrade"`, which
+opens Buy Credits rather than the subscription paywall — the user is mid-action. A *transient*
+charge-RPC failure returns `SYSTEM_BUSY` (409, retryable), never 402: telling a user they are out of
+credits when the database blinked is both wrong and unrecoverable from the client's side.
 
-```python
-# schemas/common.py — the BIZ_*/AUTH_* numbering below is illustrative only;
-# see the note above for the codes actually shipped.
+**The credit lifecycle is charge-UPFRONT**, atomic and pre-flight, plus a refund on any
+non-delivery, recorded in the append-only `credit_transactions` ledger through the unified
+`CreditService::precharge` / `CreditService::refund_ledgered` gate. Chat costs 1 credit
+(permanently — §9b.8), a report 20. Full model in [§9b](#9b-monetization--credits-entitlements--in-app-purchase).
 
-class ErrorCode(str, Enum):
-    """Standardized error codes for client handling."""
+**Auth errors are six distinct codes, deliberately.** Each maps to a *different* client action, and
+only two may cost the user their stored credential:
 
-    # Authentication (1xxx)
-    AUTH_TOKEN_EXPIRED = "AUTH_1001"
-    AUTH_INVALID_TOKEN = "AUTH_1002"
-    AUTH_UNAUTHORIZED = "AUTH_1003"
+| Code | Status | May the client clear the token? |
+|---|---|---|
+| `AUTH_REQUIRED` | 401 | **No** — no credential was sent |
+| `AUTH_TOKEN_INVALID` | 401 | Only after a refresh attempt fails |
+| `AUTH_SESSION_EXPIRED` | 401 | Yes |
+| `AUTH_ACCOUNT_NOT_FOUND` | 401 | Yes |
+| `AUTH_FORBIDDEN` | 403 | **No** — not an auth failure at all |
+| `AUTH_UNAVAILABLE` | 503 | **No** — transient, retryable |
 
-    # Business Logic (2xxx)
-    CREDITS_INSUFFICIENT = "BIZ_2001"
-    CREDITS_LIMIT_REACHED = "BIZ_2002"
-    REPORT_GENERATION_FAILED = "BIZ_2003"
-    STOCK_NOT_FOUND = "BIZ_2004"
+Two further codes describe **credentials in a request body** rather than the state of a stored
+token: `AUTH_CREDENTIALS_INVALID` ("the password you just typed is wrong") and
+`AUTH_PROVIDER_FAILED`. Neither may appear in `triggersTokenRefresh`.
 
-    # Validation (3xxx)
-    VALIDATION_FAILED = "VAL_3001"
-    INVALID_TICKER = "VAL_3002"
-    INVALID_PERSONA = "VAL_3003"
+*Why they are separate:* there was once no code for a mistyped password, so `auth.py` raised a
+bare-string 401, iOS failed to decode it, fell back to `APIError.unauthorized` and showed its
+hardcoded *"Your session has expired."* Worse, `.unauthorized` sets `triggersTokenRefresh`, so the
+client also refreshed and **replayed** the request — spending two of five attempts on one typo.
+Collapsing these codes back together re-creates that.
 
-    # External Services (4xxx)
-    GEMINI_ERROR = "EXT_4001"
-    FMP_ERROR = "EXT_4002"
-    DATABASE_ERROR = "EXT_4003"
+Raised via `auth_error()`, which puts the contract body in `HTTPException.detail`; a
+`StarletteHTTPException` handler in `main.py` emits a dict detail verbatim and leaves a string detail
+as `{"detail": ...}`. That handler is **narrow on purpose** — roughly 100 existing string raises stay
+byte-identical, and `APIClient` keys per-status behaviour off those shapes. `HTTPBearer` is
+constructed `auto_error=False` because FastAPI's default answers a *missing* credential with 403,
+which iOS never treats as recoverable — that 403 is why tapping Follow while signed out reverted the
+button with nothing shown.
 
+The shipped shape, in one line:
 
-class APIError(BaseModel):
-    """Standardized error response."""
-    error_code: ErrorCode
-    message: str
-    user_message: str  # User-friendly, actionable
-    details: Optional[Dict[str, Any]] = None
-    retry_after: Optional[int] = None  # Seconds (for rate limiting)
-    action: Optional[str] = None  # Suggested action (upgrade, retry, etc.)
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "error_code": "BIZ_2001",
-                "message": "User has insufficient credits for deep research",
-                "user_message": "You've used all your research credits this month.",
-                "details": {"current_credits": 0, "required": 1},
-                "action": "upgrade"
-            }
-        }
-
-
-# Custom exception handler
-@app.exception_handler(AppException)
-async def app_exception_handler(request: Request, exc: AppException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=APIError(
-            error_code=exc.error_code,
-            message=exc.message,
-            user_message=exc.user_message,
-            details=exc.details,
-            action=exc.action
-        ).dict()
-    )
+```
+{"error_code": "INSUFFICIENT_CREDITS", "message": "...", "user_message": "...",
+ "action": "upgrade", "details": {"required": 20, "available": 4}}
 ```
 
-### 6.3 iOS Error Handling
+Built by `app/api/error_response.py::make_error_body` / `make_error_response` / `auth_error`, with
+`classify_exception` and `error_response_from_exception` mapping a typed service/integration
+exception onto an `ErrorCode` and its HTTP status. 18 of the 23 endpoint modules import it, with 44
+`error_response_from_exception` call sites; the remainder are a WebSocket (close codes, no body) and
+always-200 fire-and-forget analytics.
 
-```swift
-// MARK: - Domain Errors
-enum AppError: Error, Identifiable {
-    case network(NetworkError)
-    case auth(AuthError)
-    case business(BusinessError)
-    case validation(ValidationError)
+Run `/list-error-codes` to verify every backend code has an iOS `AppError` branch.
 
-    var id: String { localizedDescription }
+### 6.3 iOS error handling
 
-    var userMessage: String {
-        switch self {
-        case .network(.offline):
-            return "No internet connection. Please check your network."
-        case .network(.timeout):
-            return "Request timed out. Please try again."
-        case .auth(.tokenExpired):
-            return "Your session has expired. Please sign in again."
-        case .business(.insufficientCredits):
-            return "You've used all your research credits this month."
-        case .validation(let error):
-            return error.message
-        default:
-            return "Something went wrong. Please try again."
-        }
-    }
-
-    var suggestedAction: ErrorAction? {
-        switch self {
-        case .auth(.tokenExpired), .auth(.invalidToken):
-            return .reAuthenticate
-        case .business(.insufficientCredits):
-            return .showUpgrade
-        case .network(.offline):
-            return .waitForConnection
-        case .network(.serverError), .network(.timeout):
-            return .retry
-        default:
-            return nil
-        }
-    }
-
-    var isRetryable: Bool {
-        switch self {
-        case .network(.timeout), .network(.serverError):
-            return true
-        default:
-            return false
-        }
-    }
-}
-
-// MARK: - Error Presentation
-struct ErrorBanner: View {
-    let error: AppError
-    let onDismiss: () -> Void
-    let onAction: (() -> Void)?
-
-    var body: some View {
-        HStack {
-            Image(systemName: error.icon)
-            Text(error.userMessage)
-            Spacer()
-
-            if let action = error.suggestedAction {
-                Button(action.title) {
-                    onAction?()
-                }
-            }
-        }
-        .padding()
-        .background(error.backgroundColor)
-    }
-}
-
-// MARK: - Global Error Handler
-extension AppState {
-    func handleError(_ error: Error) {
-        let appError = AppError.from(error)
-
-        // Log for debugging
-        Logger.error("App error: \(appError)")
-
-        // Handle auth errors immediately
-        if case .auth(.tokenExpired) = appError {
-            Task { await forceLogout() }
-            return
-        }
-
-        // Set for UI display
-        self.globalError = appError
-    }
-}
+```
+APIClient throws APIError          (transport / status layer)
+        ↓
+AppError.from(_:)                  (Core/Utilities/AppError.swift)
+        ↓
+.title / .message / .suggestedAction   (what the UI renders)
 ```
 
-### 6.4 Retry Strategy
+`AppError` is a **flat** enum — there is no `.network(...)` / `.auth(...)` / `.business(...)` nesting,
+and no `userMessage` property. Its 24 cases group by what the user can DO about them: transport
+(`noConnection`, `timeout`, `serverError`, `cancelled`), identity (`unauthorized`, `tokenExpired`,
+`forbidden`, `signInRequired`, `sessionEnded`, `authUnavailable`, `emailNotConfirmed`), money
+(`insufficientCredits`, `planUpgradeRequired`, and the four `purchase*` cases), and request
+(`notFound`, `validationFailed`, `rateLimited`, `apiError`, `unknown`).
 
-```swift
-// MARK: - Exponential Backoff Retry
-struct RetryPolicy {
-    let maxAttempts: Int
-    let initialDelay: TimeInterval
-    let maxDelay: TimeInterval
-    let multiplier: Double
+Properties: `title`, `message`, `suggestedAction` (**non-optional** — every error names an action,
+even if that action is "dismiss"), plus the predicates `isRetryable`, `isCancellation`,
+`isExpectedOffline`, `isAuthError`.
 
-    static let standard = RetryPolicy(
-        maxAttempts: 3,
-        initialDelay: 1.0,
-        maxDelay: 10.0,
-        multiplier: 2.0
-    )
+Two rules that have each been violated in production and are now pinned by tests:
 
-    static let aggressive = RetryPolicy(
-        maxAttempts: 5,
-        initialDelay: 0.5,
-        maxDelay: 30.0,
-        multiplier: 2.0
-    )
-}
+- **Never surface a raw backend string.** Route everything through `AppError.from(_:)`; a backend
+  `user_message` reaches the user only via a mapped case.
+- **A new backend `ErrorCode` needs a branch in `mapAPIError`.** Letting it fall through to
+  `.apiError(code:message:)` produces a generic message and loses the action — which is how "out of
+  credits" inside chat became a dead end with no route to Buy Credits (§9b.8).
 
-extension APIService {
-    func requestWithRetry<T: Decodable>(
-        endpoint: Endpoint,
-        responseType: T.Type,
-        policy: RetryPolicy = .standard
-    ) async throws -> T {
-        var lastError: Error?
-        var delay = policy.initialDelay
+There is no `Logger` type; diagnostics go through `Core/Monitoring/`.
 
-        for attempt in 1...policy.maxAttempts {
-            do {
-                return try await request(endpoint: endpoint, responseType: responseType)
-            } catch let error as AppError where error.isRetryable {
-                lastError = error
-                Logger.warning("Request failed (attempt \(attempt)/\(policy.maxAttempts)): \(error)")
+### 6.4 Retry
 
-                if attempt < policy.maxAttempts {
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                    delay = min(delay * policy.multiplier, policy.maxDelay)
-                }
-            } catch {
-                throw error  // Non-retryable, throw immediately
-            }
-        }
+There is no `RetryPolicy` type and no exponential backoff. `APIClient` retries on a **fixed 1-second
+delay**, at most twice (once for `downloadData`), and only when **both** conditions hold:
 
-        throw lastError ?? AppError.network(.unknown)
-    }
-}
-```
+1. the failure is `.serverError` — never a timeout, never a transport error, never a 4xx; and
+2. the endpoint's method is **safe to retry** (`APIEndpoint.HTTPMethod.isSafeToRetryAfterServerError`,
+   i.e. GET).
+
+**Condition 2 is a money guard, not tidiness.** An unconditional retry on `POST /research/generate`
+re-ran the credit pre-charge on every attempt, so one user-visible failure could debit 60 credits for
+one report. Any future change here must keep non-idempotent POSTs out of the retry path.
+
+A separate mechanism handles auth: a 401 triggers a **single-flight** token refresh and retries the
+original request **exactly once** (`allowAuthRetry`), so a burst of concurrent 401s produces one
+refresh rather than one per request.
+
+`AppError.isRetryable` exists but drives **UI affordances** — whether to show a Retry button — not an
+automatic loop. The two must not be conflated: `.timeout` is user-retryable and is deliberately not
+auto-retried.
 
 ---
 
@@ -1243,19 +701,14 @@ extension APIService {
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                     iOS CLIENT                                       │    │
 │  │                                                                       │    │
-│  │  L1: In-Memory (NSCache)                                             │    │
-│  │      ├── TTL: 5 minutes                                               │    │
-│  │      ├── Size: 50MB max                                               │    │
-│  │      └── Eviction: LRU                                                │    │
+│  │  In-memory only — ONE dict, in StockRepository                        │    │
+│  │      ├── [String: CacheEntry], capped by ENTRY COUNT (not bytes)     │    │
+│  │      ├── TTL per resource class (see 7.2), 25 s … 24 h               │    │
+│  │      └── FIFO eviction (the "LRU" comment is wrong)                  │    │
 │  │                                                                       │    │
-│  │  L2: Disk Cache (FileManager)                                         │    │
-│  │      ├── TTL: 24 hours (configurable per resource)                   │    │
-│  │      ├── Size: 200MB max                                              │    │
-│  │      └── Location: /Caches (can be purged by OS)                     │    │
-│  │                                                                       │    │
-│  │  L3: Persistent Storage (Core Data / SwiftData)                      │    │
-│  │      ├── User data (watchlist, settings, generated reports)          │    │
-│  │      └── Location: /Documents (backed up, never purged)              │    │
+│  │  Persistence: Keychain (tokens) + UserDefaults (preferences)          │    │
+│  │      └── NO disk cache, NO Core Data, NO SwiftData, NO NSCache       │    │
+│  │          Everything else is re-fetched on cold launch.                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -1299,123 +752,26 @@ shares) legitimately feeds the P/FCF, EV/EBITDA and earnings-yield fallbacks. It
 slow, daily-cadence upstream field on the same clock as FMP's TTM ratios, inside the
 24-hour staleness budget by construction. A live quote is not.
 
-### 7.2 Cache Invalidation Strategy
+### 7.2 Client-side TTLs
 
-```swift
-// MARK: - Cache Policy
-enum CachePolicy {
-    case cacheFirst        // Return cache, refresh in background
-    case networkFirst      // Try network, fallback to cache
-    case cacheOnly         // Only cache, no network
-    case networkOnly       // Only network, no cache
-    case staleWhileRevalidate(maxStale: TimeInterval)
-}
+`StockRepository` keys its dict by request and picks a TTL per resource class. These are the real
+values; there is no `CachePolicy` or `CacheKey` type.
 
-// MARK: - Cache Keys
-enum CacheKey {
-    case stock(ticker: String)
-    case stockFundamentals(ticker: String)
-    case newsFeed(page: Int)
-    case newsArticle(id: String)
-    case researchReport(id: String)
-    case userProfile
-    case watchlist
+| Class | TTL | Rationale |
+|---|---|---|
+| volatile (quote, header) | 120 s | a price is only ever briefly true |
+| chart | 25 s | redraw cadence, not data cadence |
+| news | 60 s | the backend already caches it for hours; this only collapses tab-flipping |
+| analysis | 1800 s | recomputed on the server far less often than that |
+| fundamental | 86400 s | quarterly data |
+| events | 86400 s | earnings calendar |
 
-    var key: String {
-        switch self {
-        case .stock(let ticker): return "stock_\(ticker)"
-        case .stockFundamentals(let ticker): return "fundamentals_\(ticker)"
-        case .newsFeed(let page): return "news_feed_\(page)"
-        case .newsArticle(let id): return "news_\(id)"
-        case .researchReport(let id): return "report_\(id)"
-        case .userProfile: return "user_profile"
-        case .watchlist: return "watchlist"
-        }
-    }
+Eviction drops the 20 oldest **by insertion time** once the entry cap is reached. That is FIFO, not
+LRU — `getCached` does not touch the timestamp — and the code comment saying "LRU" is wrong. It has
+not mattered, because the cap is generous relative to a session's working set; if it ever does, the
+fix is one line in `getCached`.
 
-    var defaultTTL: TimeInterval {
-        switch self {
-        case .stock: return 60            // 1 minute (prices change)
-        case .stockFundamentals: return 86400  // 24 hours (quarterly data)
-        case .newsFeed: return 300        // 5 minutes
-        case .newsArticle: return 3600    // 1 hour
-        case .researchReport: return 86400 * 7  // 7 days (static once generated)
-        case .userProfile: return 600     // 10 minutes
-        case .watchlist: return 300       // 5 minutes
-        }
-    }
-}
-```
-
-### 7.3 Backend Caching Decorators (Recommended — Not Yet Implemented)
-
-> **Current state:** Backend uses Supabase DB-level caching (e.g. `news_articles`
-> table with 6-hour TTL, background pre-warmer in `main.py`). The decorator
-> pattern below is a recommended future enhancement if Redis is added.
-
-```python
-# cache_decorators.py
-
-from functools import wraps
-from typing import Callable, Optional
-import hashlib
-import json
-
-def cached(
-    ttl: int = 300,
-    key_prefix: str = "",
-    vary_on: Optional[list] = None
-):
-    """
-    Caching decorator for service methods.
-
-    Args:
-        ttl: Time-to-live in seconds
-        key_prefix: Prefix for cache key
-        vary_on: Parameters to include in cache key
-    """
-    def decorator(func: Callable):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            # Build cache key
-            key_parts = [key_prefix, func.__name__]
-
-            if vary_on:
-                for param in vary_on:
-                    if param in kwargs:
-                        key_parts.append(f"{param}:{kwargs[param]}")
-
-            cache_key = ":".join(key_parts)
-
-            # Check cache
-            cached_value = await cache_manager.get(cache_key)
-            if cached_value is not None:
-                return cached_value
-
-            # Execute function
-            result = await func(*args, **kwargs)
-
-            # Store in cache
-            await cache_manager.set(cache_key, result, ttl=ttl)
-
-            return result
-        return wrapper
-    return decorator
-
-
-# Usage in service
-class StockService:
-
-    @cached(ttl=60, key_prefix="stock", vary_on=["ticker"])
-    async def get_quote(self, ticker: str) -> dict:
-        return await self.fmp.get_quote(ticker)
-
-    @cached(ttl=86400, key_prefix="profile", vary_on=["ticker"])
-    async def get_company_profile(self, ticker: str) -> dict:
-        return await self.fmp.get_company_profile(ticker)
-```
-
-### 7.4 Benchmark & Report Caching (Implemented)
+### 7.3 Benchmark & report caching
 
 The "vs peer average" comparisons and the AI research reports are backed by purpose-built
 cache layers that go beyond a simple TTL. These are **live in the codebase**, not aspirational.
@@ -1483,73 +839,54 @@ regenerates; everyone that session shares the result.
 
 ## 8. API Contract Standards
 
-### 8.1 Response Envelope
+### 8.1 Response shape
 
-All API responses should follow a consistent structure:
+**There is no envelope.** A success response is the Pydantic `response_model` serialized at the top
+level — no `success`, no `data` wrapper, no `meta` block:
 
-```json
-// Success Response
-{
-  "success": true,
-  "data": { /* payload */ },
-  "meta": {
-    "request_id": "uuid",
-    "timestamp": "ISO-8601",
-    "cache_hit": false,
-    "version": "1.0"
-  }
-}
+- **Success** — the bare model. `GET /api/v1/research/reports/{id}/status` returns
+  `ResearchStatusResponse` fields at the root.
+- **Error** — the flat contract from
+  `app/api/error_response.py::make_error_body`: `{error_code, message, user_message, action?,
+  details?}`. `error_code` is a symbolic string (`INSUFFICIENT_CREDITS`, `SYSTEM_BUSY`,
+  `TICKER_NOT_FOUND`), never a number. This is CLAUDE.md invariant #3, and it is mirrored by the iOS
+  `AppError` layer — run `/list-error-codes` to check parity.
+- **Pagination** — flat sibling fields on the response model (`page`, `per_page`, `has_more`), not a
+  nested block. There is no `total_items` / `total_pages` / `has_next` / `has_prev` anywhere.
 
-// Error Response
-{
-  "success": false,
-  "error": {
-    "code": "BIZ_2001",
-    "message": "Insufficient credits",
-    "user_message": "You've used all your research credits.",
-    "action": "upgrade"
-  },
-  "meta": {
-    "request_id": "uuid",
-    "timestamp": "ISO-8601"
-  }
-}
+`details` values must be **flat scalars**: the iOS `AnyCodable` decodes String/Int/Double/Bool only
+and silently yields `""` for anything else, so a nested dict arrives as garbage.
 
-// Paginated Response
-{
-  "success": true,
-  "data": [ /* items */ ],
-  "pagination": {
-    "page": 1,
-    "per_page": 20,
-    "total_items": 150,
-    "total_pages": 8,
-    "has_next": true,
-    "has_prev": false
-  },
-  "meta": { /* ... */ }
-}
-```
+An earlier revision of this section specified a `{success, data, meta}` envelope with numbered
+`BIZ_2001`-style codes. Neither was ever built, and describing them here made the document unusable
+as a client-integration reference.
 
-### 8.2 Versioning Strategy
+### 8.2 Versioning
 
-```
-/api/v1/stocks/{ticker}    ← Current version
-/api/v2/stocks/{ticker}    ← Future breaking changes
+**URL-path versioning only** — every route is mounted under `/api/v1` (`app/main.py`,
+`app/api/v1/api.py`). There is no `/api/v2`, and no `Accept-Version` or `X-API-Version` header is
+read or emitted anywhere.
 
-Headers:
-  Accept-Version: 1.0      ← Optional version override
-  X-API-Version: 1.0       ← Response version indicator
-```
+Because there is exactly one iOS client and it ships from the same repo, a breaking change is
+handled by shipping both sides, not by negotiating a version. The compensating control is the
+schema-parity tests (`.claude/rules/testing.md`): a response shape iOS decodes cannot change without
+a test change in the same commit.
 
-### 8.3 Rate Limiting Headers
+### 8.3 Response headers
 
-```
-X-RateLimit-Limit: 100          # Max requests per window
-X-RateLimit-Remaining: 95       # Requests remaining
-X-RateLimit-Reset: 1704067200   # Unix timestamp when limit resets
-Retry-After: 60                 # Seconds to wait (on 429)
-```
+Emitted by the app on its own responses:
+
+| Header | When | Where |
+|---|---|---|
+| `Retry-After` | on a 429 from any in-process limiter | `app/dependencies.py::RateLimitChecker` and siblings; also the auth throttles |
+| `X-Request-ID` | every response | `app/main.py` `add_process_time` middleware |
+| `X-Process-Time` | every response | same middleware |
+
+**`X-RateLimit-Limit` / `-Remaining` / `-Reset` are NOT emitted by this API.** They appear in the
+codebase only as *reads of FMP's upstream response* in `app/integrations/fmp.py`, where a low
+remaining count raises `FMPRateLimitException`. `X-RateLimit-Reset` is not referenced at all. An
+earlier revision of this section documented all four as part of our own contract; no client should
+depend on them.
 
 ---
 
@@ -1557,98 +894,68 @@ Retry-After: 60                 # Seconds to wait (on 429)
 
 ### 9.1 Authentication Flow
 
-> **Corrections to the diagram below (verified 2026-08-02).** `POST /api/v1/auth/token` does not
-> exist — the real exchange routes are `POST /auth/oauth` (native Apple identity token) and
-> `POST /auth/session-exchange` (web OAuth, e.g. Google), both minting app tokens via
-> `_issue_app_tokens_for`. The `"tier"` JWT claim shown is never emitted; tier is read from
-> `public.users`. Lifetimes are correct: access 24h, refresh 7d (rotating).
->
-> **Step 5 is now broader than "on 401 refresh".** The client heals a session from five triggers,
-> not just a failed request: launch, foreground, network-path restored (`NetworkMonitor`), a
-> bounded backoff, and any auth failure received while a credential is stored. A *transient*
-> failure keeps the Keychain token and retries; only a genuine auth failure clears it. This
-> closes the defect where one flaky launch left a signed-in user running as a guest — with a
-> perfectly good credential in the Keychain — for the entire app run.
->
-> **Guest identity.** A signed-out caller is not "no user": `X-Guest-Id` is hashed
-> (`guest_user_id_for`, UUID5) into a per-INSTALL identity for watchlist/portfolios (migration
-> 108), research (110), chat (111) and Learn (066/067). A missing header still resolves to the
-> shared `GUEST_USER_ID` sentinel. Guest chat history is partitioned per install as of migration
-> 111 — see §9.3, which supersedes the earlier note here that said it was not.
->
-> **Which surfaces require an account.** All 27 `.signInRequired` routes. Beyond the
-> `/users/me` family, `/auth/logout`, `/auth/change-password`, `/billing/verify` and whale
-> follow/unfollow/activity (`whale_follows.user_id` is FK-bound to `public.users`), this now
-> covers **every AI-generation surface**: the nine `/research/*` routes, `GET /stocks/{t}/report`,
-> `POST /stocks/{t}/report/chat` and `POST /stocks/{t}/prewarm-report`. Both generation doors
-> must stay gated or the gate is cosmetic — they cost the same on a cache miss. Everything else
-> is guest-capable by design. The iOS mirror is `APIEndpoint.authPolicy`, and
-> `tests/test_ios_auth_policy_parity.py` fails the build if the two disagree.
->
-> **Storefronts split catalog from purchase.** `GET /billing/plans` and
-> `GET /billing/credit-packs` are `.public` — both screens must render before we know who is
-> looking, and neither exposes anything Apple's storefront doesn't. `POST /billing/verify` is
-> `.signInRequired` for both product families, and for consumables that gate is load-bearing
-> rather than tidy: Apple does not restore them, so credits bought against a per-install guest
-> identity would be stranded on an install the user can wipe. See
-> [§9b.4](#9b4-restore-and-why-buying-requires-an-account).
+**Token exchange.** Two routes mint app tokens, both via `_issue_app_tokens_for`:
+`POST /auth/oauth` (native Apple identity token) and `POST /auth/session-exchange` (web OAuth, e.g.
+Google). There is no `POST /auth/token`. Access tokens last 24 h, refresh tokens 7 d and rotate. The
+JWT carries `sub`, `email`, `iat`, `exp` — **not** a `tier` claim; tier is read from `public.users`
+so a plan change takes effect without waiting for a token to turn over.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     AUTHENTICATION FLOW                                      │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        iOS CLIENT                                     │   │
-│  │                                                                        │   │
-│  │  1. User signs in with Apple/Google via Supabase Auth                 │   │
-│  │     └── Returns: supabase_access_token                                │   │
-│  │                                                                        │   │
-│  │  2. Exchange for app token:                                            │   │
-│  │     POST /api/v1/auth/token                                           │   │
-│  │     Body: { supabase_token: "..." }                                   │   │
-│  │     └── Returns: { access_token, refresh_token, expires_in }         │   │
-│  │                                                                        │   │
-│  │  3. Store tokens securely:                                             │   │
-│  │     └── Keychain (access_token, refresh_token)                        │   │
-│  │                                                                        │   │
-│  │  4. Include in all requests:                                           │   │
-│  │     └── Header: Authorization: Bearer {access_token}                  │   │
-│  │                                                                        │   │
-│  │  5. On 401 error:                                                      │   │
-│  │     └── POST /api/v1/auth/refresh { refresh_token }                   │   │
-│  │     └── Update stored tokens                                          │   │
-│  │     └── Retry original request                                        │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        BACKEND                                         │   │
-│  │                                                                        │   │
-│  │  Token Structure (JWT):                                                │   │
-│  │  {                                                                     │   │
-│  │    "sub": "user-uuid",                                                │   │
-│  │    "email": "user@example.com",                                       │   │
-│  │    "tier": "pro",                                                     │   │
-│  │    "iat": 1704067200,                                                 │   │
-│  │    "exp": 1704153600  // 24 hours                                     │   │
-│  │  }                                                                     │   │
-│  │                                                                        │   │
-│  │  Validation:                                                           │   │
-│  │    1. Verify JWT signature                                            │   │
-│  │    2. Check expiration                                                │   │
-│  │    3. Validate user exists in Supabase                                │   │
-│  │    4. Row Level Security (RLS) enforces data access                   │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+**A password change evicts live sessions.** `users.password_changed_at` is compared against the
+token's `iat`, so any JWT minted before the change is rejected — a reset invalidates sessions an
+attacker may already hold.
+
+**The session heals itself.** The client recovers from five triggers, not just a failed request:
+launch, foreground, network-path restored (`NetworkMonitor`), a bounded backoff, and any auth
+failure received while a credential is stored. A *transient* failure keeps the Keychain token,
+disarms the client token so the wire identity matches the guest-equivalent UI, and retries; only a
+genuine auth failure clears it.
+
+*Why it is built this way:* the previous shape refreshed only on a 401 from a live request, so one
+flaky launch left a signed-in user running as a guest — with a perfectly good credential in the
+Keychain — for the entire app run. `AuthStatus.restoring` exists to represent that state honestly
+rather than collapsing it into `.unauthenticated`.
+
+**Guest identity.** A signed-out caller is not "no user". `X-Guest-Id` is hashed by
+`guest_user_id_for` (UUID5) into a per-INSTALL identity for watchlist and portfolios (migration
+108), research (110), chat (111) and Learn (066/067). A missing header falls back to the shared
+`GUEST_USER_ID` sentinel. Per-install partitioning is a correctness requirement, not tidiness: every
+read path filters on `user_id`, so a shared bucket is a cross-user leak on exactly the surfaces where
+people paste their holdings.
+
+**Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
+`/auth/logout`, `/auth/change-password`, `/billing/verify`, whale follow/unfollow/activity — and
+**every AI-generation surface**: the `/research/*` routes, `GET /stocks/{t}/report`,
+`POST /stocks/{t}/report/chat`, `POST /stocks/{t}/prewarm-report`.
+
+*Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
+Everything else is guest-capable by design, which is also an App Store requirement (Guideline
+5.1.1(v): an app without significant account-based features must be usable without a login). The iOS
+mirror is `APIEndpoint.authPolicy`, and `tests/test_ios_auth_policy_parity.py` fails the build if the
+two disagree.
+
+**Storefronts split catalog from purchase.** `GET /billing/plans` and `GET /billing/credit-packs` are
+`.public` — both screens must render before we know who is looking, and neither exposes anything
+Apple's storefront doesn't. `POST /billing/verify` is `.signInRequired` for both product families,
+and for consumables that gate is load-bearing rather than tidy: Apple does not restore consumables,
+so credits bought against a per-install guest identity would be stranded on an install the user can
+wipe. See [§9b.4](#9b4-restore-and-why-buying-requires-an-account).
+
+Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 
 ### 9.2 Data Protection
 
-| Data Type | iOS Storage | Backend Storage | Encryption |
-|-----------|-------------|-----------------|------------|
-| Auth Tokens | Keychain | N/A | AES-256 (Keychain) |
-| User Profile | Core Data | Supabase (RLS) | At-rest (Supabase) |
-| Research Reports | Core Data + Cache | Supabase (RLS) | At-rest |
-| API Keys | N/A | Environment vars | N/A (never in code) |
+| Data | iOS storage | Backend storage | Notes |
+|---|---|---|---|
+| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). |
+| User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
+| Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
+| UI preferences | `UserDefaults` | `user_settings.preferences` (JSONB), remote-synced | Appearance, notification toggles, Learn progress. |
+| API keys | never present | environment variables | Never in code, never logged (`app/log_redaction.py`). |
+
+**Nothing on the device survives app termination except the Keychain and `UserDefaults`.** There is
+no Core Data, no SwiftData, and no local database — see §7.1 and
+[iOS_ARCHITECTURE_GUIDE.md](../../frontend/ios/iOS_ARCHITECTURE_GUIDE.md) § Data Persistence, which
+states the same thing independently.
 
 ### 9.3 AI Chat Security ("Ask Cay AI") — OWASP LLM Top 10 (2025)
 
@@ -2194,95 +1501,27 @@ and it refuses any profile without `consented_at`.
 
 ---
 
-## 10. Recommendations & Critique
+## 10. Known gaps and accepted trade-offs
 
-### 10.1 Current Architecture Strengths
+Most of the honest gap list lives with the mechanism it belongs to, and is not repeated here:
+[§9.3 "Still open, deliberately"](#93-ai-chat-security-ask-cay-ai--owasp-llm-top-10-2025) (guest chat
+budget keyed on a client-chosen header), [§9b.6](#9b6-known-accepted-gaps) (`CONSUMPTION_REQUEST`
+unanswered, refund-after-consumption reclaims 0, `REFUND_REVERSED` manual) and
+[§9b.7](#9b7-pricing) (the "~17 Gemini calls" figure is wrong in 18 places; the real count is 20–26).
 
-1. **Clean Separation of Concerns**: Backend layers (API → Service → Agent → Integration) are well-defined
-2. **Atomic Design for iOS UI**: Good reusability with Atoms/Molecules/Organisms pattern
-3. **Background Tasks**: Using FastAPI's BackgroundTasks for long-running operations
-4. **Investor Personas**: Well-structured prompts with clear differentiation
+What follows is the set with no other home.
 
-### 10.2 Areas for Improvement
+| Gap | Real state | Why it is this way |
+|---|---|---|
+| No backend repository / data-access layer | Services call `supabase.table(...)` directly | Deliberate — Appendix B, Feb 2026. Still holds; the cost is that service math is harder to unit-test without a live client. |
+| No Redis | Tier 1 in-process dict + Tier 2 Supabase `*_cache` (§7.1) | Sufficient today. **The condition that changes it is horizontal scale:** the Tier-1 dict is per-process, so a second Railway instance stops sharing it and the cache-hit rate halves per instance added. |
+| Request correlation is partial | The middleware stack is exactly **four** entries — CORS, GZip, `cap_json_body`, `add_process_time`. The last sets `request.state.request_id` and emits `X-Request-ID`, but the id is a millisecond timestamp (collides under concurrency), is read nowhere else, is absent from log records, and is not forwarded upstream | Enough to correlate a client report with one response; not enough to trace a request through the logs. Fixing it is a small, well-bounded change. |
+| Report status is polled while chat streams | SSE ships for chat; report status is a 3s poll with a 300s client deadline | Not an oversight. Per §5.4 the client deadline is deliberately *not* a failure — the server keeps generating and a list poll reconciles — which a stream would complicate rather than simplify. |
+| `caydex-report-architecture.svg` is stale | Predates the 2026-07-30 unification that put the direct report path behind the same concurrency guards as the deep path (§5) | Re-export it when that diagram is next touched. `caydex-100-users-dataflow.svg` has the same lag. |
 
-#### Backend
-
-| Issue | Current State | Recommendation |
-|-------|---------------|----------------|
-| **Background Tasks** | Using FastAPI `asyncio.create_task()` | Consider Celery/Redis Queue for production scale. Tasks don't survive server restarts. |
-| **No Status Updates** | Report status stored, polled by client | Add WebSocket endpoint or SSE for live progress updates |
-| **No Repository Pattern** | Services call Supabase directly | Consider adding a repository/data-access layer for testability |
-| **Missing Middleware** | No request ID propagation | Add correlation ID middleware for distributed tracing |
-| **Error Granularity** | Basic FastAPI HTTPException only | Implement structured error codes (see Section 6.2) |
-| **No Redis Cache** | DB-level caching only (news_articles table) | Add Redis for high-frequency endpoints if needed at scale |
-
-#### Frontend (iOS) — Largely Addressed
-
-| Issue | Previous State | Current State (March 2026) |
-|-------|---------------|----------------|
-| **No Networking Layer** | ViewModels use mock data | ✅ Implemented: Repository pattern with URLSession (`StockRepository`, `ResearchRepository`) |
-| **Isolated State** | Each ViewModel manages own state | ✅ Implemented: Centralized `AppState` with `@Observable` and sub-states |
-| **No Retry Logic** | Single request attempts | ✅ Implemented: Exponential backoff in error handling framework |
-| **Error Handling** | Generic errors | ✅ Implemented: Comprehensive `AppError` enum with `suggestedAction`, `isRetryable` |
-| **Task Polling** | No polling mechanism | ✅ Implemented: `TaskPollingManager` with `AsyncThrowingStream` |
-| **Offline Support** | Assumed always online | Partial: In-memory caching in `StockRepository`, no Core Data persistence yet |
-| **Hardcoded Personas** | Some mismatch with backend | ✅ Synced from backend via `/research/personas` endpoint |
-
-### 10.3 Architecture Evolution Roadmap
-
-```
-Phase 1: Foundation ✅ COMPLETE
-├── ✅ Basic MVVM structure
-├── ✅ Atomic Design components
-├── ✅ Backend layered architecture
-└── ✅ Repository pattern (iOS) — StockRepository, ResearchRepository
-
-Phase 2: Networking & State ✅ COMPLETE
-├── ✅ Centralized AppState (@Observable with sub-states)
-├── ✅ API Service layer (iOS) — APIService + TaskPollingManager
-├── ✅ Multi-layer caching (iOS in-memory + backend DB-level)
-└── ✅ Error handling framework (AppError with suggestedAction)
-
-Phase 3: Real-time & Offline (PARTIAL)
-├── ✅ Task polling for research reports (AsyncThrowingStream)
-├── 🔲 WebSocket for live updates
-├── 🔲 Core Data persistence
-├── 🔲 Offline-first sync
-└── 🔲 Background refresh (iOS)
-
-Phase 4: Scale & Observability
-├── 🔲 Redis cache (Backend)
-├── 🔲 Celery task queue (Backend)
-├── 🔲 Structured backend error codes (Section 6.2)
-├── 🔲 Distributed tracing
-├── 🔲 Performance monitoring
-└── 🔲 A/B testing infrastructure
-```
-
-### 10.4 Action Items
-
-1. **Completed** (as of March 2026)
-   - [x] Create `Services/` folder in iOS with `APIService` and `CacheManager`
-   - [x] Implement `AppState` observable container
-   - [x] Create polling mechanism for report generation status (`TaskPollingManager`)
-   - [x] Implement Repository pattern (StockRepository, ResearchRepository)
-   - [x] iOS error handling framework (`AppError`)
-
-2. **High Priority** (remaining)
-   - [ ] Add structured error handling to backend endpoints (Section 6.2)
-   - [ ] Add backend repository/data-access layer for testability
-   - [ ] Add request/response logging middleware
-
-3. **Medium Priority**
-   - [ ] Add Redis caching for high-frequency endpoints
-   - [ ] Create Core Data models for offline persistence
-   - [ ] Implement token refresh interceptor in iOS
-
-4. **Nice to Have**
-   - [ ] WebSocket endpoint for real-time progress
-   - [x] Push notifications for completed reports — **SHIPPED** (see §11)
-   - [x] Background app refresh for watchlist updates — **SHIPPED** as a server-side
-         sweeper + push rather than client background refresh (see §11)
+Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
+none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
+made a design decision look like unfinished work for months.
 
 ---
 
@@ -2385,54 +1624,19 @@ individually opt-out-able in-app, and frequency is capped per category.
 
 ---
 
-## Appendix A: File Structure (Recommended)
+## Appendix A: Where things live
 
 ### iOS
 
-```
-ios/
-├── App/
-│   ├── AIValueInvestorApp.swift
-│   └── AppDelegate.swift
-├── Core/
-│   ├── State/
-│   │   ├── AppState.swift
-│   │   ├── AuthState.swift
-│   │   ├── UserState.swift
-│   │   └── ...
-│   ├── Services/
-│   │   ├── APIService.swift
-│   │   ├── CacheManager.swift
-│   │   └── PersistenceManager.swift
-│   ├── Repositories/
-│   │   ├── StockRepository.swift
-│   │   ├── ResearchRepository.swift
-│   │   └── ...
-│   └── Utilities/
-│       ├── Logger.swift
-│       └── Extensions/
-├── Features/
-│   ├── Home/
-│   │   ├── HomeView.swift
-│   │   └── HomeViewModel.swift
-│   ├── Research/
-│   │   ├── ResearchView.swift
-│   │   └── ResearchViewModel.swift
-│   └── ...
-├── SharedUI/
-│   ├── Atoms/
-│   ├── Molecules/
-│   └── Organisms/
-├── Models/
-│   ├── Domain/
-│   │   ├── Stock.swift
-│   │   └── ResearchReport.swift
-│   └── DTO/
-│       ├── StockResponse.swift
-│       └── ResearchResponse.swift
-└── Resources/
-    └── Assets.xcassets
-```
+**Pointer, not a copy:** the current structure lives in
+[frontend/ios/iOS_ARCHITECTURE_GUIDE.md](../../frontend/ios/iOS_ARCHITECTURE_GUIDE.md)
+§ Project Structure, and `.claude/rules/ios-swiftui.md` is the authority on where a new file belongs.
+Maintaining a second tree here is what let this appendix drift into naming `App/`, `Features/`,
+`SharedUI/` and `Models/{Domain,DTO}/`, none of which exist.
+
+The shape in one line: `Views/{Atoms,Molecules,Organisms,Screens,Modifiers}` (strict atomic design),
+a flat `ViewModels/`, a flat `Models/` with DTO and UI models co-located per feature, `Core/`
+(`State/`, `Services/`, `Repositories/`, `Utilities/`, `Monitoring/`), and `Theme/`.
 
 ### Backend
 
@@ -2440,32 +1644,34 @@ ios/
 backend/
 ├── app/
 │   ├── api/
+│   │   ├── error_response.py     # the {error_code, message, user_message, action, details} contract
 │   │   └── v1/
-│   │       ├── endpoints/
-│   │       └── dependencies.py
-│   ├── core/
-│   │   ├── config.py
-│   │   ├── security.py
-│   │   └── middleware.py
+│   │       ├── api.py            # router registration
+│   │       └── endpoints/        # 23 modules; HTTP surface only
+│   ├── core/security.py          # (config and dependencies are NOT here — see below)
+│   ├── integrations/             # 11 thin HTTP clients
+│   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
+│   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
-│   │   └── *.py
-│   ├── agents/
-│   │   └── *.py
-│   ├── integrations/
-│   │   └── *.py
-│   ├── schemas/
-│   │   └── *.py
-│   ├── models/           # SQLAlchemy models (if needed)
-│   ├── tasks/            # Background task definitions (NEW)
-│   │   ├── research_tasks.py
-│   │   └── news_tasks.py
-│   └── main.py
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
-└── requirements.txt
+│   │   └── agents/               # the multi-agent research pipeline
+│   ├── templates/                # PDF (WeasyPrint)
+│   ├── utils/
+│   ├── config.py                 # NOT app/core/config.py
+│   ├── database.py               # get_supabase(); raw SDK, no ORM
+│   ├── dependencies.py           # NOT app/api/v1/dependencies.py
+│   ├── log_redaction.py
+│   └── main.py                   # lifespan, middleware, ~15 supervised background loops
+├── database/
+│   ├── migrations/               # NNN_*.sql, applied by hand
+│   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase
+├── scripts/
+├── tests/                        # FLAT — ~275 test_*.py + one tests/services/ subdir
+└── conftest.py                   # rootdir; forces SENTRY_DSN="" only
 ```
+
+There is no `app/agents/` (agents live under `app/services/agents/`), no `app/tasks/`, no
+`app/core/middleware.py` (middleware is inline in `main.py`), and no `tests/{unit,integration,e2e}`
+split. `app/models/` exists but is empty: adding an ORM there would violate CLAUDE.md invariant #5.
 
 ---
 
@@ -2483,6 +1689,15 @@ backend/
 | Jun 2026 | TTM current-snapshot benchmark (`period_type='ttm'`); median + positive-only + cap | Apples-to-apples with the company card; no partial-fiscal-year spike; robust to outliers | Latest fiscal year; trimmed mean |
 | Jun 2026 | Close-aligned report cache + `CACHE_SCHEMA_FLOOR` | Reports are point-in-time snapshots pinned to the last close; floor forces re-collect on a schema change | Rolling wall-clock TTL |
 | Jun 2026 | Separate weekly TTM job vs quarterly fiscal recompute; period-type-scoped freshness | TTM drifts daily, fiscal only on earnings; non-overlapping windows avoid FMP contention | One combined recompute job |
+| Jul 2026 | `_spawn` supervision + a reconciliation sweeper, rather than a task queue | Makes "tasks don't survive restarts" survivable: a strong handle is retained, `add_done_callback` logs a dying loop, and `research_reconciliation_service` re-refunds work a dead worker abandoned | Celery, RQ, Dramatiq (all still rejected) |
+| Jul 2026 | Flat string error codes (`INSUFFICIENT_CREDITS`), not numbered (`BIZ_2001`) | Greppable across backend + iOS; the code IS the name, so a mismatch is visible at the call site | Numbered enum per the original §6.2 sketch |
+| Jul 2026 | `key_prefix` namespacing on the agent dedup key | The deep and direct report pipelines produce DIFFERENT reports for the same `(ticker, persona)`; one namespace would let a deep caller attach to a direct leader and be charged deep price for a shallow report | One shared dedup namespace |
+| Jul 2026 | Repository pattern landed as ONE repository, no protocol layer, no DI | `StockRepository` is the only one that caches; four others are thin. The Jan 2026 decision is honoured in spirit, not in the shape that entry implies | Full protocol + injection per the original sketch |
+| Aug 2026 | Two credit pools — granted (expires) + purchased (never expires) | App Store Guideline 3.1.1 forbids purchased credits expiring; three existing RPCs each destroyed or mishandled a cash-bought balance | One pool with an expiry flag (violates 3.1.1) |
+| Aug 2026 | User-selectable appearance (System / Dark / Light), every token adaptive | A "colour that works in both modes" is what made light mode fail WCAG AA across ~2,700 call sites | Dark-only (the prior shipped state) |
+| Aug 2026 | A notification registry as the single source of truth | 12 of the original 13 toggles wrote a preference nothing read; the inverse shipped too (kinds with no toggle) | Per-sender ad-hoc preference keys |
+| Aug 2026 | Three transports coexist, chosen per latency budget | Supersedes "polling over WebSocket for v1": report status polls (3s), chat streams (SSE), live price pushes (WS) | One transport for everything |
+| 2026-08-27 | Report thinking budget capped at 0, both stages, separately configurable | Measured −66% cost/report; the failure mode is a clipped sentence, not a wrong number. The two post-assembly syntheses stay UNCAPPED | Model default (uncapped); a single shared setting |
 
 ---
 

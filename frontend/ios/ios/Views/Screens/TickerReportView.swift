@@ -122,6 +122,11 @@ struct TickerReportView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
+                // The reader must ENCLOSE the ScrollView. A `ScrollViewReader` nested
+                // INSIDE one contains no scroll view for the proxy to scan, so `scrollTo`
+                // compiles, runs, and silently does nothing — every reader in this app is
+                // on the outside (BookCoreDetailView, ChatMessagesList, DailyScannersSection).
+                ScrollViewReader { proxy in
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: AppSpacing.xxl) {
                         // Agent Badge + Score
@@ -137,7 +142,7 @@ struct TickerReportView: View {
                         ReportCoreThesisSection(thesis: report.coreThesis)
 
                         // Deep Dive Modules
-                        deepDiveModulesSection(report)
+                        deepDiveModulesSection(report, proxy: proxy)
 
                         // Critical Factors
                         ReportCriticalFactorsSection(factors: report.criticalFactors)
@@ -166,6 +171,7 @@ struct TickerReportView: View {
                     Text("This analysis has aged out of the cache. Generating a fresh one uses "
                          + "\(AnalysisCost.standard.credits) credits.")
                 }
+                }   // ScrollViewReader
 
                 // Floating chat bar
                 CaydexAIChatBar(
@@ -322,9 +328,40 @@ struct TickerReportView: View {
         .padding(.vertical, AppSpacing.sm)
     }
 
+    /// Put a just-collapsed module's own header back at the top of the viewport.
+    ///
+    /// Unanimated on purpose. An animated `scrollTo` is an in-flight scroll animation over a
+    /// `contentSize` that is changing underneath it — the same family as the two freezes this
+    /// app has already shipped (`DailyScannersSection`'s `.scrollPosition` deadlock and the
+    /// `LazyVStack` hang on Home), and the collapse itself is instant, so a glide would only
+    /// stream unfamiliar content past the reader.
+    ///
+    /// `withTransaction` REPLACES the ambient transaction rather than merging, so this stays
+    /// unanimated even if someone later wraps the collapse in `withAnimation`.
+    ///
+    /// Called twice, following `BookCoreDetailView.scrollToTop`. The destination itself cannot
+    /// move — collapsing removes height BELOW the header, so the header's content-space y is
+    /// identical before and after — but the reachable offset can: the content just shrank, so
+    /// near the end of the report the target may exceed the new maximum and be clamped. The
+    /// synchronous call resolves against pre-collapse layout, the async one against settled
+    /// layout. Because the destination is invariant, the retry can never fight the first call.
+    private func scrollModuleHeaderToTop(_ id: DeepDiveModule.ID, proxy: ScrollViewProxy) {
+        func jump() {
+            var transaction = Transaction()
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(id, anchor: .top)
+            }
+        }
+        jump()
+        DispatchQueue.main.async { jump() }
+    }
+
     // MARK: - Deep Dive Modules
 
-    private func deepDiveModulesSection(_ report: TickerReportData) -> some View {
+    private func deepDiveModulesSection(_ report: TickerReportData,
+                                        proxy: ScrollViewProxy) -> some View {
         // Hide the Hidden Market Signals module when no congress / short-interest
         // data is available for this ticker.
         let modules = viewModel.deepDiveModules.filter { module in
@@ -341,10 +378,17 @@ struct TickerReportView: View {
                 ForEach(Array(modules.enumerated()), id: \.element.id) { index, module in
                     ReportDeepDiveSection(
                         module: module,
-                        isLast: index == modules.count - 1
+                        isLast: index == modules.count - 1,
+                        onCollapse: { scrollModuleHeaderToTop(module.id, proxy: proxy) }
                     ) {
                         deepDiveContent(for: module.type, report: report)
                     }
+                    // The scroll anchor. Safe to attach here ONLY because
+                    // `TickerReportViewModel.deepDiveModules` is a stored `let` — its
+                    // `UUID`s are minted once. A computed property would hand out fresh
+                    // ids on every render, and a changing `.id()` resets the child's
+                    // `@State isExpanded`, so every module would silently re-collapse.
+                    .id(module.id)
                 }
             }
             // One rounded card (top + bottom curves) wrapping the whole stack,

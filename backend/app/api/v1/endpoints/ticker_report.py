@@ -310,6 +310,27 @@ async def get_ticker_report(
             # /research/generate there is no research_reports row for the
             # reconciliation sweep — so a failed refund gets a greppable REFUND
             # LEAK marker (logged inside refund_ledgered) for manual correction.
+            # ⚠️ NO "your report didn't finish" PUSH HERE, and a `CancelledError` arm
+            # above would be DEAD CODE — do not add one back. It was added and removed:
+            #
+            # The premise (FastAPI cancels the handler when the client disconnects, so
+            # only this `finally` runs and the user learns nothing) is FALSE on the
+            # pinned stack. `starlette.routing.request_response` in 0.41.3 is a bare
+            # `response = await f(request)` with no task group and no `http.disconnect`
+            # listener; `BaseHTTPMiddleware` only turns a disconnect into a `receive()`
+            # MESSAGE, which this GET never reads; and uvicorn 0.34 cancels only on
+            # `timeout_graceful_shutdown`, which is unset here. Verified empirically
+            # against this venv: an aborted curl, a hard TCP RST and a SIGTERM mid-request
+            # all left the handler running to completion.
+            #
+            # So a backgrounded app is not a non-delivery at all — the handler finishes,
+            # `delivered` is True, the report is CACHED, and the user gets it free on
+            # their next open. That is the right outcome, and a "we couldn't finish this
+            # analysis" push would have been factually wrong.
+            #
+            # The one real hole is a Railway SIGKILL past the grace period, which runs no
+            # Python at all and so cannot be closed from here. Unlike /research/generate
+            # there is no `research_reports` row for the reconciliation sweep to find.
             credit_service.refund_ledgered(
                 user["id"], CreditService.DEEP_RESEARCH_COST,
                 reason="report_refund", ref_id=f"{ticker}:{persona}",

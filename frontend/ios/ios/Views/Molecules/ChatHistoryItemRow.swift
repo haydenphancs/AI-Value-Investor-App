@@ -68,6 +68,7 @@ struct ChatHistoryItemRow: View {
                     .multilineTextAlignment(.leading)
             }
             .padding(.vertical, AppSpacing.md)
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
     }

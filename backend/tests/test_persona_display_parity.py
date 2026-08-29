@@ -29,10 +29,12 @@ from app.api.v1.endpoints.research import _FALLBACK_PERSONAS
 from app.services.agents.persona_config import PERSONA_KEYS, get_persona_config
 from app.services.pdf_report_service import _PERSONA_DISPLAY, _persona_display
 
-_MIGRATION = (
-    Path(__file__).resolve().parents[1]
-    / "database/migrations/103_persona_style_names.sql"
-)
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "database/migrations"
+# 103 is where the style names were introduced; it is the FLOOR, not the answer.
+# Migrations are immutable once applied, so a later rename supersedes it rather
+# than editing it, and this test has to resolve names the way Postgres does —
+# by applying them in order and letting the last writer win.
+_MIGRATION = _MIGRATIONS_DIR / "103_persona_style_names.sql"
 
 # Names that must never appear as a user-facing label again.
 _REAL_INVESTOR_NAMES = (
@@ -44,14 +46,32 @@ def _fallback_by_key() -> dict[str, dict]:
     return {p["key"]: p for p in _FALLBACK_PERSONAS}
 
 
+_NAME_UPDATE = re.compile(
+    r"SET\s+name\s*=\s*'([^']+)'.*?WHERE\s+key\s*=\s*'([^']+)'",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
 def _migration_names() -> dict[str, str]:
-    """Parse `SET name = '…' … WHERE key = '…'` pairs out of migration 103."""
-    sql = _MIGRATION.read_text()
-    pattern = re.compile(
-        r"SET\s+name\s*=\s*'([^']+)'.*?WHERE\s+key\s*=\s*'([^']+)'",
-        re.DOTALL | re.IGNORECASE,
-    )
-    return {key: name for name, key in pattern.findall(sql)}
+    """The name each persona ends up with after every migration from 103 onward.
+
+    Applied in numeric order, last writer wins — the same resolution Postgres
+    performs. Reading 103 alone was correct only while it was the newest rename;
+    the moment a later migration supersedes one of its rows (155 renamed
+    `peter_lynch`), a 103-only read reports a name the database does not hold and
+    fails a change that is actually correct.
+
+    Deliberately scans the whole directory rather than naming migrations: a
+    hardcoded list is a second place to forget to update, which is the exact
+    failure mode this module exists to catch.
+    """
+    names: dict[str, str] = {}
+    for path in sorted(_MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+        if int(path.name[:3]) < 103:
+            continue                     # pre-style-name era; 043 sets investor names
+        for name, key in _NAME_UPDATE.findall(path.read_text()):
+            names[key] = name
+    return names
 
 
 # ── Parity ────────────────────────────────────────────────────────────────────
@@ -60,7 +80,7 @@ def test_migration_exists_and_covers_every_persona():
     assert _MIGRATION.exists(), f"missing {_MIGRATION}"
     names = _migration_names()
     assert set(names) == PERSONA_KEYS, (
-        f"migration 103 covers {sorted(names)}, PERSONA_KEYS is {sorted(PERSONA_KEYS)}"
+        f"migrations cover {sorted(names)}, PERSONA_KEYS is {sorted(PERSONA_KEYS)}"
     )
 
 

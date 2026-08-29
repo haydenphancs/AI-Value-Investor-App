@@ -20,6 +20,7 @@ xcrun simctl push "$DEV" com.phan.caydex price_alert_crypto.json
 | `insider_trade` / `congress_trade` | `interruption-level: passive` (iOS may batch) |
 | `price_alert_crypto` | **the routing regression**: `asset_type: crypto` must open `CryptoDetailView`. The old handler hardcoded `.stock` and showed stock fundamentals for a coin. |
 | `unroutable` | no ticker and no report id → lands in the INBOX. This used to be a silent no-op: tappable banner, nothing happened, nothing logged. |
+| `ticker_move_markread` | carries `dedup_key` and `badge: 3`. Long-press → **Mark as Read** must decrement the app-icon badge; without the key in the payload that button is a no-op, which is what shipped. |
 
 ## Cold launch
 

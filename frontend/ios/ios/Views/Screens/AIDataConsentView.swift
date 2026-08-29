@@ -32,7 +32,7 @@ struct AIDataConsentView: View {
         Row(text: "Your watchlist, portfolio, or holdings.")
     ]
 
-    /// The accuracy / not-advice half of the gate.
+    /// The accuracy / not-advice half of the gate — headed "Before you act on it".
     ///
     /// This screen used to cover PRIVACY only — what gets sent, what doesn't — and said nothing
     /// about the answers being generated, fallible, or not advice. The first-run
@@ -80,7 +80,17 @@ struct AIDataConsentView: View {
                         group(title: "What never gets sent", rows: whatWeDont, tint: AppColors.bullish)
                         // `caution` is a TEXT-role token (4.5:1). NOT `cautionGraphic` — the
                         // graphic tokens are chart-only and fail AA as text (ios-swiftui.md).
-                        group(title: "What this is not", rows: whatItIsNot, tint: AppColors.caution)
+                        // NOT "What this is not". Two of these three bullets are genuinely that
+                        // ("isn't financial advice", "not a registered investment adviser"), but
+                        // the first — Cay AI can be wrong — is about RELIABILITY, not identity,
+                        // and it is the most useful line on the screen. Filing it under a heading
+                        // that reads as legal boilerplate is how it gets skimmed past.
+                        //
+                        // It also deliberately breaks the "What …" grammar of the two above. Those
+                        // are a matched pair about data flow; this section pivots to accuracy and
+                        // legal status, and the heading should mark the change rather than
+                        // camouflage it. All three bullets answer "before you act on it".
+                        group(title: "Before you act on it", rows: whatItIsNot, tint: AppColors.caution)
 
                         Text("Your conversations are saved to your account so you can come "
                              + "back to them, and you can delete any conversation at any "
@@ -125,6 +135,7 @@ struct AIDataConsentView: View {
                             .foregroundColor(AppColors.textSecondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, AppSpacing.md)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }

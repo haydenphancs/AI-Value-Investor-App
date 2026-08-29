@@ -101,7 +101,9 @@ struct ReportHiddenMarketSignalsSection: View {
                         .foregroundColor(AppColors.primaryBlue)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.xs)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }

@@ -294,25 +294,83 @@ def test_cancellation_cannot_leave_a_future_pending(module):
         )
 
 
+# A CONCURRENCY CEILING is not a shared future. `settings.MAX_GLOBAL_INFLIGHT_REPORTS`
+# is an integer that bounds how many reports may run at once; it is never awaited by
+# anyone. Testing for the bare substring "inflight" swept
+# `research_reconciliation_service.py` in on that name alone the moment it grew an
+# unrelated `create_task`, and listing a module here that does not participate is worse
+# than leaving it out — every parametrized assertion above would pass vacuously over it
+# while reading as coverage.
+#
+# Deliberately narrow: only a `settings.` reference is discounted. The real shapes stay
+# in, and they vary a lot — a dict (`self._inflight[k]`), a SET of keys
+# (`_ai_refresh_inflight.add(symbol)`), and a single-slot class attribute
+# (`JourneyContentService._inflight = future`) are all this pattern. Matching the
+# container's *syntax* instead lost all three, which is what the reverse-direction
+# assertion below now catches.
+_SETTINGS_CEILING = re.compile(r"\bsettings\.\w*INFLIGHT\w*", re.IGNORECASE)
+
+
+def _uses_inflight_pattern(src: str) -> bool:
+    body = "\n".join(
+        "" if line.strip().startswith("#") else line for line in src.splitlines()
+    )
+    body = _SETTINGS_CEILING.sub("", body)
+    if "inflight" not in body.lower():
+        return False
+    # A shared awaitable is a shared awaitable: `loop.create_future()` and
+    # `asyncio.ensure_future(...)` / `asyncio.create_task(...)` have the SAME
+    # cancellation hazard — a joiner that gives up cancels the object everyone else
+    # is waiting on. Looking only for `create_future()` is what hid
+    # `agents/ticker_report_data_collector.py` from this check entirely.
+    return any(tok in body for tok in
+               ("create_future()", "ensure_future(", "create_task("))
+
+
 def test_no_inflight_service_is_missing_from_this_list():
     """Anti-vacuity. A new service adopting the pattern must be added above, or it is
     unguarded and this file silently says nothing about it."""
     found = set()
     for path in _SERVICES.rglob("*.py"):
-        src = path.read_text()
-        if "inflight" not in src.lower():
-            continue
-        # A shared awaitable is a shared awaitable: `loop.create_future()` and
-        # `asyncio.ensure_future(...)` / `asyncio.create_task(...)` have the SAME
-        # cancellation hazard — a joiner that gives up cancels the object everyone else
-        # is waiting on. Looking only for `create_future()` is what hid
-        # `agents/ticker_report_data_collector.py` from this check entirely.
-        if not any(tok in src for tok in
-                   ("create_future()", "ensure_future(", "create_task(")):
-            continue
-        found.add(str(path.relative_to(_SERVICES)))
+        if _uses_inflight_pattern(path.read_text()):
+            found.add(str(path.relative_to(_SERVICES)))
     missing = found - set(_INFLIGHT_MODULES)
     assert not missing, (
         f"services using the in-flight pattern but absent from _INFLIGHT_MODULES: "
         f"{sorted(missing)}"
     )
+    # THE OTHER DIRECTION, and the one the tightening above could break. A detector that
+    # stops recognising the pattern makes every parametrized assertion in this file pass
+    # over a shrinking set while still reading green, which is precisely the vacuity the
+    # `_unshielded_joins` rewrite was needed for.
+    undetected = set(_INFLIGHT_MODULES) - found
+    assert not undetected, (
+        f"listed as in-flight services but no longer DETECTED as such: "
+        f"{sorted(undetected)} — the detector has been narrowed too far and this file's "
+        f"coverage is silently shrinking"
+    )
+
+
+def test_the_inflight_detector_distinguishes_a_ceiling_from_a_shared_future():
+    """Anti-vacuity for the detector itself.
+
+    Every shape below is real: the first two are `research_reconciliation_service.py`
+    after it grew a fire-and-forget notice task, and the last three are the dict, set and
+    single-slot forms actually used in `_INFLIGHT_MODULES`.
+    """
+    assert not _uses_inflight_pattern(
+        "backlog = settings.MAX_GLOBAL_INFLIGHT_REPORTS - slots\n"
+        "loop.create_task(notify())\n"
+    ), "a settings CEILING plus an unrelated task is not the shared-future pattern"
+    assert not _uses_inflight_pattern(
+        "# waits for ~MAX_GLOBAL_INFLIGHT_REPORTS to drain\nloop.create_task(notify())\n"
+    ), "a comment mentioning the word is not the pattern either"
+    assert _uses_inflight_pattern(
+        "fut = self._inflight.get(k)\nfut = loop.create_future()\n"
+    ), "the dict form must still be detected"
+    assert _uses_inflight_pattern(
+        "_ai_refresh_inflight.add(symbol)\nasyncio.create_task(refresh())\n"
+    ), "the SET-of-keys form must still be detected"
+    assert _uses_inflight_pattern(
+        "JourneyContentService._inflight = future\nfuture = loop.create_future()\n"
+    ), "the single-slot class-attribute form must still be detected"

@@ -906,6 +906,11 @@ private struct CoreChapterTimelineRow: View {
                 }
                 .padding(.bottom, isLast ? 0 : AppSpacing.xxl)
             }
+            // On the ROW, not on the content column: the timeline column is a
+            // 44pt frame plus 16pt of HStack spacing, so a shape on the inner
+            // VStack would leave the numbered chapter badge — the most obvious
+            // thing to press — dead.
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
     }

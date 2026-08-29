@@ -160,7 +160,12 @@ enum APIEndpoint: Sendable {
     /// not an offset — rows arrive continuously at the head, so an offset page 2 would
     /// repeat or skip whenever a notification landed between requests.
     case listNotifications(limit: Int, before: String?)
-    case markNotificationsRead(ids: [String], all: Bool)
+    /// `dedupKeys` addresses rows by the other half of the backend's
+    /// `(user_id, dedup_key)` unique key. It exists for the notification's own
+    /// "Mark as Read" action: an APNs payload carries no `notification_events.id`, only
+    /// the dedup key, so this is the sole way a lock-screen tap can reach the right row.
+    /// `ids` wins server-side if both are sent.
+    case markNotificationsRead(ids: [String], dedupKeys: [String], all: Bool)
     case listPriceAlerts(ticker: String?)
     case createPriceAlert(ticker: String, kind: String, threshold: Double, assetType: String, repeatMode: String)
     case updatePriceAlert(id: String, threshold: Double?, isActive: Bool?, repeatMode: String?)
@@ -937,8 +942,8 @@ enum APIEndpoint: Sendable {
             // Same body shape; the backend reads only `token` and scopes the delete to the caller.
             return DeviceRegisterRequestBody(token: token, platform: "ios", environment: nil)
 
-        case .markNotificationsRead(let ids, let all):
-            return MarkNotificationsReadRequestBody(ids: ids, all: all)
+        case .markNotificationsRead(let ids, let dedupKeys, let all):
+            return MarkNotificationsReadRequestBody(ids: ids, dedupKeys: dedupKeys, all: all)
 
         case .createPriceAlert(let ticker, let kind, let threshold, let assetType, let repeatMode):
             return CreatePriceAlertRequestBody(
@@ -1434,6 +1439,9 @@ nonisolated struct UpdateUserSettingsRequestBody: Encodable, Sendable {
 /// ignored — the two are deliberately one call so "mark all read" is not N requests.
 nonisolated struct MarkNotificationsReadRequestBody: Encodable, Sendable {
     let ids: [String]
+    /// Encoded as `dedup_keys` by the client's snake-case key strategy, matching
+    /// `MarkReadRequest` on the backend.
+    let dedupKeys: [String]
     let all: Bool
 }
 

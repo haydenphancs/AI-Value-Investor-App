@@ -281,3 +281,62 @@ def test_a_key_named_only_in_a_comment_is_not_counted_as_declared():
     block = _strip_comments(_bracket_block(sample, "static let preferenceDefaults"))
     parsed = dict(re.findall(r'"(notify_\w+)"\s*:\s*(true|false)', block))
     assert set(parsed) == {"notify_real"}
+
+
+# ── apns-expiration ──────────────────────────────────────────────────────────
+#
+# APNs stores an undeliverable push and retries for its own default window, so a phone
+# that was off through the afternoon lights up at 18:00 with "AAPL +8%" describing a price
+# that no longer exists. `expiration_hours` bounds that per kind — the same judgement
+# `flush_deferred` already applies to the quiet-hours queue.
+
+
+def test_every_expiration_is_either_absent_or_positive():
+    """`0` is NOT "no expiry" — it tells APNs to attempt delivery exactly once and never
+    store it, which is the strictest possible expiry. The two must never be confused, so a
+    non-positive value fails at import rather than silently dropping pushes to any device
+    that was briefly offline."""
+    from app.services.notification_kinds import NOTIFICATION_KINDS
+
+    for key, kind in NOTIFICATION_KINDS.items():
+        assert kind.expiration_hours is None or kind.expiration_hours > 0, key
+
+
+def test_a_zero_expiration_is_rejected_at_import():
+    """The trap, pinned. Someone writing `expiration_hours=0` means "never expire"."""
+    import pytest as _pytest
+    from app.services.notification_kinds import (
+        CATEGORY_APP, LEVEL_ACTIVE, NotificationKind,
+    )
+
+    with _pytest.raises(ValueError, match="try once and discard"):
+        NotificationKind(
+            key="x", preference_key="notify_x", master_preference_key=None,
+            default_on=True, category=CATEGORY_APP, interruption_level=LEVEL_ACTIVE,
+            thread_id="app", respects_quiet_hours=False, route_kind="ticker",
+            label="x", expiration_hours=0,
+        )
+
+
+def test_the_two_kinds_the_user_paid_for_never_expire():
+    """A report the user spent 20 credits on must arrive whenever the phone comes back —
+    it is a frozen point-in-time snapshot, so it does not go stale — and so must the
+    notice that it failed and their credits were returned."""
+    from app.services.notification_kinds import (
+        KIND_RESEARCH_COMPLETE, KIND_RESEARCH_FAILED, get_kind,
+    )
+
+    assert get_kind(KIND_RESEARCH_COMPLETE).expiration_hours is None
+    assert get_kind(KIND_RESEARCH_FAILED).expiration_hours is None
+
+
+def test_price_moves_expire_within_the_session_they_describe():
+    """These carry a NUMBER measured at a moment. Delivered hours later they are not late
+    news, they are wrong news — and the inbox row keeps them either way."""
+    from app.services.notification_kinds import (
+        KIND_EARNINGS_RESULT, KIND_PRICE_ALERT, KIND_TICKER_MOVE, get_kind,
+    )
+
+    for key in (KIND_TICKER_MOVE, KIND_PRICE_ALERT, KIND_EARNINGS_RESULT):
+        hours = get_kind(key).expiration_hours
+        assert hours is not None and hours <= 4, f"{key} may arrive {hours}h stale"

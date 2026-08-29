@@ -37,6 +37,13 @@ struct TrackingContentView: View {
     @State private var showProfile = false
     @State private var showSearch = false
 
+    /// Chosen in the alert-detail sheet while it is still on screen. A `fullScreenCover` cannot
+    /// be presented while its sheet is up, so the hand-off happens in the sheet's `onDismiss`.
+    @State private var pendingAlertDestination: AlertDestination?
+
+    /// Drives the cover. See `AlertDestinationCover` for why a cover and not a push.
+    @State private var openedAlertDestination: AlertDestination?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -125,11 +132,23 @@ struct TrackingContentView: View {
                     whaleName: tradeData.whaleName
                 )
             }
-            .sheet(item: $viewModel.selectedAlert) { alert in
+            // ⚠️ The detail's destinations do NOT push within this sheet. They did, which put
+            // `TickerDetailView` (seven `.sheet` modifiers) and `WhaleProfileView` (five) inside
+            // a sheet, where their own sheets cannot present — a tester found the ticker screen's
+            // search icon doing nothing. They open in a cover with its own `NavigationStack` now,
+            // exactly as Home's Daily Scanners opens a ticker. See `AlertDestinationCover`.
+            .sheet(item: $viewModel.selectedAlert, onDismiss: {
+                openedAlertDestination = pendingAlertDestination
+                pendingAlertDestination = nil
+            }) { alert in
                 NavigationStack {
-                    AlertDetailView(alert: alert)
+                    AlertDetailView(alert: alert) { destination in
+                        pendingAlertDestination = destination
+                        viewModel.selectedAlert = nil
+                    }
                 }
             }
+            .alertDestinationCover($openedAlertDestination)
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()
                     .environment(appState)
@@ -172,6 +191,13 @@ struct TrackingContentViewWithBinding: View {
     @State private var showProfile = false
     @State private var showSearch = false
 
+    /// Chosen in the alert-detail sheet while it is still on screen. A `fullScreenCover` cannot
+    /// be presented while its sheet is up, so the hand-off happens in the sheet's `onDismiss`.
+    @State private var pendingAlertDestination: AlertDestination?
+
+    /// Drives the cover. See `AlertDestinationCover` for why a cover and not a push.
+    @State private var openedAlertDestination: AlertDestination?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -260,11 +286,23 @@ struct TrackingContentViewWithBinding: View {
                     whaleName: tradeData.whaleName
                 )
             }
-            .sheet(item: $viewModel.selectedAlert) { alert in
+            // ⚠️ The detail's destinations do NOT push within this sheet. They did, which put
+            // `TickerDetailView` (seven `.sheet` modifiers) and `WhaleProfileView` (five) inside
+            // a sheet, where their own sheets cannot present — a tester found the ticker screen's
+            // search icon doing nothing. They open in a cover with its own `NavigationStack` now,
+            // exactly as Home's Daily Scanners opens a ticker. See `AlertDestinationCover`.
+            .sheet(item: $viewModel.selectedAlert, onDismiss: {
+                openedAlertDestination = pendingAlertDestination
+                pendingAlertDestination = nil
+            }) { alert in
                 NavigationStack {
-                    AlertDetailView(alert: alert)
+                    AlertDetailView(alert: alert) { destination in
+                        pendingAlertDestination = destination
+                        viewModel.selectedAlert = nil
+                    }
                 }
             }
+            .alertDestinationCover($openedAlertDestination)
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()
                     .environment(appState)
@@ -1035,6 +1073,7 @@ struct WhaleHeroCard: View {
             }
             .cornerRadius(AppCornerRadius.extraLarge)
             .padding(.horizontal, AppSpacing.lg)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

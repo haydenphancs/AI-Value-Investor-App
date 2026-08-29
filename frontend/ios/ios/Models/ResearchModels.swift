@@ -210,7 +210,7 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let peterLynch = AnalysisPersona(
         key: "peter_lynch",
-        name: "The Everyday Growth Hunter",
+        name: "The Growth Hunter",
         tagline: "Growth at a Reasonable Price",
         iconName: "icon_persona_lynch",
         systemIconName: "chart.line.uptrend.xyaxis",

@@ -47,6 +47,11 @@ from typing import Dict, Optional
 # Key NAMES only — `quiet_hours` is a pure leaf and imports nothing from here, so this
 # direction is safe and keeps each key spelled in exactly one place.
 from app.services.quiet_hours import PREF_QUIET_ENABLED
+# Same exemption, same reason: `asset_class` is a pure symbol classifier — no I/O, no
+# Supabase, no imports from this module — so depending on it keeps this file's "pure
+# data + pure functions" promise intact while giving `ticker_route` one shared answer to
+# "what kind of thing is this ticker" instead of a second, drifting copy.
+from app.services.asset_class import detect_asset_class
 
 
 # ── Categories ───────────────────────────────────────────────────────────────
@@ -182,6 +187,26 @@ class NotificationKind:
     route_tab: Optional[str] = None
     # Sub-tab inside `route_tab` (Holders has Insiders / Institutions / Congress).
     route_section: Optional[str] = None
+    # How long APNs may keep RETRYING this push before giving up (`apns-expiration`).
+    #
+    # APNs stores an undeliverable notification and re-attempts it for its own default
+    # window, so a phone that was off all afternoon lights up at 18:00 with "AAPL +8%"
+    # describing a price that no longer exists. This project has already written that
+    # judgement down once, for the quiet-hours path: `flush_deferred` marks anything
+    # past `NOTIFICATION_MAX_DEFER_HOURS` failed because "a 14-hour-late 'AAPL moved 8%'
+    # is misinformation, not a notification — and the INBOX row survives either way, so
+    # the information is not lost, only the buzz." The same rule, applied to APNs' own
+    # store-and-forward.
+    #
+    # The value is a DURATION in hours; `push_service` converts it to the absolute UNIX
+    # epoch the header actually wants at send time.
+    #
+    # ⚠️ `None` means OMIT THE HEADER, which is what gets APNs' default store-and-retry.
+    # It does NOT mean "send 0" — `apns-expiration: 0` tells APNs to attempt delivery
+    # exactly once and never store it, i.e. the strictest possible expiry rather than
+    # none at all. Getting those two backwards would silently drop pushes to any device
+    # that happened to be offline for a second.
+    expiration_hours: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Fail at IMPORT, not at send time. A typo'd level would otherwise surface as a
@@ -218,6 +243,16 @@ class NotificationKind:
                     f"{self.route_section!r} does not belong to tab {self.route_tab!r} "
                     f"(expected one of {sorted(allowed) or 'none — that tab has no sub-tabs'})"
                 )
+        if self.expiration_hours is not None and self.expiration_hours <= 0:
+            # 0 would be read as "deliver once, never store" — see the field comment.
+            # A negative would produce an expiry in the past, which APNs treats the same
+            # way. Neither is ever what an author means by writing a number here.
+            raise ValueError(
+                f"NotificationKind {self.key!r}: expiration_hours must be a positive "
+                f"number of hours or None (omit the header), got "
+                f"{self.expiration_hours!r}. 0 is NOT 'no expiry' — it tells APNs to "
+                f"try once and discard."
+            )
         if not self.preference_key.startswith("notify_"):
             # `user_settings_service._KNOWN_KEY_PREFIXES` only accepts `notify_*`, so a
             # key without the prefix is silently dropped by `sanitize_preferences` and
@@ -259,6 +294,10 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Watchlist price moves",
+            # A percentage move is a number AT A MOMENT. Delivered after the session it
+            # describes, it is not late news — it is wrong news, and the inbox row keeps
+            # it either way.
+            expiration_hours=4,
         ),
         # Quiet hours are BYPASSED: the user pressed Generate and paid credits minutes
         # ago. Holding "your report is ready" until 07:00 is worse than not sending it,
@@ -274,6 +313,11 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=False,
             route_kind="report",
             label="Report ready",
+            # NO expiry (header omitted). The user pressed Generate and paid 20 credits;
+            # this must arrive whenever the phone comes back, not be discarded because
+            # they were on a plane. The report itself does not go stale — it is a frozen
+            # point-in-time snapshot by construction.
+            expiration_hours=None,
         ),
         # The mirror of the above, and the only event in the whole registry where the
         # user SPENT MONEY AND GOT SILENCE.
@@ -304,6 +348,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=False,
             route_kind="ticker",
             label="Report didn't finish",
+            # Same reasoning as its mirror above, and the refund it reports is permanent.
+            expiration_hours=None,
         ),
         NotificationKind(
             key=KIND_EARNINGS_UPCOMING,
@@ -317,6 +363,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             route_kind="ticker",
             label="Earnings coming up",
             route_tab=TAB_FINANCIALS,
+            # A "reports tomorrow" heads-up is worthless once the company has reported.
+            expiration_hours=12,
         ),
         NotificationKind(
             key=KIND_EARNINGS_RESULT,
@@ -330,6 +378,8 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             route_kind="ticker",
             label="Earnings results",
             route_tab=TAB_FINANCIALS,
+            # The surprise is measured against a consensus and a price that both move.
+            expiration_hours=4,
         ),
         # Smart-money kinds are PASSIVE and get apns-priority 5: a Form 4 filed this
         # evening is information, not an interruption. iOS is allowed to batch them for
@@ -347,6 +397,10 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             label="Insider trades",
             route_tab=TAB_HOLDERS,
             route_section=SECTION_INSIDERS,
+            # A filing is still a filing tomorrow — these are already days-to-weeks old
+            # when they surface, so a day of APNs retry changes nothing about their
+            # accuracy. Bounded anyway so a week-old device wake is not a surprise.
+            expiration_hours=24,
         ),
         # Ships OFF. 13F data is up to 45 days stale by the time it is public, so it is
         # the least time-critical signal in the app and the easiest to over-send (a
@@ -364,6 +418,7 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             label="Institutional (13F) filings",
             route_tab=TAB_HOLDERS,
             route_section=SECTION_INSTITUTIONS,
+            expiration_hours=24,
         ),
         NotificationKind(
             key=KIND_CONGRESS_TRADE,
@@ -378,6 +433,7 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             label="Congressional trades",
             route_tab=TAB_HOLDERS,
             route_section=SECTION_CONGRESS,
+            expiration_hours=24,
         ),
         # TIME-SENSITIVE and quiet-hours-exempt: the user typed this threshold in
         # themselves. A price alert that arrives after the move is over is worthless, so
@@ -396,6 +452,11 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=False,
             route_kind="ticker",
             label="Price alerts",
+            # The SHORTEST-LIVED kind in the registry, and the one where a late delivery
+            # does the most damage: it pierces Focus to announce a threshold crossing
+            # that may since have reversed. The rule the user typed still exists and
+            # fires again, so nothing is lost by letting this one expire.
+            expiration_hours=4,
         ),
         # Signals in a topic or feed the reader told us they follow.
         #
@@ -420,6 +481,9 @@ NOTIFICATION_KINDS: Dict[str, NotificationKind] = {
             respects_quiet_hours=True,
             route_kind="ticker",
             label="Topics you follow",
+            # Capped at 1/day already. A match surfaced yesterday should not arrive
+            # alongside today's.
+            expiration_hours=12,
         ),
     )
 }
@@ -516,7 +580,7 @@ def ticker_route(
     kind_key: str,
     ticker: str,
     *,
-    asset_type: str = "stock",
+    asset_type: Optional[str] = None,
     whale_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the `route` payload for a notification that opens an asset screen.
@@ -536,12 +600,29 @@ def ticker_route(
     Both are the kind of bug that looks fine in every log and only shows up on a phone,
     so the shape is built here from the registry instead of hand-written per sender.
     `tests/test_notification_schema_parity.py` pins every sender to this function.
+
+    ⚠️ WHEN THE CALLER DOES NOT KNOW, THE SYMBOL DECIDES — not the literal "stock".
+
+    This defaulted to `"stock"` and five of the six callers took the default, which had
+    two consequences. Every crypto/index/commodity notification from those senders was
+    labelled an equity. And, less obviously, it made the dispatcher's own backfill DEAD
+    CODE: `notify_watchers` only resolved a type `if not route.get("asset_type")`, and
+    the key was always present, so the resolution step never once ran.
+
+    `detect_asset_class` is pure and free (no I/O), so it costs nothing to be right
+    about the four classes a symbol can reveal on its own. The one class it cannot see
+    is ETF — nothing about "SPY" says fund — and that is resolved from local data at the
+    dispatcher's choke point instead. `asset_type` is still never absent or empty: iOS
+    would fall back to `.stock` anyway, and an explicit value keeps the wire shape
+    stable for the parity test.
     """
     kind = get_kind(kind_key)
     route: Dict[str, str] = {
         "route": kind.route_kind,
         "ticker": ticker.upper(),
-        "asset_type": (asset_type or "stock").strip().lower() or "stock",
+        "asset_type": (
+            (asset_type or "").strip().lower() or detect_asset_class(ticker)
+        ),
     }
     # Omitted entirely when absent — an empty string would decode on iOS as a present-
     # but-blank tab and defeat the `nil` check that falls back to Overview.

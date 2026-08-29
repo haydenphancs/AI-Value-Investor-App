@@ -98,6 +98,7 @@ struct ETFSnapshotCardHeader: View {
                     .foregroundColor(AppColors.textMuted)
             }
             .padding(.vertical, AppSpacing.md)
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
     }

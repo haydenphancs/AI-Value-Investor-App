@@ -127,6 +127,7 @@ struct ValuationSnapshotCard: View {
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.vertical, AppSpacing.md)
+                .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -292,6 +293,7 @@ struct SectorPerformanceSnapshotCard: View {
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.vertical, AppSpacing.md)
+                .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -394,6 +396,7 @@ struct MacroForecastSnapshotCard: View {
                         .foregroundColor(AppColors.textMuted)
                 }
                 .padding(.vertical, AppSpacing.md)
+                .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 

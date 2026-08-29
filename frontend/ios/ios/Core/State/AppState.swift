@@ -19,6 +19,7 @@
 
 import SwiftUI
 import Combine
+import UserNotifications
 
 // MARK: - Global App State
 
@@ -144,18 +145,35 @@ final class AppState {
     /// user's badge. Same bug class as the four Learn stores and `WhaleService`.
     var unreadNotificationCount: Int = 0
 
-    /// Broadcast an authoritative unread count from wherever it was last observed.
+    /// Broadcast an authoritative unread count from wherever it was last observed, and
+    /// write it to the APP-ICON badge.
     ///
     /// Posted as a Notification rather than written directly because the inbox ViewModel
     /// is not `@Observable` and has no AppState reference; `iosApp` observes this and
     /// updates the badge. Keeps the ViewModel free of a global lookup (ios-swiftui.md:
     /// dependencies arrive via `init`, never a singleton reach-through).
+    ///
+    /// ⚠️ THE ONE WRITER OF THE ICON BADGE. `setBadgeCount` used to live in
+    /// `AppDelegate.syncBadge` and nowhere else, which meant it ran only when a push
+    /// ARRIVED. Reading the inbox took the other path — this method — which drove the
+    /// tab-bar badge alone. So three pushes lit up a "3" on the app icon that survived
+    /// opening the app, reading every one of them and marking them read on the server:
+    /// only the next push could change the number. Both paths already call this, so
+    /// putting the write here makes the icon agree with the inbox by construction.
     static func notificationUnreadDidChange(_ count: Int) {
         NotificationCenter.default.post(
             name: .caydexNotificationUnreadChanged,
             object: nil,
             userInfo: ["count": count]
         )
+        // `count == 0` is the meaningful case — it CLEARS the badge — so no falsiness
+        // guard here. Negative would be rejected by iOS with an error.
+        UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { error in
+            guard let error else { return }
+            #if DEBUG
+            print("⚠️ [Push] setBadgeCount failed: \(error.localizedDescription)")
+            #endif
+        }
     }
 
     // MARK: - Services (Injected)
@@ -1054,6 +1072,14 @@ final class AppState {
         // on this phone the previous user's unread count, and possibly opening a screen
         // they never asked for. Same reasoning as the Learn stores above.
         unreadNotificationCount = 0
+        // The APP-ICON badge as well, which the assignment above does NOT reach: it is owned
+        // by iOS, survives the process, and is visible without launching the app at all. Left
+        // alone, the next account to sign in on this phone opens to a home screen still
+        // showing the PREVIOUS user's unread count — a number they cannot clear by reading
+        // anything, because the rows behind it belong to an account that is gone. Routed
+        // through the one writer so the icon and the tab agree here as everywhere else.
+        // (auth.md §7: a store keyed without a user id must be reset when a session ends.)
+        AppState.notificationUnreadDidChange(0)
         // And the object that PRODUCES that count. It is a singleton now (so the badge can be
         // refreshed away from the Alerts tab), which means it no longer dies with the view —
         // `AlertsTabContent`'s own `.reloadOnIdentityChange` reset is no longer sufficient on

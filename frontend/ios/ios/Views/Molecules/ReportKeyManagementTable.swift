@@ -109,7 +109,9 @@ struct ReportKeyManagementTable: View {
             .foregroundColor(AppColors.primaryBlue)
             .frame(maxWidth: .infinity)
             .padding(.vertical, AppSpacing.xs)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private func managerRow(_ manager: KeyManager) -> some View {

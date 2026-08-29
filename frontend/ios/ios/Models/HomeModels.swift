@@ -276,7 +276,7 @@ struct DailyBriefingItem: Identifiable, Codable {
 /// the first case.
 enum InvestorPersona: String, CaseIterable, Codable {
     case qualityCompounder = "The Quality Compounder"
-    case everydayGrowthHunter = "The Everyday Growth Hunter"
+    case growthHunter = "The Growth Hunter"
     case disruptionSeeker = "The Disruption Seeker"
     case activistConcentrator = "The Activist Concentrator"
     case deepValueSkeptic = "The Deep Value Skeptic"
@@ -284,7 +284,10 @@ enum InvestorPersona: String, CaseIterable, Codable {
     /// Pre-rename labels, mapped to their current case.
     private static let legacyNames: [String: InvestorPersona] = [
         "Warren Buffett": .qualityCompounder,
-        "Peter Lynch": .everydayGrowthHunter,
+        "Peter Lynch": .growthHunter,
+        // Renamed 2026-08-29. A feed row frozen under the old label — or a
+        // backend still a deploy behind the app — must still resolve.
+        "The Everyday Growth Hunter": .growthHunter,
         "Cathie Wood": .disruptionSeeker,
         "Bill Ackman": .activistConcentrator,
         "Michael Burry": .deepValueSkeptic
@@ -293,7 +296,7 @@ enum InvestorPersona: String, CaseIterable, Codable {
     /// Also accepts the backend `key` form, in case a caller sends that instead.
     private static let backendKeys: [String: InvestorPersona] = [
         "warren_buffett": .qualityCompounder,
-        "peter_lynch": .everydayGrowthHunter,
+        "peter_lynch": .growthHunter,
         "cathie_wood": .disruptionSeeker,
         "bill_ackman": .activistConcentrator,
         "michael_burry": .deepValueSkeptic
@@ -322,7 +325,7 @@ enum InvestorPersona: String, CaseIterable, Codable {
     var badgeColor: String {
         switch self {
         case .qualityCompounder: return "4F46E5"
-        case .everydayGrowthHunter: return "059669"
+        case .growthHunter: return "059669"
         case .disruptionSeeker: return "DC2626"
         case .activistConcentrator: return "DC2626"
         case .deepValueSkeptic: return "991B1B"

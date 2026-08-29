@@ -140,7 +140,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             syncBadge(from: info)
             Analytics.shared.track(.pushReceived, ["kind": .string(kindDimension(info))])
         }
-        return [.banner, .badge, .sound]
+        // `.list` is not optional chrome. Without it a notification that arrives while
+        // the app is in the FOREGROUND shows its banner and is then gone — it is never
+        // added to Notification Center, so pulling down five minutes later shows nothing
+        // and the alert has no second chance to be read.
+        return [.banner, .list, .badge, .sound]
     }
 
     // The TAP. Without this, a notification that says "NVDA moved 8%" opened the app
@@ -155,8 +159,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     ) async {
         let info = response.notification.request.content.userInfo
 
-        // "Mark as Read" is a background action: acknowledge it and stay out of the way.
+        // "Mark as Read" is a background action: do the work and stay out of the way.
+        //
+        // This used to fire one analytics event and return — a button registered on all
+        // six categories, offered on every notification the app sends, that did nothing.
+        // It could not have worked: the payload identified no row. The backend now sends
+        // `dedup_key` (the other half of `notification_events`' unique index), which is
+        // what the view model marks read.
         if response.actionIdentifier == Action.markRead {
+            await NotificationInboxViewModel.shared.markReadFromNotificationAction(
+                dedupKey: info["dedup_key"] as? String
+            )
             await MainActor.run {
                 Analytics.shared.track(.pushOpened, ["action": "mark_read"])
             }
@@ -183,16 +196,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// Server-computed on purpose: incrementing client-side drifts the moment a
     /// notification is delivered and not opened, and the badge is the one piece of
     /// notification state visible without launching the app.
+    ///
+    /// ⚠️ Writes the app-icon badge INDIRECTLY, through
+    /// `AppState.notificationUnreadDidChange`. This method used to call `setBadgeCount`
+    /// itself, and it was the only caller anywhere — so the icon was written when a push
+    /// ARRIVED and never again. Three pushes lit up a "3" that survived opening the app,
+    /// reading the Alerts tab and marking everything read on the server; only the next
+    /// push could change it. One writer, fed by both paths, is the fix.
     @MainActor
     private func syncBadge(from info: [AnyHashable: Any]) {
         guard let aps = info["aps"] as? [String: Any],
               let badge = aps["badge"] as? Int, badge >= 0 else { return }
-        UNUserNotificationCenter.current().setBadgeCount(badge) { error in
-            guard let error else { return }
-            #if DEBUG
-            print("⚠️ [Push] setBadgeCount failed: \(error.localizedDescription)")
-            #endif
-        }
         AppState.notificationUnreadDidChange(badge)
     }
 

@@ -234,6 +234,62 @@ final class NotificationInboxViewModel: ObservableObject {
         }
     }
 
+    /// Mark read from the notification's own "Mark as Read" button.
+    ///
+    /// That action is registered on all six categories, so every push the app sends offers
+    /// it — and it did nothing at all: it fired one analytics event and returned. Nothing
+    /// in the payload identified the row, because `route` carries a ticker and a tab and
+    /// never an id. The backend now sends `dedup_key`, which is the other half of the
+    /// `(user_id, dedup_key)` unique index.
+    ///
+    /// ⚠️ NO NETWORK CALL WITHOUT A TOKEN ALREADY IN MEMORY. This runs from
+    /// `didReceive` for a NON-foreground action, which iOS may service by launching the
+    /// app in the background with no scene — before `AppState.restoreSession` has put a
+    /// token on `APIClient`. Firing anyway would 401, and `.unauthorized` sets
+    /// `triggersTokenRefresh`, so a button tap would kick off a background refresh from a
+    /// process that is about to be suspended. Read the client's token (auth.md §8 — never
+    /// the Keychain, the two deliberately diverge during `.restoring`) and skip if absent.
+    ///
+    /// Skipping costs nothing durable: opening Alerts marks everything read on sight, so
+    /// the state converges the next time the user looks.
+    ///
+    /// ⚠️ NO OPTIMISTIC LOCAL DECREMENT. There was one — `unreadCount = max(0, unreadCount
+    /// - 1)` — and on the path this method exists for it WIPED the badge instead of
+    /// decrementing it. iOS services a non-foreground action by launching the app in the
+    /// background with no scene, so this singleton is constructed FRESH with
+    /// `unreadCount == 0` and nothing has loaded the inbox: `max(0, 0 - 1)` is 0, and a
+    /// user with five unread alerts watched all five disappear from the icon for marking
+    /// one read.
+    ///
+    /// It hid in testing because a simulator run with a genuinely-empty inbox produces
+    /// 0 either way — the wrong answer and the right answer are the same number.
+    ///
+    /// There is no public getter for the current icon badge, so a correct local
+    /// decrement is not available. The server's count is the only trustworthy number and
+    /// it is the only thing that writes the badge here. When the call is skipped or
+    /// fails, the badge is left ALONE — stale by one is a far smaller lie than zeroed.
+    func markReadFromNotificationAction(dedupKey: String?) async {
+        guard let dedupKey, !dedupKey.isEmpty else {
+            log.warning("mark-as-read tapped but the payload carried no dedup_key")
+            return
+        }
+        guard await APIClient.shared.currentAuthToken() != nil else {
+            log.info("mark-as-read deferred: no auth token in memory (background launch)")
+            return
+        }
+        do {
+            let result = try await repository.markRead(dedupKeys: [dedupKey])
+            unreadCount = result.unreadCount
+            AppState.notificationUnreadDidChange(unreadCount)
+        } catch {
+            // No toast is possible — the app is in the background and this action
+            // deliberately does not foreground it. Logged rather than silent, per
+            // auth.md §6, and self-healing: Alerts marks everything read on sight.
+            let appError = AppError.from(error)
+            log.warning("mark-as-read from notification failed: \(appError.message, privacy: .public)")
+        }
+    }
+
     func markAllRead() async {
         guard unreadCount > 0 else { return }
         applyOptimisticRead(ids: items.filter { !$0.isRead }.map(\.id))

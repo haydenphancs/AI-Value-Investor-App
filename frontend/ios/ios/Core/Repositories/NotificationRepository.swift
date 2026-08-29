@@ -15,6 +15,7 @@ import Foundation
 protocol NotificationRepositoryProtocol: Sendable {
     func fetchNotifications(limit: Int, before: String?) async throws -> NotificationListDTO
     func markRead(ids: [String]) async throws -> MarkNotificationsReadDTO
+    func markRead(dedupKeys: [String]) async throws -> MarkNotificationsReadDTO
     func markAllRead() async throws -> MarkNotificationsReadDTO
 
     func fetchPriceAlerts(ticker: String?) async throws -> PriceAlertListDTO
@@ -46,7 +47,19 @@ struct NotificationRepository: NotificationRepositoryProtocol {
 
     func markRead(ids: [String]) async throws -> MarkNotificationsReadDTO {
         try await apiClient.request(
-            endpoint: .markNotificationsRead(ids: ids, all: false),
+            endpoint: .markNotificationsRead(ids: ids, dedupKeys: [], all: false),
+            responseType: MarkNotificationsReadDTO.self
+        )
+    }
+
+    /// Mark read by DEDUP KEY rather than row id.
+    ///
+    /// The "Mark as Read" button on a delivered notification has no row id to work with —
+    /// an APNs payload carries `dedup_key`, which is the other half of the backend's
+    /// `(user_id, dedup_key)` unique index. Same endpoint, same user scoping.
+    func markRead(dedupKeys: [String]) async throws -> MarkNotificationsReadDTO {
+        try await apiClient.request(
+            endpoint: .markNotificationsRead(ids: [], dedupKeys: dedupKeys, all: false),
             responseType: MarkNotificationsReadDTO.self
         )
     }
@@ -55,7 +68,7 @@ struct NotificationRepository: NotificationRepositoryProtocol {
     /// round trips, each able to fail independently and leave the badge wrong.
     func markAllRead() async throws -> MarkNotificationsReadDTO {
         try await apiClient.request(
-            endpoint: .markNotificationsRead(ids: [], all: true),
+            endpoint: .markNotificationsRead(ids: [], dedupKeys: [], all: true),
             responseType: MarkNotificationsReadDTO.self
         )
     }

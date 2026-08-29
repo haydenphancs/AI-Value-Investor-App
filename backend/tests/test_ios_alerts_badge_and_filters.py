@@ -45,6 +45,8 @@ _DEST_ROW = _IOS / "Views" / "Molecules" / "AlertDestinationRow.swift"
 _NOTIF_DETAIL = _IOS / "Views" / "Screens" / "NotificationDetailView.swift"
 _ALERT_DETAIL = _IOS / "Views" / "Screens" / "AlertDetailView.swift"
 _ROUTE_DEST = _IOS / "Views" / "Molecules" / "NotificationRouteDestination.swift"
+_DEST_COVER = _IOS / "Views" / "Modifiers" / "AlertDestinationCover.swift"
+_TRACKING = _IOS / "Views" / "Screens" / "TrackingView.swift"
 _SMART_MONEY = (
     _REPO / "backend" / "app" / "services" / "notification_senders" / "smart_money_sender.py"
 )
@@ -640,13 +642,20 @@ def test_the_reports_glyph_is_the_research_tab_glyph_by_construction():
     )
 
 
-def test_research_failed_notifies_from_exactly_one_place():
-    """Both failure paths run; only one wins the claim.
+def test_research_failed_notifies_only_from_paths_that_cannot_collide():
+    """Two senders, and their disjointness is the whole argument.
 
-    `claim_and_mark_failed` is the single atomic compare-and-set — PostgREST folds the
-    `is_refunded=False` guard into one UPDATE, so exactly one of the worker's `except` and
-    the reconciliation sweep gets there. A second send from `research_service` would
-    double-notify on the ordinary failure path.
+    1. `claim_and_mark_failed` — the single atomic compare-and-set. PostgREST folds the
+       `is_refunded=False` guard into one UPDATE, so of the worker's own `except` and the
+       reconciliation sweep, exactly one reaches it for a given report.
+    2. `schedule_abandoned_report_notice` — `GET /stocks/{ticker}/report`, which creates
+       NO `research_reports` row, so (1) can never fire for it.
+
+    A third caller inside `research_service` would double-notify on the ordinary failure
+    path, because both it and the sweep run and only one wins the CAS. That is what the
+    negative assertion below forbids, and it is why the count is pinned rather than left
+    open: this was `== 2` (definition + one call) and is now `== 3`, and the next person
+    to change it has to say which disjointness argument they are relying on.
     """
     recon = _RECON.read_text(encoding="utf-8")
     assert "KIND_RESEARCH_FAILED" in recon, (
@@ -654,7 +663,10 @@ def test_research_failed_notifies_from_exactly_one_place():
         "that failed is told nothing at all — the gap this kind exists to close."
     )
     assert recon.count("_notify_report_failed(") == 2, (
-        "Expected exactly one call site plus the definition of `_notify_report_failed`."
+        "Expected exactly one call site plus the definition of `_notify_report_failed`. A "
+        "second was added for a client-disconnect path and removed once that path proved "
+        "unreachable; any new one needs its own argument for why it cannot fire alongside "
+        "the compare-and-set winner."
     )
     svc = _RESEARCH_SVC.read_text(encoding="utf-8")
     assert "KIND_RESEARCH_FAILED" not in svc, (
@@ -800,21 +812,27 @@ def test_both_detail_screens_use_the_one_destination_row():
     )
 
 
-def test_the_detail_screens_push_content_not_the_stack_wrapper():
+def test_the_destination_cover_uses_content_not_the_stack_wrapper():
     """`NotificationRouteDestination` wraps itself in a `NavigationStack`.
 
-    Nesting it inside a screen that already owns a stack double-stacks: the pushed screen gets
-    its own back button that pops to nothing, and the outer one disappears.
+    Nesting it inside a view that already owns a stack double-stacks: the inner screen gets its
+    own back button that pops to nothing, and the outer one disappears. `AlertDestinationCover`
+    writes a stack, so it must use the stack-free dispatch inside it.
+
+    The OWNER of this invariant moved. It used to be the two detail screens, which pushed the
+    destination themselves; they now report the choice upward and the cover does the presenting.
     """
     assert "struct NotificationRouteContent: View" in _read(_ROUTE_DEST), (
-        "The stack-free dispatch was removed; the detail screens have nothing safe to push."
+        "The stack-free dispatch was removed; the cover has nothing safe to present."
     )
-    for path, name in ((_NOTIF_DETAIL, "NotificationDetailView"), (_ALERT_DETAIL, "AlertDetailView")):
-        src = _read(path)
-        assert "NotificationRouteContent(route:" in src, f"{name} is not pushing the content view."
-        assert "NotificationRouteDestination(" not in src, (
-            f"{name} pushes the NavigationStack wrapper — this double-stacks."
-        )
+    cover = _read(_DEST_COVER)
+    assert "NotificationRouteContent(route:" in cover, (
+        "AlertDestinationCover is not using the content view."
+    )
+    assert "NotificationRouteDestination(" not in cover, (
+        "AlertDestinationCover presents the NavigationStack wrapper inside its own stack — "
+        "this double-stacks."
+    )
 
 
 def test_a_report_notification_opens_the_report():
@@ -872,3 +890,162 @@ def test_the_report_route_carries_the_persona():
     assert '"persona": persona_key,' in src, (
         "The report-ready route no longer carries the persona."
     )
+
+
+# ── the report that "died with the client", which does not happen ────────────
+
+
+_TICKER_REPORT = _REPO / "backend" / "app" / "api" / "v1" / "endpoints" / "ticker_report.py"
+
+
+def test_the_disconnect_notice_is_not_rebuilt_on_a_false_premise():
+    """A guard against re-adding something that was added, shipped nothing, and removed.
+
+    The idea is seductive: `GET /stocks/{ticker}/report` is synchronous, so every ordinary
+    failure reaches the user as a structured error — EXCEPT a client disconnect, where the
+    handler is cancelled, the `finally` refunds 20 credits and the user learns nothing. So
+    catch `asyncio.CancelledError` and push "your analysis didn't finish".
+
+    THE PREMISE IS FALSE ON THIS STACK, and it was believed long enough to ship a flag, a
+    fire-and-forget task, a second `_notify_report_failed` caller and five source-scan
+    tests that all passed over unreachable code:
+
+      * `starlette.routing.request_response` (0.41.3, pinned via fastapi 0.115.6) is a
+        bare `response = await f(request)` — no anyio task group, no `http.disconnect`
+        listener.
+      * `BaseHTTPMiddleware` only converts a disconnect into a `receive()` MESSAGE. This
+        GET handler never calls `receive()`.
+      * uvicorn 0.34 cancels the request task only when `timeout_graceful_shutdown` is
+        exceeded, and that setting appears in neither the Procfile nor the Dockerfile.
+
+    Measured against this venv with an identical middleware shape: an aborted curl, a hard
+    TCP RST with SO_LINGER 0, and a SIGTERM mid-request ALL let the handler run to
+    completion. So a backgrounded app is not a non-delivery — the report finishes, is
+    cached, and the user gets it free on their next open. The push would have been a
+    factual lie.
+
+    If someone genuinely wants disconnect handling later it has to be built on
+    `await request.is_disconnected()` polling, not on `CancelledError`.
+    """
+    src = _TICKER_REPORT.read_text(encoding="utf-8")
+    code = "\n".join(
+        "" if line.strip().startswith("#") else line for line in src.splitlines()
+    )
+    assert "except asyncio.CancelledError" not in code, (
+        "the CancelledError arm is back. On starlette 0.41.3 a client disconnect does not "
+        "cancel the handler, so this branch cannot execute — and the comment beside it "
+        "will state the opposite of what the framework does."
+    )
+    assert "schedule_abandoned_report_notice" not in code, (
+        "the abandoned-report push is back on a path that cannot reach it"
+    )
+    # The refund itself is untouched and must stay unconditional.
+    assert "if charged and not delivered:" in code
+    assert "reason=\"report_refund\"" in code
+
+
+def test_the_reasoning_survives_where_the_next_reader_will_look():
+    """A deleted branch teaches nothing; the note that explains WHY is the artifact.
+
+    Both files carried the false claim, so both had to be corrected — not just the one
+    holding the code.
+    """
+    assert "does NOT cancel the handler" in _RECON.read_text(encoding="utf-8"), (
+        "research_reconciliation_service lost the note explaining why its second caller "
+        "was removed"
+    )
+    assert "no task group" in _TICKER_REPORT.read_text(encoding="utf-8")
+
+
+# ── the ticker must not render inside the alert sheet ────────────────────────
+#
+# Both Activity detail screens are sheets, and both PUSHED the destination onto the sheet's own
+# NavigationStack — so `TickerDetailView` ran inside a sheet. That screen declares SEVEN `.sheet`
+# modifiers (search, price alerts, share, upgrades/downgrades, technical analysis) and
+# `WhaleProfileView` five, and inside the alert sheet every one of them is a sheet presented from
+# a sheet. A tester reported the ticker screen's search icon doing nothing; search was simply the
+# one they tapped. The screen was visibly slow to arrive too — the heaviest in the app, rendered
+# inside a modal presentation.
+
+
+def test_the_detail_screens_report_the_choice_instead_of_navigating():
+    """They must hand the destination UP, not open it themselves.
+
+    A `.navigationDestination` here is the bug: it keeps the ticker inside the sheet.
+    """
+    for path, name in ((_NOTIF_DETAIL, "NotificationDetailView"),
+                       (_ALERT_DETAIL, "AlertDetailView")):
+        src = _read(path)
+        assert "var onOpen: (AlertDestination) -> Void" in src, (
+            f"{name} lost the report-upward channel."
+        )
+        assert "NotificationRouteContent" not in src, (
+            f"{name} opens the destination itself again — that renders TickerDetailView inside "
+            f"the sheet, where its own seven sheets cannot present."
+        )
+        assert "WhaleProfileView" not in src, (
+            f"{name} pushes the whale profile itself again — five sheets, same failure."
+        )
+        assert "navigationDestination" not in src, (
+            f"{name} navigates again instead of reporting upward."
+        )
+
+
+def test_the_cover_writes_its_own_navigation_stack():
+    """THE assertion that actually pins the fix.
+
+    A `fullScreenCover` starts a NEW presentation context, and `.navigationDestination` is inert
+    without a `NavigationStack` ancestor *in that same context*. Without the stack written inside
+    the cover, `TickerDetailView`'s search-RESULT push (`$selectedSearchResult`) silently does
+    nothing: the search sheet opens, you pick a ticker, and the screen just sits there. Deleting
+    the stack looks harmless and reintroduces half the original bug.
+
+    This is exactly what `HomeDashboardView` does for a Daily Scanners tap, which is the path the
+    tester asked us to match.
+    """
+    cover = _read(_DEST_COVER)
+    body = _balanced(cover, "func body(content: Content) -> some View {")
+    assert "fullScreenCover(item:" in body, (
+        "the destination is no longer opened in its own presentation context"
+    )
+    stack = body.find("NavigationStack")
+    dispatch = body.find("destinationView(")
+    assert stack != -1, (
+        "the cover no longer writes a NavigationStack — TickerDetailView's search results and "
+        "in-content ticker taps become silent no-ops"
+    )
+    assert stack < dispatch, "the destination is rendered outside the stack"
+
+
+def test_the_cover_is_handed_off_from_the_sheets_dismissal():
+    """A cover cannot be presented while its sheet is still on screen.
+
+    Setting the cover's item straight from the row callback races the sheet's dismissal: UIKit
+    refuses to present from a controller that is already presenting, and the tap silently does
+    nothing. `.sheet(item:onDismiss:)` exists for exactly this hand-off.
+    """
+    for path, name in ((_ALERTS_TAB, "AlertsTabContent"), (_TRACKING, "TrackingView")):
+        src = _read(path)
+        assert "onDismiss:" in src, f"{name} presents the cover without waiting for the sheet."
+        assert ".alertDestinationCover(" in src, f"{name} no longer opens destinations."
+        # The row callback parks it; only `onDismiss` promotes it to the cover.
+        assert "pendingDestination" in src or "pendingAlertDestination" in src, (
+            f"{name} assigns the cover item directly from the row tap, which races the dismissal"
+        )
+
+
+def test_both_tracking_copies_were_updated():
+    """`TrackingView` defines two near-identical screens — `TrackingContentView` and
+    `TrackingContentViewWithBinding`. Only the second is reachable from `ContentView`, but both
+    compile and both embed `AlertsTabContent`.
+
+    A fix that lands only on the unreachable copy has shipped in this repo before
+    (`project_research_screen_live_vs_preview`), and the two reading differently is how the next
+    person "fixes" the dead one.
+    """
+    src = _read(_TRACKING)
+    assert src.count(".alertDestinationCover(") == 2, (
+        f"expected both TrackingContentView copies to open destinations the same way, found "
+        f"{src.count('.alertDestinationCover(')}"
+    )
+    assert src.count("AlertDetailView(alert: alert) { destination in") == 2

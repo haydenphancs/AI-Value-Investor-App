@@ -146,3 +146,28 @@ def test_no_sender_hand_writes_a_ticker_route_any_more():
         f"hand-written ticker routes in {offenders} — use "
         f"notification_kinds.ticker_route() so the shape stays in one place"
     )
+
+
+# ── the asset type when the sender does not know ─────────────────────────────
+#
+# `asset_type` defaulted to the literal "stock" and FIVE of the six callers took that
+# default, which cost two separate things. Every crypto / index / commodity notification
+# from those senders was labelled an equity and opened `TickerDetailView`. And, less
+# obviously, it made the dispatcher's own backfill dead code: `notify_watchers` resolved a
+# type only `if not route.get("asset_type")`, and the key was never absent.
+
+
+def test_the_symbol_decides_when_the_caller_does_not():
+    """`detect_asset_class` is pure and free, so there is no reason to guess "stock"."""
+    assert ticker_route("ticker_move", "BTCUSD")["asset_type"] == "crypto"
+    assert ticker_route("ticker_move", "^GSPC")["asset_type"] == "index"
+    assert ticker_route("ticker_move", "GCUSD")["asset_type"] == "commodity"
+    assert ticker_route("ticker_move", "AAPL")["asset_type"] == "stock"
+
+
+def test_an_explicit_asset_type_still_wins_over_the_symbol():
+    """A sender that reads the type off its own row (price alerts) knows better than a
+    symbol heuristic, and `resolve_asset_class` is deliberately not consulted here."""
+    assert ticker_route("price_alert", "AAPL", asset_type="etf")["asset_type"] == "etf"
+
+

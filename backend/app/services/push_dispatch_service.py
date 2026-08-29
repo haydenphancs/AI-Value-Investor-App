@@ -62,7 +62,7 @@ from app.services.notification_kinds import (
     kind_for_preference_key,
     preference_defaults,
 )
-from app.services.push_service import PushService
+from app.services.push_service import LEDGER_BODY_LIMIT, PushService, truncate_for_banner
 
 logger = logging.getLogger(__name__)
 
@@ -632,7 +632,10 @@ class PushDispatchService:
             "kind": kind or "unknown",
             "category": category or "unknown",
             "title": title,
-            "body": body,
+            # Defensive ceiling only — see LEDGER_BODY_LIMIT. The banner's own, much shorter
+            # bound is applied at the APNs boundary, so the row keeps the full text for the
+            # detail screen to show.
+            "body": truncate_for_banner(body, LEDGER_BODY_LIMIT),
             "route": route or {},
             "push_state": push_state,
         }
@@ -783,7 +786,7 @@ class PushDispatchService:
             )
             return False
 
-        accepted = await self.push.send_to_user(
+        outcome = await self.push.send_to_user(
             uid,
             title=title,
             body=body,
@@ -795,15 +798,33 @@ class PushDispatchService:
             category=kind.thread_id,
             badge=recipient.unread + 1,
         )
-        if accepted:
+        # What APNs said about EVERY device, not just whether one worked.
+        #
+        # `sent` still means "at least one device took it" — that is the right semantics for
+        # the inbox and the daily cap, and demanding ALL devices would mark a real delivery
+        # failed because of one stale simulator token. What changes is that a PARTIAL
+        # delivery is no longer silent: the per-device rejections are written to
+        # `last_error` even on the success path, so `push_state='sent' AND last_error IS NOT
+        # NULL` is the query that answers "it says sent, why did my phone not buzz?".
+        #
+        # This existed as a `logger.warning` only, and Railway's buffer is hours deep — by
+        # the time a TestFlight report arrives the evidence is gone. `last_error` was NULL on
+        # every row in the table.
+        detail = outcome.summary()
+        if outcome.accepted:
+            if detail:
+                logger.warning(
+                    "push PARTIAL user=%s kind=%s: %d/%d devices accepted — %s",
+                    uid, kind.key, outcome.accepted, outcome.attempted, detail,
+                )
             await asyncio.to_thread(
-                self.mark_state, uid, dedup_key, STATE_SENT, sent=True
+                self.mark_state, uid, dedup_key, STATE_SENT, sent=True, error=detail
             )
             return True
 
         await asyncio.to_thread(
             self.mark_state, uid, dedup_key, STATE_FAILED,
-            error="APNs accepted no device", sent=False,
+            error=detail or "APNs accepted no device", sent=False,
         )
         return False
 
@@ -871,13 +892,28 @@ class PushDispatchService:
             )
             users = users[:MAX_RECIPIENTS_PER_SCOPE]
 
-        # DRY RUN still needs `push.enabled` to be irrelevant: the whole point is to
-        # exercise the pipeline without APNs configured.
+        # APNs being unconfigured must NOT delete the inbox.
+        #
+        # This used to `return 0` right here — before `resolve_recipients` and before any
+        # `claim_send` — so a missing APNS_* value produced no `notification_events` row at
+        # all. The in-app inbox was empty, the calling job logged a healthy "delivered 0/0",
+        # and the only trace was a `logger.debug` that is invisible at the default INFO level.
+        # The inbox exists precisely so a notification survives a failed push; returning here
+        # threw away the one artifact that was supposed to outlive it.
+        #
+        # Now it falls through: the row is claimed and written, `_deliver` gets the
+        # "APNs is not configured" outcome from `PushService.send_to_user`, and the row lands
+        # in `failed` carrying that reason. The user still sees the alert in the app.
+        #
+        # ERROR, not debug. If push is unconfigured in production that is an emergency, and
+        # the cost of the old choice was a month of silence nobody could see.
         if not settings.PUSH_DRY_RUN and not self.push.enabled:
-            # Expected until the APNs key is configured. Debug, not warning — this
-            # would otherwise log on every material move, forever.
-            logger.debug("push: APNs not configured — skipping %s alert", kind)
-            return 0
+            logger.error(
+                "push: APNs is NOT CONFIGURED — %s alerts will be recorded in the inbox but "
+                "no device will be notified. Check APNS_KEY_ID / APNS_TEAM_ID / "
+                "APNS_AUTH_KEY / APNS_BUNDLE_ID.",
+                kind,
+            )
 
         recipients = await asyncio.to_thread(self.resolve_recipients, users, nkind, now)
 

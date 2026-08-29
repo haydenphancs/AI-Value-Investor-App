@@ -79,12 +79,24 @@ final class NewsDetailViewModel: ObservableObject {
 
     /// Key Takeaways ARE the AI enrichment bullets. No synthesis happens on the
     /// client — if the backend has not produced bullets, there are no takeaways.
+    ///
+    /// The LAST bullet is the conclusion and may still open with a lead-in
+    /// ("The takeaway for everyday investors, …") from a cached enrichment. Under
+    /// a heading that already reads "Key Takeaways", in a NUMBERED list, those
+    /// words are pure repetition — so they are stripped here too. This list keeps
+    /// its numbers rather than taking the arrow glyph: the number already marks
+    /// position, and an arrow would compete with it.
     private static func takeaways(from bullets: [String]) -> [KeyTakeaway] {
-        bullets
+        let cleaned = bullets
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .enumerated()
-            .map { KeyTakeaway(index: $0.offset + 1, text: $0.element) }
+        return cleaned.enumerated().map { offset, text in
+            let isLast = offset == cleaned.count - 1
+            return KeyTakeaway(
+                index: offset + 1,
+                text: isLast ? text.strippingConclusionLeadIn() : text
+            )
+        }
     }
 
     /// Read time from the article body's word count. Nil when there is no body

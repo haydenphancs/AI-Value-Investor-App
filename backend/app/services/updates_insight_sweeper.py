@@ -497,7 +497,11 @@ class InsightSweeper:
                 # also makes the lock-screen banner answer "how much?" without opening
                 # the app. `cp` is validated non-None and non-zero above.
                 title=f"{scope} {cp:+.1f}%",
-                body=headline[:180],
+                # NOT truncated here. This same string becomes `notification_events.body`,
+                # which the Activity detail screen shows in full — a slice at the sender made
+                # every stored catalyst exactly 180 characters, ending mid-word. The lock-screen
+                # bound is applied at the APNs boundary instead (`truncate_for_banner`).
+                body=headline,
                 dedup_key=f"move:{scope}:{trading_date_et()}",
                 preference_key="notify_watchlist_changes",
                 # Routes the tap straight to this ticker (AppDelegate → deep link).

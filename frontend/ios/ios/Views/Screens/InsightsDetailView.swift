@@ -89,11 +89,8 @@ struct InsightsDetailView: View {
                 ForEach(Array(visibleBullets.enumerated()), id: \.offset) { index, point in
                     let isLast = index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        Circle()
-                            .fill(AppColors.textSecondary)
-                            .frame(width: 5, height: 5)
-                            .padding(.top, 6)
-                        Text(isLast ? point.normalizingLeadInColon() : point)
+                        SummaryBulletGlyph(isConclusion: isLast)
+                        Text(isLast ? point.strippingConclusionLeadIn() : point)
                             .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -140,10 +137,24 @@ struct InsightsDetailView: View {
                         .foregroundColor(AppColors.textPrimary)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let host = source.host {
-                        Text(host)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textMuted)
+                    // The OUTLET, with the URL host only as a fallback. A bare
+                    // host mislabels broadcast news: feeds link TV segments to
+                    // their video upload, so this row read "youtube.com" when the
+                    // source was Bloomberg or CNBC Television.
+                    if let name = source.displayName {
+                        HStack(spacing: AppSpacing.xxs) {
+                            if source.isVideo {
+                                Image(systemName: "play.rectangle.fill")
+                                    .font(AppTypography.iconTiny)
+                                    .foregroundColor(AppColors.textMuted)
+                            }
+                            Text(name)
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .lineLimit(1)
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(source.isVideo ? "\(name), video" : name)
                     }
                 }
                 Spacer(minLength: AppSpacing.sm)
@@ -176,9 +187,18 @@ struct InsightsDetailView: View {
             updatedAt: Date().addingTimeInterval(-3600),
             summaryType: "24h",
             sources: [
-                InsightSource(title: "Nvidia leads AI rally as valuations stretch", url: URL(string: "https://www.reuters.com/tech/ai")),
-                InsightSource(title: "Oil climbs on Middle East tensions", url: URL(string: "https://www.cnbc.com/oil")),
-                InsightSource(title: "Big Tech earnings preview", url: nil)
+                InsightSource(title: "Nvidia leads AI rally as valuations stretch",
+                              url: URL(string: "https://www.reuters.com/tech/ai"),
+                              publisher: "Reuters"),
+                // A broadcast segment: video host, real outlet. The case this screen got wrong.
+                InsightSource(title: "Fed Chair's full remarks at the Jackson Hole symposium",
+                              url: URL(string: "https://www.youtube.com/watch?v=abc123"),
+                              publisher: "CNBC Television"),
+                // A card stored before `publisher` shipped — falls back to the host.
+                InsightSource(title: "Oil climbs on Middle East tensions",
+                              url: URL(string: "https://www.cnbc.com/oil"),
+                              publisher: nil),
+                InsightSource(title: "Big Tech earnings preview", url: nil, publisher: nil)
             ]
         )
     )

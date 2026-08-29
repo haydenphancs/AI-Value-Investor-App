@@ -39,12 +39,30 @@ final class SettingsSyncManager {
 
     // Boolean toggles (NotificationsSettingsView + AppSettingsView). App Lock is
     // deliberately NOT synced — it's device-local security.
+    /// ⚠️ EVERY `preference_key` and `master_preference_key` in the backend registry
+    /// (`notification_kinds.py`) must appear here, or its toggle is a control that does
+    /// nothing. `currentBlob()` iterates ONLY this list, so a key missing from it is written
+    /// to `UserDefaults` and never uploaded — the backend then falls back to the kind's
+    /// `default_on` forever.
+    ///
+    /// Both directions matter, and only one was guarded. `notify_profile_topics` was absent
+    /// for months: `profile_match` ships default-OFF, so the toggle could never be turned on
+    /// and the kind was undeliverable to EVERY user — 0 rows in `notification_events`
+    /// all-time while its job ran nightly. `notify_research_failed` was absent too; that one
+    /// ships ON, so it worked, but the opt-out was inert, which is the "alerts with no in-app
+    /// way to turn them off" failure the registry's own docstring warns about.
+    ///
+    /// `test_push_preference_typing.py` now pins `registry ⊆ boolKeys`. The reverse
+    /// (`boolKeys ⊆ declared`) was already pinned; the `notify_market_*` keys are
+    /// deliberately synced with no kind behind them.
     static let boolKeys: [String] = [
         "notify_earnings_alerts", "notify_earnings_surprises", "notify_earnings_upcoming",
         "notify_market_alerts", "notify_market_macro", "notify_market_volatility", "notify_market_sector",
         "notify_smart_money", "notify_smart_money_whale", "notify_smart_money_insider",
         "notify_smart_money_institutional",
-        "notify_research_complete", "notify_watchlist_changes",
+        "notify_research_complete", "notify_research_failed",
+        "notify_profile_topics",
+        "notify_watchlist_changes",
         "notify_price_alerts",
         "notify_quiet_hours_enabled",
         "haptic_feedback", "autoplay_next",

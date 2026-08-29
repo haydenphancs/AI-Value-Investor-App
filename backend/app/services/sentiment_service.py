@@ -502,7 +502,15 @@ class SentimentService:
                 # that; overwriting them with `_classify_headline`'s keyword guess destroyed
                 # the enrichment and replaced it with something materially worse. The
                 # classification above is still used for THIS response.
-                "source_name": a.get("site") or a.get("source") or "",
+                # PUBLISHER-FIRST, matching `NewsCacheService._build_and_cache_rows`,
+                # which owns this table. Both writers upsert on the same
+                # `(ticker, external_id)` key, so a disagreement here does not
+                # merely differ — it CLOBBERS. This used to be `site`-first, and
+                # production held the same outlet under both spellings
+                # ("The Motley Fool" and "fool.com", "CNBC Television" and
+                # "youtube.com") depending on which writer touched the row last,
+                # with the domain form winning because this path ran later.
+                "source_name": a.get("publisher") or a.get("site") or a.get("source") or "",
                 "published_at": published,  # None when unparseable — see above
                 "thumbnail_url": a.get("image") or "",
                 "article_url": url,

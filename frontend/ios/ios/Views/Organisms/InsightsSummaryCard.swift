@@ -144,18 +144,18 @@ struct InsightsSummaryCard: View {
                 // Index-keyed, not `id: \.self` — two identical bullet lines
                 // would collide and one would be dropped/glitched.
                 ForEach(Array(visibleBullets.enumerated()), id: \.offset) { index, point in
-                    // Final bullet = the takeaway; render its lead-in colon as a
-                    // comma so it reads as a sentence, matching the article cards.
+                    // Final bullet = the conclusion. The arrow glyph marks it, so
+                    // any "The takeaway," lead-in is stripped from the text — cached
+                    // bullets still carry it (the per-article prompt has no version
+                    // to invalidate them) and it would otherwise sit right next to
+                    // the icon that replaced it.
                     // Measured against the TRUNCATED list, so a card whose tail was
-                    // dropped by the cap does not comma-splice a mid-list bullet.
+                    // dropped by the cap does not mark a mid-list bullet.
                     let isLast = index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        Circle()
-                            .fill(AppColors.textSecondary)
-                            .frame(width: 5, height: 5)
-                            .padding(.top, 6)
+                        SummaryBulletGlyph(isConclusion: isLast)
 
-                        Text(isLast ? point.normalizingLeadInColon() : point)
+                        Text(isLast ? point.strippingConclusionLeadIn() : point)
                             .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

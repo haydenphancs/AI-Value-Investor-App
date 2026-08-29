@@ -13,13 +13,17 @@ struct TickerNewsExpandedContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             ForEach(Array(bullets.enumerated()), id: \.offset) { index, bullet in
-                // The final bullet is the "why investors care" takeaway. If it
-                // opens with a lead-in transition ending in a colon
-                // ("The takeaway: …"), show it as a comma-led sentence so it
-                // reads like "Ultimately, …" rather than a bold label.
+                // The final bullet is the "why investors care" conclusion. The
+                // arrow glyph marks it now, so any lead-in ("The takeaway for
+                // everyday investors, …") is stripped from the text. This surface
+                // needs the strip most: per-article bullets have NO invalidation —
+                // re-enrichment is gated on a boolean and `expires_at` is
+                // re-stamped on every refresh — so an article that keeps
+                // circulating keeps its old wording indefinitely.
                 let isLast = index == bullets.count - 1
                 NewsCardBulletPoint(
-                    text: isLast ? bullet.normalizingLeadInColon() : bullet
+                    text: isLast ? bullet.strippingConclusionLeadIn() : bullet,
+                    isConclusion: isLast
                 )
             }
         }

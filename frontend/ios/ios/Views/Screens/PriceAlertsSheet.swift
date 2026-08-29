@@ -15,6 +15,7 @@
 //
 
 import SwiftUI
+import UserNotifications
 
 struct PriceAlertsSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -22,6 +23,18 @@ struct PriceAlertsSheet: View {
     @StateObject private var viewModel: PriceAlertsViewModel
     /// The rows, shared with Tracking → Alerts and with the header bell.
     @ObservedObject private var store = PriceAlertStore.shared
+
+    /// iOS's notification permission, read on appear and re-read after we ask.
+    ///
+    /// THIS SCREEN IS THE HIGHEST-INTENT MOMENT IN THE PRODUCT for that permission — the user
+    /// is typing "tell me when ORCL hits $147" — and until now it neither asked nor admitted
+    /// it could not deliver. The onboarding prompt is gated on finishing the flow AND picking
+    /// a ticker (`OnboardingView.finish`), which is a defensible choice — iOS asks once, so a
+    /// wasted prompt is permanent — but it left no second chance: Skip, or pick nothing, and
+    /// the app never asks again. Anyone who installed before that flow existed already has
+    /// `has_completed_onboarding = true` and never saw it at all. Measured consequence: 1 of
+    /// 16 production users had a device token.
+    @State private var permission: UNAuthorizationStatus = .notDetermined
 
     init(ticker: String, assetType: String = "stock") {
         _viewModel = StateObject(
@@ -37,6 +50,12 @@ struct PriceAlertsSheet: View {
 
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                        // Only when DENIED. `.notDetermined` is handled by asking after the
+                        // first successful create instead — a pre-emptive CTA here would
+                        // compete with the button the user actually came to press.
+                        if permission == .denied {
+                            NotificationPermissionBanner(status: permission) {}
+                        }
                         createCard
                         existingSection
                     }
@@ -56,11 +75,39 @@ struct PriceAlertsSheet: View {
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }
-            .task { await viewModel.load() }
+            .task {
+                await viewModel.load()
+                await refreshPermission()
+            }
+            // Re-read on return from iOS Settings, so the banner clears without a re-entry.
+            .onReceive(NotificationCenter.default.publisher(
+                for: UIApplication.willEnterForegroundNotification
+            )) { _ in
+                Task { await refreshPermission() }
+            }
         }
     }
 
     // MARK: - Create
+
+    private func refreshPermission() async {
+        permission = await UNUserNotificationCenter.current().notificationSettings()
+            .authorizationStatus
+    }
+
+    /// Ask iOS, but only when it has never been asked.
+    ///
+    /// Mirrors `NotificationSettingsViewModel.requestPermissionIfNeeded`: calling this while
+    /// `.denied` is a silent no-op that would leave the screen looking identical to the
+    /// granted case. Denied users get the banner above instead, which sends them to Settings.
+    private func requestPermissionIfNeeded() async {
+        guard permission == .notDetermined else { return }
+        // AWAIT the answer. Sleeping a fixed 500ms and re-reading was wrong: the prompt is
+        // modal and a person takes seconds to read it, so the re-read observed
+        // `.notDetermined` and the denial warning never appeared. Caught on the simulator.
+        await PushNotificationManager.shared.requestAuthorizationResult()
+        await refreshPermission()
+    }
 
     private var createCard: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
@@ -108,7 +155,14 @@ struct PriceAlertsSheet: View {
                 .foregroundColor(AppColors.textMuted)
 
             Button {
-                Task { await viewModel.create() }
+                Task {
+                    // Ask ONLY after a rule exists. The prompt is one-shot, so spending it on
+                    // a failed create — or before the user has committed to anything — is how
+                    // a permanent denial happens.
+                    if await viewModel.create() {
+                        await requestPermissionIfNeeded()
+                    }
+                }
             } label: {
                 Text(viewModel.isSaving ? "Saving…" : "Add Alert")
                     .font(AppTypography.bodyEmphasis)

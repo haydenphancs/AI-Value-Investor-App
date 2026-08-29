@@ -163,3 +163,45 @@ def test_get_stock_news_docstring_warns_about_the_none_fallback():
     # today must be told otherwise.
     doc = (FMPClient.get_stock_news.__doc__ or "").lower()
     assert "does not return general" in doc
+
+
+def test_the_offtopic_gate_is_actually_wired_into_the_market_fetch():
+    """Unit-testing `filter_market_articles` proves the rule; this proves the
+    WIRING. `_fetch_market_raw` catches filter errors and serves the UNFILTERED
+    corpus, so a gate that raised — or one that was never called — would look
+    identical from the outside: a full feed and a green suite.
+    """
+    svc = _StubService(
+        general=[
+            _article("g1", "A 158-year-old lawn company says it's a lifestyle brand now"),
+            _article("g2", "Fed signals a possible rate hike"),
+        ],
+        index=[_article("i1", "S&P 500 hits resistance", symbol="SPY")],
+    )
+    titles = {r["title"] for r in asyncio.run(svc._fetch_market_raw(25))}
+    assert "Fed signals a possible rate hike" in titles
+    assert "S&P 500 hits resistance" in titles
+    assert not any("lifestyle brand" in t for t in titles), (
+        "the off-topic gate is not reached by the market fetch"
+    )
+
+
+def test_source_name_is_stored_from_the_publisher_not_the_domain():
+    """The market corpus is where the Insights card reads its publishers from.
+    A row cached with the hosting domain is how a Bloomberg TV segment came to be
+    cited as "youtube.com" — see tests/test_news_source_writers.py."""
+    raw = {
+        "url": "https://www.youtube.com/watch?v=x", "title": "Fed chair speaks",
+        "publishedDate": "2026-07-20 18:00:00", "symbol": None,
+        "publisher": "CNBC Television", "site": "youtube.com",
+        "text": "body", "image": None,
+    }
+    svc = _StubService()
+    rows = svc._build_and_cache_rows(
+        "__MARKET__", [raw], 25, fallback_ticker=None, label="market",
+        ingest_only=True,
+    )
+    assert rows and rows[0]["source_name"] == "CNBC Television", (
+        f"expected the broadcaster, got {rows[0]['source_name']!r} — a cached "
+        "hosting domain is what made the Insights card cite youtube.com"
+    )

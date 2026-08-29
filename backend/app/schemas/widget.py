@@ -169,14 +169,45 @@ class WidgetMoveContextResponse(BaseModel):
     market_change_percent: Optional[float] = None
 
 
+class WidgetMarketBriefResponse(BaseModel):
+    """The one-sentence read on the whole market, for the Market tile.
+
+    This is the `__MARKET__` roll-up the Updates screen already shows — same cache,
+    same sweeper, no extra AI spend. It exists so the Market tile can answer "what is
+    going on with the market" at a glance, which is a different question from the
+    biggest-mover tile that Holdings mode answers.
+
+    ⚠️ SESSION-GATED AT THE SOURCE. The roll-up's own window is 24-96h and its hard TTL
+    is 96h, so it can outlive the session it describes — which is precisely why this
+    payload used to refuse to carry it. The service omits the whole object unless the
+    card was generated during the session the rest of the payload describes, so the
+    widget keeps rendering only facts dated to today BY CONSTRUCTION rather than by a
+    label the client has to be trusted to respect (`test_widget_daily_scope.py`).
+    """
+
+    # One sentence, already word-capped by the roll-up prompt.
+    headline: str
+    # 'Bullish' | 'Bearish' | 'Neutral' — same vocabulary as the Updates card's badge.
+    sentiment: Optional[str] = None
+    # ISO-8601 UTC. Present so the client can age the tile, never to be shown raw.
+    generated_at: Optional[str] = None
+
+
 class WidgetMoverPayload(BaseModel):
     """What one widget timeline entry renders.
 
-    Deliberately NOT carrying: a market news headline (`__MARKET__`'s roll-up is not a
-    move and not today-scoped), a `universe_label` (was decoded by iOS and rendered
-    nowhere), or an `is_stale` flag (it meant "the market is closed", which is not the
+    Deliberately NOT carrying: a `universe_label` (was decoded by iOS and rendered
+    nowhere) or an `is_stale` flag (it meant "the market is closed", which is not the
     same thing — a Saturday snapshot of Friday's close is correct, not stale).
     `market_session` + `as_of` carry all of that honestly.
+
+    It DOES now carry a market headline (`market_brief`), which this docstring used to
+    rule out. The objection was that `__MARKET__`'s roll-up "is not a move and not
+    today-scoped", and both halves still stand — so the field is session-gated in the
+    service and the tile that renders it is no longer a move tile. Market mode answers
+    "what is the market doing"; Holdings mode answers "what moved most of mine". Two
+    different questions, and conflating them is what made the Market tile a
+    biggest-mover list nobody asked for.
     """
 
     # 'market' | 'portfolio'.
@@ -214,6 +245,10 @@ class WidgetMoverPayload(BaseModel):
     # data at the endpoint, and nothing told the user their "My Holdings" tile
     # was showing the market.
     scope_label: Optional[str] = None
+
+    # Market mode only, and only when the roll-up is dated to this session. Absent is
+    # normal and must render fine: the tile falls back to the index numbers alone.
+    market_brief: Optional[WidgetMarketBriefResponse] = None
 
     # How the market itself did. Absent only when every leg failed — the tile then leads
     # with the mover, exactly as it did before this field existed.

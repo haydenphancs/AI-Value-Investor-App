@@ -179,3 +179,73 @@ def test_a_none_cause_never_carries_a_tag():
                   sigma_daily=0.02)
     assert a.kind is CauseKind.NONE
     assert a.tag is None
+
+
+# ── the Market tile's headline is bound by the same rule ─────────────
+#
+# `_market_brief` puts the `__MARKET__` roll-up on the Market tile. That roll-up's own
+# corpus window is 24-96h and its hard TTL is 96h, so it can comfortably outlive the
+# session it describes — which is exactly why `WidgetMoverPayload` used to refuse to
+# carry a market headline at all ("not a move and not today-scoped").
+#
+# It carries one now, so the refusal has to be re-implemented as a GATE. Rendering
+# Friday's market read on a Monday morning is the same class of error as the ACHR
+# "+42.7% fifteen-day rally" above: confident, wrong, and on a surface with no way to
+# interrogate it.
+
+
+def _brief_card(headline="AI, Fed Speech Drive Market Cautious Tone", **extra):
+    card = {"headline": headline, "sentiment": "Neutral", "generated_at": _ts(0)}
+    card.update(extra)
+    return card
+
+
+def test_a_roll_up_from_this_session_reaches_the_tile():
+    from app.services.widget_movers_service import _market_brief
+
+    brief = _market_brief(_brief_card(), TODAY_ISO)
+    assert brief is not None
+    assert brief.headline == "AI, Fed Speech Drive Market Cautious Tone"
+    assert brief.sentiment == "Neutral"
+
+
+@pytest.mark.parametrize("days_ago", [1, 3, 7])
+def test_a_roll_up_from_a_previous_session_never_reaches_the_tile(days_ago):
+    from app.services.widget_movers_service import _market_brief
+
+    assert _market_brief(_brief_card(generated_at=_ts(days_ago)), TODAY_ISO) is None, (
+        "an off-session market headline was served. On a Monday morning that is "
+        "Friday's read presented as what the market is doing right now."
+    )
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        None,
+        {},
+        "not a dict",
+        {"headline": "x"},                                   # undated ⇒ unprovable
+        {"headline": "", "generated_at": _ts(0)},            # empty
+        {"headline": "   ", "generated_at": _ts(0)},         # whitespace only
+        {"headline": "x", "generated_at": "not a timestamp"},
+    ],
+)
+def test_an_unusable_roll_up_yields_no_brief_rather_than_a_blank_line(card):
+    from app.services.widget_movers_service import _market_brief
+
+    assert _market_brief(card, TODAY_ISO) is None
+
+
+def test_the_gate_is_the_same_one_the_news_detectors_use():
+    """One rule, one implementation — a second date comparison would drift."""
+    import inspect
+
+    from app.services.widget_movers_service import _classified_today_news, _market_brief
+
+    for fn in (_market_brief, _classified_today_news):
+        src = inspect.getsource(fn)
+        assert '_et_date(card.get("generated_at")) != today_et' in src, (
+            f"{fn.__name__} no longer gates on the session date the rest of the payload "
+            "describes"
+        )

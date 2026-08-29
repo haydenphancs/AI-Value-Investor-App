@@ -76,6 +76,7 @@ from app.schemas.widget import (
     WidgetBasketResponse,
     WidgetCauseResponse,
     WidgetIndexResponse,
+    WidgetMarketBriefResponse,
     WidgetMarketContextResponse,
     WidgetMoveContextResponse,
     WidgetMoverPayload,
@@ -399,6 +400,42 @@ def _et_date(value: Any) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(ET).date().isoformat()
+
+
+def _market_brief(
+    card: Optional[Dict[str, Any]], today_et: str
+) -> Optional["WidgetMarketBriefResponse"]:
+    """The one-sentence read on the whole market, or None.
+
+    Market mode answers "what is the market doing"; Holdings mode answers "what moved
+    most of mine". Two different questions, and the Market tile used to answer the wrong
+    one — a biggest-mover list where the reader wanted the state of the tape.
+
+    ⚠️ SESSION-GATED, and that is the entire reason this is a function rather than a
+    field copy. `WidgetMoverPayload` used to refuse a market headline outright because
+    the `__MARKET__` roll-up "is not today-scoped": its corpus window is 24-96h and its
+    hard TTL is 96h, so on a Monday morning the freshest stored card can still be
+    Friday's. Rendering that as the market right now is the same class of error as the
+    ACHR "+42.7% fifteen-day rally" the daily-scope rebuild removed — confident, wrong,
+    and on a surface the reader cannot interrogate.
+
+    So the gate is identical to `_classified_today_news`': the card must have been
+    generated in the session the rest of the payload describes. Off-session ⇒ None ⇒ the
+    tile shows the index numbers alone, which are always current.
+    """
+    if not isinstance(card, dict):
+        return None
+    if _et_date(card.get("generated_at")) != today_et:
+        return None
+    headline = str(card.get("headline") or "").strip()
+    if not headline:
+        return None
+    sentiment = card.get("sentiment")
+    return WidgetMarketBriefResponse(
+        headline=headline,
+        sentiment=str(sentiment).strip() or None if sentiment else None,
+        generated_at=card.get("generated_at") or None,
+    )
 
 
 def _classified_today_news(
@@ -751,7 +788,27 @@ class WidgetMoversService:
             mode="market", ranked=ranked, cards=cards, ctx=ctx,
             basket=None, head_grades=grades,
             scope_label=_SCOPE_MARKET,
+            market_card=await self._market_card(),
         )
+
+    async def _market_card(self) -> Optional[Dict[str, Any]]:
+        """The `__MARKET__` roll-up behind the Market tile's headline.
+
+        BEST-EFFORT, and separate from the per-ticker `get_cards` in `_rank_and_read`
+        because that read is shared with portfolio mode, which must not pay for it.
+        One batched Supabase select; a failure costs the headline and nothing else.
+        Market mode only.
+        """
+        try:
+            cards = await get_news_insight_service().get_cards([MARKET_SCOPE])
+            return cards.get(MARKET_SCOPE)
+        except Exception as e:
+            logger.warning(
+                "widget: market roll-up unavailable (%s: %s) — the tile will lead with "
+                "the index numbers instead",
+                type(e).__name__, e,
+            )
+            return None
 
     async def _build_portfolio(
         self, user_id: str, tickers: Sequence[str]
@@ -1092,6 +1149,7 @@ class WidgetMoversService:
         basket: Optional[WidgetBasketResponse],
         head_grades: Optional[Sequence[Dict[str, Any]]] = None,
         scope_label: Optional[str] = None,
+        market_card: Optional[Dict[str, Any]] = None,
     ) -> WidgetMoverPayload:
         # The SESSION date, not the wall clock. Every detector below is gated on this:
         # earnings rows, analyst grades and news cards are all stamped with a trading
@@ -1146,6 +1204,9 @@ class WidgetMoversService:
             session_date=today_iso,
             session_label=session_label(),
             scope_label=scope_label,
+            # Gated on the SAME session date every other detector uses, so an
+            # off-session roll-up is dropped rather than labelled.
+            market_brief=_market_brief(market_card, today_iso),
             market_context=build_market_context(
                 ctx.index_rows, ctx.sector_changes,
                 sector_available=ctx.sector_available,

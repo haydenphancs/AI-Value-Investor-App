@@ -30,6 +30,7 @@ from app.schemas.widget import (
     WidgetMarketContextResponse,
     WidgetMoveContextResponse,
     WidgetMoverPayload,
+    WidgetMarketBriefResponse,
     WidgetMoverResponse,
 )
 from app.services.daily_move_attribution import CauseKind, attribute
@@ -49,7 +50,11 @@ _PAYLOAD_KEYS = {
     "scope_label",
     # How the market itself did — the band the tile leads with.
     "market_context",
+    # The one-sentence read on the whole market, for the Market tile. Absent whenever
+    # the __MARKET__ roll-up is not dated to this session — see _MARKET_BRIEF_KEYS.
+    "market_brief",
 }
+_MARKET_BRIEF_KEYS = {"headline", "sentiment", "generated_at"}
 _MARKET_CONTEXT_KEYS = {
     "indices", "breadth_up", "breadth_total",
     "leading_sector", "leading_sector_change_percent",
@@ -112,6 +117,11 @@ def _full_payload() -> WidgetMoverPayload:
             text="3 of your 5 holdings fell together.",
         ),
         runners_up=[_mover("JOBY")],
+        market_brief=WidgetMarketBriefResponse(
+            headline="AI, Fed Speech Drive Market Cautious Tone",
+            sentiment="Neutral",
+            generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ),
         market_context=WidgetMarketContextResponse(
             indices=[
                 WidgetIndexResponse(symbol="^GSPC", label="S&P 500",
@@ -128,6 +138,7 @@ def _full_payload() -> WidgetMoverPayload:
 def test_every_documented_key_is_present_at_the_documented_level():
     d = _full_payload().model_dump(mode="json")
     assert set(d) == _PAYLOAD_KEYS
+    assert set(d["market_brief"]) == _MARKET_BRIEF_KEYS
     assert set(d["headline_mover"]) == _MOVER_KEYS
     assert set(d["headline_mover"]["cause"]) == _CAUSE_KEYS
     assert set(d["headline_mover"]["context"]) == _CONTEXT_KEYS

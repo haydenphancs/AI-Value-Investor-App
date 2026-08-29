@@ -68,8 +68,13 @@ final class PriceAlertsViewModel: ObservableObject {
 
     // MARK: - Mutate
 
-    func create() async {
-        guard let threshold = parsedThreshold else { return }
+    /// Returns whether a rule was actually created.
+    ///
+    /// The caller needs to know: a successful create is the moment to ask for notification
+    /// permission, and asking after a failed one would spend iOS's single prompt on nothing.
+    @discardableResult
+    func create() async -> Bool {
+        guard let threshold = parsedThreshold else { return false }
         isSaving = true
         defer { isSaving = false }
         // Server-first, inside the store: it mints the id, seeds `last_price` from a live
@@ -81,11 +86,12 @@ final class PriceAlertsViewModel: ObservableObject {
             assetType: assetType,
             repeatMode: draftRepeat
         )
-        guard created else { return }
+        guard created else { return false }
         // `kind` is the fixed rule type. NEVER the ticker or the threshold — those
         // are user-specific values, useless as dimensions and a privacy footgun.
         Analytics.shared.track(.priceAlertCreated, ["kind": .string(draftKind.rawValue)])
         draftThreshold = ""
+        return true
     }
 
     func toggleActive(_ alert: PriceAlertDTO) async {

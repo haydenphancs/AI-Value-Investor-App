@@ -330,3 +330,70 @@ def test_the_manifest_scan_is_not_vacuous():
     keys |= set(re.findall(r'masterKey:\s*"(notify_\w+)"', block))
     # The commented-out ghost must NOT appear; the real row and the master must.
     assert keys == {"notify_real", "notify_master"}, keys
+
+
+def _synced_bool_keys() -> set:
+    """Every boolean preference `SettingsSyncManager` actually uploads to the server.
+
+    `currentBlob()` iterates ONLY `boolKeys`, so this list is the complete set of toggles
+    that can ever reach the backend. Anything outside it writes to `UserDefaults` and stops.
+
+    Bracket-bounded from the literal's `= [`, never from the declaration: the type
+    annotation `[String]` contains a `]` that would truncate the block to nothing — the
+    classic way this kind of guard goes silently vacuous. Comments stripped, because the
+    doc comment above the list names several of these keys.
+    """
+    import re
+    from pathlib import Path
+
+    mgr = (Path(__file__).resolve().parents[2]
+           / "frontend/ios/ios/Core/Services/SettingsSyncManager.swift")
+    assert mgr.exists(), f"missing {mgr}"
+    src = re.sub(r"//[^\n]*", "", mgr.read_text())
+
+    start = src.find("static let boolKeys")
+    assert start != -1, (
+        "SettingsSyncManager.boolKeys is gone — it is the declared set of preferences that "
+        "reach the server, and this guard has nothing to read without it"
+    )
+    open_at = src.index("= [", start)
+    block = src[open_at: src.index("\n    ]", open_at)]
+    keys = set(re.findall(r'"([a-z_]+)"', block))
+    assert keys, "the boolKeys scan matched nothing — it has drifted"
+    return keys
+
+
+def test_every_wired_preference_key_is_actually_synced_to_the_server():
+    """The direction nobody was checking, and it cost a whole notification kind.
+
+    `test_every_wired_preference_key_has_a_visible_toggle` proves a control is RENDERED.
+    It does not prove the control's value ever leaves the device. `notify_profile_topics`
+    was rendered, tappable, and absent from `SettingsSyncManager.boolKeys` — so it was
+    written to UserDefaults and never uploaded. `profile_match` ships `default_on=False`,
+    which meant the backend read the absent key, fell back to False, and refused EVERY user
+    permanently: 0 rows in `notification_events` all-time while the job ran nightly, and the
+    key stored for 0 of 5 users in production.
+
+    `notify_research_failed` was missing too. That one ships ON, so it delivered — but the
+    opt-out was inert, which is precisely the "alerts with no in-app way to turn them off"
+    failure `notification_kinds.py`'s own docstring says is pinned by tests.
+
+    A toggle that cannot be persisted is worse than no toggle: it reports a state it does
+    not have.
+    """
+    from app.services.notification_kinds import NOTIFICATION_KINDS
+
+    wired = set()
+    for kind in NOTIFICATION_KINDS.values():
+        wired.add(kind.preference_key)
+        if kind.master_preference_key:
+            wired.add(kind.master_preference_key)
+    assert wired, "the notification registry is empty — nothing can be wired"
+
+    missing = sorted(wired - _synced_bool_keys())
+    assert not missing, (
+        f"these preference keys are wired to a NotificationKind but are NOT in "
+        f"SettingsSyncManager.boolKeys, so their toggles never reach the server: {missing}. "
+        f"A default-OFF kind is then undeliverable to everyone; a default-ON kind cannot be "
+        f"turned off."
+    )

@@ -405,6 +405,24 @@ def test_prompt_includes_price_context_only_when_the_quote_is_usable(svc):
         assert "Price context" not in svc._build_prompt("AAPL", rows, "x", "notable", bad)
 
 
+def test_prompt_bans_the_conclusion_lead_in(svc):
+    """The final bullet is marked by an icon now, so naming it in words is dead weight.
+
+    The card is built to be skimmed and the lead-in cost eleven words in front of the point
+    ("The takeaway for everyday investors, While AI drives…"). Both bullet-writing prompts
+    forbid it; iOS strips it from already-cached text (`strippingConclusionLeadIn`), which is
+    the only lever the per-article path has — see tests/test_ios_conclusion_marker.py.
+    """
+    prompt = svc._build_prompt("AAPL", [{"headline": "A"}], "x", None, None)
+    assert "NO LEAD-IN" in prompt
+    for banned in ("The takeaway,", "In short,", "Ultimately,", "So What?"):
+        assert banned in prompt, f"the prompt no longer names {banned!r} as forbidden"
+    assert "Vary how you open it" not in prompt, (
+        "the old instruction to vary the transition is back — it is what produced the wording "
+        "the icon replaced"
+    )
+
+
 def test_prompt_forbids_invention(svc):
     prompt = svc._build_prompt("AAPL", [{"headline": "A"}], "x", None, None)
     assert "Never state a fact" in prompt

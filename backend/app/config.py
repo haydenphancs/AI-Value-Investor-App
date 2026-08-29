@@ -287,7 +287,18 @@ class Settings(BaseSettings):
     APNS_AUTH_KEY: Optional[str] = None        # PEM contents of the AuthKey_XXXX.p8
     APNS_BUNDLE_ID: str = "com.phan.caydex"    # apns-topic
     # "production" → api.push.apple.com ; "sandbox" → api.sandbox.push.apple.com
-    APNS_ENV: str = "sandbox"
+    # Fallback APNs host for a token whose OWN environment is unknown.
+    #
+    # `production`, not `sandbox`. A token carries its environment (`device_tokens.
+    # environment`, set from the client's build configuration) and that always wins, so this
+    # only applies to a row written before the client sent one — and every such row belongs
+    # to a shipped TestFlight/App Store build, which is production. Defaulting to sandbox
+    # routed those to the wrong host, where APNs answers 400 BadDeviceToken and the push is
+    # silently lost.
+    #
+    # ⚠️ Also set this explicitly on Railway. The deployment overrides this default, so a
+    # code change alone does not fix production.
+    APNS_ENV: str = "production"
     # Per-user daily ceiling on ALERTS, across every ticker.
     #
     # The dedup key is per (user, ticker, day), which stops the SAME alert repeating

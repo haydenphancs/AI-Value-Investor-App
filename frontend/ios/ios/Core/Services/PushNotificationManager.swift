@@ -49,6 +49,29 @@ final class PushNotificationManager {
 
     private static let registeredTokenKey = "registered_apns_device_token"
 
+    /// True once a token has been CONFIRMED with the backend.
+    ///
+    /// Read by the Notifications screen so "iOS says authorized, but no device is registered"
+    /// stops rendering as a healthy screen. That state is reachable — `didFailToRegister`
+    /// records nothing — and it means every toggle on that screen is a control that cannot
+    /// possibly work.
+    var hasRegisteredToken: Bool { registeredToken != nil }
+
+    /// Re-assert the APNs registration when iOS already granted permission.
+    ///
+    /// Idempotent: iOS returns the cached token, so calling it on every foreground costs
+    /// nothing. It has to run there, not just at launch, because **iOS only delivers a token
+    /// in response to a registration call**. The recovery flow the permission banner is built
+    /// to drive — denied → Open Settings → enable → come back — otherwise ends with the banner
+    /// gone, every toggle live, and NO token sent to the backend until the user fully quits
+    /// and relaunches. Nothing on screen said so.
+    func registerIfAuthorized() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        guard settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional else { return }
+        UIApplication.shared.registerForRemoteNotifications()
+    }
+
     /// Optional + nil-coalesce, matching the codebase's repository-injection idiom (see
     /// `HomeDashboardViewModel.init` / `SearchViewModel.init`): `AccountRepository.shared` is
     /// MainActor-isolated, and a default-argument expression is evaluated at the CALL SITE,
@@ -83,30 +106,48 @@ final class PushNotificationManager {
 
     /// Ask for notification permission; register for remote notifications on grant.
     /// Safe to call repeatedly — iOS only prompts once.
+    ///
+    /// Fire-and-forget. A caller that needs to redraw based on the ANSWER must use
+    /// `requestAuthorizationResult()` instead — see the note there.
     func requestAuthorization() {
-        Task {
-            do {
-                let granted = try await UNUserNotificationCenter.current()
-                    .requestAuthorization(options: [.alert, .badge, .sound])
-                // The single most important number in the push funnel: iOS prompts ONCE,
-                // so the grant rate is a one-shot measurement and a denial is permanent
-                // until the user goes to Settings themselves. Without it there is no way
-                // to tell "our copy is bad" from "nobody is being asked".
-                //
-                // The outcome is computed OUTSIDE the props literal on purpose: an inline
-                // ternary puts `"granted" :` inside the dictionary, which the prop-key
-                // source scan in `test_analytics_ingest.py` reads as a second key.
-                let outcome = granted ? "granted" : "denied"
-                Analytics.shared.track(.pushPermissionResult, ["reason": .string(outcome)])
-                if granted {
-                    UIApplication.shared.registerForRemoteNotifications()
-                }
-            } catch {
-                #if DEBUG
-                print("⚠️ [Push] authorization request failed: \(error.localizedDescription)")
-                #endif
-                Analytics.shared.track(.pushPermissionResult, ["reason": "error"])
+        Task { _ = await requestAuthorizationResult() }
+    }
+
+    /// The same request, AWAITING the user's actual answer.
+    ///
+    /// ⚠️ The fire-and-forget form cannot tell a caller what happened, and the two callers
+    /// that need to know were guessing: they slept 500ms and re-read `authorizationStatus`.
+    /// The system prompt is MODAL and a person takes seconds to read it, so that re-read
+    /// almost always observed `.notDetermined` and the screen never updated. Measured on the
+    /// simulator: tapping "Don't Allow" left the price-alert sheet showing no warning at all,
+    /// which is the exact state the warning exists for.
+    ///
+    /// - Returns: whether permission was granted.
+    @discardableResult
+    func requestAuthorizationResult() async -> Bool {
+        do {
+            let granted = try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .badge, .sound])
+            // The single most important number in the push funnel: iOS prompts ONCE,
+            // so the grant rate is a one-shot measurement and a denial is permanent
+            // until the user goes to Settings themselves. Without it there is no way
+            // to tell "our copy is bad" from "nobody is being asked".
+            //
+            // The outcome is computed OUTSIDE the props literal on purpose: an inline
+            // ternary puts `"granted" :` inside the dictionary, which the prop-key
+            // source scan in `test_analytics_ingest.py` reads as a second key.
+            let outcome = granted ? "granted" : "denied"
+            Analytics.shared.track(.pushPermissionResult, ["reason": .string(outcome)])
+            if granted {
+                UIApplication.shared.registerForRemoteNotifications()
             }
+            return granted
+        } catch {
+            #if DEBUG
+            print("⚠️ [Push] authorization request failed: \(error.localizedDescription)")
+            #endif
+            Analytics.shared.track(.pushPermissionResult, ["reason": "error"])
+            return false
         }
     }
 

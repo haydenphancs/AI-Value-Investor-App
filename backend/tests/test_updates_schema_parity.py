@@ -50,7 +50,9 @@ IOS_INSIGHT_KEYS = {
 # The nested "why it moved" block iOS decodes (PriceMoveDTO in UpdatesModels.swift).
 IOS_PRICE_MOVE_KEYS = {"tier", "change_percent", "catalyst_tag", "reason"}
 # The nested source rows iOS decodes (InsightSourceDTO in UpdatesModels.swift).
-IOS_SOURCE_KEYS = {"title", "url"}
+# `publisher` joined in the youtube.com relabel: the URL host is a bad name for
+# broadcast news, which the market feed is roughly a quarter of.
+IOS_SOURCE_KEYS = {"title", "url", "publisher"}
 IOS_ARTICLE_KEYS = {
     "id", "headline", "summary", "summary_bullets", "sentiment",
     "sentiment_confidence", "source_name", "source_logo_url", "published_at",

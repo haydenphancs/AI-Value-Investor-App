@@ -85,7 +85,13 @@ logger = logging.getLogger(__name__)
 # day's evidence with no shared context, so on an earnings day both wrote the same
 # story and the user read it twice. Every cached card predates the instruction and
 # still carries the duplicate bullets, so the bump is what actually ships the fix.
-PROMPT_VERSION = 4
+# v5: the FINAL bullet's lead-in transition ("The takeaway," / "In short," /
+# "Ultimately,") is banned outright — the iOS card now marks the conclusion with an
+# icon, so the words were pure scaffolding in front of the point. Prompt-output
+# contract changed → one controlled regen wave. NOTE this lever only reaches the
+# INSIGHTS card; the per-article enrichment prompt in news_cache_service has no
+# version at all, which is why iOS also strips the phrase at display time.
+PROMPT_VERSION = 5
 
 
 # ── Thresholds ────────────────────────────────────────────────────────

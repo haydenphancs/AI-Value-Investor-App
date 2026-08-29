@@ -1101,7 +1101,7 @@ For EACH article, provide:
    - Minimum 2, maximum 5 bullet points
    - Each bullet must be under 25 words — short and punchy
    - The FINAL bullet must always explain why an everyday investor should care, in plain English
-   - Transition Rule: To sound natural and human, vary how you start this final bullet. Sometimes use a short, friendly transition like "So,", "In short,", "Ultimately,", or "The takeaway," — always followed by a COMMA, never a colon. Other times, just state the insight directly without any introductory phrase at all. NEVER use "So What?" or "So what:" as a prefix, and never end the transition with a colon.
+   - NO LEAD-IN. Start that final bullet with the point itself. Do NOT open it with a transition of any kind: not "So,", "In short,", "Ultimately,", "The takeaway,", "The takeaway for everyday investors,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?" or "So what:". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 25-word budget.
    - No introductory phrases like "This article discusses..." or "The key points are..."
 2. Sentiment classification — the NET directional lean for the stock, one of these three exact values:
    - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
@@ -1115,7 +1115,7 @@ For EACH article, provide:
 
 Return a JSON array with one object per article in order. Each object must have:
 - "index": the article number (0-based)
-- "bullets": array of 2-5 strings (last one explains why investors should care — vary the opening naturally)
+- "bullets": array of 2-5 strings (last one explains why investors should care — stated directly, with NO lead-in transition)
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral"
 - "confidence": integer 0-100
 - "related_tickers": array of uppercase ticker symbol strings (max 8)
@@ -1239,9 +1239,14 @@ Return a JSON array with one object per article in order. Each object must have:
             return {}
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        # `source_name` is load-bearing, not cosmetic: it is the ONLY place the
+        # real publisher survives. FMP links broadcast segments (CNBC Television,
+        # Bloomberg Markets and Finance, Fox Business) to their YouTube upload, so
+        # without this column the Insights card falls back to the URL host and
+        # cites "youtube.com" instead of the broadcaster.
         columns = (
             "id, ticker, external_id, headline, summary, sentiment, "
-            "ai_processed, published_at, article_url"
+            "ai_processed, published_at, article_url, source_name"
         )
         grouped: Dict[str, List[Dict[str, Any]]] = {}
 

@@ -25,14 +25,11 @@ struct InsightCatalystBullet: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.sm) {
-            // Matches the sibling bullets' glyph exactly — same size, same
-            // top padding — so the body reads as ONE list. The bolt lives in
+            // The same atom the sibling bullets use, so the body reads as ONE
+            // list and the three surfaces cannot drift apart. The bolt lives in
             // the card header instead; repeating it here would put two bolts
             // three lines apart.
-            Circle()
-                .fill(AppColors.textSecondary)
-                .frame(width: 5, height: 5)
-                .padding(.top, 6)
+            SummaryBulletGlyph()
 
             // Text + Text concatenation, not an HStack: the change and the
             // reason must reflow as ONE paragraph. An HStack would pin the

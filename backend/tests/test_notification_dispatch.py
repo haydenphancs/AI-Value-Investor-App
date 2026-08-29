@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.services.push_service import PushOutcome
+
 from app.config import settings
 from app.services import quiet_hours as qh
 from app.services.notification_kinds import (
@@ -31,6 +33,7 @@ from app.services.notification_kinds import (
 from app.services.push_dispatch_service import (
     STATE_DEFERRED,
     STATE_DRY_RUN,
+    STATE_FAILED,
     STATE_NO_DEVICE,
     STATE_SENT,
     PushDispatchService,
@@ -51,7 +54,14 @@ class _FakePush:
 
     async def send_to_user(self, user_id, **kw):
         self.calls.append({"user_id": user_id, **kw})
-        return self._accepted
+        # Mirrors `PushService.send_to_user`'s `PushOutcome` return, INCLUDING its `enabled`
+        # check — see the note on the double in test_push_dispatch.py.
+        if not self.enabled:
+            return PushOutcome(
+                attempted=0, accepted=0,
+                failures=("APNs is not configured on this server",),
+            )
+        return PushOutcome(attempted=self._accepted, accepted=self._accepted)
 
 
 def _svc(push=None):
@@ -306,15 +316,33 @@ async def test_dry_run_exercises_everything_except_the_apns_post(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_with_apns_unconfigured_and_no_dry_run_nothing_is_claimed():
-    """The state before the APNs key is set. Claiming here would burn dedup slots for
-    notifications that were never sent, permanently suppressing them."""
+async def test_with_apns_unconfigured_the_row_is_still_claimed_and_marked_failed():
+    """⚠️ THIS REVERSES AN EARLIER DECISION. Do not flip it back without reading why.
+
+    This test used to assert `claims == []`, on the reasoning that claiming while APNs is
+    down burns the dedup slot and permanently suppresses a notification that was never
+    sent. That reasoning is real, but it trades the wrong way: it protects a RE-SEND that is
+    rarely worth anything (a market event is stale hours later) at the cost of the
+    `notification_events` row, which is worth something always.
+
+    With the early return in place, a missing APNS_* value produced no row at all — the
+    in-app inbox was empty, the calling job logged a healthy "delivered 0/0", and the only
+    trace was a `logger.debug` invisible at the default INFO level. The inbox exists
+    precisely so a notification survives a failed push.
+
+    So: claim, write the row, and mark it `failed` with the reason. The user sees the alert
+    in the app; `last_error` says why their phone never buzzed.
+    """
     svc = _svc(_FakePush(enabled=False))
-    claims = []
-    _wire(svc, claims=claims, recipients=[_recipient(preferences={})])
+    claims, states = [], []
+    _wire(svc, claims=claims, states=states, recipients=[_recipient(preferences={})])
     assert await svc.notify_users(["u1"], kind=KIND_TICKER_MOVE, title="T", body="B",
                                   dedup_key="k", now=NOON_ET) == 0
-    assert claims == []
+    assert len(claims) == 1, "the inbox row must be written even when no push can go out"
+    assert states and states[0][1] == STATE_FAILED
+    assert "APNs" in (states[0][2].get("error") or ""), (
+        f"the row must say WHY it failed; got {states[0][2]!r}"
+    )
 
 
 @pytest.mark.asyncio

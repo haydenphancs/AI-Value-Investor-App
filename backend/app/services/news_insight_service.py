@@ -43,6 +43,7 @@ from app.config import settings
 from app.services.agents.persona_config import neutral_system_instruction
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
+from app.services.market_news_quality import is_material_headline
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
 from app.utils.market_hours import is_market_active, last_completed_close
@@ -740,7 +741,7 @@ class NewsInsightService:
 Rules:
 - "headline": one sentence, under 90 characters, stating the single most important theme. No ticker-symbol soup, no clickbait, no invented numbers.
 - "bullets": {MIN_BULLETS} to {MAX_BULLETS} bullets. Each under 30 words. Cover the distinct threads across the articles rather than restating one story. Use concrete figures ONLY when they appear in the articles below.
-- The FINAL bullet must explain why an everyday investor should care, in plain English. Vary how you open it — sometimes a short transition like "In short," or "The takeaway," (always followed by a COMMA, never a colon), sometimes just state the insight directly. NEVER use "So What?" as a prefix.
+- The FINAL bullet must explain why an everyday investor should care, in plain English. NO LEAD-IN: start it with the point itself. Do NOT open it with a transition of any kind: not "In short,", "The takeaway,", "The takeaway for everyday investors,", "Ultimately,", "So,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 30-word budget.
 - No introductory phrases like "This article discusses" or "The key points are".
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral" — the NET directional lean for {subject}, judged by weighing the articles together, not by counting headlines.
     - "bullish": the balance tilts to upward catalysts (earnings beats, upgrades, wins, easing conditions, raised guidance, constructive positioning).
@@ -869,10 +870,30 @@ _MAX_SOURCES = 8
 def _corpus_sources(
     articles: Sequence[Dict[str, Any]], cap: int = _MAX_SOURCES
 ) -> List[Dict[str, Any]]:
-    """The source stories a card was built from — ``[{title, url}]`` — from the
-    corpus dicts (headline + article_url). Drops rows with no title, dedups by url
-    (falling back to title when there is no url), and caps at ``cap``. Pure; the
-    result is fed straight to ``_sanitize_sources`` on write."""
+    """The source stories a card was built from — ``[{title, url, publisher}]`` —
+    from the corpus dicts (headline + article_url + source_name). Drops rows with
+    no title, dedups by url (falling back to title when there is no url), and caps
+    at ``cap``. Pure; the result is fed straight to ``_sanitize_sources`` on write.
+
+    ``publisher`` is the outlet NAME as the news feed reported it ("CNBC
+    Television"), never the hosting domain. It is omitted entirely when unknown,
+    so the client keeps its URL-host fallback for legacy cards.
+
+    ORDERING — material headlines first, then recency. The cap is the whole
+    reason: the corpus holds ~25 rows and only ``cap`` (8) are cited, so a pure
+    recency slice spent those slots on whatever happened to be newest. Measured on
+    a live Jackson Hole corpus, that cited a mortgage lawsuit and two Venezuela
+    oil wires while "Markets Brace for Possible Rate Hike After Warsh's Hawkish
+    Turn" fell outside the list; ranking put 8 of 8 on the day's actual story.
+
+    Deliberately a STABLE sort, so equal-materiality rows keep their newest-first
+    order, and deliberately a re-ORDER rather than a filter — nothing is dropped,
+    so a quiet day with fewer than ``cap`` material stories still fills the list.
+    Safe against the cache: ``compute_inputset_id`` digests SORTED article ids and
+    never sees this list, so reordering cannot invalidate a card or change a
+    generated bullet. This is display provenance only; the model still reads the
+    full corpus in its own order.
+    """
     out: List[Dict[str, Any]] = []
     seen: set = set()
     for a in articles:
@@ -886,10 +907,20 @@ def _corpus_sources(
         if key in seen:
             continue
         seen.add(key)
-        out.append({"title": title, "url": url})
-        if len(out) >= cap:
-            break
-    return out
+        row: Dict[str, Any] = {"title": title, "url": url}
+        # isinstance, NOT str(...): a malformed cache row would otherwise be
+        # stringified into the subtitle, rendering "{'a': 1}" under a headline.
+        # `_sanitize_sources` rejects non-str, but it runs AFTER this and would
+        # only ever see the coerced string.
+        name = a.get("source_name")
+        publisher = name.strip() if isinstance(name, str) else ""
+        if publisher:
+            row["publisher"] = publisher
+        out.append(row)
+    # Rank AFTER dedup and BEFORE the cap — ranking a list already truncated by
+    # recency would sort the wrong 8 rows and change nothing that matters.
+    out.sort(key=lambda r: 0 if is_material_headline(r.get("title")) else 1)
+    return out[:cap]
 
 
 # Max WEB (catalyst) sources folded into a card's source list. Grounded search
@@ -941,7 +972,16 @@ def _catalyst_web_sources(
             continue
         seen_pub.add(pub_key)
         seen_url.add(url)
-        out.append({"title": label, "url": url})
+        row: Dict[str, Any] = {"title": label, "url": url}
+        # Same field the corpus rows carry, so a merged list renders one way —
+        # but ONLY when it says something the title does not. Grounding usually
+        # returns a bare host as the `title`, and both branches above then fall
+        # back to the publisher name for the label, so an unconditional write
+        # renders "Reuters" as the row title AND as its subtitle.
+        pub_name = publisher.capitalize() if publisher else ""
+        if pub_name and pub_name.casefold() != label.casefold():
+            row["publisher"] = pub_name
+        out.append(row)
         if len(out) >= cap:
             break
     return out
@@ -973,18 +1013,35 @@ def _merge_sources(
         if key in seen:
             continue
         seen.add(key)
-        merged.append({"title": title, "url": url})
+        row: Dict[str, Any] = {"title": title, "url": url}
+        pub = src.get("publisher")
+        publisher = pub.strip() if isinstance(pub, str) else ""
+        if publisher:
+            row["publisher"] = publisher
+        merged.append(row)
         if len(merged) >= cap:
             break
     return merged
 
 
+# Publisher names are short ("Bloomberg Markets and Finance" is 29). Clipped
+# anyway because this value originates upstream and is rendered on one line.
+_MAX_PUBLISHER_CHARS = 80
+
+
 def _sanitize_sources(raw: Any) -> Optional[List[Dict[str, Any]]]:
     """Coerce a ``sources`` value (from the builder, or a DB JSONB row) to a clean
-    ``[{title, url}]`` list, or ``None``. NEVER raises — a malformed value must not
-    block or fail the news card. Drops rows without a non-empty title; empty url is
-    allowed (a source with no link is still nameable, just not tappable). Idempotent
-    on read-back, and bounded so a giant stored blob can't bloat the response."""
+    ``[{title, url, publisher?}]`` list, or ``None``. NEVER raises — a malformed
+    value must not block or fail the news card. Drops rows without a non-empty
+    title; empty url is allowed (a source with no link is still nameable, just not
+    tappable). Idempotent on read-back, and bounded so a giant stored blob can't
+    bloat the response.
+
+    ``publisher`` is OMITTED when absent or blank rather than emitted as ``""``.
+    This function runs on write and again on read-back, so it is the choke point
+    for the whole field: cards stored before it existed have no such key and must
+    keep flowing through unchanged, and the client then falls back to the URL host.
+    """
     if not isinstance(raw, list):
         return None
     out: List[Dict[str, Any]] = []
@@ -996,7 +1053,12 @@ def _sanitize_sources(raw: Any) -> Optional[List[Dict[str, Any]]]:
             continue
         url = item.get("url")
         url = url.strip() if isinstance(url, str) else ""
-        out.append({"title": _clip(title, 200), "url": _clip(url, 500)})
+        row: Dict[str, Any] = {"title": _clip(title, 200), "url": _clip(url, 500)}
+        publisher = item.get("publisher")
+        publisher = publisher.strip() if isinstance(publisher, str) else ""
+        if publisher:
+            row["publisher"] = _clip(publisher, _MAX_PUBLISHER_CHARS)
+        out.append(row)
         if len(out) >= _MAX_SOURCES:
             break
     return out or None

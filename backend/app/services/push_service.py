@@ -21,7 +21,7 @@ in the app. Provide APNS_* via env/secrets — never commit the .p8.
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import httpx
 
@@ -30,6 +30,39 @@ from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
 
+
+class PushOutcome(NamedTuple):
+    """What APNs said about EACH of a user's devices, not just whether one worked.
+
+    WHY THIS IS NOT AN INT. `send_to_user` used to return a bare accepted-count and
+    `_deliver` stamped `sent` on any non-zero — so a user with several registered devices
+    got a row saying "sent" when only one of them took it, with nothing recorded about the
+    others. Per-device rejections were `logger.warning` only, and Railway's log buffer is
+    hours deep, so by the time anyone asked "why didn't my phone buzz?" the evidence was
+    gone. `last_error` was NULL on every row in the table.
+
+    That is exactly how a TestFlight report of "the price-move notification doesn't work"
+    became undiagnosable: the alert's row read `sent`, and the account had three simulator
+    tokens alongside one real iPhone. Any one of them accepting was enough to make the row
+    look perfect.
+
+    `failures` is what survives into `notification_events.last_error`, so a partial
+    delivery is answerable with a SQL query instead of a live log tail.
+    """
+
+    attempted: int
+    accepted: int
+    failures: Tuple[str, ...] = ()
+
+    @property
+    def partial(self) -> bool:
+        """Some devices took it and some did not — the case that used to be invisible."""
+        return 0 < self.accepted < self.attempted
+
+    def summary(self) -> Optional[str]:
+        """One line for the ledger, or None when every device accepted."""
+        return "; ".join(self.failures)[:500] or None
+
 # APNs allows a provider token up to 60 min old; refresh a little early.
 _TOKEN_TTL_SECONDS = 50 * 60
 
@@ -37,6 +70,48 @@ _HOSTS = {
     "production": "https://api.push.apple.com",
     "sandbox": "https://api.sandbox.push.apple.com",
 }
+
+
+# The lock-screen banner is a few lines; anything past this is unread on the device and
+# unhelpful in a list row. It is a DISPLAY bound, which is why it lives here at the APNs
+# boundary and NOT in the senders — see `truncate_for_banner`.
+BANNER_BODY_LIMIT = 180
+
+# A defensive ceiling on what the ledger stores. The body of a `ticker_move` is written by a
+# grounded LLM search, so it is not length-bounded by construction; this keeps one pathological
+# generation from putting a novel in an inbox row. Generous on purpose — the whole point is
+# that the detail screen can show the reason in full.
+LEDGER_BODY_LIMIT = 1000
+
+
+def truncate_for_banner(text: str, limit: int = BANNER_BODY_LIMIT) -> str:
+    """Shorten a notification body without cutting mid-word, and mark that it was cut.
+
+    ⚠️ THE SENDERS MUST NOT DO THIS THEMSELVES. `updates_insight_sweeper` used to pass
+    `headline[:180]`, and that one slice was the whole body the system ever knew: the same
+    string went to APNs *and* into `notification_events.body`, so the inbox row was born
+    truncated. Every stored `ticker_move` body was exactly 180 characters, ending mid-word —
+    "…analyst estimates of $3.27, and sub". The Activity detail screen exists to show the
+    catalyst in full and could only ever show a fragment of it.
+
+    Note which text lost: a short fallback headline ("Hydrogen Stocks Face Selloff", ~40-60
+    chars) passed through untouched, while the grounded, cited catalyst — the sentence worth
+    reading — was the one guillotined.
+
+    Truncation belongs HERE, at the boundary that actually has the constraint, so the ledger
+    keeps the full text and only the banner is shortened.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    space = cut.rfind(" ")
+    # Only honour a word boundary that is not absurdly early — a 170-character single "word"
+    # (a URL, say) should still be cut near the limit rather than thrown away.
+    if space > limit // 2:
+        cut = cut[:space]
+    # A trailing comma or dash before an ellipsis reads as a typo: "guidance,…".
+    return cut.rstrip(" ,;:—-") + "…"
 
 
 def host_for_environment(environment: Optional[str], default: str) -> str:
@@ -142,7 +217,7 @@ class PushService:
         collapse_id: Optional[str] = None,
         category: Optional[str] = None,
         badge: Optional[int] = None,
-    ) -> int:
+    ) -> PushOutcome:
         """Send an alert push to every device the user has registered.
 
         Returns the number of pushes accepted by APNs. No-op (returns 0) when push
@@ -168,9 +243,19 @@ class PushService:
           * `badge` — server-computed unread count. Never incremented client-side, or it
             drifts the moment a notification is delivered and never opened.
         """
+        # ⚠️ EVERY return below is a `PushOutcome`, never a bare int.
+        #
+        # These three early exits kept returning `0` after the signature changed, and
+        # `_deliver` calls `.summary()` on the result — so the reachable one (`_provider_jwt`
+        # failing) raised `AttributeError` AFTER the claim row was already inserted. The
+        # per-recipient guard swallowed it, `mark_state` never ran, and the
+        # `(user_id, dedup_key)` pair was permanently burned: that notification could never be
+        # retried for that user. A malformed `APNS_AUTH_KEY` PEM is all it takes.
         if not self.enabled:
             logger.info("Push disabled (APNs not configured) — skipping send to %s", user_id)
-            return 0
+            return PushOutcome(
+                attempted=0, accepted=0, failures=("APNs is not configured on this server",)
+            )
 
         if devices is None:
             # OFF-THREAD. The Supabase SDK is synchronous, and this runs inside the Updates
@@ -180,14 +265,31 @@ class PushService:
             # this module was the one that did not. CLAUDE.md invariant #6.
             devices = await asyncio.to_thread(self._device_tokens_for, user_id)
         if not devices:
-            return 0
+            # Nothing attempted and nothing wrong — the caller stamps `no_device`, which is a
+            # legitimate state, not a failure. No failure string, or every tokenless user
+            # would write noise into `last_error`.
+            return PushOutcome(attempted=0, accepted=0)
 
         jwt_token = self._provider_jwt()
         if not jwt_token:
-            return 0
+            # THE REACHABLE ONE. All four APNS_* settings are present (or `enabled` would have
+            # caught it above) and signing still failed — overwhelmingly a mangled
+            # `APNS_AUTH_KEY` PEM, which is what happens when a `.p8` is pasted into an env var
+            # instead of piped in. Named explicitly so `last_error` points at the cause rather
+            # than at the devices, which are fine.
+            return PushOutcome(
+                attempted=len(devices),
+                accepted=0,
+                failures=(
+                    "APNs provider token could not be signed — check APNS_AUTH_KEY (PEM "
+                    "newlines), APNS_KEY_ID and APNS_TEAM_ID",
+                ),
+            )
 
         aps: Dict[str, Any] = {
-            "alert": {"title": title, "body": body},
+            # Shortened HERE and nowhere else. The full text is what the ledger stored and
+            # what the in-app detail screen shows; only the lock-screen banner is bounded.
+            "alert": {"title": title, "body": truncate_for_banner(body)},
             "sound": "default",
         }
         if interruption_level:
@@ -222,10 +324,24 @@ class PushService:
         headers["apns-priority"] = "5" if interruption_level == "passive" else "10"
 
         accepted = 0
+        attempted = 0
+        # Per-device outcomes, kept so a PARTIAL delivery reaches the ledger. See PushOutcome.
+        failures: List[str] = []
+
+        def _label(device: dict) -> str:
+            """Identify a device in an error string WITHOUT logging its token.
+
+            Last six characters plus the environment is enough to tell one registration
+            from another when reading `last_error`, and a token is a credential.
+            """
+            env = (device.get("environment") or settings.APNS_ENV or "?").lower()
+            return f"{env} …{str(device.get('token') or '')[-6:]}"
+
         try:
             async with httpx.AsyncClient(http2=True, timeout=httpx.Timeout(10.0)) as client:
                 for device in devices:
                     token = device["token"]
+                    attempted += 1
                     host = host_for_environment(device.get("environment"), settings.APNS_ENV)
                     try:
                         resp = await client.post(
@@ -238,15 +354,47 @@ class PushService:
                             "APNs POST failed for token …%s (%s: %s)",
                             token[-8:], type(e).__name__, e,
                         )
+                        failures.append(f"{_label(device)}: transport {type(e).__name__}")
                         continue
                     if resp.status_code == 200:
                         accepted += 1
-                    elif resp.status_code == 410:
+                        continue
+
+                    # APNs states the machine-readable cause in `reason`; the raw body is
+                    # noise in a 500-char ledger column.
+                    try:
+                        reason = (resp.json() or {}).get("reason") or ""
+                    except Exception:
+                        reason = (resp.text or "")[:60]
+                    failures.append(f"{_label(device)}: {resp.status_code} {reason}".strip())
+
+                    if resp.status_code == 410:
                         # 410 Unregistered = token is genuinely dead → prune.
                         # NOT on 400/BadDeviceToken: that can be an env/routing issue,
                         # and pruning a valid token would silently stop notifications.
                         # Off-thread for the same reason as the read above.
                         await asyncio.to_thread(self._prune_token, token)
+                    elif resp.status_code == 403:
+                        # NOT a device problem — a PROVIDER problem, so it is an error, not a
+                        # per-token warning. A 403 means the .p8 cannot sign for this host at
+                        # all, so it takes out EVERY device in that environment at once while
+                        # the other environment keeps succeeding.
+                        #
+                        # That asymmetry is exactly how this hid: an APNs auth key scoped to
+                        # Sandbox only returned 200 for three simulator tokens and
+                        # `403 BadEnvironmentKeyInToken` for the one real iPhone, so every
+                        # ledger row read `sent` and no TestFlight user ever got a push. It is
+                        # a configuration fault with a one-line fix, and it was invisible for
+                        # weeks.
+                        logger.error(
+                            "APNs REFUSED THE PROVIDER KEY for the %s environment "
+                            "(HTTP 403 %s). This is not a bad device token — no push can "
+                            "reach ANY %s device until the APNS_AUTH_KEY/APNS_KEY_ID pair is "
+                            "valid for it. A Sandbox-only key cannot sign for production.",
+                            "sandbox" if "sandbox" in host else "production",
+                            reason or resp.text[:120],
+                            "sandbox" if "sandbox" in host else "production",
+                        )
                     else:
                         logger.warning(
                             "APNs rejected token …%s: %s %s",
@@ -256,4 +404,5 @@ class PushService:
             logger.error(
                 "Push send to user=%s failed (%s: %s)", user_id, type(e).__name__, e
             )
-        return accepted
+            failures.append(f"send aborted: {type(e).__name__}")
+        return PushOutcome(attempted=attempted, accepted=accepted, failures=tuple(failures))

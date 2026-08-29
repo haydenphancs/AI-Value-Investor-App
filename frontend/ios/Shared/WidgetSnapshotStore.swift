@@ -77,6 +77,10 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     /// then leads with the mover, exactly as it did before this field existed.
     public let marketContext: WidgetMarketContext?
     public let headlineMover: WidgetMover?
+    /// The one-sentence read on the whole market — Market mode only, and only when the
+    /// backend's roll-up is dated to this session. Absent is NORMAL: the tile then
+    /// leads with the index numbers, which are always current.
+    public let marketBrief: WidgetMarketBrief?
     public let basket: WidgetBasket?
     /// Next few movers, for the large family. Empty on smaller sizes' data too —
     /// the backend always sends them; only Large renders them.
@@ -89,6 +93,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         case sessionDate = "session_date"
         case sessionLabel = "session_label"
         case scopeLabel = "scope_label"
+        case marketBrief = "market_brief"
         case marketContext = "market_context"
         case headlineMover = "headline_mover"
         case basket
@@ -110,6 +115,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         sessionDate = try c.decodeIfPresent(String.self, forKey: .sessionDate)
         sessionLabel = try c.decodeIfPresent(String.self, forKey: .sessionLabel)
         scopeLabel = try c.decodeIfPresent(String.self, forKey: .scopeLabel)
+        marketBrief = try c.decodeIfPresent(WidgetMarketBrief.self, forKey: .marketBrief)
         marketContext = try c.decodeIfPresent(WidgetMarketContext.self, forKey: .marketContext)
         headlineMover = try c.decodeIfPresent(WidgetMover.self, forKey: .headlineMover)
         basket = try c.decodeIfPresent(WidgetBasket.self, forKey: .basket)
@@ -119,6 +125,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     public init(
         mode: String, asOf: Date, marketSession: String,
         sessionDate: String? = nil, sessionLabel: String? = nil, scopeLabel: String? = nil,
+        marketBrief: WidgetMarketBrief? = nil,
         marketContext: WidgetMarketContext? = nil,
         headlineMover: WidgetMover?, basket: WidgetBasket?, runnersUp: [WidgetMover] = []
     ) {
@@ -128,6 +135,7 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
         self.sessionDate = sessionDate
         self.sessionLabel = sessionLabel
         self.scopeLabel = scopeLabel
+        self.marketBrief = marketBrief
         self.marketContext = marketContext
         self.headlineMover = headlineMover
         self.basket = basket
@@ -140,6 +148,37 @@ public struct WidgetMoverSnapshot: Codable, Equatable, Sendable {
     /// `headline_mover: null`. That is a legitimate response but NOT something worth
     /// overwriting a good snapshot with — see `WidgetSnapshotStore.write`.
     public var isEmpty: Bool { headlineMover == nil && runnersUp.isEmpty }
+}
+
+/// The one-sentence read on the whole market, for the Market tile.
+///
+/// Market mode answers "what is the market doing"; Holdings mode answers "what moved
+/// most of mine". The backend session-gates this so an off-session roll-up arrives as
+/// nil rather than as a stale sentence the tile would have to caveat.
+public struct WidgetMarketBrief: Codable, Equatable, Sendable {
+    public let headline: String
+    /// 'Bullish' | 'Bearish' | 'Neutral'. Optional — an older backend omits it.
+    public let sentiment: String?
+    public let generatedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case headline
+        case sentiment
+        case generatedAt = "generated_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        headline = try c.decode(String.self, forKey: .headline)
+        sentiment = try c.decodeIfPresent(String.self, forKey: .sentiment)
+        generatedAt = try c.decodeIfPresent(Date.self, forKey: .generatedAt)
+    }
+
+    public init(headline: String, sentiment: String? = nil, generatedAt: Date? = nil) {
+        self.headline = headline
+        self.sentiment = sentiment
+        self.generatedAt = generatedAt
+    }
 }
 
 /// One index in the market band.
@@ -396,7 +435,10 @@ public enum WidgetSnapshotStore {
         return e
     }
 
-    private static var decoder: JSONDecoder {
+    /// The wire decoder. Public so the extension's fetcher decodes a live response with
+    /// the SAME date strategy the stored envelope uses — a second decoder would be one
+    /// `.iso8601` away from silently failing on `as_of` and blanking the tile.
+    public static var decoder: JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
@@ -432,6 +474,28 @@ public enum WidgetSnapshotStore {
     /// snapshot, blanking that widget until the next portfolio fetch.
     @discardableResult
     public static func write(mode: WidgetMode, snapshot: WidgetMoverSnapshot) -> Bool {
+        write(mode: mode, snapshot: snapshot, reloading: true)
+    }
+
+    /// The same write, from the WIDGET process, WITHOUT asking WidgetKit to redraw.
+    ///
+    /// ⚠️ THE RELOAD IS THE WHOLE REASON THIS EXISTS. The extension fetches from inside
+    /// `timeline(for:in:)`; calling `reloadTimelines()` there asks WidgetKit for a new
+    /// timeline while it is building one, which is a loop that spends the day's refresh
+    /// allowance and leaves the tile staler than doing nothing. The extension is already
+    /// returning the fresh entries directly, so it has nothing to gain from a reload —
+    /// it writes only so the NEXT failed fetch has something current to fall back on.
+    @discardableResult
+    public static func writeFromExtension(
+        mode: WidgetMode, snapshot: WidgetMoverSnapshot
+    ) -> Bool {
+        write(mode: mode, snapshot: snapshot, reloading: false)
+    }
+
+    @discardableResult
+    private static func write(
+        mode: WidgetMode, snapshot: WidgetMoverSnapshot, reloading: Bool
+    ) -> Bool {
         guard let defaults else {
             log.error("cannot write widget snapshot — App Group unavailable")
             return false
@@ -490,7 +554,7 @@ public enum WidgetSnapshotStore {
             log.error("widget snapshot encode failed: \(String(describing: error))")
             return false
         }
-        reloadTimelines()
+        if reloading { reloadTimelines() }
         return true
     }
 

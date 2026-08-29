@@ -253,11 +253,36 @@ struct InsightSource: Identifiable {
     let title: String
     /// nil when the source has no link (still nameable, just not tappable).
     let url: URL?
+    /// The outlet NAME the backend reported ("CNBC Television"). nil on cards
+    /// stored before the field existed, and on any source with no known outlet.
+    let publisher: String?
 
     /// Publisher host for the row subtitle, e.g. "reuters.com".
     var host: String? {
         guard let h = url?.host else { return nil }
         return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
+    }
+
+    /// What the row actually shows. The host is the FALLBACK, not the answer:
+    /// news feeds link broadcast segments to their video upload, so the host
+    /// says "youtube.com" when the source is really Bloomberg or CNBC.
+    var displayName: String? {
+        if let p = publisher?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !p.isEmpty {
+            return p
+        }
+        return host
+    }
+
+    /// True when the link opens a video rather than an article.
+    ///
+    /// Derived from the URL rather than sent by the backend, deliberately: it is
+    /// a fact about the link this app already holds, so it also labels cards
+    /// cached before `publisher` shipped — the ones that still show a bare host
+    /// and would otherwise be the most confusing rows on the screen.
+    var isVideo: Bool {
+        guard let h = host?.lowercased() else { return false }
+        return h == "youtube.com" || h == "m.youtube.com" || h == "youtu.be"
     }
 }
 
@@ -445,6 +470,10 @@ struct PriceMoveDTO: Codable, Sendable {
 struct InsightSourceDTO: Codable, Sendable {
     let title: String
     let url: String
+    /// Optional so a card stored before this field existed still decodes — Swift
+    /// synthesises `decodeIfPresent` for Optionals. A non-optional here would
+    /// blank the whole Insights sheet for up to the card's 96h hard TTL.
+    let publisher: String?
 }
 
 struct AIInsightCardDTO: Codable, Sendable {
@@ -649,7 +678,12 @@ extension NewsInsightSummary {
             let title = s.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { return nil }
             let trimmed = s.url.trimmingCharacters(in: .whitespacesAndNewlines)
-            return InsightSource(title: title, url: trimmed.isEmpty ? nil : URL(string: trimmed))
+            let pub = s.publisher?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return InsightSource(
+                title: title,
+                url: trimmed.isEmpty ? nil : URL(string: trimmed),
+                publisher: (pub?.isEmpty ?? true) ? nil : pub
+            )
         }
     }
 }

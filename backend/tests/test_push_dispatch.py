@@ -16,6 +16,8 @@ import asyncio
 
 import pytest
 
+from app.services.push_service import PushOutcome
+
 from app.services.notification_kinds import KIND_TICKER_MOVE, get_kind
 from app.services.push_dispatch_service import (
     MAX_RECIPIENTS_PER_SCOPE,
@@ -27,9 +29,15 @@ _MOVE = get_kind(KIND_TICKER_MOVE)
 
 
 class _FakePush:
-    def __init__(self, enabled=True, accepted=1):
+    def __init__(self, enabled=True, accepted=1, attempted=None, failures=()):
         self.enabled = enabled
         self._accepted = accepted
+        # A double of `PushService.send_to_user`, which returns a `PushOutcome` — how many
+        # devices were TRIED and what APNs said about each, not a bare accepted-count. The
+        # extra fields let a test express a PARTIAL delivery, which is the case that used to
+        # be invisible in production.
+        self._attempted = accepted if attempted is None else attempted
+        self._failures = tuple(failures)
         self.sent = []
 
     async def send_to_user(self, user_id, *, title, body, data=None, **kw):
@@ -39,7 +47,17 @@ class _FakePush:
         # pinned in THIS file are about who gets sent to, not how the payload is shaped.
         self.sent.append((user_id, title, body, data))
         self.last_kwargs = kw
-        return self._accepted
+        # Mirrors the real `PushService.send_to_user`, which checks `enabled` FIRST and
+        # returns an outcome describing the misconfiguration. A double that ignored
+        # `enabled` reported a successful delivery with APNs switched off.
+        if not self.enabled:
+            return PushOutcome(
+                attempted=0, accepted=0,
+                failures=("APNs is not configured on this server",),
+            )
+        return PushOutcome(
+            attempted=self._attempted, accepted=self._accepted, failures=self._failures
+        )
 
 
 def _service(*, watchers=None, prefs=None, claim=True, push=None,
@@ -171,11 +189,16 @@ async def test_an_opted_out_user_is_not_even_claimed():
 # ── resilience ───────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_disabled_push_is_a_silent_noop():
-    """The state before the APNs key is configured. Must not error or claim."""
+async def test_disabled_push_still_records_the_notification():
+    """⚠️ REVERSED DECISION — see the twin test in test_notification_dispatch.py.
+
+    This asserted `svc.claimed == []`. An unconfigured APNs must not also empty the in-app
+    inbox: that is the one artifact meant to outlive a failed push, and losing it is how a
+    month of undelivered notifications left no trace anywhere.
+    """
     svc = _service(watchers=["u1"], push=_FakePush(enabled=False))
-    assert await _notify(svc) == 0
-    assert svc.claimed == []
+    assert await _notify(svc) == 0, "nothing is DELIVERED — only recorded"
+    assert len(svc.claimed) == 1, "the notification must still reach the inbox"
 
 
 @pytest.mark.asyncio

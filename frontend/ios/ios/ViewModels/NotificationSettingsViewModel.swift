@@ -185,6 +185,18 @@ final class NotificationSettingsViewModel: ObservableObject {
         permission == .denied
     }
 
+    /// iOS granted permission, but this device has never been registered with the backend —
+    /// so nothing can be delivered, and every toggle below is inert.
+    ///
+    /// A REACHABLE state that used to render as perfectly healthy. `didFailToRegister` records
+    /// nothing, and `systemNotificationsBlocked` only tests `.denied`, so a user whose APNs
+    /// registration failed saw full-opacity rows and a screen with no banner. That is the one
+    /// axis `NotificationPermissionBanner` was written to cover and did not.
+    ///
+    /// Recomputed by `refreshPermission()` rather than being a computed property over the
+    /// manager, so a `@Published` change actually redraws the view.
+    @Published private(set) var deviceUnregistered: Bool = false
+
     // MARK: Lifecycle
 
     /// Read every declared key out of UserDefaults, applying each key's declared default
@@ -220,6 +232,11 @@ final class NotificationSettingsViewModel: ObservableObject {
     func refreshPermission() async {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         permission = settings.authorizationStatus
+        // Only meaningful once iOS has said yes: before that, "no token" is the expected
+        // state and saying so would be noise.
+        deviceUnregistered = (settings.authorizationStatus == .authorized
+                              || settings.authorizationStatus == .provisional)
+            && !PushNotificationManager.shared.hasRegisteredToken
     }
 
     /// Ask for permission when the user has never been asked.
@@ -229,11 +246,11 @@ final class NotificationSettingsViewModel: ObservableObject {
     /// banner sends denied users to iOS Settings instead.
     func requestPermissionIfNeeded() {
         guard permission == .notDetermined else { return }
-        PushNotificationManager.shared.requestAuthorization()
         Task {
-            // The system prompt is modal; re-read once it has been answered so the banner
-            // and the row styling reflect the real state without a screen re-entry.
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            // AWAIT the answer rather than sleeping a guess. The prompt is modal and a person
+            // takes seconds to read it, so a fixed 500ms re-read observed `.notDetermined` and
+            // left the banner and row styling stale until the screen was re-entered.
+            await PushNotificationManager.shared.requestAuthorizationResult()
             await refreshPermission()
         }
     }

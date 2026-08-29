@@ -9,14 +9,20 @@ import SwiftUI
 
 struct NewsCardBulletPoint: View {
     let text: String
+    /// The final bullet — the conclusion. Marked with an arrow instead of a dot,
+    /// which is what replaced the old "The takeaway," wording. Defaulted so the
+    /// atom's other callers are unaffected.
+    var isConclusion: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: AppSpacing.sm) {
-            // Bullet dot
-            Circle()
-                .fill(AppColors.textMuted)
-                .frame(width: 5, height: 5)
-                .padding(.top, 6)
+            SummaryBulletGlyph(
+                isConclusion: isConclusion,
+                color: AppColors.textMuted,
+                // 12pt here, not the 14pt of the insight card — the glyph centres
+                // itself on whichever it is given.
+                textFont: AppTypography.labelSmall
+            )
 
             // One uniform color for the whole bullet. The previous version
             // bolded + brightened any text before a colon (a generic "Label:"

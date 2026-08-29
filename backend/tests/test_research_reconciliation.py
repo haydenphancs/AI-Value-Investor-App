@@ -658,4 +658,17 @@ async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog):
     with caplog.at_level(logging.DEBUG):
         await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
 
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # Scoped to THIS module's logger, not to every ERROR anywhere.
+    #
+    # `claim_and_mark_failed` now notifies the user that their report failed, which reaches
+    # `push_dispatch_service` — and with no APNs configured in tests that legitimately logs an
+    # ERROR of its own. A blanket "no errors at all" assertion turned this test into a
+    # detector of the push configuration, which is not what it is about.
+    recon_errors = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR
+        and r.name.startswith("app.services.research_reconciliation")
+    ]
+    assert not recon_errors, (
+        f"a refund that succeeded logged an error: {[r.getMessage() for r in recon_errors]}"
+    )

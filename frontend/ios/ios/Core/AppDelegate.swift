@@ -56,13 +56,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // never held a token, forever. Adversarial review caught this; it made push
         // silently unreachable for the app's own default (guest-first) path.
         Task { @MainActor in
-            let settings = await UNUserNotificationCenter.current().notificationSettings()
-            if settings.authorizationStatus == .authorized
-                || settings.authorizationStatus == .provisional {
-                UIApplication.shared.registerForRemoteNotifications()
-            }
+            await PushNotificationManager.shared.registerIfAuthorized()
         }
         return true
+    }
+
+    /// And again on EVERY foreground, not only at launch.
+    ///
+    /// iOS hands over a device token only in response to a registration call. Granting
+    /// permission in iOS Settings and returning to the app therefore produced a screen that
+    /// looked completely healthy — banner gone, every toggle live — with nothing registered
+    /// on the backend until the process was killed and relaunched. That silently defeated the
+    /// one recovery path the permission banner exists to offer.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        Task { @MainActor in
+            await PushNotificationManager.shared.registerIfAuthorized()
+        }
     }
 
     /// Give every notification family a "View" and a "Mark as Read" button.
@@ -112,7 +121,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         #if DEBUG
         print("⚠️ [Push] didFailToRegisterForRemoteNotifications: \(error.localizedDescription)")
         #endif
-        Analytics.shared.track(.pushRegisterFailed, ["reason": "apns"])
+        // Keep the REAL error. `"apns"` was a hardcoded literal, so in production a missing
+        // entitlement, a network failure and a provisioning problem were indistinguishable —
+        // on the one failure that makes push unreachable for that device entirely.
+        let code = (error as NSError).code
+        Analytics.shared.track(.pushRegisterFailed, [
+            "reason": .string("apns_\(code)"),
+        ])
     }
 
     // Show alerts while the app is in the foreground.

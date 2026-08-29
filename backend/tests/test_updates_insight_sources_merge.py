@@ -28,23 +28,33 @@ def test_web_source_real_headline_kept():
     out = _catalyst_web_sources(
         [{"title": "Salesforce cuts guidance on soft demand", "uri": _VERTEX, "publisher": "reuters"}]
     )
-    assert out == [{"title": "Salesforce cuts guidance on soft demand", "url": _VERTEX}]
+    assert out == [{
+        "title": "Salesforce cuts guidance on soft demand",
+        "url": _VERTEX,
+        # Carried so a merged list labels grounded rows the same way corpus rows
+        # are labelled; the row title here is the headline, not the outlet.
+        "publisher": "Reuters",
+    }]
 
 
 def test_web_source_bare_domain_title_falls_back_to_publisher():
     # Grounding often returns title as a bare host — use the publisher name instead.
     out = _catalyst_web_sources([{"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"}])
+    # No publisher key: it IS the row title here, and writing it too would render
+    # "Reuters" above "Reuters" on the card.
     assert out == [{"title": "Reuters", "url": _VERTEX}]
 
 
 def test_web_source_bare_domain_no_publisher_strips_tld():
     out = _catalyst_web_sources([{"title": "www.infosys.com", "uri": _VERTEX, "publisher": ""}])
+    # No publisher was reported, so no publisher key — the TLD-stripped host is
+    # already the row title and repeating it would render "Infosys" twice.
     assert out == [{"title": "Infosys", "url": _VERTEX}]
 
 
 def test_web_source_empty_title_uses_publisher():
     out = _catalyst_web_sources([{"title": "", "uri": _VERTEX, "publisher": "bloomberg"}])
-    assert out == [{"title": "Bloomberg", "url": _VERTEX}]
+    assert out == [{"title": "Bloomberg", "url": _VERTEX}]   # same: title == publisher
 
 
 def test_web_source_no_name_and_no_url_skipped():
@@ -66,7 +76,18 @@ def test_web_source_dedup_by_url():
         {"title": "Reuters A", "uri": _VERTEX, "publisher": "reuters"},
         {"title": "CNBC B", "uri": _VERTEX, "publisher": "cnbc"},
     ])
-    assert out == [{"title": "Reuters A", "url": _VERTEX}]
+    assert out == [{"title": "Reuters A", "url": _VERTEX, "publisher": "Reuters"}]
+
+
+def test_web_source_publisher_is_omitted_when_it_equals_the_title():
+    """A row must never label itself twice. Grounding returns a bare host as the
+    title far more often than a headline, and both label fallbacks resolve to the
+    publisher name — so this is the COMMON case, not an edge one."""
+    for item in ({"title": "reuters.com", "uri": _VERTEX, "publisher": "reuters"},
+                 {"title": "", "uri": _VERTEX, "publisher": "Reuters"},
+                 {"title": "REUTERS.COM", "uri": _VERTEX, "publisher": "REUTERS"}):
+        row = _catalyst_web_sources([item])[0]
+        assert "publisher" not in row, row
 
 
 def test_web_source_caps_at_max_and_keeps_head_order():
@@ -107,6 +128,33 @@ def test_merge_reserves_slots_so_web_always_shows():
     assert len(merged) == _MAX_SOURCES == 8
     assert merged[-2:] == web            # web reserved at the tail
     assert merged[:6] == corpus[:6]      # corpus fills the rest, in order
+
+
+def test_merge_carries_the_publisher_from_both_lists():
+    """`_merge_sources` REBUILDS each row, so it silently drops any key it does
+    not name. It is the last hop before storage on every card that has a
+    catalyst — losing the publisher here would send per-ticker cards back to
+    citing bare hosts while the market card looked fine."""
+    corpus = _corpus_sources(
+        [{"headline": "Fed holds rates", "article_url": "https://x/1",
+          "source_name": "CNBC Television"}]
+    )
+    web = _catalyst_web_sources(
+        [{"title": "Salesforce cuts guidance", "uri": _VERTEX, "publisher": "reuters"}]
+    )
+    merged = _merge_sources(corpus, web)
+    assert [s.get("publisher") for s in merged] == ["CNBC Television", "Reuters"]
+
+
+def test_merge_omits_the_publisher_key_when_there_is_none():
+    """Absent, not blank — the client falls back to the URL host on absent."""
+    merged = _merge_sources([{"title": "Old story", "url": "https://x/1"}], [])
+    assert merged == [{"title": "Old story", "url": "https://x/1"}]
+
+
+def test_merge_ignores_a_non_str_publisher():
+    merged = _merge_sources([{"title": "t", "url": "https://x", "publisher": {"a": 1}}], [])
+    assert merged == [{"title": "t", "url": "https://x"}]
 
 
 def test_merge_dedup_by_url_across_lists():

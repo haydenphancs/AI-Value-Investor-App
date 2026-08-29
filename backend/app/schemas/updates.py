@@ -94,6 +94,14 @@ class SourceRefResponse(BaseModel):
     # Publisher link; may be empty when the source has no url (still nameable,
     # just not tappable). iOS builds a URL only when non-empty.
     url: str
+    # The outlet NAME as the news feed reported it ("CNBC Television"), never the
+    # hosting domain. None on cards stored before this field existed — iOS then
+    # falls back to the URL host, which is what it always did.
+    #
+    # It exists because the host is a bad label for broadcast news: FMP links TV
+    # segments to their YouTube upload, so a third of the market feed cited
+    # "youtube.com" while the row was really Bloomberg or CNBC Television.
+    publisher: Optional[str] = None
 
 
 class AIInsightCardResponse(BaseModel):

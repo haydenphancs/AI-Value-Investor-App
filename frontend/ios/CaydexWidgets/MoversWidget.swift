@@ -24,6 +24,7 @@
 //  this file; see `daily_move_attribution` for why that is structural.
 //
 
+import AppIntents
 import SwiftUI
 import WidgetKit
 
@@ -56,48 +57,78 @@ struct MoversProvider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: MoversConfigurationIntent, in context: Context) async -> Timeline<MoversEntry> {
-        // SEVERAL entries over ONE snapshot, not one.
+        // THE EXTENSION FETCHES NOW. It did not used to, and that was the whole bug:
+        // the tile could only change when the APP was foregrounded, so a user who did
+        // not open Caydex for a day saw yesterday's numbers for a day. Reported from
+        // TestFlight as "it doesn't automatically update new information", and correct.
         //
-        // The content only changes when the APP writes a new snapshot, and it calls
-        // `reloadTimelines` when it does — so re-rendering buys no new DATA. What it buys
-        // is an honest LABEL: `WidgetSessionLabel` derives the time wording at render
-        // time, so a tile written at 14:14 says "Live 2:14 PM ET" now, "As of 2:14 PM ET"
-        // an hour later, and "Fri close" tomorrow — with no fetch, no background task,
-        // and nothing for anyone to keep true. Each entry is the same bytes at a later
-        // clock, which is exactly what the derivation needs.
+        // Market mode only — see `WidgetMarketFetcher`. Holdings needs an identity the
+        // extension must never hold, so it still renders what the app last wrote.
+        let mode = effectiveMode(for: configuration)
+        var snap = snapshot(for: mode)
+
+        if mode == .market, let fresh = await WidgetMarketFetcher.fetchMarket() {
+            snap = fresh
+            // Store it WITHOUT a reload — see `writeFromExtension`. This is not how the
+            // entries below get the data (they already have it); it is so the next
+            // FAILED fetch falls back to something current instead of to whenever the
+            // app was last opened.
+            WidgetSnapshotStore.writeFromExtension(mode: .market, snapshot: fresh)
+        }
+
+        // SEVERAL entries over ONE snapshot.
+        //
+        // Re-rendering buys no new DATA between fetches; what it buys is an honest
+        // LABEL. `WidgetSessionLabel` derives the wording at render time, so a tile
+        // written at 14:14 says "Live 2:14 PM ET" now and "As of 2:14 PM ET" an hour
+        // later with no network at all. Each entry is the same bytes at a later clock,
+        // which is exactly what that derivation needs.
         let now = Date()
+        let reload = WidgetRefreshSchedule.nextRefresh(after: now)
         let cal = Calendar.current
         var dates: [Date] = [now]
         for minutes in [20, 60, 180] {
-            if let d = cal.date(byAdding: .minute, value: minutes, to: now) { dates.append(d) }
+            guard let d = cal.date(byAdding: .minute, value: minutes, to: now) else { continue }
+            // Never schedule a render past the point we have asked to be reloaded: those
+            // entries are redundant when the reload lands, and on a quiet weekend the
+            // ones before it are the only thing keeping the label moving.
+            if d < reload { dates.append(d) }
         }
-        // Cross midnight so "today" becomes "yesterday" without waiting for a refresh.
+        // Cross midnight so "today" becomes "yesterday" even when the reload is far off.
         if let midnight = cal.nextDate(
             after: now, matching: DateComponents(hour: 0, minute: 1),
             matchingPolicy: .nextTime
-        ) {
+        ), midnight < reload {
             dates.append(midnight)
         }
 
-        let snap = snapshot(for: configuration)
-        let entries = dates.map {
-            MoversEntry(date: $0, snapshot: snap, configuredMode: configuration.mode)
-        }
-        let next = dates.last ?? now
-        return Timeline(entries: entries, policy: .after(next))
+        let entries = dates
+            .sorted()
+            .map { MoversEntry(date: $0, snapshot: snap, configuredMode: mode) }
+        // ⚠️ `.after(reload)`, NOT the last entry's date. Those used to be the same
+        // thing, because the last entry WAS the next 00:01 — and that equality was the
+        // second half of the bug: WidgetKit was told not to ask again until tomorrow, so
+        // nothing could wake the extension during the day even in principle.
+        return Timeline(entries: entries, policy: .after(reload))
+    }
+
+    /// The tile's mode: what the in-tile toggle last set, else what was configured.
+    ///
+    /// The override is global (WidgetKit gives a provider no per-instance identity), so
+    /// an untouched install behaves exactly as before — it stays nil until somebody
+    /// taps the button.
+    private func effectiveMode(for configuration: MoversConfigurationIntent) -> MoversMode {
+        WidgetModeOverride.current() ?? configuration.mode
     }
 
     private func entry(for configuration: MoversConfigurationIntent) -> MoversEntry {
-        MoversEntry(
-            date: Date(),
-            snapshot: snapshot(for: configuration),
-            configuredMode: configuration.mode
-        )
+        let mode = effectiveMode(for: configuration)
+        return MoversEntry(date: Date(), snapshot: snapshot(for: mode), configuredMode: mode)
     }
 
-    private func snapshot(for configuration: MoversConfigurationIntent) -> WidgetMoverSnapshot? {
+    private func snapshot(for mode: MoversMode) -> WidgetMoverSnapshot? {
         let envelope = WidgetSnapshotStore.read()
-        switch configuration.mode {
+        switch mode {
         case .portfolio:
             // Fall back to market data rather than showing nothing — but the tile MUST
             // say so. Two independent fallbacks land here (this one, and the backend
@@ -141,14 +172,234 @@ struct MoversWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: MoversEntry
 
+    /// The Market brief, when this tile is in Market mode and the backend supplied one.
+    ///
+    /// Absent is ordinary — the roll-up is session-gated server-side — and the tile then
+    /// falls through to the mover layout it has always had. A market tile that renders
+    /// nothing because its headline expired would be a worse regression than the staleness
+    /// this whole change is fixing.
+    private var marketBrief: WidgetMarketBrief? {
+        guard entry.configuredMode == .market else { return nil }
+        return entry.snapshot?.marketBrief
+    }
+
     var body: some View {
         switch family {
+        // Lock Screen families stay exactly as they were: they are one or two lines of
+        // glanceable text, they cannot host a Button, and a headline sentence does not
+        // fit where a ticker and a percentage barely do.
         case .accessoryInline:      InlineView(entry: entry)
         case .accessoryRectangular: RectangularView(entry: entry)
-        case .systemSmall:          SmallView(entry: entry, configured: entry.configuredMode)
-        case .systemLarge:          LargeView(entry: entry, configured: entry.configuredMode)
-        default:                    MediumView(entry: entry, configured: entry.configuredMode)
+        case .systemSmall:
+            if let snap = entry.snapshot, let brief = marketBrief {
+                homeScreen {
+                    MarketBriefView(
+                        snapshot: snap, brief: brief,
+                        indexLimit: 1, headlineLimit: 3, now: entry.date,
+                        showBreadth: false
+                    )
+                }
+            } else {
+                homeScreen { SmallView(entry: entry, configured: entry.configuredMode) }
+            }
+        case .systemLarge:
+            if let snap = entry.snapshot, let brief = marketBrief {
+                homeScreen {
+                    MarketBriefView(
+                        snapshot: snap, brief: brief,
+                        indexLimit: 3, headlineLimit: 4, now: entry.date,
+                        showSectorDetail: true
+                    )
+                }
+            } else {
+                homeScreen { LargeView(entry: entry, configured: entry.configuredMode) }
+            }
+        default:
+            if let snap = entry.snapshot, let brief = marketBrief {
+                homeScreen {
+                    MarketBriefView(
+                        snapshot: snap, brief: brief,
+                        indexLimit: 3, headlineLimit: 3, now: entry.date
+                    )
+                }
+            } else {
+                homeScreen { MediumView(entry: entry, configured: entry.configuredMode) }
+            }
         }
+    }
+
+    /// Home Screen content with the mode toggle on its own row underneath.
+    ///
+    /// ⚠️ A ROW, NOT AN OVERLAY. The first version pinned it to `.bottomTrailing`, which
+    /// on the Small family drew it straight through the session footer — the rendered
+    /// tile read "As of 2:14 PM E⇆ Holdings". That footer is the widget's honesty
+    /// mechanism (it is the only thing saying whether a number is from today), so
+    /// anything that can cover it is disqualified no matter how little space it saves.
+    /// A row costs ~11pt and cannot overlap by construction.
+    @ViewBuilder
+    private func homeScreen<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            content()
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                ModeToggle(current: entry.configuredMode)
+            }
+        }
+    }
+}
+
+// MARK: - Market mode
+
+/// The Market tile: the day's one-line read, then the numbers behind it.
+///
+/// ⚠️ MARKET MODE IS NOT A MOVER TILE. It used to be — the same biggest-mover layout as
+/// Holdings, differing only in which universe it ranked — and that answered the wrong
+/// question. Someone glancing at a Market tile wants to know what the tape is doing, not
+/// to pick a name out of it. Holdings keeps the mover layout, because there the
+/// individual name IS the point.
+///
+/// The headline is the `__MARKET__` roll-up the Updates screen already shows, and the
+/// backend drops it unless it was generated in the session the rest of the payload
+/// describes — so this view never has to caveat it.
+private struct MarketBriefView: View {
+    let snapshot: WidgetMoverSnapshot
+    let brief: WidgetMarketBrief
+    var indexLimit: Int
+    var headlineLimit: Int
+    var now: Date = Date()
+    var showBreadth: Bool = true
+    /// Large only. Without it that family rendered four lines in a 354pt tile and left
+    /// the bottom two-thirds empty — which reads as a broken widget, not a calm one.
+    var showSectorDetail: Bool = false
+
+    private var breadth: String? {
+        guard showBreadth, let mc = snapshot.marketContext,
+              let up = mc.breadthUp, let total = mc.breadthTotal, total > 0
+        else { return nil }
+        return "\(up) of \(total) sectors up"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("Market")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                    .lineLimit(1)
+                if let s = brief.sentiment, !s.isEmpty {
+                    Text(s)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                Spacer(minLength: 2)
+            }
+
+            // The sentence is why this tile exists, so it outranks everything below it
+            // for space. Without the priority SwiftUI recovers a cramped tile from the
+            // tallest flexible element, which is exactly this one.
+            Text(brief.headline)
+                .font(.caption.weight(.semibold))
+                .lineLimit(headlineLimit)
+                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
+
+            if let mc = snapshot.marketContext, !mc.isEmpty {
+                IndexStrip(indices: mc.indices, limit: indexLimit)
+            }
+            if let breadth {
+                Text(breadth)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            if showSectorDetail, let mc = snapshot.marketContext {
+                SectorLeaders(context: mc)
+            }
+
+            Spacer(minLength: 0)
+            SessionFooter(snapshot: snapshot, now: now)
+        }
+    }
+}
+
+/// Which parts of the market are pulling, and which are dragging.
+///
+/// Large only. Both halves are already on the payload — nothing extra is fetched — and
+/// each renders independently, so a missing leader does not cost the laggard.
+private struct SectorLeaders: View {
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    let context: WidgetMarketContext
+
+    private func tint(_ pct: Double?) -> Color {
+        // Same rule as ChangeBadge: colour REINFORCES the signed number, never carries
+        // the direction alone — accessory and tinted modes flatten it away.
+        guard renderingMode == .fullColor, let pct else { return .secondary }
+        return pct >= 0 ? .green : .red
+    }
+
+    @ViewBuilder
+    private func row(_ caption: String, _ name: String?, _ pct: Double?) -> some View {
+        if let name, !name.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(caption)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                Text(name)
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                if let pct {
+                    Text(String(format: "%+.1f%%", pct))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(tint(pct))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            row("Leading", context.leadingSector, context.leadingSectorChangePercent)
+            row("Lagging", context.laggingSector, context.laggingSectorChangePercent)
+        }
+    }
+}
+
+/// The in-tile Market ⇄ Holdings switch.
+///
+/// Home Screen families only — Apple does not allow buttons on Lock Screen widgets, so
+/// `.accessoryInline` / `.accessoryRectangular` keep the long-press configuration.
+///
+/// ⚠️ Flips EVERY Caydex tile, not just this one: WidgetKit gives a provider no
+/// per-instance identity, so the choice has to live in the App Group. See
+/// `ToggleMoversModeIntent`.
+private struct ModeToggle: View {
+    let current: MoversMode
+
+    private var other: MoversMode { current == .market ? .portfolio : .market }
+    private var title: String { other == .market ? "Market" : "Holdings" }
+
+    var body: some View {
+        Button(intent: ToggleMoversModeIntent(mode: other)) {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 8, weight: .bold))
+                Text(title)
+                    .font(.system(size: 9, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -267,6 +267,15 @@ final class AppState {
             // root `.task` reaches `configure()`, so `iosApp`'s foreground trigger fires
             // first on every cold launch — and being `.guestAllowed`, it did not fail, it
             // succeeded as the guest.
+            // Tell the widget extension which backend to call. It cannot use APIConfig
+            // (app-target only, and in DEBUG it depends on a localhost probe that lives
+            // in this process), so the app publishes the resolved URL into the App
+            // Group. Written on every launch, not just when it changes, because writing
+            // the production URL is what CLEARS a stale localhost override left behind
+            // by a debug run — which would otherwise strand the widget on a dead port.
+            WidgetAPIConfig.publishBaseURL(
+                ServerEnvironmentManager.shared.resolvedBaseURL ?? APIConfig.baseURL
+            )
             WidgetRefreshService.shared.markCredentialReady()
             WidgetRefreshService.shared.refresh(identity: identityGeneration)
 
@@ -643,6 +652,16 @@ final class AppState {
             // stays conditional above: idempotence is not enough there, because a re-POSTed
             // claim is a real indexed write and the log stops being truthful.
             SettingsSyncManager.shared.resumeSyncIfNeeded(trigger: "session-healed")
+            // Same argument, same shape: a device token stranded by a transient 5xx or an
+            // offline moment is re-stashed by `registerOrStash`, and `flushPendingToken()`
+            // sits at the BOTTOM of this method, past this return. Restore re-runs on launch,
+            // foreground, network-restore and backoff — every one of those hits this early
+            // return, so the retry only ever happened on a cold launch. `SettingsSyncManager`
+            // has a durable ladder for exactly this; the push token had none.
+            //
+            // Self-gating: a no-op when there is no pending token, so a healthy reconnect
+            // still performs zero network calls.
+            PushNotificationManager.shared.flushPendingToken()
             return
         }
         // A different account on the same device: drop the previous session's device-global

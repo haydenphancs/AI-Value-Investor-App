@@ -115,6 +115,30 @@ struct NotificationsSettingsView: View {
                         viewModel.requestPermissionIfNeeded()
                     }
 
+                    // Permission granted, device not registered — nothing below can be
+                    // delivered. Previously indistinguishable from a healthy screen.
+                    // `AppDelegate.applicationDidBecomeActive` re-registers on every
+                    // foreground, so this usually clears itself; this covers the case where
+                    // it does not, instead of lying about it.
+                    if viewModel.deviceUnregistered {
+                        InlineRetryNotice(
+                            message: "This device isn't registered for notifications yet. "
+                                + "Your choices below are saved, but nothing can be delivered "
+                                + "until it is.",
+                            systemImage: "exclamationmark.arrow.circlepath",
+                            iconColor: AppColors.caution,
+                            retryTitle: "Retry",
+                            onRetry: {
+                                Task {
+                                    await PushNotificationManager.shared.registerIfAuthorized()
+                                    try? await Task.sleep(nanoseconds: 800_000_000)
+                                    await viewModel.refreshPermission()
+                                }
+                            }
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                    }
+
                     ForEach(NotificationSettingsViewModel.groups) { group in
                         groupCard(group)
                     }

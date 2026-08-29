@@ -189,6 +189,7 @@ class NotificationInboxService:
         user_id: str,
         *,
         ids: Optional[Sequence[str]] = None,
+        dedup_keys: Optional[Sequence[str]] = None,
         mark_all: bool = False,
     ) -> int:
         """Mark rows read. Returns how many changed.
@@ -197,6 +198,18 @@ class NotificationInboxService:
         Filtering on `id` alone is a textbook IDOR — one user marking another's
         notifications read. The service-role key bypasses RLS, so this in-code filter is
         the effective wall (SYSTEM_DESIGN_GUIDELINES §9: RLS is defence in depth).
+
+        `dedup_keys` addresses the same rows by the OTHER half of their unique key. It
+        exists for the notification's own "Mark as Read" button: a push payload carries
+        no `notification_events.id`, and adding one would mean returning the inserted id
+        out of `claim_send`, whose boolean contract several call sites and tests depend
+        on. `(user_id, dedup_key)` is UNIQUE (migration 119), so this is an indexed
+        lookup addressing exactly one row — and it is scoped by `user_id` for precisely
+        the same reason `ids` is. A dedup key is not a secret and not a capability: it is
+        derived from a ticker and a date, so `user_id` is what does the work either way.
+
+        `ids` wins if both are supplied — one filter per query, and the caller that has
+        real ids is the in-app list, which is the more specific request.
         """
         from datetime import datetime, timezone
 
@@ -210,15 +223,23 @@ class NotificationInboxService:
             )
             if not mark_all:
                 wanted = [str(i) for i in (ids or []) if i]
-                if not wanted:
+                keys = [str(k) for k in (dedup_keys or []) if k]
+                if wanted:
+                    query = query.in_("id", wanted)
+                elif keys:
+                    query = query.in_("dedup_key", keys)
+                else:
+                    # Neither selector and not `all` — nothing was asked for. Returning 0
+                    # rather than falling through matters: without this the query would
+                    # be scoped to the user alone and mark their ENTIRE inbox read.
                     return 0
-                query = query.in_("id", wanted)
             return len(query.execute().data or [])
         except Exception as e:
             logger.error(
-                "notification inbox: mark_read failed for user=%s (all=%s, ids=%d) "
-                "(%s: %s)",
-                user_id, mark_all, len(ids or []), type(e).__name__, e, exc_info=True,
+                "notification inbox: mark_read failed for user=%s (all=%s, ids=%d, "
+                "dedup_keys=%d) (%s: %s)",
+                user_id, mark_all, len(ids or []), len(dedup_keys or []),
+                type(e).__name__, e, exc_info=True,
             )
             raise NotificationInboxUnavailable(str(e)) from e
 

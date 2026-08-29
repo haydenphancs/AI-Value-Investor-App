@@ -863,7 +863,7 @@ _FALLBACK_PERSONAS: List[dict] = [
     {
         "id": "fallback-peter_lynch",
         "key": "peter_lynch",
-        "name": "The Everyday Growth Hunter",
+        "name": "The Growth Hunter",
         "tagline": "Growth at a Reasonable Price",
         "description": (
             "Looks for growth at a reasonable price (GARP), with focus on "

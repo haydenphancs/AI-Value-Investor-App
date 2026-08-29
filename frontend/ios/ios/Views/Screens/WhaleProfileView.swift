@@ -488,6 +488,18 @@ struct WhaleDescriptionSection: View {
                 Text(isExpanded ? "Show Less" : "Show More")
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.primaryBlue)
+                    // A bare Text label is a ~17pt target. Padding + a content shape is
+                    // what actually grows it: hitSlop's trailing .padding(-inset)
+                    // returns the frame and a Button clips its hit region to it, so
+                    // slop alone moves nothing here (measured: 21 vs 117 hit points).
+                    // The sites that use slop successfully set a .frame first.
+                    // 8pt takes a ~17pt text run to ~33pt. Not the full 44:
+                    // the remaining 11 would push "more" visibly away from the
+                    // paragraph it belongs to, for a control that is already
+                    // twice the size it was.
+                    .padding(.vertical, AppSpacing.sm)
+                    .padding(.trailing, AppSpacing.md)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
@@ -1072,6 +1084,7 @@ struct WhaleHoldingRow: View {
                 }
             }
             .padding(.vertical, AppSpacing.md)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1246,6 +1259,7 @@ struct WhaleTradeGroupCard: View {
                     .padding(.leading, AppSpacing.md)
             }
             .padding(.vertical, AppSpacing.md)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

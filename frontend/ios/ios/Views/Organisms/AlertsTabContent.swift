@@ -120,6 +120,14 @@ struct AlertsTabContent: View {
     /// detail screen lists every member and works out the destinations itself.
     @State private var selectedNotification: NotificationInboxSection.CollapsedGroup?
 
+    /// Chosen in the detail sheet while it is still on screen. Parked rather than acted on,
+    /// because a `fullScreenCover` CANNOT be presented while its sheet is up — the hand-off
+    /// happens in the sheet's `onDismiss` below.
+    @State private var pendingDestination: AlertDestination?
+
+    /// Drives the cover. See `AlertDestinationCover` for why this is a cover and not a push.
+    @State private var openedDestination: AlertDestination?
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             // THE one lazy stack. Do not add another inside any section below.
@@ -134,16 +142,31 @@ struct AlertsTabContent: View {
         .refreshable { await refreshAll() }
         // The DETAIL first, then the user picks where to go.
         //
-        // This used to be a `fullScreenCover` presenting `NotificationRouteDestination`, i.e. a
-        // tap dropped the user onto the ticker screen with the alert's own text left behind. A
-        // sheet is the right container now: the screen is a detail, and its destinations push
-        // within it so Back returns here rather than to the feed.
-        .sheet(item: $selectedNotification) { group in
+        // A tap used to drop the user straight onto the ticker screen with the alert's own text
+        // left behind, so the detail is a sheet now.
+        //
+        // ⚠️ ITS DESTINATIONS DO NOT PUSH WITHIN IT. They did, and Back returning here rather
+        // than to the feed was the point — but pushing inside this sheet meant `TickerDetailView`
+        // rendered INSIDE a sheet, and that screen carries seven `.sheet` modifiers of its own.
+        // A tester found its search icon doing nothing; search was just the one they tapped.
+        // The destination now opens in a cover with its own `NavigationStack`, exactly as Home's
+        // Daily Scanners opens a ticker, which costs the breadcrumb: Back lands on the feed, and
+        // re-tapping the row reopens this. See `AlertDestinationCover`.
+        //
+        // The sheet must be GONE before the cover is presented, hence the `onDismiss` hand-off.
+        .sheet(item: $selectedNotification, onDismiss: {
+            openedDestination = pendingDestination
+            pendingDestination = nil
+        }) { group in
             NavigationStack {
-                NotificationDetailView(group: group)
+                NotificationDetailView(group: group) { destination in
+                    pendingDestination = destination
+                    selectedNotification = nil
+                }
             }
             .environment(appState)
         }
+        .alertDestinationCover($openedDestination)
         // auth.md §7 — this tab shows three lists of the CALLER'S OWN data on device-global
         // view models. Without this the next account to sign in on the phone inherits the
         // previous user's notifications and price rules.

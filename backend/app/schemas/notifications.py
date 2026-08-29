@@ -49,9 +49,16 @@ class NotificationListResponse(BaseModel):
 
 
 class MarkReadRequest(BaseModel):
-    """Ids to mark read. Empty list + `all=True` marks everything."""
+    """What to mark read. Empty selectors + `all=True` marks everything.
+
+    `dedup_keys` addresses rows by the other half of the `(user_id, dedup_key)` unique
+    key. The notification's own "Mark as Read" action has no `notification_events.id` —
+    the APNs payload carries the dedup key instead — so this is how a tap from the lock
+    screen reaches the right row. `ids` takes precedence if both are sent.
+    """
 
     ids: List[str] = []
+    dedup_keys: List[str] = []
     all: bool = False
 
 

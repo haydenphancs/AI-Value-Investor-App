@@ -305,6 +305,7 @@ struct RecentActivitiesSection: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, AppSpacing.sm)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

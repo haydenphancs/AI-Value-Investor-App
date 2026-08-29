@@ -1552,7 +1552,8 @@ async def mark_my_notifications_read(
     service = get_notification_inbox_service()
     try:
         updated = await asyncio.to_thread(
-            service.mark_read, user["id"], ids=request.ids, mark_all=request.all
+            service.mark_read, user["id"],
+            ids=request.ids, dedup_keys=request.dedup_keys, mark_all=request.all,
         )
     except NotificationInboxUnavailable as e:
         return make_error_response(

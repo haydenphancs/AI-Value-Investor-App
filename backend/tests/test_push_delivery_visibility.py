@@ -366,3 +366,142 @@ def test_an_unconfigured_apns_is_logged_as_an_error_not_a_debug_line():
     assert "logger.error" in code[max(0, marker - 300):marker], (
         "the unconfigured-APNs message is no longer logged at ERROR"
     )
+
+
+# ── apns-expiration ──────────────────────────────────────────────────────────
+
+
+def _headers_from(monkeypatch, **send_kwargs):
+    """Capture the headers of a single APNs POST."""
+    _configure_apns(monkeypatch)
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+        def json(self): return {}
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None):
+            captured.update(headers or {})
+            return _Resp()
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", lambda **kw: _Client())
+    svc = PushService()
+    monkeypatch.setattr(svc, "_provider_jwt", lambda: "jwt")
+    asyncio.run(svc.send_to_user(
+        "u1", title="t", body="b",
+        devices=[{"token": "z" * 64, "environment": "production"}],
+        **send_kwargs,
+    ))
+    return captured
+
+
+def test_no_expiration_means_the_header_is_ABSENT_not_zero(monkeypatch):
+    """THE TRAP. `apns-expiration: 0` tells APNs to attempt delivery once and never store
+    the notification — the strictest possible expiry, not the absence of one. Sending 0
+    where "no expiry" was meant would silently drop every push to a device that happened
+    to be offline for a second, including the report a user paid 20 credits for."""
+    headers = _headers_from(monkeypatch, expiration_hours=None)
+    assert "apns-expiration" not in headers
+
+
+def test_an_expiration_is_an_absolute_epoch_in_the_future(monkeypatch):
+    """A DURATION in the header would be read as a timestamp in 1970 — i.e. already
+    expired — so the conversion is the whole point of the parameter."""
+    import time as _time
+
+    before = int(_time.time())
+    headers = _headers_from(monkeypatch, expiration_hours=4)
+    value = int(headers["apns-expiration"])
+    assert before + 4 * 3600 <= value <= before + 4 * 3600 + 30, (
+        f"expected an epoch ~4h out, got {value} (now={before})"
+    )
+
+
+def test_a_non_positive_expiration_is_omitted_rather_than_sent(monkeypatch):
+    """Belt and braces for a caller that bypasses the registry's own validation. The
+    "0 means omit, never send 0" invariant has to hold at the boundary too."""
+    assert "apns-expiration" not in _headers_from(monkeypatch, expiration_hours=0)
+    assert "apns-expiration" not in _headers_from(monkeypatch, expiration_hours=-3)
+
+
+def test_the_delivery_passes_the_kinds_own_expiration(monkeypatch):
+    """Wiring check: `_deliver` must read it off the registry rather than leaving the
+    default, or every kind's carefully chosen window is dead configuration."""
+    from app.services.notification_kinds import KIND_RESEARCH_COMPLETE
+
+    captured = {}
+
+    class _RecordingPush:
+        enabled = True
+        async def send_to_user(self, user_id, **kw):
+            captured.update(kw)
+            return PushOutcome(attempted=1, accepted=1)
+
+    svc = object.__new__(PushDispatchService)
+    svc._push = _RecordingPush()
+    svc.supabase = None
+    svc.mark_state = lambda *a, **k: None
+
+    asyncio.run(svc._deliver(
+        _Recipient(user_id="u1", devices=[{"token": "x", "environment": "production"}]),
+        get_kind(KIND_PRICE_ALERT),
+        title="t", body="b", dedup_key="alert:1", route={"ticker": "ORCL"},
+    ))
+    assert captured["expiration_hours"] == get_kind(KIND_PRICE_ALERT).expiration_hours
+
+    asyncio.run(svc._deliver(
+        _Recipient(user_id="u1", devices=[{"token": "x", "environment": "production"}]),
+        get_kind(KIND_RESEARCH_COMPLETE),
+        title="t", body="b", dedup_key="report:1", route={"ticker": "ORCL"},
+    ))
+    assert captured["expiration_hours"] is None, (
+        "the report the user paid for was given an expiry — it must never be discarded"
+    )
+
+
+def test_the_payload_carries_the_dedup_key(monkeypatch):
+    """What makes "Mark as Read" possible at all.
+
+    That action is registered on all six categories, so every notification offers it, and
+    it did nothing — the payload named no row. `route` carries a ticker and a tab; this is
+    the other half of the `(user_id, dedup_key)` unique index.
+    """
+    captured = {}
+
+    class _RecordingPush:
+        enabled = True
+        async def send_to_user(self, user_id, **kw):
+            captured.update(kw)
+            return PushOutcome(attempted=1, accepted=1)
+
+    svc = object.__new__(PushDispatchService)
+    svc._push = _RecordingPush()
+    svc.supabase = None
+    svc.mark_state = lambda *a, **k: None
+    asyncio.run(svc._deliver(
+        _Recipient(user_id="u1", devices=[{"token": "x", "environment": "production"}]),
+        get_kind(KIND_PRICE_ALERT),
+        title="t", body="b", dedup_key="alert:42", route={"ticker": "ORCL"},
+    ))
+    assert captured["data"]["dedup_key"] == "alert:42"
+    # A flat scalar, like every other route value — iOS `AnyCodable` yields "" for
+    # anything nested (auth.md §3).
+    assert isinstance(captured["data"]["dedup_key"], str)
+
+
+def test_the_module_docstring_does_not_claim_push_is_unwired():
+    """It opened with "NOT wired to any trigger yet — future events (research-complete,
+    price alerts) will call…" while TEN kinds shipped through it. That is the first thing
+    anyone debugging a delivery reads, and it points them away from the code that ran."""
+    import app.services.push_service as module
+
+    doc = module.__doc__ or ""
+    assert "NOT wired to any trigger" not in doc
+    assert "push_dispatch_service" in doc, (
+        "the docstring no longer says which layer decides WHO gets a notification, which "
+        "is the question a reader arrives with"
+    )

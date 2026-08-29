@@ -417,7 +417,7 @@ TONE: Be conversational and down-to-earth. Use analogies from everyday life. Ref
 _LYNCH_CONFIG = PersonaConfig(
     key="peter_lynch",
     agent_tag="lynch",
-    display_name="The Everyday Growth Hunter",
+    display_name="The Growth Hunter",
     agent_label_text="GARP Agent",
     system_prompt=_LYNCH_PROMPT,
     extra_data=["quarterly_income", "dividends", "sec_filings"],

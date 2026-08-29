@@ -42,7 +42,16 @@ struct PersonaCard: View {
                             .fontWeight(.semibold)
                             .foregroundColor(AppColors.textPrimary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            // 0.75, not 0.8, and derived rather than felt. "Everyday Growth"
+                            // measured 100.1pt of 12pt semibold in a 100pt box — it overflowed
+                            // at the DEFAULT text size, with no Dynamic Type involved, by a
+                            // tenth of a point. A margin that thin is decided by how a given
+                            // SwiftUI release rounds text measurement, which is why one tester
+                            // saw "Everyday Grow…" while another saw the full name on the same
+                            // build. The longest line that remains ("Concentrator") needs 0.95
+                            // at the 1.4x cap, so 0.75 is headroom, not a shrink.
+                            .minimumScaleFactor(0.75)
+                            .allowsTightening(true)
                     }
 
                     Text(nameLines.bottom)
@@ -50,7 +59,8 @@ struct PersonaCard: View {
                         .fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.75)
+                        .allowsTightening(true)
                 }
 
                 // Tagline — reserves two lines so short taglines still align across cards
@@ -59,6 +69,21 @@ struct PersonaCard: View {
                     .foregroundColor(persona.accentColor)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
+                    // This was the card's ONLY Text with no scale floor, so truncation was
+                    // the single remedy its modifier chain allowed. "Growth at a Reasonable
+                    // Price" needs 205.9pt of run at the 1.4x cap against the 200pt that two
+                    // 100pt lines provide — it overflows by 6pt and had nothing to give.
+                    // 0.70 is what a RENDER proved, not what arithmetic suggested:
+                    // 0.85 still truncated to "Reasonable Pri…" at the cap, and
+                    // `fixedSize` alone did not save it either. The floor has to be
+                    // low enough that the two lines can break at a word boundary —
+                    // "Reasonable" is 10 characters that cannot be split.
+                    .minimumScaleFactor(0.70)
+                    .allowsTightening(true)
+                    // Take the full ideal height for the proposed width, so a bad
+                    // height proposal cannot force truncation. Same idiom as
+                    // AnalysisDescriptionCard and PersonasSheet use for persona prose.
+                    .fixedSize(horizontal: false, vertical: true)
                     // Two lines of `caption` occupy 28pt at the default content size but
                     // ~31pt at the 1.4x cap, so a hard `height: 28` clipped the second line
                     // outright at any raised size. A floor keeps the reserved space (short

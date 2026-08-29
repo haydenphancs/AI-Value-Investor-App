@@ -9,13 +9,21 @@ import SwiftUI
 
 struct AlertDetailView: View {
     let alert: AppAlert
-    @Environment(\.dismiss) private var dismiss
-    @State private var navigateToWhaleId: String?
 
-    /// A ticker/tab destination picked from an item card. Separate from `navigateToWhaleId`
-    /// because the whale row is a DATA row that happens to navigate, while these are pure
-    /// destinations — see `AlertDestinationRow`.
-    @State private var pushedDestination: AlertDestination?
+    /// Where the user chose to go. REPORTED UP, never navigated to from here.
+    ///
+    /// This screen used to push destinations onto its own (sheet's) `NavigationStack`, which
+    /// meant `TickerDetailView` — seven `.sheet` modifiers deep — and `WhaleProfileView` (five)
+    /// ran inside a sheet, where their own sheets cannot present. The owner of the sheet now
+    /// closes it and opens the destination in a cover; see `AlertDestinationCover`.
+    ///
+    /// ONE channel for both. The lead-whale row used to have a `navigateToWhaleId: String?` of
+    /// its own — a data row that happens to navigate, versus a pure destination row — but
+    /// `AlertDestination.Target` already models `.whale`, and two channels here meant two
+    /// pushes to keep correct.
+    var onOpen: (AlertDestination) -> Void
+
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ZStack {
@@ -58,16 +66,6 @@ struct AlertDetailView: View {
                     .foregroundColor(AppColors.textPrimary)
             }
         }
-        .navigationDestination(item: $navigateToWhaleId) { whaleId in
-            WhaleProfileView(whaleId: whaleId)
-        }
-        // ⚠️ `NotificationRouteContent`, never `NotificationRouteDestination` — that one wraps
-        // itself in a `NavigationStack` and nesting it here would double-stack.
-        .navigationDestination(item: $pushedDestination) { destination in
-            if let route = destination.route {
-                NotificationRouteContent(route: route)
-            }
-        }
         // Chrome this screen was missing. It was the documented outlier: presented via
         // `.sheet(item:)` with no Done button, no detents and no drag indicator, so the only way
         // out was a swipe nothing on screen advertised. Matched to the ~19-site convention, and
@@ -91,7 +89,7 @@ struct AlertDetailView: View {
     private func destinationRows(for ticker: String) -> some View {
         ForEach(AlertDestination.destinations(forRollupItem: ticker, in: alert)) { destination in
             AlertDestinationRow(destination: destination) {
-                pushedDestination = destination
+                onOpen(destination)
             }
         }
     }
@@ -189,7 +187,11 @@ struct AlertDetailView: View {
     private func leadWhaleRow(name: String, firm: String?, whaleId: String?) -> some View {
         if let whaleId {
             Button {
-                navigateToWhaleId = whaleId
+                onOpen(AlertDestination(
+                    label: name,
+                    systemImage: "person.crop.circle",
+                    target: .whale(id: whaleId)
+                ))
             } label: {
                 HStack {
                     Text("Lead Whale")
@@ -311,6 +313,6 @@ struct AlertDetailView: View {
 
 #Preview {
     NavigationStack {
-        AlertDetailView(alert: AppAlert.sampleData[0])
+        AlertDetailView(alert: AppAlert.sampleData[0]) { _ in }
     }
 }

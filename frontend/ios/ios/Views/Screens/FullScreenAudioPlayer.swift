@@ -472,6 +472,7 @@ struct PlaybackSpeedSheet: View {
                             }
                         }
                         .padding(.vertical, AppSpacing.xs)
+                        .contentShape(Rectangle())
                     }
                 }
             }
@@ -520,6 +521,7 @@ struct SleepTimerSheet: View {
                             }
                         }
                         .padding(.vertical, AppSpacing.xs)
+                        .contentShape(Rectangle())
                     }
                 }
             }

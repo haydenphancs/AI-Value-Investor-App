@@ -25,11 +25,15 @@ import SwiftUI
 struct NotificationDetailView: View {
     let group: NotificationInboxSection.CollapsedGroup
 
-    @Environment(\.dismiss) private var dismiss
+    /// Where the user chose to go. REPORTED UP, never navigated to from here.
+    ///
+    /// This screen used to push the destination onto its own (sheet's) `NavigationStack`, which
+    /// meant `TickerDetailView` — seven `.sheet` modifiers deep — ran inside a sheet, where its
+    /// search, price-alert and share sheets cannot present. The owner of the sheet now closes it
+    /// and opens the destination in a cover instead; see `AlertDestinationCover`.
+    var onOpen: (AlertDestination) -> Void
 
-    /// The pushed destination. `AlertDestination` is `Hashable` so it can drive
-    /// `.navigationDestination(item:)` — the same shape `AlertDetailView` uses for the whale push.
-    @State private var pushed: AlertDestination?
+    @Environment(\.dismiss) private var dismiss
 
     private var item: NotificationEventDTO { group.newest }
     private var destinations: [AlertDestination] { AlertDestination.destinations(for: item) }
@@ -86,29 +90,10 @@ struct NotificationDetailView: View {
                     .foregroundColor(AppColors.primaryBlue)
             }
         }
-        .navigationDestination(item: $pushed) { destination in
-            destinationView(destination)
-        }
         // Matches the sheet convention the rest of the app uses (~19 sites) and that
         // `AlertDetailView` now adopts too, so the two halves of Activity are indistinguishable.
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-    }
-
-    // MARK: - Pushed destination
-
-    /// ⚠️ `NotificationRouteContent`, never `NotificationRouteDestination` — the latter wraps
-    /// itself in a `NavigationStack` and nesting one inside this screen's stack double-stacks.
-    @ViewBuilder
-    private func destinationView(_ destination: AlertDestination) -> some View {
-        switch destination.target {
-        case .whale(let whaleId):
-            WhaleProfileView(whaleId: whaleId)
-        default:
-            if let route = destination.route {
-                NotificationRouteContent(route: route)
-            }
-        }
     }
 
     // MARK: - Header
@@ -165,7 +150,7 @@ struct NotificationDetailView: View {
         card {
             ForEach(destinations) { destination in
                 AlertDestinationRow(destination: destination) {
-                    pushed = destination
+                    onOpen(destination)
                 }
             }
         }

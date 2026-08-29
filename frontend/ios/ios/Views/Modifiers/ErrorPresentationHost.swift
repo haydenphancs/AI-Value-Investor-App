@@ -79,9 +79,17 @@ struct ErrorPresentationHost: ViewModifier {
             // problem: they are plain view-hierarchy, drawn inside this cover, competing with
             // nothing.
             //
-            // A `requestSignIn(for:)` raised from inside a cover is a separate, unconfirmed
-            // problem with a different fix (deciding which presentation owns the prompt), and
-            // is out of scope here rather than papered over with a racing duplicate.
+            // A `requestSignIn(for:)` raised from inside a cover is a separate problem with a
+            // different fix, and is out of scope here rather than papered over with a racing
+            // duplicate.
+            //
+            // ⚠️ IT IS NO LONGER "UNCONFIRMED". Verified on the simulator: the guest banner
+            // on Profile → Notifications called `AppActions.requestSignIn(for:)` and NOTHING
+            // HAPPENED — the root cannot present while Account's cover is up, so the prompt
+            // is simply swallowed. The fix that works is the one this file already uses for
+            // its own two destinations: a cover-LOCAL `.sheet` presenting `SignInView`
+            // directly, which is what `NotificationsSettingsView` now does. Any other screen
+            // inside a cover needing sign-in must do the same, not call `requestSignIn`.
 
             // A 402 INSUFFICIENT_CREDITS carries `action: "upgrade"`. Buy Credits rather than the
             // subscription paywall, matching the root's routing and its reasoning: the user was

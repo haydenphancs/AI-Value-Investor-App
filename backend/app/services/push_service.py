@@ -2,8 +2,14 @@
 APNs push service — token-based auth (.p8), HTTP/2 via httpx.
 
 Sends alert pushes to a user's registered `device_tokens` (migration 102).
-NOT wired to any trigger yet — future events (research-complete, price alerts)
-will call `PushService().send_to_user(...)`. Design goals:
+
+This is the DELIVERY layer and nothing else. It does not decide who gets a
+notification, whether they opted out, or whether one was already sent — that is
+`push_dispatch_service`, which claims a `notification_events` row first and then
+calls `send_to_user` here. Ten kinds ship through it today; see
+`notification_kinds.NOTIFICATION_KINDS` for the list.
+
+Design goals:
 
   * Gracefully DISABLED when APNs config is absent (`enabled` is False) — the app
     runs fine without push; registration still records tokens for later.
@@ -217,6 +223,7 @@ class PushService:
         collapse_id: Optional[str] = None,
         category: Optional[str] = None,
         badge: Optional[int] = None,
+        expiration_hours: Optional[int] = None,
     ) -> PushOutcome:
         """Send an alert push to every device the user has registered.
 
@@ -242,6 +249,11 @@ class PushService:
             longer one with a 400, which would drop the whole send.
           * `badge` — server-computed unread count. Never incremented client-side, or it
             drifts the moment a notification is delivered and never opened.
+          * `expiration_hours` — how long APNs may keep RETRYING an undelivered push.
+            `None` OMITS the header, which is APNs' own store-and-retry default. It is
+            NOT the same as sending 0: `apns-expiration: 0` means "attempt once, never
+            store", so confusing the two would drop a notification to any device that
+            was briefly offline. See `NotificationKind.expiration_hours`.
         """
         # ⚠️ EVERY return below is a `PushOutcome`, never a bare int.
         #
@@ -322,6 +334,16 @@ class PushService:
         # background signal, and materially kinder to battery than waking the device for
         # a 13F filing. 10 = deliver immediately, the default for everything else.
         headers["apns-priority"] = "5" if interruption_level == "passive" else "10"
+        if expiration_hours is not None and expiration_hours > 0:
+            # An ABSOLUTE UNIX epoch, not a duration — APNs stops retrying at that
+            # instant and discards the notification. Computed here rather than in the
+            # registry so the deadline is measured from the send, which is what matters
+            # for a row that sat in the quiet-hours queue for six hours first.
+            #
+            # The `> 0` guard is belt-and-braces: `__post_init__` already rejects a
+            # non-positive value, and this makes the "0 means omit, never send 0"
+            # invariant hold even for a caller that bypasses the registry.
+            headers["apns-expiration"] = str(int(time.time() + expiration_hours * 3600))
 
         accepted = 0
         attempted = 0

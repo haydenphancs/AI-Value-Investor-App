@@ -244,6 +244,13 @@ async def _notify_report_failed(
     `research_service`'s `except` would double-notify on the ordinary failure path,
     because BOTH paths run — only one of them wins the claim.
 
+    ⚠️ A SECOND CALLER WAS ADDED AND REMOVED. It fired from `GET /stocks/{ticker}/report`
+    on what was believed to be a client-disconnect cancellation. On the pinned stack
+    (starlette 0.41.3) a disconnect does NOT cancel the handler — verified empirically —
+    so that caller was unreachable, and the situation it described does not arise: the
+    handler completes, the report is cached, and the user gets it on their next open.
+    See the note in `ticker_report.py`'s `finally` before re-adding anything like it.
+
     The BODY states the refund. That is the whole reason this notification earns its
     place: "it failed" without "you have your credits back" leaves the user checking
     their balance, which is the anxiety the alert was supposed to remove. When the

@@ -38,7 +38,11 @@ def _strip_comments(src: str) -> str:
     an un-stripped scan would pass on the EXPLANATION after the code was reverted.
     """
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    return re.sub(r"^\s*//.*$", "", src, flags=re.M)
+    # `[ \t]*`, NOT `\s*`: `\s` matches newlines, so `^\s*//` consumed the blank
+    # line before a comment and collapsed two lines into one. Every line number
+    # this file reports is derived from the stripped text, so that silently
+    # shifted them (SnapshotCard 91->85, BookDetailView 1078->1029).
+    return re.sub(r"^[ \t]*//.*$", "", src, flags=re.M)
 
 
 def _decl_body(src: str, prefix: str) -> str:
@@ -627,3 +631,304 @@ def test_the_sheet_uses_navigationstack_like_its_working_siblings():
     assert "NavigationView {" not in code, (
         "NavigationView is deprecated and was the odd one out among these sheets"
     )
+
+
+# ── app-wide: a row-shaped Button is tappable across the whole row ────────────
+#
+# TestFlight, 2026-08-24, ticker report → Deep Dive Modules:
+#
+#     "To expand a card/module, they can hit anywhere on the top of the card,
+#      not just on the title or the down icon."
+#
+# The SECOND report of the defect this file was created for. The first fix was
+# scoped to one screen, so the class survived and resurfaced elsewhere. This
+# scanner is the sweep, so there cannot be a third.
+#
+# The mechanism, restated because it is the part that keeps being forgotten: a
+# Button is hit-tested on the shape its label DRAWS, not on the label's frame.
+# `Spacer()` draws nothing and `.padding` is empty space, so a header row of
+# icon + title + Spacer + chevron responds ONLY on those three glyphs — and the
+# Spacer is the widest part of the row. `.contentShape(Rectangle())`, applied
+# AFTER the padding, is what makes the row one target.
+#
+# ⚠️ The exemption rule is where this scanner goes wrong, and it already did
+# twice. A fill DOES donate a hit region, so a filled label needs no shape — but
+# the first version searched the whole label closure for `.background`/`.fill`
+# and thereby MISSED six real offenders, because those tokens matched a 36x36
+# icon chip and a badge pill nested INSIDE the row. `_fill_on_root` therefore
+# depth-tracks: only a modifier on the label's OUTERMOST view counts. A curated
+# allowlist was tried alongside it and deleted — measured, it exempted nothing
+# the depth check did not already handle, so it was pure misdirection.
+
+_ROW_WIDE = ("Spacer()", "Spacer(minLength", ".frame(maxWidth: .infinity")
+_FILL_ON_LABEL = re.compile(r"\.(background|cardSurface|cardFill)\(")
+
+
+def _row_shaped_buttons():
+    """(rel_path, line, has_shape) for every Button whose label spans a row.
+
+    "Spans a row" = the label contains a `Spacer()` or `.frame(maxWidth:)` AND
+    some padding. That is exactly the shape whose empty regions swallow taps.
+    """
+    out = []
+    for path in sorted(_VIEWS.rglob("*.swift")):
+        rel = str(path.relative_to(_REPO / "frontend/ios/ios"))
+        src = _code(path)
+        for m in _BUTTON_TOKEN.finditer(src):
+            # The label is the LAST closure belonging to this Button, so both
+            # `Button(action:) { … }` and `Button { … } label: { … }` resolve.
+            i = m.start()
+            pos, label = i, None
+            while True:
+                br = src.find("{", pos)
+                if br == -1:
+                    break
+                if pos != i and not re.fullmatch(r"[\s)]*(label:)?\s*", src[pos:br]):
+                    break
+                cl = _brace_close(src, br)
+                if cl is None:
+                    break
+                label = (br, cl)
+                pos = cl + 1
+            if label is None:
+                continue
+            # INTERIOR of the label closure. Including the opening `{` line would
+            # make `_root_indent` read the Button's own indentation instead of
+            # its content's, and every root-placement check would then miss.
+            body = src[label[0] + 1:label[1]]
+            if not any(t in body for t in _ROW_WIDE):
+                continue
+            if ".padding(" not in body:
+                continue
+            if _fill_on_root(body):
+                continue          # a drawn surface donates the shape
+            ok = _shape_is_effective(body)
+            out.append((rel, src[:i].count("\n") + 1, ok))
+    return out
+
+
+def _root_modifiers(body: str) -> list:
+    """Lines of ``body`` that are modifiers on the label's OUTERMOST view.
+
+    Depth-tracked rather than indentation-matched. Indentation cannot express
+    this: when the root is a container the modifiers sit at the container's
+    indent (`HStack { … }` then `.padding`), but when the root is a single view
+    they sit one level deeper (`Text("more")` then an indented `.font`). A
+    modifier belongs to the root exactly when its leading `.` is at nesting
+    depth 0 of the label interior.
+
+    This is the check that makes the guard mean what its message says. Both
+    failure modes it catches ship silently: a `.contentShape` applied to a
+    nested child (BookDetailView's content column, leaving a 44pt timeline
+    column dead) and one applied before the padding (measuring the unpadded
+    frame) compile and render identically to the correct code.
+    """
+    out, depth = [], 0
+    for idx, line in enumerate(body.splitlines()):
+        stripped = line.strip()
+        leading_depth = depth
+        for ch in line:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        if leading_depth == 0 and stripped.startswith("."):
+            out.append((idx, stripped))
+    return out
+
+
+def _fill_on_root(body: str) -> bool:
+    """A drawn surface donates a hit region ONLY when applied to the label
+    itself. Searching the whole closure is what made the first version of this
+    scanner clear six real offenders: it matched a 36x36 icon chip's `.fill(`
+    and a badge pill's `.background(` nested inside the row."""
+    return any(_FILL_ON_LABEL.match(t) for _, t in _root_modifiers(body))
+
+
+def _shape_is_effective(body: str) -> bool:
+    """True when a content shape is on the label root AND after the padding."""
+    mods = _root_modifiers(body)
+    shape = [i for i, t in mods if t.startswith(".contentShape(")]
+    if not shape:
+        return False
+    pad = [i for i, t in mods if t.startswith(".padding(")]
+    return not pad or max(shape) > max(pad)
+
+
+def test_every_row_shaped_button_declares_its_hit_area():
+    """20 sites failed this before the sweep, across 15 files.
+
+    The sweep also fixed 6 inline text links and added 4 missing plain button
+    styles, but those are NOT in this scanner's population (a bare `Text` label
+    has no Spacer and no padding) — they have their own tests below. Saying "26"
+    here would credit this assertion with coverage it does not have.
+    """
+    bad = [(f, l) for f, l, ok in _row_shaped_buttons() if not ok]
+    assert bad == [], (
+        "row-shaped Buttons whose padding and Spacer are dead pixels — add "
+        ".contentShape(Rectangle()) as the LAST modifier inside the label, after "
+        "the padding:\n  " + "\n  ".join(f"{f}:{l}" for f, l in bad)
+    )
+
+
+def test_the_reported_deep_dive_header_is_one_target():
+    """The exact card from the report, asserted by name rather than only by the
+    sweep — a scanner that stops matching would take the sweep green with it."""
+    body = _decl_body(
+        _code(_REPO / "frontend/ios/ios/Views/Organisms/ReportDeepDiveSection.swift"),
+        "struct ReportDeepDiveSection",
+    )
+    head = body[:body.index("if isExpanded")]
+    assert ".contentShape(Rectangle())" in head, (
+        "the Deep Dive module header lost its content shape — only the title and "
+        "the chevron respond again"
+    )
+    # Order matters: before the padding it measures the unpadded frame.
+    assert head.rindex(".padding(") < head.index(".contentShape(Rectangle())"), (
+        ".contentShape must come after .padding, or the margins stay dead"
+    )
+
+
+def test_the_show_more_footers_that_gained_a_hit_area_also_gained_a_button_style():
+    """Paired on purpose. These four had NO button style and looked right only
+    because the label hardcodes `AppColors.primaryBlue`. The moment the full row
+    became hit-testable, the default style would paint a press highlight across
+    it — so shipping the shape without the style is a visible regression."""
+    for rel in (
+        "Views/Molecules/ReportInsiderActivityTable.swift",
+        "Views/Molecules/ReportKeyManagementTable.swift",
+        "Views/Organisms/ReportHiddenMarketSignalsSection.swift",
+        "Views/Organisms/ReportMacroGeopoliticalSection.swift",
+    ):
+        src = _code(_REPO / "frontend/ios/ios" / rel)
+        assert ".contentShape(Rectangle())" in src, f"{rel} lost its content shape"
+        assert ".buttonStyle(.plain)" in src, (
+            f"{rel} has a full-width hit area but no plain button style — the "
+            "default style will tint and highlight the whole row"
+        )
+
+
+_MORE_LINKS = [
+    "Views/Organisms/TickerDetailCompanyProfileSection.swift",
+    "Views/Organisms/CryptoProfileSection.swift",
+    "Views/Organisms/ETFProfileSection.swift",
+    "Views/Organisms/CommodityDetailProfileSection.swift",
+    "Views/Organisms/IndexDetailProfileSection.swift",
+    "Views/Screens/WhaleProfileView.swift",
+]
+
+
+def _more_link_label(rel: str) -> str:
+    """The label closure of the `more` / `Show More` disclosure Button."""
+    src = _code(_REPO / "frontend/ios/ios" / rel)
+    at = re.search(r'Text\(isExpanded \? "Show ?[Ll]ess" : "(more|Show More)"\)', src)
+    assert at, f"{rel}: the more/less link moved — this guard has drifted"
+    starts = [m.start() for m in _BUTTON_TOKEN.finditer(src, 0, at.start())]
+    assert starts, f"{rel}: no Button wraps the more/less link"
+    i = starts[-1]
+    pos, label = i, None
+    while True:
+        br = src.find("{", pos)
+        if br == -1:
+            break
+        if pos != i and not re.fullmatch(r"[\s)]*(label:)?\s*", src[pos:br]):
+            break
+        cl = _brace_close(src, br)
+        if cl is None:
+            break
+        label = (br, cl)
+        pos = cl + 1
+    assert label, f"{rel}: could not bound the Button label"
+    return src[label[0] + 1:label[1]]
+
+
+@pytest.mark.parametrize("rel", _MORE_LINKS)
+def test_the_inline_more_links_reach_the_minimum_target(rel):
+    """`more` / `Show less` under a paragraph is a ~17pt text run.
+
+    It gets PADDING plus a content shape, not `.hitSlop()`. Measured with
+    dispatched mouse events on the same view structure: slop leaves a Button's
+    tap area unchanged (21 live probe points, identical to no slop at all)
+    because `hitSlop` ends in `.padding(-inset)` and a Button clips its
+    interaction region back to that frame. Real padding plus a shape gives 117.
+    `NavBackButton` and `MoreOptionsButton` only look like counter-examples
+    because they set an explicit 44pt `.frame` before their slop.
+
+    Brace-bounded to the Button and asserted on the LABEL's own modifiers: a
+    file-wide substring check passed while all six were attached OUTSIDE the
+    Button, where they did nothing at all.
+    """
+    body = _more_link_label(rel)
+    mods = _root_modifiers(body)
+    names = [t.split("(")[0] for _, t in mods]
+    assert ".contentShape" in names, (
+        f"{rel}: the more/less label has no content shape on its root — the "
+        "target is back to the width of the word"
+    )
+    assert ".padding" in names, (
+        f"{rel}: the shape without padding is just the text frame again"
+    )
+    assert _shape_is_effective(body), (
+        f"{rel}: the content shape does not come after the padding, so it "
+        "measures the unpadded text frame"
+    )
+
+
+def test_the_more_links_do_not_rely_on_hit_slop_alone(rel=None):
+    """The regression that shipped: `.hitSlop(...)` placed after
+    `.buttonStyle(...)`, i.e. on the Button rather than inside its label, where
+    a content shape cannot reach the Button's own gesture. Every one of the 31
+    other hitSlop call sites in this app is inside a label."""
+    views = _REPO / "frontend/ios/ios/Views"
+    stray = []
+    for path in sorted(views.rglob("*.swift")):
+        lines = _code(path).splitlines()
+        for k, line in enumerate(lines):
+            if ".hitSlop(" in line and k > 0 and ".buttonStyle(" in lines[k - 1]:
+                stray.append(f"{path.relative_to(views)}:{k + 1}")
+    assert stray == [], (
+        "hitSlop applied to the Button instead of its label — it expands a "
+        "region no gesture is attached to:\n  " + "\n  ".join(stray)
+    )
+
+
+def test_the_row_shaped_scanner_is_not_vacuous():
+    """Four controls — each failure mode has already bitten a scan in this file."""
+    sites = _row_shaped_buttons()
+
+    # 1. It still finds the population. If the Button walker breaks, every
+    #    assertion above passes on an empty list.
+    assert len(sites) >= 20, (
+        f"only {len(sites)} row-shaped buttons found — the walker has drifted"
+    )
+
+    # 2. It finds the specific site the report was about.
+    assert any(f.endswith("ReportDeepDiveSection.swift") for f, _, _ in sites), (
+        "the reported card is no longer classified as row-shaped"
+    )
+
+    # 3. Comment stripping bites — the comment added beside the fix quotes
+    #    `.contentShape(Rectangle())`, `Spacer()` and `.padding` verbatim.
+    assert ".contentShape" not in _strip_comments("// .contentShape(Rectangle())\nlet x = 1\n")
+
+    # 4. Comment stripping preserves LINE COUNT, so the line numbers this file
+    #    reports point at the real source. `^\s*//` used to eat the newline of a
+    #    preceding blank line and collapse two lines into one.
+    src = "a\n\n    // note\nb\n"
+    assert _strip_comments(src).count("\n") == src.count("\n")
+
+    # 5. The root-placement check discriminates. A shape on a NESTED child and a
+    #    shape BEFORE the padding both compile and render identically to the
+    #    correct code, so a membership test would bless either.
+    good = '\n    HStack {\n        Text("x")\n    }\n    .padding(8)\n    .contentShape(Rectangle())\n'
+    nested = '\n    HStack {\n        VStack {\n            Text("x")\n        }\n        .contentShape(Rectangle())\n    }\n    .padding(8)\n'
+    before = '\n    HStack {\n        Text("x")\n    }\n    .contentShape(Rectangle())\n    .padding(8)\n'
+    assert _shape_is_effective(good)
+    assert not _shape_is_effective(nested), "a shape on a nested child must not count"
+    assert not _shape_is_effective(before), "a shape before the padding must not count"
+
+    # 6. The fill exemption is root-scoped. A nested chip's fill is exactly what
+    #    made an earlier version of this scanner clear six real offenders.
+    chip = '\n    HStack {\n        RoundedRectangle(cornerRadius: 8)\n            .fill(Color.red)\n        Spacer()\n    }\n    .padding(8)\n'
+    assert not _fill_on_root(chip), "a nested chip's fill must not exempt the row"
+    assert _fill_on_root('\n    HStack {\n        Text("x")\n    }\n    .background(Color.red)\n')

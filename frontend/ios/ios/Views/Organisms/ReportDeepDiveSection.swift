@@ -12,6 +12,19 @@ struct ReportDeepDiveSection<Content: View>: View {
     /// Suppresses the bottom hairline divider for the LAST module so the parent's
     /// rounded card ends cleanly at its curved bottom corners.
     var isLast: Bool = false
+    /// Fired after this module has closed VIA THE BOTTOM "^" ONLY, so the parent can put
+    /// the module's own header back at the top of the viewport.
+    ///
+    /// ⚠️ Deliberately NOT fired from the header chevron, and that is the whole design.
+    /// Collapsing removes height BELOW the header, so the header itself never moves — a
+    /// user who taps it is looking straight at it and nothing has gone anywhere. Scrolling
+    /// on that path would CREATE the jump this fixes, in mirror image: tap a header sitting
+    /// at y≈600 while reading the executive summary and the page yanks down 600pt.
+    ///
+    /// The bottom affordance is the opposite case by construction — reaching it means the
+    /// header is far above the fold, so the collapse pulls the content the reader was
+    /// looking at up and out of view. That is the reported bug.
+    var onCollapse: (() -> Void)? = nil
     @ViewBuilder let content: () -> Content
 
     @State private var isExpanded: Bool = false
@@ -41,6 +54,13 @@ struct ReportDeepDiveSection<Content: View>: View {
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.vertical, AppSpacing.lg)
+                // AFTER the padding, and not optional. A Button is hit-tested on
+                // the shape its label DRAWS: `Spacer()` draws nothing and padding
+                // is empty, so without this only the icon, the title glyphs and
+                // the chevron respond — reported from TestFlight as "you can only
+                // hit the title or the down icon". Applied before the padding it
+                // would measure the unpadded frame and leave the margins dead.
+                .contentShape(Rectangle())
             }
             .buttonStyle(PlainButtonStyle())
 
@@ -53,7 +73,10 @@ struct ReportDeepDiveSection<Content: View>: View {
                 // closes the card, mirroring the header chevron. These modules
                 // can be long, so this lets the user dismiss one without
                 // scrolling back up to the header.
-                Button(action: { isExpanded = false }) {
+                Button(action: {
+                    isExpanded = false
+                    onCollapse?()
+                }) {
                     HStack(spacing: 0) {
                         Spacer()
                         Image(systemName: "chevron.up")

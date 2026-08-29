@@ -12,6 +12,7 @@ import AuthenticationServices
 
 struct SignInView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
 
     @State private var mode: Mode = .signIn
     @State private var email: String = ""
@@ -158,6 +159,28 @@ struct SignInView: View {
             if let message = pendingConfirmationMessage {
                 confirmationPrompt(message)
             }
+        }
+        // CLOSE ITSELF WHEN THE SESSION ARRIVES.
+        //
+        // `submit()` succeeds and does nothing but stop the spinner, so this view relied
+        // entirely on its presenter to take it away — and of the five presenters, only
+        // `SignInRequiredSheet` did (via its own `.onChange`, which tears down the nested
+        // sheet with it). The other four are plain `.sheet(isPresented:)`, which SwiftUI
+        // never closes on its own: the user typed their password, authentication SUCCEEDED,
+        // and they were left looking at a filled-in "Welcome back" form with no
+        // confirmation — indistinguishable from a silent failure, escapable only by
+        // swiping. Reached from an error toast's "Sign In" action, from Profile, from the
+        // Notifications banner, and from the root's own error path.
+        //
+        // Fixed HERE rather than at four call sites so a fifth presenter cannot reintroduce
+        // it. `.onChange` and not `.task`/`.onAppear`: it must fire on the TRANSITION, or a
+        // view presented while already authenticated would dismiss itself instantly.
+        //
+        // Sign-up that needs email confirmation deliberately does NOT dismiss — there is no
+        // session yet, so `isAuthenticated` stays false and the "check your inbox" overlay
+        // above remains, which is the whole point of that terminal state.
+        .onChange(of: appState.auth.isAuthenticated) { _, isAuthenticated in
+            if isAuthenticated { dismiss() }
         }
     }
 

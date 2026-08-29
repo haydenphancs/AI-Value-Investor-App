@@ -21,10 +21,44 @@ import UserNotifications
 
 struct NotificationPermissionBanner: View {
     let status: UNAuthorizationStatus
+    /// No account on this install — so nothing below can be delivered no matter what iOS
+    /// says. Takes precedence over every permission state because it is the binding
+    /// constraint: `device_tokens` is FK-bound to `public.users`, so a guest cannot hold a
+    /// push token at all, and `/me/settings` is `.signInRequired` so their choices never
+    /// reach the server either.
+    ///
+    /// ⚠️ Must be false while a session is merely RESTORING. `AuthStatus.restoring` means
+    /// "we hold a credential we could not validate yet" and renders like a guest — telling
+    /// that user to sign in is the exact defect auth.md §5 names, and the restore backoff
+    /// runs indefinitely, so the window is not brief.
+    var needsAccount: Bool = false
+    /// Called when the user taps the primary button in the `needsAccount` state.
+    var onSignIn: () -> Void = {}
     /// Called when the user taps the primary button in `.notDetermined`.
     var onEnable: () -> Void
 
     var body: some View {
+        if needsAccount {
+            // BEFORE the permission switch, deliberately. A guest in `.notDetermined`
+            // would otherwise be invited to allow notifications that can never be sent —
+            // spending the one-shot iOS prompt on a permission with nothing behind it.
+            banner(
+                icon: "person.crop.circle.badge.plus",
+                tint: AppColors.primaryBlue,
+                title: "Notifications need an account",
+                message: "Alerts are delivered to your account, not to this device. "
+                       + "Set your preferences here — they're saved and applied as soon "
+                       + "as you sign in.",
+                buttonTitle: "Sign In",
+                action: onSignIn
+            )
+        } else {
+            permissionBanner
+        }
+    }
+
+    @ViewBuilder
+    private var permissionBanner: some View {
         switch status {
         case .denied:
             banner(
@@ -139,6 +173,7 @@ struct NotificationPermissionBanner: View {
 
 #Preview {
     VStack(spacing: AppSpacing.xl) {
+        NotificationPermissionBanner(status: .notDetermined, needsAccount: true, onEnable: {})
         NotificationPermissionBanner(status: .denied, onEnable: {})
         NotificationPermissionBanner(status: .notDetermined, onEnable: {})
         NotificationPermissionBanner(status: .provisional, onEnable: {})

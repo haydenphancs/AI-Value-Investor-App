@@ -34,7 +34,36 @@ import UserNotifications
 
 struct NotificationsSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appState) private var appState
     @StateObject private var viewModel = NotificationSettingsViewModel()
+
+    /// No account → nothing on this screen can be delivered, whatever iOS says.
+    /// `device_tokens` is FK-bound to `public.users` so a guest cannot hold a push token,
+    /// and `/me/settings` is `.signInRequired` so their toggles never reach the server.
+    ///
+    /// The screen is NOT gated on this — auth.md §1a: a login wall in front of browsing
+    /// risks a 5.1.1(v) rejection, and the choices genuinely are kept (they live in
+    /// `UserDefaults`, and `SettingsSyncManager` pushes them on the first sync after sign
+    /// -in). It just has to say so instead of looking identical to a signed-in user's.
+    ///
+    /// ⚠️ False while merely RESTORING. That state renders like a guest but holds a real
+    /// credential, and telling such a user to sign in is the defect auth.md §5 names.
+    private var needsAccount: Bool {
+        !appState.auth.isAuthenticated && !appState.hasUnusedStoredCredential
+    }
+
+    /// Presented from HERE, not via `AppActions.requestSignIn(for:)`.
+    ///
+    /// ⚠️ THIS SCREEN LIVES INSIDE A `fullScreenCover`. Account is presented as one, and
+    /// `appState.signInPrompt` is bound to a `.sheet(item:)` on the ROOT — which cannot
+    /// present while the cover is up, so the prompt is simply swallowed. Verified on the
+    /// simulator: tapping the banner's button did nothing at all, which is exactly the
+    /// class of defect this whole pass exists to remove.
+    ///
+    /// `ErrorPresentationHost` hit the same wall and documents it ("a `requestSignIn(for:)`
+    /// raised from inside a cover is a separate, unconfirmed problem"); its fix is a
+    /// cover-local `.sheet` presenting `SignInView` directly, which is what this mirrors.
+    @State private var showSignIn = false
 
     // MARK: - Declared defaults
 
@@ -111,7 +140,11 @@ struct NotificationsSettingsView: View {
 
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: AppSpacing.xxl) {
-                    NotificationPermissionBanner(status: viewModel.permission) {
+                    NotificationPermissionBanner(
+                        status: viewModel.permission,
+                        needsAccount: needsAccount,
+                        onSignIn: { showSignIn = true }
+                    ) {
                         viewModel.requestPermissionIfNeeded()
                     }
 
@@ -120,7 +153,12 @@ struct NotificationsSettingsView: View {
                     // `AppDelegate.applicationDidBecomeActive` re-registers on every
                     // foreground, so this usually clears itself; this covers the case where
                     // it does not, instead of lying about it.
-                    if viewModel.deviceUnregistered {
+                    // `&& !needsAccount`: a guest who granted permission during onboarding
+                    // satisfies "authorized but no token" by construction — registration
+                    // deliberately stashes the token until sign-in. Showing this as well
+                    // would stack a second notice offering a Retry that cannot ever
+                    // succeed, on top of a banner that already explains the real reason.
+                    if viewModel.deviceUnregistered && !needsAccount {
                         InlineRetryNotice(
                             message: "This device isn't registered for notifications yet. "
                                 + "Your choices below are saved, but nothing can be delivered "
@@ -153,6 +191,19 @@ struct NotificationsSettingsView: View {
                 .padding(.top, AppSpacing.md)
             }
         }
+        // Cover-LOCAL, for the reason spelled out on `showSignIn`: the root's
+        // `.sheet(item: signInPrompt)` cannot present from behind the Account cover, so
+        // routing through `AppActions.requestSignIn` here is a button that does nothing.
+        .sheet(isPresented: $showSignIn) {
+            SignInView()
+                .environment(appState)
+        }
+        // No `.onChange` here to close it: `SignInView` dismisses ITSELF on a successful
+        // sign-in now. It did not when this screen was written — it relied entirely on its
+        // presenter, and a plain `.sheet(isPresented:)` never closes on its own, so the
+        // user authenticated successfully and was left on a filled-in "Welcome back" form.
+        // Four of the five presenters had that bug; it is fixed in `SignInView` so a fifth
+        // cannot reintroduce it.
         .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppColors.background, for: .navigationBar)

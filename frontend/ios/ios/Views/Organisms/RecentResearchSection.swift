@@ -79,7 +79,7 @@ struct RecentResearchSection: View {
             stockTicker: "NVDA",
             stockName: "NVIDIA Corp.",
             companyLogoName: "icon_nvidia",
-            persona: .everydayGrowthHunter,
+            persona: .growthHunter,
             headline: "NVIDIA: Excellent Quality",
             summary: "Dominant position in AI accelerators with data center revenue surging. GPU demand from AI training and inference workloads continues to outpace supply.",
             rating: 95,

@@ -104,6 +104,11 @@ _PERSONA_DISPLAY: dict[str, str] = _build_persona_display()
 # `agent.name == "Warren Buffett"`, and without this it would fall through to the generic
 # tail below and print the old surname.
 _LEGACY_PERSONA_NAME_FRAGMENTS: dict[str, str] = {
+    # Style names that have been renamed since. `_PERSONA_DISPLAY` is DERIVED from
+    # `persona_config`, so a renamed label stops resolving there the moment it
+    # changes, and a report frozen under the old name would fall through to the
+    # generic tail and print "Hunter Agent".
+    "everyday growth hunter": "GARP Agent",
     "buffett": "Quality Agent",
     "wood": "Disruption Agent",
     "lynch": "GARP Agent",

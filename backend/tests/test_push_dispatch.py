@@ -251,7 +251,13 @@ async def test_the_payload_carries_the_ticker_for_the_tap_handler():
         ticker="NVDA", title="NVDA", body="moved 8%",
         dedup_key="k", data={"kind": "ticker_move", "ticker": "NVDA"},
     )
-    assert push.sent[0][3] == {"kind": "ticker_move", "ticker": "NVDA"}
+    payload = push.sent[0][3]
+    assert payload["ticker"] == "NVDA"
+    assert payload["kind"] == "ticker_move"
+    # And the dedup key, which is what makes the notification's own "Mark as Read"
+    # button work: the payload carries no `notification_events.id`, so this is the only
+    # thing that identifies the row from a lock-screen tap.
+    assert payload["dedup_key"] == "k"
 
 
 # ── bounds ───────────────────────────────────────────────────────────────────
@@ -536,3 +542,201 @@ def test_a_failed_count_read_fails_open():
     svc = object.__new__(PushDispatchService)
     svc.supabase = _Boom()
     assert svc.alerts_sent_today("u1") == 0
+
+
+# ── the ETF upgrade ──────────────────────────────────────────────────────────
+#
+# 13F and congressional filings are FULL of funds — SPY, QQQ and IWM are among the
+# most-held 13F positions — and nothing about the SYMBOL "SPY" says fund, so
+# `detect_asset_class` cannot see it. Every one of those alerts opened
+# `TickerDetailView` to render equity fundamentals for an ETF.
+
+
+def _resolver(*, watchlist_rows=None, profile=None):
+    """A dispatcher with only the asset-type resolution live."""
+    from app.services.push_dispatch_service import PushDispatchService as _PDS
+
+    class _Q:
+        def __init__(self, table):
+            self.table_name = table
+        def select(self, *_a): return self
+        def eq(self, *_a): return self
+        def limit(self, *_a): return self
+        def execute(self):
+            class _R:
+                pass
+            r = _R()
+            r.data = (
+                (watchlist_rows or []) if self.table_name == "watchlist_items"
+                else ([{"profile_json": profile}] if profile is not None else [])
+            )
+            return r
+
+    class _Supa:
+        def table(self, name):
+            return _Q(name)
+
+    svc = object.__new__(_PDS)
+    svc.supabase = _Supa()
+    return svc
+
+
+def test_a_cached_profile_upgrades_a_stock_route_to_etf():
+    """`isEtf` / `isFund` on the cached FMP profile — the same flags the Home dashboard
+    already calls the only reliable bulk source. Read locally; never an FMP call on the
+    notification send path."""
+    svc = _resolver(profile={"symbol": "SPY", "isEtf": True})
+    assert svc.resolve_route_asset_type("SPY", "stock") == "etf"
+
+
+def test_a_fund_flag_counts_too():
+    svc = _resolver(profile={"symbol": "VTSAX", "isFund": True})
+    assert svc.resolve_route_asset_type("VTSAX", "stock") == "etf"
+
+
+def test_a_specific_asset_type_is_never_DOWNGRADED():
+    """The invariant that makes this safe to run on every notification. A sender that
+    knows better always wins, and a stale watchlist row can never turn a crypto alert
+    back into an equity."""
+    svc = _resolver(watchlist_rows=[{"asset_type": "stock"}], profile={"isEtf": True})
+    assert svc.resolve_route_asset_type("BTCUSD", "crypto") is None
+    assert svc.resolve_route_asset_type("^GSPC", "index") is None
+
+
+def test_the_symbol_answers_before_any_stored_value():
+    """`detect_asset_class` is pure and cannot be influenced by a request."""
+    svc = _resolver()
+    assert svc.resolve_route_asset_type("BTCUSD", "stock") == "crypto"
+    assert svc.resolve_route_asset_type("^GSPC", "stock") == "index"
+    assert svc.resolve_route_asset_type("GCUSD", "stock") == "commodity"
+
+
+def test_the_client_writable_watchlist_column_never_decides_a_route():
+    """A CROSS-TENANT write, and the reason `asset_type_of` was deleted rather than left
+    unused.
+
+    `watchlist_items.asset_type` is written by `POST/PATCH /api/v1/tracking/holdings`,
+    whose body field is a bare `Optional[str]` — no enum, no validator — on routes taking
+    `get_watchlist_identity`, i.e. `.guestAllowed`, which resolves a signed-out caller
+    from the CLIENT-CHOSEN `X-Guest-Id` header (auth.md §1a). The old reader selected on
+    `ticker` ALONE with no user scope and took the mode over 50 arbitrary rows. So anyone
+    willing to rotate a header could decide where every OTHER user's notifications for
+    that ticker opened — with no account and nothing rate-limiting it.
+
+    It survived only because it was nearly unreachable. Routing it through
+    `resolve_route_asset_type` would have run it for every ticker notification in the
+    system.
+    """
+    import ast
+    import inspect
+    import textwrap
+    from app.services import push_dispatch_service as pds
+    from app.services.push_dispatch_service import PushDispatchService as _PDS
+
+    def _executable(fn):
+        """A function's source with its DOCSTRING and comments removed.
+
+        Both matter here: this method's docstring names `watchlist_items` at length to
+        explain why it must not be read, and a scan that cannot tell prose from code
+        would fail on the explanation while passing on the defect.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        body = tree.body[0].body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        return "\n".join(ast.unparse(node) for node in body)
+
+    assert "watchlist_items" not in _executable(_PDS.resolve_route_asset_type), (
+        "the routing path reads the client-writable watchlist column again"
+    )
+    assert "def asset_type_of" not in inspect.getsource(pds).replace("# ", "#"), (
+        "asset_type_of is back. It reads a client-writable column with no user scope, and "
+        "its answer decides where OTHER users' notifications open."
+    )
+    # And the ETF source that replaced it is the server-written one.
+    etf = _executable(_PDS._is_etf)
+    assert "company_profile_cache" in etf and "watchlist_items" not in etf
+
+
+def test_the_watcher_lookup_no_longer_selects_the_poisoned_column():
+    """It was selected only to feed `asset_type_of` ("rides along … no extra round
+    trip"). With that gone, continuing to fetch it invites the next reader."""
+    import inspect
+    from app.services.push_dispatch_service import PushDispatchService as _PDS
+
+    body = inspect.getsource(_PDS.watchers_of)
+    assert 'select("user_id")' in body, (
+        "watchers_of still fetches asset_type for a consumer that no longer exists"
+    )
+
+
+def test_an_unknown_ticker_leaves_the_route_alone():
+    """No cached profile → today's behaviour, not a guess."""
+    svc = _resolver()
+    assert svc.resolve_route_asset_type("ZZZZ", "stock") is None
+
+
+def test_a_cache_miss_is_never_memoised_as_not_a_fund():
+    """The memo has NO TTL and the service is a process-lifetime singleton, so a wrong
+    answer written once is wrong until the next deploy.
+
+    A 13F alert for SPY fires before anyone has opened SPY, so `company_profile_cache`
+    has no row. If that "no" were remembered, every SPY notification for the rest of the
+    instance's life would route to the equity screen — including after a user opens SPY
+    and the profile lands.
+    """
+    svc = _resolver()
+    assert svc._is_etf("SPY") is False
+    # …the profile lands…
+    svc = _resolver(profile={"isEtf": True})
+    svc.__dict__["_etf_cache"] = {}
+    assert svc._is_etf("SPY") is True
+
+
+def test_a_profile_with_the_flags_STRIPPED_is_unknown_not_false():
+    """Two writers share `company_profile_cache.profile_json` on the same key with
+    `upsert(on_conflict="ticker")`, so the last one replaces it whole.
+    `stock_overview_service._upsert_company_profile_db` — reached from every ticker-detail
+    view — stores a FORMATTED dict (description / ceo / founded / sector / …) carrying
+    neither flag. Remembering that as "not a fund" is how opening SPY once would
+    permanently mis-route its alerts.
+    """
+    trimmed = {"description": "SPDR S&P 500 ETF Trust", "sector": "", "ceo": None}
+    svc = _resolver(profile=trimmed)
+    assert svc._is_etf("SPY") is False
+    assert "SPY" not in svc.__dict__.get("_etf_cache", {}), (
+        "a profile with neither isEtf nor isFund was memoised as 'not a fund' — that is "
+        "the trimmed-profile case, and it is indistinguishable from a real answer once "
+        "cached"
+    )
+
+
+def test_a_definite_answer_IS_memoised():
+    """Anti-vacuity for the two tests above: the cache must still do its job. ETF-ness
+    does not change, so a real answer is worth remembering."""
+    svc = _resolver(profile={"isEtf": True})
+    assert svc._is_etf("SPY") is True
+    assert svc.__dict__["_etf_cache"]["SPY"] is True
+    svc = _resolver(profile={"isEtf": False, "isFund": False})
+    assert svc._is_etf("AAPL") is False
+    assert svc.__dict__["_etf_cache"]["AAPL"] is False
+
+
+def test_a_failed_profile_read_is_not_cached_as_not_an_etf():
+    """A transient read error must not pin the wrong answer for the life of the process —
+    the memo has no TTL because ETF-ness does not change, which makes a poisoned entry
+    permanent."""
+    from app.services.push_dispatch_service import PushDispatchService as _PDS
+
+    calls = {"n": 0}
+
+    class _Boom:
+        def table(self, name):
+            calls["n"] += 1
+            raise RuntimeError("postgrest down")
+
+    svc = object.__new__(_PDS)
+    svc.supabase = _Boom()
+    assert svc._is_etf("SPY") is False
+    assert svc._is_etf("SPY") is False
+    assert calls["n"] == 2, "a failed lookup was memoised — the error is now permanent"

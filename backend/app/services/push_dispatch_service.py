@@ -54,6 +54,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.database import get_supabase
 from app.services import quiet_hours as qh
+from app.services.asset_class import detect_asset_class
 from app.services.notification_kinds import (
     KIND_TICKER_MOVE,
     NotificationKind,
@@ -143,9 +144,18 @@ class Decision:
 class PushDispatchService:
     RETENTION_DAYS = 30
 
+    # How many times a deferred row may be handed out by `claim_due_notifications` before
+    # the flush stops retrying it. See `_requeue_or_fail`.
+    MAX_FLUSH_ATTEMPTS = 3
+
+    # Symbol → "is this a fund?", memoised for the process lifetime (see `_is_etf`).
+    # ETF-ness does not change, so there is no TTL; the ceiling is the only bound needed.
+    _ETF_CACHE_MAX = 4096
+
     def __init__(self, push: Optional[PushService] = None):
         self.supabase = get_supabase()
         self._push = push
+        self._etf_cache: Dict[str, bool] = {}
 
     @property
     def push(self) -> PushService:
@@ -165,9 +175,7 @@ class PushDispatchService:
         try:
             rows = (
                 self.supabase.table("watchlist_items")
-                # `asset_type` rides along for `asset_type_of` below — same row, same
-                # index, no extra round trip.
-                .select("user_id, asset_type")
+                .select("user_id")
                 .eq("ticker", ticker.upper())
                 .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
                 .execute()
@@ -190,54 +198,149 @@ class PushDispatchService:
             users = users[:MAX_RECIPIENTS_PER_SCOPE]
         return users
 
-    def asset_type_of(self, ticker: str) -> Optional[str]:
-        """The asset type watchers have recorded for `ticker`, or None.
+    # `asset_type_of()` USED TO LIVE HERE AND WAS DELETED. It read the modal
+    # `watchlist_items.asset_type` for a ticker — selecting on `ticker` ALONE, with no
+    # user scope, over an arbitrary 50 rows. That column is written by
+    # `POST/PATCH /api/v1/tracking/holdings`, whose `asset_type` is a bare
+    # `Optional[str]` with no enum and no validator, on `.guestAllowed` routes that
+    # resolve a signed-out caller from the CLIENT-CHOSEN `X-Guest-Id` header. So the
+    # value it returned was attacker-writable, and it decided where OTHER users'
+    # notifications opened.
+    #
+    # It survived only because it was nearly unreachable (one `notify_watchers` caller
+    # that supplied no `asset_type`). Left in place it would have been wired back into
+    # the routing path by the next person who needed an asset type — so it is gone
+    # rather than merely unused. `detect_asset_class` (pure) plus `_is_etf`
+    # (FMP-sourced, server-written) answer the same question without trusting a client.
 
-        WHY THIS EXISTS. `NotificationRoute` falls back to `.stock` when a payload has
-        no `asset_type` — a documented fallback for unknown values. `ticker_move` never
-        set one, so that fallback became the primary path for the app's most common
-        notification and every BTC and ETH price alert opened `TickerDetailView`, the
-        EQUITY screen, to render stock fundamentals for a coin. (Confirmed live: BTC and
-        ETH `ticker_move` rows exist in `notification_events`.)
+    def _is_etf(self, ticker: str) -> bool:
+        """Does the locally cached company profile say this symbol is a fund?
 
-        `watchlist_items.asset_type` is the same column the price-alert path already
-        sources, and it has never been normalised — several writers populate it — so the
-        value is lowercased here and iOS matches case-insensitively.
+        The one asset class a SYMBOL cannot reveal. `detect_asset_class` reads "^GSPC"
+        as an index and "BTCUSD" as a coin, but nothing about "SPY" says fund — and
+        13F and congressional filings are full of them (SPY, QQQ and IWM are among the
+        most-held 13F positions), so every one of those alerts opened `TickerDetailView`
+        to render equity fundamentals for an ETF.
 
-        Returns None rather than guessing "stock": a None lets `notify_watchers` leave
-        the key off entirely, which keeps the client's own fallback the single place
-        that decides what an unknown asset type means.
+        `isEtf` / `isFund` on the FMP profile are what `home_dashboard_service` already
+        calls "the only reliable bulk source for these". Read from
+        `company_profile_cache`, never from FMP: this sits on the notification send path
+        and must not add an upstream call per ticker.
+
+        ⚠️ ONLY A DEFINITE ANSWER IS EVER MEMOISED, and "no flags present" is not one.
+
+        Two writers share `company_profile_cache.profile_json` on the same `ticker` key
+        with `upsert(on_conflict="ticker")`, so the last one replaces the value WHOLE:
+        `whale_service` stores the raw FMP profile (which carries `isEtf`/`isFund`),
+        while `stock_overview_service._upsert_company_profile_db` — reached from every
+        ticker-detail view, so much the more frequent writer — stores a FORMATTED dict of
+        description / ceo / founded / sector / … carrying neither flag.
+
+        So three outcomes are genuinely different and must not collapse into two:
+          * flags present and truthy → True, cacheable;
+          * flags present and falsey → False, cacheable;
+          * no row, or a row with NEITHER key → UNKNOWN, and NOT cacheable.
+
+        Caching that third case is what would have made this worse than useless: the memo
+        has no TTL and the service is a process-lifetime singleton, so ONE lookup before
+        the profile landed — or any lookup after a detail view had trimmed the flags away
+        — pinned "not a fund" until the next deploy. A 13F alert for SPY fired before
+        anyone had opened SPY would have routed every later SPY notification to the equity
+        screen for the life of that instance.
+
+        Unknown routes exactly as False (no upgrade, the route stays "stock"), which is
+        the pre-existing behaviour. It simply is not remembered.
         """
+        key = (ticker or "").strip().upper()
+        if not key:
+            return False
+        # Lazily, via `__dict__`, rather than reading an attribute `__init__` set. Tests
+        # in this repo routinely build this service with `object.__new__` and assign only
+        # `supabase`, so an `__init__`-only attribute is an AttributeError on every one of
+        # them — and inside `notify_users`, which promises never to raise, that would be
+        # swallowed and read as "delivered 0".
+        cache: Dict[str, bool] = self.__dict__.setdefault("_etf_cache", {})
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
         try:
             rows = (
-                self.supabase.table("watchlist_items")
-                .select("asset_type")
-                .eq("ticker", ticker.upper())
-                .limit(50)
+                self.supabase.table("company_profile_cache")
+                .select("profile_json")
+                .eq("ticker", key)
+                .limit(1)
                 .execute()
                 .data
                 or []
             )
         except Exception as e:
-            # Best-effort: a missing asset type costs the client its `.stock` fallback,
-            # which is the behaviour we already had. Never fail a send over it.
+            # Best-effort, and deliberately NOT cached: a transient read error must not
+            # pin "not an ETF" for the rest of the process's life.
             logger.warning(
-                "push: asset_type lookup failed for %s (%s: %s) — routing without it",
-                ticker, type(e).__name__, e,
+                "push: ETF lookup failed for %s (%s: %s) — routing without it",
+                key, type(e).__name__, e,
             )
-            return None
+            return False
 
-        # Modal non-empty value. Watchlist rows for one ticker can disagree (different
-        # writers, different vintages), and picking the most common beats trusting
-        # whichever row sorted first.
-        counts: Dict[str, int] = {}
-        for r in rows:
-            value = str(r.get("asset_type") or "").strip().lower()
-            if value:
-                counts[value] = counts.get(value, 0) + 1
-        if not counts:
+        profile = (rows[0].get("profile_json") if rows else None) or {}
+        if not isinstance(profile, dict) or (
+            "isEtf" not in profile and "isFund" not in profile
+        ):
+            # UNKNOWN: no row yet, or a row whose flags a formatted write dropped.
+            # Answer "not a fund" for THIS send and remember nothing.
+            return False
+
+        verdict = bool(profile.get("isEtf") or profile.get("isFund"))
+        if len(cache) < self._ETF_CACHE_MAX:
+            cache[key] = verdict
+        return verdict
+
+    def resolve_route_asset_type(
+        self, ticker: str, current: Optional[str]
+    ) -> Optional[str]:
+        """A better `asset_type` than the one the sender supplied, or None.
+
+        ONLY EVER UPGRADES. `"stock"` is the weakest claim a route can make — it is also
+        what the iOS router falls back to when the key is missing entirely — so it is the
+        only value this will replace. A sender that knows better (price alerts read the
+        type off their own row; `ticker_route` classifies the symbol) always wins, and a
+        crypto or index route can never be turned back into an equity here.
+
+        Two sources, in order, neither of them an FMP call:
+          1. `detect_asset_class` — PURE, symbol-only, no I/O;
+          2. the cached company profile's `isEtf` / `isFund`, for the one class a symbol
+             cannot reveal.
+
+        ⚠️ `watchlist_items.asset_type` IS DELIBERATELY NOT CONSULTED, even though
+        `asset_type_of` reads exactly that and this is where it would naturally go.
+
+        That column is written by `POST/PATCH /api/v1/tracking/holdings`, whose body
+        field is a bare `Optional[str]` with no enum and no validator, on routes that
+        take `get_watchlist_identity` — i.e. `.guestAllowed`, resolving a signed-out
+        caller to a uuid5 of the CLIENT-CHOSEN `X-Guest-Id` header (auth.md §1a). And
+        `asset_type_of` selects on `ticker` alone with NO user scope, taking the mode
+        over an arbitrary 50 rows. So anyone able to rotate a header can decide where
+        EVERY OTHER USER's notifications for that ticker land — a cross-tenant write
+        with no account and no rate limit behind it.
+
+        That read used to be nearly dead (it ran only for a `notify_watchers` caller
+        that supplied no `asset_type`); routing it through this method would have made
+        it run for every ticker notification in the system, which is what turned a
+        latent weakness into a live one. `company_profile_cache` is FMP-sourced and
+        server-written, so it answers the ETF question without trusting a client.
+
+        Returns None when nothing better is known.
+        """
+        cur = (current or "").strip().lower()
+        if cur and cur != "stock":
             return None
-        return max(counts.items(), key=lambda kv: kv[1])[0]
+        symbol = (ticker or "").strip().upper()
+        if not symbol:
+            return None
+        detected = detect_asset_class(symbol)
+        if detected != "stock":
+            return detected
+        return "etf" if self._is_etf(symbol) else None
 
     def followers_of_whale(self, whale_id: str) -> List[str]:
         """User ids following a whale. The second audience selector, used by the
@@ -790,13 +893,24 @@ class PushDispatchService:
             uid,
             title=title,
             body=body,
-            data={**route, "kind": kind.key},
+            # `dedup_key` is what makes the notification's own "Mark as Read" button
+            # work. That action is registered on all six categories, so every push the
+            # app sends offers it — and it did nothing, because nothing in the payload
+            # identified the row: `route` carries a ticker and a tab, never an id. This
+            # is the other half of the `(user_id, dedup_key)` UNIQUE index (migration
+            # 119), so marking read by it is an indexed lookup and needs no migration,
+            # and it is a flat scalar as `route` values must be (auth.md §3).
+            data={**route, "kind": kind.key, "dedup_key": dedup_key},
             devices=recipient.devices,
             interruption_level=kind.interruption_level,
             thread_id=kind.thread_id,
             collapse_id=collapse_id,
             category=kind.thread_id,
             badge=recipient.unread + 1,
+            # How long APNs may keep retrying if the device is unreachable. `None` for
+            # the two kinds the user paid for; a few hours for anything describing a
+            # price. See NotificationKind.expiration_hours.
+            expiration_hours=kind.expiration_hours,
         )
         # What APNs said about EVERY device, not just whether one worked.
         #
@@ -881,6 +995,20 @@ class PushDispatchService:
         nkind = get_kind(kind)
         now = now or datetime.now(timezone.utc)
         route = dict(route or {})
+
+        # ONE place resolves the asset type, and it is here — the choke point every
+        # sender reaches, whether it called `notify_watchers` or came straight to
+        # `notify_users`. `notify_watchers` used to hold this logic, which meant
+        # `smart_money_sender` (the one that actually routes ETFs) never ran it.
+        #
+        # Once per EVENT, not per recipient: the answer is a property of the ticker.
+        if route.get("ticker"):
+            better = await asyncio.to_thread(
+                self.resolve_route_asset_type,
+                str(route["ticker"]), route.get("asset_type"),
+            )
+            if better:
+                route["asset_type"] = better
 
         users = list(dict.fromkeys(u for u in user_ids if u))
         if not users:
@@ -1011,13 +1139,12 @@ class PushDispatchService:
 
         route = dict(data or {})
         route.setdefault("ticker", ticker.upper())
-        # Backfill the asset type for any caller that did not supply one, so a crypto
-        # alert opens the crypto screen. `setdefault`, so a sender that knows better
-        # (price alerts read it from their own row) always wins.
-        if not route.get("asset_type"):
-            resolved_type = await asyncio.to_thread(self.asset_type_of, ticker)
-            if resolved_type:
-                route["asset_type"] = resolved_type
+        # The asset-type backfill that used to live here has MOVED into
+        # `_notify_users_inner`. It was dead code in this position: it only ran
+        # `if not route.get("asset_type")`, and `ticker_route` has always set that key,
+        # so the resolution never once happened for a sender that used the builder. It
+        # also missed `smart_money_sender` entirely, which reaches `notify_users`
+        # directly and is the sender whose tickers are most often ETFs.
         return await self.notify_users(
             users, kind=resolved, title=title, body=body,
             dedup_key=dedup_key, route=route,
@@ -1065,7 +1192,7 @@ class PushDispatchService:
         not lost, only the buzz.
         """
         stats = {"claimed": 0, "sent": 0, "stale": 0, "no_device": 0,
-                 "failed": 0, "suppressed": 0}
+                 "failed": 0, "suppressed": 0, "requeued": 0}
         rows = await asyncio.to_thread(
             self._claim_due, settings.NOTIFICATION_DISPATCH_BATCH
         )
@@ -1116,70 +1243,92 @@ class PushDispatchService:
         for row in rows:
             uid, key = row.get("user_id"), row.get("dedup_key")
             if not uid or not key:
-                continue
-            try:
-                claimed_raw = str(row.get("claimed_at") or "").replace("Z", "+00:00")
-                claimed_at = datetime.fromisoformat(claimed_raw) if claimed_raw else now
-                if claimed_at.tzinfo is None:
-                    claimed_at = claimed_at.replace(tzinfo=timezone.utc)
-            except ValueError:
-                claimed_at = now
-
-            if claimed_at < cutoff:
-                stats["stale"] += 1
-                await asyncio.to_thread(
-                    self.mark_state, uid, key, STATE_FAILED,
-                    error="stale: deferred past the max window", sent=False,
-                )
-                continue
-
-            try:
-                nkind = get_kind(row.get("kind") or "")
-            except KeyError:
-                # A kind removed from the registry while rows were parked. Fail the row
-                # loudly rather than guessing a preference key and buzzing an opted-out
-                # user.
+                # The claim RPC has already flipped this row to `pending`, and both
+                # halves of its identity are needed to address it again — so it can
+                # neither be re-claimed nor marked. Say so instead of skipping silently;
+                # it means a row was written without a user or a dedup key, which the
+                # claim path cannot produce.
                 stats["failed"] += 1
-                await asyncio.to_thread(
-                    self.mark_state, uid, key, STATE_FAILED,
-                    error=f"unknown kind {row.get('kind')!r}", sent=False,
+                logger.error(
+                    "push: deferred row id=%r has no user_id/dedup_key — it is now "
+                    "stranded at 'pending' and cannot be addressed; this row was not "
+                    "written by claim_send",
+                    row.get("id"),
                 )
                 continue
 
-            prefs = preferences.get(uid) or {}
-            budget_key = (uid, nkind.category)
-            if budget_key not in charged:
-                # The user's own day boundary, not ET — the same helper, and the same
-                # cutoffs, the claim path uses.
-                counts = await asyncio.to_thread(
-                    self._category_counts_bulk,
-                    [uid],
-                    nkind.category,
-                    {uid: flush_cutoffs.get(uid, now)},
-                )
-                charged[budget_key] = counts.get(uid, 0)
-            recipient = _Recipient(
-                user_id=uid,
-                preferences=prefs,
-                devices=devices.get(uid, []),
-                unread=unread.get(uid, 0),
-                category_sent_today=charged[budget_key],
-            )
-
-            # Re-run preference + cap ONLY. Quiet hours are deliberately NOT re-checked:
-            # this row is being flushed precisely because its window ended, and asking
-            # again would re-defer it forever on a window that spans the flush.
-            gate = self.decide(recipient, nkind, now)
-            if not gate.send and gate.deliver_after is None:
-                stats["suppressed"] = stats.get("suppressed", 0) + 1
-                await asyncio.to_thread(
-                    self.mark_state, uid, key, STATE_FAILED,
-                    error=f"suppressed on flush: {gate.reason}", sent=False,
-                )
-                continue
-
-            route = row.get("route") if isinstance(row.get("route"), dict) else {}
+            # ⚠️ THE WHOLE PER-ROW BODY IS GUARDED, not just the delivery.
+            #
+            # `_category_counts_bulk` and `decide` used to sit OUTSIDE the try, so one
+            # raising row did not merely fail itself — it escaped the loop and left every
+            # REMAINING row in the batch flipped to `pending` with nothing to put them
+            # back. One bad row now costs one row.
             try:
+                try:
+                    claimed_raw = str(row.get("claimed_at") or "").replace("Z", "+00:00")
+                    claimed_at = (
+                        datetime.fromisoformat(claimed_raw) if claimed_raw else now
+                    )
+                    if claimed_at.tzinfo is None:
+                        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    claimed_at = now
+
+                if claimed_at < cutoff:
+                    stats["stale"] += 1
+                    await asyncio.to_thread(
+                        self.mark_state, uid, key, STATE_FAILED,
+                        error="stale: deferred past the max window", sent=False,
+                    )
+                    continue
+
+                try:
+                    nkind = get_kind(row.get("kind") or "")
+                except KeyError:
+                    # A kind removed from the registry while rows were parked. Fail the
+                    # row loudly rather than guessing a preference key and buzzing an
+                    # opted-out user.
+                    stats["failed"] += 1
+                    await asyncio.to_thread(
+                        self.mark_state, uid, key, STATE_FAILED,
+                        error=f"unknown kind {row.get('kind')!r}", sent=False,
+                    )
+                    continue
+
+                prefs = preferences.get(uid) or {}
+                budget_key = (uid, nkind.category)
+                if budget_key not in charged:
+                    # The user's own day boundary, not ET — the same helper, and the same
+                    # cutoffs, the claim path uses.
+                    counts = await asyncio.to_thread(
+                        self._category_counts_bulk,
+                        [uid],
+                        nkind.category,
+                        {uid: flush_cutoffs.get(uid, now)},
+                    )
+                    charged[budget_key] = counts.get(uid, 0)
+                recipient = _Recipient(
+                    user_id=uid,
+                    preferences=prefs,
+                    devices=devices.get(uid, []),
+                    unread=unread.get(uid, 0),
+                    category_sent_today=charged[budget_key],
+                )
+
+                # Re-run preference + cap ONLY. Quiet hours are deliberately NOT
+                # re-checked: this row is being flushed precisely because its window
+                # ended, and asking again would re-defer it forever on a window that
+                # spans the flush.
+                gate = self.decide(recipient, nkind, now)
+                if not gate.send and gate.deliver_after is None:
+                    stats["suppressed"] = stats.get("suppressed", 0) + 1
+                    await asyncio.to_thread(
+                        self.mark_state, uid, key, STATE_FAILED,
+                        error=f"suppressed on flush: {gate.reason}", sent=False,
+                    )
+                    continue
+
+                route = row.get("route") if isinstance(row.get("route"), dict) else {}
                 if await self._deliver(
                     recipient, nkind,
                     title=row.get("title") or "",
@@ -1197,14 +1346,63 @@ class PushDispatchService:
                 else:
                     stats["failed"] += 1
             except Exception as e:
-                stats["failed"] += 1
                 logger.warning(
                     "push: deferred delivery to user=%s key=%s failed (%s: %s)",
                     uid, key, type(e).__name__, e,
                 )
+                # PUT THE ROW BACK. `claim_due_notifications` moved it `deferred` →
+                # `pending`, so an exception here used to leave it at `pending` forever:
+                # the claim RPC only ever selects `deferred`, nothing re-reads `pending`,
+                # and `mark_state` was never called. No push, no terminal state, and an
+                # inbox row reading "pending" for the rest of its 30-day retention.
+                outcome = await asyncio.to_thread(
+                    self._requeue_or_fail, uid, key,
+                    int(row.get("attempts") or 0), f"{type(e).__name__}: {e}",
+                )
+                # Counted as ONE thing, not two. `failed` and `requeued` in the same dict
+                # must not both describe the same row, or `failed: 5, requeued: 5` reads
+                # at 2am as ten problems instead of five rows that will be retried in
+                # sixty seconds. A row is `requeued` until the attempt ceiling turns it
+                # into a real, terminal `failed`.
+                if outcome == STATE_DEFERRED:
+                    stats["requeued"] += 1
+                else:
+                    stats["failed"] += 1
 
         logger.info("push: quiet-hours flush %s", stats)
         return stats
+
+    def _requeue_or_fail(
+        self, user_id: str, dedup_key: str, attempts: int, error: str
+    ) -> str:
+        """Hand a failed flush row back for another try, or fail it terminally.
+
+        `deliver_after` is untouched by `claim_due_notifications` and is already in the
+        past, so writing `deferred` back is enough to make the next cycle re-claim it —
+        no new column, no migration.
+
+        TERMINATION IS GUARANTEED TWICE OVER, which matters because the alternative to a
+        bounded retry is an infinite one:
+          * `attempts` is incremented by the claim RPC on every hand-out, so this
+            ceiling is counted across cycles and across instances, not per call; and
+          * `flush_deferred`'s own `claimed_at < cutoff` check fails anything older than
+            `NOTIFICATION_MAX_DEFER_HOURS` regardless of how many attempts are left.
+
+        Retrying at all is the right bias here: the overwhelmingly likely cause is a
+        transient APNs or Supabase blip, and one more cycle costs 60 seconds. The dedup
+        claim already exists, so a retry can never become a second buzz.
+        """
+        if attempts < self.MAX_FLUSH_ATTEMPTS:
+            self.mark_state(
+                user_id, dedup_key, STATE_DEFERRED,
+                error=f"flush attempt {attempts} failed, requeued: {error}", sent=False,
+            )
+            return STATE_DEFERRED
+        self.mark_state(
+            user_id, dedup_key, STATE_FAILED,
+            error=f"gave up after {attempts} flush attempts: {error}", sent=False,
+        )
+        return STATE_FAILED
 
     # ── housekeeping ─────────────────────────────────────────────────
 

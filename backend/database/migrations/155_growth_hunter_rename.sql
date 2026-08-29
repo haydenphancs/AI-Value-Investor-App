@@ -1,0 +1,42 @@
+-- 155_growth_hunter_rename.sql
+--
+-- Why: TestFlight, build 1.0 (7) — "For ios below 26, the 'growth' got cut off."
+-- The persona card is a fixed 100pt wide and splits the name across two
+-- single-line rows, so `peter_lynch` rendered as "Everyday Growth" / "Hunter".
+-- Measured, "Everyday Growth" is 100.1pt of 12pt semibold in a 100pt box: it
+-- overflowed at the DEFAULT text size, by a tenth of a point, before any
+-- Dynamic Type scaling. A margin that thin is settled by how a given SwiftUI
+-- release rounds text measurement, which is why the same build truncated on
+-- iOS 18 and fitted on iOS 26.
+--
+-- "The Growth Hunter" splits to "Growth" / "Hunter" — 57.7pt and 54.5pt even at
+-- the 1.4x Dynamic Type cap, against 100pt available. The card layout was ALSO
+-- hardened (PersonaCard.swift: a scale floor on every Text, tightening enabled)
+-- so no name can clip again; this rename removes the pressure at the source.
+--
+-- IMPORTANT — what is NOT changing (same contract as 103):
+--   * `key` stays `peter_lynch`. It is persisted in research_reports.investor_persona
+--     and sent over the wire; every existing report keeps resolving.
+--   * `agent_tag` stays `lynch` — the iOS ReportAgentPersona badge dispatches on it.
+--   * `tagline` stays 'Growth at a Reasonable Price'.
+-- Only the human-readable `name` moves.
+--
+-- Idempotent: a plain UPDATE keyed on `key`, safe to re-run.
+--
+-- Keep in sync with backend/app/services/agents/persona_config.py (display_name),
+-- research.py _FALLBACK_PERSONAS, and pdf_report_service (whose _PERSONA_DISPLAY is
+-- DERIVED from persona_config — the old label was added to
+-- _LEGACY_PERSONA_NAME_FRAGMENTS so PDFs frozen under it still print "GARP Agent"
+-- instead of falling through to "Hunter Agent").
+-- backend/tests/test_persona_display_parity.py asserts they all agree.
+--
+-- REPLAY HAZARD — unchanged from 103, and this migration is now the third layer:
+--   * 043_align_personas_with_ios_fallback.sql and 074_seed_michael_burry_persona.sql
+--     both revert rows this touches. 103 must be re-run after either, and then THIS.
+--
+-- Verify on apply: the statement should report `UPDATE 1`. `UPDATE 0` means the key is
+-- missing from agent_personas and the rename silently did nothing.
+
+UPDATE public.agent_personas
+   SET name = 'The Growth Hunter'
+ WHERE key = 'peter_lynch';

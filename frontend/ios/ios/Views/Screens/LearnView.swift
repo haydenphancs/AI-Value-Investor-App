@@ -120,7 +120,15 @@ struct LearnContentView: View {
     private var learnTabContent: some View {
         VStack(spacing: 0) {
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: AppSpacing.xxl) {
+                // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+                // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+                // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+                // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+                //
+                // The books / money-moves sections land async behind `if !isEmpty`.
+                // NOTE: unlike Home, this subtree DOES render AsyncImage (BookCoverImage, MoneyMoveCoverImage),
+                // so going eager fires those on entry. Bounded (~10 books, ~15 articles) and measured.
+                VStack(spacing: AppSpacing.xxl) {
                     fullLearnDashboard
 
                     // Bottom padding for tab bar

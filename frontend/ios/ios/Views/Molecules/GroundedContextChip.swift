@@ -30,11 +30,16 @@ struct GroundedContextChip: View {
     }
 
     private var labelText: String {
-        let base = "Grounded on \(contextType.groundingLabel)"
-        if let ref = referenceLabel, !ref.isEmpty {
-            return "\(base) · \(ref)"
+        let ref = (referenceLabel ?? "").trimmingCharacters(in: .whitespaces)
+        // A book's title IS the subject, so the category prefix only repeated it. The generic
+        // label survives as the fallback for the (guarded, near-unreachable) case where the
+        // reference cannot be resolved to a title — the entry points open an UNGROUNDED chat
+        // rather than claim a book they could not identify.
+        if contextType.groundingReferenceStandsAlone, !ref.isEmpty {
+            return "Grounded on \(ref)"
         }
-        return base
+        let base = "Grounded on \(contextType.groundingLabel)"
+        return ref.isEmpty ? base : "\(base) · \(ref)"
     }
 }
 
@@ -43,6 +48,7 @@ struct GroundedContextChip: View {
         GroundedContextChip(contextType: .tickerReport, referenceLabel: "AAPL")
         GroundedContextChip(contextType: .stock, referenceLabel: "TSLA")
         GroundedContextChip(contextType: .moneyMovesArticle)
+        GroundedContextChip(contextType: .book, referenceLabel: "The Intelligent Investor")
         GroundedContextChip(contextType: .book)
     }
     .padding()

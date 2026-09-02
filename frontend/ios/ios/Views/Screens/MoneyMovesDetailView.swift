@@ -39,7 +39,14 @@ struct MoneyMovesDetailView: View {
 
                 // Scrollable content
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xxl) {
+                    // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+                    // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+                    // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+                    // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+                    //
+                    // Optional hero + bookmark row appear and disappear live as bookmarks change.
+                    // NOTE: renders MoneyMoveCoverImage (AsyncImage) eagerly now - bounded, measured.
+                    VStack(spacing: AppSpacing.xxl) {
                         // Hero Card - Featured Deep Dive. Dynamic: the isFeatured article served
                         // by the backend. Flipping isFeatured server-side swaps the hero (e.g. a
                         // weekly deep dive) with NO app update.

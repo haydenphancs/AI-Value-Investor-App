@@ -380,7 +380,13 @@ struct AssetsTabContent: View {
             // on children to shorten just this one gap, but that overlapped
             // the inner List's gesture recognizer with the next section and
             // froze the outer scroll. A smaller uniform spacing is safer.
-            LazyVStack(spacing: AppSpacing.md) {
+            // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+            // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+            // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+            // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+            //
+            // 3-way skeleton/placeholder/list swap; AssetsListSection rewrites its own measured height.
+            VStack(spacing: AppSpacing.md) {
                 // Active portfolio name (left) + "..." management menu (right).
                 // Replaces the old Sort button — sort now lives inside the menu.
                 PortfolioHeaderBar(viewModel: viewModel, activeMenu: $activeHeaderMenu)
@@ -471,7 +477,13 @@ struct WhalesTabContent: View {
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xl) {
+            // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+            // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+            // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+            // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+            //
+            // Every section is `if !isEmpty` on async whale data, plus an inline loader.
+            VStack(spacing: AppSpacing.xl) {
                 // 1. Followed Whale Profiles (horizontal scroll)
                 if !viewModel.trackedWhales.isEmpty {
                     FollowedWhalesRow(

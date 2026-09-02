@@ -10,7 +10,7 @@ A book chat is only grounded if a chain of hand-maintained data lines up:
               (the guide outline we send)                     (the method voice)
 
 Every link is a separate literal list written by hand, and a break in any of them is
-SILENT: the chat still opens, the chip still says "Grounded on Study Guide", and the
+SILENT: the chat still opens, the chip still names a book, and the
 backend receives nothing. That overclaim is exactly what this change set exists to end, so
 the join is pinned rather than trusted.
 """

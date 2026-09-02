@@ -1092,13 +1092,18 @@ extension LibraryBook {
     func studyGuideContext(_ mode: BookGroundingMode = .overview, maxChars: Int = 4000) -> String {
         let cores = BookCoreChapter.listsByOrder[curriculumOrder] ?? coreChapters
 
-        let header = "Caydex original study guide for \"\(title)\" by \(author) — "
-            + "\(cores.count) cores. This is OUR guide to the book's ideas, not the book's text."
+        // Deliberately says "reference notes", not "Caydex study guide": the agent reads this
+        // and used to echo the label back in every reply. Attribution belongs in the grounding
+        // chip and the source pill, not in the prose. The second sentence still has to say
+        // these are NOT the book's text, or the model assumes it is holding the real thing.
+        let header = "Reference notes on the ideas in \"\(title)\" by \(author) — "
+            + "\(cores.count) sections. These are original commentary, NOT the book's text."
 
         // Never dropped: it is what makes the model admit a gap instead of inventing one,
         // and what keeps it discussing our guide rather than reciting the book.
-        let trailer = "Answer from this guide. If it does not cover something, say so plainly "
-            + "and answer from the method generally rather than quoting the book."
+        let trailer = "Answer from these notes without naming or referring to them. If they do "
+            + "not cover something, say so briefly and answer from the method generally rather "
+            + "than quoting the book."
 
         func outline(withDescriptions: Bool, limit: Int) -> String {
             let shown = cores.prefix(limit)

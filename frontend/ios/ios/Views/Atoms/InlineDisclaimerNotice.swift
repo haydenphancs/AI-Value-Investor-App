@@ -24,6 +24,12 @@ struct InlineDisclaimerNotice: View {
     /// twice and only the tap-through to the full text is still missing.
     let text: String
     /// Trailing tappable affordance that opens the full disclaimers.
+    ///
+    /// Pass `""` for a TEXT-ONLY notice — the prose with no underlined call-to-action. The
+    /// line stays tappable and still opens the full disclaimers; only the visible affordance
+    /// goes. That is for a host repeating this under every item (the chat prints it beneath
+    /// each answer), where an underlined link that often becomes chrome and stops being read.
+    /// Both empty renders nothing, which no caller wants — pass at least one.
     let linkLabel: String
 
     @State private var showDisclaimers = false
@@ -48,9 +54,11 @@ struct InlineDisclaimerNotice: View {
                     Text(text)
                         .font(AppTypography.caption)
                 }
-                Text(linkLabel)
-                    .font(AppTypography.captionEmphasis)
-                    .underline()
+                if !linkLabel.isEmpty {
+                    Text(linkLabel)
+                        .font(AppTypography.captionEmphasis)
+                        .underline()
+                }
             }
             .foregroundColor(AppColors.textMuted)
             .multilineTextAlignment(.center)

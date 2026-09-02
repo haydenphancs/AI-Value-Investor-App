@@ -682,6 +682,10 @@ class NewsCacheService:
                         insert_only_rows,
                         on_conflict="ticker,external_id",
                         ignore_duplicates=True,
+                        # Nothing reads this result, and postgrest-py defaults to
+                        # returning=representation — so this pre-pass was shipping every
+                        # inserted row back in full, `summary` (the article body) included.
+                        returning="minimal",
                     )
                     .execute()
                 )
@@ -693,6 +697,12 @@ class NewsCacheService:
                 )
 
         try:
+            # ⚠️ This one KEEPS returning=representation, unlike every other write in this
+            # service. The echo is consumed below to map external_id → the DB id, and
+            # replacing it with a follow-up SELECT would re-open the misattribution hazard
+            # the comment below describes for a measured saving of only ~65 KB per refresh
+            # (50 rows x ~1.5 KB, against a 417-row table and a 15-ticker sweeper universe).
+            # Not worth it here; it is worth it everywhere the result is discarded.
             result = (
                 self.supabase.table("ticker_news_cache")
                 .upsert(cache_rows, on_conflict="ticker,external_id")
@@ -1578,7 +1588,12 @@ Return a JSON array with one object per article in order. Each object must have:
     async def cleanup_expired_cache(self):
         """Delete expired cache entries. Called periodically."""
         def _delete():
-            return self.supabase.table("ticker_news_cache").delete().lt(
+            # `returning="minimal"` because postgrest-py defaults to representation: this
+            # table-wide DELETE was shipping every expired row back in full — `summary`
+            # (the article body) included — and nothing looks at the result.
+            return self.supabase.table("ticker_news_cache").delete(
+                returning="minimal"
+            ).lt(
                 "expires_at", datetime.now(timezone.utc).isoformat()
             ).execute()
 

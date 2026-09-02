@@ -48,20 +48,26 @@ struct iosApp: App {
     // MARK: - Initialization
 
     init() {
-        // Start error monitoring first so even startup crashes are captured.
+        // Give AsyncImage a real cache. BookLibraryView is a LazyVStack, so its cards
+        // recycle and AsyncImage re-requests on every identity change — without this the
+        // ten covers flash gradient->image on each scroll pass. The default shared cache
+        // is far too small for image payloads. This is app-wide on purpose: it also helps
+        // news thumbnails, whale avatars, company logos and the header.
+        //
+        // ⚠️ MUST BE FIRST. Replacing `URLCache.shared` only affects sessions created after
+        // it — `URLSession.shared` captures the cache at first use and keeps it for the
+        // process. Anything above this line that touches `URLSession.shared` (monitoring being
+        // the obvious candidate) would permanently bind the tiny default cache and silently
+        // undo this.
+        configureImageCache()
+
+        // Start error monitoring early so startup crashes are still captured.
         // No-op until the Sentry package is added and a DSN is set (see
         // Core/Monitoring/MonitoringConfig.swift).
         startErrorMonitoring()
 
         // Configure appearance
         configureAppearance()
-
-        // Give AsyncImage a real cache. BookLibraryView is a LazyVStack, so its cards
-        // recycle and AsyncImage re-requests on every identity change — without this the
-        // ten covers flash gradient->image on each scroll pass. The default shared cache
-        // is far too small for image payloads. This is app-wide on purpose: it also helps
-        // news thumbnails, whale avatars, company logos and the header.
-        configureImageCache()
 
         #if DEBUG
         // Runs here, before any window exists, so the nav-bar flatten check reports

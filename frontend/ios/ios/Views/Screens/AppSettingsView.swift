@@ -696,10 +696,12 @@ struct AppSettingsView: View {
     }
 
     private func clearCache() {
-        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        guard let cacheURL else { return }
-        try? FileManager.default.removeItem(at: cacheURL)
-        try? FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        // ⚠️ Do NOT delete the Caches directory wholesale. `URLCache.shared` and
+        // `LearnAudioCache` both keep live on-disk stores in there, and removing the directory
+        // out from under them leaves each with an index pointing at files that no longer exist.
+        // Ask each owner to purge its own store instead.
+        URLCache.shared.removeAllCachedResponses()
+        LearnAudioCache.shared.purgeAll()
         StockRepository.shared.clearCache()
         calculateCacheSize()
     }

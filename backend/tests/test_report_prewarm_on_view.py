@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -114,10 +116,17 @@ def _patch_collection_boundaries(monkeypatch, *, fresh):
     async def _get_cached(ticker):
         return sentinel
 
+    async def _is_fresh(ticker):
+        return fresh
+
     async def _store(ticker, out):
         return None
 
     monkeypatch.setattr(tdc, "get_cached_collection", _get_cached)
+    # `warm_ticker_collection` probes freshness WITHOUT reading the payload, so patching only
+    # `get_cached_collection` would leave the real probe to hit Supabase — the hermeticity
+    # guard would fire, and before it existed the fast-path tests would have gone vacuous.
+    monkeypatch.setattr(tdc, "is_cached_collection_fresh", _is_fresh)
     monkeypatch.setattr(tdc, "store_collection", _store)
     monkeypatch.setattr(
         "app.services.agents.ticker_report_data_collector.TickerReportDataCollector",
@@ -263,10 +272,14 @@ async def test_prewarm_then_report_collection_is_a_cache_hit(monkeypatch):
     async def _get(ticker):
         return store.get(ticker)
 
+    async def _is_fresh(ticker):
+        return ticker in store
+
     async def _store(ticker, out):
         store[ticker] = out
 
     monkeypatch.setattr(tdc, "get_cached_collection", _get)
+    monkeypatch.setattr(tdc, "is_cached_collection_fresh", _is_fresh)
     monkeypatch.setattr(tdc, "store_collection", _store)
     monkeypatch.setattr(
         "app.services.agents.ticker_report_data_collector.TickerReportDataCollector",
@@ -335,3 +348,64 @@ async def test_prewarm_inflight_slot_released_after_completion(monkeypatch):
     done.set()
     await asyncio.sleep(0.05)                      # let the task finish + callback fire
     assert len(stocks._PREWARM_TASKS) == 0        # discarded on completion
+
+
+@pytest.mark.asyncio
+async def test_warm_fast_path_probes_cached_at_only(monkeypatch):
+    """REGRESSION (egress): the warm fast path must read `cached_at` and NOTHING else.
+
+    `collected_data` is the largest row in the database — ~930 KB average, ~1.4 MB peak,
+    measured in production. The fast path runs on every hourly pre-warmer tick across 20
+    tickers AND on every ticker-detail open (iOS fires POST /stocks/{ticker}/prewarm-report
+    fire-and-forget), and it used to call `get_cached_collection`, which selects the payload
+    and then deserializes it through Pydantic purely to look at a timestamp.
+
+    Pins BOTH halves, because either alone is defeatable: the exact column list, and that the
+    full reader is not reached at all.
+    """
+    tdc._INFLIGHT.clear()
+    tdc._WARM_SEMAPHORE = None
+    _FakeCollector.calls = 0
+    _FakeCollector.gate = None
+
+    selected: list[str] = []
+
+    class _Query:
+        def select(self, cols):
+            selected.append(cols)
+            return self
+
+        def eq(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[{"cached_at": datetime.now(timezone.utc).isoformat()}]
+            )
+
+    class _Supabase:
+        def table(self, name):
+            return _Query()
+
+    monkeypatch.setattr(tdc, "get_supabase", lambda: _Supabase())
+
+    async def _must_not_run(ticker):
+        raise AssertionError(
+            "warm fast path read the full payload — it must probe cached_at only"
+        )
+
+    monkeypatch.setattr(tdc, "get_cached_collection", _must_not_run)
+    monkeypatch.setattr(
+        "app.services.agents.ticker_report_data_collector.TickerReportDataCollector",
+        _FakeCollector,
+    )
+    monkeypatch.setattr("app.integrations.fmp.get_fmp_client", lambda: object())
+
+    await tdc.warm_ticker_collection("AAPL")
+
+    assert selected == ["cached_at"], selected
+    # Fresh row → no collection work at all.
+    assert _FakeCollector.calls == 0

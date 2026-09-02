@@ -429,6 +429,10 @@ async def upsert_cached_report(
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,persona",
+                # postgrest-py defaults every write to returning=representation, so this
+                # echoed the whole `ticker_report_data` blob (~235 KB avg) straight back.
+                # Nothing reads the result.
+                returning="minimal",
             ).execute()
             logger.info(
                 f"ticker_report_cache UPSERTED for {ticker}/{persona}"

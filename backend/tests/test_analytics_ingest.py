@@ -449,7 +449,15 @@ def test_sweep_is_chunked_and_makes_forward_progress():
         def select(self, *a): return self
         def lt(self, *a): return self
         def limit(self, n): self._n = n; return self
-        def delete(self): self._del = True; return self
+        # `returning` is asserted, not merely tolerated: postgrest-py defaults every write
+        # to representation, so without minimal this DELETE ships each swept row back in
+        # full (`props` and all). `sweep_expired` catches its own exceptions, so a wrong
+        # kwarg here silently returns 0 forever instead of failing loudly — this assert is
+        # the only thing between that and production.
+        def delete(self, *, returning=None, count=None):
+            assert returning == "minimal", f"expected returning='minimal', got {returning!r}"
+            self._del = True
+            return self
         def in_(self, col, ids): self._ids = ids; return self
 
         def execute(self):

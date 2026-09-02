@@ -104,9 +104,12 @@ class AnalyticsService:
         total = 0
         try:
             for _ in range(self._SWEEP_MAX_CHUNKS):
-                # Select ids first, then delete by id. PostgREST has no LIMIT on
-                # DELETE, and this also avoids `returning=representation` shipping
-                # every deleted row (props and all) back over HTTP just to count it.
+                # Select ids first, then delete by id — PostgREST has no LIMIT on DELETE.
+                #
+                # ⚠️ Chunking alone does NOT stop the echo: postgrest-py defaults every
+                # write to returning=representation, so the delete below shipped each
+                # row back in full (`props` and all) despite this comment once claiming
+                # otherwise. `returning="minimal"` is what actually does it.
                 stale = (
                     self.supabase.table("analytics_events")
                     .select("id")
@@ -117,7 +120,9 @@ class AnalyticsService:
                 ids = [r["id"] for r in (stale.data or [])]
                 if not ids:
                     break
-                self.supabase.table("analytics_events").delete().in_("id", ids).execute()
+                self.supabase.table("analytics_events").delete(
+                    returning="minimal"
+                ).in_("id", ids).execute()
                 total += len(ids)
                 if len(ids) < self._SWEEP_CHUNK:
                     break

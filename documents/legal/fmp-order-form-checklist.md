@@ -38,7 +38,7 @@ There is no "we tried it and it didn't work" exit. Month-to-month caps the loss 
 | `senate-latest` · `house-latest` · `senate-disclosure` · `house-disclosure` | Congressional trades — a marketed differentiator |
 | `acquisition-of-beneficial-ownership` | SC 13D/G block in the AI report |
 | `etf/info` · `etf/holdings` · `etf/sector-weightings` | ETF detail screen |
-| `sp500-constituent` | **Universe builder for every sector/industry benchmark.** No fallback |
+| `sp500-constituent` | ⚠️ **DOWNGRADED 2026-09-02.** It is *not* the benchmark universe builder — that is the static `backend/data/benchmark_universe.json`. `compute_and_persist_all_sectors` has **no caller**; `compute_all_benchmarks` is retired from scheduling and falls back to `_FALLBACK_SECTOR_TICKERS`. Safe to drop |
 | `historical-market-capitalization` | Shareholder-yield card |
 
 ## 🟡 Tier 3 — confirm status, removable if priced
@@ -74,6 +74,42 @@ included and not separately priced:
 `exchange=`/`country=` params. Do not pay for international coverage.
 
 ---
+
+## Package-level mapping (the quote sells 12 packages, not endpoints)
+
+Added 2026-09-02, once the real Order Form arrived. The endpoint tiers above still govern *what
+must survive*; this table is what you actually tick on the Order Form.
+
+| Package | List | Covers | Keep? |
+|---|---:|---|---|
+| Fundamentals | $3,000 | income/balance/cash-flow, ratios(-ttm), key-metrics(-ttm), financial-growth, revenue-product-segmentation | ✅ |
+| Company Information | $2,000 | `profile` (20 callers), shares-float, stock-peers, historical-market-cap | ✅ |
+| **Historical and Intraday** | $2,500 | EOD + intraday 1min–4hr. ⚠️ marked **"Data Delay: EOD"** — unresolved | ✅ |
+| Analyst Estimates | $2,000 | analyst-estimates, price-target-consensus, grades | ✅ |
+| Earnings Calendar | $1,500 | earnings, earnings-calendar, dividends, splits | ✅ |
+| Market News | $2,000 | news/stock, news/general-latest, **news/crypto** | ✅ |
+| Institutional Ownership | $2,000 | the 6 `institutional-ownership/*` paths | ✅ |
+| Insider & Senate | $2,000 | insider-trading/search, senate/house latest + disclosure, acquisition-of-beneficial-ownership | ✅ |
+| **ETF** | $3,000 | `etf/{info,holdings,sector-weightings}` — **no price endpoints; ETF prices come from Historical & Intraday** | ✅ keep — see below |
+| **Mutual Funds Holdings** | $2,500 | nothing the app calls | ❌ **drop** |
+| **Indexes** | $3,000 | `^`-symbols + `*-constituent` | ⚠️ droppable via SPY/QQQ/DIA |
+| **Commodities** | $2,500 | the 14 USD codes | ⚠️ droppable via GLD/USO |
+| Display licence | $1,500 | 1,000 monthly unique users | ✅ required |
+
+**If only one of ETF / Indexes can go, drop Indexes.** `ETFDetailView` is reachable from search,
+watchlist, whale 13F, trade groups and push; `IndexDetailView` is reachable from 3 Home tiles and
+**not from search at all**. SPY tracks `^GSPC` within 0.01%; ETF holdings have no substitute at any
+price. And dropping ETF ships a false green "Well Diversified" badge
+(`ETFDetailModels.swift:151` — `weight=0 → .low`) until its empty state is fixed.
+
+⚠️ **Commodities:** 7 of 14 symbols (wheat, corn, soybeans, coffee, sugar, cocoa, cotton) have
+**no navigation path from anywhere in the app** — already orphaned.
+
+⚠️ **Crypto is in no package.** `BTCUSD` price must move to CoinGecko, which already returns
+`current_price` (`integrations/coingecko.py:351`). Crypto *news* IS covered, inside Market News.
+
+⚠️ **Do not drop Indexes + Commodities without editing `_PULSE_SYMBOLS`** — Market Pulse would fall
+back to `BTCUSD` alone.
 
 ## Commercial terms — must be IN the Order Form, not just in email
 

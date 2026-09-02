@@ -221,7 +221,10 @@ FMP-dependent features.
       - [ ] Set **App Store Server Notifications** URLs (Production + Sandbox) to `https://caydexinvest.com/api/v1/billing/app-store-notifications`
 
 - [ ] **DAYS 4–6 — Close FMP**
-      - [ ] **Send the reply in [`fmp-negotiation-reply.md`](fmp-negotiation-reply.md)** (drafted 2026-08-24 — see the negotiation state below)
+      - [x] ~~Send the scope reply~~ — done. **Round 4 (counter to the formal quote) also SENT.**
+      - [ ] **Awaiting FMP's response** to: monthly term on the document · Exhibit A §2/§3/§5/§6
+            named as Permitted Uses · intraday bars available during the session. Analysis in
+            [`fmp-quote-analysis.md`](fmp-quote-analysis.md); ⚠️ **offer expires 2026-09-27**
       - [ ] Formal quote → confirm term → sign → pay
       - [ ] Flip `IAP_ENVIRONMENT` → `Production` and `APNS_ENV` → `production` on Railway *(both still read Sandbox/sandbox as of 2026-08-21 — an earlier attempt did not save)*
 

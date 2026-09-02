@@ -162,6 +162,22 @@ final class AudioManager: ObservableObject {
     // playback against a frozen playhead.
     private var timeControlObserver: NSKeyValueObservation?
 
+    // MARK: - On-device audio mirroring (egress)
+
+    /// Cadence of the periodic time observer, in MEDIA seconds. Shared with `listenedSeconds`,
+    /// which accumulates it — keep them together or the warm threshold silently drifts.
+    private static let timeObserverInterval: TimeInterval = 0.5
+    /// Below this, mirror on the first tick. At ~103 kbps mono, ten minutes is ~8 MB, so the
+    /// duplicated fetch costs less than a single replay would. Books (23-58 min) sit above it.
+    private static let warmImmediatelyMaxDuration: TimeInterval = 600
+    /// Content listened to before mirroring a LONG asset — the intent signal.
+    private static let warmAfterListenedSeconds: TimeInterval = 45
+    /// Remote URL of the streaming item, until it is either mirrored or torn down. Nil whenever
+    /// the current item is already cache-backed (nothing left to fetch).
+    private var pendingWarmURL: URL?
+    /// Content played on the current item, accumulated from the periodic observer.
+    private var listenedSeconds: TimeInterval = 0
+
     // Audio session configuration
     private let audioSession = AVAudioSession.sharedInstance()
     // Whether WE currently hold the (non-mixable) shared session. Tracked so activation is taken
@@ -920,13 +936,28 @@ final class AudioManager: ObservableObject {
     /// published state the UI binds to (currentTime, real duration, completion). Does not start.
     private func preparePlayer(url: URL) {
         teardownPlayer()
-        let item = AVPlayerItem(url: url)
+
+        // Prefer a local mirror. `AVPlayer` ignores `URLCache` for progressive media, so without
+        // this every replay, backward scrub and relaunch re-pulled the whole 17-45 MB file from
+        // Storage — see `LearnAudioCache` for the full note.
+        let cached = LearnAudioCache.shared.cachedFile(for: url)
+        // Only a STREAMED asset is a warm candidate; a cache hit has nothing left to fetch.
+        pendingWarmURL = (cached == nil) ? url : nil
+        listenedSeconds = 0
+
+        let item = AVPlayerItem(url: cached ?? url)
+        if cached == nil {
+            // Cap read-ahead while streaming. Unbounded, AVFoundation happily pulls tens of MB
+            // for a listener who sampled a few seconds; two minutes is far more than enough to
+            // ride out a network dip.
+            item.preferredForwardBufferDuration = 120
+        }
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
 
         // Mirror playback position (and the real duration once known) into published state.
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let interval = CMTime(seconds: Self.timeObserverInterval, preferredTimescale: 600)
         timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak newPlayer] time in
             Task { @MainActor [weak self, weak newPlayer] in
                 // Only honor ticks from the CURRENT player — a tick from a torn-down player must not
@@ -935,6 +966,12 @@ final class AudioManager: ObservableObject {
                 let secs = time.seconds
                 // Ignore stale ticks while a seek is settling, so the scrubber doesn't flick backward.
                 if secs.isFinite, self.pendingSeekTarget == nil { self.currentTime = secs }
+                // A periodic observer ticks on the MEDIA timeline and only while the player is
+                // progressing, so accumulating the interval measures content actually listened
+                // to — not wall time, and not the playhead (a book core starts at a large
+                // offset, which is why position can't be used here).
+                self.listenedSeconds += Self.timeObserverInterval
+                self.warmCacheIfWorthwhile()
                 // Adopt the real duration once it settles (only when it actually changes — avoids a
                 // per-tick republish) and refresh the Lock Screen / Dynamic Island scrubber length.
                 if let itemDuration = self.player?.currentItem?.duration.seconds,
@@ -1039,6 +1076,26 @@ final class AudioManager: ObservableObject {
         player?.pause()
         player = nil
         pendingSeekTarget = nil
+        // Abandon any un-earned mirror: this item is gone, and `preparePlayer` re-arms for the
+        // next one. Not clearing it here would let a warm fire against the previous episode.
+        pendingWarmURL = nil
+        listenedSeconds = 0
+    }
+
+    /// Mirror the streaming asset to disk once it has earned it.
+    ///
+    /// ⚠️ Deliberately NOT immediate for long assets. AVFoundation only pulls as much of a 45 MB
+    /// book as it actually plays, so warming on the first tick would ADD egress for someone who
+    /// sampled four seconds and left. Past the threshold the listener is committed, and the one
+    /// mirrored copy then covers every future replay, scrub and relaunch — which is where the
+    /// waste actually was. Short clips skip the wait: duplicating a few MB once is cheaper than
+    /// a single extra replay of it.
+    private func warmCacheIfWorthwhile() {
+        guard let url = pendingWarmURL else { return }
+        let isShort = duration > 0 && duration <= Self.warmImmediatelyMaxDuration
+        guard isShort || listenedSeconds >= Self.warmAfterListenedSeconds else { return }
+        pendingWarmURL = nil
+        LearnAudioCache.shared.warm(url)
     }
 
     /// React to AVPlayerItem readiness. On `.failed`, surface a real error state (so the UI stops
@@ -1103,6 +1160,14 @@ final class AudioManager: ObservableObject {
     private func handlePlaybackFailure(_ error: Error?) {
         // Already torn down (e.g. status + failed-to-end both fired) — nothing to do.
         guard player != nil else { return }
+
+        // Drop any on-disk mirror BEFORE the retry below. The retry re-mints a signed URL and
+        // replays, but `preparePlayer` prefers the local file — so a corrupt mirror would be
+        // handed back on every attempt and re-signing could never fix it. No-op when the item
+        // was streaming, which is the usual case here.
+        if let urlString = currentEpisode?.audioUrl, let url = URL(string: urlString) {
+            LearnAudioCache.shared.invalidate(url)
+        }
 
         // Learn narration streams from an EXPIRING signed URL. A signature is minted for 24h and
         // reused server-side for at most 6h, so it cannot die mid-episode — but the CLIENT

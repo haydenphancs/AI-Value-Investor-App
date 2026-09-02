@@ -273,6 +273,52 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
     return out
 
 
+async def is_cached_collection_fresh(ticker: str) -> bool:
+    """Whether a FRESH cache row exists for `ticker`, WITHOUT reading the payload.
+
+    ⚠️ Use this — never `get_cached_collection(...) is not None` — whenever the answer you
+    want is "do I need to collect?" rather than "give me the data".
+
+    `collected_data` is the largest row in the database: measured in production it averages
+    ~930 KB and peaks at ~1.4 MB (10 years of statements, price history, news, holders,
+    segments, peers, plus eleven nested Pydantic response objects). `warm_ticker_collection`
+    called the full reader on its fast path and threw the result away, so the steady state —
+    the hourly pre-warmer across 20 tickers, plus `POST /stocks/{ticker}/prewarm-report`,
+    which iOS fires on EVERY detail-view open — paid ~930 KB and a full Pydantic
+    deserialization to look at one timestamp. `cached_at` alone is ~40 bytes.
+
+    Degrades to False on any error, exactly like a cache MISS, so a probe failure can only
+    cost a redundant collection — never a wrong answer.
+    """
+    ticker = ticker.upper().strip()
+
+    def _query() -> bool:
+        try:
+            row = (
+                get_supabase()
+                .table(TABLE_NAME)
+                .select("cached_at")
+                .eq("ticker", ticker)
+                .limit(1)
+                .execute()
+            )
+            if not row.data:
+                return False
+            cached_at_str = row.data[0].get("cached_at")
+            if not cached_at_str:
+                return False
+            cached_at = datetime.fromisoformat(cached_at_str.replace("Z", "+00:00"))
+            return is_cache_fresh(cached_at)
+        except Exception as e:
+            logger.warning(
+                "ticker_data_cache freshness probe failed for %s: %s: %s",
+                ticker, type(e).__name__, e,
+            )
+            return False
+
+    return await asyncio.to_thread(_query)
+
+
 async def store_collection(ticker: str, out: Any) -> None:
     """Write/refresh the cache row. Fire-and-forget: failures are logged, never
     raised, and a serialization failure simply skips the write."""
@@ -295,6 +341,10 @@ async def store_collection(ticker: str, out: Any) -> None:
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker",
+                # postgrest-py defaults every write to returning=representation, so this
+                # echoed the ~930 KB payload straight back and made each cold collection pay
+                # for it twice. Nothing reads the result.
+                returning="minimal",
             ).execute()
             logger.info("ticker_data_cache UPSERTED for %s", ticker)
         except Exception as e:
@@ -386,7 +436,10 @@ async def warm_ticker_collection(ticker: str) -> None:
         # a non-str input (e.g. a malformed RPC row).
         ticker = ticker.upper().strip()
         # Fast path: already fresh → don't even take a slot (steady state).
-        if await get_cached_collection(ticker) is not None:
+        # Probes `cached_at` ONLY. This used to call `get_cached_collection`, which selects
+        # `collected_data` too — a ~930 KB read plus a full Pydantic deserialization, on every
+        # hourly pre-warm tick and every ticker-detail open, purely to discard it.
+        if await is_cached_collection_fresh(ticker):
             return
         # Lazy imports break the cycle (collector imports this module).
         from app.integrations.fmp import get_fmp_client

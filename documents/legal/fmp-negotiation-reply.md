@@ -157,3 +157,139 @@ A simple yes or no is all I need.
 
 Best regards,
 Hayden
+
+---
+
+# Round 4 — response to the formal quote — ✅ SENT
+
+**Awaiting reply.** Three answers decide whether this is signable:
+1. **Term** → `Initial Subscription Term: Monthly` on the document, not just in email.
+2. **§6 AI Prompts named on the Order Form** → without it the headline paid feature is unlicensed.
+3. **4(a) intraday bars during the session** → asked four times now; if EOD-only, there is no
+   current price for any asset class and the CBOE/IEX WebSocket becomes mandatory, unpriced.
+
+⚠️ **Offer expires 2026-09-27.**
+
+**The quote:** $29,500 list → 44.9% discount ($13,245 ÷ $29,500, not the stated 55%) →
+**$13,245/yr = $1,104/mo**, `Initial Subscription Term: Annual`, `Renewal Term: Annual`.
+
+**Two headline problems.** (1) 1.84× the **$600** and 2.2× the *"approximately $500"* quoted by
+email. (2) Laith wrote *"changed your commitment from annual to monthly"* — but he changed
+**Billing Frequency**, not the term. §1 defines Fees as payable *"each **Term**"*, so signing
+commits **$13,245**, not $1,104.
+
+⚠️ **The term fix needs three amendments, not one.** §9.1 runs twelve months *"or until the expiry
+of the Initial Subscription Term set forth on the Order Form, **whichever is longer**"* — so editing
+the Order Form line alone is defeated by §9.1, and editing §9.1 is defeated by §4.1
+(*"non-cancelable and non-refundable regardless of any early termination"*). §12.7 requires each
+amended section to be cited by number.
+
+🔴 **Three blocking licence gaps** (see `fmp-quote-analysis.md` §6):
+1. Exhibit A: *"Licensee is authorized only for those Permitted Uses expressly identified in the
+   applicable Order Form."* **The Order Form identifies none** — its only licence line is
+   "End-User Display Rights", which is not one of Exhibit A's numbered uses.
+2. Exhibit A §6 permits AI prompts *"provided that AI Prompt use is identified as a Permitted Use
+   on the Order Form."* **It is not.** The headline paid feature pipes FMP data into Gemini.
+3. **The PDF export is an express Non-Permitted Use**, three times over — §1(i) *"providing any Data
+   … in any downloadable fashion"*, plus Exhibit A §2 and §3 each saying *"redisplay only … does not
+   authorize … downloadable files."* Shipped today at `research.py:579` → `ReportPDFViewModel` →
+   `UIActivityViewController`. And §9.3's deletion duty covers data *"in the possession or control of
+   any … Authorized Viewer"* — unperformable once a PDF is AirDropped.
+
+**Offer expires 2026-09-27.** §8.1 indemnity is carved out of the liability cap by §7.3/§7.4.
+
+## The email
+
+Subject: Re: FMP Quote — Caydex — 0001
+
+Hi Laith,
+
+Thanks for putting this together, and apologies for the slow reply — I wanted to read the whole
+document properly rather than respond to the headline number, and the licence terms took a while
+to work through.
+
+I'll be straightforward: at $1,104 a month it's well over my budget, and I can't sign it as
+drafted. I do think most of the gap is fixable, though. Five things.
+
+**1. The term on the Order Form.**
+
+You'd mentioned a month-to-month term, so I may be misreading this — but the Order Form says
+`Initial Subscription Term: Annual` and `Renewal Term: Annual`, with `Billing Frequency: Monthly`.
+That reads to me as monthly payments on an annual commitment, which would commit me to $13,245
+rather than $1,104.
+
+An annual commitment isn't something I can take on. Could we put the monthly term on the document
+itself? Sections 4.1, 9.1 and 9.3 all bear on it, so I think it needs both of these:
+
+  - Order Form: **Initial Subscription Term: Monthly**
+  - Special Terms: "Notwithstanding Sections 4.1, 9.1 and 9.3, the Initial Term is month-to-month;
+    this Agreement shall not automatically renew without Licensee's written consent; and upon
+    termination by Licensee under Section 9.2(a), Licensee's sole payment obligation shall be the
+    monthly installments invoiced for periods through the effective date of termination."
+
+**2. Please remove three packages.**
+
+  - Mutual Funds Holdings
+  - Indexes
+  - Commodities
+
+Could you send the revised total with those removed?
+
+**3. Three licence points I need fixed before signing.**
+
+Exhibit A says "Licensee is authorized only for those Permitted Uses expressly identified in the
+applicable Order Form, and no other Permitted Uses shall be implied" — but the Order Form doesn't
+identify any of the numbered uses. Its only licence line is "End-User Display Rights". So:
+
+  a) Please name the Permitted Uses on the Order Form. I believe I need four of them:
+
+       - **§2 Access Restricted External Display** — signed-in screens
+       - **§3 Public External Display** — my market-data screens are browsable without an account
+       - **§5 Modeling / Derivation for External Use** — my AI reports are sold to users, and §4
+         expressly forbids commercializing Derived Products, so §5 is the one that fits
+       - **§6 AI Technology – AI Prompts** — see (b) below
+
+     I don't need §7 (Model Training); I don't train anything on your data.
+
+  b) **AI Prompt use.** Exhibit A §6 permits sending Data to AI "provided that AI Prompt use is
+     identified as a Permitted Use on the Order Form" — and it isn't. My core paid feature sends
+     your data to an LLM and shows the written output to the user. §6 also limits this to "internal
+     business purposes", which doesn't describe generating a report for a paying customer. Please
+     identify §6 on the Order Form and confirm it covers outputs displayed to end users. If that
+     changes the price, I'd rather know now.
+
+  c) **PDF export.** My app lets a user export a saved report as a PDF to their own device. §1
+     lists "providing any Data to any party in any downloadable fashion" as a Non-Permitted Use, and
+     Exhibit A §2 and §3 both say the display right is "redisplay only". Can this be expressly
+     permitted on the Order Form? Related: §9.3 requires deleting all Data including copies held by
+     Authorized Viewers within 30 days of termination — a PDF already on someone's phone can't be
+     recalled, so I'd need that obligation limited to data within my own systems.
+
+**4. How I plan to show prices.**
+
+With real-time quotes out, I'd take the displayed price from the last bar on
+`/stable/historical-chart` and the previous close from `/stable/historical-price-eod` — both
+endpoints my charts already use.
+
+  a) **Does that work while the market is open?** I need today's intraday bars available during
+     the session, not only after the close. Package 7 is marked "Data Delay: EOD", so I want to be
+     sure that isn't a problem.
+
+  b) **Does Historical and Intraday Market Data cover crypto pairs like BTCUSD, or US equities
+     only?** Crypto prices aren't listed in any package, though Crypto News is inside Market News.
+
+**5. Two smaller things.**
+
+  a) "Refer to Cycle Times" appears four times and Cycle Times aren't defined anywhere in the
+     document. Could you send the table?
+
+  b) The display licence covers 1,000 unique users per month, and §2.6 adjusts fees upward
+     automatically when that's exceeded. What's the next tier and what does it cost? I'd rather know
+     the growth curve before signing than discover it later.
+
+I know that's a long list. The term, the AI-prompt point and question 4(a) are the three I
+genuinely can't proceed without; the rest is scope and clarity. If we can land those and get the
+number into range, I'm ready to move.
+
+Best regards,
+Hayden

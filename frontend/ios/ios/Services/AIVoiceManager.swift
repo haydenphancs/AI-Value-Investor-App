@@ -242,7 +242,17 @@ class AIVoiceManager: NSObject, ObservableObject {
         // `name` is either a remote Storage URL (http...) or a bundled resource basename.
         let resolvedURL: URL?
         if name.hasPrefix("http"), let remote = URL(string: name) {
-            resolvedURL = remote
+            // Journey auto-narrates every card on appear and auto-advances, for every tier
+            // including guests — so a lesson pass used to re-download its clips in full each
+            // time. `AVPlayer` ignores `URLCache`, hence the explicit mirror. Clips are ~130 KB
+            // (207 of them total 28 MB), so warm immediately: the duplicate is trivial and the
+            // whole library ends up local after one pass.
+            if let local = LearnAudioCache.shared.cachedFile(for: remote) {
+                resolvedURL = local
+            } else {
+                LearnAudioCache.shared.warm(remote)
+                resolvedURL = remote
+            }
         } else {
             resolvedURL = Bundle.main.url(forResource: name, withExtension: "m4a")
         }
@@ -438,6 +448,15 @@ class AIVoiceManager: NSObject, ObservableObject {
         let text = currentText
         let completion = onComplete
         let readAlong = readAlongWords
+
+        // Drop any on-disk mirror BEFORE deciding what to do. A corrupt local file fails exactly
+        // like an expired signature, but re-signing cannot fix it — and since `refreshedClipURL`
+        // returns nil when the token hasn't changed, the clip would degrade to on-device speech
+        // permanently, every time, with nothing pointing at the cache. No-op when streaming.
+        if case .clip(let failedName, _, _) = lastRequest,
+           failedName.hasPrefix("http"), let failedURL = URL(string: failedName) {
+            LearnAudioCache.shared.invalidate(failedURL)
+        }
 
         // Only a REMOTE clip can be re-signed, and only once per clip — `didRetryClipRefresh`
         // is cleared in `playClip`, so a genuinely dead object degrades to speech instead of

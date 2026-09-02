@@ -189,6 +189,14 @@ struct BookCoreDetailView: View {
             // start. `try?` is deliberate here and banned at the two tap sites above.
             guard let episode = try? await book.playableAudioEpisode() else { return }
             guard audioManager.currentEpisode?.id != episode.id else { return }
+            // ⚠️ ONLY warm-start from a local mirror. `load()` → `preparePlayer()` starts
+            // buffering, so on a cache miss this spent up to 45 MB of Storage egress for someone
+            // who opened a core purely to READ — and it re-fired on every `.onAppear` and every
+            // chapter change, with the per-book guard defeated by switching books, `stop()`, or
+            // any relaunch. Off a cached file the prepare is free, so the warm start survives
+            // exactly where it costs nothing.
+            guard let urlString = episode.audioUrl, let url = URL(string: urlString),
+                  LearnAudioCache.shared.cachedFile(for: url) != nil else { return }
             audioManager.load(episode)
         }
     }

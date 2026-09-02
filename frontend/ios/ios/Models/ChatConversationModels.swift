@@ -44,9 +44,19 @@ enum ChatContextType: String {
         case .commodity: return "Commodity"
         case .moneyMovesArticle: return "Money Moves"
         case .journeyLesson: return "Lesson"
-        case .book: return "Study Guide"
+        case .book: return "Book"
         case .none: return ""
         }
+    }
+
+    /// True when `referenceLabel` names the subject completely, so the chip should read
+    /// "Grounded on <reference>" rather than "Grounded on <label> · <reference>".
+    ///
+    /// A book's TITLE is the subject; prefixing it with a category said the same thing twice
+    /// ("Grounded on Study Guide · The Intelligent Investor"). A ticker is the opposite case —
+    /// "AAPL" alone does not say what is being read, so those keep their label.
+    var groundingReferenceStandsAlone: Bool {
+        self == .book
     }
 
     var groundingIcon: String {

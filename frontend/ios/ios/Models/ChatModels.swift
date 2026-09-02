@@ -223,15 +223,27 @@ extension SuggestionChip {
         guard let cores = BookCoreChapter.listsByOrder[curriculumOrder], !cores.isEmpty else {
             return []
         }
+        // Three cores spread across the guide (opening / middle / closing) rather than the
+        // first three, so the chips sample the whole book instead of its introduction — and
+        // so two books never show a similar-looking set. Indices are de-duplicated, because a
+        // 1- or 2-core book would otherwise offer the same core twice.
+        let picks = NSOrderedSet(array: [0, cores.count / 2, cores.count - 1])
+            .compactMap { $0 as? Int }
+
+        // The opener is deliberately the one shared chip: it is the question a reader actually
+        // starts with, and its ANSWER is book-specific because the voice and guide behind it are.
         var chips = [SuggestionChip(text: "What's the one big idea?", type: .question)]
-        if let first = cores.first {
-            chips.append(SuggestionChip(text: "Explain: \(first.title)", type: .question))
+        for (offset, index) in picks.enumerated() where index >= 0 && index < cores.count {
+            let title = cores[index].title
+            // Vary the verb by position so the set reads as a set, not a list of one question:
+            // explain the opening and middle ideas, then apply the closing one.
+            chips.append(SuggestionChip(
+                text: offset == picks.count - 1 && picks.count > 1
+                    ? "How do I apply \(title)?"
+                    : "Explain: \(title)",
+                type: .question
+            ))
         }
-        let midIndex = cores.count / 2
-        if cores.count > 1, midIndex < cores.count {
-            chips.append(SuggestionChip(text: "Explain: \(cores[midIndex].title)", type: .question))
-        }
-        chips.append(SuggestionChip(text: "How do I actually use this?", type: .question))
         return chips
     }
 }

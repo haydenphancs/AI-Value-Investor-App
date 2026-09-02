@@ -25,7 +25,13 @@ struct TrendingAnalysisDetailView: View {
                 headerSection
 
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xxl) {
+                    // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+                    // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+                    // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+                    // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+                    //
+                    // Nothing resizes today; kept eager so a future conditional cannot silently re-arm it.
+                    VStack(spacing: AppSpacing.xxl) {
                         // Hero section
                         heroSection
 

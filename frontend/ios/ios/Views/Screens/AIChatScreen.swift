@@ -240,9 +240,14 @@ struct AIChatScreen: View {
             // Same gate as the suggestion pills below, so the two can never disagree about
             // which state we're in.
             if !(viewModel.messages.isEmpty && !viewModel.isAITyping) {
+                // No "Details" affordance here, unlike the report verdicts: the chat prints
+                // this line under EVERY answer, so an underlined call-to-action repeated that
+                // often reads as chrome and stops being read at all. The whole line stays
+                // tappable and still opens the full disclaimers, and chat additionally gates
+                // first use behind DisclaimerAcknowledgementView + AIDataConsentView.
                 InlineDisclaimerNotice(
                     text: "AI-generated · may be wrong · not financial advice",
-                    linkLabel: "Details"
+                    linkLabel: ""
                 )
                 .padding(.horizontal, AppSpacing.xl)
                 .padding(.bottom, AppSpacing.xs)
@@ -295,7 +300,7 @@ struct AIChatScreen: View {
             return ref.split(separator: "|").first.map(String.init)?.uppercased()
         case .book:
             // Resolve the curriculum order to a title. NEVER fall back to the raw order —
-            // "Grounded on Study Guide · 2" is noise, not a reference.
+            // "Grounded on 2" is noise, not a reference.
             return LibraryBook.sampleData
                 .first(where: { String($0.curriculumOrder) == ref })?.title
         default:

@@ -14,7 +14,13 @@ struct TickerHoldersContent: View {
     var initialActivitiesTab: RecentActivitiesTab?
 
     var body: some View {
-        LazyVStack(spacing: AppSpacing.lg) {
+        // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+        // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+        // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+        // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+        //
+        // RecentActivitiesSection swaps three tab bodies and three Show-All toggles.
+        VStack(spacing: AppSpacing.lg) {
             // Shareholder Breakdown Section
             ShareholderBreakdownSection(
                 breakdownData: holdersData.shareholderBreakdown

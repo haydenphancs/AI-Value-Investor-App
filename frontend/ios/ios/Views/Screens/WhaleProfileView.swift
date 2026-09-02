@@ -75,7 +75,13 @@ struct WhaleProfileView: View {
                     .scaleEffect(1.2)
             } else if let profile = viewModel.profile {
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xl) {
+                    // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+                    // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+                    // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+                    // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+                    //
+                    // `profile.isLocked` swaps the locked stub for two full sections when the tier changes.
+                    VStack(spacing: AppSpacing.xl) {
                         // Profile Header
                         WhaleProfileHeader(
                             profile: profile,

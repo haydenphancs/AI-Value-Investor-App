@@ -122,10 +122,27 @@ def test_block_tells_the_model_not_to_narrate_the_voice(order: int):
 
 
 @pytest.mark.parametrize("order", _ORDERS)
-def test_block_tells_the_model_to_use_our_guide_not_the_book(order: int):
+def test_block_forbids_reproducing_the_published_book(order: int):
     """Terms section 8: our guides are our own writing ABOUT the book. Reproducing the
     published expression is the one exposure a disclaimer cannot cure."""
-    assert "caydex study guide" in render_book_voice(order).lower()
+    block = render_book_voice(order).lower()
+    assert "never reproduce the book's own wording" in block
+    assert "ground answers in the reference notes" in block
+
+
+@pytest.mark.parametrize("order", _ORDERS)
+def test_block_forbids_narrating_the_source(order: int):
+    """The agent used to open answers with "from the Caydex study guide...", which is both
+    clunky under every reply and the wrong place for attribution — the grounding chip and
+    the source pill already say it, in UI chrome where it belongs.
+
+    It must not swing the other way either: claiming to answer "from the book" would imply
+    we hold the author's text, which Terms section 8 and the on-screen "not the book itself"
+    line both disclaim. So it names NO source and simply answers."""
+    block = render_book_voice(order).lower()
+    assert "never say where an answer came from" in block
+    for banned in ("caydex", "the guide", "according to"):
+        assert banned in block, f"the forbidden-phrase list must still name {banned!r}"
 
 
 @pytest.mark.parametrize("order", _ORDERS)
@@ -138,7 +155,9 @@ def test_no_voice_speaks_in_the_authors_first_person(order: int):
 @pytest.mark.parametrize("order", _ORDERS)
 def test_block_stays_small(order: int):
     """Re-billed on every turn of every book chat."""
-    assert len(render_book_voice(order)) < 1800
+    # 1900, not 1800: the anti-narration clause (added after the agent kept opening replies
+    # with "from the Caydex study guide") costs ~160 chars on every book. Still ~470 tokens.
+    assert len(render_book_voice(order)) < 1900
 
 
 def test_two_books_do_not_read_alike():

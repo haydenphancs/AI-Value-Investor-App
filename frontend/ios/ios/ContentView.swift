@@ -325,7 +325,13 @@ struct ResearchViewWithBinding: View {
 
     private var researchTabContent: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xxl) {
+            // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+            // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+            // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+            // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+            //
+            // `if let balance = effectiveCreditBalance` inserts the credits card once it resolves.
+            VStack(spacing: AppSpacing.xxl) {
                 // Target Selection Section
                 TargetSelectionSection(
                     selectedTarget: viewModel.selectedTarget,
@@ -376,7 +382,13 @@ struct ResearchViewWithBinding: View {
     // MARK: - Reports Tab Content
     private var reportsTabContent: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: AppSpacing.xxl) {
+            // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+            // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+            // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+            // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+            //
+            // `isSelectingReports` animates a 72pt spacer in and out.
+            VStack(spacing: AppSpacing.xxl) {
                 // Reports List Section
                 ReportsListSection(
                     sections: viewModel.groupedReports,

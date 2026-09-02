@@ -33,7 +33,24 @@ struct ProfileView: View {
                     .ignoresSafeArea()
 
                 ScrollView(showsIndicators: false) {
-                    LazyVStack(spacing: AppSpacing.xxl) {
+                    // A plain VStack, NOT LazyVStack - see HomeDashboardView.content for the full write-up.
+                    // The direct children here are a fixed, hand-written list, so laziness bought nothing,
+                    // while a lazy stack whose child RESIZES IN PLACE re-walks its predecessor chain and can
+                    // wedge the main thread at 100% inside LazySubviewPlacements -> _ViewList_Node.applyNodes.
+                    //
+                    // The worst instance in the tree, and the reason this sweep happened: the resizing child is
+                    // SLOT 0, so every successor offset depends on it. `userIdentitySection` is a 3-way branch
+                    // over isAuthenticated / isRestoring / guest - all different heights - and `.restoring` is,
+                    // per ProfileViewModel's own doc comment, "the ordinary case, not an edge one". On top of
+                    // that: the whole credits section is inserted on the same flag, the avatar swaps component,
+                    // isSavingName swaps a spinner for a pencil mid-row, and two credit rows arrive with the
+                    // network. `.onChange(of: appState.auth.status)` re-triggers the lot.
+                    //
+                    // AppSettingsView is pushed INSIDE this NavigationStack, so this container was still mounted
+                    // as the stack root when a wedge was sampled there on 2026-09-01 (2206/2206 main-thread
+                    // samples in that recursion). It is at least as likely to have been the culprit as the one
+                    // that screen had.
+                    VStack(spacing: AppSpacing.xxl) {
                         // Section 1: User Identity & Tier
                         userIdentitySection
 

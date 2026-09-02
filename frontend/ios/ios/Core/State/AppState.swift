@@ -563,6 +563,23 @@ final class AppState {
         )
     }
 
+    /// Re-read `/users/me` and adopt it. Best-effort — a failure leaves the current profile in
+    /// place rather than surfacing anything, because every caller is doing this to keep a
+    /// derived affordance honest, not to satisfy a user request.
+    ///
+    /// Added for set-password: `UserProfile.hasPassword` drives whether General Settings offers
+    /// "Set a Password" or "Change Password", so it must be re-read the moment that flips or
+    /// the row keeps offering a flow the server now refuses.
+    func refreshProfile() async {
+        do {
+            applyProfile(try await fetchCurrentUserNoRetry())
+        } catch {
+            #if DEBUG
+            print("ℹ️ [AppState] profile refresh failed: \(AppError.from(error).message)")
+            #endif
+        }
+    }
+
     /// Store the fetched profile AND map its tier string into the `UserTier` enum.
     /// This is the ONLY place `user.tier` is assigned — it drives the tier badge,
     /// paywall highlighting, and `canGenerateResearch`.
@@ -1430,11 +1447,38 @@ struct UserProfile: Codable, Identifiable, Sendable {
     let tier: String
     let createdAt: String
 
+    /// Whether this account has a password at all — `nil` means UNKNOWN, not `false`.
+    ///
+    /// An Apple/Google account is provisioned by Supabase without one, so the Change Password
+    /// screen was asking those users for a current password that has never existed and the
+    /// server answered "Your current password is incorrect." Nothing on this side could tell:
+    /// the provider string is a transient argument on the outbound sign-in body and was never
+    /// persisted anywhere.
+    ///
+    /// ⚠️ Treat `nil` exactly like `true` — keep the classic Change Password affordance. `nil`
+    /// means an older backend, or a probe that failed, and inventing "Set a Password" from an
+    /// absent answer would strand a password-having user in a flow that rejects them.
+    let hasPassword: Bool?
+
+    /// e.g. `["apple"]`, `["google"]`, `["email", "google"]`. Display only — it names the
+    /// sign-in method in copy. Never derive "has a password" from this.
+    let authProviders: [String]?
+
     enum CodingKeys: String, CodingKey {
         case id, email, tier
         case displayName = "display_name"
         case avatarUrl = "avatar_url"
         case createdAt = "created_at"
+        case hasPassword = "has_password"
+        case authProviders = "auth_providers"
+    }
+
+    /// How to name the sign-in method in user-facing copy, e.g. "Apple". `nil` when we have no
+    /// provider to name, so callers can fall back to generic wording rather than printing a raw
+    /// identifier like "google" at the user.
+    var primaryProviderLabel: String? {
+        let known = ["apple": "Apple", "google": "Google"]
+        return (authProviders ?? []).compactMap { known[$0.lowercased()] }.first
     }
 }
 

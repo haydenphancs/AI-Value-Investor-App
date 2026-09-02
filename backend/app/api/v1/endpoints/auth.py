@@ -18,10 +18,12 @@ from app.core.security import (
     trusted_client_ip, verify_supabase_token,
 )
 from app.api.error_response import ErrorCode, auth_error, make_error_response
+from app.services.auth_methods_service import auth_methods_service
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
     ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest,
+    SetPasswordRequest,
     MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
     OAuthSignInRequest, SessionExchangeRequest,
 )
@@ -919,6 +921,10 @@ async def reset_password(
     # 3. Evict sessions issued before this moment.
     _mark_password_changed(supabase, user_id)
     logger.info("Password reset completed for user=%s", user_id)
+    # `has_password` just flipped to true. Drop the cached probe or `GET /users/me` keeps
+    # reporting the old answer for up to its TTL, and the settings row keeps offering
+    # "Set a Password" to someone who now has one.
+    auth_methods_service.invalidate(user_id)
 
     return MessageResponse(
         message="Your password has been reset. You can now sign in with your new password."
@@ -940,22 +946,9 @@ async def change_password(
     stolen access token is enough to take permanent ownership of the account by changing
     its password. Verified by attempting a real sign-in with it.
     """
-    # RATE LIMITED, and it must be. This route performs a real `sign_in_with_password` per
-    # call (step 2 below), so it is a password oracle for anyone holding a stolen access
-    # token — which is exactly the threat the current-password requirement above exists to
-    # stop. It was the ONLY credential route with no limiter; every other one keys off
-    # `trusted_client_ip`. Supabase's own limiting is not a backstop here: every call leaves
-    # from the Railway container's address, so tripping it degrades sign-in for ALL users.
-    #
-    # Keyed per USER as well as per IP — the per-IP half alone would let an attacker with a
-    # pool of addresses keep guessing against one account.
+    # Read while the Request is to hand; the limiter that consumes it runs further down, after
+    # the has-a-password probe.
     client_ip = trusted_client_ip(req)
-    _enforce_credential_limits(
-        (f"changepw:ip:{client_ip}", 10, 3600),
-        (f"changepw:user:{user_id}", 5, 900),
-        detail="Too many password change attempts. Please try again later.",
-        retry_after="900",
-    )
 
     # Resolve the account's email — the request doesn't carry it, and it must come from
     # the token's subject rather than user input.
@@ -985,6 +978,44 @@ async def change_password(
             ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
             message=f"no public.users row for {user_id}",
         )
+
+    # Does this account even HAVE a password? An Apple/Google account is provisioned by
+    # `sign_in_with_id_token` and never has one written, so `auth.users.encrypted_password` is
+    # NULL — and the sign-in below then fails as `invalid_credentials`, which this route used to
+    # report as "Your current password is incorrect." about a password that has never existed.
+    # A TestFlight tester found it by asking the obvious question. Answer honestly instead, and
+    # point at `/auth/set-password`.
+    #
+    # Fails OPEN: an unknown result (RPC error, or migration 156 not applied yet) falls through
+    # to the legacy path, which is wrong only in the same way it was already wrong. The mirror
+    # decision in `/auth/set-password` fails CLOSED, and the asymmetry is deliberate — see there.
+    methods = await auth_methods_service.get(supabase, user_id)
+    if methods is not None and methods.get("has_password") is False:
+        raise auth_error(
+            ErrorCode.AUTH_PASSWORD_NOT_SET,
+            message=f"change-password on a password-less account (providers={methods.get('providers')})",
+        )
+
+    # RATE LIMITED, and it must be. This route performs a real `sign_in_with_password` below,
+    # so it is a password oracle for anyone holding a stolen access token — which is exactly the
+    # threat the current-password requirement exists to stop. It was the ONLY credential route
+    # with no limiter; every other one keys off `trusted_client_ip`. Supabase's own limiting is
+    # not a backstop here: every call leaves from the Railway container's address, so tripping it
+    # degrades sign-in for ALL users.
+    #
+    # Keyed per USER as well as per IP — the per-IP half alone would let an attacker with a pool
+    # of addresses keep guessing against one account.
+    #
+    # Placed AFTER the probe on purpose. The probe is authenticated, self-scoped (the id comes
+    # from the verified JWT subject, never the body) and cached, so it needs no anti-brute-force
+    # budget of its own — and a stale client on a password-less account no longer spends all
+    # five attempts discovering that this flow can never work for it.
+    _enforce_credential_limits(
+        (f"changepw:ip:{client_ip}", 10, 3600),
+        (f"changepw:user:{user_id}", 5, 900),
+        detail="Too many password change attempts. Please try again later.",
+        retry_after="900",
+    )
 
     if request.new_password == request.current_password:
         raise HTTPException(
@@ -1065,6 +1096,10 @@ async def change_password(
 
     _mark_password_changed(supabase, user_id)
     logger.info("Password changed for user=%s", user_id)
+    # `has_password` just flipped to true. Drop the cached probe or `GET /users/me` keeps
+    # reporting the old answer for up to its TTL, and the settings row keeps offering
+    # "Set a Password" to someone who now has one.
+    auth_methods_service.invalidate(user_id)
 
     # Re-issue THIS caller's credentials, minted after the stamp above so `iat >=
     # password_changed_at`. Without this the request that changed the password evicted its own
@@ -1073,6 +1108,159 @@ async def change_password(
     tokens = _issue_app_tokens_for(user_id, email)
     return PasswordChangedResponse(
         message="Your password has been changed. Other devices will need to sign in again.",
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        user_id=user_id,
+    )
+
+
+@router.post("/set-password", response_model=PasswordChangedResponse)
+async def set_password(
+    request: SetPasswordRequest,
+    req: Request,
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Create a FIRST password for a signed-in account that has none.
+
+    An Apple/Google account is provisioned by `sign_in_with_id_token` and never has a password
+    written for it, so until now those users had no password, no way to make one, and a Change
+    Password screen that told them their nonexistent current password was incorrect. This is the
+    way in — and it means losing access to an Apple ID or Google account no longer means losing
+    the Caydex account with it.
+
+    **The emailed recovery code is the proof, not the bearer token.** Accepting the session alone
+    would make a stolen access token sufficient to take permanent ownership of the account, which
+    is precisely what `/auth/change-password`'s current-password requirement exists to prevent —
+    and this route has no current password to fall back on. The code is obtained from the
+    unchanged `POST /auth/forgot-password`, so no new delivery path exists to get wrong.
+
+    Distinct from `/auth/reset-password`, which does the same write for a SIGNED-OUT caller and
+    answers with a bare `MessageResponse`. A signed-in caller going through that route would
+    stamp `password_changed_at` and evict their own session on the very next request. This one
+    re-mints the caller's tokens after the stamp, exactly as change-password does.
+    """
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"setpw:ip:{client_ip}", 10, 3600),
+        (f"setpw:user:{user_id}", 5, 900),
+        detail="Too many attempts. Please try again later.",
+        retry_after="900",
+    )
+
+    # From the token's subject, never the body — otherwise the OTP check below could be aimed at
+    # somebody else's mailbox. `limit(1)` not `single()`, which raises on zero rows (see the
+    # identical note in change-password).
+    try:
+        result = supabase.table("users").select("email").eq("id", user_id).limit(1).execute()
+        rows = result.data or []
+        email = rows[0].get("email") if rows else None
+    except Exception as e:
+        logger.error(
+            "set-password: user lookup failed for user=%s: %s: %s",
+            user_id, type(e).__name__, e,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"users lookup failed: {type(e).__name__}",
+        )
+
+    if not email:
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
+            message=f"no public.users row for {user_id}",
+        )
+
+    # FAILS CLOSED, and the asymmetry with change-password is the point. There it is safe to
+    # fall through on an unknown probe, because the current password is still demanded. Here
+    # there is nothing else standing between the caller and the write, so an unknown answer must
+    # refuse: proceeding would let this route overwrite an EXISTING password without proving the
+    # current one, turning it into the very bypass change-password guards against.
+    methods = await auth_methods_service.get(supabase, user_id)
+    if methods is None:
+        logger.warning(
+            "set-password: could not determine password state for user=%s — refusing", user_id
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="account_auth_methods probe returned no answer",
+        )
+    if methods.get("has_password") is True:
+        raise auth_error(
+            ErrorCode.AUTH_PASSWORD_ALREADY_SET,
+            message="set-password on an account that already has one",
+        )
+
+    # Verify the OTP. This is what proves control of the mailbox.
+    try:
+        verified = _auth_of(auth_client, supabase).auth.verify_otp({
+            "email": email,
+            "token": request.code,
+            "type": "recovery",
+        })
+    except Exception as e:
+        logger.info(
+            "set-password: OTP verification failed for user=%s (%s)", user_id, type(e).__name__
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="That code is invalid or has expired. Request a new one.",
+        )
+
+    verified_user = getattr(verified, "user", None)
+    verified_id = str(getattr(verified_user, "id", "") or "")
+    # Belt and braces. The email came from this user's own row, so a code that verifies against
+    # it should always resolve to this user — but the consequence of being wrong is writing a
+    # password into somebody else's account, so it is checked rather than assumed.
+    if not verified_id or verified_id != str(user_id):
+        logger.error(
+            "set-password: OTP resolved to a DIFFERENT user (token subject=%s, otp=%s)",
+            user_id, verified_id or "<none>",
+        )
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN,
+            message="recovery OTP resolved to a different account",
+        )
+
+    # ADMIN client, mandatorily. `verify_otp` above emits SIGNED_IN, which rewrites the headers
+    # dict shared by `auth` and `auth.admin` (they are the same object — see database.py) and
+    # re-authenticates admin calls as this user. GoTrue then refuses `/admin/*` with
+    # "User not allowed", which matches no classifier and surfaces as a bare 500. That is the
+    # exact defect that made change-password and reset-password fail 100% of the time.
+    try:
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(
+            user_id, {"password": request.new_password}
+        )
+    except Exception as e:
+        if _is_password_rejected(e):
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_REJECTED,
+                message="admin.update_user_by_id rejected the new password",
+                details=_optional_details(reasons=_password_rejection_reasons(e)),
+            )
+        logger.error(
+            "set-password: admin update failed for user=%s: %s: %s",
+            user_id, type(e).__name__, e, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="We couldn't set your password. Please try again.",
+        )
+
+    _mark_password_changed(supabase, user_id)
+    logger.info("Password set for user=%s (providers=%s)", user_id, methods.get("providers"))
+    # The probe's whole answer just changed. Without this, `GET /users/me` keeps reporting
+    # `has_password: false` for up to the TTL and the settings row keeps saying "Set a Password".
+    auth_methods_service.invalidate(user_id)
+
+    # Minted AFTER the stamp so `iat >= password_changed_at`: this device stays signed in while
+    # every other one is evicted. Same contract as change-password — dropping these tokens signs
+    # the caller out seconds after telling them it worked.
+    tokens = _issue_app_tokens_for(user_id, email)
+    return PasswordChangedResponse(
+        message="Your password is set. You can now sign in with your email and password.",
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
         user_id=user_id,

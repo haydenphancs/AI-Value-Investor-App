@@ -137,6 +137,36 @@ class ChangePasswordRequest(BaseModel):
         return _validate_password_strength(v)
 
 
+class SetPasswordRequest(BaseModel):
+    """Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
+
+    No `current_password`, because there is none — and no `email` either: it is resolved from
+    the token's subject, never from the body, so a caller cannot aim the write at another
+    account. The emailed recovery `code` is the proof of mailbox control; the bearer token alone
+    is deliberately not enough, or a stolen access token would be sufficient to take permanent
+    ownership of the account, which is exactly what change-password's current-password
+    requirement exists to prevent.
+    """
+
+    # Same shape as ResetPasswordRequest.code — it IS a Supabase recovery OTP, obtained from the
+    # unchanged `POST /auth/forgot-password`.
+    code: str = Field(min_length=6, max_length=12)
+    new_password: str
+
+    @field_validator("code")
+    @classmethod
+    def _code_digits(cls, v: str) -> str:
+        cleaned = v.strip().replace(" ", "").replace("-", "")
+        if not cleaned.isdigit():
+            raise ValueError("Code must be the digits from your email.")
+        return cleaned
+
+    @field_validator("new_password")
+    @classmethod
+    def _password_strength(cls, v: str) -> str:
+        return _validate_password_strength(v)
+
+
 class MessageResponse(BaseModel):
     """Generic acknowledgement for flows that must not leak whether an account exists."""
 

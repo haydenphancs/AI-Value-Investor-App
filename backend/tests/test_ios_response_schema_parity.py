@@ -50,7 +50,7 @@ Source-level on both sides: no DB, no network, no simulator, no app build.
 import importlib
 import re
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_origin
 
 import pytest
 
@@ -184,7 +184,12 @@ def _swift_type_base(body: str, prop: str) -> str:
 
 # JSON int → Swift Double is a legal widening, so Double accepts int.
 _SWIFT_TO_PY = {"String": (str,), "Int": (int,), "Bool": (bool,),
-                "Double": (float, int), "Float": (float, int)}
+                "Double": (float, int), "Float": (float, int),
+                # Arrays of scalars. Mapped to `list` so the arm below can assert the backend
+                # really is a sequence — an unmapped entry here does not merely skip the type
+                # check, it fails `test_every_swift_type_is_one_we_can_compare` outright, which
+                # is the anti-vacuity control that forces this decision.
+                "[String]": (list,)}
 
 
 # ── Backend introspection ────────────────────────────────────────────────────
@@ -229,9 +234,16 @@ def _findings(wire: dict, props: dict[str, bool], keys: dict[str, str],
         if want is not None:
             ann = wire[key].annotation
             base = next((a for a in get_args(ann) if a is not type(None)), ann)
+            origin = get_origin(base)
             if base in (str, int, bool, float) and base not in want:
                 out.append(f"`{key}` is {base.__name__} on the backend, "
                            f"{types[prop]} in Swift")
+            elif want == (list,) and origin is not list:
+                # Swift decodes an array; a scalar (or object) on the wire throws.
+                name = getattr(base, "__name__", str(base))
+                out.append(f"`{key}` is {name} on the backend, {types[prop]} in Swift")
+            elif origin is list and want != (list,):
+                out.append(f"`{key}` is a list on the backend, {types[prop]} in Swift")
     # Backend-only fields are deliberately NOT reported. The decoder ignores unknown keys
     # (`APIClient.swift:61-67`), and three exist today — SignUpResponse.token_type,
     # UserResponse.updated_at, ResearchStatusResponse.error_code — all correct. Asserting on

@@ -530,6 +530,22 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 // mistake was picking a bad password. It must also never suggest "retry": the
                 // identical password is refused forever.
                 return .validationFailed(message: message)
+            case "AUTH_PASSWORD_NOT_SET", "AUTH_PASSWORD_ALREADY_SET":
+                // ACCOUNT STATE, not a credential failure: the caller is signed in and their
+                // session is untouched. `.validationFailed` carries the server's own wording,
+                // is excluded from `isAuthError` (so nothing clears the Keychain), and points
+                // at the form rather than at sign-in.
+                //
+                // ⚠️ Must NOT fall through to the `default:` arm below. That returns
+                // `.authUnavailable`, which is `isRetryable` — so the UI would offer "Try
+                // Again" for a request that is refused identically forever until the account
+                // state itself changes, and frame our correct answer as our outage.
+                //
+                // AUTH_PASSWORD_NOT_SET: an Apple/Google account has no password, so
+                // change-password can never succeed for it — the user needs the Set a Password
+                // flow instead. AUTH_PASSWORD_ALREADY_SET is the mirror image on
+                // `/auth/set-password`.
+                return .validationFailed(message: message)
             case "AUTH_PROVIDER_FAILED":
                 // Apple/Google identity verification failed. Retryable and non-destructive; the
                 // copy must never mention a password, because that flow has none — the old

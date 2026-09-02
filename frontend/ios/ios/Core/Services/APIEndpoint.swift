@@ -110,6 +110,9 @@ enum APIEndpoint: Sendable {
     case resetPassword(email: String, code: String, newPassword: String)
     /// Change the password of a signed-in user (requires the current one).
     case changePassword(currentPassword: String, newPassword: String)
+    /// Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
+    /// The emailed recovery code is the proof — the session alone is deliberately not enough.
+    case setPassword(code: String, newPassword: String)
     /// Re-send the signup confirmation email.
     case resendConfirmation(email: String)
     /// Native social sign-in with a provider identity token (Sign in with Apple).
@@ -413,6 +416,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/reset-password"
         case .changePassword:
             return "/api/v1/auth/change-password"
+        case .setPassword:
+            return "/api/v1/auth/set-password"
         case .resendConfirmation:
             return "/api/v1/auth/resend-confirmation"
         case .oauthSignIn:
@@ -722,7 +727,7 @@ enum APIEndpoint: Sendable {
         switch self {
         case .trackEvents,
              .signIn, .signUp, .refreshToken, .signOut,
-             .forgotPassword, .resetPassword, .changePassword,
+             .forgotPassword, .resetPassword, .changePassword, .setPassword,
              .resendConfirmation, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
@@ -908,6 +913,9 @@ enum APIEndpoint: Sendable {
                 currentPassword: currentPassword, newPassword: newPassword
             )
 
+        case .setPassword(let code, let newPassword):
+            return SetPasswordRequest(code: code, newPassword: newPassword)
+
         case .resendConfirmation(let email):
             return ResendConfirmationRequest(email: email)
 
@@ -1045,8 +1053,11 @@ enum APIEndpoint: Sendable {
              .forgotPassword, .resetPassword,
              .resendConfirmation, .oauthSignIn, .sessionExchange:
             return true
-        // .changePassword is deliberately NOT here: it is an authenticated request, so it
-        // should still get the 401 -> refresh -> retry interceptor.
+        // .changePassword and .setPassword are deliberately NOT here: both are authenticated
+        // requests, so they should still get the 401 -> refresh -> retry interceptor. Safe for
+        // .setPassword despite its single-use OTP — a 401 comes from the auth dependency, which
+        // runs BEFORE the handler body, so the replayed attempt is the first one to reach
+        // `verify_otp` and the code has not been consumed.
         default:
             return false
         }
@@ -1284,7 +1295,7 @@ enum APIEndpoint: Sendable {
 
         // Both take `get_current_user_id`. Short-circuiting a tokenless `signOut` is harmless —
         // its only caller already ignores the result — and saves a guaranteed-401 round trip.
-        case .signOut, .changePassword:
+        case .signOut, .changePassword, .setPassword:
             return .signInRequired
         }
     }
@@ -1356,6 +1367,13 @@ nonisolated struct ResetPasswordRequest: Encodable, Sendable {
 
 nonisolated struct ChangePasswordRequest: Encodable, Sendable {
     let currentPassword: String
+    let newPassword: String
+}
+
+/// No `currentPassword` (there is none) and no `email` — the server resolves it from the
+/// token's subject, so this request cannot be aimed at another account.
+nonisolated struct SetPasswordRequest: Encodable, Sendable {
+    let code: String
     let newPassword: String
 }
 

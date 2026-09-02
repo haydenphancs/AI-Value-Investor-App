@@ -173,6 +173,13 @@ _EXPECTED_ACTIONS = {
     # retry_later — the identical password is refused forever — and NOT sign_in, which would
     # be nonsense for someone mid-registration or already authenticated.
     ErrorCode.AUTH_PASSWORD_REJECTED: "fix_input",
+    # "This account has no password" / "it already has one". Both are ACCOUNT-STATE errors, not
+    # credential errors: the caller is signed in and their session is untouched. `fix_input`
+    # points them at the other form (set a password / change it). NOT `sign_in`, which sends an
+    # already-authenticated user in a circle, and NOT `retry_later`, which would promise that
+    # the identical request eventually works — it never does until the account state changes.
+    ErrorCode.AUTH_PASSWORD_NOT_SET: "fix_input",
+    ErrorCode.AUTH_PASSWORD_ALREADY_SET: "fix_input",
 }
 
 

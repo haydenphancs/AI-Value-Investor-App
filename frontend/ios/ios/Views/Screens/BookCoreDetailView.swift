@@ -739,18 +739,13 @@ struct BookCoreDetailView: View {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         inputText = ""
-        // Ground the chat on the PASSAGE the user is reading (book text is bundled in the app, not on
-        // the backend), so "explain this part" works instead of a title/author pointer that only helps
-        // if the model already knows the book. Capped for the prompt budget.
-        let passage = currentContent.plainTextForGrounding()
-        let base = "The user is reading \"\(book.title)\" by \(book.author), core \(currentContent.chapterNumber)"
-            + (currentContent.chapterTitle.isEmpty ? "" : " — \"\(currentContent.chapterTitle)\"") + "."
-        let bookContext = passage.isEmpty
-            ? base + " Answer in that context."
-            : base + " The passage on screen:\n\(passage)\nAnswer grounded in this passage."
+        // Ground on the PASSAGE the reader is looking at, plus the guide outline as a map so
+        // "how does this connect to core 9?" still works. One renderer shared with the card
+        // entry points, so both stay inside the same budget — an oversized `context` is a
+        // Pydantic 422 the client cannot decode, not a truncation.
         chatViewModel.startNewConversation(
             firstMessage: text,
-            context: bookContext,
+            context: book.studyGuideContext(.passage(currentContent)),
             contextType: .book,
             referenceId: String(book.curriculumOrder)
         )

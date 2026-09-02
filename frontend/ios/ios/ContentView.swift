@@ -20,7 +20,7 @@ struct ContentView: View {
     /// It used to live in `LearnContentView`, which made "resume" a Wiser-only property: the
     /// header bar's chat door is in `GlobalHeaderView` now, embedded by four tab headers, and a
     /// per-header view model would have meant four unrelated threads. Contextual chats keep
-    /// their own view models on purpose — the reading screens' "Ask the Author Agent" and the
+    /// their own view models on purpose — the reading screens' "Ask the Agent" and the
     /// asset detail bars each seed a grounded conversation that must not clobber this one.
     @StateObject private var chatViewModel = ChatViewModel()
 

@@ -410,7 +410,7 @@ def test_reset_for_identity_change_clears_the_history_list_too():
 
 
 def test_the_wiser_screen_no_longer_owns_a_general_chat_view_model():
-    """Wiser keeps `bookChatViewModel` (the book-grounded "Ask the Author Agent" chat) on
+    """Wiser keeps `bookChatViewModel` (the book-grounded "Ask the Agent" chat) on
     purpose. What must NOT come back is a second general-purpose thread there: it would be
     reset by nothing, and would diverge from the one the header bar raises."""
     learn_view = _REPO / "frontend/ios/ios/Views/Screens/LearnView.swift"

@@ -26,7 +26,19 @@ struct AIChatScreen: View {
     @Environment(\.appState) private var appState
 
     @State private var inputText: String = ""
-    @State private var suggestions: [SuggestionChip] = SuggestionChip.sampleData
+    /// Starter chips for an empty chat. DERIVED, not stored: a book chat needs chips about
+    /// that book, and deriving them means they are also right after a history reopen (which
+    /// restores `currentContextType` / `currentReferenceId` but never touched a `@State`).
+    /// The default set is stock-flavoured, which is wrong on a Learn screen.
+    private var suggestions: [SuggestionChip] {
+        if viewModel.currentContextType == .book,
+           let ref = viewModel.currentReferenceId,
+           let order = Int(ref) {
+            let forBook = SuggestionChip.forBook(curriculumOrder: order)
+            if !forBook.isEmpty { return forBook }
+        }
+        return SuggestionChip.sampleData
+    }
     @State private var showingHistory: Bool = false
     /// Search query for the history panel's bottom search bar.
     @State private var historySearchText: String = ""
@@ -180,6 +192,18 @@ struct AIChatScreen: View {
         VStack(spacing: 0) {
             topBar
 
+            // "Grounded on …" chip — shows what Cay AI is reading for this chat.
+            //
+            // Lives HERE rather than inside `conversationArea` because the Learn "Ask the
+            // Agent" buttons now open an EMPTY grounded chat: the conversation area does not
+            // render until there is a message, so a chip nested inside it could never appear
+            // on the one screen that most needs to say what it is reading.
+            if let ctx = viewModel.currentContextType, ctx != .none {
+                GroundedContextChip(contextType: ctx, referenceLabel: groundingReferenceLabel)
+                    .padding(.top, AppSpacing.sm)
+                    .padding(.bottom, AppSpacing.xs)
+            }
+
             if !viewModel.messages.isEmpty || viewModel.isAITyping {
                 // Active conversation: show messages. Gating on `messages` (not `isInConversation`)
                 // keeps a seeded/orphaned user bubble visible even before the session id lands, and
@@ -247,13 +271,6 @@ struct AIChatScreen: View {
 
     private var conversationArea: some View {
         VStack(spacing: 0) {
-            // "Grounded on …" chip — shows what Cay AI is reading for this chat.
-            if let ctx = viewModel.currentContextType, ctx != .none {
-                GroundedContextChip(contextType: ctx, referenceLabel: groundingReferenceLabel)
-                    .padding(.top, AppSpacing.sm)
-                    .padding(.bottom, AppSpacing.xs)
-            }
-
             ChatMessagesList(
                 messages: viewModel.messages,
                 streamingMessageId: viewModel.streamingMessageId,
@@ -276,6 +293,11 @@ struct AIChatScreen: View {
         switch viewModel.currentContextType {
         case .tickerReport, .stock, .etf, .crypto, .index, .commodity:
             return ref.split(separator: "|").first.map(String.init)?.uppercased()
+        case .book:
+            // Resolve the curriculum order to a title. NEVER fall back to the raw order —
+            // "Grounded on Study Guide · 2" is noise, not a reference.
+            return LibraryBook.sampleData
+                .first(where: { String($0.curriculumOrder) == ref })?.title
         default:
             return nil
         }

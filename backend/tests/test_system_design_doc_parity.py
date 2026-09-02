@@ -386,6 +386,10 @@ _CURATED_TABLES = {
     "notification_events", "trending_themes", "user_investor_profile", "user_memory_facts",
     "watchlist_items", "whale_trades", "snapshot_cache", "etf_snapshot_cache",
     "news_articles", "signals_cache", "guest_report_budget",
+    # Named by §9c.0b as the corpus that is EMPTY — the reason the book source pill
+    # had to be earned rather than asserted. Curated so dropping it fails here
+    # instead of quietly orphaning that paragraph.
+    "book_chunks",
 }
 
 

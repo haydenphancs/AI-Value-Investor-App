@@ -23,6 +23,7 @@ from app.integrations.gemini import get_gemini_client
 from app.integrations.fmp import get_fmp_client
 from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
+from app.services.agents.book_voice_prompt import book_display_title, render_book_voice
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class, trades_extended_hours
 from app.services.agents.chat_tools import tools_for_asset_type
@@ -235,6 +236,7 @@ class ChatService:
             context_is_replayed=context_is_replayed,
             reader_lens=reader_lens,
             is_deep_dive=is_deep_dive,
+            reference_id=reference_id,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
 
@@ -417,6 +419,7 @@ class ChatService:
             client_context=context, asset_type=asset_type,
             context_is_replayed=context_is_replayed, reader_lens=reader_lens,
             is_deep_dive=is_deep_dive,
+            reference_id=reference_id,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
@@ -426,7 +429,9 @@ class ChatService:
         quote_line = self._widget_grounding_line(widget)
         if quote_line:
             system_instruction += quote_line
-        sources = self._build_sources(context_type, reference_id, citations)
+        sources = self._build_sources(
+            context_type, reference_id, citations, resolved_context=context
+        )
 
         return {
             "prompt": prompt,
@@ -574,10 +579,22 @@ class ChatService:
         "COMMODITY": "Commodity data",
         "MONEY_MOVES_ARTICLE": "Money Moves article",
         "JOURNEY_LESSON": "Investor Journey lesson",
-        "BOOK": "Book",
+        "BOOK": "Caydex study guide",
     }
     # context_types whose reference_id is a user-readable ticker (vs. a slug/order id).
     _TICKER_CONTEXTS = {"TICKER_REPORT", "STOCK", "ETF", "CRYPTO", "INDEX", "COMMODITY"}
+
+    # context_types whose grounding is ENTIRELY client-supplied: `ChatContextResolver`
+    # passes BOOK straight through (the guide text is bundled in the iOS app) and has no
+    # server-side source to fall back on. For these the pill must be EARNED by text
+    # actually arriving, not asserted because the context type was set.
+    #
+    # It previously was asserted, and the result was a lie on screen: chat RAG is off
+    # (CHAT_RAG_ENABLED), `book_chunks` is empty and nothing calls `search_book_chunks`,
+    # so "Grounded on Book · 1 source" appeared above an answer drawn from the model's own
+    # recollection of the published book — which is both the copyright-exposed path and a
+    # claim Terms of Use section 8 specifically disclaims.
+    _CLIENT_GROUNDED_CONTEXTS = {"BOOK"}
 
     # RAG chunk source_type → the human "source" pill label. Absent/unknown → "SEC filing"
     # (the filing-only stock path, whose chunks carry no source_type).
@@ -589,6 +606,8 @@ class ChatService:
         context_type: Optional[str],
         reference_id: Optional[str],
         citations: Optional[List[Dict]],
+        *,
+        resolved_context: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Build the small "sources" list for the thinking card from the grounding we
         already resolved: one pill for the screen context + one per distinct SEC-filing
@@ -597,11 +616,18 @@ class ChatService:
         sources: List[Dict[str, Any]] = []
         ctype = (context_type or "").strip().upper()
         label = cls._CONTEXT_SOURCE_LABEL.get(ctype)
+        if label and ctype in cls._CLIENT_GROUNDED_CONTEXTS:
+            if not (resolved_context or "").strip():
+                label = None
         if label:
             detail = None
             ref = (reference_id or "").strip()
             if ref and ctype in cls._TICKER_CONTEXTS:
                 detail = ref.split("|")[0].strip().upper() or None
+            elif ctype == "BOOK":
+                # From the TRUSTED registry, never the caller's raw reference: a curriculum
+                # order is meaningless as a label even when it is valid.
+                detail = book_display_title(reference_id)
             sources.append({"label": label, "detail": detail})
 
         # RAG citations → one pill per distinct source. Label by the chunk's source_type
@@ -1578,6 +1604,7 @@ class ChatService:
         context_is_replayed: bool = False,
         reader_lens: Optional[str] = None,
         is_deep_dive: bool = False,
+        reference_id: Optional[str] = None,
     ) -> str:
         base = (
             # Single source of truth for the identity guard (persona_config.IDENTITY_RULE),
@@ -1652,6 +1679,21 @@ class ChatService:
         if asset_type in self._ASSET_PERSONAS:
             base += self._ASSET_PERSONAS[asset_type]
 
+        # L2b — the per-book METHOD VOICE for a Learn book chat.
+        #
+        # Keyed on `session_type`, NOT `asset_type`: a book chat carries no `stock_id`, so
+        # `asset_type` is "NORMAL" and `_ASSET_PERSONAS` above can never fire for one. That
+        # is why every book answered in the same neutral register until now.
+        #
+        # Position is load-bearing. It sits AFTER the identity rule and ADVICE_BOUNDARY (so
+        # neither can be overridden by it) and BEFORE the <<<CLIENT_CONTEXT>>> fence (so it
+        # keeps its steering power — a fenced voice is an inert voice). It is trusted and
+        # unfenced, which is only safe because `render_book_voice` renders from a closed
+        # registry keyed by an integer and returns "" for everything else; see
+        # agents/book_voice_prompt.py.
+        if session_type == "BOOK":
+            base += render_book_voice(reference_id)
+
         # The SUBJECT line is no longer an `elif` on the persona — it applies to every asset
         # type. It used to be mutually exclusive with the persona block above, so an INDEX /
         # CRYPTO / ETF / COMMODITY chat got a VOICE but was never told WHAT it was looking at.
@@ -1689,6 +1731,13 @@ class ChatService:
                 base += f"\n{profit_summary}"
             if snapshot_summary:
                 base += f"\n{snapshot_summary}"
+
+        # A bundled study guide cannot go stale and there is no live tool that supersedes
+        # it, so the replayed-snapshot framing below is simply wrong for a book: on a
+        # history reopen it told the model its grounding "may now be out of date" and to
+        # prefer live figures that do not exist for this surface.
+        if session_type == "BOOK":
+            context_is_replayed = False
 
         if client_context:
             # Spotlighting (OWASP LLM01, indirect injection): client_context is

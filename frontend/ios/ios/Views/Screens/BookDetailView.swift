@@ -140,11 +140,14 @@ struct BookDetailView: View {
                         let text = aiInputText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !text.isEmpty else { return }
                         aiInputText = ""
-                        // Book text is bundled in the app, not on the backend — so BOOK
-                        // is the one context that still passes a small client string through.
+                        // Our study guide is bundled in the app, not on the backend — so BOOK
+                        // is the one context that passes a client string through. Send the
+                        // guide OUTLINE rather than a bare title/author pointer: grounded on
+                        // our own writing, the agent discusses our guide instead of reciting
+                        // its recollection of the published book (Terms of Use §8).
                         chatViewModel.startNewConversation(
                             firstMessage: text,
-                            context: "The user is reading the book \"\(book.title)\" by \(book.author). Answer in that context.",
+                            context: book.studyGuideContext(),
                             contextType: .book,
                             referenceId: String(book.curriculumOrder)
                         )

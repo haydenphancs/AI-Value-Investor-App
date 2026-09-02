@@ -2,7 +2,7 @@
 //  EducationBookCard.swift
 //  ios
 //
-//  Molecule: Card showing an educational book with an Ask the Author Agent button
+//  Molecule: Card showing an educational book with an Ask the Agent button
 //
 
 import SwiftUI
@@ -76,7 +76,7 @@ struct EducationBookCard: View {
                 onTap?()
             }
 
-            // Action button — Ask the Author Agent (not yet wired; to be developed later)
+            // Action button — Ask the Agent: OPENS the book chat (it does not ask anything).
             Button(action: {
                 onChatWithBook?()
             }) {
@@ -84,7 +84,7 @@ struct EducationBookCard: View {
                     Image(systemName: "bubble.left.fill")
                         .font(AppTypography.iconXS)
 
-                    Text("Ask the Author Agent")
+                    Text("Ask the Agent")
                         .font(AppTypography.bodySmallEmphasis)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)

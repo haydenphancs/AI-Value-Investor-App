@@ -14,7 +14,7 @@ struct LearnContentView: View {
     @EnvironmentObject private var audioManager: AudioManager
     @StateObject private var viewModel = LearnViewModel()
     @ObservedObject private var bookmarks = BookmarkStore.shared
-    /// Separate, ephemeral VM for the "Ask the Author Agent" book chat, so seeding it with a book
+    /// Separate, ephemeral VM for the "Ask the Agent" book chat, so seeding it with a book
     /// never clobbers the general conversation. That general one is owned by `ContentView` now and
     /// raised from the header bar's sparkle — this screen no longer holds a chat view model of its
     /// own, which is what let the `Learn | Chat` control go.
@@ -105,7 +105,7 @@ struct LearnContentView: View {
             await MoneyMovesProgressStore.shared.hydrate()
             await bookmarks.hydrate()
         }
-        // "Ask the Author Agent" book chat keeps its own VM + cover so a book-grounded session
+        // "Ask the Agent" book chat keeps its own VM + cover so a book-grounded session
         // never overwrites the general conversation `ContentView` owns.
         .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
         }
@@ -226,20 +226,36 @@ struct LearnContentView: View {
         showingBookLibrary = true
     }
 
+    /// The Learn tab renders `EducationBook`, but every grounded feature needs the richer
+    /// `LibraryBook` (its `curriculumOrder` is what identifies the book to the backend).
+    /// One lookup, used by both entry points: two copies of a title match is precisely the
+    /// drift that would silently un-ground a chat.
+    private func libraryBook(matching title: String) -> LibraryBook? {
+        LibraryBook.sampleData.first(where: { $0.title == title })
+    }
+
     private func handleBookTap(_ book: EducationBook) {
-        // Find matching LibraryBook by title
-        if let libraryBook = LibraryBook.sampleData.first(where: { $0.title == book.title }) {
+        if let libraryBook = libraryBook(matching: book.title) {
             selectedLibraryBook = libraryBook
         }
     }
 
     private func handleChatWithBook(_ book: EducationBook) {
-        // "Ask the Author Agent" → open the unified full-screen chat seeded with the book, in its
-        // OWN VM so it doesn't clobber the resumable Wiser Chat-tab conversation.
-        bookChatViewModel.startNewConversation(
-            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
-            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
-            contextType: .book
+        // "Ask the Agent" → OPEN the book chat, empty. It used to auto-send a synthesised
+        // "Tell me about ..." question, which spent a turn the user never typed. Its own VM
+        // so it doesn't clobber the resumable Wiser Chat-tab conversation.
+        //
+        // Fail HONEST if the title doesn't resolve: open an ungrounded chat rather than one
+        // whose chip claims a study guide the backend never received.
+        guard let library = libraryBook(matching: book.title) else {
+            bookChatViewModel.prepareGroundedConversation()
+            showBookChat = true
+            return
+        }
+        bookChatViewModel.prepareGroundedConversation(
+            context: library.studyGuideContext(),
+            contextType: .book,
+            referenceId: String(library.curriculumOrder)
         )
         showBookChat = true
     }

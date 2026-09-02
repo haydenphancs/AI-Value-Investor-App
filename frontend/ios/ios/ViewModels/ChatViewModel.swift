@@ -248,6 +248,60 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Session Management
 
+    /// Ground a chat on a subject and OPEN IT EMPTY — no session, no message, no credit.
+    ///
+    /// The Learn "Ask the Agent" buttons used to call the seeding path with a synthesised
+    /// first message ("Tell me about ..."), so tapping the card spent a turn the user never
+    /// typed and dropped them into a wall of text instead of an invitation to ask. A
+    /// TestFlight tester reported exactly that: "should open the chat only".
+    ///
+    /// This is a pure state setter — deliberately no network. The session is created lazily
+    /// on the user's first real send: `sendMessage` finds no session id and re-issues the
+    /// grounding fields retained here, which is the case its own fallback was written for.
+    /// So the backend still receives `context_type` and `reference_id` on turn one and the
+    /// book voice fires normally.
+    ///
+    /// No consent gate here either, and that is a fix rather than an omission: nothing is
+    /// transmitted, so there is nothing to consent to. The gate still fires on the first
+    /// send. Previously the consent sheet appeared the instant a book card was tapped.
+    func prepareGroundedConversation(
+        stockId: String? = nil,
+        context: String? = nil,
+        contextType: ChatContextType? = nil,
+        referenceId: String? = nil
+    ) {
+        // Re-tapping the SAME subject resumes the conversation rather than destroying it —
+        // the host owns this view model as a @StateObject precisely so a chat survives
+        // dismissal. Only the grounding text is refreshed (the digest can change as the
+        // reader moves through the guide). A DIFFERENT subject starts clean.
+        if !messages.isEmpty,
+           currentContextType == contextType,
+           currentReferenceId == referenceId {
+            currentContext = context
+            return
+        }
+
+        // Cancel any in-flight turn AND invalidate its seed: cancellation is cooperative, so
+        // a seed already past its await would otherwise adopt this screen and paint the
+        // previous subject's answer into the chat we are about to present as empty.
+        respondTask?.cancel()
+        seedGeneration &+= 1
+        cancelReveal()
+
+        currentSessionId = nil
+        messages = []
+        isAITyping = false
+        isStreaming = false
+        streamingMessageId = nil
+        errorMessage = nil
+
+        currentStockId = stockId
+        currentSessionType = stockId != nil ? "STOCK" : "NORMAL"
+        currentContext = context
+        currentContextType = contextType
+        currentReferenceId = referenceId
+    }
+
     /// Create a new chat session and optionally send the first message.
     ///
     /// Returns whether the caller should PRESENT the chat. Every caller used to set

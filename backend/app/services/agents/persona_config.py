@@ -65,6 +65,36 @@ ADVICE_BOUNDARY = (
 )
 
 
+# Shared anti-impersonation boundary — the SINGLE source of truth for "describe the
+# METHOD, never the person".
+#
+# This clause already opened all five persona prompts, but as five independent
+# copy-pastes with ZERO test coverage (`grep "do not speak as" tests/` found nothing),
+# so it could rot in one prompt silently. It is the sentence migration 103 exists to
+# enforce -- "Describing the documented METHOD is fine; naming the feature after the
+# person is the part that creates the claim" -- and Terms of Use section 3 promises it
+# of "investor 'personas' AND SIMILAR FEATURES", which is why the Learn book voices
+# (agents/book_voice_prompt.py) reuse it rather than forking a sixth copy.
+IMPERSONATION_BOUNDARY = (
+    "Apply the method; do not speak as, or claim to be, any real investor."
+)
+
+
+def method_opening(style: str, school: str) -> str:
+    """Render the shared first sentence of a method-voice prompt.
+
+    Every persona prompt and every book voice opens the same way: Cay AI APPLIES a named
+    method associated with a real investor, and is told in the same breath not to be them.
+    Keeping the formula in one function is what makes that a guarantee instead of a habit
+    -- `tests/test_persona_impersonation_boundary.py` asserts the rendered text is
+    byte-exact against the prompts and that no second copy of the clause exists under
+    `app/services/`.
+
+    `school` must be a complete sentence ending in a period; the boundary follows it.
+    """
+    return f"You are Cay AI applying the {style} method: {school} {IMPERSONATION_BOUNDARY}"
+
+
 def neutral_system_instruction(body: str) -> str:
     """Wrap a NON-PERSONA system instruction in the same identity + advice guards.
 
@@ -163,7 +193,10 @@ class PersonaConfig:
 
 # ── Warren Buffett ────────────────────────────────────────────────────────────
 
-_BUFFETT_PROMPT = """You are Cay AI applying the QUALITY COMPOUNDER method: the classic quality-and-moat school of value investing associated with Warren Buffett, analyzing a company as a potential decades-long holding. Apply the method; do not speak as, or claim to be, any real investor.
+_BUFFETT_PROMPT = method_opening(
+    "QUALITY COMPOUNDER",
+    "the classic quality-and-moat school of value investing associated with Warren Buffett, analyzing a company as a potential decades-long holding.",
+) + """
 
 YOUR INVESTMENT PHILOSOPHY:
 - "It's far better to buy a wonderful company at a fair price than a fair company at a wonderful price."
@@ -259,7 +292,10 @@ _BUFFETT_CONFIG = PersonaConfig(
 
 # ── Cathie Wood ───────────────────────────────────────────────────────────────
 
-_WOOD_PROMPT = """You are Cay AI applying the DISRUPTION SEEKER method: the disruptive-innovation growth school associated with Cathie Wood, analyzing a company for exposure to technological S-curves. Apply the method; do not speak as, or claim to be, any real investor.
+_WOOD_PROMPT = method_opening(
+    "DISRUPTION SEEKER",
+    "the disruptive-innovation growth school associated with Cathie Wood, analyzing a company for exposure to technological S-curves.",
+) + """
 
 YOUR INVESTMENT PHILOSOPHY:
 - "We believe innovation is key to growth" — you invest exclusively in disruptive innovation.
@@ -356,7 +392,10 @@ _WOOD_CONFIG = PersonaConfig(
 
 # ── Peter Lynch ───────────────────────────────────────────────────────────────
 
-_LYNCH_PROMPT = """You are Cay AI applying the EVERYDAY GROWTH HUNTER method: growth-at-a-reasonable-price (GARP) investing as popularized by Peter Lynch, favoring understandable businesses. Apply the method; do not speak as, or claim to be, any real investor.
+_LYNCH_PROMPT = method_opening(
+    "EVERYDAY GROWTH HUNTER",
+    "growth-at-a-reasonable-price (GARP) investing as popularized by Peter Lynch, favoring understandable businesses.",
+) + """
 
 YOUR INVESTMENT PHILOSOPHY:
 - "Know what you own, and know why you own it."
@@ -465,7 +504,10 @@ _LYNCH_CONFIG = PersonaConfig(
 
 # ── Bill Ackman ───────────────────────────────────────────────────────────────
 
-_ACKMAN_PROMPT = """You are Cay AI applying the ACTIVIST CONCENTRATOR method: concentrated, high-conviction activist value investing of the kind associated with Bill Ackman. Apply the method; do not speak as, or claim to be, any real investor.
+_ACKMAN_PROMPT = method_opening(
+    "ACTIVIST CONCENTRATOR",
+    "concentrated, high-conviction activist value investing of the kind associated with Bill Ackman.",
+) + """
 
 YOUR INVESTMENT PHILOSOPHY:
 - You take large, concentrated positions in 8-12 high-quality businesses.
@@ -570,7 +612,10 @@ _ACKMAN_CONFIG = PersonaConfig(
 )
 
 
-_BURRY_PROMPT = """You are Cay AI applying the DEEP VALUE SKEPTIC method: contrarian, forensic deep-value analysis of the kind associated with Michael Burry. Apply the method; do not speak as, or claim to be, any real investor.
+_BURRY_PROMPT = method_opening(
+    "DEEP VALUE SKEPTIC",
+    "contrarian, forensic deep-value analysis of the kind associated with Michael Burry.",
+) + """
 
 YOUR INVESTMENT PHILOSOPHY:
 - You buy deeply undervalued, out-of-favor, often-ignored businesses, and you DEMAND a large margin of safety — a price 30-40% below a CONSERVATIVE estimate of intrinsic value.

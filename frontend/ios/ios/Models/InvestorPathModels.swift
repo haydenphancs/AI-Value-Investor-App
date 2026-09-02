@@ -56,6 +56,10 @@ enum LessonCategory {
 struct JourneyDeepDiveBook {
     let title: String
     let author: String
+    /// Identifies the book to the backend (its `LibraryBook.curriculumOrder`), so the chat
+    /// grounds on the right study guide and gets the right method voice. Carried here for
+    /// the same reason the title is: one value, so the card and the chat cannot disagree.
+    let curriculumOrder: Int
 }
 
 

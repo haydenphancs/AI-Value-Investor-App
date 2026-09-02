@@ -172,13 +172,23 @@ struct InvestorJourneyView: View {
     /// ViewModel so the card's label and this seed cannot drift apart.
     private func handleChatWithBook() {
         let book = viewModel.deepDiveBook
-        // Present ONLY if the seed took. Both Journey entry points share one view model, so
-        // a seed refused by the in-flight guard would otherwise open the OTHER conversation.
-        guard chatViewModel.startNewConversation(
-            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
-            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
-            contextType: .book
-        ) else { return }
+        // OPENS the chat, empty and grounded — no auto-sent question. Unlike the seeding
+        // path there is no in-flight guard to lose to: preparing always takes, and it
+        // deliberately replaces whatever the shared view model was holding, because that is
+        // what tapping this card asks for. Any abandoned turn is already persisted
+        // server-side and reachable from history.
+        guard let library = LibraryBook.sampleData.first(
+            where: { $0.curriculumOrder == book.curriculumOrder }
+        ) else {
+            chatViewModel.prepareGroundedConversation()
+            showChat = true
+            return
+        }
+        chatViewModel.prepareGroundedConversation(
+            context: library.studyGuideContext(),
+            contextType: .book,
+            referenceId: String(library.curriculumOrder)
+        )
         showChat = true
     }
 

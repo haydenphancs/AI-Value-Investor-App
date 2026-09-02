@@ -109,7 +109,7 @@ struct LibraryBookCard: View {
                         Image(systemName: "bubble.left.fill")
                             .font(AppTypography.iconXS)
 
-                        Text("Ask the Author Agent")
+                        Text("Ask the Agent")
                             .font(AppTypography.bodySmallEmphasis)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)

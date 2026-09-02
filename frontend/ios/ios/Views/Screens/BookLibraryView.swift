@@ -14,7 +14,7 @@ struct BookLibraryView: View {
     @ObservedObject private var bookmarks = BookmarkStore.shared
     @State private var books: [LibraryBook] = []
     @State private var selectedBook: LibraryBook?
-    /// Own VM so "Ask the Author Agent" here doesn't clobber the resumable Wiser
+    /// Own VM so "Ask the Agent" here doesn't clobber the resumable Wiser
     /// Chat-tab conversation — same reasoning as LearnView.bookChatViewModel.
     @StateObject private var bookChatViewModel = ChatViewModel()
     @State private var showBookChat = false
@@ -157,13 +157,13 @@ struct BookLibraryView: View {
         selectedBook = book
     }
 
-    /// "Ask the Author Agent" — mirrors LearnView.handleChatWithBook, which already
-    /// did the real thing. Only this full-library screen was left as a `print()`.
+    /// "Ask the Agent" — mirrors LearnView.handleChatWithBook. OPENS the chat grounded on
+    /// this book's study guide; it does not ask anything. The first question is the user's.
     private func handleChatWithBook(_ book: LibraryBook) {
-        bookChatViewModel.startNewConversation(
-            firstMessage: "Tell me about \"\(book.title)\" by \(book.author).",
-            context: "The user wants to learn about the book \"\(book.title)\" by \(book.author). Discuss its key ideas.",
-            contextType: .book
+        bookChatViewModel.prepareGroundedConversation(
+            context: book.studyGuideContext(),
+            contextType: .book,
+            referenceId: String(book.curriculumOrder)
         )
         showBookChat = true
     }

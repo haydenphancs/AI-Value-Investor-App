@@ -1056,3 +1056,109 @@ extension LibraryBook {
         )
     ]
 }
+
+// MARK: - Study-guide grounding
+//
+// What the "Ask the Agent" chat is grounded ON. The agent must answer from CAYDEX'S OWN
+// STUDY GUIDE, not from a model's recollection of the published book: our guides are our
+// own writing about the ideas (Terms of Use §8), and reproducing an author's expression is
+// the one exposure a disclaimer cannot cure.
+//
+// ⚠️ SIZE IS A CORRECTNESS CONSTRAINT, NOT A NICETY. The backend rejects a `context` over
+// CHAT_MESSAGE_HARD_MAX (8,000) with a Pydantic 422, whose body is FastAPI's default shape
+// rather than the {error_code, ...} envelope iOS decodes — so an oversized digest surfaces
+// as an unmapped error, not a handled one. The authored core text is 19k–58k characters per
+// book, i.e. 2.4x–7.2x the cap, so the full text can never be sent; and truncating it would
+// leave the model confident about the first quarter of a book and blind to the rest, which
+// is worse than not grounding at all. We send the OUTLINE instead — every core's title plus
+// its one-line description, which is where the actual claim lives.
+
+/// Which slice of a book's guide to ground a chat on.
+enum BookGroundingMode {
+    /// Whole-book: the reader tapped "Ask the Agent" on a card, with no core selected.
+    case overview
+    /// A specific core is on screen — ground on its full text, plus the outline as a map so
+    /// "how does this connect to core 9?" still works.
+    case passage(CoreChapterContent)
+}
+
+extension LibraryBook {
+
+    /// Build the grounding text sent as the chat's `context`.
+    ///
+    /// `maxChars` defaults to half the server cap deliberately: the client enforces the
+    /// budget itself rather than relying on server-side truncation, so the shape of what
+    /// gets dropped is a decision made here rather than a cut mid-sentence made there.
+    func studyGuideContext(_ mode: BookGroundingMode = .overview, maxChars: Int = 4000) -> String {
+        let cores = BookCoreChapter.listsByOrder[curriculumOrder] ?? coreChapters
+
+        let header = "Caydex original study guide for \"\(title)\" by \(author) — "
+            + "\(cores.count) cores. This is OUR guide to the book's ideas, not the book's text."
+
+        // Never dropped: it is what makes the model admit a gap instead of inventing one,
+        // and what keeps it discussing our guide rather than reciting the book.
+        let trailer = "Answer from this guide. If it does not cover something, say so plainly "
+            + "and answer from the method generally rather than quoting the book."
+
+        func outline(withDescriptions: Bool, limit: Int) -> String {
+            let shown = cores.prefix(limit)
+            let lines = shown.map { core -> String in
+                withDescriptions && !core.description.isEmpty
+                    ? "\(core.number). \(core.title) — \(core.description)"
+                    : "\(core.number). \(core.title)"
+            }
+            let omitted = cores.count - shown.count
+            let tail = omitted > 0 ? "\n(\(omitted) further cores not shown)" : ""
+            return "Core outline:\n" + lines.joined(separator: "\n") + tail
+        }
+
+        let passageBlock: String? = {
+            if case .passage(let core) = mode {
+                return "The reader is on this core now:\n" + core.plainTextForGrounding()
+            }
+            return nil
+        }()
+
+        let why: String? = {
+            guard case .overview = mode, !whyThisBook.isEmpty else { return nil }
+            return "Why this book: " + whyThisBook.prefix(320)
+        }()
+
+        let highlights: String? = {
+            guard case .overview = mode, !keyHighlights.isEmpty else { return nil }
+            let items = keyHighlights.prefix(4).map { "\($0.title): \($0.description)" }
+            return "Key ideas: " + items.joined(separator: " · ")
+        }()
+
+        // Degradation ladder, most expendable first. A `.passage` chat already carries the
+        // core's full text, so its outline is titles-only from the start — the outline is a
+        // map there, not the content.
+        let inPassage = passageBlock != nil
+        let ladder: [(Bool, Bool, Int)] = [   // (includeExtras, outlineDescriptions, coreLimit)
+            (true,  !inPassage, cores.count),
+            (true,  false,      cores.count),
+            (false, false,      cores.count),
+            (false, false,      max(1, cores.count / 2)),
+        ]
+
+        var rendered = ""
+        for (includeExtras, withDescriptions, limit) in ladder {
+            let parts: [String?] = [
+                header,
+                includeExtras ? why : nil,
+                includeExtras ? highlights : nil,
+                passageBlock,
+                outline(withDescriptions: withDescriptions, limit: limit),
+                trailer,
+            ]
+            rendered = parts.compactMap { $0 }.joined(separator: "\n\n")
+            if rendered.count <= maxChars { return rendered }
+        }
+
+        // Everything expendable is gone and it is still over budget: cut the outline, never
+        // the header or the trailer, and say that we did.
+        let floor = [header, passageBlock, trailer].compactMap { $0 }.joined(separator: "\n\n")
+        guard rendered.count > maxChars else { return rendered }
+        return String(floor.prefix(maxChars))
+    }
+}

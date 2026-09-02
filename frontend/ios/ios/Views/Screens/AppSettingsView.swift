@@ -49,7 +49,20 @@ struct AppSettingsView: View {
             AppColors.background.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: AppSpacing.xxl) {
+                // VStack, NOT LazyVStack. All six sections below are unconditional (bar one
+                // capability check) and cheap, so laziness bought nothing — while a lazy stack
+                // whose child RESIZES IN PLACE is the documented trigger for the permanent
+                // 100%-CPU main-thread hang in `LazySubviewPlacements` -> `LazyStack.place` ->
+                // `_ViewList_Node.applyNodes`, which took down the Home feed the same way.
+                //
+                // This screen acquired exactly that shape when the password row started
+                // switching between "Change Password" / "Update your account password" and
+                // "Set a Password" / "Add a password to sign in without <provider>" — two
+                // different heights, chosen by `hasPassword`, which arrives asynchronously from
+                // `GET /users/me` and can therefore change while this view is on screen. One
+                // such wedge was captured here on 2026-09-01 (2206/2206 samples inside that
+                // recursion, taps and scrolls both dead).
+                VStack(spacing: AppSpacing.xxl) {
                     aiResearchSection
                     playbackSection
                     subscriptionSection

@@ -210,6 +210,30 @@ extension SuggestionChip {
         SuggestionChip(text: "What does this chart mean?", type: .question),
         SuggestionChip(text: "Why #TSLA moved?", type: .ticker)
     ]
+
+    /// Starter chips for a book chat, derived from that book's own cores.
+    ///
+    /// `sampleData` above is stock-flavoured ("Should I buy #AAPL?"), which is the wrong
+    /// question set entirely on a Learn screen — and it was what an empty book chat showed.
+    /// Derived from the authored cores rather than a second hand-maintained table, so a book
+    /// whose guide changes cannot drift from its own chips.
+    ///
+    /// Returns [] for an unknown order; the caller falls back to `sampleData`.
+    static func forBook(curriculumOrder: Int) -> [SuggestionChip] {
+        guard let cores = BookCoreChapter.listsByOrder[curriculumOrder], !cores.isEmpty else {
+            return []
+        }
+        var chips = [SuggestionChip(text: "What's the one big idea?", type: .question)]
+        if let first = cores.first {
+            chips.append(SuggestionChip(text: "Explain: \(first.title)", type: .question))
+        }
+        let midIndex = cores.count / 2
+        if cores.count > 1, midIndex < cores.count {
+            chips.append(SuggestionChip(text: "Explain: \(cores[midIndex].title)", type: .question))
+        }
+        chips.append(SuggestionChip(text: "How do I actually use this?", type: .question))
+        return chips
+    }
 }
 
 extension ChatSession {

@@ -273,7 +273,8 @@ class InvestorJourneyViewModel: ObservableObject {
     /// one value means the card's label and the chat's seed can no longer disagree.
     let deepDiveBook = JourneyDeepDiveBook(
         title: "The Intelligent Investor",
-        author: "Benjamin Graham"
+        author: "Benjamin Graham",
+        curriculumOrder: 2
     )
 
     func updateMorningSessionTime(_ date: Date) {

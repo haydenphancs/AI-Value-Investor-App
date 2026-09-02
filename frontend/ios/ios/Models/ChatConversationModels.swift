@@ -44,7 +44,7 @@ enum ChatContextType: String {
         case .commodity: return "Commodity"
         case .moneyMovesArticle: return "Money Moves"
         case .journeyLesson: return "Lesson"
-        case .book: return "Book"
+        case .book: return "Study Guide"
         case .none: return ""
         }
     }

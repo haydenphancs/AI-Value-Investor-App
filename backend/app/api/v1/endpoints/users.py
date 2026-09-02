@@ -29,6 +29,7 @@ from app.schemas.investor_profile import (
 )
 from app.services.agents.investor_profile_prompt import may_apply_profile
 from app.services.entitlements import required_tier_for_signals
+from app.services.auth_methods_service import auth_methods_service
 from app.services import avatar_service
 from app.services.avatar_service import (
     AvatarError,
@@ -193,6 +194,13 @@ async def get_current_user_info(
                     user_id, f"{type(exc).__name__}: {exc}",
                 )
 
+    # How this account signs in. Sourced from the `account_auth_methods` RPC (migration 156),
+    # which is the only way to reach `auth.users.encrypted_password` — PostgREST does not expose
+    # the `auth` schema. Fails OPEN: a None here leaves both fields None, and iOS reads that as
+    # "keep the classic Change Password row", i.e. exactly today's behaviour. That is what lets
+    # this deploy before the migration is applied by hand.
+    methods = await auth_methods_service.get(supabase, user_id)
+
     return UserResponse(
         id=user_id,
         email=user["email"],
@@ -201,6 +209,8 @@ async def get_current_user_info(
         tier=user.get("tier", "free"),
         created_at=user["created_at"],
         updated_at=user.get("updated_at"),
+        has_password=methods.get("has_password") if methods else None,
+        auth_providers=methods.get("providers") if methods else None,
     )
 
 

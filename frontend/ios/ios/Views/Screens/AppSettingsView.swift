@@ -335,14 +335,31 @@ struct AppSettingsView: View {
             }
             .buttonStyle(PlainButtonStyle())
 
-            // Change password — signed-in only. Guests have no password to change, and
-            // recovery for signed-out users lives on the sign-in screen instead.
+            // Password — signed-in only. Guests have no password to change, and recovery for
+            // signed-out users lives on the sign-in screen instead.
+            //
+            // The row's WORDING is driven by `hasPassword`, because an Apple/Google account has
+            // no password at all and this row used to send those users to a form that demanded
+            // a current password they could never supply — the server answered "Your current
+            // password is incorrect" about a password that has never existed. Reported from
+            // TestFlight.
+            //
+            // ⚠️ `hasPassword == nil` means UNKNOWN (an older backend, or a failed probe) and
+            // MUST be treated as `true`: keeping the classic row is harmless for an OAuth user
+            // who now gets an honest error, whereas guessing "Set a Password" would strand a
+            // password-having user in a flow the server refuses outright.
             if appState.auth.status == .authenticated {
+                let needsPassword = appState.user.profile?.hasPassword == false
                 NavigationLink {
-                    ChangePasswordView()
+                    ChangePasswordView(mode: needsPassword ? .set : .change)
                 } label: {
                     HStack {
-                        settingsLabel(title: "Change Password", subtitle: "Update your account password")
+                        settingsLabel(
+                            title: needsPassword ? "Set a Password" : "Change Password",
+                            subtitle: needsPassword
+                                ? "Add a password to sign in without \(appState.user.profile?.primaryProviderLabel ?? "your provider")"
+                                : "Update your account password"
+                        )
                         Spacer()
                         Image(systemName: "chevron.right")
                             .font(AppTypography.iconXS)

@@ -1,10 +1,19 @@
 """User request/response schemas matching DB users + user_credits tables."""
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional
 
 
 class UserResponse(BaseModel):
+    """The signed-in user's profile.
+
+    ⚠️ `has_password` / `auth_providers` MUST stay Optional with a None default. They are
+    sourced from the `account_auth_methods` RPC (migration 156), which is applied by hand, so
+    the code has to deploy cleanly ahead of the migration — and a probe failure must degrade to
+    "unknown" rather than to a wrong answer. iOS reads None as "keep doing what you did before":
+    show the classic Change Password row. See `services/auth_methods_service.py`.
+    """
+
     id: str
     email: str
     display_name: Optional[str] = None
@@ -12,6 +21,12 @@ class UserResponse(BaseModel):
     tier: str = "free"
     created_at: str
     updated_at: Optional[str] = None
+    # None = unknown, NOT False. False means "this account provably has no password", which is
+    # what turns the settings row into "Set a Password".
+    has_password: Optional[bool] = None
+    # e.g. ["apple"], ["google"], ["email", "google"]. Display only — it names the sign-in
+    # method in the UI copy and is never the has-password signal (see migration 156's header).
+    auth_providers: Optional[List[str]] = None
 
 
 class UserCreditsResponse(BaseModel):

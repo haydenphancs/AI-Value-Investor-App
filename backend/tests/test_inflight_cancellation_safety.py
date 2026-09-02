@@ -81,6 +81,10 @@ _INFLIGHT_MODULES = [
     "signals_service.py",
     "valuation_snapshot_service.py",
     "widget_movers_service.py",
+    # Added 2026-09-01 with the Apple/Google set-password work. Reads the
+    # `account_auth_methods` RPC on the `GET /users/me` path, which runs on every session
+    # restore — so a cold cache with several restores in flight would fan out one RPC each.
+    "auth_methods_service.py",
 ]
 
 

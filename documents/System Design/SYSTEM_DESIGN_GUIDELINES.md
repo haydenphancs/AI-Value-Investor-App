@@ -923,9 +923,40 @@ read path filters on `user_id`, so a shared bucket is a cross-user leak on exact
 people paste their holdings.
 
 **Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
-`/auth/logout`, `/auth/change-password`, `/billing/verify`, whale follow/unfollow/activity — and
-**every AI-generation surface**: the `/research/*` routes, `GET /stocks/{t}/report`,
-`POST /stocks/{t}/report/chat`, `POST /stocks/{t}/prewarm-report`.
+`/auth/logout`, `/auth/change-password`, `/auth/set-password`, `/billing/verify`, whale
+follow/unfollow/activity — and **every AI-generation surface**: the `/research/*` routes,
+`GET /stocks/{t}/report`, `POST /stocks/{t}/report/chat`, `POST /stocks/{t}/prewarm-report`.
+
+**An OAuth account has no password, and the app now says so.** Supabase provisions an
+Apple/Google account through `sign_in_with_id_token` and never writes one, so
+`auth.users.encrypted_password` is NULL. `/auth/change-password` proves the current password by
+attempting a real sign-in, so it answered `AUTH_CREDENTIALS_INVALID` — *"Your current password is
+incorrect"* — about a password that has never existed, and burned one of five per-user attempts
+per 15 minutes each time. Neither side could tell the difference: the provider string is a
+transient argument on the inbound `/auth/oauth` body and was never persisted, and `public.users`
+has no provider column.
+
+The truth source is `public.account_auth_methods` (migration 156), a `SECURITY DEFINER` function
+over `auth.users.encrypted_password` + `auth.identities.provider` — PostgREST does not expose the
+`auth` schema, so no `supabase.table(...)` read can reach it. `GET /users/me` surfaces it as
+optional `has_password` / `auth_providers`. **`encrypted_password`, not the identity list, is the
+signal**: an admin password write does not necessarily create an `email` identity, so an
+identity-based check would go stale after the very flow below.
+
+`POST /auth/set-password` creates a FIRST password for a signed-in account that has none. The
+emailed 6-digit recovery OTP is the proof, not the bearer token — accepting the session alone
+would make a stolen access token sufficient to take permanent ownership of the account, which is
+exactly what change-password's current-password requirement prevents and what this route has no
+current password to fall back on. It re-mints the caller's tokens after stamping
+`password_changed_at`, so this device survives while others are evicted;
+`POST /auth/reset-password` deliberately does not, which is why a signed-in caller cannot simply
+be pointed at it.
+
+The two routes read an unknown probe result in **opposite** directions, and that is the design:
+change-password fails **open** (the current password is still demanded, so falling through is no
+worse than before), while set-password fails **closed** with `AUTH_UNAVAILABLE` (nothing else
+stands between the caller and the write, so proceeding could overwrite an existing password with
+no proof of the current one). Pinned by `tests/test_set_password_oauth.py`.
 
 *Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
 Everything else is guest-capable by design, which is also an App Store requirement (Guideline

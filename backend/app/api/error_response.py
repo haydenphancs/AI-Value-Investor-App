@@ -87,6 +87,25 @@ class ErrorCode(str, Enum):
     # one was wrong.
     AUTH_PASSWORD_REJECTED = "AUTH_PASSWORD_REJECTED"
 
+    # The two below are about whether a password EXISTS, not whether the one supplied matches.
+    # That distinction is the whole reason they are separate from AUTH_CREDENTIALS_INVALID.
+    #
+    # An Apple/Google account is provisioned by `sign_in_with_id_token` and never has a
+    # password written for it, so `auth.users.encrypted_password` is NULL. `/auth/change-password`
+    # proves the current password by attempting a real sign-in, which GoTrue rejects as
+    # `invalid_credentials` — so those users were told "Your current password is incorrect" about
+    # a password that has never existed, and burned one of five per-user attempts per 15 minutes
+    # doing it. Reported from TestFlight; the copy was the only thing telling them anything, and
+    # it was false.
+    #
+    # Neither may join `triggersTokenRefresh` and neither may clear a stored credential: the
+    # caller is signed in and their session is fine. `fix_input`, not `sign_in` (a circle) and
+    # not `retry_later` (the same request fails forever until the account state changes).
+    AUTH_PASSWORD_NOT_SET = "AUTH_PASSWORD_NOT_SET"
+    # The mirror image, on `/auth/set-password`: the account already has one, so the caller
+    # must use change-password (which can prove the current password) instead.
+    AUTH_PASSWORD_ALREADY_SET = "AUTH_PASSWORD_ALREADY_SET"
+
     AVATAR_TOO_LARGE = "AVATAR_TOO_LARGE"
     AVATAR_INVALID_IMAGE = "AVATAR_INVALID_IMAGE"
     AVATAR_UPLOAD_FAILED = "AVATAR_UPLOAD_FAILED"
@@ -268,6 +287,13 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.AUTH_PASSWORD_REJECTED: (
         "That password isn't safe to use. Please choose a different one."
     ),
+    ErrorCode.AUTH_PASSWORD_NOT_SET: (
+        "This account signs in with Apple or Google, so it doesn't have a password yet. "
+        "You can set one from Settings."
+    ),
+    ErrorCode.AUTH_PASSWORD_ALREADY_SET: (
+        "This account already has a password. Use Change Password instead."
+    ),
     ErrorCode.AVATAR_TOO_LARGE: (
         "That photo is too large. Try picking a different one."
     ),
@@ -401,6 +427,10 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # `sign_in` — they are already signed in (change-password) or mid-registration, and NOT
     # retry_later — the same password will be rejected forever.
     ErrorCode.AUTH_PASSWORD_REJECTED: "fix_input",
+    # fix_input for both: the user is looking at a form, and the useful affordance is the OTHER
+    # form (set a password / change it), never "sign in" — they already are.
+    ErrorCode.AUTH_PASSWORD_NOT_SET: "fix_input",
+    ErrorCode.AUTH_PASSWORD_ALREADY_SET: "fix_input",
     # fix_input, NOT retry_later: the photo the user chose is the problem, and retrying
     # the identical bytes produces the identical failure.
     ErrorCode.AVATAR_TOO_LARGE: "fix_input",
@@ -493,6 +523,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # submitted VALUE is unacceptable. A 401 here would make iOS clear a valid token
     # (auth.md §3) for a user who merely picked a bad new password.
     ErrorCode.AUTH_PASSWORD_REJECTED: 400,
+    # 400, not 401: the credential presented is perfectly valid. What is wrong is the ACCOUNT
+    # STATE the request assumes. A 401 would send iOS through its refresh-and-retry interceptor
+    # for a request that can never succeed on retry.
+    ErrorCode.AUTH_PASSWORD_NOT_SET: 400,
+    ErrorCode.AUTH_PASSWORD_ALREADY_SET: 400,
     # 413, not 400: the request was well-formed, it was just too big. Distinct from the
     # body-cap middleware's own 413, which fires earlier and on the whole body.
     ErrorCode.AVATAR_TOO_LARGE: 413,

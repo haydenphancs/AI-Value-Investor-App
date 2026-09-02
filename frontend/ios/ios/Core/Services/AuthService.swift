@@ -217,6 +217,41 @@ final class AuthService {
         return response.message
     }
 
+    /// Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
+    ///
+    /// The `code` is the 6-digit recovery OTP from `POST /auth/forgot-password`. The session
+    /// alone is deliberately not sufficient on the server: without the code, a stolen access
+    /// token would be enough to take permanent ownership of the account.
+    ///
+    /// Token handling is identical to `changePassword` and for the identical reason — setting a
+    /// password stamps `password_changed_at`, which evicts every token minted before it,
+    /// including the one that made this request. Dropping the replacements here would sign the
+    /// user out seconds after telling them it worked.
+    @discardableResult
+    func setPassword(code: String, newPassword: String) async throws -> String {
+        let response = try await apiClient.request(
+            endpoint: .setPassword(code: code, newPassword: newPassword),
+            responseType: PasswordChangedResponse.self,
+            // retryCount 0, same reasoning as changePassword — a non-idempotent mutation behind
+            // an attempt limiter that is charged before any work and never refunded. Here there
+            // is a second reason: the OTP is single-use, so a retry that reached the handler
+            // would consume the code and then fail on the replay.
+            retryCount: 0
+        )
+
+        guard let access = response.accessToken, let refresh = response.refreshToken else {
+            #if DEBUG
+            print("ℹ️ [Auth] set-password returned no replacement tokens (older backend); this session will end")
+            #endif
+            return response.message
+        }
+
+        saveTokens(accessToken: access, refreshToken: refresh)
+        sessionEpoch += 1
+        await apiClient.setAuthToken(access)
+        return response.message
+    }
+
     func resendConfirmation(email: String) async throws {
         _ = try await apiClient.request(
             endpoint: .resendConfirmation(email: email),

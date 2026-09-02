@@ -625,7 +625,18 @@ class Settings(BaseSettings):
     # only a CHARGED turn grants one, so the worst case is 2 turns per credit no matter how
     # this is tuned. Set to 0 to disable (grant_free_followup then also CLEARS live windows,
     # so it is a true kill switch rather than a slow drain).
-    CHAT_FREE_FOLLOWUP_SECONDS: int = 300
+    #
+    # ⚠️ PARKED OFF (0), deliberately — the machinery is built, tested and intact, it is just
+    # not granting. The product call was that a standing ~50% discount is not worth paying
+    # for meter anxiety yet. NOTHING was deleted: migration 154's column, the two RPCs
+    # (grant_free_followup / claim_free_followup), the `_free` quota branch, the
+    # ChatTurnCostDTO "free_followup" arm and the server-authored badge label are all still
+    # here, and `tests/test_chat_free_followup.py` still exercises them against an explicitly
+    # pinned non-zero window, so the coverage does not go vacuous while the default is 0.
+    # To bring it back, set CHAT_FREE_FOLLOWUP_SECONDS=300 in the Railway environment
+    # and RESTART (settings is an lru_cache'd singleton — a redeploy is not required, but a
+    # restart is). Nothing else needs to change.
+    CHAT_FREE_FOLLOWUP_SECONDS: int = 0
 
     # Report pre-warming. After each market close the persona-neutral
     # ticker_data_cache goes stale; warming the top watchlist tickers means the

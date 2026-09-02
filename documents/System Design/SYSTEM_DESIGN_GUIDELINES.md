@@ -1375,14 +1375,21 @@ the Max tier ($0.0085/credit after Apple's 15%). `CHAT_MAX_SPECIALISTS` (default
 bound, and `generate_followup_suggestions` — which runs on *every* turn — moved to the cheap
 model. Raising the specialist cap back to 3 is a money decision, not a tuning knob.
 
-**One free follow-up per charged turn** (migration 154, `CHAT_FREE_FOLLOWUP_SECONDS`, default
-300s) buys back the cost of that flat price: a user who must spend a credit to ask "what does
+**One free follow-up per charged turn** (migration 154, `CHAT_FREE_FOLLOWUP_SECONDS`) —
+**BUILT, AND PARKED OFF**. The default is **0**, so no allowance is granted today; the column,
+both RPCs, the `_free` quota branch and the badge are all still wired, and one environment
+variable plus a restart brings it back. It was designed to buy back the cost of that flat price: a user who must spend a credit to ask "what does
 that mean?" learns to stop asking, and the asking is the retention loop. Invariants:
 
 - **Only a CHARGED turn grants one.** A free turn grants nothing, and a refunded turn grants
   nothing. That single asymmetry is the whole bound — worst case 2 turns per credit, i.e. a
-  standing ~50% discount for a user who always replies inside the window. Steady state, not an
-  edge case: size the allocations knowing it.
+  standing ~50% discount for a user who always replies inside the window. That discount is
+  precisely why it is parked: it is steady state rather than an edge case, so **re-enabling it
+  means re-sizing the tier allocations**, not just flipping a variable.
+- ⚠️ **The invariants below still bind whenever it is switched back on.** They are not
+  historical: the code paths they describe are live and reachable the moment the window is
+  non-zero, and `tests/test_chat_free_followup.py` still exercises them against an explicitly
+  pinned window so the coverage does not go vacuous while the default is 0.
 - The claim **skips the pre-charge**; it is never charge-then-refund, so no phantom debit/refund
   pair enters the ledger.
 - **Claim and clear are ONE statement** (`claim_free_followup`), so two racing turns cannot both

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.config import settings
+from app.config import Settings, settings
 from app.services.chat_budget_service import ChatBudgetService
 
 
@@ -78,12 +78,30 @@ def test_claim_without_a_session_never_hits_the_rpc(monkeypatch, session_id):
 # ── grant: best-effort, and a true kill switch ──────────────────────
 
 def test_grant_passes_the_configured_window(monkeypatch):
+    """Pins a NON-ZERO window explicitly rather than reading the live setting.
+
+    The shipped default is now 0 (the feature is parked), so asserting the RPC received
+    `settings.CHAT_FREE_FOLLOWUP_SECONDS` would assert 0 == 0 and prove nothing about the
+    grant path carrying a real window — it would pass just as well if the plumbing were
+    deleted. Re-enabling must find this test still meaningful.
+    """
+    monkeypatch.setattr(settings, "CHAT_FREE_FOLLOWUP_SECONDS", 300)
     svc, supa = _svc(monkeypatch, rpc_data=None)
     svc.grant_free_followup("sess-1")
     supa.rpc.assert_called_once_with(
         "grant_free_followup",
-        {"p_session_id": "sess-1", "p_seconds": settings.CHAT_FREE_FOLLOWUP_SECONDS},
+        {"p_session_id": "sess-1", "p_seconds": 300},
     )
+
+
+def test_the_feature_ships_parked_off():
+    """The free follow-up is BUILT but not granting, by product decision.
+
+    Everything stays wired so it can come back with one environment variable; this pins that
+    the shipped default does not grant, so re-enabling is a deliberate act rather than
+    something that drifts back in on a fresh deploy.
+    """
+    assert Settings.model_fields["CHAT_FREE_FOLLOWUP_SECONDS"].default == 0
 
 
 def test_grant_of_zero_is_a_kill_switch_not_a_zero_length_window(monkeypatch):

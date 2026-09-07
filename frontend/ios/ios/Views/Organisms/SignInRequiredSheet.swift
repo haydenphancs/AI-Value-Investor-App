@@ -53,7 +53,11 @@ struct SignInRequiredSheet: View {
                     .foregroundColor(AppColors.textPrimary)
                     .multilineTextAlignment(.center)
 
-                Text("Your account keeps this in sync across your devices. Everything else in the app stays available without one.")
+                // ⚠️ The second sentence used to read "Everything else in the app stays
+                // available without one." That went false when the app became account-only
+                // (FMP End-User Display Rights — see APIEndpoint.authPolicy). Leaving it would
+                // have told the user the app works signed out while a wall says otherwise.
+                Text("Your account keeps this in sync across your devices, and holds the credits your reports and chats are spent from.")
                     .font(AppTypography.body)
                     .foregroundColor(AppColors.textSecondary)
                     .multilineTextAlignment(.center)

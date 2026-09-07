@@ -33,7 +33,7 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends
 
-from app.dependencies import StandardRateLimit, get_watchlist_identity
+from app.dependencies import StandardRateLimit, get_current_user_id, get_watchlist_identity
 from app.schemas.widget import WidgetMoverPayload
 from app.services.active_group_service import (
     ActiveGroupUnavailable,
@@ -43,7 +43,18 @@ from app.services.widget_movers_service import get_widget_movers_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
+#
+# FMP's signed Order Form grants End-User Display Rights — Exhibit A's *Access-Restricted
+# External Display* — so their market data may be shown only "through the Licensee's
+# authenticated platform". Public External Display was declined (2026-09-04), which makes a
+# signed-out response on any of these routes a licence breach, not a product choice.
+#
+# Declared on the ROUTER rather than per-route on purpose: a route added to this file
+# tomorrow is authenticated by default. The per-route form relies on the author remembering,
+# and this file alone has 2 routes — the failure mode is silent (a 200 with real prices)
+# and nothing downstream would notice.
+router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 # How many of the caller's holdings are RANKED.
 #

@@ -4,10 +4,10 @@ ETF Endpoints — Aggregated data for the ETFDetailView screen.
 Frontend: GET /api/v1/etfs/{symbol}?range=3M&interval=daily
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit
+from app.dependencies import StandardRateLimit, get_current_user_id
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -38,7 +38,18 @@ from app.schemas.news import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
+#
+# FMP's signed Order Form grants End-User Display Rights — Exhibit A's *Access-Restricted
+# External Display* — so their market data may be shown only "through the Licensee's
+# authenticated platform". Public External Display was declined (2026-09-04), which makes a
+# signed-out response on any of these routes a licence breach, not a product choice.
+#
+# Declared on the ROUTER rather than per-route on purpose: a route added to this file
+# tomorrow is authenticated by default. The per-route form relies on the author remembering,
+# and this file alone has 8 routes — the failure mode is silent (a 200 with real prices)
+# and nothing downstream would notice.
+router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 # ETF tickers are ordinary NMS symbols (SPY, QQQ, ARKK). Same shape as stocks.
 _ETF_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")

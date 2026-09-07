@@ -1082,38 +1082,69 @@ enum APIEndpoint: Sendable {
     nonisolated var authPolicy: AuthPolicy {
         switch self {
 
-        // ── Public: the backend reads no identity at all ────────────────────────────────
+        // ── Public: reachable with no credential ────────────────────────────────────────
+        //
+        // TEN cases, and the list is deliberately hard to grow. Everything else in the app is
+        // `.signInRequired` — see the licence note under "Account-only" below.
 
         // Pre-session auth flows. Password recovery in particular must be reachable
-        // WITHOUT a token — it exists for people who cannot sign in.
+        // WITHOUT a token — it exists for people who cannot sign in. Gating any of these is
+        // an unbreakable loop: `APIClient.buildRequest` throws `APIError.authRequired` before
+        // any network I/O, so you could never obtain the token that grants the token.
         case .signIn, .signUp, .refreshToken,
              .forgotPassword, .resetPassword,
              .resendConfirmation, .oauthSignIn, .sessionExchange:
             return .public
 
-        // Tier catalog — the paywall has to render for guests.
-        case .getPlanCatalog:
+        // The two price catalogues. They carry no FMP data and no user data, and
+        // `PaywallSignInGate.swift` renders the plan list before an account exists.
+        // Only BUYING is gated — `verifyPurchase` is `.signInRequired` below, because
+        // consumables are not restorable by Apple, so credits must attach to a real account
+        // or a reinstall loses money the user actually spent.
+        case .getPlanCatalog, .getCreditPackCatalog:
             return .public
 
-        // Credit-pack catalog. Public for the same reason: the Buy Credits screen must render
-        // before we know who is looking, and it is the same pricing Apple already shows on the
-        // storefront. Only BUYING is gated — `verifyPurchase` is `.signInRequired` below,
-        // because consumables are not restorable by Apple, so credits must attach to a real
-        // account or a reinstall loses money the user actually spent.
-        case .getCreditPackCatalog:
-            return .public
+        // ── Guest-allowed: exactly one, and it is deliberate ────────────────────────────
+        //
+        // Analytics resolves through `get_identity_only_user`, the one backend dependency that
+        // must NEVER raise (`.claude/rules/auth.md` §4): the module promises in its own
+        // docstring that instrumentation cannot break the product, and the iOS `Analytics`
+        // actor drops the whole batch on any error. Gating it would also delete the
+        // pre-sign-up funnel — `app_open`, onboarding, signup conversion — which is the only
+        // instrument that can measure what the sign-in wall costs in installs.
+        case .trackEvents:
+            return .guestAllowed
 
-        // Market data. `getHoldersData` and `enrichStockNews` are here rather than under
-        // sign-in-required (where `default: true` used to put them): `/stocks/{t}/holders`
-        // and `/stocks/{t}/news/enrich` take no auth dependency at all.
+        // ── Account-only: everything else ───────────────────────────────────────────────
+        //
+        // 🔒 WHY, because this reverses a documented product decision. FMP's signed Order Form
+        // grants **End-User Display Rights** — Exhibit A's *Access-Restricted External
+        // Display* — which permits showing their data only "through the Licensee's
+        // authenticated platform". Public External Display was priced, evaluated and DECLINED
+        // on 2026-09-04. So a signed-out 200 on a market-data route is a licence breach, not a
+        // product choice, and that is why ~100 cases moved here at once.
+        //
+        // The counter-argument that used to live here — App Store Guideline 5.1.1(v), "if your
+        // app doesn't include significant account-based features, let people use it without a
+        // login" — is answered by the second half of its own sentence: credits, paid AI
+        // reports, watchlists, portfolios and subscriptions ARE significant account-based
+        // features. Keep that reasoning to hand for App Review.
+        //
+        // A tokenless call is refused by `APIClient.buildRequest` before it goes out, and
+        // surfaces through `AppActions.reportMutationFailure` → the sign-in wall.
+
+        // Stock market data.
         case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote,
              .getStockFundamentals, .getStockNews, .enrichStockNews, .getStockChart,
              .getAnalystAnalysis, .getSentimentAnalysis, .getTechnicalAnalysis,
              .getTechnicalAnalysisDetail, .getChartEvents, .getEarnings, .getGrowth,
              .getProfitPower, .getRevenueBreakdown, .getHealthCheck, .getSignalOfConfidence,
              .getHoldersData:
-            return .public
+            return .signInRequired
 
+        // Index / crypto / ETF / commodity detail, including the fast-core first-paint slices.
+        // Crypto prices come from CoinGecko rather than FMP, but crypto NEWS is FMP's Market
+        // News package and the screens are indistinguishable to a user, so they move together.
         case .getIndexDetail, .getIndexNews, .enrichIndexNews,
              .getCryptoDetail, .getCryptoNews, .enrichCryptoNews, .getCryptoFearGreed,
              .getCryptoSentiment, .getCryptoTechnicalAnalysis, .getCryptoTechnicalAnalysisDetail,
@@ -1121,104 +1152,58 @@ enum APIEndpoint: Sendable {
              .enrichETFNews, .getETFQuote, .getIndexQuote,
              .getCommodityDetail, .getCommodityQuote, .getCommodityNews,
              .enrichCommodityNews,
-             // The fast-core first-paint slices. Same audience and same data as the
-             // detail routes above — market data, not the caller's own — so the same
-             // policy. `authPolicy` has no `default:` arm on purpose, so omitting these
-             // would be a compile error rather than an assumption.
              .getIndexCore, .getETFCore, .getCommodityCore, .getCryptoCore:
-            return .public
+            return .signInRequired
 
-        // Updates: /feed and /news/enrich are plain market data (/tabs is not — see below).
-        case .getUpdatesFeed, .enrichUpdatesNews:
-            return .public
+        // Home, Updates, themes, and the research meta lists.
+        case .getUpdatesFeed, .enrichUpdatesNews, .getUpdatesTabs,
+             .getHomeFeed, .getHomeDashboard,
+             .getThemeDetail,
+             .getPersonas, .getTrendingAnalyses:
+            return .signInRequired
 
-        // The widget's market mode: a shared universe, nothing about the caller. Public
-        // means the default widget works with no identity at all, which matters because a
-        // widget extension is a separate process that cannot reach `APIClient`'s token.
-        case .getWidgetMarketMover:
-            return .public
+        // The widget's two modes. ⚠️ A widget extension is a separate process that cannot
+        // reach `APIClient`'s token, so it never calls these itself — `WidgetRefreshService`
+        // runs in the APP and writes a snapshot to the App Group. That write is gated on being
+        // authenticated, and `AppState.discardDataForEndedSession()` clears the snapshot on
+        // sign-out; otherwise FMP prices would sit on the Home Screen after the session ended,
+        // which is the same licence problem one layer out.
+        case .getWidgetMarketMover, .getWidgetPortfolioMover:
+            return .signInRequired
 
-        // Theme detail is public market data.
-        case .getThemeDetail:
-            return .public
-
-        case .getPersonas, .getTrendingAnalyses:
-            return .public
-
-        // ── Guest-allowed: per-identity, but a guest is a first-class caller ─────────────
-        //
-        // These resolve through `get_watchlist_identity` / `get_research_identity` /
-        // `get_learn_identity` / `get_current_user_or_guest` / `get_identity_only_user`, which
-        // partition a signed-out caller per INSTALL off the `X-Guest-Id` header that
-        // `APIClient.buildRequest` sends unconditionally. Gating any of these on a token would
-        // be a straight feature regression for the guest-first product.
-
-        case .trackEvents:
-            return .guestAllowed
-
-        case .getUserCredits:
-            return .guestAllowed
-
-        case .getWatchlist, .addToWatchlist, .removeFromWatchlist:
-            return .guestAllowed
-
-        case .getTrackingAssets, .bulkUpdateHoldings, .getPortfolioInsights:
-            return .guestAllowed
-
-        case .getPortfolios, .createPortfolio, .renamePortfolio, .deletePortfolio,
+        // The caller's own data. Was `.guestAllowed`, partitioned per install off `X-Guest-Id`
+        // (migrations 108/110/111/131 dropped the FKs to make that possible). Those rows still
+        // exist and are still claimable — `POST /users/me/claim-guest-data` deliberately
+        // OUTLIVES the guest product, because it is the only thing that can reunite an
+        // existing install's watchlist with the account that install is about to create.
+        case .getUserCredits,
+             .getWatchlist, .addToWatchlist, .removeFromWatchlist,
+             .getTrackingAssets, .bulkUpdateHoldings, .getPortfolioInsights,
+             .getPortfolios, .createPortfolio, .renamePortfolio, .deletePortfolio,
              .setPortfolioTickers, .setPortfolioHoldings, .reorderPortfolios,
-             .activatePortfolio,
-             .getPortfolioInsightsForPortfolio:
-            // Guest-allowed like every sibling: groups are cheap, are the caller's own
-            // data, and are claimable on sign-up (auth.md §1a). `get_watchlist_identity`
-            // resolves a signed-out caller to their per-install partition.
-            return .guestAllowed
+             .activatePortfolio, .getPortfolioInsightsForPortfolio:
+            return .signInRequired
 
+        // Chat. The transcript is the caller's own, but the answers are built from FMP data
+        // through `agents/fmp_tools.py`, so it is account-only on both counts.
         case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage,
              .getChatHistory, .updateChatSession, .deleteChatSession:
-            return .guestAllowed
+            return .signInRequired
 
+        // Learn. The content is our OWN — no FMP anywhere in `learn.py` — so the licence does
+        // not force this one; the hard wall does. Recorded so a future reader knows Learn could
+        // be re-opened without touching the FMP contract, if the wall is ever softened.
         case .getLearnProgress, .completeLearnItem, .uncompleteLearnItem,
              .getBookBookmarks, .addBookBookmark, .removeBookBookmark,
-             // Cheap, the caller's own data, claimable on sign-up (auth.md §1a) — the backend
-             // resolves a signed-out caller via `get_learn_identity`, so gating these would
-             // delete a working feature for every guest.
-             .getMoneyMoveBookmark, .setMoneyMoveBookmark, .removeMoneyMoveBookmark:
-            return .guestAllowed
+             .getMoneyMoveBookmark, .setMoneyMoveBookmark, .removeMoneyMoveBookmark,
+             .getJourney, .getMoneyMoves, .getBooksAudio:
+            return .signInRequired
 
-        // Learn CONTENT moved off `.public` when narration became Pro/Max. It is still
-        // free to read on every tier — the identity is read ONLY for `tier`, to decide
-        // whether the response carries audio URLs. A signed-out caller resolves to a
-        // per-install guest and still gets every word of every lesson and article.
-        case .getJourney, .getMoneyMoves:
-            return .guestAllowed
-
-        // Same identity rule, and deliberately NOT `.signInRequired` even though it only
-        // ever returns anything to a paying account: a guest must be able to CALL it and
-        // read back `audio_locked` + `tier_required` to render the upgrade offer. Refusing
-        // the request client-side would leave the Book Library unable to say why.
-        case .getBooksAudio:
-            return .guestAllowed
-
-        case .getUpdatesTabs, .getHomeFeed, .getHomeDashboard:
-            return .guestAllowed
-
-        // The widget's portfolio mode reads the caller's OWN holdings, so it resolves
-        // through `get_watchlist_identity` — the same per-install partition the watchlist
-        // routes write (migration 108). Backend dependency: `get_watchlist_identity`.
-        case .getWidgetPortfolioMover:
-            return .guestAllowed
-
-        // Whales resolve a signed-out caller through `get_watchlist_identity`, so they are
-        // guest-capable — but they are TIER-gated on top of that, which is a different axis:
-        // the roster and the profile header always render, while the paid sections come back
-        // redacted. Trade groups and the signal drill-down moved off `.public` when that gate
-        // landed; they now take the same identity because they serve the same paid data the
-        // profile withholds, and leaving them open made that redaction a curtain, not a gate.
+        // Whales / 13F. FMP's Institutional Ownership package, plus congress disclosures.
         case .getWhaleList, .getWhaleProfile,
              .getWhaleTradeGroups, .getWhaleTradeGroupDetail,
              .getSignalDetail:
-            return .guestAllowed
+            return .signInRequired
 
         // ── Sign-in required: the backend uses strict `get_current_user(_id)` ────────────
         //
@@ -1274,8 +1259,13 @@ enum APIEndpoint: Sendable {
         // answers would be silently dropped for every user who has not signed up yet — i.e.
         // all of them, at the exact moment we ask. Saving is free on every tier; only
         // APPLYING the profile is gated, and that gate lives on the server.
+        // Onboarding captures the investor profile, and it used to run BEFORE an account
+        // existed — which is why this pair was guest-allowed. The gate order in `iosApp.swift`
+        // is now disclaimer → SIGN-IN → onboarding, so by the time `OnboardingViewModel`
+        // PUTs the profile there is a real account to attach it to. ⚠️ Reverse that order and
+        // every onboarding answer is dropped on a 401 the client never surfaces.
         case .getMyInvestorProfile, .updateMyInvestorProfile:
-            return .guestAllowed
+            return .signInRequired
 
         // Push never reaches a guest: `device_tokens` is FK-bound to public.users and
         // auth-only, so a guest inbox is empty by construction and a guest price alert is

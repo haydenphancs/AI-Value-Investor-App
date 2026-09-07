@@ -216,7 +216,11 @@ async def get_current_user_info(
 
 @router.get("/me/credits", response_model=UserCreditsResponse)
 async def get_user_credits(
-    user: dict = Depends(get_current_user_or_guest),  # TEMP: guest fallback
+    # Was `get_current_user_or_guest` with a `# TEMP: guest fallback` note, dating from
+    # before the iOS sign-in UI existed. The shared guest sentinel owns a real
+    # `user_credits` row seeded with 100,000 credits, so a signed-out caller read a
+    # balance that belonged to nobody. Account-only settles it.
+    user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
 ):
     """Get current user's credit balance from user_credits table."""

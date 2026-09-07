@@ -171,11 +171,13 @@ for an app in this category:
 > that summarise the ideas of ten well-known investing books, plus original lessons and
 > articles. No book text is reproduced; all narration audio is of our own writing.
 >
-> **Demo account — please use this to review.** Most of the app (market data, company
-> detail screens, news, search, the Learn library, watchlist and portfolios) is usable
-> signed out. However, **AI report generation and report chat require an account** because
-> each run has a real per-use cost, so a reviewer signed out cannot exercise those features.
-> Credentials are in the App Review sign-in fields; the account is pre-loaded with credits.
+> **Demo account — please use this to review.** Caydex requires an account. Our market-data
+> licence permits displaying the provider's data only through an authenticated platform, and
+> the app has significant account-based features — credits, subscriptions, saved research,
+> watchlists and portfolios. Account creation is free and takes a moment; in-app account
+> deletion is at Profile → Settings → Delete Account, and Sign in with Apple is offered
+> alongside email and Google. Credentials are in the App Review sign-in fields, and that
+> account is pre-loaded with credits so every feature can be exercised.
 >
 > **In-app purchases.** Two auto-renewable subscriptions (Pro, Max) and four consumable
 > credit packs. Credits are consumed only inside the app for AI generation; they are not a

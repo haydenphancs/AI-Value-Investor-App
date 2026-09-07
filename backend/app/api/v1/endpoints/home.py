@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends
 from typing import Optional
 import logging
 
-from app.dependencies import get_optional_user_id, get_watchlist_identity
+from app.dependencies import get_current_user_id, get_watchlist_identity
 from app.services.home_service import HomeService
 from app.services.home_dashboard_service import get_home_dashboard_service
 from app.services.signals_service import get_signals_service
@@ -35,12 +35,27 @@ _VALID_SIGNAL_KINDS = {"whale", "congress"}
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
+#
+# FMP's signed Order Form grants End-User Display Rights — Exhibit A's *Access-Restricted
+# External Display* — so their market data may be shown only "through the Licensee's
+# authenticated platform". Public External Display was declined (2026-09-04), which makes a
+# signed-out response on any of these routes a licence breach, not a product choice.
+#
+# Declared on the ROUTER rather than per-route on purpose: a route added to this file
+# tomorrow is authenticated by default. The per-route form relies on the author remembering,
+# and this file alone has 4 routes — the failure mode is silent (a 200 with real prices)
+# and nothing downstream would notice.
+router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 
 @router.get("/feed", response_model=HomeFeedResponse)
 async def get_home_feed(
-    user_id: Optional[str] = Depends(get_optional_user_id),
+    # Was `get_optional_user_id`, which answered None for a signed-out caller and served the
+    # feed anyway. The feed is FMP market data, so under the End-User Display licence there is
+    # no signed-out case left to be optional about. `Optional[str]` is kept on the annotation
+    # only because the service signature takes one; it is never None now.
+    user_id: Optional[str] = Depends(get_current_user_id),
 ):
     """
     Aggregated home feed — single request for the entire home screen.

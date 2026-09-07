@@ -425,15 +425,35 @@ struct RootView: View {
                 // Launch / restore only. Never set from a rendered screen: doing so swaps the
                 // root out mid-request and takes the presenting sheet with it.
                 SplashView()
-            } else {
-                // Guest-first BY DESIGN: the app is fully usable signed-out. Requests without
-                // a Bearer token fall back to the backend GUEST_USER_ID; sign-in is offered
-                // from the Account screen and unlocks real per-user profile / credits / tier.
+            } else if appState.auth.status == .unauthenticated {
+                // 🔒 THE SIGN-IN WALL. This replaced "guest-first BY DESIGN: the app is fully
+                // usable signed-out", which is the single largest behavioural reversal in the
+                // app's history, so the reason is recorded here rather than in a commit message.
                 //
-                // `.restoring` renders the SAME container, deliberately. We hold a credential
-                // we could not validate — on the wire that is a guest, so showing guest
-                // content is honest. Sending it to SplashView instead would trade a usable
-                // app for a spinner on exactly the flaky networks where restore takes longest.
+                // FMP's signed Order Form grants End-User Display Rights — Exhibit A's
+                // *Access-Restricted External Display* — permitting their data only "through
+                // the Licensee's authenticated platform". Public External Display was priced
+                // and DECLINED on 2026-09-04. Nearly every screen in this app is FMP data, so
+                // a signed-out session has nothing it is licensed to render.
+                //
+                // `SignInView` is used directly rather than wrapped: it already carries
+                // email/password, Sign in with Apple, Google, sign-up and forgot-password, it
+                // has no cancel affordance to hide, and its `.onChange(of: isAuthenticated)`
+                // dismiss is simply inert at the root.
+                SignInView()
+            } else {
+                // `.authenticated` AND `.restoring` — one arm, deliberately.
+                //
+                // ⚠️ `.restoring` MUST NOT fall into the wall above. It means "we hold a
+                // credential we could not yet validate", which happens on every cold launch on
+                // a flaky network. Routing it to `SignInView` would show a login screen to a
+                // user who IS signed in, and worse, invite them to sign in again while a
+                // perfectly good session was still being restored.
+                //
+                // Keeping these two in the SAME arm is also what preserves view identity across
+                // a reconnect: SwiftUI gives each ViewBuilder branch its own
+                // `_ConditionalContent` identity, so splitting them would tear the tree down
+                // and reset the selected tab and every ViewModel each time the session healed.
                 RootContainerView()
             }
         }
@@ -505,7 +525,14 @@ struct RootView: View {
             // Its only job is capturing a few tickers: a populated watchlist is what
             // makes Updates, the personalized Home strip, and push relevant at all.
             // Skippable on every page.
+            // ⚠️ `isAuthenticated` is load-bearing, not tidiness. Onboarding PUTs the investor
+            // profile (`OnboardingViewModel.putProfile` → `updateMyInvestorProfile`), which is
+            // `.signInRequired` now. Running it over the sign-in wall would mean `APIClient`
+            // refuses the PUT before it leaves the device and every answer is dropped silently
+            // — the user fills in five pages and nothing is saved. Gate order is therefore
+            // disclaimer → SIGN-IN → onboarding.
             if hasAcknowledgedDisclaimers, !hasCompletedOnboarding,
+               appState.auth.isAuthenticated,
                appState.auth.status != .unknown, appState.auth.status != .loading {
                 OnboardingView()
                     .transition(.opacity)

@@ -31,6 +31,7 @@ from app.api.error_response import (
 from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
+    get_current_user_id,
     StandardRateLimit,
 )
 from app.schemas.research import (
@@ -69,7 +70,15 @@ def _outcome_name(refunded) -> str:
         return "rpc_failed"
     return refunded.get("outcome", "unknown") if isinstance(refunded, dict) else "legacy_int"
 
-router = APIRouter()
+# 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
+#
+# FMP's signed Order Form grants End-User Display Rights — Exhibit A's *Access-Restricted
+# External Display* — so their market data may be shown only "through the Licensee's
+# authenticated platform". Public External Display was declined (2026-09-04).
+#
+# Declared on the ROUTER so a route added tomorrow is authenticated by default; the per-route
+# form relies on the author remembering, and the failure mode is a silent 200 with real prices.
+router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 # Strong references to in-flight report workers. See the `create_task` call in
 # `generate_research_report` for why this is not optional.

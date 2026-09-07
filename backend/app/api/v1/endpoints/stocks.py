@@ -60,13 +60,24 @@ from app.services.signal_of_confidence_service import get_signal_of_confidence_s
 from app.schemas.holders import HoldersResponse
 from app.services.holders_service import get_holders_service
 from app.config import settings
-from app.dependencies import get_current_user, StandardRateLimit
+from app.dependencies import get_current_user, get_current_user_id, StandardRateLimit
 from app.services.ticker_data_cache import warm_ticker_collection
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
+#
+# FMP's signed Order Form grants End-User Display Rights — Exhibit A's *Access-Restricted
+# External Display* — so their market data may be shown only "through the Licensee's
+# authenticated platform". Public External Display was declined (2026-09-04), which makes a
+# signed-out response on any of these routes a licence breach, not a product choice.
+#
+# Declared on the ROUTER rather than per-route on purpose: a route added to this file
+# tomorrow is authenticated by default. The per-route form relies on the author remembering,
+# and this file alone has 23 routes — the failure mode is silent (a 200 with real prices)
+# and nothing downstream would notice.
+router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 # Ticker validation pattern: 1-10 uppercase letters, digits, dots, or hyphens
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")

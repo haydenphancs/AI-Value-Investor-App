@@ -138,8 +138,8 @@ ALSO IN THE APP
 
 HOW IT'S PAID FOR
 
-Caydex is free to browse. Market data, company detail screens, news, search and the education
-library don't require an account.
+Caydex needs a free account. Signing up takes a moment and includes a monthly allowance of
+credits for AI research.
 
 AI-generated research reports and report chat cost credits, because each run has a real
 per-use cost. A free account includes a monthly credit allowance. Pro and Max subscriptions
@@ -170,8 +170,9 @@ Privacy Policy: https://caydexinvest.com/privacy
 Support: https://caydexinvest.com/support
 ```
 
-**3,906 / 4000.** Measured, not estimated — the first draft came in at 4,018 and would have been
-silently truncated on paste. Only ~94 characters of headroom: if you add a sentence, cut one.
+**3,894 / 4000.** Measured, not estimated — the first draft came in at 4,018 and would have been
+silently truncated on paste. Only ~106 characters of headroom: if you add a sentence, cut one.
+(Re-measured 2026-09-07 after the account-only rewrite of the "HOW IT'S PAID FOR" block.)
 
 ### Why the description is shaped this way
 
@@ -179,10 +180,18 @@ silently truncated on paste. Only ~94 characters of headroom: if you add a sente
   own Buy/Sell technical meter as the likeliest 5.1.1(ix) / 3.1.5-adjacent rejection hook. Saying
   plainly, on the store page, that the app holds no funds and executes no trades is the cheapest
   possible pre-emption — the reviewer reads it before they open the app.
-- **"Free to browse" is stated because it is true and load-bearing.** Guideline 5.1.1(v) requires
-  that an app without significant account-based features let people in without a login, and 46% of
-  Caydex's routes take no identity at all. Saying so up front frames the account requirement as
-  scoped to the metered feature rather than as a wall.
+- 🔒 **"Free to browse" was REMOVED 2026-09-07, and must not come back.** It used to be true and
+  load-bearing. The app is now account-only: FMP's signed Order Form grants End-User Display
+  Rights, permitting their data only "through the Licensee's authenticated platform", and Public
+  External Display was declined. Leaving that sentence would have put a claim on the store page
+  that the build contradicts in its first second — the cheapest possible way to fail review.
+  The replacement says *free account* rather than *free to browse*: the word doing the work is
+  "free", because the objection being pre-empted is cost, not friction.
+  On Guideline 5.1.1(v): the answer is the second half of Apple's own sentence — Caydex DOES have
+  significant account-based features (credits, paid reports, subscriptions, watchlists,
+  portfolios), so requiring an account is within the rule. Keep that argument for the review
+  notes, and note Apple's two conditions for a mandatory account both ship: in-app account
+  deletion, and Sign in with Apple alongside Google.
 - **The credits paragraph is required by 3.1.1.** Consumables that could read as a currency need
   the "not transferable, not redeemable" language, and it must match the Terms.
 - **No persona names.** The Research section describes the lenses by their *method*

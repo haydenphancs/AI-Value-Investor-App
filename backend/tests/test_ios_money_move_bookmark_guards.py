@@ -199,20 +199,32 @@ def test_the_toggle_is_hidden_for_an_article_with_no_slug():
 # ── 6. Auth policy parity with the backend ─────────────────────────────────────
 
 
-def test_the_new_endpoints_are_guest_allowed():
-    """
-    Backend uses `get_learn_identity`, which resolves a signed-out caller to a per-install
-    identity. Gating these on a token would delete a working feature for every guest
-    (auth.md §1a). `test_ios_auth_policy_parity.py` checks the whole matrix; this pins the case.
+def test_the_three_bookmark_endpoints_share_one_policy_arm():
+    """All three must carry the SAME policy, and that policy must be `.signInRequired`.
+
+    ⚠️ Inverted 2026-09-07. This asserted `.guestAllowed`, on the reasoning that gating these
+    "would delete a working feature for every guest" (auth.md §1a). True, and now intended:
+    FMP's End-User Display Rights permit their data only through an authenticated platform,
+    and the app went account-only rather than buy Public External Display.
+
+    What survives unchanged is the reason this test is case-specific rather than left to
+    `test_ios_auth_policy_parity.py`: the three bookmark endpoints are a SET. A change that
+    moved one of them to a different arm would leave Money Moves able to read a bookmark it
+    cannot write, or write one it cannot clear — a half-broken feature that no whole-matrix
+    check would notice, because each individual case would still have a valid policy.
     """
     block = _decl_block(_read(_ENDPOINTS), "nonisolated var authPolicy: AuthPolicy")
-    guest_arm = re.search(
+    arm = re.search(
         r"case\s+([^:]*?getMoneyMoveBookmark.*?):\s*\n\s*return\s+\.(\w+)", block, re.S
     )
-    assert guest_arm, "getMoneyMoveBookmark has no authPolicy arm"
-    assert guest_arm.group(2) == "guestAllowed", (
-        f"expected .guestAllowed, found .{guest_arm.group(2)}"
+    assert arm, "getMoneyMoveBookmark has no authPolicy arm"
+    assert arm.group(2) == "signInRequired", (
+        f"expected .signInRequired, found .{arm.group(2)} — a signed-out caller must not "
+        "reach the Learn surface while the app is account-only"
     )
-    arm_cases = guest_arm.group(1)
+    arm_cases = arm.group(1)
     for case in ("setMoneyMoveBookmark", "removeMoneyMoveBookmark"):
-        assert case in arm_cases, f"{case} is not in the guest-allowed arm"
+        assert case in arm_cases, (
+            f"{case} left the arm its two siblings are in — the read/write/clear trio must "
+            "move together or the feature half-breaks"
+        )

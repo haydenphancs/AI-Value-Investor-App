@@ -926,12 +926,27 @@ flaky launch left a signed-in user running as a guest — with a perfectly good 
 Keychain — for the entire app run. `AuthStatus.restoring` exists to represent that state honestly
 rather than collapsing it into `.unauthenticated`.
 
-**Guest identity.** A signed-out caller is not "no user". `X-Guest-Id` is hashed by
-`guest_user_id_for` (UUID5) into a per-INSTALL identity for watchlist and portfolios (migration
-108), research (110), chat (111) and Learn (066/067). A missing header falls back to the shared
-`GUEST_USER_ID` sentinel. Per-install partitioning is a correctness requirement, not tidiness: every
-read path filters on `user_id`, so a shared bucket is a cross-user leak on exactly the surfaces where
-people paste their holdings.
+**Guest identity — RETIRED as an identity, KEPT as a rate-limit key (2026-09-07).** The app is
+account-only. FMP's signed Order Form grants End-User Display Rights — Exhibit A's
+*Access-Restricted External Display* — permitting their data only "through the Licensee's
+**authenticated** platform"; Public External Display was priced and declined. The five
+`*_identity` wrappers now delegate to `get_current_user` and raise, so no route resolves a
+signed-out caller to a per-install identity any more.
+
+Three pieces of that machinery survive on purpose, and each is load-bearing:
+
+- **`guest_user_id_for` (UUID5 of `X-Guest-Id`)** is still the bucket key in `RateLimitChecker`
+  and `identity_key`. After the wall, `/auth/login` and `/auth/register` are the app's only
+  unauthenticated surface — precisely the one that most needs per-caller bucketing.
+- **`POST /users/me/claim-guest-data`** still runs: existing installs hold guest rows written
+  before the wall, and this is the only path that reunites them with a new account.
+- **`_UNLINKED_USER_TABLES`** still drives account deletion. Migrations 108/110/111/131 dropped
+  nine `ON DELETE CASCADE` FKs to make per-install partitioning possible, and those FKs cannot
+  be restored while orphan rows exist.
+
+The reasoning that produced per-install partitioning remains correct for anything that resolves
+an identity: every read path filters on `user_id`, so any identity more than one caller can hold
+is a cross-user leak, not untidy state.
 
 **Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
 `/auth/logout`, `/auth/change-password`, `/auth/set-password`, `/billing/verify`, whale
@@ -970,10 +985,25 @@ stands between the caller and the write, so proceeding could overwrite an existi
 no proof of the current one). Pinned by `tests/test_set_password_oauth.py`.
 
 *Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
-Everything else is guest-capable by design, which is also an App Store requirement (Guideline
-5.1.1(v): an app without significant account-based features must be usable without a login). The iOS
-mirror is `APIEndpoint.authPolicy`, and `tests/test_ios_auth_policy_parity.py` fails the build if the
-two disagree.
+
+⚠️ **This paragraph used to end "everything else is guest-capable by design, which is also an App
+Store requirement".** That is no longer true: **136 of 147** iOS endpoint cases are
+`.signInRequired`, leaving ten `.public` (the eight pre-session auth flows plus the two price
+catalogues) and one `.guestAllowed` (`trackEvents`, backed by `get_identity_only_user`, the one
+dependency that must never raise). On the backend the same line is drawn with router-level
+dependencies — `APIRouter(dependencies=[Depends(get_current_user_id)])` — so a route added to a
+market-data module is closed by default rather than relying on the author to remember.
+
+On Guideline 5.1.1(v): the answer is the second half of Apple's own sentence. Caydex *does* have
+significant account-based features — credits, paid reports, subscriptions, watchlists, portfolios
+— so requiring an account is within the rule. Apple's two conditions for a mandatory account both
+ship: in-app account deletion and Sign in with Apple.
+
+Three tests hold this together, and they check different things:
+`tests/test_account_only_licence_gate.py` issues real unauthenticated requests and asserts 401
+(the only one that proves the app is actually closed); `tests/test_ios_auth_policy_parity.py`
+proves the two SIDES agree; `tests/test_ios_sign_in_wall.py` proves the client renders a wall
+rather than a broken tab bar.
 
 **Storefronts split catalog from purchase.** `GET /billing/plans` and `GET /billing/credit-packs` are
 `.public` — both screens must render before we know who is looking, and neither exposes anything

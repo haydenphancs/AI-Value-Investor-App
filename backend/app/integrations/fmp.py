@@ -375,6 +375,59 @@ class FMPClient:
                 )
                 raise
 
+    # ── Entitled price sources (the quote-family replacements) ──────
+
+    async def get_company_screener(
+        self,
+        *,
+        market_cap_more_than: Optional[int] = None,
+        exchange: Optional[str] = None,
+        actively_trading: Optional[bool] = None,
+        limit: int = 10000,
+        page: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Screener sweep — the entitled BATCH price source.
+
+        Replaces `batch-quote` ("Real-time Market Data", not purchased). Returns
+        ``symbol, companyName, marketCap, sector, industry, beta, price, volume,
+        avgVolume, exchange, exchangeShortName, country, isEtf, isFund,
+        isActivelyTrading`` for the whole US universe in ~1 s.
+
+        ⚠️ It carries **no change field**, so a day change has to be computed against a
+        previous close — see `price_service` and migration 157.
+
+        ⚠️ Hard ceiling of 10,000 rows per call regardless of `limit` (verified:
+        limit=20000 and limit=50000 both return exactly 10,000). It DOES paginate, so a
+        universe larger than the ceiling must walk `page`.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if page:
+            params["page"] = page
+        if market_cap_more_than is not None:
+            params["marketCapMoreThan"] = market_cap_more_than
+        if exchange:
+            params["exchange"] = exchange
+        if actively_trading is not None:
+            params["isActivelyTrading"] = "true" if actively_trading else "false"
+        data = await self._make_request("company-screener", params=params)
+        return data if isinstance(data, list) else []
+
+    async def get_batch_eod(self, trade_date: str) -> List[Dict[str, Any]]:
+        """Every symbol's official OHLCV for one session, in one call.
+
+        Entitled under package 7 ("EOD Price"). Measured: 65,690 rows / 11.7 MB / ~10 s —
+        far too heavy for a request path, so `price_service.refresh_close_snapshot`
+        calls this once a day and persists the result.
+
+        ⚠️ The payload INCLUDES `^GSPC`, `GCUSD`, `BTCUSD` and `EURUSD`, all of which
+        answer 402 on the per-symbol `historical-price-eod/full`. FMP enforces the symbol
+        block on one endpoint and not the other. Callers MUST filter with
+        `fmp_entitlements.is_blocked_symbol` — see the note in
+        `price_service.refresh_close_snapshot`.
+        """
+        data = await self._make_request("batch-eod", params={"date": trade_date})
+        return data if isinstance(data, list) else []
+
     # ── Company profile & quote ─────────────────────────────────────
 
     async def get_company_profile(self, ticker: str) -> Dict[str, Any]:

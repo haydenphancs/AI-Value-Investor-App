@@ -143,9 +143,33 @@ def test_every_target_declares_the_encryption_answer():
 # ── 2. All three shipped copies of the base URL agree ────────────────────────────────
 
 
-def _production_host(path: Path, header: str) -> str:
+def _call_expr(src: str, header: str) -> str:
+    """The paren-balanced argument list of the call starting at `header`.
+
+    The sibling of `_decl_block` for the declarations that have NO braces: both
+    `let railwayURL = URL(string: "…")!` and `WidgetAPIConfig.productionBaseURL` are
+    initialiser expressions, one on a single line and one wrapped across three. Bounding
+    those with `_decl_block` silently walks forward to the next unrelated `{` in the file,
+    which is how this scan first read an empty window instead of failing.
+    """
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found — this scan has drifted"
+    open_paren = src.index("(", start)
+    depth = 0
+    for i in range(open_paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_paren : i + 1]
+    pytest.fail(f"unbalanced parentheses after {header!r}")
+
+
+def _production_host(path: Path, header: str, *, braced: bool = False) -> str:
     """The single https literal inside one declaration."""
-    block = _decl_block(_strip_swift_comments(_read(path)), header)
+    src = _strip_swift_comments(_read(path))
+    block = _decl_block(src, header) if braced else _call_expr(src, header)
     found = re.findall(r'"(https://[^"]+)"', block)
     assert len(found) == 1, (
         f"expected exactly one https literal in {path.name} → {header!r}, found {found}"
@@ -159,7 +183,7 @@ def test_the_three_shipped_base_urls_are_the_same_host():
     That makes drift the default failure mode rather than an unlikely one: the widget's copy
     is edited by nobody, and a widget calling an abandoned host just stops updating.
     """
-    app = _production_host(_API_CONFIG, "static var baseURL: URL")
+    app = _production_host(_API_CONFIG, "static var baseURL: URL", braced=True)
     probe = _production_host(_SERVER_ENV, "let railwayURL = URL")
     widget = _production_host(_WIDGET_CONFIG, "static let productionBaseURL = URL")
 
@@ -200,5 +224,11 @@ def test_the_abandoned_railway_subdomain_is_gone_from_shipped_swift():
 #       -> BOTH url tests FAILED  ✅
 #  4. All three hosts reverted together (the case equality alone cannot catch)
 #       -> test_the_abandoned_railway_subdomain_is_gone_from_shipped_swift FAILED  ✅
-#  5. Comment-stripping disabled, then mutation 4 applied
-#       -> still FAILED, i.e. the scan reads code and not the explanatory comments  ✅
+#  5. Comment-stripping's own value, tested in the direction that actually matters. The
+#     fixes here did NOT leave the banned literal in prose, so re-running 4 with stripping
+#     off would have proved nothing. Instead: added the comment a developer plausibly
+#     writes next to a hostname move — `// Was https://…up.railway.app until 2026-09-07.`
+#     — inside the bounded block, leaving the CODE correct.
+#       stripping on  -> 5 passed (correct: a comment is not a shipped URL)   ✅
+#       stripping off -> FAILED on correct code, both because the block then holds two
+#                        https literals and because the negative scan sees the old host  ✅

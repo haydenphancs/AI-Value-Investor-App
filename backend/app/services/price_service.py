@@ -1,0 +1,508 @@
+"""The single price primitive, rebuilt on endpoints the FMP contract actually grants.
+
+WHY THIS EXISTS
+---------------
+FMP enforced its Data Packages on 2026-09-03. "Real-time Market Data" — `quote`,
+`batch-quote`, `batch-quote-short`, `stock-price-change`, `aftermarket-quote` — is not one
+we bought, so all five answer `402 Restricted Endpoint`. Those two of them supplied every
+price in the app, across 39 call sites in 27 files: Home tiles, the watchlist, Updates
+pills, portfolio valuation, price alerts, the widget, the AI report's macro block.
+
+WHAT REPLACES THEM
+------------------
+Two entitled endpoints, each covering half the problem:
+
+===================  ==========================  ==========================================
+                     ``/stable/profile`` (pkg 3)  ``/stable/company-screener``
+===================  ==========================  ==========================================
+symbols per call     ONE (``?symbol=A,B`` → [])   whole US universe, ~1 s
+price                live                         live
+change / change %    **yes**                      **NO — the field does not exist**
+volume, marketCap    yes                          yes
+===================  ==========================  ==========================================
+
+So single-symbol quotes come from `profile` complete. A BATCH change% has no upstream
+source at all, and is computed here against the previous official close held in
+``market_close_snapshot`` (migration 157), refreshed daily from `/stable/batch-eod`.
+
+THE CONTRACT THIS MODULE KEEPS
+------------------------------
+`get_quote` / `get_quotes` return **quote-shaped dicts** — the same keys the FMP
+`quote` row carried, including the `changesPercentage` spelling alongside
+`changePercentage`, because consumers read both. That is deliberate: it makes migrating 39
+call sites a change of *which function they call*, not a rewrite of how each one reads its
+fields, which is the difference between a mechanical diff and 27 chances to introduce a
+subtle bug.
+
+TWO INVARIANTS, both learned the hard way in this repo
+------------------------------------------------------
+1. **An unknown number is ``None``, never ``0.0``.** A missing previous close means the
+   day change is unknown; emitting ``0.00%`` invents a fact. The repo has shipped this bug
+   more than once — the ETF "Well Diversified" badge on zero data, and `index_service`
+   painting ``$0.00`` under a live market-status badge.
+2. **Never persist a live price.** Only the settled close is written to Supabase. Anything
+   with a price in it stays in the in-process tier, where staleness is bounded by the TTL.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import time
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from app.database import get_supabase
+from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp_entitlements import is_blocked_symbol
+
+logger = logging.getLogger(__name__)
+
+# ── Tiering ───────────────────────────────────────────────────────────────────────
+# The screener sweep is ~1.5 s for ~8k rows, and every symbol on screen shares it, so a
+# short TTL turns a burst of tile requests into one upstream call. 60 s matches the
+# freshness a user perceives on a price and is what `home_dashboard_service` already
+# assumed of batch-quote.
+_UNIVERSE_TTL = 60.0
+
+# A single profile is cheap; this only collapses the duplicate calls a single screen makes.
+_QUOTE_TTL = 30.0
+
+# Previous closes move once per session. Held for an hour so a restart re-reads Supabase
+# rather than the 11.7 MB bulk endpoint.
+_CLOSES_TTL = 3600.0
+
+# `marketCapMoreThan` trims the long tail of shells and delisted husks that would otherwise
+# consume most of the 10,000-row ceiling. $50M keeps every symbol with a detail screen
+# while leaving ~2k rows of headroom under the cap.
+_UNIVERSE_MIN_MARKET_CAP = 50_000_000
+_UNIVERSE_EXCHANGES = "NASDAQ,NYSE,AMEX"
+
+# `/stable/company-screener` hard-caps at 10,000 rows per call regardless of `limit`
+# (verified: limit=20000 and limit=50000 both return exactly 10,000). It DOES paginate.
+_SCREENER_PAGE_SIZE = 10_000
+_SCREENER_MAX_PAGES = 4
+
+_cache: Dict[str, Tuple[float, Any]] = {}
+_inflight: Dict[str, asyncio.Future] = {}
+
+
+def _cache_get(key: str, ttl: float) -> Optional[Any]:
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if time.time() - ts > ttl:
+        _cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_set(key: str, value: Any) -> None:
+    _cache[key] = (time.time(), value)
+
+
+def _finite(value: Any) -> Optional[float]:
+    """A float, or None for anything that is not a real finite number.
+
+    FMP emits NaN and Infinity for thin or just-listed symbols. Those serialize to invalid
+    JSON under `allow_nan=False` and 500 the screen, and NaN additionally defeats ordinary
+    `<= 0` guards *and* `except (TypeError, ValueError)` — the trap recorded in
+    `project_whale_tab_deep_check_2026_08`. Guard on `math.isfinite`, not on truthiness.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+class PriceService:
+    """Quote-shaped prices from entitled endpoints. One instance per process."""
+
+    # ── shaping ───────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _shape(
+        *,
+        symbol: str,
+        name: Optional[str],
+        price: Optional[float],
+        previous_close: Optional[float],
+        change: Optional[float],
+        change_pct: Optional[float],
+        volume: Optional[float],
+        avg_volume: Optional[float],
+        market_cap: Optional[float],
+        exchange: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build one quote-shaped row.
+
+        `changesPercentage` is emitted alongside `changePercentage` because consumers read
+        BOTH spellings — 32 sites use one, 25 the other. Dropping either would silently
+        blank a field on roughly half the screens.
+        """
+        return {
+            "symbol": symbol,
+            "name": name,
+            "price": price,
+            "change": change,
+            "changePercentage": change_pct,
+            "changesPercentage": change_pct,   # legacy spelling, still widely read
+            "previousClose": previous_close,
+            "volume": volume,
+            "avgVolume": avg_volume,
+            "marketCap": market_cap,
+            "exchange": exchange,
+        }
+
+    @classmethod
+    def _from_profile(cls, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        symbol = (row.get("symbol") or "").upper()
+        if not symbol:
+            return None
+        price = _finite(row.get("price"))
+        change = _finite(row.get("change"))
+        # profile has no previousClose; it is exactly price - change when both are real.
+        prev = price - change if (price is not None and change is not None) else None
+        return cls._shape(
+            symbol=symbol,
+            name=row.get("companyName"),
+            price=price,
+            previous_close=prev,
+            change=change,
+            change_pct=_finite(row.get("changePercentage")),
+            volume=_finite(row.get("volume")),
+            avg_volume=_finite(row.get("averageVolume")),
+            market_cap=_finite(row.get("marketCap")),
+            exchange=row.get("exchange"),
+        )
+
+    @classmethod
+    def _from_screener(
+        cls, row: Dict[str, Any], previous_close: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        symbol = (row.get("symbol") or "").upper()
+        if not symbol:
+            return None
+        price = _finite(row.get("price"))
+        prev = _finite(previous_close)
+
+        change = change_pct = None
+        if price is not None and prev is not None and prev > 0:
+            change = price - prev
+            change_pct = (change / prev) * 100.0
+        # else: left as None on purpose. No previous close means the day change is
+        # genuinely unknown, and 0.00% would be a fabricated fact (invariant 1).
+
+        return cls._shape(
+            symbol=symbol,
+            name=row.get("companyName"),
+            price=price,
+            previous_close=prev,
+            change=change,
+            change_pct=change_pct,
+            volume=_finite(row.get("volume")),
+            avg_volume=_finite(row.get("avgVolume")),
+            market_cap=_finite(row.get("marketCap")),
+            exchange=row.get("exchangeShortName") or row.get("exchange"),
+        )
+
+    # ── single symbol ─────────────────────────────────────────────────────────────
+
+    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """One quote-shaped row, or None. Replaces `FMPClient.get_stock_price_quote`."""
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return None
+        if is_blocked_symbol(sym):
+            # Index / commodity / crypto / FX. Return None so the caller hides the
+            # surface; raising here would turn "not covered" into an error page.
+            logger.debug("price_service: %s is outside the FMP licence", sym)
+            return None
+
+        key = f"price:quote:{sym}"
+        hit = _cache_get(key, _QUOTE_TTL)
+        if hit is not None:
+            return hit
+
+        try:
+            rows = await get_fmp_client().get_company_profile(sym)
+        except Exception as e:
+            logger.warning("price_service: profile failed for %s: %s: %s",
+                           sym, type(e).__name__, e)
+            return None
+
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list) or not rows:
+            return None
+        quote = self._from_profile(rows[0])
+        if quote is not None:
+            _cache_set(key, quote)
+        return quote
+
+    # ── batch ─────────────────────────────────────────────────────────────────────
+
+    async def get_quotes(self, symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """Quote-shaped rows keyed by UPPERCASE symbol. Replaces `get_batch_quotes_bulk`.
+
+        Returns only the symbols it could resolve — a caller must treat a missing key as
+        "no data" and drop the row, exactly as it did when batch-quote omitted a symbol.
+        """
+        wanted = {(s or "").strip().upper() for s in symbols if s and s.strip()}
+        wanted = {s for s in wanted if not is_blocked_symbol(s)}
+        if not wanted:
+            return {}
+
+        universe, closes = await asyncio.gather(
+            self._get_universe(),
+            self.get_previous_closes(wanted),
+            return_exceptions=True,
+        )
+        if isinstance(universe, Exception):
+            logger.warning("price_service: universe unavailable: %s: %s",
+                           type(universe).__name__, universe)
+            universe = {}
+        if isinstance(closes, Exception):
+            logger.warning("price_service: previous closes unavailable: %s: %s",
+                           type(closes).__name__, closes)
+            closes = {}
+
+        out: Dict[str, Dict[str, Any]] = {}
+        for sym in wanted:
+            row = universe.get(sym)
+            if row is None:
+                continue
+            quote = self._from_screener(row, closes.get(sym))
+            if quote is not None and quote.get("price") is not None:
+                out[sym] = quote
+
+        missing = wanted - set(out)
+        if missing:
+            # The screener covers actively-traded US listings above the cap. Anything else
+            # — a foreign listing, a sub-$50M microcap, a brand-new ticker — falls through
+            # to the single-symbol path rather than being silently absent.
+            resolved = await asyncio.gather(
+                *(self.get_quote(s) for s in sorted(missing)),
+                return_exceptions=True,
+            )
+            for quote in resolved:
+                if isinstance(quote, dict) and quote.get("symbol"):
+                    out[quote["symbol"]] = quote
+
+        return out
+
+    async def _get_universe(self) -> Dict[str, Dict[str, Any]]:
+        """The screener sweep, keyed by symbol. One upstream call shared by every caller."""
+        key = "price:universe"
+        hit = _cache_get(key, _UNIVERSE_TTL)
+        if hit is not None:
+            return hit
+
+        if key in _inflight:
+            # Shielded so a caller that times out cannot cancel the shared fetch and leave
+            # every other awaiter with a CancelledError.
+            return await asyncio.shield(_inflight[key])
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[key] = future
+        try:
+            rows = await self._fetch_universe_pages()
+            universe = {}
+            for row in rows:
+                sym = (row.get("symbol") or "").upper()
+                if sym and not is_blocked_symbol(sym):
+                    universe[sym] = row
+            _cache_set(key, universe)
+            if not future.done():
+                future.set_result(universe)
+            return universe
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+        finally:
+            _inflight.pop(key, None)
+
+    async def _fetch_universe_pages(self) -> List[Dict[str, Any]]:
+        fmp = get_fmp_client()
+        rows: List[Dict[str, Any]] = []
+        for page in range(_SCREENER_MAX_PAGES):
+            batch = await fmp.get_company_screener(
+                market_cap_more_than=_UNIVERSE_MIN_MARKET_CAP,
+                exchange=_UNIVERSE_EXCHANGES,
+                actively_trading=True,
+                limit=_SCREENER_PAGE_SIZE,
+                page=page,
+            )
+            if not isinstance(batch, list) or not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < _SCREENER_PAGE_SIZE:
+                break
+        return rows
+
+    # ── previous closes ───────────────────────────────────────────────────────────
+
+    async def get_previous_closes(self, symbols: Iterable[str]) -> Dict[str, float]:
+        """Latest stored official close per symbol. Missing symbols are simply absent."""
+        wanted = sorted({(s or "").upper() for s in symbols if s})
+        if not wanted:
+            return {}
+
+        out: Dict[str, float] = {}
+        lookup: List[str] = []
+        for sym in wanted:
+            hit = _cache_get(f"price:close:{sym}", _CLOSES_TTL)
+            if hit is not None:
+                out[sym] = hit
+            else:
+                lookup.append(sym)
+        if not lookup:
+            return out
+
+        try:
+            rows = await asyncio.to_thread(self._select_closes, lookup)
+        except Exception as e:
+            # Until migration 157 is applied this is a missing relation. Degrade to "no
+            # change %" rather than failing the whole screen.
+            logger.warning("price_service: close lookup failed: %s: %s",
+                           type(e).__name__, e)
+            return out
+
+        for row in rows:
+            sym = (row.get("symbol") or "").upper()
+            close = _finite(row.get("close"))
+            if sym and close is not None and close > 0:
+                out[sym] = close
+                _cache_set(f"price:close:{sym}", close)
+        return out
+
+    @staticmethod
+    def _select_closes(symbols: List[str]) -> List[Dict[str, Any]]:
+        """Synchronous Supabase read — call via `asyncio.to_thread`.
+
+        Chunked because a very long `in_` list becomes a URL longer than PostgREST will
+        accept, which fails the whole lookup rather than the tail of it.
+        """
+        supabase = get_supabase()
+        rows: List[Dict[str, Any]] = []
+        CHUNK = 200
+        for i in range(0, len(symbols), CHUNK):
+            chunk = symbols[i:i + CHUNK]
+            resp = (
+                supabase.table("market_close_snapshot")
+                .select("symbol,close")
+                .in_("symbol", chunk)
+                .execute()
+            )
+            rows.extend(resp.data or [])
+        return rows
+
+    # ── daily ingest ──────────────────────────────────────────────────────────────
+
+    async def refresh_close_snapshot(self, trade_date: Optional[str] = None) -> int:
+        """Ingest one session's official closes from `/stable/batch-eod`. Returns rows written.
+
+        🔴 Index, commodity, crypto and FX symbols are DROPPED here, deliberately.
+        `batch-eod` includes `^GSPC`, `GCUSD`, `BTCUSD` and `EURUSD` even though the
+        per-symbol `historical-price-eod/full` answers 402 for every one of them — FMP
+        enforces the symbol block on one endpoint and not the other. Ingesting them would
+        be taking data we did not buy through a gap in the vendor's enforcement, which is
+        what ToS §2.10 (monitor and terminate) is written for. Do not remove this filter to
+        make an index chart work; buy the package instead.
+        """
+        target = trade_date or self._last_trading_day()
+        try:
+            rows = await get_fmp_client().get_batch_eod(target)
+        except Exception as e:
+            logger.error("price_service: batch-eod failed for %s: %s: %s",
+                         target, type(e).__name__, e, exc_info=True)
+            return 0
+        if not isinstance(rows, list) or not rows:
+            logger.warning("price_service: batch-eod returned no rows for %s", target)
+            return 0
+
+        payload: List[Dict[str, Any]] = []
+        skipped_blocked = 0
+        for row in rows:
+            sym = (row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            if is_blocked_symbol(sym):
+                skipped_blocked += 1
+                continue
+            close = _finite(row.get("close"))
+            if close is None or close <= 0:
+                continue
+            volume = _finite(row.get("volume"))
+            payload.append({
+                "symbol": sym,
+                "trade_date": row.get("date") or target,
+                "close": close,
+                "volume": int(volume) if volume is not None else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        if not payload:
+            logger.warning("price_service: nothing to write for %s", target)
+            return 0
+
+        try:
+            written = await asyncio.to_thread(self._upsert_closes, payload)
+        except Exception as e:
+            logger.error("price_service: close upsert failed for %s: %s: %s",
+                         target, type(e).__name__, e, exc_info=True)
+            return 0
+
+        logger.info(
+            "price_service: stored %d closes for %s (%d unlicensed symbols skipped)",
+            written, target, skipped_blocked,
+        )
+        for key in [k for k in _cache if k.startswith("price:close:")]:
+            _cache.pop(key, None)
+        return written
+
+    @staticmethod
+    def _upsert_closes(payload: List[Dict[str, Any]]) -> int:
+        supabase = get_supabase()
+        written = 0
+        CHUNK = 1000
+        for i in range(0, len(payload), CHUNK):
+            chunk = payload[i:i + CHUNK]
+            supabase.table("market_close_snapshot").upsert(
+                chunk, on_conflict="symbol", returning="minimal",
+            ).execute()
+            written += len(chunk)
+        return written
+
+    @staticmethod
+    def _last_trading_day(today: Optional[date] = None) -> str:
+        """Most recent weekday on or before yesterday, as YYYY-MM-DD.
+
+        Weekday-only. A market holiday simply yields a date `batch-eod` has no rows for,
+        which is logged and leaves the previous snapshot in place — correct, because the
+        last real close IS still the previous session's. Callers that need true session
+        state use `/stable/exchange-market-hours`, which does account for holidays (it
+        reported `isMarketOpen: false` on Labor Day 2026-09-07 while a weekday check
+        would have said open).
+        """
+        d = (today or datetime.now(timezone.utc).date()) - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d.isoformat()
+
+
+_price_service: Optional[PriceService] = None
+
+
+def get_price_service() -> PriceService:
+    global _price_service
+    if _price_service is None:
+        _price_service = PriceService()
+    return _price_service

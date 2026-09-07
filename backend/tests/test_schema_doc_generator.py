@@ -658,6 +658,33 @@ def test_every_public_table_is_curated():
     assert missing == [], f"add these to backend/scripts/schema_curation.py: {missing}"
 
 
+# Tables whose migration is written but NOT YET APPLIED to Supabase.
+#
+# CLAUDE.md requires a curation entry "in the same change as its migration", but
+# `schema_snapshot.sql` is a dump of the LIVE database and the user applies migrations
+# by hand (CLAUDE.local.md). So between writing a migration and applying it, a curated
+# table legitimately has no row in the snapshot — which is not the staleness this test
+# exists to catch.
+#
+# An entry here is a promise, not an exemption: once the migration is applied and
+# `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
+# fails until the name is removed.
+_PENDING_MIGRATION_TABLES = {
+    "public.market_close_snapshot",   # migration 157
+}
+
+
+def test_pending_tables_are_really_still_pending():
+    """Stop `_PENDING_MIGRATION_TABLES` becoming a permanent hole in the guard above."""
+    s = parse_dump(SNAPSHOT.read_text())
+    applied = sorted(q for q in _PENDING_MIGRATION_TABLES if q in s.tables)
+    assert not applied, (
+        f"{applied} now exist in schema_snapshot.sql, so their migrations have been "
+        "applied. Remove them from _PENDING_MIGRATION_TABLES — the real column check "
+        "below cannot run while a table is listed as pending."
+    )
+
+
 @pytest.mark.skipif(not SNAPSHOT.exists(), reason="no schema snapshot checked out")
 def test_curation_never_names_a_column_that_no_longer_exists():
     """A stale key-column name is invisible in the page (it is filtered out),
@@ -667,6 +694,8 @@ def test_curation_never_names_a_column_that_no_longer_exists():
     s = parse_dump(SNAPSHOT.read_text())
     stale: list[str] = []
     for q, doc in cur.CURATION.items():
+        if q in _PENDING_MIGRATION_TABLES:
+            continue
         t = s.tables.get(q)
         if t is None:
             stale.append(f"{q} (table gone)")

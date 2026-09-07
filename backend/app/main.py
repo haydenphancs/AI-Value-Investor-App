@@ -183,6 +183,11 @@ async def lifespan(app: FastAPI):
                 "loops locally (PUSH_DRY_RUN=%s)", settings.PUSH_DRY_RUN,
             )
     else:
+        # Keep the previous-close table current. This is the denominator for every batch
+        # day-change % in the app now that FMP's `quote` / `batch-quote` are unlicensed —
+        # without it, prices render but every change % is blank.
+        _spawn(_run_close_snapshot_loop(), "run_close_snapshot_loop")
+
         # Pre-warm ApeWisdom social mentions cache at startup
         _spawn(_warm_social_cache(), "warm_social_cache")
 
@@ -391,6 +396,50 @@ async def _run_news_pre_warmer():
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
+
+
+async def _run_close_snapshot_loop():
+    """Background task: keep `market_close_snapshot` current.
+
+    This is the denominator for every BATCH day-change % in the app. FMP's package
+    enforcement (2026-09-03) took away `quote` / `batch-quote`, and the entitled
+    `company-screener` that replaced them for breadth carries a live price but NO change
+    field — so without this table, Home tiles, the watchlist, Updates pills and the widget
+    can show a price but not a day move.
+
+    Fed by `/stable/batch-eod`, which returns the whole market's official close for one
+    session in a single call: 65,690 rows / 11.7 MB / ~10 s, measured. Far too heavy for a
+    request path, and it only changes once per session — hence a daily job.
+
+    Runs hourly rather than once a day on purpose. A single fixed daily tick is one
+    Railway redeploy away from being missed entirely, and the symptom would be silent:
+    prices keep rendering and only the change % goes blank. `refresh_close_snapshot` is
+    an idempotent upsert keyed on symbol, so re-running it inside the same session simply
+    rewrites identical rows.
+    """
+    from app.services.price_service import get_price_service
+
+    # Stagger past the startup burst — this is the heaviest single upstream call in the
+    # app and must not compete with the pre-warmers for the first seconds of a deploy.
+    await asyncio.sleep(90)
+
+    while True:
+        try:
+            written = await get_price_service().refresh_close_snapshot()
+            if written == 0:
+                # Expected on a market holiday (batch-eod has no rows for a non-session
+                # date) — the previous snapshot stays valid, because the last real close
+                # IS still the previous session's. Logged at warning so a persistent zero,
+                # which would mean stale change %, is visible rather than silent.
+                logger.warning("Close snapshot cycle wrote 0 rows")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Close snapshot cycle failed (%s: %s)",
+                type(e).__name__, e, exc_info=True,
+            )
+        await asyncio.sleep(3600)
 
 
 async def _run_notification_dispatch_loop():

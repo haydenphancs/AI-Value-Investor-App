@@ -452,6 +452,19 @@ CURATION: dict[str, TableDoc] = {
              "non-intraday chart) — that is what let `_refresh_volatile` be deleted rather "
              "than fixed. The raw daily history is deliberately excluded: reading ~1 MB "
              "back is slower than re-fetching it from FMP."),
+    "public.market_close_snapshot": T("market-cache",
+        purpose="Most recent official close per symbol — the denominator for batch "
+                "day-change %.",
+        key=("symbol", "trade_date", "close", "volume"),
+        note="Migration 157. Exists because FMP's package enforcement (2026-09-03) took "
+             "away quote/batch-quote: the entitled company-screener has live price but NO "
+             "change field, and profile has change but only one symbol per call. Fed "
+             "daily from /stable/batch-eod (whole market, 65,690 rows, ~10 s) — far too "
+             "heavy for a request path. SERVICE-ROLE ONLY, unlike the other *_cache "
+             "tables: a bulk close dump must not be readable with the anon key shipped in "
+             "the iOS binary (FMP ToS 2.6.1 redistribution). Index/commodity/crypto/FX "
+             "symbols are dropped on ingest — batch-eod includes them, but they 402 on "
+             "the per-symbol endpoint and are in no purchased package."),
     "public.commodity_cache": T("market-cache",
         key=("cache_key", "symbol", "category", "response_json", "cached_at"),
         note="Migration 149. Same per-section shape as index_cache, and the first of the "

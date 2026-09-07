@@ -31,6 +31,10 @@ _SERVICES = Path(__file__).resolve().parents[1] / "app/services"
 # Every module using the shared-future dedup pattern. Adding one without adding it here is
 # what let three of these drift — `test_no_inflight_service_is_missing_from_this_list` catches it.
 _INFLIGHT_MODULES = [
+    # The universe sweep is ~1.5 s and every tile on screen shares it, so a burst of
+    # requests must collapse to ONE upstream call — and a caller that times out must not
+    # cancel the shared fetch out from under the others.
+    "price_service.py",
     "profit_power_service.py",
     "growth_service.py",
     "earnings_service.py",

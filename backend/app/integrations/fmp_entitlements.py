@@ -139,6 +139,10 @@ PACKAGE_OF: Dict[str, str] = {
     "institutional-ownership/industry-summary": "6 Institutional Ownership",
     # -- 7. Historical and Intraday ------------------------------------------------
     # Entitled for equities and international symbols ONLY — see BLOCKED_SYMBOL_PREFIXES.
+    # Whole-market OHLCV for one session, 65,690 rows in one call. Verified 200.
+    # ⚠️ Serves ^GSPC / GCUSD / BTCUSD / EURUSD even though the per-symbol endpoint
+    # 402s them — callers MUST filter with is_blocked_symbol().
+    "batch-eod": "7 Historical and Intraday",
     "historical-price-eod/full": "7 Historical and Intraday",
     "historical-price-eod/light": "7 Historical and Intraday",
     "historical-price-eod/non-split-adjusted": "7 Historical and Intraday",

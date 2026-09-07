@@ -20,6 +20,7 @@ import pytest
 from app.schemas.home_dashboard import HomeDashboardResponse, MarketPulseItemResponse
 from app.services.active_group_service import ActiveGroup, ActiveGroupUnavailable
 from app.services.home_dashboard_service import HomeDashboardService
+from _price_fakes import PriceFromFMPFake
 
 _DEFAULT_TITLE = "Your Watchlist"
 
@@ -69,6 +70,7 @@ def _service(
             return [q for q in (quotes or []) if q.get("symbol") in symbols]
 
     svc.fmp = _FakeFMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     class _Tbl:
         def select(self, *a): return self

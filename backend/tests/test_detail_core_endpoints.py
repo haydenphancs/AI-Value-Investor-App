@@ -37,6 +37,7 @@ from app.schemas.etf import ETFCoreResponse
 from app.schemas.etf import MarketStatusResponse as ETFMarketStatusResponse
 from app.schemas.index import IndexCoreResponse
 from app.schemas.index import MarketStatusResponse as IndexMarketStatusResponse
+from _price_fakes import PriceFromFMPFake
 
 
 # The exact snake_case keys each iOS DTO decodes.
@@ -96,6 +97,7 @@ def _index_service(fmp=None, tier2=None):
     _cache.clear()
     svc = IndexService.__new__(IndexService)   # no __init__: no live FMP/Supabase
     svc.fmp = fmp or _FakeFMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.supabase = None
     svc._tier2_get = staticmethod(lambda symbol, category: tier2)  # type: ignore[assignment]
     svc._tier2_put = staticmethod(lambda *a, **k: None)            # type: ignore[assignment]
@@ -107,6 +109,7 @@ def _etf_service(fmp=None, tier2=None):
     _cache.clear()
     svc = ETFService.__new__(ETFService)
     svc.fmp = fmp or _FakeFMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.supabase = None
     svc._tier2_get = staticmethod(lambda symbol, category: tier2)  # type: ignore[assignment]
     svc._tier2_put = staticmethod(lambda *a, **k: None)            # type: ignore[assignment]
@@ -118,6 +121,7 @@ def _commodity_service(fmp=None, tier2=None):
     _cache.clear()
     svc = CommodityService.__new__(CommodityService)
     svc.fmp = fmp or _FakeFMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc._tier2_get = staticmethod(lambda key: tier2)               # type: ignore[assignment]
     svc._tier2_put = staticmethod(lambda *a, **k: None)            # type: ignore[assignment]
     return svc

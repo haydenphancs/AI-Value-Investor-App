@@ -32,6 +32,7 @@ from app.services.portfolio_insights_service import (
     normalized_hhi_score,
     score_holdings,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 def _h(
@@ -329,6 +330,8 @@ class _FakeFMP:
 def _install_fakes(monkeypatch, supabase, fmp):
     monkeypatch.setattr(svc, "get_supabase", lambda: supabase)
     monkeypatch.setattr(svc, "get_fmp_client", lambda: fmp)
+    monkeypatch.setattr(svc, "price_source",
+                        lambda owner=None: PriceFromFMPFake(fmp))
 
 
 @pytest.mark.asyncio

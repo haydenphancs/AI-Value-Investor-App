@@ -25,6 +25,7 @@ from app.services.updates_materiality import (
     PER_SCOPE_DAILY_CAP_MARKET,
     daily_cap_for,
 )
+from _price_fakes import PriceFromFMPFake
 
 NOW = datetime(2026, 7, 21, 18, 0, tzinfo=timezone.utc)
 
@@ -62,6 +63,7 @@ class _StubSweeper(InsightSweeper):
     def __init__(self, supabase):
         self.supabase = supabase
         self.fmp = None
+        self.price = PriceFromFMPFake(self.fmp)
         self.news = None
         self.insights = None
 

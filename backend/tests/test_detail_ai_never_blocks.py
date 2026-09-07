@@ -30,6 +30,7 @@ import asyncio
 import pytest
 
 from app.schemas.index import MacroForecastItemResponse, SectorPerformanceEntryResponse
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Fakes ────────────────────────────────────────────────────────────
@@ -96,6 +97,7 @@ def _index_service(monkeypatch, gemini, tier2=None, macro=None):
     mod._background_tasks.clear()
     svc = mod.IndexService.__new__(mod.IndexService)
     svc.fmp = None
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.supabase = None
     svc._tier2_get = staticmethod(lambda symbol, category: tier2)      # type: ignore
     puts: list = []
@@ -368,6 +370,7 @@ def _etf_service(monkeypatch, gemini, tier2=None):
     mod._background_tasks.clear()
     svc = mod.ETFService.__new__(mod.ETFService)
     svc.fmp = None
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.supabase = None
     svc._tier2_get = staticmethod(lambda symbol, category: tier2)   # type: ignore
     puts: list = []

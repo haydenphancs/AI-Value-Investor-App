@@ -71,6 +71,7 @@ from app.schemas.themes_detail import (
     ThemeConstituentResponse,
     ThemeDetailResponse,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +837,7 @@ class HomeDashboardService:
 
         quotes: Dict[str, Dict[str, Any]] = {}
         try:
-            for q in await self.fmp.get_batch_quotes_bulk(symbols):
+            for q in await price_source(self).get_quotes_list(symbols):
                 sym = q.get("symbol")
                 if sym:
                     quotes[str(sym).upper()] = q
@@ -1009,7 +1010,7 @@ class HomeDashboardService:
         # the strip.
         quote_map: Dict[str, Dict[str, Any]] = {}
         try:
-            rows = await self.fmp.get_batch_quotes_bulk(
+            rows = await price_source(self).get_quotes_list(
                 [cfg["symbol"] for cfg in _PULSE_SYMBOLS]
             )
             for row in rows or []:
@@ -1299,7 +1300,7 @@ class HomeDashboardService:
         candidates = items[:_SHORT_QUOTE_CANDIDATES]
         candidate_symbols = [it["symbol"] for it in candidates]
 
-        quotes = await self.fmp.get_batch_quotes_bulk(candidate_symbols)
+        quotes = await price_source(self).get_quotes_list(candidate_symbols)
         qmap = {
             (q.get("symbol") or "").upper(): q
             for q in quotes
@@ -1493,7 +1494,7 @@ class HomeDashboardService:
         change_map: Dict[str, float] = {}
         if union:
             # Fetch by the canonical (dash) form — FMP's /quote resolves BRK-B.
-            quotes = await self.fmp.get_batch_quotes_bulk(sorted(union))
+            quotes = await price_source(self).get_quotes_list(sorted(union))
             for q in quotes:
                 if not isinstance(q, dict):
                     continue
@@ -1609,7 +1610,7 @@ class HomeDashboardService:
         if not union:
             return []
         try:
-            quotes = await self.fmp.get_batch_quotes_bulk(union)
+            quotes = await price_source(self).get_quotes_list(union)
         except Exception as exc:  # noqa: BLE001 — degrade the list, never the screen
             logger.warning(
                 "Theme constituents quote fetch failed: %s: %s", type(exc).__name__, exc
@@ -1707,7 +1708,7 @@ class HomeDashboardService:
         )
         if quote is None:
             quote, spark_result = await asyncio.gather(
-                self.fmp.get_stock_price_quote(symbol), spark_task
+                price_source(self).get_quote(symbol), spark_task
             )
         else:
             spark_result = await spark_task

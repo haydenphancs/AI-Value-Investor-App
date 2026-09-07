@@ -19,6 +19,7 @@ from app.services.news_cache_service import (
     _sanitize_published_at,
     is_crypto_scope,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────
@@ -166,6 +167,7 @@ class _StubService(NewsCacheService):
                 return [_raw("c1", "Crypto story")]
 
         self.fmp = _FMP()
+        self.price = PriceFromFMPFake(self.fmp)
 
 
 def _raw(url, title, when="2026-07-20 18:00:00", symbol=None):

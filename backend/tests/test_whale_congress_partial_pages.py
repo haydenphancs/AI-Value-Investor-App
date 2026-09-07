@@ -51,6 +51,7 @@ from app.integrations.fmp import (  # noqa: E402
     FMPRateLimitException,
     FMPUnavailableException,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────────
@@ -321,6 +322,7 @@ def _hydrator(fmp):
 
     h = object.__new__(WhaleHydrator)
     h.fmp = fmp
+    h.price = PriceFromFMPFake(h.fmp)
     h.gemini = MagicMock()
     h.force = False
     h.dry_run = False

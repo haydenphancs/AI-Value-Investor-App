@@ -30,6 +30,7 @@ from app.services._analyst_common import (
     classify_grade,
     normalize_fmp_action,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +380,7 @@ class AnalystService:
         results = await asyncio.gather(
             self.fmp.get_grades(ticker, limit=100),
             self.fmp.get_price_target_consensus(ticker),
-            self.fmp.get_stock_price_quote(ticker),
+            price_source(self).get_quote(ticker),
             return_exceptions=True,
         )
 

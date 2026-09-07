@@ -19,6 +19,7 @@ from app.services.news_cache_service import (
     MARKET_SCOPE,
     NewsCacheService,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 class _StubService(NewsCacheService):
@@ -49,6 +50,7 @@ class _StubService(NewsCacheService):
                 return outer._index
 
         self.fmp = _FMP()
+        self.price = PriceFromFMPFake(self.fmp)
 
     async def _market_trending_tickers(self):
         # Keep the corpus tests network-free: the real method calls ApeWisdom.

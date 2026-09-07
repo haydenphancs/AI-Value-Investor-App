@@ -48,6 +48,7 @@ from app.services.price_alert_engine import (
 )
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +384,7 @@ class PriceAlertService:
         stats["tickers"] = len(tickers)
 
         try:
-            quotes = await get_fmp_client().get_batch_quotes_bulk(tickers)
+            quotes = await price_source(self).get_quotes_list(tickers)
         except Exception as e:
             logger.warning(
                 "price alerts: batch quote failed for %d ticker(s) (%s: %s) — "

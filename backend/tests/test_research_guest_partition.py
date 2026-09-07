@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import inspect
+
 import pytest
 
 import app.api.v1.endpoints.users as users_ep
@@ -50,37 +52,72 @@ class _NoUserSB:
     def table(self, _n): return _Users()
 
 
-@pytest.mark.asyncio
-async def test_two_installs_get_different_identities():
-    """THE leak, at its source: distinct installs must never resolve to one bucket."""
-    a = await get_research_identity(authorization=None, x_guest_id="install-A", supabase=_NoUserSB())
-    b = await get_research_identity(authorization=None, x_guest_id="install-B", supabase=_NoUserSB())
-    assert a["id"] != b["id"], "two guests still share one research bucket"
-    assert a["id"] != GUEST_USER_ID and b["id"] != GUEST_USER_ID
+def _strip_py_comments(src: str) -> str:
+    """Source with its docstring and every `#` comment removed (testing.md §3 rule 1).
+
+    Load-bearing here: this file's prose narrates the guest history it now asserts is gone,
+    so an un-stripped scan for `guest_user_id_for` would fail on a docstring, and one for its
+    absence would pass on a docstring after a real revert.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
+    body = getattr(fn, "body", None)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        fn.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
 
 
 @pytest.mark.asyncio
-async def test_identity_is_stable_across_requests():
-    """It is a uuid5 of the install id, so a user's own reports survive a relaunch."""
-    first = await get_research_identity(authorization=None, x_guest_id="install-A", supabase=_NoUserSB())
-    second = await get_research_identity(authorization=None, x_guest_id="install-A", supabase=_NoUserSB())
-    assert first["id"] == second["id"] == guest_user_id_for("install-A")
+async def test_a_signed_in_account_passes_through_flagged_not_guest():
+    """A real account's row survives the wrapper intact, with `is_guest` present-and-FALSE.
+
+    The surviving half of the old `test_a_signed_in_account_always_wins`. It matters more now,
+    not less: `whales.py:130` reads `bool(user.get("is_guest", True))` — absent means DENY — so
+    a wrapper returning a bare account row would classify every signed-in user as a guest and
+    silently disable features for the entire user base, with nothing logging or failing.
+    """
+    got = await get_research_identity(user={"id": "real-user-1", "email": "u@example.com", "tier": "pro"})
+    assert got["id"] == "real-user-1"
+    assert got["tier"] == "pro", "the wrapper must not shadow the account's tier"
+    assert "is_guest" in got, "callers default is_guest to True (deny) when it is absent"
+    assert got.get("is_guest") is False
 
 
-@pytest.mark.asyncio
-async def test_guests_are_flagged_so_the_sentinel_comparison_is_not_needed():
-    """`user["id"] == GUEST_USER_ID` can no longer detect a guest — a per-install id never
-    equals the sentinel. Without an explicit flag every guest would be classified as signed-in
-    and sent into `precharge` against a `user_credits` row that does not exist (402)."""
-    guest = await get_research_identity(authorization=None, x_guest_id="install-A", supabase=_NoUserSB())
-    assert guest["is_guest"] is True
+def test_research_identity_can_no_longer_produce_a_guest():
+    """No guest branch survives — neither per-install nor the shared sentinel.
+
+    Replaces the partitioning and stable-identity tests above it. Those asserted the guest
+    product that FMP's End-User Display licence ended: their data may be shown only "through
+    the Licensee's authenticated platform", and a generated report is built from ~20 FMP calls.
+
+    Source-scanned rather than called, because the absence of a branch is not observable from
+    outside — a wrapper can compute a synthetic id and simply never return it on the paths a
+    behavioural test exercises. Comment-stripped, because this file's own prose names both
+    symbols throughout.
+    """
+    code = _strip_py_comments(inspect.getsource(get_research_identity))
+    assert "guest_user_id_for" not in code
+    assert "GUEST_USER_ID" not in code
 
 
-@pytest.mark.asyncio
-async def test_a_client_sending_no_install_id_still_gets_the_shared_sentinel():
-    """Already-shipped app versions send no header; their behaviour must be unchanged."""
-    out = await get_research_identity(authorization=None, x_guest_id=None, supabase=_NoUserSB())
-    assert out["id"] == GUEST_USER_ID
+def test_the_rate_limit_bucket_key_survives_the_guest_retirement():
+    """`guest_user_id_for` must NOT be deleted along with the guest product.
+
+    `RateLimitChecker` and `identity_key` still use it to bucket unauthenticated callers, and
+    after the sign-in wall `/auth/login` and `/auth/register` are the only unauthenticated
+    surface in the app — precisely the one that most needs a per-caller key. Delete it and
+    every anonymous caller shares one bucket, so one attacker exhausts everyone's allowance.
+    """
+    assert guest_user_id_for("install-A") == guest_user_id_for("install-A")
+    assert guest_user_id_for("install-A") != guest_user_id_for("install-B")
 
 
 def test_every_research_route_now_requires_an_account():

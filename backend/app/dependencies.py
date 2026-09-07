@@ -487,204 +487,101 @@ async def get_identity_only_user(
     return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
 
 
-async def get_learn_identity(
-    authorization: Optional[str] = Header(None),
-    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
-    supabase: Client = Depends(get_supabase),
-    request: Request = None,
-) -> dict:
-    """Identity for the LEARN routes: a real account, else a PER-INSTALL guest.
+# ─────────────────────────────────────────────────────────────────────────────────────
+# The five *_identity dependencies — STRICT since the account-only redesign.
+#
+# WHAT CHANGED AND WHY. These used to resolve a signed-out caller to a PER-INSTALL guest
+# (a uuid5 of the client-chosen `X-Guest-Id`), which is what made watchlists, portfolios,
+# chat and Learn progress work without an account. FMP's signed Order Form grants
+# End-User Display Rights only — Exhibit A's *Access-Restricted External Display*, i.e.
+# their market data may be shown solely "through the Licensee's authenticated platform."
+# Public External Display was declined. Serving market data to a signed-out caller is
+# therefore outside the licence, so every one of these now requires a real account.
+#
+# THREE THINGS DELIBERATELY KEPT, each of which would be a real defect to "clean up":
+#
+#   1. `is_guest: False` is still stamped, and must be. Call sites read it with a
+#      FAIL-SAFE default — `whales.py:130` does `bool(user.get("is_guest", True))`, i.e.
+#      absent means DENY. Returning a bare `get_current_user` row here would silently
+#      classify every signed-in user as a guest and disable whale force-refresh for
+#      everyone, with nothing failing loudly. The key must be present and explicitly False.
+#
+#   2. They delegate to `get_current_user`, not to a hand-rolled check. That is what
+#      preserves the whole credential grid: AUTH_REQUIRED (no credential — client must NOT
+#      clear its Keychain) vs AUTH_TOKEN_INVALID vs AUTH_ACCOUNT_NOT_FOUND vs
+#      AUTH_SESSION_EXPIRED vs AUTH_UNAVAILABLE (503, retryable). Collapsing those into one
+#      401 is how "you tapped something needing an account" becomes "your session expired".
+#      See `.claude/rules/auth.md` §2 and §3.
+#
+#   3. They stay FIVE separate functions rather than one alias. The point was never the
+#      body — it is that a change to one table's identity semantics cannot silently
+#      re-partition another. That property is worth more than the duplication costs.
+#
+# `guest_user_id_for()` is NOT dead and must not be deleted: `RateLimitChecker` and
+# `identity_key` below still use it as the rate-limit bucket key for unauthenticated
+# callers, and after the wall `/auth/login` and `/auth/register` are the only
+# unauthenticated surface in the app — precisely the one that most needs bucketing.
+# ─────────────────────────────────────────────────────────────────────────────────────
 
-    Deliberately scoped to Learn rather than replacing
-    :func:`get_current_user_or_guest` everywhere: research / credits / portfolios
-    hang off a seeded ``GUEST_USER_ID`` row (with real credits), and pointing
-    those at a synthetic id would break them. Learn progress has no such
-    dependency — ``user_learn_progress.user_id`` is a bare uuid column with no
-    foreign key — so it can be partitioned safely.
+
+async def get_learn_identity(user: dict = Depends(get_current_user)) -> dict:
+    """Identity for the LEARN routes. Strict: a real account, or 401.
+
+    Was per-install guest-partitioned (migrations 066/067 dropped
+    `user_learn_progress`'s FK so a synthetic uuid could own rows). Those rows still
+    exist and are still claimable via `POST /users/me/claim-guest-data`, which is why
+    that endpoint outlives the guest product.
     """
-    user = await get_current_user_or_guest(
-        request=request, authorization=authorization, supabase=supabase
-    )
-    if user.get("id") != GUEST_USER_ID:
-        return {**user, "is_guest": False}   # a real signed-in account always wins
-    return {
-        "id": guest_user_id_for(x_guest_id),
-        "email": "guest@local",
-        "tier": "free",
-        # Carried for the same reason the research and chat wrappers carry it, and it was
-        # missing here: a per-install id NEVER equals ``GUEST_USER_ID``, so the obvious test
-        # ``user["id"] == GUEST_USER_ID`` classifies every guest as a paying account. The
-        # rulebook prescribes ``user.get("is_guest")``, which read falsy on this dependency
-        # and on the watchlist one — a loaded gun for the next caller that follows the rule.
-        "is_guest": True,
-    }
+    return {**user, "is_guest": False}
 
 
-async def get_profile_identity(
-    authorization: Optional[str] = Header(None),
-    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
-    supabase: Client = Depends(get_supabase),
-    request: Request = None,
-) -> dict:
-    """Identity for the INVESTOR-PROFILE routes: a real account, else a PER-INSTALL guest.
+async def get_profile_identity(user: dict = Depends(get_current_user)) -> dict:
+    """Identity for the INVESTOR PROFILE routes. Strict: a real account, or 401.
 
-    Same shape and same justification as :func:`get_learn_identity`, and guest-capable
-    for a specific product reason: the profile is captured during FIRST-RUN onboarding,
-    before an account exists. Gating it on a token would mean the questions can only be
-    asked after sign-up — which is the wrong order for a guest-first funnel and would
-    leave the whole feature with no data for the users most likely to convert.
-
-    Safe because `user_investor_profile.user_id` has NO foreign key (migration 131), so
-    a synthetic per-install uuid5 is a valid owner. It costs nothing per call — no LLM,
-    no upstream — so it sits on the cheap-and-claimable side of the line in
-    .claude/rules/auth.md §1a rather than with the metered surfaces.
-
-    Its own dependency rather than borrowing the Learn or watchlist one: those carry
-    their own table's semantics, and a future change to either must not silently
-    re-partition this one.
+    ⚠️ Onboarding captures this profile, and it used to run BEFORE an account existed.
+    The iOS gate order is now disclaimer → sign-in → onboarding precisely so this
+    dependency can be strict; reverse it and every onboarding answer is silently dropped
+    on a 401 the client never surfaces.
     """
-    user = await get_current_user_or_guest(
-        request=request, authorization=authorization, supabase=supabase
-    )
-    if user.get("id") != GUEST_USER_ID:
-        return {**user, "is_guest": False}   # a real signed-in account always wins
-    return {
-        "id": guest_user_id_for(x_guest_id),
-        "email": "guest@local",
-        "tier": "free",
-        # Never `user["id"] == GUEST_USER_ID` downstream — a per-install id never equals
-        # the sentinel, so that test reads every guest as a paying account.
-        "is_guest": True,
-    }
+    return {**user, "is_guest": False}
 
 
-async def get_research_identity(
-    authorization: Optional[str] = Header(None),
-    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
-    supabase: Client = Depends(get_supabase),
-    request: Request = None,
-) -> dict:
-    """Identity for the RESEARCH routes: a real account, else a PER-INSTALL guest.
+async def get_research_identity(user: dict = Depends(get_current_user)) -> dict:
+    """⚠️ NOT WIRED TO ANY ROUTE, and must stay that way.
 
-    ⚠️ **NOT WIRED TO ANY ROUTE. Do not connect one without reading this.**
-
-    All nine ``/research/*`` routes take ``Depends(get_current_user)``: AI generation is
-    account-only, because it is the most expensive call in the product (~17 Gemini + ~20 FMP
-    per run) and the guest meter it used to rely on keyed on ``X-Guest-Id`` — a header the
-    CLIENT picks — so rotating it minted a fresh allowance on every request. Credits replaced
-    that: FK-bound to a real ``public.users`` row, and therefore not rotatable. Re-pointing a
-    research route at this dependency re-opens free, unmetered AI generation.
-
-    Kept rather than deleted because migration 110's per-install partitioning is still live for
-    anyone holding reports created before the change, and because
-    ``POST /users/me/claim-guest-data`` must still be able to find them. Two source-scan tests
-    fail the build if ``Depends(get_research_identity)`` reappears in ``research.py``
-    (``test_research_guest_partition.py`` and ``test_auth_dependency_matrix.py``).
-
-    Same shape and same reason as :func:`get_watchlist_identity`. Before migration 110 every
-    signed-out user wrote `research_reports` under the shared ``GUEST_USER_ID``, and
-    ``GET /research/reports`` filters on that column — so one guest's Reports tab listed every
-    other guest's reports (ticker, executive summary, score, fair value), and either could open,
-    rate, or delete the other's. The ticker someone researches discloses intent, so this is a
-    cross-user data leak, not just untidy state.
-
-    Safe only because migration 110 dropped ``research_reports_user_id_fkey`` — a synthetic
-    per-install uuid has no ``public.users`` row. That FK was ON DELETE CASCADE, so account
-    deletion now clears the table explicitly via ``_UNLINKED_USER_TABLES`` in the users endpoint.
-
-    Callers must ALSO stop using ``user["id"] == GUEST_USER_ID`` as their guest test — a
-    per-install id never equals the sentinel. Use ``user.get("is_guest")``.
+    Kept only so the name resolves for the two source-scan tests that fail the build if
+    `Depends(get_research_identity)` ever reappears in `research.py`. AI generation is
+    account-only because it costs real money per run (~17 Gemini + ~20 FMP calls); the
+    predecessor metered guests against a rotatable client-chosen header, i.e. not at all.
     """
-    user = await get_current_user_or_guest(
-        request=request, authorization=authorization, supabase=supabase
-    )
-    if user.get("id") != GUEST_USER_ID:
-        return {**user, "is_guest": False}   # a real signed-in account always wins
-    return {
-        "id": guest_user_id_for(x_guest_id),
-        "email": "guest@local",
-        "tier": "free",
-        "is_guest": True,
-    }
+    return {**user, "is_guest": False}
 
 
-async def get_chat_identity(
-    authorization: Optional[str] = Header(None),
-    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
-    supabase: Client = Depends(get_supabase),
-    request: Request = None,
-) -> dict:
-    """Identity for the CHAT routes: a real account, else a PER-INSTALL guest.
+async def get_chat_identity(user: dict = Depends(get_current_user)) -> dict:
+    """Identity for the CHAT routes. Strict: a real account, or 401.
 
-    Same shape and same reason as :func:`get_research_identity`. Before migration 111 every
-    signed-out user wrote `chat_sessions` under the shared ``GUEST_USER_ID``, and both read
-    paths filter on that column — ``GET /chat/sessions`` and ``GET /chat/sessions/{id}`` each
-    do ``.eq("user_id", user["id"])``. So one guest's conversations were listed, readable,
-    renameable and DELETABLE by every other guest.
-
-    This was the last table where that was still true, and the worst one: chat is where people
-    paste holdings and ask personal financial questions.
-
-    Safe only because migration 111 dropped ``chat_sessions_user_id_fkey`` — a synthetic
-    per-install uuid has no ``public.users`` row. That FK was ON DELETE CASCADE, so account
-    deletion now clears the table explicitly via ``_UNLINKED_USER_TABLES``; ``chat_messages``
-    still cascades from ``chat_sessions``.
-
-    Callers must ALSO stop using ``user["id"] == GUEST_USER_ID`` as their guest test — a
-    per-install id never equals the sentinel, so that comparison silently classifies every
-    guest as a paying account and sends them into a credit precharge against a `user_credits`
-    row that does not exist (402 "insufficient credits"). Use ``user.get("is_guest")``.
+    Note for readers of `chat.py`: its `user.get("is_guest")` branches (the guest daily
+    free-turn quota) are now unreachable, because this always returns False. They are
+    left in place rather than excised — they fail SAFE (a guest would be charged nothing
+    and is impossible to construct), and removing them touches the credit path, which is
+    the one place in the app where a mistake mints or destroys money.
     """
-    user = await get_current_user_or_guest(
-        request=request, authorization=authorization, supabase=supabase
-    )
-    if user.get("id") != GUEST_USER_ID:
-        return {**user, "is_guest": False}   # a real signed-in account always wins
-    return {
-        "id": guest_user_id_for(x_guest_id),
-        "email": "guest@local",
-        "tier": "free",
-        "is_guest": True,
-    }
+    return {**user, "is_guest": False}
 
 
-async def get_watchlist_identity(
-    authorization: Optional[str] = Header(None),
-    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
-    supabase: Client = Depends(get_supabase),
-    request: Request = None,
-) -> dict:
-    """Identity for the WATCHLIST routes: a real account, else a PER-INSTALL guest.
+async def get_watchlist_identity(user: dict = Depends(get_current_user)) -> dict:
+    """Identity for WATCHLIST / TRACKING / PORTFOLIOS / WHALES / HOME / UPDATES / WIDGET.
 
-    Same shape and same reason as :func:`get_learn_identity`. Before migration 108,
-    every signed-out user wrote `watchlist_items` under the shared ``GUEST_USER_ID``,
-    so one guest adding a ticker put it on EVERY other guest's Tracking tab and either
-    could delete the other's. That is the identical defect `guest_user_id_for` was
-    introduced to fix for Learn progress; it just was never extended here.
+    The widest surface of the five — ~28 routes. Before migration 108 every signed-out
+    user wrote `watchlist_items` under the shared `GUEST_USER_ID`, so one guest adding a
+    ticker put it on every other guest's Tracking tab. 108 fixed that by dropping the FK
+    and partitioning per install; the wall now removes the guest case entirely.
 
-    Safe only because migration 108 dropped ``watchlist_items_user_id_fkey`` — a
-    synthetic per-install uuid has no ``public.users`` row. That FK was ON DELETE
-    CASCADE, so account deletion now clears the table explicitly via
-    ``_UNLINKED_USER_TABLES`` in the users endpoint.
-
-    Still deliberately scoped rather than replacing ``get_current_user_or_guest``
-    everywhere: research / credits / portfolios hang off the seeded GUEST_USER_ID row
-    (which owns real credits), and pointing those at a synthetic id would break them.
+    ⚠️ The dropped FK does NOT come back. `watchlist_items` and `portfolios` still have no
+    `ON DELETE CASCADE`, so account deletion still depends on the explicit
+    `_UNLINKED_USER_TABLES` sweep in the users endpoint. Do not remove that list.
     """
-    user = await get_current_user_or_guest(
-        request=request, authorization=authorization, supabase=supabase
-    )
-    if user.get("id") != GUEST_USER_ID:
-        return {**user, "is_guest": False}   # a real signed-in account always wins
-    return {
-        "id": guest_user_id_for(x_guest_id),
-        "email": "guest@local",
-        "tier": "free",
-        # See get_learn_identity. This wrapper backs 20 routes (portfolios, tracking,
-        # watchlist, home /dashboard, updates /tabs) — the widest guest surface in the app,
-        # and the one where a falsy ``is_guest`` would do the most damage.
-        "is_guest": True,
-    }
+    return {**user, "is_guest": False}
 
 
 class RateLimitChecker:

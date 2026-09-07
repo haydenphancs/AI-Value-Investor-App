@@ -84,6 +84,11 @@ _UNIVERSE_EXCHANGES = "NASDAQ,NYSE,AMEX"
 _SCREENER_PAGE_SIZE = 10_000
 _SCREENER_MAX_PAGES = 4
 
+# A holiday is a weekday with no session, so the ingest asks the data rather than
+# carrying a calendar. Bounded so an upstream outage cannot spin: 5 steps covers the
+# longest US market closure in living memory (Sandy, 2 sessions) with room to spare.
+_MAX_SESSION_LOOKBACK = 5
+
 _cache: Dict[str, Tuple[float, Any]] = {}
 _inflight: Dict[str, asyncio.Future] = {}
 
@@ -181,15 +186,46 @@ class PriceService:
             exchange=row.get("exchange"),
         )
 
+    @staticmethod
+    def _pick_denominator(
+        price: Optional[float], snap: Optional[Dict[str, Any]]
+    ) -> Optional[float]:
+        """The close of the session BEFORE the one this price belongs to.
+
+        ⚠️ This choice is the whole point of migration 158, and getting it wrong is
+        invisible. The live price is the price of the most recent session that has one:
+        today while the market is open, and the last official close while it is shut. So
+        using the latest stored close unconditionally makes `price == close` every night,
+        every weekend and every holiday, and the day change collapses to exactly 0.00% —
+        a fabricated flat market on every tile. Found by cross-checking the batch path
+        against `profile`, which reported -2.51% for a symbol the batch path called flat.
+
+        Deciding by comparing price to close, rather than by asking whether the market is
+        open, keeps this correct across the open and the close with no dependency on
+        session state, holiday calendars, or when the ingest job happened to run.
+        """
+        if snap is None or price is None:
+            return None
+        close = _finite(snap.get("close"))
+        prev = _finite(snap.get("previous_close"))
+        if close is None:
+            return prev
+        # A price that has moved off the stored close belongs to a LATER session, so that
+        # close is the right denominator. Compared with a relative epsilon because these
+        # are floats round-tripped through JSON and Postgres NUMERIC.
+        if abs(price - close) > max(abs(close), 1.0) * 1e-9:
+            return close
+        return prev
+
     @classmethod
     def _from_screener(
-        cls, row: Dict[str, Any], previous_close: Optional[float]
+        cls, row: Dict[str, Any], snap: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
         symbol = (row.get("symbol") or "").upper()
         if not symbol:
             return None
         price = _finite(row.get("price"))
-        prev = _finite(previous_close)
+        prev = cls._pick_denominator(price, snap)
 
         change = change_pct = None
         if price is not None and prev is not None and prev > 0:
@@ -213,16 +249,26 @@ class PriceService:
 
     # ── single symbol ─────────────────────────────────────────────────────────────
 
-    async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """One quote-shaped row, or None. Replaces `FMPClient.get_stock_price_quote`."""
+    async def get_quote(self, symbol: str) -> Dict[str, Any]:
+        """One quote-shaped row, or ``{}``. Replaces `FMPClient.get_stock_price_quote`.
+
+        Returns ``{}`` rather than ``None`` on a miss, deliberately: that is the exact
+        contract the method it replaces had (`return data[0] if data else {}`), so all 20
+        call sites keep working unchanged. Several of them sit inside `asyncio.gather(...)`
+        lists where an `or {}` cannot be applied to a coroutine, so a `None` here would
+        have meant restructuring those call sites — and every one of them would have been
+        a chance to introduce an `AttributeError` on a degraded path that only fires when
+        upstream is already unhappy. Callers test falsiness (`if not quote`), which is
+        identical for both.
+        """
         sym = (symbol or "").strip().upper()
         if not sym:
-            return None
+            return {}
         if is_blocked_symbol(sym):
-            # Index / commodity / crypto / FX. Return None so the caller hides the
-            # surface; raising here would turn "not covered" into an error page.
+            # Index / commodity / crypto / FX. Empty so the caller hides the surface;
+            # raising here would turn "not covered" into an error page.
             logger.debug("price_service: %s is outside the FMP licence", sym)
-            return None
+            return {}
 
         key = f"price:quote:{sym}"
         hit = _cache_get(key, _QUOTE_TTL)
@@ -234,15 +280,16 @@ class PriceService:
         except Exception as e:
             logger.warning("price_service: profile failed for %s: %s: %s",
                            sym, type(e).__name__, e)
-            return None
+            return {}
 
         if isinstance(rows, dict):
             rows = [rows]
         if not isinstance(rows, list) or not rows:
-            return None
+            return {}
         quote = self._from_profile(rows[0])
-        if quote is not None:
-            _cache_set(key, quote)
+        if quote is None:
+            return {}
+        _cache_set(key, quote)
         return quote
 
     # ── batch ─────────────────────────────────────────────────────────────────────
@@ -260,7 +307,7 @@ class PriceService:
 
         universe, closes = await asyncio.gather(
             self._get_universe(),
-            self.get_previous_closes(wanted),
+            self.get_close_snapshots(wanted),
             return_exceptions=True,
         )
         if isinstance(universe, Exception):
@@ -294,6 +341,32 @@ class PriceService:
                 if isinstance(quote, dict) and quote.get("symbol"):
                     out[quote["symbol"]] = quote
 
+        return out
+
+    async def get_quotes_list(self, symbols: Sequence[str]) -> List[Dict[str, Any]]:
+        """`get_quotes` as a LIST — the drop-in shape for `get_batch_quotes_bulk`.
+
+        Every one of the 19 former batch-quote call sites iterates the result and builds
+        its own `{symbol: row}` map, so returning a list keeps each migration a one-line
+        change instead of a restructure. Prefer `get_quotes` in new code: it hands back
+        the map those callers were building by hand.
+
+        Rows come back in the ORDER THE SYMBOLS WERE ASKED FOR, which `batch-quote` also
+        did. That is load-bearing, not cosmetic: callers such as
+        `portfolio_insights_service` rank straight off this list, so returning
+        `dict.values()` silently reordered their output. Caught by a ranking test.
+
+        Symbols that could not be resolved are ABSENT, exactly as `batch-quote` omitted
+        them — callers already skip a missing symbol rather than rendering a zero.
+        """
+        resolved = await self.get_quotes(symbols)
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+        for raw in symbols:
+            sym = (raw or "").strip().upper()
+            if sym in resolved and sym not in seen:
+                seen.add(sym)
+                out.append(resolved[sym])
         return out
 
     async def _get_universe(self) -> Dict[str, Dict[str, Any]]:
@@ -349,13 +422,19 @@ class PriceService:
 
     # ── previous closes ───────────────────────────────────────────────────────────
 
-    async def get_previous_closes(self, symbols: Iterable[str]) -> Dict[str, float]:
-        """Latest stored official close per symbol. Missing symbols are simply absent."""
+    async def get_close_snapshots(
+        self, symbols: Iterable[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Stored close AND previous close per symbol. Missing symbols are simply absent.
+
+        Both are needed: which one is the day-change denominator depends on whether the
+        live price has moved past the stored close — see `_pick_denominator`.
+        """
         wanted = sorted({(s or "").upper() for s in symbols if s})
         if not wanted:
             return {}
 
-        out: Dict[str, float] = {}
+        out: Dict[str, Dict[str, Any]] = {}
         lookup: List[str] = []
         for sym in wanted:
             hit = _cache_get(f"price:close:{sym}", _CLOSES_TTL)
@@ -377,10 +456,14 @@ class PriceService:
 
         for row in rows:
             sym = (row.get("symbol") or "").upper()
-            close = _finite(row.get("close"))
-            if sym and close is not None and close > 0:
-                out[sym] = close
-                _cache_set(f"price:close:{sym}", close)
+            if not sym:
+                continue
+            snap = {"close": _finite(row.get("close")),
+                    "previous_close": _finite(row.get("previous_close"))}
+            if snap["close"] is None and snap["previous_close"] is None:
+                continue
+            out[sym] = snap
+            _cache_set(f"price:close:{sym}", snap)
         return out
 
     @staticmethod
@@ -397,7 +480,7 @@ class PriceService:
             chunk = symbols[i:i + CHUNK]
             resp = (
                 supabase.table("market_close_snapshot")
-                .select("symbol,close")
+                .select("symbol,close,previous_close")
                 .in_("symbol", chunk)
                 .execute()
             )
@@ -407,7 +490,12 @@ class PriceService:
     # ── daily ingest ──────────────────────────────────────────────────────────────
 
     async def refresh_close_snapshot(self, trade_date: Optional[str] = None) -> int:
-        """Ingest one session's official closes from `/stable/batch-eod`. Returns rows written.
+        """Ingest the two most recent sessions' official closes. Returns rows written.
+
+        TWO sessions, not one. The day-change denominator is the close of the session
+        BEFORE the one the live price belongs to, and while the market is shut the live
+        price already IS the latest close — so storing only that one makes every change %
+        read 0.00% overnight and at weekends (migration 158).
 
         🔴 Index, commodity, crypto and FX symbols are DROPPED here, deliberately.
         `batch-eod` includes `^GSPC`, `GCUSD`, `BTCUSD` and `EURUSD` even though the
@@ -417,20 +505,29 @@ class PriceService:
         what ToS §2.10 (monitor and terminate) is written for. Do not remove this filter to
         make an index chart work; buy the package instead.
         """
-        target = trade_date or self._last_trading_day()
-        try:
-            rows = await get_fmp_client().get_batch_eod(target)
-        except Exception as e:
-            logger.error("price_service: batch-eod failed for %s: %s: %s",
-                         target, type(e).__name__, e, exc_info=True)
+        latest_date, latest = await self._fetch_latest_session(trade_date)
+        if not latest:
+            logger.warning("price_service: no batch-eod session found to ingest")
             return 0
-        if not isinstance(rows, list) or not rows:
-            logger.warning("price_service: batch-eod returned no rows for %s", target)
-            return 0
+
+        # The session before it. Walking back from `latest_date` rather than from today,
+        # so a holiday run does not silently pair two non-adjacent sessions.
+        prev_date, prev_rows = await self._fetch_latest_session(
+            self._step_back(latest_date)
+        )
+        prev_by_symbol = {
+            (r.get("symbol") or "").upper(): _finite(r.get("close"))
+            for r in prev_rows
+        }
+        if not prev_by_symbol:
+            logger.warning(
+                "price_service: no prior session before %s — change %% will be unknown "
+                "until the next successful ingest", latest_date,
+            )
 
         payload: List[Dict[str, Any]] = []
         skipped_blocked = 0
-        for row in rows:
+        for row in latest:
             sym = (row.get("symbol") or "").upper()
             if not sym:
                 continue
@@ -441,32 +538,69 @@ class PriceService:
             if close is None or close <= 0:
                 continue
             volume = _finite(row.get("volume"))
+            prev_close = prev_by_symbol.get(sym)
             payload.append({
                 "symbol": sym,
-                "trade_date": row.get("date") or target,
+                "trade_date": row.get("date") or latest_date,
                 "close": close,
+                "previous_close": prev_close if (prev_close or 0) > 0 else None,
+                "previous_trade_date": prev_date if prev_close else None,
                 "volume": int(volume) if volume is not None else None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
 
         if not payload:
-            logger.warning("price_service: nothing to write for %s", target)
+            logger.warning("price_service: nothing to write for %s", latest_date)
             return 0
 
         try:
             written = await asyncio.to_thread(self._upsert_closes, payload)
         except Exception as e:
             logger.error("price_service: close upsert failed for %s: %s: %s",
-                         target, type(e).__name__, e, exc_info=True)
+                         latest_date, type(e).__name__, e, exc_info=True)
             return 0
 
+        with_prev = sum(1 for r in payload if r["previous_close"] is not None)
         logger.info(
-            "price_service: stored %d closes for %s (%d unlicensed symbols skipped)",
-            written, target, skipped_blocked,
+            "price_service: stored %d closes for %s (prev session %s on %d of them; "
+            "%d unlicensed symbols skipped)",
+            written, latest_date, prev_date, with_prev, skipped_blocked,
         )
         for key in [k for k in _cache if k.startswith("price:close:")]:
             _cache.pop(key, None)
         return written
+
+    async def _fetch_latest_session(
+        self, start_date: Optional[str] = None
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Walk back from `start_date` to the first date `batch-eod` actually has rows for.
+
+        Weekday arithmetic alone is not enough: a market holiday is a weekday with no
+        session, and today — Labor Day — is exactly that. Rather than carry a holiday
+        calendar, ask the data. Bounded so a persistent upstream outage cannot spin.
+        """
+        target = start_date or self._last_trading_day()
+        fmp = get_fmp_client()
+        for _ in range(_MAX_SESSION_LOOKBACK):
+            try:
+                rows = await fmp.get_batch_eod(target)
+            except Exception as e:
+                logger.error("price_service: batch-eod failed for %s: %s: %s",
+                             target, type(e).__name__, e, exc_info=True)
+                return target, []
+            if rows:
+                return target, rows
+            logger.info("price_service: no session on %s, stepping back", target)
+            target = self._step_back(target)
+        return target, []
+
+    @staticmethod
+    def _step_back(iso_date: str) -> str:
+        """The previous weekday before `iso_date` (holidays are handled by the caller)."""
+        d = date.fromisoformat(iso_date) - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d.isoformat()
 
     @staticmethod
     def _upsert_closes(payload: List[Dict[str, Any]]) -> int:
@@ -506,3 +640,20 @@ def get_price_service() -> PriceService:
     if _price_service is None:
         _price_service = PriceService()
     return _price_service
+
+
+def price_source(owner: Any = None) -> Any:
+    """The price primitive for `owner`, honouring an injected stand-in.
+
+    Services hold their upstream as `self.fmp`, and dozens of tests drive them by
+    assigning a fake to it. Prices no longer come from that client, so those tests need a
+    seam of their own — this is it: set `svc.price` and every price read on that instance
+    goes through it.
+
+    An explicit, documented seam rather than monkeypatching a module global, because the
+    fakes in question are built inside helper functions where `monkeypatch` is not in
+    scope, and an instance attribute needs no teardown to stay isolated between tests.
+    Production never sets `price`, so `owner` falls through to the singleton.
+    """
+    injected = getattr(owner, "price", None)
+    return injected if injected is not None else get_price_service()

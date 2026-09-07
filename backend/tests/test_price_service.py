@@ -112,33 +112,33 @@ async def test_single_quote_carries_change_and_derives_previous_close(monkeypatc
 @pytest.mark.parametrize("symbol", ["^GSPC", "GCUSD", "BTCUSD", "EURUSD"])
 async def test_blocked_symbols_return_none_without_calling_fmp(monkeypatch, symbol):
     fake = _install(monkeypatch, _FakeFMP())
-    assert await PriceService().get_quote(symbol) is None
+    assert await PriceService().get_quote(symbol) == {}
     assert fake.profile_calls == [], "an unlicensed symbol must not reach FMP at all"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [{}, [], None])
-async def test_empty_profile_yields_none_not_a_zero_quote(monkeypatch, payload):
+async def test_empty_profile_yields_an_empty_dict_not_a_zero_quote(monkeypatch, payload):
     fake = _FakeFMP()
     fake.profiles = {"AAPL": payload}
     _install(monkeypatch, fake)
-    assert await PriceService().get_quote("AAPL") is None
+    assert await PriceService().get_quote("AAPL") == {}
 
 
 @pytest.mark.asyncio
-async def test_upstream_failure_degrades_to_none(monkeypatch):
+async def test_upstream_failure_degrades_to_an_empty_quote(monkeypatch):
     class _Boom(_FakeFMP):
         async def get_company_profile(self, ticker):
             raise RuntimeError("upstream down")
     _install(monkeypatch, _Boom())
-    assert await PriceService().get_quote("AAPL") is None
+    assert await PriceService().get_quote("AAPL") == {}
 
 
 @pytest.mark.asyncio
 async def test_blank_symbol_is_not_a_request(monkeypatch):
     fake = _install(monkeypatch, _FakeFMP())
     for bad in ["", "   ", None]:
-        assert await PriceService().get_quote(bad) is None
+        assert await PriceService().get_quote(bad) == {}
     assert fake.profile_calls == []
 
 
@@ -292,3 +292,143 @@ async def test_ingest_of_an_empty_session_writes_nothing(monkeypatch):
 ])
 def test_last_trading_day_skips_weekends(today, expected):
     assert PriceService._last_trading_day(today) == expected
+
+
+# ── the denominator bug (migration 158) ────────────────────────────────────────────
+#
+# Found by cross-checking the batch path against `profile`: the batch path called AAPL
+# flat (+0.00%) at the same instant `profile` reported -2.51%. Both were reading correct
+# data — the batch path was just dividing by the wrong session.
+
+@pytest.mark.parametrize("price,close,prev,expected,why", [
+    # Market OPEN: the live price has moved off the stored close, so that close is the
+    # session boundary and the right denominator.
+    (110.0, 100.0, 90.0, 100.0, "open market uses the latest close"),
+    # Market CLOSED: the live price IS the latest close. Using it would give exactly
+    # 0.00% — the bug. The session before it is the right denominator.
+    (100.0, 100.0, 90.0, 90.0, "closed market must step back one session"),
+    # Float round-tripping through JSON and Postgres NUMERIC must not read as "moved".
+    (100.0000000001, 100.0, 90.0, 90.0, "epsilon tolerance, still 'equal'"),
+    # Degraded rows: an unknown denominator is None, never a silent substitute.
+    (100.0, 100.0, None, None, "no prior session -> unknown, not 0%"),
+    (110.0, None, 90.0, 90.0, "no latest close -> fall back to the prior one"),
+    (None, 100.0, 90.0, None, "no price -> nothing to compare"),
+    (100.0, None, None, None, "nothing stored at all"),
+])
+def test_denominator_picks_the_session_before_the_price(price, close, prev, expected, why):
+    snap = {"close": close, "previous_close": prev}
+    assert PriceService._pick_denominator(price, snap) == expected, why
+
+
+def test_denominator_with_no_snapshot_row_is_unknown():
+    assert PriceService._pick_denominator(100.0, None) is None
+
+
+@pytest.mark.asyncio
+async def test_closed_market_reports_the_last_sessions_move_not_zero(monkeypatch):
+    """THE REGRESSION. Overnight, at weekends and on holidays, price == close.
+
+    Before 158 this produced +0.00% on every tile — a fabricated flat market, and the
+    exact failure class `price_service` exists to prevent.
+    """
+    _install(monkeypatch, _FakeFMP(screener=[_screener_row("AAPL", 319.97)]))
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: [
+        {"symbol": "AAPL", "close": 319.97, "previous_close": 328.21},
+    ]))
+    q = (await PriceService().get_quotes(["AAPL"]))["AAPL"]
+    assert q["change"] == pytest.approx(-8.24, abs=0.01)
+    assert q["changePercentage"] == pytest.approx(-2.51, abs=0.01), (
+        "must match what FMP profile reports for the same instant"
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_market_measures_from_the_previous_close(monkeypatch):
+    _install(monkeypatch, _FakeFMP(screener=[_screener_row("AAPL", 330.0)]))
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: [
+        {"symbol": "AAPL", "close": 319.97, "previous_close": 328.21},
+    ]))
+    q = (await PriceService().get_quotes(["AAPL"]))["AAPL"]
+    assert q["previousClose"] == 319.97, "an in-progress session measures from yesterday"
+    assert q["changePercentage"] == pytest.approx((330.0 / 319.97 - 1) * 100, abs=0.01)
+
+
+# ── two-session ingest ─────────────────────────────────────────────────────────────
+
+def _eod(symbol: str, d: str, close: float):
+    return {"symbol": symbol, "date": d, "close": close, "volume": 1000}
+
+
+class _SessionFMP(_FakeFMP):
+    """batch-eod keyed by date, so holiday gaps can be simulated."""
+
+    def __init__(self, sessions):
+        super().__init__()
+        self.sessions = sessions
+        self.requested: List[str] = []
+
+    async def get_batch_eod(self, trade_date):
+        self.requested.append(trade_date)
+        return self.sessions.get(trade_date, [])
+
+
+@pytest.mark.asyncio
+async def test_ingest_pairs_the_two_most_recent_sessions(monkeypatch):
+    captured: List[Dict[str, Any]] = []
+    _install(monkeypatch, _SessionFMP({
+        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
+        "2026-09-03": [_eod("AAPL", "2026-09-03", 328.21)],
+    }))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 1
+    row = captured[0]
+    assert row["close"] == 319.97
+    assert row["previous_close"] == 328.21
+    assert row["previous_trade_date"] == "2026-09-03"
+
+
+@pytest.mark.asyncio
+async def test_ingest_walks_back_over_a_market_holiday(monkeypatch):
+    """A holiday is a weekday with no session — Labor Day is how this was found."""
+    fake = _install(monkeypatch, _SessionFMP({
+        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
+        "2026-09-03": [_eod("AAPL", "2026-09-03", 328.21)],
+        # 2026-09-07 (Mon) is Labor Day: a weekday with no rows at all.
+    }))
+    monkeypatch.setattr(PriceService, "_upsert_closes", staticmethod(lambda p: len(p)))
+    assert await PriceService().refresh_close_snapshot("2026-09-07") == 1
+    assert "2026-09-07" in fake.requested, "it must try the holiday first"
+    assert "2026-09-04" in fake.requested, "then step back to the real session"
+
+
+@pytest.mark.asyncio
+async def test_ingest_stores_a_close_even_when_the_prior_session_is_missing(monkeypatch):
+    """Half the data is better than none: price still renders, change % reads unknown."""
+    captured: List[Dict[str, Any]] = []
+    _install(monkeypatch, _SessionFMP({"2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)]}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 1
+    assert captured[0]["close"] == 319.97
+    assert captured[0]["previous_close"] is None
+    assert captured[0]["previous_trade_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_lookback_is_bounded(monkeypatch):
+    """An upstream returning nothing forever must terminate, not spin."""
+    fake = _install(monkeypatch, _SessionFMP({}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    assert len(fake.requested) <= 12, f"unbounded lookback: {len(fake.requested)} calls"
+
+
+@pytest.mark.parametrize("start,expected", [
+    ("2026-09-07", "2026-09-04"),   # Mon -> Fri
+    ("2026-09-04", "2026-09-03"),   # Fri -> Thu
+    ("2026-09-08", "2026-09-07"),   # Tue -> Mon (holiday handled by the data, not here)
+])
+def test_step_back_skips_weekends(start, expected):
+    assert PriceService._step_back(start) == expected

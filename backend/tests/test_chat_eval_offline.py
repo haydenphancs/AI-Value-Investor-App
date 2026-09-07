@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.chat_service import ChatService
+from _price_fakes import PriceFromFMPFake
 
 
 class _FakeGemini:
@@ -35,6 +36,7 @@ def _make_service(*, chunks=None, profit=None, snapshot=None, profile=None,
     svc = object.__new__(ChatService)
     svc.supabase = None
     svc.fmp = None
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.gemini = _FakeGemini(raises=embed_raises)
 
     svc._get_recent_messages = lambda session_id, limit=10: list(history or [])

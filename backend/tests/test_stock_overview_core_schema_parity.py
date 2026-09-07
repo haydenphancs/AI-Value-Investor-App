@@ -30,6 +30,7 @@ from app.services.stock_overview_service import (
     _cache,
     _get_market_status,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # The exact snake_case keys the iOS StockOverviewCoreResponseDTO.CodingKeys decode.
@@ -123,6 +124,7 @@ async def test_get_overview_core_only_calls_quote_and_profile_on_daily():
     svc = StockOverviewService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     # Daily range → _get_volatile fetches NO chart (would come from the slow
     # bundle in the full path); core ships an empty chart. Exactly 2 FMP calls.
@@ -150,6 +152,7 @@ async def test_get_overview_core_degrades_on_partial_failure():
             raise RuntimeError("quote upstream down")
 
     svc.fmp = _ProfileOnlyFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     # Quote fails, profile succeeds → still returns a valid response (price falls
     # back to the profile), never raises.
     resp = await svc.get_overview_core("NVDA", chart_range="3M")
@@ -171,6 +174,7 @@ async def test_get_overview_core_no_slow_historical_on_all_or_5y(rng):
     svc = StockOverviewService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     resp = await svc.get_overview_core("NVDA", chart_range=rng)
 
@@ -209,6 +213,7 @@ async def test_get_overview_core_refuses_to_invent_a_price_when_there_is_none():
 
     svc = StockOverviewService()
     svc.fmp = _NaNFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     with pytest.raises(FMPUnavailableException):
         await svc.get_overview_core("NVDA", chart_range="3M")
 
@@ -233,6 +238,7 @@ async def test_get_overview_core_still_strips_non_finite_from_a_usable_response(
 
     svc = StockOverviewService()
     svc.fmp = _PartialNaNFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     resp = await svc.get_overview_core("NVDA", chart_range="3M")
     assert resp.current_price == 182.5
     assert _m.isfinite(resp.price_change) and _m.isfinite(resp.price_change_percent)
@@ -255,6 +261,7 @@ async def test_get_overview_core_fetches_intraday_chart_on_1d():
 
     svc = StockOverviewService()
     svc.fmp = _IntradayFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     resp = await svc.get_overview_core("NVDA", chart_range="1D")
     # Intraday fetch happened (fast) and never a historical/fundamentals call.
     assert "get_intraday_prices" in svc.fmp.calls

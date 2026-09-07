@@ -417,7 +417,7 @@ async def _run_close_snapshot_loop():
     an idempotent upsert keyed on symbol, so re-running it inside the same session simply
     rewrites identical rows.
     """
-    from app.services.price_service import get_price_service
+    from app.services.price_service import price_source
 
     # Stagger past the startup burst — this is the heaviest single upstream call in the
     # app and must not compete with the pre-warmers for the first seconds of a deploy.
@@ -425,7 +425,7 @@ async def _run_close_snapshot_loop():
 
     while True:
         try:
-            written = await get_price_service().refresh_close_snapshot()
+            written = await price_source().refresh_close_snapshot()
             if written == 0:
                 # Expected on a market holiday (batch-eod has no rows for a non-session
                 # date) — the previous snapshot stays valid, because the last real close

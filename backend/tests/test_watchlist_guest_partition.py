@@ -7,6 +7,13 @@ introduced to fix for Learn progress (066/067), never extended here.
 
 The failure mode is SILENT — no error, just other people's data — so the wiring is
 pinned by source inspection rather than left to review.
+
+⚠️ ACCOUNT-ONLY SINCE 2026-09-07. The guest half of that story is over: FMP's signed Order
+Form grants End-User Display Rights only, so market data — which is what `watchlist_items`
+drives on the Tracking tab — may be shown solely to a signed-in caller. The partitioning
+tests below are inverted accordingly. What is NOT over is the bug class: an identity that
+more than one caller can hold is still a cross-user data leak, so the assertions now pin the
+absence of any such identity rather than the correctness of the per-install one.
 """
 
 import inspect
@@ -18,69 +25,77 @@ from app.dependencies import GUEST_USER_ID, get_watchlist_identity, guest_user_i
 
 # ── the dependency itself ────────────────────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_two_guest_installs_get_different_identities(monkeypatch):
-    import app.dependencies as deps
+def _strip_py_comments(src: str) -> str:
+    """Source with its docstring and every `#` comment removed (testing.md §3 rule 1).
 
-    async def _guest(*a, **kw):
-        return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+    Load-bearing here: this file's prose narrates the guest history it now asserts is gone,
+    so an un-stripped scan for `guest_user_id_for` would fail on a docstring, and one for its
+    absence would pass on a docstring after a real revert.
+    """
+    import ast
+    import textwrap
 
-    monkeypatch.setattr(deps, "get_current_user_or_guest", _guest)
-
-    a = await get_watchlist_identity(None, "install-A", None)
-    b = await get_watchlist_identity(None, "install-B", None)
-
-    assert a["id"] != b["id"], "two guest installs collapsed to one watchlist"
-    assert a["id"] != GUEST_USER_ID
-    # Hashed, never the raw client-supplied string.
-    assert "install-A" not in a["id"]
-    # The flag matters MORE here than anywhere: this wrapper backs 20 routes (portfolios,
-    # tracking, watchlist, home /dashboard, updates /tabs), and it shipped without it. Because
-    # a per-install uuid5 never equals the sentinel, the obvious `user["id"] == GUEST_USER_ID`
-    # test classifies every guest as a paying account — which is how a free feature ends up
-    # answering 402 against a `user_credits` row that does not exist. That trap has fired three
-    # times; `user.get("is_guest")` is the prescribed test and it must be truthy here.
-    assert a.get("is_guest") is True
-    assert b.get("is_guest") is True
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
+    body = getattr(fn, "body", None)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        fn.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
 
 
 @pytest.mark.asyncio
-async def test_a_signed_in_account_always_wins(monkeypatch):
-    """A real account must never be re-bucketed by a client-supplied header —
-    otherwise rotating X-Guest-Id would detach a user from their own watchlist."""
-    import app.dependencies as deps
+async def test_a_signed_in_account_passes_through_flagged_not_guest(monkeypatch):
+    """A real account's row survives the wrapper intact, with `is_guest` present-and-FALSE.
 
-    async def _real(*a, **kw):
-        return {"id": "real-user-1", "email": "u@example.com", "tier": "pro"}
-
-    monkeypatch.setattr(deps, "get_current_user_or_guest", _real)
-
-    got = await get_watchlist_identity(None, "install-A", None)
+    Was `test_a_signed_in_account_always_wins`, which proved a client-supplied X-Guest-Id
+    could not re-bucket a signed-in user. There is no bucket to be re-assigned to now, but the
+    second half of that test is MORE load-bearing than before: `whales.py:130` reads
+    `bool(user.get("is_guest", True))` — absent means DENY — so a wrapper that returned a bare
+    account row would classify every signed-in user as a guest and silently disable whale
+    force-refresh for the whole user base.
+    """
+    got = await get_watchlist_identity(
+        user={"id": "real-user-1", "email": "u@example.com", "tier": "pro"}
+    )
     assert got["id"] == "real-user-1"
-    # And the flag must be present-and-false, not absent: a caller reading
-    # `user.get("is_guest")` has to be able to tell a real account apart from a wrapper that
-    # simply forgot to set it.
+    assert got["tier"] == "pro", "the wrapper must not shadow the account's tier"
+    assert "is_guest" in got, "callers default is_guest to True (deny) when it is absent"
     assert got.get("is_guest") is False
 
 
-@pytest.mark.asyncio
-async def test_headerless_clients_keep_the_legacy_shared_bucket(monkeypatch):
-    """Back-compat: a client that sends no X-Guest-Id still resolves to the shared
-    sentinel, so already-shipped builds keep seeing the rows they created."""
-    import app.dependencies as deps
+def test_the_watchlist_identity_can_no_longer_produce_a_guest():
+    """No guest branch survives in the wrapper — neither per-install nor the shared sentinel.
 
-    async def _guest(*a, **kw):
-        return {"id": GUEST_USER_ID, "email": "guest@local", "tier": "free"}
+    Replaces `test_two_guest_installs_get_different_identities` and
+    `test_headerless_clients_keep_the_legacy_shared_bucket`. Both asserted the guest product
+    that FMP's End-User Display licence removed: market data may be shown only "through the
+    Licensee's authenticated platform", and `watchlist_items` rows drive the Tracking tab's
+    prices.
 
-    monkeypatch.setattr(deps, "get_current_user_or_guest", _guest)
-
-    got = await get_watchlist_identity(None, None, None)
-    assert got["id"] == GUEST_USER_ID
+    Source-scanned rather than called, because the absence of a branch is not observable from
+    the outside — a wrapper can compute a synthetic id and simply not return it on the paths a
+    behavioural test exercises. Comment-stripped: this file's own prose names both symbols, so
+    an un-stripped scan would fail on the docstring above it.
+    """
+    code = _strip_py_comments(inspect.getsource(get_watchlist_identity))
+    assert "guest_user_id_for" not in code
+    assert "GUEST_USER_ID" not in code
 
 
 def test_identity_is_deterministic_across_restarts():
-    """The id must survive app restarts and backend deploys, or a guest loses their
-    watchlist every time the process cycles."""
+    """`guest_user_id_for` outlives the guest product — it is the RATE-LIMIT bucket key.
+
+    Kept deliberately, and this test with it. `RateLimitChecker` and `identity_key` use it to
+    bucket unauthenticated callers, and after the sign-in wall `/auth/login` and
+    `/auth/register` are the only unauthenticated surface in the app — precisely the one that
+    most needs a per-caller key. Delete the function and every anonymous caller shares one
+    bucket, so one attacker exhausts everyone's login allowance.
+    """
     assert guest_user_id_for("install-A") == guest_user_id_for("install-A")
 
 

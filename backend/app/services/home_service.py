@@ -27,6 +27,7 @@ from app.schemas.home import (
     RecentResearchResponse,
     HomeFeedResponse,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ class HomeService:
         async def _fetch_one(cfg: Dict[str, str]) -> Optional[MarketTickerResponse]:
             try:
                 quote, sparkline = await asyncio.gather(
-                    self.fmp.get_stock_price_quote(cfg["symbol"]),
+                    price_source().get_quote(cfg["symbol"]),
                     self._get_sparkline(cfg["symbol"]),
                 )
                 if not quote:
@@ -268,7 +269,7 @@ class HomeService:
 
         # 2. Fallback: derive from S&P 500 quote
         try:
-            quote = await self.fmp.get_stock_price_quote("^GSPC")
+            quote = await price_source(self).get_quote("^GSPC")
             if not quote:
                 return None
 

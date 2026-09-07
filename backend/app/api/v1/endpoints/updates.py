@@ -61,6 +61,7 @@ from app.services.news_insight_service import (
     select_recent_corpus,
     get_news_insight_service,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ async def get_updates_tabs(
         # Watchlist tickers only — the Market pill carries no change %, so
         # MARKET_INDEX_SYMBOL would be a quote nobody reads. `_bulk` returns []
         # for an empty list, so a user with no watchlist skips the call entirely.
-        for q in await fmp.get_batch_quotes_bulk(tickers):
+        for q in await price_source().get_quotes_list(tickers):
             sym = q.get("symbol")
             if sym:
                 quotes[str(sym).upper()] = q

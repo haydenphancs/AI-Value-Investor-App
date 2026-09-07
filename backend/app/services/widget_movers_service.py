@@ -99,6 +99,7 @@ from app.utils.market_hours import (
     session_phase,
     session_trading_date,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -1306,7 +1307,7 @@ class WidgetMoversService:
         return ranked, cards, news_available, index_rows
 
     async def _quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        rows = await get_fmp_client().get_batch_quotes_bulk(symbols)
+        rows = await price_source(self).get_quotes_list(symbols)
         out: Dict[str, Dict[str, Any]] = {}
         for r in rows or []:
             sym = str(r.get("symbol") or "").upper()

@@ -44,6 +44,7 @@ from app.services.news_insight_service import (
 )
 from app.services.news_cache_service import MARKET_SCOPE
 from app.services.updates_insight_sweeper import InsightSweeper
+from _price_fakes import PriceFromFMPFake
 
 NOW = datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
 
@@ -266,6 +267,7 @@ class _StubSweeper(InsightSweeper):
     def __init__(self, supabase):
         self.supabase = supabase
         self.fmp = None
+        self.price = PriceFromFMPFake(self.fmp)
         self.news = None
         self.insights = None
         self.vol = None
@@ -314,6 +316,7 @@ class _SweepStub(InsightSweeper):
     def __init__(self):
         self.supabase = None
         self.fmp = self
+        self.price = PriceFromFMPFake(self.fmp)
         self.vol = self
         self.news = self
         self.insights = self

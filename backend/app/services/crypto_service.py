@@ -35,6 +35,7 @@ from app.schemas.crypto import (
     RelatedCryptoResponse,
 )
 from app.utils.market_hours import to_utc_instant
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -848,7 +849,7 @@ class CryptoService:
         coin_data_task = self._get_coin_fundamentals(symbol)
         hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
         news_task = self.fmp.get_stock_news(fmp_symbol, limit=10)
-        related_task = self.fmp.get_batch_quotes_bulk(related_fmp_symbols)
+        related_task = price_source(self).get_quotes_list(related_fmp_symbols)
 
         coin_data, hist_raw, news_raw, related_raw = await asyncio.gather(
             coin_data_task, hist_task, news_task, related_task,

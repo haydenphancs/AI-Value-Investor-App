@@ -13,6 +13,7 @@ from app.services.volatility_cache_service import (
     _chronological_closes,
     _sigma_from_closes,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Parsing FMP historical → chronological closes ─────────────────────────
@@ -89,6 +90,7 @@ class _NoDBService(VolatilityCacheService):
     def __init__(self):
         self.supabase = None   # any DB access raises → _select_fresh returns {}
         self.fmp = None
+        self.price = PriceFromFMPFake(self.fmp)
 
 
 @pytest.mark.asyncio

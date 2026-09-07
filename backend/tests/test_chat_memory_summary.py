@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services.chat_service import ChatService
+from _price_fakes import PriceFromFMPFake
 
 BASE = datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -78,6 +79,7 @@ def _svc(gemini, supabase=None):
     s.gemini = gemini
     s.supabase = supabase
     s.fmp = None
+    s.price = PriceFromFMPFake(s.fmp)
     return s
 
 

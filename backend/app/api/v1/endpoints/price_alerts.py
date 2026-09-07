@@ -36,6 +36,7 @@ from app.services.price_alert_service import (
     PriceAlertUnavailable,
     get_price_alert_service,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ async def create_price_alert(
     """
     seed = None
     try:
-        quotes = await get_fmp_client().get_batch_quotes_bulk([request.ticker.upper()])
+        quotes = await price_source().get_quotes_list([request.ticker.upper()])
         for q in quotes or []:
             if str(q.get("symbol") or "").upper() == request.ticker.upper():
                 seed = finite_price(q.get("price"))

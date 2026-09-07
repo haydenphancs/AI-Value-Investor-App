@@ -62,6 +62,7 @@ from app.services.holders_service import get_holders_service
 from app.config import settings
 from app.dependencies import get_current_user, StandardRateLimit
 from app.services.ticker_data_cache import warm_ticker_collection
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -740,7 +741,7 @@ async def get_stock_quote(ticker: str):
     fmp = get_fmp_client()
     try:
         results = await asyncio.gather(
-            fmp.get_stock_price_quote(ticker),
+            price_source().get_quote(ticker),
             fmp.get_income_statement(ticker, period="quarter", limit=4),
             fmp.get_shares_float(ticker),
             fmp.get_company_profile(ticker),

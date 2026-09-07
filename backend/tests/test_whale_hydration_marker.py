@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.integrations.fmp import FMPClient, FMPRateLimitException
 from app.services import notification_jobs as nj
+from _price_fakes import PriceFromFMPFake
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ def _make_hydrator(*, fmp, sb):
 
     h = object.__new__(WhaleHydrator)
     h.fmp = fmp
+    h.price = PriceFromFMPFake(h.fmp)
     h.gemini = MagicMock()
     h.force = False
     h.dry_run = False

@@ -21,6 +21,7 @@ import pytest
 
 from app.services import tracking_service as tsvc
 from app.services.tracking_service import TrackingService
+from _price_fakes import PriceFromFMPFake
 
 
 _RECENT = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
@@ -58,6 +59,7 @@ async def test_analyst_surfaces_every_material_change_per_ticker():
             _grade("Morgan Stanley", "upgrade", "Neutral", "Overweight"),
         ]
     })
+    svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_analyst_rating_alerts(["CRM"])
     assert len(alerts) == 1
     items = alerts[0].analyst_rating_items
@@ -77,6 +79,7 @@ async def test_analyst_dedups_same_firm_multiple_rows():
             _grade("Goldman Sachs", "upgrade", "Neutral", "Buy"),  # dup firm
         ]
     })
+    svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_analyst_rating_alerts(["CRM"])
     assert len(alerts) == 1
     assert len(alerts[0].analyst_rating_items) == 1
@@ -89,6 +92,7 @@ async def test_analyst_maintains_are_filtered_out():
     svc.fmp = _GradesFMP({
         "CRM": [_grade("Barclays", "maintain", "Buy", "Buy")]  # non-material
     })
+    svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_analyst_rating_alerts(["CRM"])
     assert alerts == []
 
@@ -196,6 +200,7 @@ async def test_insider_items_order_by_exact_amount_not_label():
         "X": [_tx(9_999, 100.0, "Alice Smith")],     # 999_900
         "Y": [_tx(10_400, 100.0, "Bob Jones")],      # 1_040_000
     })
+    svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_insider_transaction_alerts(["X", "Y"])
     sold = [a for a in alerts if a.action == "sold"]
     assert len(sold) == 1
@@ -208,5 +213,6 @@ async def test_insider_items_order_by_exact_amount_not_label():
 async def test_insider_below_threshold_is_dropped():
     svc = TrackingService()
     svc.fmp = _InsiderFMP({"Z": [_tx(100, 100.0, "Tiny Trader")]})  # $10K < $100K
+    svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_insider_transaction_alerts(["Z"])
     assert alerts == []

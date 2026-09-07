@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # `ticker_news_cache` is owned by NewsCacheService; borrow ITS ttl so the two writers cannot
 # drift. A longer value here silently freezes the News tab (see `_persist_articles`).
 from app.services.news_cache_service import CACHE_TTL_HOURS as _NEWS_CACHE_TTL_HOURS
+from app.services.price_service import price_source
 
 _NEWS_CACHE_TTL = timedelta(hours=_NEWS_CACHE_TTL_HOURS)
 
@@ -573,7 +574,7 @@ class SentimentService:
     ) -> Dict[str, Any]:
         """Fetch real-time quote for price momentum scoring."""
         try:
-            return await self.fmp.get_stock_price_quote(ticker)
+            return await price_source(self).get_quote(ticker)
         except Exception as e:
             logger.warning(f"Price data fetch failed for {ticker}: {e}")
             return {}

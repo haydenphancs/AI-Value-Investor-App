@@ -36,6 +36,7 @@ from app.services.benchmark_math import (
     overlapping_cagrs,
 )
 from app.utils.market_hours import to_utc_instant
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -654,7 +655,7 @@ class CommodityService:
         if cached is not None:
             return cached
         try:
-            quote = await self.fmp.get_stock_price_quote(fmp_symbol)
+            quote = await price_source(self).get_quote(fmp_symbol)
         except Exception as e:
             logger.warning(
                 "Commodity quote fetch failed for %s: %s: %s",
@@ -859,7 +860,7 @@ class CommodityService:
         if cached is not None:
             return cached
         results = await asyncio.gather(
-            *[self.fmp.get_stock_price_quote(s) for s in related_symbols],
+            *[price_source(self).get_quote(s) for s in related_symbols],
             return_exceptions=True,
         )
         related_quotes = [

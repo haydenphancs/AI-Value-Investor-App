@@ -71,6 +71,7 @@ from app.services.updates_materiality import (
     finite,
 )
 from app.utils.market_hours import ET, is_market_active, session_phase
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -748,7 +749,7 @@ class InsightSweeper:
         symbols = [s for s in scopes if s != MARKET_SCOPE] + [MARKET_INDEX_SYMBOL]
         quotes_by_symbol: Dict[str, Dict[str, Any]] = {}
         try:
-            for row in await self.fmp.get_batch_quotes_bulk(symbols):
+            for row in await price_source(self).get_quotes_list(symbols):
                 sym = row.get("symbol")
                 if sym:
                     quotes_by_symbol[str(sym).upper()] = row

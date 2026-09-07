@@ -1077,6 +1077,7 @@ def test_enforce_answer_actually_redacts_what_reasoning_would_leak():
 
 import re as _re
 from pathlib import Path as _Path
+from _price_fakes import PriceFromFMPFake
 
 _IOS = _Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
 
@@ -1418,6 +1419,7 @@ async def test_browsing_every_range_shares_one_history_fetch(monkeypatch):
     _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     for rng in ["1D", "1W", "3M", "6M", "1Y", "5Y", "ALL"]:
         await svc.get_commodity_detail("GCUSD", chart_range=rng)
@@ -1451,6 +1453,7 @@ async def test_daily_and_aggregated_ranges_need_no_extra_fetch(monkeypatch):
     _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     await svc.get_commodity_detail("GCUSD", chart_range="3M")
     baseline = dict(calls)
@@ -1472,6 +1475,7 @@ async def test_sections_have_distinct_ttls_not_one_flat_300(monkeypatch):
     _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, _ = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
     await svc.get_commodity_detail("GCUSD", chart_range="3M")
 
     ttls = {k: entry[2] for k, entry in M._cache.items()}
@@ -1591,6 +1595,7 @@ async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypat
     _isolate_tier2(monkeypatch, store)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, calls = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
     cold = await svc.get_commodity_detail("GCUSD", chart_range="3M")
     assert calls["hist_by_symbol"].get("GCUSD") == 1
     assert store, "nothing was persisted to tier 2"
@@ -1600,6 +1605,7 @@ async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypat
     M._inflight.clear()
     svc2 = M.CommodityService.__new__(M.CommodityService)
     svc2.fmp, calls2 = _fake_fmp_counter()
+    svc2.price = PriceFromFMPFake(svc2.fmp)
     warm = await svc2.get_commodity_detail("GCUSD", chart_range="3M")
 
     assert calls2["hist_by_symbol"].get("GCUSD") is None, \
@@ -1623,6 +1629,7 @@ async def test_an_intraday_chart_is_never_persisted(monkeypatch):
     store = _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, _ = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     await svc.get_commodity_detail("GCUSD", chart_range="1D")
     intraday = [k for k in store if ":chart:1D:" in k]
@@ -1643,6 +1650,7 @@ async def test_an_empty_history_is_not_persisted(monkeypatch):
     store = _isolate_tier2(monkeypatch)
     svc = M.CommodityService.__new__(M.CommodityService)
     svc.fmp, _ = _fake_fmp_counter()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     async def no_history(_sym):
         return []
@@ -1806,6 +1814,7 @@ def _etf_svc(monkeypatch):
     M._inflight.clear()
     svc = M.ETFService.__new__(M.ETFService)
     svc.fmp, calls = _fake_etf_fmp()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     async def _hook(self, **kw):
         return kw.get("fallback") or "A low-cost way to own the whole S&P 500."
@@ -2202,6 +2211,7 @@ def _index_svc(monkeypatch):
     M._inflight.clear()
     svc = M.IndexService.__new__(M.IndexService)
     svc.fmp, calls = _fake_index_fmp()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     # `_compute_index_pe_from_sectors` reads the shared `sector_benchmarks` table — real
     # Supabase I/O on the cold path, so the test would measure production's data.

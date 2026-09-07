@@ -21,6 +21,7 @@ from fastapi import WebSocket
 from app.config import settings
 from app.services.asset_class import detect_asset_class
 from app.integrations.fmp import get_fmp_client
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ class LivePriceManager:
         room.last_prev_close_attempt = time.monotonic()
         try:
             fmp = get_fmp_client()
-            quote = await fmp.get_stock_price_quote(room.ticker)
+            quote = await price_source(self).get_quote(room.ticker)
             pc = quote.get("previousClose", 0.0) or 0.0
             if pc and pc > 0:
                 room.previous_close = float(pc)

@@ -34,6 +34,7 @@ from app.services.signals_service import (
     _mask_symbol,
     redact_signals,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── builders ─────────────────────────────────────────────────────────────────
@@ -371,6 +372,7 @@ def _service():
     _prime_signals_cache()
     svc = HomeDashboardService()
     svc.fmp = _NoQuotesFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     return svc
 
 

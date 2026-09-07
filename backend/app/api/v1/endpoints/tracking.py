@@ -43,6 +43,7 @@ from app.services._classification_common import classification_from_profile
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService
 from app.utils.supabase_errors import is_transient_supabase_error
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ async def add_holding(
                 resolved_company_name = profile.get("companyName") or None
             classification = classification_from_profile(profile)
         if request.shares is not None and request.market_value is None:
-            quote = await fmp.get_stock_price_quote(ticker)
+            quote = await price_source().get_quote(ticker)
             if quote and quote.get("price"):
                 current_price = float(quote["price"])
     except Exception as e:

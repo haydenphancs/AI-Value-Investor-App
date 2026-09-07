@@ -45,6 +45,7 @@ from app.services.signals_service import (
 )
 from app.services import home_dashboard_service as hds
 import time as _time
+from _price_fakes import PriceFromFMPFake
 
 
 # ── 1. Schema parity ──────────────────────────────────────────────────
@@ -328,6 +329,7 @@ def _fresh_service() -> tuple[HomeDashboardService, _FakeFMP]:
     svc = HomeDashboardService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     return svc, fake
 
 

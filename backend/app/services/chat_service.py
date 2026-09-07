@@ -31,6 +31,7 @@ from app.services.chat_security import normalize_text, cap_prompt, neutralize_fe
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
 from app.services.chart_helper import _finite_or_none
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -819,7 +820,7 @@ class ChatService:
         return them as a dict matching ``StockChartWidget``.
         """
         try:
-            quote = await self.fmp.get_stock_price_quote(ticker)
+            quote = await price_source(self).get_quote(ticker)
             if not quote:
                 return {"error": f"No quote data found for {ticker}"}
 

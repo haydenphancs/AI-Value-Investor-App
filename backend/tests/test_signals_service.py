@@ -28,6 +28,7 @@ from app.services.signals_service import (
     _aggregate_whale,
     _aggregate_earnings,
 )
+from _price_fakes import PriceFromFMPFake
 
 # Fixed "now" so disclosure windowing is deterministic. 30-day window → on/after 2026-05-31.
 NOW = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
@@ -486,6 +487,7 @@ async def test_build_earnings_applies_exchange_and_market_cap_gate():
     }
     s = ssvc.SignalsService()
     s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
+    s.price = PriceFromFMPFake(s.fmp)
     g = await s._build_earnings()
     assert g is not None
     # ZOO.L never reaches quotes (foreign); OTCBIG dropped by the exchange gate; TINY by the floor.
@@ -500,4 +502,5 @@ async def test_build_earnings_none_when_no_candidate_clears_floor():
     quotes = {"TINY": {"symbol": "TINY", "marketCap": 10_000_000}}
     s = ssvc.SignalsService()
     s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
+    s.price = PriceFromFMPFake(s.fmp)
     assert await s._build_earnings() is None

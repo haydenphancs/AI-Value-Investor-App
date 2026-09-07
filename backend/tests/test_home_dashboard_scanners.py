@@ -47,6 +47,7 @@ from app.services.home_dashboard_service import (
     _short_rows,
     _volume_rows,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, **extra):
@@ -484,6 +485,7 @@ def _fresh_service(monkeypatch, *, short_pct=33.0, short_delay=0.0):
     SignalsService._cache[_SIGNALS_CACHE_KEY] = (time.time(), SignalsGroupResponse())
     s = HomeDashboardService()
     s.fmp = _FakeFMP()  # type: ignore[assignment]
+    s.price = PriceFromFMPFake(s.fmp)
 
     async def fake_si(ticker):
         if short_delay:
@@ -833,6 +835,7 @@ async def test_shorts_applies_250m_floor_and_settlement_freshness(monkeypatch):
             return {"floatShares": 10_000_000}
 
     s.fmp = _FMP()  # type: ignore[assignment]
+    s.price = PriceFromFMPFake(s.fmp)
 
     async def fake_si(ticker):
         await asyncio.sleep(0)

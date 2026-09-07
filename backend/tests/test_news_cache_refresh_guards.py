@@ -18,6 +18,7 @@ from app.services.news_cache_service import (
     REFRESH_LOOKBACK_HOURS,
     NewsCacheService,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 class _Stub(NewsCacheService):
@@ -28,6 +29,7 @@ class _Stub(NewsCacheService):
         self.supabase = self
         self.gemini = None
         self.fmp = None
+        self.price = PriceFromFMPFake(self.fmp)
         self._inflight = {}
 
     # Supabase surface used by _build_and_cache_rows

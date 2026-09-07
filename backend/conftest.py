@@ -195,3 +195,17 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001 - pytest hook sig
         )
         session.exitstatus = 1
 
+@pytest.fixture(autouse=True)
+def _isolate_price_cache():
+    """Clear `price_service`'s module-global cache between tests.
+
+    It is a process-wide dict keyed by symbol with a wall-clock TTL, so a value written
+    by one test is visible to every later one — the classic source of a suite that passes
+    in file order and fails under `pytest-randomly`. Autouse because the leak is invisible
+    at the call site: a test that never mentions prices can still be handed a cached quote
+    by a service it exercises for other reasons.
+    """
+    from app.services.price_service import _cache
+    _cache.clear()
+    yield
+    _cache.clear()

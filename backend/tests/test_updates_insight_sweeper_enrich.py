@@ -25,6 +25,7 @@ from app.services.updates_insight_sweeper import (
     _ENRICH_WINDOW_CAP,
 )
 from app.utils.market_hours import ET
+from _price_fakes import PriceFromFMPFake
 
 NOW = datetime(2026, 7, 21, 18, 0, tzinfo=timezone.utc)
 
@@ -67,6 +68,7 @@ class _StubSweeper(InsightSweeper):
         self.news = news
         self.supabase = None
         self.fmp = None
+        self.price = PriceFromFMPFake(self.fmp)
         self.insights = None
         self.vol = None
         self._enrich_day = None

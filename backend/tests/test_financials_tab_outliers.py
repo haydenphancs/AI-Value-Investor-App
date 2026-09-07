@@ -50,6 +50,7 @@ from app.services.signal_of_confidence_service import (
     _market_cap_on,
 )
 from app.utils.period_labels import extract_year, quarterly_period_label
+from _price_fakes import PriceFromFMPFake
 
 
 # ── 1. Null date / null period never crash a sorter or label builder ─────────
@@ -386,6 +387,7 @@ def _build_rev(seg, inc):
 
     svc = RevenueBreakdownService.__new__(RevenueBreakdownService)
     svc.fmp = _FakeRevFMP(seg, inc)
+    svc.price = PriceFromFMPFake(svc.fmp)
     resp, _ = asyncio.run(svc._build_revenue_breakdown("AAPL"))
     return resp
 

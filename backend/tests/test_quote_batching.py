@@ -31,6 +31,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _price_fakes import PriceFromFMPFake
 
 _APP = Path(__file__).resolve().parents[1] / "app"
 
@@ -99,6 +100,7 @@ async def test_market_pulse_issues_one_quote_request_for_every_tile():
 
     svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
     svc.fmp = _FMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     async def _no_spark(symbol, extended_hours=False):
         # (series, spark_from, spark_to). The two bounds are non-optional floats on
@@ -140,6 +142,7 @@ async def test_pulse_falls_back_per_tile_when_the_batch_fails():
 
     svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
     svc.fmp = _FMP()
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     async def _no_spark(symbol, extended_hours=False):
         # (series, spark_from, spark_to). The two bounds are non-optional floats on
@@ -181,11 +184,15 @@ async def test_portfolio_prices_are_one_request_and_drop_unpriceable_rows():
 
     svc = pi.PortfolioInsightsService.__new__(pi.PortfolioInsightsService)
     original = pi.get_fmp_client
+    original_price = pi.price_source
     pi.get_fmp_client = lambda: _FMP()
+    # Prices no longer come from the FMP client — `price_source` is the seam now.
+    pi.price_source = lambda owner=None: PriceFromFMPFake(_FMP())
     try:
         prices = await svc._fetch_prices(["ORCL", "CRM", "ZZZ", "NVDA"])
     finally:
         pi.get_fmp_client = original
+        pi.price_source = original_price
 
     assert calls["bulk"] == 1
     assert calls["single"] == 0, "still fanning out per holding"

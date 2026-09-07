@@ -38,6 +38,7 @@ from app.services._whale_common import (
     SOURCE_STOCK,
     AnnualReturn,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── builders ─────────────────────────────────────────────────────────────────
@@ -156,6 +157,7 @@ def _hydrator(sb, monkeypatch):
     # the two are indistinguishable otherwise, because every FMP method swallows its
     # exception and returns []. request_failures=0 here means "upstream healthy".
     h.fmp = SimpleNamespace(request_failures=0)
+    h.price = PriceFromFMPFake(h.fmp)
     # Mirrors WhaleHydrator.__init__. `no_data` is its own bucket so a filer that has
     # gone quiet is not averaged into "unchanged since last run"; `upstream_failed` is
     # its own bucket so an outage is never fed to a dormancy review.

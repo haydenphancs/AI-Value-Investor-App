@@ -51,6 +51,7 @@ from app.schemas.holders import (
     TopInsiderSchema,
     TopInstitutionSchema,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +429,7 @@ class HoldersService:
             stock_splits,
         ) = await asyncio.gather(
             self.fmp.get_shares_float(ticker),
-            self.fmp.get_stock_price_quote(ticker),
+            price_source(self).get_quote(ticker),
             self.fmp.get_institutional_holder(ticker, limit=20),
             self.fmp.get_institutional_ownership_summary(ticker),
             self.fmp.get_institutional_ownership_for_quarter(ticker, data_year, data_quarter),

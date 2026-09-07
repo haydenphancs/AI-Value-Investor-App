@@ -24,6 +24,7 @@ from app.services.tracking_service import (
     _downsample,
     _format_amount,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ════════════════════════════ _format_amount ═════════════════════════════
@@ -243,6 +244,7 @@ async def test_change_percent_reads_plural_key_for_non_stock(monkeypatch):
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed("u-crypto")
 
     assert len(feed.assets) == 1
@@ -271,6 +273,7 @@ async def test_change_percent_reads_singular_key_for_stock(monkeypatch):
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed("u-stock")
 
     assert feed.assets[0].change_percent == pytest.approx(-2.45)
@@ -381,6 +384,7 @@ async def test_non_finite_quote_field_never_reaches_the_wire(monkeypatch, bad):
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed("u-nan")
 
     # This is the exact mechanism that 500s in production.
@@ -415,6 +419,7 @@ async def test_non_finite_stored_holding_fields_are_dropped(monkeypatch):
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed("u-holding-nan")
 
     json.dumps(feed.model_dump(), allow_nan=False)
@@ -443,6 +448,7 @@ async def test_barely_negative_change_never_serializes_as_signed_zero(monkeypatc
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed(f"u-signed-{raw}")
 
     change = feed.assets[0].change_percent
@@ -678,6 +684,7 @@ async def test_feed_with_zero_resolved_quotes_is_not_cached(monkeypatch):
 
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP({})           # every quote unresolved
+    svc.price = PriceFromFMPFake(svc.fmp)
     feed = await svc.get_tracking_feed("u-degraded")
 
     assert len(feed.assets) == 1
@@ -685,5 +692,6 @@ async def test_feed_with_zero_resolved_quotes_is_not_cached(monkeypatch):
 
     # A feed that DID resolve its quotes is cached as normal.
     svc.fmp = _QuoteOnlyFMP({"ORCL": {"symbol": "ORCL", "price": 1.0, "changePercentage": 0.0}})
+    svc.price = PriceFromFMPFake(svc.fmp)
     await svc.get_tracking_feed("u-healthy")
     assert tsvc._feed_cache_get("u-healthy") is not None

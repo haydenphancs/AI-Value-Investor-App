@@ -86,6 +86,7 @@ from app.services.sector_aggregates_service import (
     get_sector_aggregates,
 )
 from app.services.agents.persona_scoring import compute_quality_score
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -643,7 +644,7 @@ class TickerReportDataCollector:
         # Each entry: (attribute_name, awaitable, default_on_failure)
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
-            ("quote", self.fmp.get_stock_price_quote(ticker), {}),
+            ("quote", price_source(self).get_quote(ticker), {}),
             # 10y annual depth (was 5) so the Fundamentals & Growth cards'
             # tap-to-expand history charts a full decade. All downstream
             # consumers use [0]/[1] or iterate — more rows only adds context.
@@ -900,7 +901,7 @@ class TickerReportDataCollector:
             try:
                 change_row, quote_row = await asyncio.gather(
                     self.fmp.get_stock_price_change(sym),
-                    self.fmp.get_stock_price_quote(sym),
+                    price_source().get_quote(sym),
                     return_exceptions=True,
                 )
                 if isinstance(change_row, Exception) or not isinstance(
@@ -3502,7 +3503,7 @@ async def refresh_wall_street_consensus_block(
         holders_service = HoldersService()
 
         quote, analyst, holders, historical = await asyncio.gather(
-            fmp.get_stock_price_quote(ticker),
+            price_source().get_quote(ticker),
             analyst_service.get_analysis(ticker),
             holders_service.get_holders(ticker),
             fmp.get_historical_prices(ticker),

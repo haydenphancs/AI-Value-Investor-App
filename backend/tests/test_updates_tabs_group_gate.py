@@ -23,6 +23,7 @@ import pytest
 
 import app.api.v1.endpoints.updates as up
 from app.services.active_group_service import ActiveGroup, ActiveGroupUnavailable
+from _price_fakes import PriceFromFMPFake
 
 _USER = "user-1"
 
@@ -65,6 +66,8 @@ def _patch(monkeypatch, *, group=None, group_raises=False, watchlist=(),
     monkeypatch.setattr(up, "get_supabase",
                         lambda: type("S", (), {"table": lambda _s, n: _Tbl()})())
     monkeypatch.setattr(up, "get_fmp_client", lambda: _FMP())
+    monkeypatch.setattr(up, "price_source",
+                        lambda owner=None: PriceFromFMPFake(_FMP()))
 
 
 def _tabs(resp):
@@ -263,11 +266,15 @@ def test_the_identity_dependency_actually_carries_a_tier():
         "get_current_user_or_guest no longer selects every users column — if `tier` is not "
         "among them, the Updates plan gate silently demotes every paying user to free"
     )
-    # Every hand-built identity dict in the module states a tier explicitly.
-    module_src = inspect.getsource(deps)
-    assert module_src.count('"tier": "free"') >= 4, (
-        "an identity dict lost its explicit tier — the gate would read None and, while that "
-        "still fails CLOSED, it would do so for reasons nobody chose"
+    # And the strict path, which is now the ONLY path. The account-only redesign removed the
+    # four hand-built guest identity dicts this used to count `"tier": "free"` in; every
+    # identity is a real `public.users` row today, so `get_current_user` is where a narrowed
+    # column list would do the damage. Asserting the old count would now pass vacuously at
+    # zero — the wrong half of the invariant survived the refactor.
+    strict_src = inspect.getsource(deps.get_current_user)
+    assert 'table("users").select("*")' in strict_src, (
+        "get_current_user no longer selects every users column — if `tier` is not among "
+        "them, the Updates plan gate silently demotes every paying user to free"
     )
 
 
@@ -365,6 +372,8 @@ async def test_quotes_are_one_bounded_call_for_the_whole_strip(monkeypatch):
 
     _patch(monkeypatch, group=_group([f"T{i:03d}" for i in range(120)]))
     monkeypatch.setattr(up, "get_fmp_client", lambda: _FMP())
+    monkeypatch.setattr(up, "price_source",
+                        lambda owner=None: PriceFromFMPFake(_FMP()))
     await up.get_updates_tabs(user=_user("free"))
 
     assert len(asked) == 1

@@ -32,6 +32,7 @@ from app.schemas.index import (
 )
 from app.database import get_supabase
 from app.utils.market_hours import market_status_fields, to_utc_instant
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -578,7 +579,7 @@ class IndexService:
         if cached is not None:
             return cached
         try:
-            quote = await self.fmp.get_stock_price_quote(symbol)
+            quote = await price_source(self).get_quote(symbol)
         except Exception as e:
             logger.warning(
                 "Index quote fetch failed for %s: %s: %s", symbol, type(e).__name__, e

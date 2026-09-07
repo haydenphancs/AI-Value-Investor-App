@@ -16,6 +16,7 @@ from app.schemas.signals_detail import (
 )
 from app.services import signals_service as ssvc
 from app.services.signals_service import SignalsService, _norm_name, _congress_role
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Fakes ──────────────────────────────────────────────────────────────
@@ -211,6 +212,7 @@ async def test_get_ticker_detail_does_not_cache_whale_transient_failure(monkeypa
     monkeypatch.setattr(ssvc, "get_supabase", boom)
     s = _svc()
     s.fmp = _FakeFMP(profile={})   # profile empty too → totally empty result
+    s.price = PriceFromFMPFake(s.fmp)
     resp = await s.get_ticker_detail("whale", "TSM")
     assert resp.holders == []                                    # degraded, not a 500
     assert "whale:TSM" not in SignalsService._detail_cache       # NOT pinned for 10 min
@@ -245,6 +247,7 @@ async def test_congress_rows_filters_and_registry_match(monkeypatch):
     ]
     s = _svc()
     s.fmp = _FakeFMP(senate=senate, house=house)
+    s.price = PriceFromFMPFake(s.fmp)
     # Registry: only Pelosi (senate) is tracked → only she is tappable. Keyed by
     # (chamber, normalized-name) so a same-named House member can't false-match.
     monkeypatch.setattr(
@@ -271,6 +274,7 @@ async def test_congress_rows_filters_and_registry_match(monkeypatch):
 async def test_congress_rows_empty_when_no_buyers(monkeypatch):
     s = _svc()
     s.fmp = _FakeFMP(senate=[], house=[])
+    s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
     rows, as_of = await s._detail_congress_rows("NVDA")
     assert rows == [] and as_of is None
@@ -288,6 +292,7 @@ async def test_get_ticker_detail_congress_wraps_header_and_holders(monkeypatch):
     s = _svc()
     s.fmp = _FakeFMP(senate=senate, house=[],
                      profile={"companyName": "NVIDIA Corp", "price": 170.0, "marketCap": 4.2e12})
+    s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
     resp = await s.get_ticker_detail("congress", "NVDA")
     assert isinstance(resp, SignalTickerDetailResponse)
@@ -304,6 +309,7 @@ async def test_get_ticker_detail_degrades_on_fmp_error(monkeypatch):
         async def get_house_latest(self, limit=1000): return []
     s = _svc()
     s.fmp = _BoomFMP()
+    s.price = PriceFromFMPFake(s.fmp)
     resp = await s.get_ticker_detail("congress", "NVDA")
     assert resp.symbol == "NVDA" and resp.holders == []   # degraded, not a 500
 
@@ -312,6 +318,7 @@ async def test_get_ticker_detail_degrades_on_fmp_error(monkeypatch):
 async def test_get_ticker_detail_unknown_kind_is_empty(monkeypatch):
     s = _svc()
     s.fmp = _FakeFMP(profile={})
+    s.price = PriceFromFMPFake(s.fmp)
     resp = await s.get_ticker_detail("bogus", "NVDA")
     assert resp.kind == "bogus" and resp.holders == []
 
@@ -464,6 +471,7 @@ async def test_congress_dedups_multiple_filings_per_member_keeps_latest(monkeypa
     ]
     s = _svc()
     s.fmp = _FakeFMP(senate=senate, house=[])
+    s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
     rows, as_of = await s._detail_congress_rows("NVDA")
     assert len(rows) == 1                          # ONE row per member (matches the card count)
@@ -480,6 +488,7 @@ async def test_congress_registry_chamber_scoped_no_false_match(monkeypatch):
               "firstName": "Nancy", "lastName": "Pelosi", "district": "CA1", "amount": "$1,001 - $15,000"}]
     s = _svc()
     s.fmp = _FakeFMP(senate=[], house=house)
+    s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map",
                         lambda: {("senate", _norm_name("Nancy Pelosi")): "whale-senate-pelosi"})
     rows, _ = await s._detail_congress_rows("NVDA")
@@ -493,6 +502,7 @@ async def test_congress_handles_missing_owner_and_district(monkeypatch):
                "firstName": "Charlie", "lastName": "Minimal", "amount": "$1,001 - $15,000"}]  # no owner/district
     s = _svc()
     s.fmp = _FakeFMP(senate=senate, house=[])
+    s.price = PriceFromFMPFake(s.fmp)
     monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
     rows, _ = await s._detail_congress_rows("NVDA")
     assert len(rows) == 1

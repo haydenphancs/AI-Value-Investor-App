@@ -27,6 +27,7 @@ output did not move — that is the regression a copy fix like this is most like
 import pytest
 
 from app.services.valuation_snapshot_service import _fmt_ratio, _fmt_pfcf
+from _price_fakes import PriceFromFMPFake
 
 
 # ── 1. The formatter: three outcomes, not two ────────────────────────
@@ -380,6 +381,7 @@ async def _compute_with(ratios_ttm, monkeypatch, bench=None, fmp=None):
                         lambda: _StubLookup(bench))
     svc = mod.ValuationSnapshotService.__new__(mod.ValuationSnapshotService)
     svc.fmp = fmp or _RatiosFMP(ratios_ttm)
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc.supabase = None
     return await svc._compute("AAPL")
 

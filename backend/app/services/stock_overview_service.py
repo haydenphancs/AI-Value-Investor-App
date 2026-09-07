@@ -46,6 +46,7 @@ from app.schemas.stock_overview import (
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
 from app.utils.market_hours import market_status_fields
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -809,7 +810,7 @@ class StockOverviewService:
         ``chart_data=None`` so the core NEVER pays the slow historical fetch
         (5Y = a multi-year daily pull; ALL = up to 5 sequential paginated pulls via
         ``_fetch_all_daily``). The full ``/overview`` supplies those charts."""
-        quote_task = self.fmp.get_stock_price_quote(ticker)
+        quote_task = price_source(self).get_quote(ticker)
 
         from app.services.chart_helper import (
             fetch_chart_data,
@@ -1703,7 +1704,7 @@ class StockOverviewService:
             if not peers:
                 return []
 
-            peer_quotes = await self.fmp.get_batch_quotes_bulk(peers)
+            peer_quotes = await price_source(self).get_quotes_list(peers)
             related = []
             for q in peer_quotes:
                 if not isinstance(q, dict):

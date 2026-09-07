@@ -33,6 +33,7 @@ from app.services.home_dashboard_service import (
     _canonical_symbol,
     _theme_change,
 )
+from _price_fakes import PriceFromFMPFake
 
 
 # ── 1. Schema parity ──────────────────────────────────────────────────
@@ -139,6 +140,7 @@ def _service_with(rows, quotes_by_symbol):
     HomeDashboardService._themes_inflight.clear()
     svc = HomeDashboardService()
     svc.fmp = _FakeThemesFMP(quotes_by_symbol)  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     svc._read_theme_rows = lambda: rows  # type: ignore[assignment]
     return svc
 
@@ -289,6 +291,7 @@ def _detail_service(quotes_by_symbol, row="__unset__"):
     HomeDashboardService._theme_detail_inflight.clear()
     svc = HomeDashboardService()
     svc.fmp = _FakeThemesFMP(quotes_by_symbol)  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     if row != "__unset__":
         svc._read_theme_row = lambda slug: row  # type: ignore[assignment]
     return svc
@@ -411,6 +414,7 @@ async def test_get_theme_detail_preserves_slug_casing_for_db_lookup():
     HomeDashboardService._theme_detail_inflight.clear()
     svc = HomeDashboardService()
     svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]  # no tickers → no quotes
+    svc.price = PriceFromFMPFake(svc.fmp)
 
     seen = {}
 
@@ -455,6 +459,7 @@ async def test_get_themes_caches_empty_successful_read():
     HomeDashboardService._themes_inflight.clear()
     svc = HomeDashboardService()
     svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     calls = {"n": 0}
 
     def _read():
@@ -477,6 +482,7 @@ async def test_get_themes_does_not_cache_on_read_error():
     HomeDashboardService._themes_inflight.clear()
     svc = HomeDashboardService()
     svc.fmp = _FakeThemesFMP({})  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     calls = {"n": 0}
 
     def _read():

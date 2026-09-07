@@ -69,6 +69,7 @@ from app.services.report_degradation import (  # noqa: E402
     _degraded_reason,
     _mark_degraded,
 )
+from app.services.price_service import price_source
 
 
 class TickerReportService:
@@ -90,7 +91,7 @@ class TickerReportService:
         """
         tasks = {
             "profile": self.fmp.get_company_profile(ticker),
-            "quote": self.fmp.get_stock_price_quote(ticker),
+            "quote": price_source(self).get_quote(ticker),
         }
         keys = list(tasks.keys())
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)

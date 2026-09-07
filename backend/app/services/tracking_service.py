@@ -48,6 +48,7 @@ from app.services._earnings_common import (
     timing_sentence,
     alert_report_time,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -557,7 +558,7 @@ class TrackingService:
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch real-time quotes for all tickers in a single FMP call."""
         try:
-            quotes = await self.fmp.get_batch_quotes_bulk(tickers)
+            quotes = await price_source(self).get_quotes_list(tickers)
             return {q["symbol"]: q for q in quotes if q.get("symbol")}
         except Exception as exc:
             logger.warning("Batch quotes failed: %s", exc)

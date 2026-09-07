@@ -242,61 +242,125 @@ async def test_lowercase_bearer_scheme_is_a_credential():
     assert user["id"] == _USER_ID
 
 
-# ── the three per-install identity wrappers inherit the rejection ────────────
+def _strip_py_comments(src: str) -> str:
+    """A function's source with its docstring and every `#` comment removed.
 
-@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
-@pytest.mark.asyncio
-async def test_identity_wrappers_reject_a_bad_token(dep):
-    """A bad token must NOT land in a per-install guest partition. Silently writing a
-    signed-in user's data into their install's guest bucket is invisible and unrecoverable —
-    the rows are simply owned by the wrong identity."""
-    with pytest.raises(HTTPException) as exc:
-        await dep(authorization=_bearer("not.a.jwt"), x_guest_id="install-A", supabase=_SB(_row()))
-    assert _code(exc.value) == "AUTH_TOKEN_INVALID"
-
-
-@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
-@pytest.mark.asyncio
-async def test_identity_wrappers_still_partition_real_guests(dep):
-    """The guest path must be untouched — this is the whole guest-first product."""
-    a = await dep(authorization=None, x_guest_id="install-A", supabase=_SB([]))
-    b = await dep(authorization=None, x_guest_id="install-B", supabase=_SB([]))
-    assert a["id"] != b["id"]
-    assert a["id"] != GUEST_USER_ID
-
-
-@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
-@pytest.mark.asyncio
-async def test_identity_wrappers_all_flag_a_guest(dep):
-    """`is_guest` must be present and TRUE on every per-install wrapper.
-
-    This is the invariant that has now failed three separate times — in research, watchlist and
-    chat. The trap: a per-install id is a uuid5 that NEVER equals `GUEST_USER_ID`, so the
-    obvious-looking `user["id"] == GUEST_USER_ID` classifies every guest as a paying account.
-    In chat that meant sending guests into a credit precharge against a `user_credits` row that
-    does not exist — a 402 "insufficient credits" on a feature that is free for them.
-
-    `user.get("is_guest")` is the prescribed test, and it only works if EVERY wrapper sets it.
-    Two of the four did not until this week, so the prescribed test read falsy on the widest
-    guest surface in the app.
+    `.claude/rules/testing.md` §3 rule 1. Acute here: the wrappers' own docstrings narrate the
+    guest history they no longer implement, so an un-stripped scan for `guest_user_id_for`
+    would fail on prose, and one for its ABSENCE would pass on prose after a real revert.
+    `ast.unparse` drops comments for free; the docstring has to be popped explicitly.
     """
-    guest = await dep(authorization=None, x_guest_id="install-A", supabase=_SB([]))
-    assert guest.get("is_guest") is True, (
-        f"{dep.__name__} does not flag a guest — `user.get('is_guest')` will read falsy and "
-        "callers following the rulebook will treat this guest as a paying account"
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(src))
+    fn = tree.body[0]
+    body = getattr(fn, "body", None)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        fn.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
+# ── the five identity wrappers are STRICT now ────────────────────────────────
+#
+# These four tests used to assert the opposite: that a tokenless caller was resolved to a
+# per-install guest, and that `is_guest` was True. FMP's signed Order Form grants only
+# Access-Restricted External Display — their market data may be shown solely "through the
+# Licensee's authenticated platform" — so the guest path is gone.
+#
+# The two bugs the originals were written to catch are NOT gone, and are re-pinned below:
+#   • a wrapper that drops `is_guest` entirely (callers default it to DENY, so absence
+#     silently disables features for real accounts — `whales.py:130`), and
+#   • a wrapper that answers a bad credential with an identity instead of a rejection.
+
+
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
+def test_identity_wrappers_delegate_to_the_strict_dependency(dep):
+    """Structural, and it is the assertion that carries the whole credential grid.
+
+    Each wrapper resolves its identity through `get_current_user`, so all five inherit
+    AUTH_REQUIRED (no credential — the client must NOT clear its Keychain),
+    AUTH_TOKEN_INVALID, AUTH_ACCOUNT_NOT_FOUND, AUTH_SESSION_EXPIRED and the retryable
+    AUTH_UNAVAILABLE 503 for free. A hand-rolled `if not token: raise 401` inside a wrapper
+    would pass any behavioural test written against it while collapsing five distinct client
+    behaviours into one — which is exactly how "you tapped something that needs an account"
+    became "your session expired" (`.claude/rules/auth.md` §3).
+    """
+    import inspect
+
+    params = inspect.signature(dep).parameters
+    assert "user" in params, (
+        f"{dep.__name__} no longer takes a resolved `user` — if it went back to reading "
+        "headers itself, it is no longer covered by the credential grid above"
+    )
+    default = params["user"].default
+    assert getattr(default, "dependency", None) is get_current_user, (
+        f"{dep.__name__} must delegate to get_current_user, found {default!r}"
     )
 
 
 @pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
 @pytest.mark.asyncio
 async def test_identity_wrappers_flag_a_real_account_as_not_guest(dep):
-    """Present-and-False, not absent. A caller must be able to tell a real account apart from
-    a wrapper that simply forgot to set the key — those are the same value to `.get()`."""
-    user = await dep(
-        authorization=_bearer(_access()), x_guest_id="install-A", supabase=_SB(_row())
-    )
+    """Present-and-False, NEVER absent — and this is a live trap, not tidiness.
+
+    `whales.py:130` reads `bool(user.get("is_guest", True))`: the default is DENY. A wrapper
+    that returned a bare `get_current_user` row would therefore classify every signed-in user
+    as a guest and silently disable whale force-refresh for the entire user base, with nothing
+    logging or failing. `.get()` cannot tell "False" from "never set", so the key must be
+    present and explicitly False.
+    """
+    user = await dep(user=dict(_row()[0]))
     assert user["id"] == _USER_ID
+    assert "is_guest" in user, (
+        f"{dep.__name__} dropped the is_guest key — callers that default it to True "
+        "(whales.py:130) will treat every real account as a guest"
+    )
     assert user.get("is_guest") is False
+
+
+@pytest.mark.parametrize("dep", _IDENTITY_WRAPPERS, ids=_IDENTITY_WRAPPER_IDS)
+@pytest.mark.asyncio
+async def test_identity_wrappers_preserve_the_account_row(dep):
+    """The wrapper adds a flag; it must not shadow or drop the row it was given.
+
+    `tier` in particular: every entitlement gate downstream reads it, and a wrapper that
+    rebuilt a fresh dict with a hardcoded "free" would silently drop every paying user to the
+    free tier with no error anywhere — the failure mode `test_updates_tabs_group_gate.py`
+    documents as "EVERY PAYING USER silently drops to one chip".
+    """
+    row = dict(_row()[0])
+    row["tier"] = "premium"
+    out = await dep(user=row)
+    assert out["tier"] == "premium"
+    assert out["email"] == row["email"]
+
+
+def test_no_identity_wrapper_can_still_mint_a_guest_partition():
+    """Source-scan: none of the five may call `guest_user_id_for` any more.
+
+    The behavioural tests above cannot see this — a wrapper could compute a synthetic id and
+    then never return it on the paths they exercise. `guest_user_id_for` itself MUST survive
+    (RateLimitChecker and identity_key use it to bucket unauthenticated callers, and after the
+    wall /auth/login is the only unauthenticated surface left), so its mere existence proves
+    nothing; what matters is that no identity dependency reaches for it.
+    """
+    import inspect
+    import re
+
+    for dep in _IDENTITY_WRAPPERS:
+        code = _strip_py_comments(inspect.getsource(dep))
+        assert "guest_user_id_for" not in code, (
+            f"{dep.__name__} still mints a per-install guest id"
+        )
+        assert not re.search(r"\bGUEST_USER_ID\b", code), (
+            f"{dep.__name__} still references the shared guest sentinel"
+        )
 
 
 # ── the deliberate carve-out ─────────────────────────────────────────────────
@@ -372,7 +436,11 @@ def test_both_generation_paths_require_an_account():
     endpoints = Path(__file__).resolve().parents[1] / "app/api/v1/endpoints"
     for name, minimum in (("research.py", 9), ("ticker_report.py", 2)):
         src = (endpoints / name).read_text()
-        assert src.count("Depends(get_current_user)") >= minimum, name
+        strict = src.count("Depends(get_current_user)") + src.count("Depends(get_current_user_id)")
+        assert strict >= minimum, (
+            f"{name}: found {strict} strict auth dependencies, expected >= {minimum}. "
+            "Every AI-generation route must take get_current_user or get_current_user_id."
+        )
         for guest_dep in ("get_current_user_or_guest", "get_research_identity"):
             assert f"Depends({guest_dep})" not in src, f"{name} still admits guests via {guest_dep}"
 
@@ -388,3 +456,25 @@ def test_the_rotatable_guest_budget_is_no_longer_consulted():
             if not line.lstrip().startswith("#")
         )
         assert "get_guest_report_budget_service" not in code, name
+
+
+# ── MUTATION_LOG — the identity-wrapper block ────────────────────────────────────────
+#
+# Hand-run 2026-09-07 when these four tests were inverted from "guests are partitioned per
+# install" to "there are no guests". Each mutation applied to app/dependencies.py, the file
+# run, then reverted. testing.md §3 rule 3 — an inverted guard that survives its own mutation
+# is worse than the guard it replaced, because it reads as coverage.
+#
+#  1. Wrapper returns `dict(user)` — the is_guest key dropped. This is the REAL regression the
+#     redesign invites, since a bare get_current_user row looks obviously correct.
+#       -> test_identity_wrappers_flag_a_real_account_as_not_guest FAILED  ✅
+#  2. Wrapper returns `{**user, "tier": "free", ...}` — the silent paid-user downgrade.
+#       -> test_identity_wrappers_preserve_the_account_row FAILED  ✅
+#  3. Wrapper regrows a guest branch calling guest_user_id_for().
+#       -> test_no_identity_wrapper_can_still_mint_a_guest_partition FAILED  ✅
+#  4. One wrapper reverted to Depends(get_current_user_or_guest) — i.e. tokenless callers are
+#     silently guests again, which is the licence breach this whole change exists to close.
+#       -> test_identity_wrappers_delegate_to_the_strict_dependency FAILED  ✅
+#  5. Anti-vacuity: `guest_user_id_for` and `GUEST_USER_ID` written into a wrapper's DOCSTRING
+#     with the code left correct.
+#       -> 46 passed ✅ — the scan reads code, not the prose that narrates the history.

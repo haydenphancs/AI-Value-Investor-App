@@ -62,6 +62,7 @@ from app.schemas.signals_detail import (
     SignalHolderResponse,
 )
 from pydantic import ValidationError
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -719,7 +720,7 @@ class SignalsService:
             return None
 
         symbols = [e.symbol for e in candidates.entries]
-        quotes = await self.fmp.get_batch_quotes_bulk(symbols)
+        quotes = await price_source(self).get_quotes_list(symbols)
         qmap = {
             _canonical_symbol(q.get("symbol")): q
             for q in quotes

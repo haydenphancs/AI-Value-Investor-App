@@ -22,6 +22,7 @@ import pytest
 import app.api.v1.endpoints.stocks as stocks
 import app.services.ticker_data_cache as tdc
 from app.config import settings
+from _price_fakes import PriceFromFMPFake
 
 
 # ── Endpoint ────────────────────────────────────────────────────────────────
@@ -95,6 +96,7 @@ class _FakeCollector:
 
     def __init__(self, fmp=None):
         self.fmp = fmp
+        self.price = PriceFromFMPFake(self.fmp)
 
     async def _collect_fresh(self, ticker):
         type(self).calls += 1

@@ -18,6 +18,7 @@ No network — the FMP client is faked and records every call.
 import pytest
 
 from app.services.earnings_service import EarningsService
+from _price_fakes import PriceFromFMPFake
 
 
 class _FakeFMP:
@@ -69,6 +70,7 @@ class _FakeFMP:
 async def test_earnings_uses_one_per_symbol_call_not_global_fanout():
     svc = EarningsService()
     svc.fmp = _FakeFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     resp = await svc._build_earnings("AAPL")
 
     fake = svc.fmp
@@ -86,6 +88,7 @@ async def test_next_earnings_date_resolves_from_per_symbol_upcoming_row():
     not the analyst-estimate quarter-end fallback (2099-06-30)."""
     svc = EarningsService()
     svc.fmp = _FakeFMP()  # type: ignore[assignment]
+    svc.price = PriceFromFMPFake(svc.fmp)
     resp = await svc._build_earnings("AAPL")
 
     assert resp.next_earnings_date is not None

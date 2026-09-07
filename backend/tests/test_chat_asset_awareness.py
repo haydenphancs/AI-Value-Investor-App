@@ -17,6 +17,7 @@ import pytest
 
 from app.services.agents import chat_tools
 from app.services.chat_service import ChatService
+from _price_fakes import PriceFromFMPFake
 
 
 def _svc() -> ChatService:
@@ -182,6 +183,7 @@ async def test_round_the_clock_assets_are_live_while_wall_street_sleeps(monkeypa
         get_historical_prices=AsyncMock(return_value=[]),
         get_company_profile=AsyncMock(return_value=None),
     )
+    svc.price = PriceFromFMPFake(svc.fmp)
     widget = await svc._fetch_stock_widget_data(symbol)
     assert widget["is_market_open"] is True
 
@@ -198,6 +200,7 @@ async def test_an_equity_still_follows_the_us_session(monkeypatch):
         get_historical_prices=AsyncMock(return_value=[]),
         get_company_profile=AsyncMock(return_value=None),
     )
+    svc.price = PriceFromFMPFake(svc.fmp)
     widget = await svc._fetch_stock_widget_data("AAPL")
     assert widget["is_market_open"] is False
 

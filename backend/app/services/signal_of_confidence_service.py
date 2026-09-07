@@ -29,6 +29,7 @@ from app.schemas.signal_of_confidence import (
     SignalOfConfidenceResponse,
     SignalOfConfidenceSummarySchema,
 )
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,7 @@ class SignalOfConfidenceService:
         ) = await asyncio.gather(
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=20),
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
-            self.fmp.get_stock_price_quote(ticker),
+            price_source(self).get_quote(ticker),
             self.fmp.get_dividend_history(ticker, limit=40),
             self.fmp.get_earning_calendar_full(ticker),
             self.fmp.get_historical_market_cap(

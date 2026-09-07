@@ -39,6 +39,7 @@ from app.schemas.etf import (
     RelatedTickerResponse,
 )
 from app.utils.market_hours import market_status_fields, to_utc_instant
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +468,7 @@ class ETFService:
         if cached is not None:
             return cached
         try:
-            quote = await self.fmp.get_stock_price_quote(symbol)
+            quote = await price_source(self).get_quote(symbol)
         except Exception as e:
             logger.warning(
                 "ETF quote fetch failed for %s: %s: %s", symbol, type(e).__name__, e
@@ -2037,7 +2038,7 @@ class ETFService:
         # ONE `batch-quote` request for the peers instead of one `/quote` each. Same
         # field set (verified live), so this is a pure call-count reduction.
         try:
-            rows = await self.fmp.get_batch_quotes_bulk(related_symbols)
+            rows = await price_source(self).get_quotes_list(related_symbols)
         except Exception as e:
             logger.warning(
                 "Related-ETF batch quote failed for %s: %s: %s",

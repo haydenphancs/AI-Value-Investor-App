@@ -43,6 +43,7 @@ from app.schemas.tracking import (
     PortfolioInsightsResponse,
 )
 from app.services.sector_benchmark_service import _normalize_sector
+from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
@@ -522,7 +523,7 @@ class PortfolioInsightsService:
         # the caller falls back to the stored `market_value` for that row — exactly what
         # a failed individual fetch did before.
         try:
-            rows = await fmp.get_batch_quotes_bulk(list(tickers))
+            rows = await price_source(self).get_quotes_list(list(tickers))
         except Exception as e:
             logger.warning(
                 "[portfolio_insights] Batch quote fetch failed for %d tickers: %s: %s",

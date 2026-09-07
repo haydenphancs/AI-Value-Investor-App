@@ -7772,12 +7772,29 @@ def build_financial_context(out: CollectedTickerData) -> str:
             parts.append(f"Description: {profile['description'][:400]}")
 
     if quote:
-        parts.append(f"\nPrice: ${quote.get('price', 0):.2f}")
+        # ⚠️ NOT `quote.get('price', 0):.2f`. Two separate defects lived in that line, and both
+        # shipped straight into the prompt of a 20-credit report:
+        #
+        #   1. CRASH. `price_service._shape()` always EMITS a `price` key and sets it to None
+        #      when `_finite()` rejects the upstream value (thin / just-listed / halted /
+        #      delisted names, and anything FMP returns NaN or Inf for). `dict.get(k, default)`
+        #      returns None for a PRESENT-but-None key — the default is only used when the key
+        #      is ABSENT — so this reached `f"{None:.2f}"` and raised
+        #      `TypeError: unsupported format string passed to NoneType.__format__`.
+        #   2. FABRICATION. `yearLow`/`yearHigh` come from the retired `quote` endpoint. They
+        #      are now parsed from `profile.range` by `price_service`, but when that band is
+        #      unparseable the keys are absent and the `, 0` default rendered
+        #      "52W Range: $0.00 - $0.00" — which the model then reasons from, e.g. "trading at
+        #      the top of its 52-week range".
+        #
+        # Every number here is either real or the literal "N/A". An LLM given "N/A" says it does
+        # not know; an LLM given $0.00 invents.
+        parts.append(f"\nPrice: {_fmt_money_or_na(quote.get('price'))}")
         parts.append(
-            f"52W Range: ${quote.get('yearLow', 0):.2f} - "
-            f"${quote.get('yearHigh', 0):.2f}"
+            f"52W Range: {_fmt_money_or_na(quote.get('yearLow'))} - "
+            f"{_fmt_money_or_na(quote.get('yearHigh'))}"
         )
-        parts.append(f"P/E (quote): {quote.get('pe', 'N/A')}")
+        parts.append(f"P/E (quote): {_fmt_or_na(quote.get('pe'))}")
 
     parts.append(f"\nAltman Z-Score: {_fmt_or_na(c.get('altman_z'))}")
     parts.append(
@@ -8034,6 +8051,22 @@ def _extract_tam_relevant_excerpt(transcript: str, head_chars: int = 2000) -> st
     if extra_chunks:
         body += "\n\n[TAM-mention paragraphs from later in the call]\n" + "\n\n".join(extra_chunks)
     return body[:5000]
+
+
+def _fmt_money_or_na(v: Any) -> str:
+    """`$123.45`, or `"N/A"` for anything that is not a real finite number.
+
+    Non-finite is rejected as well as None: FMP emits NaN/Inf for thin symbols, and
+    `f"{float('nan'):.2f}"` renders the string "nan" into the prompt, which reads to the model
+    as a value rather than as an absence.
+    """
+    if v is None or isinstance(v, bool):
+        return "N/A"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"${f:.2f}" if math.isfinite(f) else "N/A"
 
 
 def _fmt_or_na(v: Any) -> str:

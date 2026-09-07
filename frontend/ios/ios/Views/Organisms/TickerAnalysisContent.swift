@@ -32,6 +32,14 @@ struct TickerAnalysisContent: View {
                 CryptoFearGreedSection(data: fgData, selectedTimeframe: fgTimeframe)
             } else if !isFearGreedLoaded && analystRatingsData == nil {
                 analysisSectionPlaceholder(height: 280)
+            } else if let ratingsData = analystRatingsData, !ratingsData.sectionAvailable {
+                // Nothing at all. The analyst packages (grades, price targets) are outside the
+                // signed FMP licence, so we cannot ask — and `noAnalystCoverageCard` would
+                // then state that no analyst covers Apple, which is false. An empty state is
+                // honest only when the source HAS no data; when we stopped paying for it, the
+                // honest thing is to show no section. Checked BEFORE `hasCoverage`, because
+                // an unlicensed source always looks like zero coverage.
+                EmptyView()
             } else if let ratingsData = analystRatingsData, !ratingsData.hasCoverage {
                 // No analyst covers this ticker. Rendering the section anyway printed a
                 // confident "HOLD" consensus over a $0.00 low / $0.00 average / $0.00

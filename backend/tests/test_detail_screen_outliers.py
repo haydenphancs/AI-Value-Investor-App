@@ -640,6 +640,102 @@ def test_no_analyst_coverage_is_stated_not_rendered_as_a_hold():
     assert "dist_cutoff" in code and "timedelta(days=730)" in code
 
 
+def test_an_unlicensed_analyst_source_hides_the_card_instead_of_denying_coverage():
+    """"No analyst covers Apple" is a FALSE claim, and the app was making it on every ticker.
+
+    `grades` and `price-target-consensus` are outside the signed FMP licence, so `fmp.py`
+    raises `FMPNotEntitledException` before the request. Both were swallowed by
+    `asyncio.gather(return_exceptions=True)` to `[]`/`{}`, and `has_coverage` is derived from
+    emptiness — so EVERY ticker came back `has_coverage=False` and the iOS card rendered
+    "no analyst covers this". An honest empty state is right when FMP HAS no data; it is
+    misinformation when we stopped paying for it.
+
+    The two states must stay distinct: `section_available` = we cannot ask,
+    `has_coverage` = we asked and nobody covers it.
+    """
+    from app.integrations.fmp_entitlements import entitlement_error
+    from app.schemas.analyst import AnalystAnalysisResponse
+
+    # Additive + defaulted, so an older iOS build is unaffected.
+    assert AnalystAnalysisResponse.model_fields["section_available"].default is True
+
+    # The premise: both paths really are unlicensed today.
+    assert entitlement_error("grades") is not None
+    assert entitlement_error("price-target-consensus") is not None
+
+    src = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "app/services/analyst_service.py"
+    ).read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+
+    # Derived from the manifest, NOT hardcoded — so the card returns by itself if the
+    # package is ever repurchased, instead of staying dark until someone remembers.
+    assert 'entitlement_error("grades")' in code
+    assert 'entitlement_error("price-target-consensus")' in code
+    assert "section_available=section_available" in code, (
+        "the flag is computed but never returned — the response would still say has_coverage"
+    )
+    # And the two guaranteed-to-fail calls are not made.
+    assert "if section_available:" in code, (
+        "the blocked FMP calls are still issued unconditionally: two exceptions per ticker"
+    )
+
+
+def test_ios_hides_the_analyst_section_before_it_checks_coverage():
+    """Order matters: an unlicensed source always LOOKS like zero coverage.
+
+    If `hasCoverage` is tested first, the no-coverage card wins and the user is told nobody
+    covers Apple — the exact bug. Brace-bounded to the view's `body` and comment-stripped,
+    because the prose around both branches names both symbols (testing.md §3).
+    """
+    import re
+
+    view = (
+        __import__("pathlib").Path(__file__).resolve().parents[2]
+        / "frontend/ios/ios/Views/Organisms/TickerAnalysisContent.swift"
+    ).read_text()
+    code = "\n".join(
+        "" if l.strip().startswith("//") else re.sub(r"\s//.*$", "", l)
+        for l in view.splitlines()
+    )
+    start = code.index("var body: some View")
+    depth, body = 0, None
+    for i in range(code.index("{", start), len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                body = code[code.index("{", start):i + 1]
+                break
+    assert body, "could not bound TickerAnalysisContent.body"
+
+    avail = body.find("!ratingsData.sectionAvailable")
+    cover = body.find("!ratingsData.hasCoverage")
+    assert avail != -1, "the view no longer hides the section for an unlicensed source"
+    assert cover != -1, "the genuine no-coverage state was removed — it is still correct when FMP has no data"
+    assert avail < cover, (
+        "hasCoverage is checked BEFORE sectionAvailable, so an unlicensed source falls into "
+        "the no-coverage card and the app states that no analyst covers Apple"
+    )
+
+
+# ── MUTATION_LOG — the two analyst-section guards above ──────────────────────────────
+#
+# Hand-run 2026-09-07 (testing.md §3 rule 3). Each applied, the file run, then reverted.
+#
+#  1. iOS branch order swapped so `hasCoverage` is tested first — the exact shape of the bug,
+#     and the most likely accidental reintroduction, since both branches read correct alone.
+#       -> test_ios_hides_the_analyst_section_before_it_checks_coverage FAILED  ✅
+#  2. The `sectionAvailable` branch deleted outright.  -> same test FAILED  ✅
+#  3. `section_available = True` hardcoded instead of derived from the entitlement manifest.
+#       -> test_an_unlicensed_analyst_source_hides_the_card... FAILED  ✅
+#     This is the mutation that matters most: hardcoding LOOKS harmless and would leave the
+#     card permanently dark even after the package is repurchased.
+#  4. The flag computed but not passed to the response.  -> same test FAILED  ✅
+
+
 def test_a_degraded_fundamentals_bundle_is_not_pinned_for_24h():
     """The poison gate checked ONLY the profile, while the heaviest slice —
     `get_historical_prices(…, "1900-01-01", …)` — is the one FMP 429s first. A good

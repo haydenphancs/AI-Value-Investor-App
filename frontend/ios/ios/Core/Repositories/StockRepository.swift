@@ -1205,6 +1205,12 @@ struct AnalystAnalysisDTO: Codable {
     /// False when NO analyst covers this ticker. Optional + defaulted so an older
     /// backend (which never sends it) keeps the previous behaviour.
     let hasCoverage: Bool?
+    /// False when the DATA SOURCE is outside our FMP licence — a different statement from
+    /// `hasCoverage`, and the card must react differently. `hasCoverage == false` means we
+    /// asked and nobody covers this ticker; this means we cannot ask at all, and showing the
+    /// no-coverage card for it tells the user nobody covers Apple. Optional + defaulted for
+    /// the same older-backend reason.
+    let sectionAvailable: Bool?
     let totalAnalysts: Int
     let updatedDate: String
     let consensus: String
@@ -1221,6 +1227,7 @@ struct AnalystAnalysisDTO: Codable {
     enum CodingKeys: String, CodingKey {
         case symbol
         case hasCoverage = "has_coverage"
+        case sectionAvailable = "section_available"
         case totalAnalysts = "total_analysts"
         case updatedDate = "updated_date"
         case consensus
@@ -1720,6 +1727,7 @@ extension AnalystAnalysisDTO {
 
         return AnalystRatingsData(
             hasCoverage: hasCoverage ?? true,
+            sectionAvailable: sectionAvailable ?? true,
             totalAnalysts: totalAnalysts,
             updatedDate: parsedDate,
             consensus: consensusEnum,

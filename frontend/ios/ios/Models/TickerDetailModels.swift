@@ -1091,6 +1091,11 @@ struct AnalystRatingsData {
     /// $0.00 low / $0.00 average / $0.00 high target. Defaults true so nothing changes
     /// for a covered stock or an older backend.
     var hasCoverage: Bool = true
+    /// False when the analyst data source is outside our FMP licence. Distinct from
+    /// `hasCoverage` on purpose — see the DTO. The section is HIDDEN for this, not rendered
+    /// as an empty state, because "no analyst covers Apple" is a false claim while "we no
+    /// longer license analyst data" is simply not the user's business.
+    var sectionAvailable: Bool = true
     let totalAnalysts: Int
     let updatedDate: Date
     let consensus: AnalystConsensus

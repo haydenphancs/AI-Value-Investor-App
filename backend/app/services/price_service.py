@@ -125,6 +125,32 @@ def _finite(value: Any) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
+def parse_range_band(raw: Any) -> tuple[Optional[float], Optional[float]]:
+    """Split FMP /stable's ``"low-high"`` 52-week band into ``(low, high)`` floats.
+
+    `/stable` folds the 52-week band into a single string on `profile` (`"223.78-344.57"`)
+    instead of the `yearHigh`/`yearLow` numbers the retired `quote` endpoint carried. Seven
+    consumers still read those two keys — `etf_service:1024`, `index_service:1167-1169`,
+    `commodity_service:1076-1078`, `chat_service:984-992`, `stock_overview_service:972`, and
+    the report collector — so the band is parsed HERE, once, rather than at each of them.
+
+    Returns ``(None, None)`` for anything unparseable: a missing band must leave the fields
+    absent so callers show "—", never invent a number.
+    """
+    if not isinstance(raw, str):
+        return (None, None)
+    parts = raw.split("-")
+    if len(parts) != 2:
+        return (None, None)
+    try:
+        lo, hi = float(parts[0].strip()), float(parts[1].strip())
+    except (TypeError, ValueError):
+        return (None, None)
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return (None, None)
+    return (min(lo, hi), max(lo, hi))
+
+
 class PriceService:
     """Quote-shaped prices from entitled endpoints. One instance per process."""
 
@@ -143,6 +169,8 @@ class PriceService:
         avg_volume: Optional[float],
         market_cap: Optional[float],
         exchange: Optional[str],
+        year_low: Optional[float] = None,
+        year_high: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Build one quote-shaped row.
 
@@ -150,7 +178,7 @@ class PriceService:
         BOTH spellings — 32 sites use one, 25 the other. Dropping either would silently
         blank a field on roughly half the screens.
         """
-        return {
+        row: Dict[str, Any] = {
             "symbol": symbol,
             "name": name,
             "price": price,
@@ -163,6 +191,18 @@ class PriceService:
             "marketCap": market_cap,
             "exchange": exchange,
         }
+        # 52-week band: OMITTED when unknown, never emitted as None.
+        #
+        # The distinction matters and it is the opposite of the `change` fields above. There,
+        # `None` is meaningful — "unknown, and 0.0 would be a fabricated flat day" — and every
+        # consumer guards for it. Here, consumers use `quote.get("yearHigh", 0)`, and
+        # `dict.get` returns None for a PRESENT-but-None key, so emitting None would disarm
+        # their default and hand a `None` to `f"{...:.2f}"`. Absent keeps the default reachable.
+        if year_low is not None:
+            row["yearLow"] = year_low
+        if year_high is not None:
+            row["yearHigh"] = year_high
+        return row
 
     @classmethod
     def _from_profile(cls, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -173,6 +213,10 @@ class PriceService:
         change = _finite(row.get("change"))
         # profile has no previousClose; it is exactly price - change when both are real.
         prev = price - change if (price is not None and change is not None) else None
+        # `/stable/profile` carries the 52-week band as a "low-high" string, which is the only
+        # entitled source for it now that `quote` is 402. Parsed here so every consumer of a
+        # single quote gets it back; the batch (screener) path has no band and omits both keys.
+        year_low, year_high = parse_range_band(row.get("range"))
         return cls._shape(
             symbol=symbol,
             name=row.get("companyName"),
@@ -184,6 +228,8 @@ class PriceService:
             avg_volume=_finite(row.get("averageVolume")),
             market_cap=_finite(row.get("marketCap")),
             exchange=row.get("exchange"),
+            year_low=year_low,
+            year_high=year_high,
         )
 
     @staticmethod

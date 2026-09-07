@@ -30,6 +30,7 @@ from app.services._analyst_common import (
     classify_grade,
     normalize_fmp_action,
 )
+from app.integrations.fmp_entitlements import entitlement_error
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -376,18 +377,45 @@ class AnalystService:
         if cached is not None:
             return cached
 
-        # Parallel FMP fetches (3 calls)
-        results = await asyncio.gather(
-            self.fmp.get_grades(ticker, limit=100),
-            self.fmp.get_price_target_consensus(ticker),
-            price_source(self).get_quote(ticker),
-            return_exceptions=True,
+        # `grades` and `price-target-consensus` are OUTSIDE THE SIGNED FMP LICENCE — the
+        # Analyst Ratings & Price Targets package was not purchased, and there is no entitled
+        # substitute. `fmp.py` raises `FMPNotEntitledException` for both before it makes a
+        # request, so calling them was two guaranteed failures per ticker.
+        #
+        # ⚠️ Why this needed more than deleting the calls. `asyncio.gather(...,
+        # return_exceptions=True)` swallowed both to `[]` and `{}`, and `has_coverage` below
+        # is derived from emptiness — so every ticker in the market came back
+        # `has_coverage=False` and the app told users that no analyst covers Apple. An honest
+        # empty state is correct when FMP HAS no data; it is misinformation when we simply
+        # stopped paying for it. The two states are now distinct: `section_available` says we
+        # cannot ask, `has_coverage` says we asked and the answer was nobody.
+        #
+        # Derived from the entitlement manifest rather than hardcoded, so the section returns
+        # by itself if the package is ever repurchased.
+        section_available = (
+            entitlement_error("grades") is None
+            and entitlement_error("price-target-consensus") is None
         )
 
-        # Extract with safe fallbacks
-        grades = results[0] if not isinstance(results[0], Exception) else []
-        pt_consensus = results[1] if not isinstance(results[1], Exception) else {}
-        quote = results[2] if not isinstance(results[2], Exception) else {}
+        if section_available:
+            results = await asyncio.gather(
+                self.fmp.get_grades(ticker, limit=100),
+                self.fmp.get_price_target_consensus(ticker),
+                price_source(self).get_quote(ticker),
+                return_exceptions=True,
+            )
+            grades = results[0] if not isinstance(results[0], Exception) else []
+            pt_consensus = results[1] if not isinstance(results[1], Exception) else {}
+            quote = results[2] if not isinstance(results[2], Exception) else {}
+        else:
+            # The quote still resolves — the price line is entitled and other fields use it.
+            grades, pt_consensus = [], {}
+            try:
+                quote = await price_source(self).get_quote(ticker)
+            except Exception as e:
+                logger.warning("analyst: quote failed for %s: %s: %s", ticker, type(e).__name__, e)
+                quote = {}
+            results = []
 
         for i, r in enumerate(results):
             if isinstance(r, Exception):
@@ -448,6 +476,7 @@ class AnalystService:
 
         # No grades AND no price-target consensus ⇒ nobody covers this ticker. Say so
         # rather than shipping the zero-defaults as if they were measurements.
+        # Only meaningful when we were able to ask; see `section_available` above.
         has_coverage = bool(total_analysts > 0 or target_consensus_price > 0)
         if not has_coverage:
             logger.info(
@@ -491,6 +520,7 @@ class AnalystService:
             symbol=ticker,
             total_analysts=total_analysts,
             has_coverage=has_coverage,
+            section_available=section_available,
             updated_date=updated_date,
             consensus=consensus,
             target_price=target_consensus_price,

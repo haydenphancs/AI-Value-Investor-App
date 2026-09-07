@@ -107,8 +107,14 @@ class TickerReportService:
 
         persona = get_persona_config(persona_key)
         company_name = profile.get("companyName", ticker)
-        price = quote.get("price", "N/A")
-        pe = quote.get("pe", "N/A")
+        # `or "N/A"`, not `.get(k, "N/A")`: `price_service._shape()` emits `price` as a
+        # PRESENT key holding None when the symbol has no usable price, and `dict.get`'s
+        # default is only reached for an ABSENT key — so the old form put the literal
+        # string "None" into the prompt. `pe` is genuinely absent (the retired `quote`
+        # endpoint carried it), so its default does fire, but it is written the same way
+        # so the next edit cannot reintroduce the asymmetry.
+        price = quote.get("price") or "N/A"
+        pe = quote.get("pe") or "N/A"
         mkt_cap = profile.get("mktCap", "N/A")
         sector = profile.get("sector", "N/A")
         industry = profile.get("industry", "N/A")

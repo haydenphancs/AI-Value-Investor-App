@@ -75,6 +75,13 @@ class AnalystAnalysisResponse(BaseModel):
     # for a company no analyst has an opinion on. Additive + defaulted, so an older
     # client is unaffected; a current one renders an honest empty state instead.
     has_coverage: bool = True
+    # False when the DATA SOURCE is outside the FMP licence, which is a different statement
+    # from `has_coverage=False`. `has_coverage` means "we asked and no analyst covers this
+    # ticker" — an honest, useful fact. This means "we cannot ask at all", and rendering the
+    # no-coverage card for it tells the user that nobody covers Apple, which is false.
+    # Additive and defaulted, so an older client is unaffected; a current one hides the
+    # section entirely. Flips back to True on its own if the packages are ever repurchased.
+    section_available: bool = True
     target_price: float
     target_upside: float                       # percentage
     distributions: List[AnalystRatingDistribution]

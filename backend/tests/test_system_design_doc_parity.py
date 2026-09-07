@@ -448,13 +448,48 @@ def test_middleware_count_matches_the_doc() -> None:
     )
 
 
+# Modules that live under `integrations/` but are NOT upstream clients. §2 counts
+# "thin HTTP clients" — i.e. vendors — so a pure data module would inflate that number
+# and misdescribe the architecture. Each entry is listed explicitly and is proved
+# I/O-free by `test_non_client_integration_modules_really_do_no_io`, so a genuinely new
+# vendor can never hide in here to dodge the count.
+_NON_CLIENT_MODULES = {
+    "fmp_entitlements",   # FMP licence manifest: which Data Packages we bought. Data only.
+}
+
+
+def _integration_client_modules() -> list:
+    return [
+        p for p in (_BACKEND / "app" / "integrations").glob("*.py")
+        if p.stem != "__init__" and p.stem not in _NON_CLIENT_MODULES
+    ]
+
+
 def test_integration_count_matches_the_doc() -> None:
-    n = len([p for p in (_BACKEND / "app" / "integrations").glob("*.py")
-             if p.name != "__init__.py"])
+    n = len(_integration_client_modules())
     assert n == EXPECTED["integrations"], (
         f"§2 says there are {EXPECTED['integrations']} integrations; found {n}. "
         f"Update the diagram note in §2 and this number together."
     )
+
+
+def test_non_client_integration_modules_really_do_no_io() -> None:
+    """An exclusion is only legitimate while the module genuinely talks to nothing.
+
+    Without this, `_NON_CLIENT_MODULES` becomes a hole in the count guard: someone adds
+    a real vendor, drops its name in to silence the failure, and §2 quietly goes stale —
+    which is the exact drift this whole file exists to catch.
+    """
+    forbidden = ("httpx", "requests", "urllib.request", "aiohttp", "socket")
+    for stem in _NON_CLIENT_MODULES:
+        src = (_BACKEND / "app" / "integrations" / f"{stem}.py").read_text()
+        for token in forbidden:
+            assert token not in src, (
+                f"{stem}.py is excluded from the integration count as a data-only "
+                f"module, but references {token!r}. Either it is a real integration "
+                f"(remove it from _NON_CLIENT_MODULES and update §2), or the I/O "
+                f"belongs somewhere else."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

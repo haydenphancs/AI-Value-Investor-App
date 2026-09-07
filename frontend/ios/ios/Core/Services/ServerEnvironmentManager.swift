@@ -61,7 +61,10 @@ final class ServerEnvironmentManager: @unchecked Sendable {
     // MARK: - Constants
 
     let localURL = URL(string: "http://127.0.0.1:8000")!
-    let railwayURL = URL(string: "https://ai-value-investor-app-production.up.railway.app")!
+    /// Production backend. The custom domain rather than the Railway subdomain — see the
+    /// note in `APIConfig.baseURL`. Kept named `railwayURL` because it still means "the
+    /// remote server" to every call site; only the hostname moved.
+    let railwayURL = URL(string: "https://caydexinvest.com")!
 
     /// Timeout for the localhost liveness probe (seconds).
     ///

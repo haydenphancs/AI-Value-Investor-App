@@ -172,6 +172,17 @@ Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_
 `get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top. Supabase
 is reached through `app/database.py`, not through an integration module.
 
+The folder also holds one **non-client** module, deliberately excluded from that count:
+`app/integrations/fmp_entitlements.py` is a pure data manifest of which FMP **Data Packages** the signed
+Order Form actually grants. Since 2026-09-03 FMP enforces those packages — an unpurchased
+endpoint answers `402 Restricted Endpoint` — so `app/integrations/fmp.py`'s `_make_request` consults the
+manifest and refuses such a call up front with `FMPNotEntitledException`, naming both the
+package that would unlock it and the entitled substitute. Nothing is deleted when a
+dataset is unavailable: the wrapper and its callers stay, the feature is **hidden**, and
+buying the package later is one line in `PURCHASED_PACKAGES`. Pinned by
+`backend/tests/test_fmp_entitlement_parity.py` (source scan) and
+`backend/tests/test_fmp_entitlement_guard.py` (runtime behaviour).
+
 ---
 
 ## 3. Data Flow Architecture
@@ -1709,7 +1720,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 23 modules; HTTP surface only
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 11 thin HTTP clients
+│   ├── integrations/             # 11 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

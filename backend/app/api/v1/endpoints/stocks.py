@@ -502,10 +502,29 @@ async def search_stocks(
         # "STX" is Seagate AND Stacks, "SUI" is Sun Communities AND the coin.
         # Drop the crypto duplicate for any symbol we found as a stock so the
         # company (which the picker filters to) is always present.
+        #
+        # ⚠️ EXCEPT the symbol the user typed EXACTLY — that carve-out is the fix for a
+        # live bug. `_CRYPTO_NAMES` is keyed on the bare ticker ("BTC", "ETH", "SOL"),
+        # and each of those is ALSO a real US listing (BTC and ETH are AMEX ETFs, SOL an
+        # NYSE equity). So the unconditional filter dropped the coin every time, and the
+        # three largest cryptocurrencies were unfindable — searching "BTC" returned the
+        # BTC *ETF* and never Bitcoin. DOGE worked only because no equity collides.
+        # Verified live before the fix.
+        #
+        # Keeping the exact match satisfies the invariant above in full: nothing is
+        # shadowed, because BOTH now appear. `_dedupe_secondary_listings` already takes
+        # the identical `keep_symbol=query_upper` escape hatch for the same reason.
+        crypto_symbols_before = {c.symbol.upper() for c in crypto_results}
         stock_symbols = {r.symbol.upper() for r in stock_results}
         crypto_results = [
-            c for c in crypto_results if c.symbol.upper() not in stock_symbols
+            c for c in crypto_results
+            if c.symbol.upper() == query_upper or c.symbol.upper() not in stock_symbols
         ]
+        if query_upper in crypto_symbols_before and query_upper in stock_symbols:
+            logger.debug(
+                "search %r: keeping the exact-symbol crypto alongside the equity",
+                query_upper,
+            )
 
         # ── Merge: exact-symbol crypto first, then stocks, then other crypto ──
         exact_crypto = [r for r in crypto_results if r.symbol == query_upper]

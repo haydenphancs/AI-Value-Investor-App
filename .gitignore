@@ -311,3 +311,8 @@ xcuserdata/
 # plaintext passwords for real accounts on the production Supabase project, so the script
 # is committable and the credentials are not.
 backend/scripts/testflight_testers.local.json
+documents/legal/LAUNCH_CHECKLIST.md
+documents/legal/LAUNCH_CHECKLIST.md
+documents/legal/fmp-negotiation-reply.md
+documents/legal/fmp-quote-analysis.md
+documents/legal/HANDOFF-crypto-to-coingecko.md

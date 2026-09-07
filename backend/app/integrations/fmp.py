@@ -32,6 +32,14 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     return profile
 
 
+from app.integrations.fmp_entitlements import (
+    SYMBOL_SENSITIVE_PREFIXES,
+    entitlement_error,
+    is_blocked_symbol,
+    normalize_path,
+)
+
+
 class FMPException(Exception):
     """Base class for typed FMP integration errors."""
 
@@ -46,6 +54,24 @@ class FMPRateLimitException(FMPException):
     def __init__(self, message: str, retry_after: Optional[str] = None):
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class FMPNotEntitledException(FMPException):
+    """Raised when a path is outside the packages on the signed FMP Order Form.
+
+    Deliberately NOT a subclass of :class:`FMPUnavailableException`: that means
+    "transient, retry later", and this is the opposite — a permanent contractual
+    condition that retrying can never fix. Callers should degrade *permanently*
+    (hide the surface) rather than back off.
+
+    Raised BEFORE the HTTP call, so a blocked endpoint costs nothing and does not
+    inflate ``request_failures`` (which tracks genuine upstream flakiness). Without
+    this, FMP answers ``402 Restricted Endpoint`` and the wrapper's generic
+    ``except Exception`` logs an opaque HTTP error with no hint of the cause.
+
+    The message names the package that would unlock the path and the entitled
+    substitute — see ``fmp_entitlements.entitlement_error``.
+    """
 
 
 class FMPUnavailableException(FMPException):
@@ -148,6 +174,39 @@ class FMPClient:
     _MAX_RETRIES = 2            # 3 attempts total
     _RETRY_BASE_DELAY = 0.5     # seconds; exponential backoff (0.5s, 1.0s)
 
+    @staticmethod
+    def _raise_if_not_entitled(
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Refuse a call the FMP contract does not cover, before it costs anything.
+
+        Two independent checks, because FMP enforces on two axes:
+
+        * **By endpoint** — ``quote``, ``grades``, ``dividends`` and 31 others belong to
+          packages we did not buy.
+        * **By SYMBOL, on endpoints we DO own** — ``historical-price-eod/full`` answers
+          200 for ``AAPL`` and ``SHOP.TO`` but 402 for ``^GSPC``, ``GCUSD``, ``BTCUSD``
+          and ``EURUSD``. Index, commodity, crypto and FX market data is simply not in
+          the licence, so there is no endpoint to switch to; those asset classes need a
+          different vendor. Missing this axis is easy: the endpoint looks entitled.
+        """
+        reason = entitlement_error(endpoint)
+        if reason:
+            raise FMPNotEntitledException(reason)
+
+        path = normalize_path(endpoint)
+        if not path.startswith(SYMBOL_SENSITIVE_PREFIXES):
+            return
+        symbol = (params or {}).get("symbol")
+        if is_blocked_symbol(symbol):
+            raise FMPNotEntitledException(
+                f"symbol {symbol!r} is outside the FMP licence on {path!r} — index, "
+                f"commodity, crypto and FX market data are not covered by any purchased "
+                f"package (FMP answers 402 even though the endpoint itself is licensed). "
+                f"Equities, ETFs and international listings are fine."
+            )
+
     async def _make_request(
         self,
         endpoint: str,
@@ -158,7 +217,15 @@ class FMPClient:
         Thin on purpose: this is the single point every public method funnels through,
         so it is the only place a reliable "upstream failed" signal can be taken without
         editing the ~20 methods that each swallow their own exception.
+
+        It is also where the LICENCE is enforced. FMP charges per Data Package and, since
+        2026-09-03, answers ``402 Restricted Endpoint`` for anything outside the ones on
+        our Order Form. Refusing here — before the request — means an unlicensed feature
+        is *hidden* rather than half-working: no wasted call, no opaque HTTP error, and a
+        message that names the package that would turn it back on. Nothing is deleted, so
+        buying a package later re-enables the feature with a one-line manifest change.
         """
+        self._raise_if_not_entitled(endpoint, params)
         try:
             return await self._make_request_impl(endpoint, params)
         except Exception:
@@ -1243,17 +1310,62 @@ class FMPClient:
         search-name if the first call returns no results (handles
         cases where the user types a company name instead of a ticker).
         """
-        results = await self._make_request(
+        symbol_hits = await self._make_request(
             "search-symbol",
             params={"query": query, "limit": limit},
         )
-        if results:
-            return results
+        symbol_hits = symbol_hits if isinstance(symbol_hits, list) else []
 
-        # Fallback: search by company name
-        return await self._make_request(
-            "search-name",
-            params={"query": query, "limit": limit},
+        if self._has_symbol_prefix_match(query, symbol_hits):
+            return symbol_hits
+
+        # No real ticker match, so this is a NAME query. Merge both sources rather than
+        # returning whichever fired, because `search-symbol` may still hold a legitimate
+        # (if weak) hit — and name results are the relevant ones, so they rank first.
+        try:
+            name_hits = await self._make_request(
+                "search-name",
+                params={"query": query, "limit": limit},
+            )
+            name_hits = name_hits if isinstance(name_hits, list) else []
+        except Exception as e:
+            # Degrade to the weak matches rather than failing the whole search.
+            logger.warning(
+                "search-name failed for %r: %s: %s — returning %d symbol match(es)",
+                query, type(e).__name__, e, len(symbol_hits),
+            )
+            return symbol_hits
+
+        merged: List[Dict[str, Any]] = []
+        seen: set = set()
+        for row in [*name_hits, *symbol_hits]:
+            sym = (row.get("symbol") or "").upper()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            merged.append(row)
+        return merged[:limit]
+
+    @staticmethod
+    def _has_symbol_prefix_match(query: str, rows: List[Dict[str, Any]]) -> bool:
+        """Did `search-symbol` actually match a TICKER, or just a substring of one?
+
+        ⚠️ This predicate is the whole fix for a live bug: `search-symbol` matches
+        anywhere in the symbol, not just at the start. Searching "Coca" returned exactly
+        one row — the crypto `PACOCAUSD` ("Pacoca USD") — and the old code's `if results:`
+        was truthy on it, so the `search-name` fallback never ran and **Coca-Cola was
+        unfindable by name**. Verified live before the fix.
+
+        A genuine ticker match starts with what the user typed. Anything else means they
+        were typing a company name, so the name search has to run.
+        """
+        q = (query or "").strip().upper()
+        if not q:
+            return False
+        return any(
+            (row.get("symbol") or "").upper().startswith(q)
+            for row in rows
+            if isinstance(row, dict)
         )
 
     async def get_stock_splits(self, ticker: str) -> List[Dict[str, Any]]:
@@ -1890,60 +2002,104 @@ class FMPClient:
     async def get_senate_disclosure(
         self, symbol: str
     ) -> List[Dict[str, Any]]:
-        """Get senate disclosure trades filtered by symbol.
+        """Senate trades for one symbol, via the entitled `senate-trades` endpoint.
 
-        Falls back to senate-latest with client-side symbol filtering
-        if the dedicated endpoint is unavailable on the stable API.
+        ⚠️ This used to call `senate-disclosure`, which FMP has RETIRED — it answers
+        404 on every request. The old code paid for that failed call and then fell
+        through to pulling 1,000 rows of `senate-latest` to filter client-side, so a
+        single-symbol lookup cost a full paginated sweep every time.
+
+        It also stopped working entirely once the licence guard landed: the guard raises
+        `FMPNotEntitledException` for a retired path, which the broad `except` below
+        swallows into `[]` — so the 404 fallback, which keyed off `httpx.HTTPStatusError`,
+        could never run again.
+
+        `senate-trades` ("Senate Trading Activity API") is named in package 10 of the
+        Order Form, filters by symbol server-side, and answers in one call. The
+        paginate-and-filter path is kept below purely as a degraded fallback.
         """
         try:
             data = await self._make_request(
-                "senate-disclosure",
+                "senate-trades",
                 params={"symbol": symbol},
             )
-            return data if isinstance(data, list) else []
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (403, 404):
-                # Fallback: fetch senate-latest and filter by symbol
-                logger.info("senate-disclosure 404, falling back to senate-latest + filter")
-                all_trades = await self._fetch_congress_pages("senate-latest", 1000)
-                symbol_upper = symbol.upper()
-                return [
-                    t for t in all_trades
-                    if (t.get("symbol") or "").upper() == symbol_upper
-                ]
-            raise
+            if isinstance(data, list):
+                return data
+            logger.warning(
+                "senate-trades returned %s for %s, expected a list",
+                type(data).__name__, symbol,
+            )
         except Exception as e:
-            logger.warning(f"Senate disclosure request failed for {symbol}: {e}")
+            logger.warning(
+                "senate-trades failed for %s: %s: %s — falling back to senate-latest",
+                symbol, type(e).__name__, e,
+            )
+
+        try:
+            all_trades = await self._fetch_congress_pages("senate-latest", 1000)
+        except Exception as e:
+            logger.warning(
+                "Senate disclosure fallback failed for %s: %s: %s",
+                symbol, type(e).__name__, e,
+            )
             return []
+        symbol_upper = symbol.upper()
+        return [
+            t for t in all_trades
+            if (t.get("symbol") or "").upper() == symbol_upper
+        ]
+
 
     async def get_house_disclosure(
         self, symbol: str
     ) -> List[Dict[str, Any]]:
-        """Get house disclosure trades filtered by symbol.
+        """House trades for one symbol, via the entitled `house-trades` endpoint.
 
-        Falls back to house-latest with client-side symbol filtering
-        if the dedicated endpoint is unavailable on the stable API.
+        ⚠️ This used to call `house-disclosure`, which FMP has RETIRED — it answers
+        404 on every request. The old code paid for that failed call and then fell
+        through to pulling 1,000 rows of `house-latest` to filter client-side, so a
+        single-symbol lookup cost a full paginated sweep every time.
+
+        It also stopped working entirely once the licence guard landed: the guard raises
+        `FMPNotEntitledException` for a retired path, which the broad `except` below
+        swallows into `[]` — so the 404 fallback, which keyed off `httpx.HTTPStatusError`,
+        could never run again.
+
+        `house-trades` ("House Trading Activity API") is named in package 10 of the
+        Order Form, filters by symbol server-side, and answers in one call. The
+        paginate-and-filter path is kept below purely as a degraded fallback.
         """
         try:
             data = await self._make_request(
-                "house-disclosure",
+                "house-trades",
                 params={"symbol": symbol},
             )
-            return data if isinstance(data, list) else []
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (403, 404):
-                # Fallback: fetch house-latest and filter by symbol
-                logger.info("house-disclosure 404, falling back to house-latest + filter")
-                all_trades = await self._fetch_congress_pages("house-latest", 1000)
-                symbol_upper = symbol.upper()
-                return [
-                    t for t in all_trades
-                    if (t.get("symbol") or "").upper() == symbol_upper
-                ]
-            raise
+            if isinstance(data, list):
+                return data
+            logger.warning(
+                "house-trades returned %s for %s, expected a list",
+                type(data).__name__, symbol,
+            )
         except Exception as e:
-            logger.warning(f"House disclosure request failed for {symbol}: {e}")
+            logger.warning(
+                "house-trades failed for %s: %s: %s — falling back to house-latest",
+                symbol, type(e).__name__, e,
+            )
+
+        try:
+            all_trades = await self._fetch_congress_pages("house-latest", 1000)
+        except Exception as e:
+            logger.warning(
+                "House disclosure fallback failed for %s: %s: %s",
+                symbol, type(e).__name__, e,
+            )
             return []
+        symbol_upper = symbol.upper()
+        return [
+            t for t in all_trades
+            if (t.get("symbol") or "").upper() == symbol_upper
+        ]
+
 
     async def get_senate_trades_by_name(
         self, name: str, limit: int = 7500

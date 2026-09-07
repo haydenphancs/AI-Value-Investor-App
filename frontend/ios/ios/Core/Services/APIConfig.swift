@@ -52,7 +52,13 @@ enum APIConfig: Sendable {
         }
         #endif
 
-        return URL(string: "https://ai-value-investor-app-production.up.railway.app")!
+        // The custom domain, NOT the Railway subdomain. Both resolve to the same Railway
+        // edge (measured: identical `server: railway-hikari` + `x-railway-edge: den1`, and
+        // no Cloudflare proxy in front — DNS-only, so no SSE/WebSocket buffering to worry
+        // about). Shipping the subdomain meant every installed app depended on a Railway
+        // hostname that is incidental and revocable, while ASC, the AASA and every legal
+        // document point at caydexinvest.com.
+        return URL(string: "https://caydexinvest.com")!
     }
 
     // MARK: - OAuth (Google via the Supabase web redirect)

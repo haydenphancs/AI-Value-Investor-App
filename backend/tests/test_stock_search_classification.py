@@ -291,8 +291,26 @@ async def test_crypto_does_not_shadow_same_ticker_stock(monkeypatch):
     results = await stocks_ep.search_stocks(q="STX", limit=10)
     stocks = [r for r in results if r.type == "stock"]
     assert any(r.symbol == "STX" for r in stocks), "Seagate (STX stock) must survive"
-    # The crypto STX must be dropped (it duplicates the stock symbol).
-    assert not any(r.symbol == "STX" and r.type == "crypto" for r in results)
+
+    # ⚠️ CHANGED 2026-09-07. This used to assert the crypto STX was DROPPED. That was the
+    # mechanism, not the requirement — the requirement, stated in the comment above, is
+    # that the company must not vanish, and it does not.
+    #
+    # Dropping it unconditionally caused a worse bug: `_CRYPTO_NAMES` is keyed on the
+    # bare ticker, and BTC / ETH / SOL are all real US listings too, so the three largest
+    # cryptocurrencies became unfindable — searching "BTC" returned the BTC *ETF* and
+    # never Bitcoin. The filter now exempts the symbol the user typed EXACTLY (the same
+    # `keep_symbol` carve-out `_dedupe_secondary_listings` already uses), so BOTH appear
+    # and nothing is shadowed in either direction.
+    #
+    # A crypto that only substring-matches is still suppressed — pinned by
+    # tests/test_stock_search_bugs.py.
+    assert any(r.symbol == "STX" and r.type == "crypto" for r in results), (
+        "the exact-symbol coin must also be present now"
+    )
+    assert {r.type for r in results if r.symbol == "STX"} == {"stock", "crypto"}, (
+        "exactly one of each — no duplicates from the merge"
+    )
 
 
 @pytest.mark.asyncio

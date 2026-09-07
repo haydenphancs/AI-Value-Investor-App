@@ -696,3 +696,93 @@ def test_the_carve_out_scan_is_not_vacuous():
         assert len(prose) > 2000, f"{screen} scan returned {len(prose)} chars — extractor drifted"
         assert "caydex" in prose, f"{screen} scan produced text without the product name"
         assert "we guarantee your investment returns" not in prose
+
+
+# ── The third-party-AI consent promise (App Review 5.1.2(i)) ──────────────────
+#
+# Privacy §3 makes three AFFIRMATIVE promises about Cay AI chat: that we ask explicit
+# permission before the first send, that chat does not work until it is given, and that it is
+# withdrawable at a NAMED location in Settings. Those are the sentences a reviewer reads
+# against 5.1.2(i)/5.1.2(ii), and they are promises about BEHAVIOUR — the code half is pinned
+# by `tests/test_ios_ai_consent_gate.py`.
+#
+# Same shape and same reason as the personalization carve-out above: `PrivacyPolicyView.swift`
+# is a hand-maintained mirror with no automated sync, and the 2026-08-13 carve-out landed on
+# the website and was forgotten in the app. This is the clause where that failure is worst —
+# the in-app policy is the copy a user can reach from the consent flow itself.
+#
+# NOT duplicated here: `test_served_copy_matches_the_authored_original` already pins
+# `documents/legal/privacy.html` byte-for-byte against the served copy, so asserting the
+# authored file too would prove nothing extra.
+
+_AI_CONSENT_SCREEN = "PrivacyPolicyView.swift"
+
+_AI_CONSENT_CLAUSES = [
+    # The disclosure prong of 5.1.2(i) — "clearly disclose where personal data will be shared
+    # with third parties, including with third-party AI".
+    "cay ai chat sends what you type to a third-party ai provider for processing",
+    # Promise 1 — explicit permission, and it comes FIRST.
+    "we ask for your explicit permission before this happens for the first time",
+    # Promise 2 — the gate is real, not advisory.
+    "chat does not work until you give it",
+    # Promise 3 — withdrawable, at a location named EXACTLY as the Settings row is labelled.
+    # `test_ios_ai_consent_gate.py::test_the_privacy_policy_names_the_row_that_actually_exists`
+    # holds the other end: the row really is titled "AI Chat Data Permission", and it really is
+    # inside `generalSection`.
+    "you can withdraw that permission at any time in settings → general • ai chat data permission",
+    # The honest consequence, and the scope limit — both are why declining is a real option.
+    "chat then stops working until you allow it again",
+    "the rest of the app is unaffected",
+]
+
+
+def test_the_published_page_states_the_ai_consent_promise(client):
+    """The website half. Without this, the mirror test below could pass by both being absent."""
+    body = _normalized_prose(client.get("/privacy").text, strip_tags=True)
+    for clause in _AI_CONSENT_CLAUSES:
+        assert clause in body, f"/privacy no longer states {clause!r}"
+
+
+def test_the_in_app_mirror_states_the_ai_consent_promise():
+    """The half that gets forgotten.
+
+    `PrivacyPolicyView.swift` is reachable from inside the app, including from the consent
+    sheet itself — a promise amended only on the website is not one the user reading the
+    in-app policy was ever shown.
+    """
+    prose = _normalized_prose(
+        _swift_user_facing_strings(_IOS_SCREENS_DIR / _AI_CONSENT_SCREEN), strip_tags=False
+    )
+    for clause in _AI_CONSENT_CLAUSES:
+        assert clause in prose, (
+            f"{_AI_CONSENT_SCREEN} does not state {clause!r}, but the published /privacy page "
+            f"does. App Review 5.1.2(i) requires the disclosure AND the permission; the in-app "
+            f"policy is the copy a user can reach without leaving the app."
+        )
+
+
+def test_the_ai_consent_scan_is_not_vacuous(client):
+    """Guard against the guard.
+
+    Both assertions above are substring checks, and a substring check against an empty or
+    mis-parsed haystack passes for `""` and fails for everything else — so a broken scanner
+    would look like a broken document. Prove BOTH haystacks are real prose (the carve-out
+    version above checks only the Swift side), and that a sentence which is NOT in the policy
+    is absent, so neither haystack is somehow matching everything.
+    """
+    swift = _normalized_prose(
+        _swift_user_facing_strings(_IOS_SCREENS_DIR / _AI_CONSENT_SCREEN), strip_tags=False
+    )
+    assert len(swift) > 4000, (
+        f"{_AI_CONSENT_SCREEN} scan returned {len(swift)} chars — extractor drifted"
+    )
+    assert "caydex" in swift, f"{_AI_CONSENT_SCREEN} scan produced text without the product name"
+
+    web = _normalized_prose(client.get("/privacy").text, strip_tags=True)
+    assert len(web) > 5000, f"/privacy scan returned {len(web)} chars — tag-stripping drifted"
+    assert "we do not sell your personal information" in web, "/privacy scan is not the policy"
+
+    for haystack, name in ((swift, _AI_CONSENT_SCREEN), (web, "/privacy")):
+        assert "we send your chat messages to advertisers" not in haystack, (
+            f"{name} matches a sentence it does not contain — the haystack is not real prose"
+        )

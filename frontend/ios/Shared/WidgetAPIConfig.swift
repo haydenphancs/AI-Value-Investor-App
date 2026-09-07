@@ -19,8 +19,11 @@ import Foundation
 /// keeps `USE_LOCAL=1` and the localhost auto-probe working for the widget too, without
 /// the extension knowing anything about how the app decided.
 public enum WidgetAPIConfig {
+    /// Must stay in lockstep with `APIConfig.baseURL` — this is a deliberate SECOND copy
+    /// (see the note above), so a hostname change has to be made in both places or the
+    /// widget silently keeps calling the old host long after the app moved.
     public static let productionBaseURL = URL(
-        string: "https://ai-value-investor-app-production.up.railway.app"
+        string: "https://caydexinvest.com"
     )!
 
     static let baseURLOverrideKey = "widget.api.baseURL"

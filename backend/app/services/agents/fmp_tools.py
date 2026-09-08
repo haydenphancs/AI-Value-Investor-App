@@ -16,6 +16,7 @@ from typing import Dict, Any, Callable, Awaitable
 from google.genai import types
 
 from app.integrations.fmp import FMPClient
+from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
 
     async def fetch_sector_performance(args: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            data = await fmp.get_sector_performance()
+            data = await get_market_movers_service().get_sector_performance()
             return {"sectors": data}
         except Exception as e:
             logger.warning(f"Tool fetch_sector_performance failed: {e}")

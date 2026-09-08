@@ -47,6 +47,7 @@ from app.schemas.stock_overview import (
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
 from app.utils.market_hours import market_status_fields
 from app.services.price_service import price_source
+from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
 
@@ -355,8 +356,8 @@ class StockOverviewService:
         from app.services.ownership_snapshot_service import get_ownership_snapshot_service
         fund_task = self._get_fundamentals(ticker)
         vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
-        sector_perf_task = self.fmp.get_sector_performance()
-        industry_perf_task = self.fmp.get_industry_performance()
+        sector_perf_task = get_market_movers_service().get_sector_performance()
+        industry_perf_task = get_market_movers_service().get_industry_performance()
         prof_task = get_profitability_snapshot_service().get_profitability_snapshot(ticker)
         growth_task = get_growth_snapshot_service().get_growth_snapshot(ticker)
         val_task = get_valuation_snapshot_service().get_valuation_snapshot(ticker)
@@ -563,9 +564,9 @@ class StockOverviewService:
             self.fmp.get_institutional_ownership_summary(ticker),                # 8
             self.fmp.get_income_statement(ticker, period="quarter", limit=4),    # 9
             get_short_interest(ticker),                                          # 10
-            self.fmp.get_sector_performance(),                                   # 11
+            get_market_movers_service().get_sector_performance(),                                   # 11
             self.fmp.get_historical_prices(ticker, from_date_full, to_date),     # 12
-            self.fmp.get_industry_performance(),                                 # 13
+            get_market_movers_service().get_industry_performance(),                                 # 13
         ]
 
         spy_task_idx = None

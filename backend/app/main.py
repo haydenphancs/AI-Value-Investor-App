@@ -426,6 +426,23 @@ async def _run_close_snapshot_loop():
     while True:
         try:
             written = await price_source().refresh_close_snapshot()
+
+            # Warm the movers close map straight after the ingest. It is a 63-request /
+            # ~6.6 s Supabase sweep (PostgREST caps a response at 1,000 rows however wide
+            # a `range` you ask for) and it backs Home's Top Movers, Heavy Traffic and
+            # every sector strip. Warming here means the first request after a deploy is
+            # served from cache instead of paying the sweep on the hot path.
+            try:
+                from app.services.market_movers_service import get_market_movers_service
+
+                await get_market_movers_service()._all_closes()
+            except Exception as e:
+                # Best-effort: a cold cache is slower, never wrong. Logged rather than
+                # swallowed so a persistent failure is visible.
+                logger.warning(
+                    "Movers close-map warm failed (%s: %s)", type(e).__name__, e,
+                )
+
             if written == 0:
                 # Expected on a market holiday (batch-eod has no rows for a non-session
                 # date) — the previous snapshot stays valid, because the last real close

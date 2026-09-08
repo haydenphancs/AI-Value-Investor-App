@@ -68,3 +68,79 @@ class PriceFromFMPFake:
             for r in rows
             if isinstance(r, dict) and r.get("symbol")
         }
+
+
+class MoversFromFMPFake:
+    """Adapts a legacy FMP-shaped test fake to the `market_movers_service` interface.
+
+    Same reasoning as `PriceFromFMPFake`: the scanner tests each encode a specific
+    scenario in their fake (a starved most-actives list, a universe past the old 50-symbol
+    profile chunk, an ETF that must fail the quality gate). Re-deriving that data by hand
+    against a new interface is how a test quietly stops testing what it says it does.
+
+    So the DATA stays where it is and only the SOURCE is re-pointed: this reads the fake's
+    `get_biggest_gainers` / `get_biggest_losers` / `get_most_actives` /
+    `get_company_profiles_batch` and returns the `(profile_map, change_map)` pair the
+    service now hands to the ranking helpers.
+
+    Usage, alongside the existing `svc.fmp = fake`:
+
+        monkeypatch.setattr(module_under_test, "get_market_movers_service",
+                            lambda: MoversFromFMPFake(fake))
+    """
+
+    def __init__(self, fmp: Any):
+        self._fmp = fmp
+
+    async def _raw_lists(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for name in ("get_biggest_gainers", "get_biggest_losers", "get_most_actives"):
+            getter = getattr(self._fmp, name, None)
+            if getter is None:
+                continue
+            rows = await getter()
+            out.extend(r for r in (rows or []) if isinstance(r, dict))
+        return out
+
+    async def get_scanner_inputs(self):
+        raw = await self._raw_lists()
+        symbols, seen = [], set()
+        for r in raw:
+            s = (r.get("symbol") or "").upper()
+            if s and s not in seen:
+                seen.add(s)
+                symbols.append(s)
+
+        profile_map: Dict[str, Dict[str, Any]] = {}
+        batch = getattr(self._fmp, "get_company_profiles_batch", None)
+        if batch is not None and symbols:
+            # Chunked at 50 like the real client was, so a fake that asserts on chunking
+            # still sees the call pattern it expects.
+            for i in range(0, len(symbols), 50):
+                for p in (await batch(symbols[i:i + 50])) or []:
+                    if isinstance(p, dict) and p.get("symbol"):
+                        profile_map[p["symbol"].upper()] = p
+
+        change_map: Dict[str, float] = {}
+        for r in raw:
+            s = (r.get("symbol") or "").upper()
+            if not s or s in change_map:
+                continue
+            for key in ("changesPercentage", "changePercentage"):
+                v = r.get(key)
+                if v is None:
+                    continue
+                try:
+                    change_map[s] = float(str(v).replace("%", ""))
+                except (TypeError, ValueError):
+                    pass
+                break
+        return profile_map, change_map
+
+    async def get_sector_performance(self):
+        getter = getattr(self._fmp, "get_sector_performance", None)
+        return (await getter()) if getter else []
+
+    async def get_industry_performance(self):
+        getter = getattr(self._fmp, "get_industry_performance", None)
+        return (await getter()) if getter else []

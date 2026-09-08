@@ -35,6 +35,10 @@ _INFLIGHT_MODULES = [
     # requests must collapse to ONE upstream call — and a caller that times out must not
     # cancel the shared fetch out from under the others.
     "price_service.py",
+    # The close map is a 63-request / ~6.6 s sweep shared by every scanner and every
+    # sector strip, so concurrent callers must collapse to one — and a caller that times
+    # out must not cancel it out from under the rest.
+    "market_movers_service.py",
     "profit_power_service.py",
     "growth_service.py",
     "earnings_service.py",

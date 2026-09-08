@@ -9,7 +9,6 @@ import re
 from collections import defaultdict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from app.core.security import trusted_client_ip
 # `_user_id_from_token` applies the access-token type guard that `decode_token` alone does not.
 # The endpoint layer importing from `dependencies` (not `integrations`) is consistent with how
 # every other endpoint reaches its auth helpers.
@@ -57,9 +56,10 @@ def _validate_ws_token(token: str) -> str | None:
     the `password_changed_at` eviction check, so honouring one here handed a stolen or
     post-password-change refresh token a live price stream for the rest of the week.
 
-    Returning None on failure is deliberate and unchanged: the caller treats an unusable token
-    as "guest", because the stream is genuinely public for crypto. There is no 401 to raise on a
-    socket that has not been accepted yet.
+    Returning None on failure is unchanged, but the CALLER's response to it is not: a missing
+    or unusable token is now a REFUSED connection, not a guest session. See `live_price_ws`.
+    There is no 401 to raise on a socket that has not been accepted yet, so the refusal is a
+    close frame with policy code 1008.
     """
     return _user_id_from_token(token)
 
@@ -71,11 +71,27 @@ async def live_price_ws(
     token: str = Query(None),
 ):
     """
-    WebSocket endpoint for real-time price streaming.
+    WebSocket endpoint for real-time price streaming. **Requires a valid access token.**
+
+    ⚠️ This used to accept an ANONYMOUS connection — `token` was optional and an absent or
+    unusable one produced `user_id = None`, which the handler treated as a guest session
+    ("allows guest access for crypto"). Verified against production: a tokenless client
+    connected successfully and would have been streamed prices on a trading day.
+
+    That is the one surface the account-only redesign did not close. It is invisible to
+    `tests/test_ios_auth_policy_parity.py`, whose scanner only matches `@router.get/post/...`
+    and never sees a `@router.websocket`, and it does not go through `APIClient`'s REST path
+    where `APIEndpoint.authPolicy` is enforced — so neither guard could catch it.
+
+    It matters because the payload is FMP-derived price data, and the signed Order Form grants
+    End-User Display Rights only: their data may be shown solely "through the Licensee's
+    authenticated platform." A public price socket is outside that licence. The crypto
+    carve-out that justified the exception is also moot — FMP answers 402 for every `…USD`
+    pair now, so there is no 24/7 public stream left to serve.
 
     Connection flow:
-    1. Client connects with optional JWT token as query param
-    2. Server validates token (optional — allows guest access for crypto)
+    1. Client connects with a JWT access token as a query param — REQUIRED
+    2. Server validates it and REFUSES the connection if it is missing or unusable
     3. Server checks market hours for stocks — crypto is 24/7
     4. Server subscribes client to the ticker's LivePriceManager room
     5. Price updates stream to client as JSON messages
@@ -89,7 +105,8 @@ async def live_price_ws(
     Auth:
         JWT passed as ?token=eyJ... query parameter (WebSocket doesn't
         support Authorization headers from iOS URLSessionWebSocketTask).
-        Token is optional for crypto symbols (24/7 public data).
+        REQUIRED — a refused connection closes with 1008 before `accept()`, so it costs
+        no server resources and holds no connection slot.
     """
     # Validate ticker format
     ticker_upper = ticker.strip().upper()
@@ -97,17 +114,23 @@ async def live_price_ws(
         await websocket.close(code=1008, reason="Invalid ticker")
         return
 
-    # Validate JWT (optional — allow guest access)
-    if token:
-        user_id = _validate_ws_token(token)
-    else:
-        user_id = None
+    # Authenticate BEFORE accepting. Refusing pre-accept means an unauthenticated caller
+    # never holds a connection slot, so this cannot be used to exhaust the per-key cap.
+    user_id = _validate_ws_token(token) if token else None
+    if not user_id:
+        # Deliberately one message for both "absent" and "invalid": distinguishing them
+        # tells an unauthenticated caller whether a token was well-formed.
+        logger.info(
+            "live price WS refused for %s: %s",
+            ticker_upper, "no token" if not token else "invalid token",
+        )
+        await websocket.close(code=1008, reason="Authentication required")
+        return
 
-    # Enforce per-user/IP connection limit
-    # Anonymous cap keys off the address OUR edge observed, not the leftmost X-Forwarded-For
-    # entry uvicorn puts in `websocket.client` under --forwarded-allow-ips='*' (caller-supplied,
-    # so rotating it gave every connection a fresh bucket and voided this cap entirely).
-    conn_key = user_id or trusted_client_ip(websocket)
+    # Per-user connection limit. Always keyed by user id now that anonymous connections are
+    # refused above — the old `or trusted_client_ip(...)` fallback existed only to give an
+    # anonymous caller a bucket, and is unreachable.
+    conn_key = user_id
     # `.get`, NOT `[...]`: this is a defaultdict, so subscripting INSERTS the key — a
     # connection REJECTED by the cap below would still leave a permanent entry behind.
     if _active_connections.get(conn_key, 0) >= _MAX_CONNECTIONS_PER_KEY:

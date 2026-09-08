@@ -72,6 +72,7 @@ from app.schemas.themes_detail import (
     ThemeDetailResponse,
 )
 from app.services.price_service import price_source
+from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,6 @@ _MOVERS_MIN_ABS_CHANGE_PCT = 0.05
 # Bound the shared profile fan-out. Sized to fit the WHOLE in-play universe
 # (≈ filtered gainers + losers + most-actives, ~65–90), so most-actives — the
 # source of "real down names" that backfill Top Losers — aren't truncated.
-_UNIVERSE_CAP = 90
 # Short % of float above this is treated as bad data and dropped — a stale FMP
 # float vs a post-reverse-split FINRA shares_short can yield absurd ratios
 # (e.g. WOLF computing 435%). Genuine values essentially never exceed 100%.
@@ -1147,81 +1147,29 @@ class HomeDashboardService:
     ) -> Tuple[Optional[ScannerGroupResponse], Optional[ScannerGroupResponse]]:
         """Top Movers (gainers/losers) + Heavy Traffic (RVOL) share ONE batch of
         quotes over the in-play universe."""
-        gainers_raw, losers_raw, actives_raw = await asyncio.gather(
-            self.fmp.get_biggest_gainers(),
-            self.fmp.get_biggest_losers(),
-            self.fmp.get_most_actives(),
-        )
-
-        # Universe = price/exchange-eligible candidates from all three lists.
-        # Build each list's eligibles, then ROUND-ROBIN interleave so the cap
-        # can't starve one list — in particular most-actives, the RVOL backbone,
-        # which would otherwise be truncated on a day with many gainers. One
-        # profile fan-out then supplies marketCap / averageVolume / isEtf / volume.
-        def _eligible(raw: Any) -> List[str]:
-            out: List[str] = []
-            for r in raw or []:
-                if not isinstance(r, dict):
-                    continue
-                price = _finite_float(r.get("price"))
-                if price is None or price < _MOVERS_MIN_PRICE:
-                    continue
-                if (r.get("exchange") or "").upper() not in _MOVERS_EXCHANGES:
-                    continue
-                s = (r.get("symbol") or "").upper()
-                if s:
-                    out.append(s)
-            return out
-
-        eligible_lists = [
-            _eligible(gainers_raw), _eligible(losers_raw), _eligible(actives_raw)
-        ]
-        universe: List[str] = []
-        seen: set = set()
-        depth = max((len(lst) for lst in eligible_lists), default=0)
-        for i in range(depth):
-            for lst in eligible_lists:
-                if i < len(lst) and len(universe) < _UNIVERSE_CAP:
-                    s = lst[i]
-                    if s not in seen:
-                        seen.add(s)
-                        universe.append(s)
-            if len(universe) >= _UNIVERSE_CAP:
-                break
-
-        # get_company_profiles_batch hard-caps at 50 symbols/call, so chunk the
-        # universe (otherwise the tail — where most-actives land after the
-        # round-robin — is silently dropped, starving Top Losers of real names).
-        profile_chunks = await asyncio.gather(
-            *[
-                self.fmp.get_company_profiles_batch(universe[i:i + 50])
-                for i in range(0, len(universe), 50)
-            ]
-        )
-        profile_map = {
-            (p.get("symbol") or "").upper(): p
-            for chunk in profile_chunks
-            for p in chunk
-            if isinstance(p, dict) and p.get("symbol")
-        }
-
-        # Today's % change per symbol, from the three raw lists (each row carries
-        # `changesPercentage`). Used to rank the quality universe into movers.
-        change_map: Dict[str, float] = {}
-        for raw in (gainers_raw, losers_raw, actives_raw):
-            for r in raw or []:
-                if not isinstance(r, dict):
-                    continue
-                # Canonical key so the join survives the class-share delimiter
-                # mismatch between these lists and the profile endpoint.
-                s = _canonical_symbol(r.get("symbol"))
-                if not s or s in change_map:
-                    continue
-                chg = _parse_pct(r.get("changesPercentage"))
-                if chg is None:
-                    chg = _parse_pct(r.get("changePercentage"))
-                if chg is not None:
-                    change_map[s] = chg
+        # ONE entitled screener sweep replaces three 402'd Market Performance calls
+        # AND the profile fan-out that used to follow them.
+        #
+        # What this used to do: call biggest-gainers / biggest-losers / most-actives to
+        # seed a candidate list, round-robin interleave them under a cap, then fan out
+        # `get_company_profiles_batch` in chunks of 50 to fetch the marketCap /
+        # averageVolume / isEtf that the quality gate and RVOL actually rank on.
+        #
+        # All three seed endpoints are now `402 Restricted Endpoint` — Market Performance
+        # is in none of the nine purchased packages. `company-screener` IS entitled and
+        # carries every one of those fields inline for the whole US universe in ~1 s, so
+        # the seed calls and the entire fan-out both disappear rather than being replaced.
+        #
+        # The ranking below is untouched: `get_scanner_inputs` hands back exactly the
+        # `(profile_map, change_map)` pair this function already built, in the same
+        # profile shape, so `_is_quality_company` / `_movers_from_universe` / `_volume_rows`
+        # and all of their hard-won guards keep working as-is.
+        #
+        # It also ranks a wider and cleaner pool. FMP's seed lists were capped at 50 each
+        # and skewed to sub-$300M names and leveraged ETFs (measured 2026-09-07: six of
+        # the top twenty at a $300M floor were 2x/3x products); this ranks every quality
+        # company in the universe.
+        profile_map, change_map = await get_market_movers_service().get_scanner_inputs()
 
         gainers = _movers_from_universe(profile_map, change_map, positive=True)
         losers = _movers_from_universe(profile_map, change_map, positive=False)

@@ -50,7 +50,19 @@ final class LivePriceWebSocketManager: ObservableObject {
     // MARK: - Public API
 
     /// Connect to the live price WebSocket for a given ticker.
-    /// Auth token is optional — crypto symbols can connect without login.
+    ///
+    /// An access token is REQUIRED. The server refuses a tokenless socket with close code
+    /// 1008 before accepting it — the endpoint used to allow anonymous "guest access for
+    /// crypto", which streamed FMP-derived prices to unauthenticated callers and sat
+    /// outside the End-User Display Rights the FMP Order Form grants. The crypto carve-out
+    /// is moot besides: FMP answers 402 for every `…USD` pair now.
+    ///
+    /// Returning early without a token is a courtesy, not the enforcement — the server is.
+    /// It just avoids burning all three reconnect attempts on a socket that cannot succeed,
+    /// which is the state a signed-out user or an `AppState.restoring` session is in
+    /// (`APIClient.currentAuthToken()` is deliberately disarmed while restoring).
+    /// `TickerDetailViewModel` keeps REST-polling while `isConnected` stays false, so the
+    /// price still updates; it just does not stream.
     func connect(ticker: String, authToken: String? = nil) {
         // Tear down any existing socket + pending reconnect first. Without this a
         // second connect() (pull-to-refresh, ticker switch) leaks the prior
@@ -72,6 +84,14 @@ final class LivePriceWebSocketManager: ObservableObject {
         self.authToken = authToken ?? ""
         isIntentionalDisconnect = false
         reconnectAttempts = 0
+
+        guard !self.authToken.isEmpty else {
+            // No credential — the server would refuse this. Stay disconnected so the
+            // caller's REST polling continues, rather than flapping through three
+            // doomed attempts first.
+            isIntentionalDisconnect = true
+            return
+        }
 
         openConnection()
     }
@@ -228,10 +248,11 @@ final class LivePriceWebSocketManager: ObservableObject {
     /// error, no analytics — just a stale quote until the user leaves and re-enters.
     ///
     /// `APIClient.currentAuthToken()` is the single source of truth (never the Keychain, which
-    /// deliberately diverges during `.restoring`). An empty token means we reconnect as an
-    /// anonymous caller, which is the correct behaviour for crypto and for a signed-out user.
+    /// deliberately diverges during `.restoring`). An empty token can no longer reach here —
+    /// `connect()` refuses to open a tokenless socket — so the guard below is belt-and-braces
+    /// rather than the "stay anonymous" path it used to be.
     private func refreshCurrentAuthToken() async {
-        guard !authToken.isEmpty else { return }  // was anonymous; stay anonymous
+        guard !authToken.isEmpty else { return }  // no credential; nothing to refresh
         if let current = await APIClient.shared.currentAuthToken(), !current.isEmpty {
             authToken = current
         }

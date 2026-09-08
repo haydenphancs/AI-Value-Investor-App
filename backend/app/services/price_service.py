@@ -54,7 +54,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client
+from app.integrations.fmp import FMPRateLimitException, get_fmp_client
 from app.integrations.fmp_entitlements import is_blocked_symbol
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,24 @@ _SCREENER_MAX_PAGES = 4
 # carrying a calendar. Bounded so an upstream outage cannot spin: 5 steps covers the
 # longest US market closure in living memory (Sandy, 2 sessions) with room to spare.
 _MAX_SESSION_LOOKBACK = 5
+
+# Two ~12 MB batch-eod calls back to back reliably trip FMP's burst limiter; measured,
+# it clears within seconds. This is a once-daily background job, so waiting is free.
+_RATE_LIMIT_RETRIES = 3
+_RATE_LIMIT_BACKOFF_SECONDS = 10.0
+
+# "Did the US market trade on this date?" cannot be answered by "did batch-eod return
+# rows" — that endpoint is global, and on a US-only holiday the international exchanges
+# still report. Measured on Labor Day 2026-09-07: `batch-eod?date=2026-09-07` returned
+# 40,159 rows and AAPL was ABSENT from every one of them. A row-count check accepted that
+# as a session, so the ingest wrote 37,695 international symbols and silently skipped the
+# entire US universe.
+#
+# These three are the probe. They are the most liquid US listings there are: if a real US
+# session happened, all three are in the payload. A quorum of two tolerates one symbol
+# being halted or renamed without falsely rejecting a genuine session.
+_US_SESSION_BELLWETHERS = ("AAPL", "MSFT", "SPY")
+_US_SESSION_QUORUM = 2
 
 _cache: Dict[str, Tuple[float, Any]] = {}
 _inflight: Dict[str, asyncio.Future] = {}
@@ -566,10 +584,25 @@ class PriceService:
             for r in prev_rows
         }
         if not prev_by_symbol:
-            logger.warning(
-                "price_service: no prior session before %s — change %% will be unknown "
-                "until the next successful ingest", latest_date,
+            # 🔴 ABORT rather than write. This upsert replaces the whole row, so writing
+            # here would set `previous_close = NULL` on every symbol and DESTROY a good
+            # denominator that is still perfectly valid.
+            #
+            # Not hypothetical: observed in production 2026-09-07. The hourly loop ran a
+            # build without the rate-limit backoff, the second (prior-session) batch-eod
+            # call was rejected by FMP's burst limiter, and the job cheerfully nulled
+            # `previous_close` across all 63,394 rows — turning a working day-change into
+            # "unknown" app-wide, hours after a successful ingest had populated it.
+            #
+            # Skipping is always safe: the stored pair (close, previous_close) stays
+            # internally consistent, and yesterday's close is still yesterday's close.
+            # The loop retries within the hour.
+            logger.error(
+                "price_service: prior session before %s unavailable — SKIPPING the write "
+                "to avoid nulling previous_close on %d existing rows",
+                latest_date, len(latest),
             )
+            return 0
 
         payload: List[Dict[str, Any]] = []
         skipped_blocked = 0
@@ -628,17 +661,64 @@ class PriceService:
         target = start_date or self._last_trading_day()
         fmp = get_fmp_client()
         for _ in range(_MAX_SESSION_LOOKBACK):
+            rows = await self._batch_eod_with_backoff(fmp, target)
+            if rows is None:
+                return target, []          # hard failure, already logged
+            if self._is_us_session(rows):
+                return target, rows
+            logger.info(
+                "price_service: %s is not a US session (%d rows, bellwethers missing) "
+                "— stepping back", target, len(rows or []),
+            )
+            target = self._step_back(target)
+        return target, []
+
+    @staticmethod
+    async def _batch_eod_with_backoff(fmp: Any, target: str) -> Optional[List[Dict[str, Any]]]:
+        """`batch-eod` for one date, retrying a rate limit. None means give up.
+
+        ⚠️ The retry is not optional. A full ingest makes TWO of these calls back to back —
+        the latest session and the one before it — and each pulls ~12 MB / ~65k rows. FMP's
+        burst limiter rejects the second almost every time, and the observed failure was
+        silent in the worst way: the first call succeeded, so 62,893 closes were written
+        correctly while EVERY `previous_close` came back NULL, leaving the day change
+        unknown across the whole app. Measured: the limit clears in seconds, so a short
+        backoff turns a guaranteed daily failure into a non-event.
+        """
+        delay = _RATE_LIMIT_BACKOFF_SECONDS
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
             try:
-                rows = await fmp.get_batch_eod(target)
+                return await fmp.get_batch_eod(target)
+            except FMPRateLimitException as e:
+                if attempt == _RATE_LIMIT_RETRIES:
+                    logger.error(
+                        "price_service: batch-eod for %s still rate-limited after %d "
+                        "retries: %s", target, _RATE_LIMIT_RETRIES, e,
+                    )
+                    return None
+                logger.warning(
+                    "price_service: batch-eod for %s rate-limited, retrying in %.0fs "
+                    "(attempt %d/%d)", target, delay, attempt + 1, _RATE_LIMIT_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
             except Exception as e:
                 logger.error("price_service: batch-eod failed for %s: %s: %s",
                              target, type(e).__name__, e, exc_info=True)
-                return target, []
-            if rows:
-                return target, rows
-            logger.info("price_service: no session on %s, stepping back", target)
-            target = self._step_back(target)
-        return target, []
+                return None
+        return None
+
+    @staticmethod
+    def _is_us_session(rows: Optional[List[Dict[str, Any]]]) -> bool:
+        """Did the US market actually trade on the date these rows came from?
+
+        NOT "are there any rows". `batch-eod` is global, so a US-only holiday still
+        returns tens of thousands of international rows — see `_US_SESSION_BELLWETHERS`.
+        """
+        if not rows:
+            return False
+        symbols = {(r.get("symbol") or "").upper() for r in rows}
+        return sum(1 for b in _US_SESSION_BELLWETHERS if b in symbols) >= _US_SESSION_QUORUM
 
     @staticmethod
     def _step_back(iso_date: str) -> str:

@@ -48,6 +48,7 @@ from app.services.home_dashboard_service import (
     _volume_rows,
 )
 from _price_fakes import PriceFromFMPFake
+from _price_fakes import MoversFromFMPFake
 
 
 def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, **extra):
@@ -485,6 +486,13 @@ def _fresh_service(monkeypatch, *, short_pct=33.0, short_delay=0.0):
     SignalsService._cache[_SIGNALS_CACHE_KEY] = (time.time(), SignalsGroupResponse())
     s = HomeDashboardService()
     s.fmp = _FakeFMP()  # type: ignore[assignment]
+    # Movers no longer come from the FMP client — Market Performance is 402 and the
+    # scanner reads `market_movers_service` instead. Route it back at the SAME fake object
+    # so every test's data is untouched, and read `s.fmp` lazily so the tests below that
+    # swap individual methods onto it (get_most_actives, get_company_profiles_batch) are
+    # still honoured.
+    monkeypatch.setattr(svc, "get_market_movers_service",
+                        lambda: MoversFromFMPFake(s.fmp))
     s.price = PriceFromFMPFake(s.fmp)
 
     async def fake_si(ticker):
@@ -874,9 +882,22 @@ def test_load_short_universe_dedups_and_normalizes(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_volume_universe_not_starved_of_most_actives(monkeypatch):
     """Round-robin interleave: even with a long gainers list, most-actives
-    (the RVOL backbone) still make it into the quoted universe under the cap."""
+    (the RVOL backbone) are not crowded out by a long list of gainers.
+
+    ⚠️ REWRITTEN 2026-09-07 — the mechanism it guarded is GONE, and the guarantee is now
+    structural rather than procedural.
+
+    It used to set `_UNIVERSE_CAP = 6` and prove that a round-robin interleave of the
+    three FMP seed lists kept the single most-active name inside the cap. Those seed lists
+    are `402 Restricted Endpoint` now (Market Performance is unpurchased), and the scanner
+    ranks the WHOLE screener universe instead — there is no cap to be starved by and no
+    interleave to get it wrong. `_UNIVERSE_CAP` has been deleted as dead.
+
+    So the property is re-stated in terms that still mean something: a genuinely unusual
+    volume name ranks into Heavy Traffic on its RVOL, however many gainers exist. The
+    original data can no longer show this — every symbol shared one RVOL of 3.0x, so the
+    old pass depended entirely on insertion order surviving the cap."""
     s = _fresh_service(monkeypatch)
-    monkeypatch.setattr(svc, "_UNIVERSE_CAP", 6)
 
     async def many_gainers():
         return [{"symbol": f"G{i}", "name": f"G{i}", "price": 10.0,
@@ -886,11 +907,16 @@ async def test_volume_universe_not_starved_of_most_actives(monkeypatch):
         return [{"symbol": "MEGA", "name": "Mega", "price": 100.0,
                  "changesPercentage": 1.0, "exchange": "NASDAQ"}]
 
-    profiled = {}
-
     async def profiles(symbols):
-        return [_profile(s_, price=10.0, volume=30e6, avg=10e6, changePercentage=1.0)
-                for s_ in symbols]
+        out = []
+        for s_ in symbols:
+            # MEGA is the one genuinely unusual name: 8x its average against the
+            # gainers' 3x. Under the old cap-and-interleave every symbol shared the
+            # same 3.0x, so nothing in the data distinguished them.
+            vol = 80e6 if s_ == "MEGA" else 30e6
+            out.append(_profile(s_, price=10.0, volume=vol, avg=10e6,
+                                changePercentage=1.0))
+        return out
 
     s.fmp.get_biggest_gainers = many_gainers  # type: ignore[assignment]
     s.fmp.get_biggest_losers = one_active      # reuse as a 1-item list  # type: ignore[assignment]
@@ -898,22 +924,34 @@ async def test_volume_universe_not_starved_of_most_actives(monkeypatch):
     s.fmp.get_company_profiles_batch = profiles  # type: ignore[assignment]
 
     movers, volume = await s._build_movers_and_volume()
-    # MEGA (the most-active) must be present in the RVOL card despite 20 gainers
-    # ahead of it — round-robin guarantees it under the cap of 6.
     assert volume is not None
     assert "MEGA" in {r.symbol for r in volume.entries}
+    assert volume.entries[0].symbol == "MEGA", (
+        "the most unusual volume must rank first, not merely survive a cap"
+    )
 
 
 @pytest.mark.asyncio
-async def test_movers_profile_fetch_chunks_past_the_50_cap(monkeypatch):
-    """`get_company_profiles_batch` hard-caps at 50 symbols/call. The service must
-    CHUNK so a >50 universe is fully profiled — otherwise the tail (where
-    most-actives' down names land after the round-robin) is silently dropped and
-    Top Losers is starved of real names. Regression for that exact bug."""
-    s = _fresh_service(monkeypatch)
-    monkeypatch.setattr(svc, "_UNIVERSE_CAP", 90)
+async def test_a_universe_past_fifty_symbols_is_fully_ranked(monkeypatch):
+    """The tail of a large universe must not be silently dropped.
 
-    # 60 down most-actives; A59 is the most-negative and lands PAST position 50.
+    ⚠️ REWRITTEN 2026-09-07. This used to be
+    `test_movers_profile_fetch_chunks_past_the_50_cap`, guarding a bug where
+    `get_company_profiles_batch` hard-capped at 50 symbols per call and an unchunked fetch
+    truncated the universe — starving Top Losers of real names, because the down movers
+    landed past position 50 after the round-robin.
+
+    That fan-out is gone. Market Performance is `402 Restricted Endpoint`, so there are no
+    seed lists to fan out FROM, and the entitled `company-screener` carries marketCap /
+    averageVolume / isEtf inline for the whole universe in one call. There is no chunk
+    boundary left to get wrong.
+
+    Both halves are asserted, because the behavioural half alone would be vacuous: the
+    test double still chunks at 50 (it stands in for the old client), so it cannot show
+    that PRODUCTION stopped doing so. The source assertion is what pins that."""
+    s = _fresh_service(monkeypatch)
+
+    # 60 down names; A59 is the most-negative and would have landed past position 50.
     actives = [
         {"symbol": f"A{i}", "name": f"A{i}", "price": 10.0,
          "changesPercentage": -float(i + 1), "exchange": "NYSE"}
@@ -926,18 +964,33 @@ async def test_movers_profile_fetch_chunks_past_the_50_cap(monkeypatch):
     async def _empty():
         return []
 
-    # Mirror the REAL 50-per-call cap so the test fails without chunking.
-    async def _capped_profiles(symbols):
-        return [_profile(sym, price=10.0, mc=1e9, avg=2e6) for sym in symbols[:50]]
+    async def _profiles(symbols):
+        return [_profile(sym, price=10.0, mc=1e9, avg=2e6) for sym in symbols]
 
     s.fmp.get_biggest_gainers = _empty       # type: ignore[assignment]
     s.fmp.get_biggest_losers = _empty        # type: ignore[assignment]
     s.fmp.get_most_actives = _actives        # type: ignore[assignment]
-    s.fmp.get_company_profiles_batch = _capped_profiles  # type: ignore[assignment]
+    s.fmp.get_company_profiles_batch = _profiles  # type: ignore[assignment]
 
     movers, _volume = await s._build_movers_and_volume()
     assert movers is not None
     syms = {r.symbol for r in movers.losers}
-    # A59/A58/… land past index 50; they'd be dropped without chunking.
-    assert "A59" in syms and "A55" in syms
-    assert len(movers.losers) == 10  # the 10 most-negative, fully profiled
+    assert "A59" in syms and "A55" in syms, (
+        "the deepest losers sit past the old 50-symbol boundary and must still rank"
+    )
+    assert len(movers.losers) == 10  # the 10 most-negative
+
+    # Structural half — production must not reintroduce a chunked profile fan-out.
+    import ast
+    import inspect
+    src = inspect.getsource(svc.HomeDashboardService._build_movers_and_volume)
+    tree = ast.parse(src.lstrip())
+    called = {
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "get_company_profiles_batch" not in called, (
+        "the scanner fans out profiles again — the screener already carries marketCap, "
+        "averageVolume and isEtf inline, so a fan-out is both a chunking hazard and "
+        "N wasted calls"
+    )

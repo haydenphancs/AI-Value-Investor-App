@@ -100,6 +100,7 @@ from app.utils.market_hours import (
     session_trading_date,
 )
 from app.services.price_service import price_source
+from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
 
@@ -919,7 +920,7 @@ class WidgetMoversService:
         today = session_trading_date()
 
         async def _industry_perf():
-            rows = await fmp.get_industry_performance()
+            rows = await get_market_movers_service().get_industry_performance()
             out: Dict[str, float] = {}
             # FMP stamps every row with the session it describes, and
             # `_latest_perf_snapshot` deliberately walks back to the last trading day —
@@ -971,7 +972,7 @@ class WidgetMoversService:
             # day for the whole product, and it is still O(1) in user count — but it is
             # why this leg must stay inside `_ctx_cache` and must never be moved onto the
             # 60-second payload path.
-            rows = await fmp.get_sector_performance()
+            rows = await get_market_movers_service().get_sector_performance()
             out: List[Tuple[str, float]] = []
             for r in rows or []:
                 name = str(r.get("sector") or "").strip()

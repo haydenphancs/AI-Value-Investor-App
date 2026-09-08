@@ -239,7 +239,10 @@ async def test_ingest_drops_every_unlicensed_symbol(monkeypatch):
     """🔴 The compliance filter. batch-eod serves these; no purchased package covers them."""
     captured: List[Dict[str, Any]] = []
     _install(monkeypatch, _FakeFMP(eod=[
+        # A real US session (bellwethers present) that also carries the unlicensed
+        # symbols batch-eod ships even though the per-symbol endpoint 402s them.
         {"symbol": "AAPL", "date": "2026-09-04", "close": 319.97, "volume": 1},
+        {"symbol": "MSFT", "date": "2026-09-04", "close": 499.70, "volume": 1},
         {"symbol": "^GSPC", "date": "2026-09-04", "close": 7718.6, "volume": 1},
         {"symbol": "GCUSD", "date": "2026-09-04", "close": 4476.6, "volume": 1},
         {"symbol": "BTCUSD", "date": "2026-09-04", "close": 79675.12, "volume": 1},
@@ -248,8 +251,8 @@ async def test_ingest_drops_every_unlicensed_symbol(monkeypatch):
     monkeypatch.setattr(PriceService, "_upsert_closes",
                         staticmethod(lambda p: captured.extend(p) or len(p)))
     written = await PriceService().refresh_close_snapshot("2026-09-04")
-    assert written == 1
-    assert [r["symbol"] for r in captured] == ["AAPL"], (
+    assert written == 2
+    assert [r["symbol"] for r in captured] == ["AAPL", "MSFT"], (
         "an unlicensed close must never be persisted — this filter is the only thing "
         "preventing ingest through FMP's own enforcement gap"
     )
@@ -359,6 +362,17 @@ def _eod(symbol: str, d: str, close: float):
     return {"symbol": symbol, "date": d, "close": close, "volume": 1000}
 
 
+def _session(d: str, *extra: dict) -> list:
+    """One US trading session's rows.
+
+    Always carries the bellwethers `_is_us_session` probes for. `batch-eod` is a GLOBAL
+    feed, so "there are rows" does not mean the US traded — on Labor Day 2026-09-07 it
+    returned 40,159 international rows with AAPL absent. A fixture without them is not a
+    US session and the ingest is right to reject it.
+    """
+    return [_eod("AAPL", d, 100.0), _eod("MSFT", d, 200.0), *extra]
+
+
 class _SessionFMP(_FakeFMP):
     """batch-eod keyed by date, so holiday gaps can be simulated."""
 
@@ -376,13 +390,13 @@ class _SessionFMP(_FakeFMP):
 async def test_ingest_pairs_the_two_most_recent_sessions(monkeypatch):
     captured: List[Dict[str, Any]] = []
     _install(monkeypatch, _SessionFMP({
-        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
-        "2026-09-03": [_eod("AAPL", "2026-09-03", 328.21)],
+        "2026-09-04": _session("2026-09-04", _eod("ZZZ", "2026-09-04", 319.97)),
+        "2026-09-03": _session("2026-09-03", _eod("ZZZ", "2026-09-03", 328.21)),
     }))
     monkeypatch.setattr(PriceService, "_upsert_closes",
                         staticmethod(lambda p: captured.extend(p) or len(p)))
-    assert await PriceService().refresh_close_snapshot("2026-09-04") == 1
-    row = captured[0]
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 3
+    row = next(r for r in captured if r["symbol"] == "ZZZ")
     assert row["close"] == 319.97
     assert row["previous_close"] == 328.21
     assert row["previous_trade_date"] == "2026-09-03"
@@ -392,27 +406,60 @@ async def test_ingest_pairs_the_two_most_recent_sessions(monkeypatch):
 async def test_ingest_walks_back_over_a_market_holiday(monkeypatch):
     """A holiday is a weekday with no session — Labor Day is how this was found."""
     fake = _install(monkeypatch, _SessionFMP({
-        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
-        "2026-09-03": [_eod("AAPL", "2026-09-03", 328.21)],
-        # 2026-09-07 (Mon) is Labor Day: a weekday with no rows at all.
+        "2026-09-04": _session("2026-09-04"),
+        "2026-09-03": _session("2026-09-03"),
+        # Labor Day: a WEEKDAY with rows — international exchanges traded — but no US
+        # session, so no bellwethers. This is the exact shape that fooled the old check.
+        "2026-09-07": [_eod("SHOP.TO", "2026-09-07", 90.0),
+                       _eod("2205.HK", "2026-09-07", 3.0)],
     }))
-    monkeypatch.setattr(PriceService, "_upsert_closes", staticmethod(lambda p: len(p)))
-    assert await PriceService().refresh_close_snapshot("2026-09-07") == 1
+    captured: List[Dict[str, Any]] = []
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+    await PriceService().refresh_close_snapshot("2026-09-07")
+
     assert "2026-09-07" in fake.requested, "it must try the holiday first"
     assert "2026-09-04" in fake.requested, "then step back to the real session"
 
+    # ⚠️ Assert on SYMBOLS, not the row count. Mutation-testing caught this: with the
+    # broken "any rows means a session" check the job accepts Labor Day and writes the two
+    # international rows instead — also a count of 2, so a count assertion passed happily
+    # while the entire US universe was being skipped.
+    written = {r["symbol"] for r in captured}
+    assert "AAPL" in written and "MSFT" in written, (
+        f"must ingest the US session, got {sorted(written)}"
+    )
+    assert "SHOP.TO" not in written, (
+        "the Labor Day international rows must not be mistaken for a US session"
+    )
+    assert all(r["trade_date"] == "2026-09-04" for r in captured)
+
 
 @pytest.mark.asyncio
-async def test_ingest_stores_a_close_even_when_the_prior_session_is_missing(monkeypatch):
-    """Half the data is better than none: price still renders, change % reads unknown."""
-    captured: List[Dict[str, Any]] = []
-    _install(monkeypatch, _SessionFMP({"2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)]}))
+async def test_ingest_without_a_prior_session_writes_nothing(monkeypatch):
+    """⚠️ THIS TEST'S EXPECTATION WAS INVERTED on 2026-09-07, by evidence.
+
+    It used to assert the opposite — "half the data is better than none: price still
+    renders, change % reads unknown" — and that reasoning was simply wrong. The upsert
+    replaces the whole row, so writing a close with no prior session sets
+    `previous_close = NULL` on EVERY symbol, destroying a denominator that was still
+    perfectly good.
+
+    Observed in production hours later: the hourly loop hit FMP's burst limiter on the
+    second batch-eod call and nulled `previous_close` across all 63,394 rows, turning the
+    day change into "unknown" app-wide long after a successful ingest had populated it.
+
+    Skipping is strictly safer. The stored (close, previous_close) pair stays internally
+    consistent, yesterday's close is still yesterday's close, and the loop retries within
+    the hour. A first-ever ingest into an empty table needs both calls to succeed, which
+    the rate-limit backoff makes the normal case.
+    """
+    _install(monkeypatch, _SessionFMP({"2026-09-04": _session("2026-09-04")}))
     monkeypatch.setattr(PriceService, "_upsert_closes",
-                        staticmethod(lambda p: captured.extend(p) or len(p)))
-    assert await PriceService().refresh_close_snapshot("2026-09-04") == 1
-    assert captured[0]["close"] == 319.97
-    assert captured[0]["previous_close"] is None
-    assert captured[0]["previous_trade_date"] is None
+                        staticmethod(lambda p: pytest.fail(
+                            "must not write — this is the destructive partial write"
+                        )))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
 
 
 @pytest.mark.asyncio
@@ -432,3 +479,101 @@ async def test_session_lookback_is_bounded(monkeypatch):
 ])
 def test_step_back_skips_weekends(start, expected):
     assert PriceService._step_back(start) == expected
+
+
+# ── rate-limit backoff on the bulk ingest ──────────────────────────────────────────
+#
+# Found in production: a full ingest makes TWO ~12 MB batch-eod calls back to back, and
+# FMP's burst limiter rejected the second almost every time. The failure was silent in the
+# worst way — 62,893 closes written correctly, every `previous_close` NULL, and the day
+# change therefore unknown across the whole app.
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_batch_eod_is_retried(monkeypatch):
+    from app.integrations.fmp import FMPRateLimitException
+
+    attempts = {"n": 0}
+
+    class _Limited(_SessionFMP):
+        async def get_batch_eod(self, trade_date):
+            self.requested.append(trade_date)
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise FMPRateLimitException("burst limit")
+            return self.sessions.get(trade_date, [])
+
+    _install(monkeypatch, _Limited({
+        "2026-09-04": _session("2026-09-04"),
+        "2026-09-03": _session("2026-09-03"),
+    }))
+    monkeypatch.setattr(ps_module, "_RATE_LIMIT_BACKOFF_SECONDS", 0)
+    captured: List[Dict[str, Any]] = []
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 2
+    assert attempts["n"] >= 2, "the rate-limited call must be retried, not abandoned"
+    assert next(r for r in captured if r["symbol"] == "AAPL")["previous_close"] == 100.0, (
+        "the whole point of the retry: without it the prior session is lost and every "
+        "day change silently reads as unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_persistent_rate_limit_gives_up_rather_than_spinning(monkeypatch):
+    from app.integrations.fmp import FMPRateLimitException
+
+    calls = {"n": 0}
+
+    class _AlwaysLimited(_SessionFMP):
+        async def get_batch_eod(self, trade_date):
+            calls["n"] += 1
+            raise FMPRateLimitException("still limited")
+
+    _install(monkeypatch, _AlwaysLimited({}))
+    monkeypatch.setattr(ps_module, "_RATE_LIMIT_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    assert calls["n"] <= 8, f"unbounded retry: {calls['n']} calls"
+
+
+@pytest.mark.asyncio
+async def test_a_non_rate_limit_error_is_not_retried(monkeypatch):
+    """Backoff is for a transient burst limit; a real error must fail fast."""
+    calls = {"n": 0}
+
+    class _Broken(_SessionFMP):
+        async def get_batch_eod(self, trade_date):
+            calls["n"] += 1
+            raise RuntimeError("upstream down")
+
+    _install(monkeypatch, _Broken({}))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail("must not write")))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+    assert calls["n"] == 1, "a hard error must not be retried"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_prior_session_never_nulls_a_good_previous_close(monkeypatch):
+    """🔴 Observed in production 2026-09-07 — a destructive partial write.
+
+    The upsert replaces the whole row, so writing a batch with no prior-session data sets
+    `previous_close = NULL` on every symbol. The hourly loop did exactly that: the second
+    batch-eod call was rate-limited, and the job nulled the denominator across all 63,394
+    rows hours after a successful ingest had populated it, turning the day change into
+    "unknown" app-wide.
+
+    Skipping is always safe — the stored (close, previous_close) pair stays internally
+    consistent and the loop retries within the hour.
+    """
+    _install(monkeypatch, _SessionFMP({
+        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
+        # nothing for any earlier session
+    }))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail(
+                            "must not write — this would null previous_close on every row"
+                        )))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0

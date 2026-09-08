@@ -1174,6 +1174,7 @@ def test_enforce_answer_actually_redacts_what_reasoning_would_leak():
 import re as _re
 from pathlib import Path as _Path
 from _price_fakes import PriceFromFMPFake
+from _price_fakes import MoversFromFMPFake
 
 _IOS = _Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
 
@@ -2308,6 +2309,11 @@ def _index_svc(monkeypatch):
     svc = M.IndexService.__new__(M.IndexService)
     svc.fmp, calls = _fake_index_fmp()
     svc.price = PriceFromFMPFake(svc.fmp)
+    # Sector performance moved off FMP — `sector-performance-snapshot` is 402 (Market
+    # Performance is unpurchased) and it is now derived from the entitled screener. Route
+    # it back at the same fake so this file's call-counting assertions still hold.
+    monkeypatch.setattr(M, "get_market_movers_service",
+                        lambda: MoversFromFMPFake(svc.fmp))
 
     # `_compute_index_pe_from_sectors` reads the shared `sector_benchmarks` table — real
     # Supabase I/O on the cold path, so the test would measure production's data.

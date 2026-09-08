@@ -33,6 +33,7 @@ from app.schemas.index import (
 from app.database import get_supabase
 from app.utils.market_hours import market_status_fields, to_utc_instant
 from app.services.price_service import price_source
+from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
 
@@ -658,7 +659,7 @@ class IndexService:
         if cached is not None:
             return cached
         try:
-            sector_raw = await self.fmp.get_sector_performance()
+            sector_raw = await get_market_movers_service().get_sector_performance()
         except Exception as e:
             logger.warning(
                 "Index sector performance fetch failed: %s: %s", type(e).__name__, e

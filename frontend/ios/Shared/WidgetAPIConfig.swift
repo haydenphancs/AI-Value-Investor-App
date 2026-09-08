@@ -27,6 +27,7 @@ public enum WidgetAPIConfig {
     )!
 
     static let baseURLOverrideKey = "widget.api.baseURL"
+    static let widgetTokenKey = "widget.api.token"
 
     /// What the extension should call. The override is only ever set by the app.
     public static var baseURL: URL {
@@ -45,10 +46,48 @@ public enum WidgetAPIConfig {
         WidgetSharedDefaults.store?.set(url.absoluteString, forKey: baseURLOverrideKey)
     }
 
-    /// Market mode only. Portfolio needs an identity the extension must never hold —
+    /// Market mode only. Portfolio needs a SESSION the extension must never hold —
     /// see the header of `WidgetSnapshotStore`.
     public static var marketMoverURL: URL {
         baseURL.appendingPathComponent("api/v1/widget/market-mover")
+    }
+
+    // MARK: - The widget's credential
+
+    /// The header `/widget/market-mover` authenticates with. Deliberately NOT `Authorization`:
+    /// the widget token and a session bearer are not interchangeable, and giving the widget one
+    /// its own header means no route can start accepting it just because it reads a bearer.
+    ///
+    /// Must match `WIDGET_TOKEN_HEADER` in `backend/app/dependencies.py`.
+    public static let tokenHeader = "X-Caydex-Widget-Token"
+
+    /// The extension's market-data credential, or nil when there is none.
+    ///
+    /// nil is the normal signed-out state and the fetcher treats it as "do not call" rather
+    /// than "call and get a 401" — a WidgetKit refresh spent on a guaranteed rejection is one
+    /// the tile does not get back.
+    public static var widgetToken: String? {
+        guard let raw = WidgetSharedDefaults.store?.string(forKey: widgetTokenKey),
+              !raw.isEmpty else { return nil }
+        return raw
+    }
+
+    /// Called by the APP when it mints or renews the token. The app is the only writer.
+    ///
+    /// ⚠️ This is the one credential that crosses into the extension, and it is safe ONLY
+    /// because of what it can reach: `/widget/market-mover` returns a market-wide roll-up and
+    /// nothing about the caller. It is not a session — the backend refuses it as a bearer on
+    /// every authenticated route (`_decode_access_token` allow-lists `type == "access"`). Do
+    /// not publish the session token here; it would expire in an hour and the extension cannot
+    /// refresh one.
+    public static func publishWidgetToken(_ token: String) {
+        WidgetSharedDefaults.store?.set(token, forKey: widgetTokenKey)
+    }
+
+    /// Called by the APP when the session ends. Without this the tile keeps refreshing FMP
+    /// prices onto a signed-out device, which End-User Display Rights do not permit.
+    public static func clearWidgetToken() {
+        WidgetSharedDefaults.store?.removeObject(forKey: widgetTokenKey)
     }
 
     /// Short on purpose. WidgetKit gives a timeline provider a limited budget, and a

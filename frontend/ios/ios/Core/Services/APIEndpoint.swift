@@ -327,11 +327,15 @@ enum APIEndpoint: Sendable {
     // with an argument could not be expressed in that model, and would have to be
     // special-cased in the very test that exists to stop auth drift.
     //
-    /// The most unusual move among the tickers Caydex tracks. Public market data.
+    /// The most unusual move among the tickers Caydex tracks. Market-wide, but no longer
+    /// public — see `authPolicy`.
     case getWidgetMarketMover
     /// The caller's own biggest mover, plus the combined reason when holdings moved
-    /// together. Needs an identity to know whose holdings — hence `.guestAllowed`.
+    /// together. Needs an identity to know whose holdings.
     case getWidgetPortfolioMover
+    /// Mints the market-scoped credential the `CaydexWidgets` extension authenticates with.
+    /// The APP calls this; the extension only ever reads the result out of the App Group.
+    case getWidgetToken
 
     // MARK: - Chat
     case listChatSessions(limit: Int, offset: Int)
@@ -634,6 +638,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/widget/market-mover"
         case .getWidgetPortfolioMover:
             return "/api/v1/widget/portfolio-mover"
+        case .getWidgetToken:
+            return "/api/v1/widget/token"
         case .enrichUpdatesNews:
             return "/api/v1/updates/news/enrich"
 
@@ -1162,13 +1168,20 @@ enum APIEndpoint: Sendable {
              .getPersonas, .getTrendingAnalyses:
             return .signInRequired
 
-        // The widget's two modes. ⚠️ A widget extension is a separate process that cannot
-        // reach `APIClient`'s token, so it never calls these itself — `WidgetRefreshService`
-        // runs in the APP and writes a snapshot to the App Group. That write is gated on being
-        // authenticated, and `AppState.discardDataForEndedSession()` clears the snapshot on
-        // sign-out; otherwise FMP prices would sit on the Home Screen after the session ended,
-        // which is the same licence problem one layer out.
-        case .getWidgetMarketMover, .getWidgetPortfolioMover:
+        // The widget's two modes, plus the token mint. ⚠️ A widget extension is a separate
+        // process that cannot reach `APIClient`'s token. `WidgetRefreshService` runs in the APP,
+        // fetches both modes, and writes a snapshot to the App Group;
+        // `AppState.discardDataForEndedSession()` clears it on sign-out, or FMP prices would sit
+        // on the Home Screen after the session ended.
+        //
+        // ⚠️ `.signInRequired` here describes what **`APIClient`** must do, and it is still
+        // exactly right: every call through this client needs a session. The extension bypasses
+        // `APIClient` entirely and authenticates `/widget/market-mover` with a widget token
+        // (`WidgetMarketFetcher`), which the backend accepts on that ONE route via
+        // `get_widget_caller`. Do not weaken this to `.public` to "make the widget work" — the
+        // widget does not come through here, and the route serves FMP data, which End-User
+        // Display Rights forbid serving to an unauthenticated caller.
+        case .getWidgetMarketMover, .getWidgetPortfolioMover, .getWidgetToken:
             return .signInRequired
 
         // The caller's own data. Was `.guestAllowed`, partitioned per install off `X-Guest-Id`

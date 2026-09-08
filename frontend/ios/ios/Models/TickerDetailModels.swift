@@ -1121,9 +1121,130 @@ struct AnalystRatingsData {
     var formattedUpdatedDate: String {
         TickerDetailFormatters.slashDateFormatter.string(from: updatedDate)
     }
+
+    /// The analyst facts Cay AI may be told, or **nil when there are none to tell**.
+    ///
+    /// ⚠️ THIS EXISTS SO A CALLER CANNOT FORGET THE CHECK. `TickerDetailViewModel.analysisContext`
+    /// used to spell these lines out itself and gate on nothing but `if let ar = analystRatingsData`
+    /// — which is always non-nil. Since `grades` / `price-target-consensus` went outside the FMP
+    /// licence, every ticker resolves to `HOLD, 0 analysts, $0/$0/$0`, so the chat context read:
+    ///
+    ///     "Analyst Consensus: HOLD (0 analysts). Price Target: Low $0, Avg $0, High $0.
+    ///      Target Upside: +0.0% upside. Ratings: Strong Buy: 0, Buy: 0, ..."
+    ///
+    /// and the model stated Wall Street's consensus on Apple was HOLD with a $0 target — on a
+    /// credit-charged turn. The card had already been taught to check `sectionAvailable`; the AI
+    /// had not. Rendering here means a future consumer gets nil instead of zeros for free.
+    ///
+    /// Both flags matter and neither implies the other: `sectionAvailable == false` means we are
+    /// not licensed to ask, `hasCoverage == false` means we asked and nobody covers the ticker.
+    /// For grounding a model they are the same instruction — say nothing.
+    /// True when the entitled Street-estimates dataset produced something worth rendering.
+    ///
+    /// ⚠️ Deliberately SEPARATE from `sectionAvailable`, and it must stay that way. The
+    /// section-available flag is what makes `TickerAnalysisContent` render `EmptyView()`;
+    /// it guards the ratings fields (`consensus`, `priceTarget`), which are all zero
+    /// defaults now that `grades` and `price-target-consensus` are outside the FMP licence.
+    /// Reusing it to mean "we have estimates" would render a confident HOLD at a $0.00
+    /// target — the exact bug that flag exists to stop.
+    var estimatesAvailable: Bool = false
+
+    /// Forward Street estimates, oldest period first. Empty unless `estimatesAvailable`.
+    var estimates: [AnalystEstimatePeriod] = []
+
+    /// The forward periods only — what a "what the Street expects" card should show.
+    /// A closed fiscal year's estimate is history, not a forecast.
+    var forwardEstimates: [AnalystEstimatePeriod] { estimates.filter(\.isForward) }
+
+    var groundingLines: [String]? {
+        guard sectionAvailable, hasCoverage else { return nil }
+
+        var lines = [
+            "Analyst Consensus: \(consensus.rawValue) (\(totalAnalysts) analysts)",
+            "Price Target: Low $\(String(format: "%.0f", priceTarget.lowPrice)), "
+                + "Avg $\(String(format: "%.0f", priceTarget.averagePrice)), "
+                + "High $\(String(format: "%.0f", priceTarget.highPrice))",
+            "Target Upside: \(formattedUpside)",
+            "Ratings: " + distributions.map { "\($0.label): \($0.count)" }
+                .joined(separator: ", "),
+        ]
+
+        let recentActions = actions.prefix(3)
+        if !recentActions.isEmpty {
+            lines.append(
+                "Recent: " + recentActions
+                    .map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }
+                    .joined(separator: "; ")
+            )
+        }
+        return lines
+    }
+}
+
+/// Street low/avg/high for one forecast line item.
+///
+/// Optional throughout: the backend sends `null`, never `0.0`, for a number it does not
+/// have. A `$0.0` forecast rendered next to a real analyst count reads as a measurement.
+struct AnalystEstimateRange {
+    let low: Double?
+    let avg: Double?
+    let high: Double?
+
+    var hasValue: Bool { low != nil || avg != nil || high != nil }
+}
+
+/// One fiscal period of Street estimates (FMP `analyst-estimates`, an entitled dataset).
+///
+/// Carries NO rating, NO price target and NO upgrade history — those come from the
+/// unlicensed `grades` / `price-target-consensus` pair. Nothing here may be presented as a
+/// consensus recommendation.
+struct AnalystEstimatePeriod: Identifiable {
+    let fiscalPeriod: String
+    let date: String
+    let isForward: Bool
+    let revenue: AnalystEstimateRange
+    let eps: AnalystEstimateRange
+    /// Contributing analysts — the honest denominator behind the word "Street".
+    let analystCount: Int
+
+    var id: String { fiscalPeriod + date }
+
+    var formattedRevenue: String {
+        guard let v = revenue.avg else { return "—" }
+        let bn = v / 1_000_000_000
+        return bn >= 1000 ? String(format: "$%.2fT", bn / 1000) : String(format: "$%.1fB", bn)
+    }
+
+    var formattedEPS: String {
+        guard let v = eps.avg else { return "—" }
+        return String(format: "$%.2f", v)
+    }
 }
 
 extension AnalystRatingsData {
+    /// Preview fixture for `AnalystForecastsSection`. Numbers are AAPL's real measured
+    /// estimates, including the genuine thinning of coverage in the out-years (29 analysts
+    /// on FY2027, 8 on FY2029) so the preview shows the case the card has to handle.
+    static let sampleWithEstimates: AnalystRatingsData = {
+        var d = AnalystRatingsData.sampleData
+        d.estimatesAvailable = true
+        d.estimates = [
+            AnalystEstimatePeriod(
+                fiscalPeriod: "FY2026", date: "2026-09-27", isForward: true,
+                revenue: AnalystEstimateRange(low: 464e9, avg: 477.4e9, high: 490e9),
+                eps: AnalystEstimateRange(low: 8.4, avg: 8.83, high: 9.2), analystCount: 27),
+            AnalystEstimatePeriod(
+                fiscalPeriod: "FY2027", date: "2027-09-27", isForward: true,
+                revenue: AnalystEstimateRange(low: 500e9, avg: 521.4e9, high: 545e9),
+                eps: AnalystEstimateRange(low: 9.0, avg: 9.57, high: 10.2), analystCount: 29),
+            AnalystEstimatePeriod(
+                fiscalPeriod: "FY2029", date: "2029-09-27", isForward: true,
+                revenue: AnalystEstimateRange(low: nil, avg: nil, high: nil),
+                eps: AnalystEstimateRange(low: 11.5, avg: 12.34, high: 13.1), analystCount: 8),
+        ]
+        return d
+    }()
+
     static let sampleData = AnalystRatingsData(
         totalAnalysts: 40,
         updatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,

@@ -13,6 +13,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from google.genai import types
 
+from app.services._analyst_common import analyst_section_available
+
 
 def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
     return types.FunctionDeclaration(
@@ -72,8 +74,26 @@ def tools_for_asset_type(asset_type: Optional[str]) -> frozenset:
 
     An unknown / missing asset type falls back to the full equity set — the conservative
     direction, since that is exactly what every caller did before this table existed.
+
+    ⚠️ The LICENCE filter is applied on top of the asset-class table, and it has to be here
+    rather than in the table because it is a global fact, not a per-asset one. `grades` and
+    `price-target-consensus` are 402-blocked (see `analyst_section_available`), so
+    `get_analyst_analysis` now returns `HOLD, 0 analysts, $0/$0/$0` for EVERY equity. Offering
+    the model a tool whose only possible answer is a fabricated consensus is worse than offering
+    no tool: it asserted "Wall Street's consensus on Apple is HOLD with a $0 average price
+    target" on a credit-charged turn.
+    
+    Removing the tool is exactly what the table above already does for ETF / CRYPTO / INDEX /
+    COMMODITY, and for the same reason — there is no analyst coverage to fetch. This is that
+    case, arrived at from the licence rather than from the asset class.
+
+    Both tool registries (`chat_service._ALL_TOOLS` and `build_chat_tool_declarations` below)
+    filter through this function, so closing it here closes both doors.
     """
-    return _TOOLS_BY_ASSET_TYPE.get((asset_type or "").strip().upper(), _STOCK_TOOLSET)
+    allowed = _TOOLS_BY_ASSET_TYPE.get((asset_type or "").strip().upper(), _STOCK_TOOLSET)
+    if not analyst_section_available():
+        allowed = allowed - {"get_analyst_analysis"}
+    return allowed
 
 
 def build_chat_tool_declarations(asset_type: Optional[str] = None) -> List[types.Tool]:

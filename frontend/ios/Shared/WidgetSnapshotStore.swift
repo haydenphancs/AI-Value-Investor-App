@@ -23,8 +23,17 @@
 //  watchlist, portfolios, chats and Learn progress, with no recovery (the old rows are
 //  service-role-only). Do not add an access group to GuestIdentity.
 //
-//  Market mode is a `.public` route, so a future revision COULD let the widget fetch it
-//  directly for extra freshness. Portfolio mode never can.
+//  ⚠️ MARKET MODE NOW FETCHES ITSELF — the paragraph above still governs, narrowly.
+//  `/widget/market-mover` is no longer a `.public` route (End-User Display Rights permit FMP
+//  data only through an authenticated platform), so the extension authenticates it with a
+//  WIDGET TOKEN: long-lived, scoped to that one market-wide route, published into this App
+//  Group by the app, and refused as a session bearer everywhere else. That does not weaken §8
+//  — the extension still never reads the Keychain and still holds no session, so it cannot
+//  diverge from `APIClient` and has nothing to refresh. See `WidgetMarketFetcher` and the
+//  WIDGET TOKEN block in `backend/app/core/security.py`.
+//
+//  PORTFOLIO MODE NEVER CAN, and the widget token cannot reach it — that is precisely why a
+//  long-lived credential is defensible for the other route.
 //
 
 import Foundation
@@ -558,17 +567,21 @@ public enum WidgetSnapshotStore {
         return true
     }
 
-    /// Clears the PORTFOLIO snapshot when a session ends — see `.claude/rules/auth.md`
-    /// §7: a device-global store that survives sign-out hands the next account the
-    /// previous user's data, and a portfolio snapshot on the Home Screen is visible
-    /// without even unlocking into the app.
+    /// Clears the PORTFOLIO snapshot only. See `clearAll()` for what a session ending uses.
     ///
-    /// The MARKET snapshot deliberately survives. It comes from a `.public` route, is
-    /// identical for every caller, and carries nothing about the user — so §7 does not
-    /// reach it. Wiping it too meant the default-configured widget (Market is the
-    /// AppIntent default) went blank on sign-out and stayed blank until the user next
-    /// backgrounded and re-foregrounded the app, which reads as the sign-out having
-    /// broken something.
+    /// ⚠️ **This is no longer the sign-out path, and must not be restored as one.** It used to
+    /// be, on the reasoning that the MARKET snapshot "comes from a `.public` route, is identical
+    /// for every caller, and carries nothing about the user — so `auth.md` §7 does not reach it",
+    /// and that wiping it blanked the default-configured tile until the next foreground.
+    ///
+    /// The first clause stopped being true on 2026-09-07. §7 was never the binding constraint
+    /// here — the FMP licence is. End-User Display Rights permit their data only "through the
+    /// Licensee's authenticated platform", so a signed-out phone showing FMP prices on its Home
+    /// Screen indefinitely is a contract breach, not a UX nicety. Blanking to the placeholder is
+    /// the CORRECT render for a signed-out device.
+    ///
+    /// Kept because it is still the right primitive for "this account's holdings ended but the
+    /// session did not" — nothing calls it today.
     public static func clear() {
         guard let defaults else { return }
         var envelope = read() ?? WidgetSnapshotEnvelope()
@@ -583,7 +596,8 @@ public enum WidgetSnapshotStore {
         reloadTimelines()
     }
 
-    /// Removes BOTH modes. For a deliberate reset, not for a session ending.
+    /// Removes BOTH modes. **This is what a session ending uses** — see `clear()` for why the
+    /// market snapshot may not be kept, and `WidgetRefreshService.clearForEndedSession()`.
     public static func clearAll() {
         defaults?.removeObject(forKey: WidgetSharedConfig.snapshotKey)
         reloadTimelines()

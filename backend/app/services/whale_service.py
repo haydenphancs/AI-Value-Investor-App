@@ -29,6 +29,10 @@ from app.integrations.fmp import (
 )
 from app.database import get_supabase
 from app.utils.period_labels import filing_period_display
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    window_for_range,
+)
 from app.services._whale_common import (
     parse_congress_amount_dollars,
     parse_congress_amount_bounds,
@@ -50,6 +54,7 @@ from app.services._whale_common import (
     RETURN_INSUFFICIENT,
     RETURN_UNAVAILABLE,
     SPLIT_SUPPRESS,
+    is_implausible_share_flow,
     generate_trade_summary,
     restate_prev_shares_for_split,
     dedupe_congress_trades,
@@ -1878,13 +1883,25 @@ class WhaleService:
             sector_data = fallback_sectors
 
         # Fetch stock-split ratios ONLY for tickers whose share count jumped
-        # like a split (value ~preserved) — bounds FMP /splits calls to the rare
+        # like a split (value ~preserved) — bounds the lookup to the rare
         # suspicious holdings instead of every position. Without this, a
         # held-through-split position (e.g. a 10:1) fabricates a huge BOUGHT
         # trade in the diff below.
-        # Best-effort refinement: never let a splits lookup failure abort 13F
-        # processing (which would degrade to a stale snapshot). Any error here
-        # just leaves split_ratios empty → the raw diff, same as before.
+        #
+        # Splits no longer come from FMP `/splits`, which is outside the signed licence and
+        # answers 402 — so this whole block was silently yielding `{}` and the fabricated
+        # BOUGHT was live. `corporate_actions_service` derives them from the entitled
+        # adjusted-vs-raw price series instead, and returns FMP's own row shape so
+        # `_split_ratio_in_window` below is unchanged.
+        #
+        # ⚠️ A spin-off moves the same adjustment factor and changes NO share count, so the
+        # derivation classifies rather than just detecting: an unnameable factor comes back
+        # as no split at all, and `is_implausible_share_flow` in `_diff_quarters` is the
+        # backstop for the case it cannot name (an out-of-range reverse split).
+        #
+        # Best-effort refinement: never let a lookup failure abort 13F processing (which
+        # would degrade to a stale snapshot). Any error here just leaves split_ratios
+        # empty → the raw diff, same as before.
         split_ratios: Dict[str, float] = {}
         try:
             suspects = self._suspicious_split_tickers(current_raw, prev_raw)
@@ -1894,8 +1911,10 @@ class WhaleService:
                     if prev else None
                 )
                 curr_end = _quarter_end_date(year, quarter)
+                from_date, to_date = window_for_range(prev_end, curr_end)
+                actions = corporate_actions_source(self)
                 split_lists = await asyncio.gather(
-                    *[self.fmp.get_stock_splits(t) for t in suspects],
+                    *[actions.get_split_rows(t, from_date, to_date) for t in suspects],
                     return_exceptions=True,
                 )
                 for t, sl in zip(suspects, split_lists):
@@ -1903,7 +1922,11 @@ class WhaleService:
                         logger.warning("Split lookup failed for %s: %s", t, sl)
                         continue
                     r = _split_ratio_in_window(sl, prev_end, curr_end)
-                    if r and r != 1.0:
+                    # Tolerance, not `!= 1.0`. The derived ratio is an exact rational so
+                    # 1.0 really is 1.0 today, but an exact float compare on a computed
+                    # quantity is one refactor away from restating a perfectly ordinary
+                    # quarter by 1.0000001.
+                    if r and abs(r - 1.0) > 1e-9:
                         split_ratios[t] = r
         except Exception as e:
             logger.warning("Split adjustment skipped for CIK %s: %s", cik, e)
@@ -2215,6 +2238,28 @@ class WhaleService:
                 if _restated is SPLIT_SUPPRESS:
                     continue
                 prev_shares = _restated
+
+                # Magnitude backstop. Does NOT depend on classifying the corporate action
+                # correctly, which is exactly why it is here: splits are now DERIVED from
+                # price series, and that derivation deliberately refuses to name an
+                # adjustment it cannot resolve to a small rational. A spin-off is fine —
+                # it changes no share count, so the raw diff below is already right — but
+                # a reverse split outside the derivation's range (1:150, 1:200, routine in
+                # delisting-defence microcaps) would otherwise sail through as a
+                # catastrophic fabricated trade.
+                #
+                # `calc_13f_trade_dollars` turns a bad `prev_shares` into a WRONG-SIGN
+                # trade, not merely a wrong magnitude, and this row is written to
+                # `whale_trades` where it feeds user alerts. A missing bar is recoverable;
+                # a fabricated multi-million-dollar BOUGHT in someone's notifications is
+                # not. "No bar, not garbage."
+                if is_implausible_share_flow(curr_shares - prev_shares, curr_shares):
+                    logger.warning(
+                        "whale diff: implausible share flow for %s (prev=%.0f curr=%.0f, "
+                        "split_ratio=%s) — suppressing rather than emitting a trade",
+                        ticker, prev_shares, curr_shares, split_ratios.get(ticker, 1.0),
+                    )
+                    continue
 
             # Shared 13F formula — shares_change × implied_price. Keeps
             # Supabase whale_trades.amount aligned with what TickerDetailView's

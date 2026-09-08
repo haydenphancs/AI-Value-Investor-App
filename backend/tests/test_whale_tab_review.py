@@ -66,17 +66,26 @@ def test_finite_float_rejects_non_finite_and_garbage():
 
 # ── 13F split adjustment (#1) ────────────────────────────────────────
 
-def test_diff_quarters_without_split_ratio_fabricates_the_split_as_a_trade():
-    # Documents the BUG the fix prevents: a held-through-10:1-split position
-    # (raw share count 1000 -> 10000) with NO split_ratios looks like a huge buy.
+def test_diff_quarters_without_split_ratio_suppresses_rather_than_fabricating():
+    """A held-through-10:1 position with NO split_ratios must produce NOTHING.
+
+    This test used to assert the opposite — that the diff fabricated a ~$990K BOUGHT —
+    as a record of the bug the split ratio prevents. That contrast is obsolete and was
+    actively dangerous to keep: splits are now DERIVED from price series, and the
+    derivation deliberately refuses to name an adjustment it cannot resolve to a small
+    rational (a spin-off, or a reverse split outside its range). So "no ratio" is a state
+    the code genuinely reaches in production, and the magnitude backstop
+    `is_implausible_share_flow` is what stands between it and a fabricated trade written
+    to `whale_trades` — where it feeds user alerts.
+    """
     svc = _svc()
     current = [_h("NVDA", 1_100_000, 10_000)]
     previous = [_h("NVDA", 900_000, 1_000)]
     group = svc._diff_quarters(current, previous, "2024-06-30", 1_100_000)
-    assert group is not None
-    nvda = group["trades"][0]
-    assert nvda["action"] == "BOUGHT"
-    assert nvda["amount"] > 900_000  # ~ $990K fabricated from the split
+    assert group is None, (
+        "a 9,000-share change on a 10,000-share position is a corporate action, not a "
+        "trade; suppressing it is the whole point of the backstop"
+    )
 
 
 def test_diff_quarters_with_split_ratio_suppresses_the_fabricated_trade():

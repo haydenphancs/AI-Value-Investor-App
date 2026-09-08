@@ -61,6 +61,41 @@ class AnalystAction(BaseModel):
     new_price_target: Optional[float] = None
 
 
+class AnalystEstimateRange(BaseModel):
+    """Street low/average/high for one forecast line item.
+
+    Every field is Optional because an unknown number must be `None`, never `0.0` — a
+    zero revenue estimate is indistinguishable from a measurement, which is the exact
+    class of bug `has_coverage` and `section_available` exist to prevent.
+    """
+
+    low: Optional[float] = None
+    avg: Optional[float] = None
+    high: Optional[float] = None
+
+
+class AnalystEstimatePeriod(BaseModel):
+    """One fiscal period of Street estimates, from FMP's entitled `analyst-estimates`.
+
+    This is a DIFFERENT dataset from the rest of this response. `grades` and
+    `price-target-consensus` fund the consensus/target/momentum fields and are outside the
+    signed licence; `analyst-estimates` is inside it and carries forward fundamentals
+    instead. It cannot produce a rating, a price target, or an upgrade — so nothing here
+    is a substitute for those, and the two halves are gated by separate flags.
+    """
+
+    fiscal_period: str                                  # "FY2027"
+    date: str                                           # ISO — a fiscal period END
+    is_forward: bool
+    revenue: Optional[AnalystEstimateRange] = None
+    ebitda: Optional[AnalystEstimateRange] = None
+    ebit: Optional[AnalystEstimateRange] = None
+    net_income: Optional[AnalystEstimateRange] = None
+    eps: Optional[AnalystEstimateRange] = None
+    num_analysts_revenue: Optional[int] = None
+    num_analysts_eps: Optional[int] = None
+
+
 class AnalystAnalysisResponse(BaseModel):
     """Top-level response for GET /stocks/{ticker}/analyst-analysis."""
 
@@ -91,3 +126,26 @@ class AnalystAnalysisResponse(BaseModel):
     net_negative: int
     actions_summary: AnalystActionsSummary
     actions: List[AnalystAction]
+
+    # ── Street estimates — a SEPARATE dataset behind a SEPARATE flag ──────────────────
+    #
+    # ⚠️ These deliberately do NOT flip `section_available`. iOS renders `EmptyView()`
+    # precisely because `sectionAvailable == false`; flipping it while every legacy field
+    # above is still a zero default would make every ALREADY-SHIPPED build render a
+    # confident HOLD at a $0.00 price target — re-shipping the fabricated verdict that flag
+    # was added to stop, to exactly the users who cannot update. The new card is driven by
+    # `estimates_available` instead, which old clients ignore because they never decode it.
+    #
+    # `analyst_is_usable()` in `_analyst_common` is likewise about the RATINGS half and
+    # must stay that way: nothing here licenses quoting a consensus or a price target.
+    #
+    # All additive and defaulted, so a payload cached before this shipped still validates.
+    estimates_available: bool = False          # the licence permits asking
+    estimates_have_coverage: bool = False      # ...and at least one period survived
+    estimates: List[AnalystEstimatePeriod] = []
+    estimates_period: str = "annual"
+    # ISO date of the nearest FORWARD fiscal period end, or None when every period we hold
+    # is already in the past. Deliberately NOT called `updated_date`: an estimate row's
+    # date is a fiscal period END, never a publication date, and reusing the legacy field's
+    # wording would put "Updated On 2027-09-27" under a card about the future.
+    estimates_next_period: Optional[str] = None

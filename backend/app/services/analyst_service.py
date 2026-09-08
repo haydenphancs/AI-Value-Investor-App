@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.analyst import (
+    AnalystEstimatePeriod,
+    AnalystEstimateRange,
     AnalystAction,
     AnalystActionsSummary,
     AnalystActionType,
@@ -27,10 +29,11 @@ from app.schemas.analyst import (
 )
 from app.services._analyst_common import (
     RATING_CATEGORY_UNKNOWN,
+    analyst_estimates_available,
+    analyst_section_available,
     classify_grade,
     normalize_fmp_action,
 )
-from app.integrations.fmp_entitlements import entitlement_error
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,15 @@ def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
 # container that is a slow leak whose only resolution is an OOM restart — which drops every
 # in-flight report with it. Bounded LRU-ish: evict from the head (least recently WRITTEN).
 _CACHE_MAX_ENTRIES = 1024
+
+#: Minimum contributing analysts for an estimate period to be shown. Below this it is one
+#: desk's guess, not "the Street" — GME's FY2028 carries a single EPS estimate. Mirrors
+#: `market_movers_service._MIN_GROUP_MEMBERS`: drop a thin group rather than caveat it.
+_MIN_ESTIMATE_ANALYSTS = 2
+
+#: How many forward periods to request. Annual only — quarterly estimates exist but a card
+#: showing eight quarters of forward revenue is noise next to five fiscal years.
+_ESTIMATE_LIMIT = 8
 
 
 def _cache_set(key: str, value: Any):
@@ -368,6 +380,85 @@ class AnalystService:
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
 
+    @staticmethod
+    def _opt_num(value: Any) -> Optional[float]:
+        """A float, or None. Separate from `_num` ON PURPOSE.
+
+        `_num` defaults to 0.0 and the fifteen legacy fields depend on that. Here a missing
+        estimate must stay `None`: a $0 revenue forecast rendered next to a real analyst
+        count is a fabricated measurement, which is the whole failure mode this surface has
+        already shipped once. Guards on `isfinite`, not truthiness — NaN defeats `<= 0`.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    @classmethod
+    def _range(cls, row: Dict[str, Any], stem: str) -> Optional[AnalystEstimateRange]:
+        """One low/avg/high triple, or None when the whole triple is absent."""
+        low = cls._opt_num(row.get(f"{stem}Low"))
+        avg = cls._opt_num(row.get(f"{stem}Avg"))
+        high = cls._opt_num(row.get(f"{stem}High"))
+        if low is None and avg is None and high is None:
+            return None
+        return AnalystEstimateRange(low=low, avg=avg, high=high)
+
+    @classmethod
+    def _build_estimates(
+        cls, rows: Any, today: Optional[str] = None
+    ) -> List[AnalystEstimatePeriod]:
+        """FMP `analyst-estimates` rows → response periods, oldest first.
+
+        Two judgement calls worth stating:
+
+        **Order.** FMP returns furthest-future FIRST (AAPL: 2030, 2029, ... 2025). Sorting
+        ascending here is defensive — nothing downstream should depend on an upstream
+        ordering that is not documented.
+
+        **Thin coverage is dropped, not annotated.** A period backed by a single desk is one
+        analyst's guess; rendering it under a heading that says "Street" is the class of
+        claim LAUNCH_CHECKLIST §1 is about. Measured: GME's FY2028 carries
+        `numAnalystsEps=1`. Same rule and the same reasoning as
+        `market_movers_service._MIN_GROUP_MEMBERS`, which drops a thin sector rather than
+        publishing it with a caveat — a card has nowhere to put "n=1".
+        """
+        if not isinstance(rows, list):
+            return []
+        cutoff = today or datetime.utcnow().strftime("%Y-%m-%d")
+        out: List[AnalystEstimatePeriod] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_date = str(row.get("date") or "")[:10]
+            if len(raw_date) != 10:
+                continue
+            n_eps = cls._opt_num(row.get("numAnalystsEps"))
+            n_rev = cls._opt_num(row.get("numAnalystsRevenue"))
+            if max(n_eps or 0, n_rev or 0) < _MIN_ESTIMATE_ANALYSTS:
+                continue
+            period = AnalystEstimatePeriod(
+                fiscal_period=f"FY{raw_date[:4]}",
+                date=raw_date,
+                is_forward=raw_date > cutoff,
+                revenue=cls._range(row, "revenue"),
+                ebitda=cls._range(row, "ebitda"),
+                ebit=cls._range(row, "ebit"),
+                net_income=cls._range(row, "netIncome"),
+                eps=cls._range(row, "eps"),
+                num_analysts_revenue=int(n_rev) if n_rev is not None else None,
+                num_analysts_eps=int(n_eps) if n_eps is not None else None,
+            )
+            if not any((period.revenue, period.ebitda, period.ebit,
+                        period.net_income, period.eps)):
+                continue
+            out.append(period)
+        out.sort(key=lambda p: p.date)
+        return out
+
     async def get_analysis(self, ticker: str) -> AnalystAnalysisResponse:
         ticker = ticker.upper()
 
@@ -392,29 +483,49 @@ class AnalystService:
         #
         # Derived from the entitlement manifest rather than hardcoded, so the section returns
         # by itself if the package is ever repurchased.
-        section_available = (
-            entitlement_error("grades") is None
-            and entitlement_error("price-target-consensus") is None
-        )
+        # One definition, in `_analyst_common`, because the report collector and the chat tool
+        # need the same answer and a second copy here would drift from them.
+        section_available = analyst_section_available()
+
+        # Street estimates ride alongside and are fetched in BOTH branches: they are a
+        # different, ENTITLED dataset (package 8) and must keep working through the ratings
+        # blackout — that is the entire point of the separate flag.
+        estimates_available = analyst_estimates_available()
+
+        async def _estimates() -> Any:
+            if not estimates_available:
+                return []
+            return await self.fmp.get_analyst_estimates(
+                ticker, period="annual", limit=_ESTIMATE_LIMIT
+            )
 
         if section_available:
             results = await asyncio.gather(
                 self.fmp.get_grades(ticker, limit=100),
                 self.fmp.get_price_target_consensus(ticker),
                 price_source(self).get_quote(ticker),
+                _estimates(),
                 return_exceptions=True,
             )
             grades = results[0] if not isinstance(results[0], Exception) else []
             pt_consensus = results[1] if not isinstance(results[1], Exception) else {}
             quote = results[2] if not isinstance(results[2], Exception) else {}
+            est_rows = results[3] if not isinstance(results[3], Exception) else []
         else:
             # The quote still resolves — the price line is entitled and other fields use it.
             grades, pt_consensus = [], {}
-            try:
-                quote = await price_source(self).get_quote(ticker)
-            except Exception as e:
-                logger.warning("analyst: quote failed for %s: %s: %s", ticker, type(e).__name__, e)
-                quote = {}
+            gathered = await asyncio.gather(
+                price_source(self).get_quote(ticker), _estimates(),
+                return_exceptions=True,
+            )
+            quote = gathered[0] if not isinstance(gathered[0], Exception) else {}
+            est_rows = gathered[1] if not isinstance(gathered[1], Exception) else []
+            for label, r in (("quote", gathered[0]), ("estimates", gathered[1])):
+                if isinstance(r, Exception):
+                    logger.warning(
+                        "analyst: %s failed for %s: %s: %s",
+                        label, ticker, type(r).__name__, r,
+                    )
             results = []
 
         for i, r in enumerate(results):
@@ -515,6 +626,15 @@ class AnalystService:
             # `or ""` — a present-but-null date would make None[:10] raise → 502.
             updated_date = (grades[0].get("date") or "")[:10]
 
+        estimates = self._build_estimates(est_rows)
+        if estimates_available and not estimates:
+            logger.info(
+                "Analyst estimates for %s: none survived (rows=%s, min analysts=%d)",
+                ticker,
+                len(est_rows) if isinstance(est_rows, list) else "n/a",
+                _MIN_ESTIMATE_ANALYSTS,
+            )
+
         # Assemble response
         response = AnalystAnalysisResponse(
             symbol=ticker,
@@ -532,6 +652,16 @@ class AnalystService:
             net_negative=net_negative,
             actions_summary=actions_summary,
             actions=actions,
+            estimates_available=estimates_available,
+            estimates_have_coverage=bool(estimates),
+            estimates=estimates,
+            estimates_period="annual",
+            # The nearest FORWARD period, not `estimates[0]` — the list is sorted ascending
+            # and its head is the OLDEST period, which for AAPL is FY2023. A card about
+            # what the Street expects should not lead with a fiscal year that has closed.
+            estimates_next_period=next(
+                (p.date for p in estimates if p.is_forward), None
+            ),
         )
 
         _cache_set(cache_key, response)

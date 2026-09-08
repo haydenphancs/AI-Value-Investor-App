@@ -109,6 +109,15 @@ class ETFNetYieldResponse(BaseModel):
     verdict: str  # "This fund pays you Nx more in dividends than it charges in fees."
     last_dividend_payment: ETFDividendPaymentResponse
     dividend_history: List[ETFDividendPaymentResponse]
+    # False when the yield could not be COMPUTED, as opposed to being genuinely zero.
+    # `dividend_yield` is a non-Optional float on the wire (shipped iOS builds decode it
+    # as `Double`), so 0.0 has to carry both meanings — and "0.00%" on a fund that simply
+    # pays nothing is CORRECT, while the same string on a fund whose price we failed to
+    # fetch is fabricated. Measured: `profile.lastDividend` is always present for an ETF
+    # and reads exactly 0 for a genuine non-distributor (ARKK, GLD, SLV, USO), so the two
+    # states are distinguishable. Additive + defaulted True, so an older client is
+    # unaffected. Same three-state idea as `stock_overview_service`'s Dividends stat.
+    dividend_yield_known: bool = True
 
 
 class ETFAssetAllocationResponse(BaseModel):

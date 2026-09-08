@@ -81,7 +81,16 @@ async def test_guest_dep_no_token_returns_guest():
 @pytest.mark.asyncio
 async def test_guest_dep_valid_token_transient_read_raises_not_guest(monkeypatch):
     # Valid token resolves to a real user_id, but the users read blips.
-    monkeypatch.setattr(deps, "decode_token", lambda _t: {"sub": "real-user-123"})
+    monkeypatch.setattr(
+        deps,
+        # `"type": "access"` is what `create_access_token` stamps on every token it mints
+        # (core/security.py). Omitting it here modelled a token production cannot issue, and
+        # the stub only passed while `_decode_access_token` deny-listed `"refresh"` instead of
+        # allow-listing `"access"` — the change that stops a widget token being replayed as a
+        # session. A faithful stub, not a relaxed assertion.
+        "decode_token",
+        lambda _t: {"sub": "real-user-123", "type": "access"},
+    )
     with pytest.raises(HTTPException) as ei:
         await deps.get_current_user_or_guest(
             authorization="Bearer valid", supabase=_RaisingSupabase()
@@ -92,7 +101,16 @@ async def test_guest_dep_valid_token_transient_read_raises_not_guest(monkeypatch
 @pytest.mark.asyncio
 async def test_guest_dep_valid_token_no_row_falls_back_to_guest(monkeypatch):
     # Valid token but no public.users row (rare first-touch) → guest, not a 500.
-    monkeypatch.setattr(deps, "decode_token", lambda _t: {"sub": "real-user-123"})
+    monkeypatch.setattr(
+        deps,
+        # `"type": "access"` is what `create_access_token` stamps on every token it mints
+        # (core/security.py). Omitting it here modelled a token production cannot issue, and
+        # the stub only passed while `_decode_access_token` deny-listed `"refresh"` instead of
+        # allow-listing `"access"` — the change that stops a widget token being replayed as a
+        # session. A faithful stub, not a relaxed assertion.
+        "decode_token",
+        lambda _t: {"sub": "real-user-123", "type": "access"},
+    )
     r = await deps.get_current_user_or_guest(
         authorization="Bearer valid", supabase=_EmptySupabase()
     )

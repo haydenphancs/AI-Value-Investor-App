@@ -52,6 +52,11 @@ api_router.include_router(updates.router, prefix="/updates", tags=["Updates"])
 # no Gemini on this path either. Two routes rather than one `?mode=` route so each
 # carries exactly one auth policy — see the module header.
 api_router.include_router(widget.router, prefix="/widget", tags=["Widget"])
+# `/widget/market-mover` lives on its own router because the Home Screen extension
+# authenticates with a widget token rather than a session — see `widget.py`.
+api_router.include_router(
+    widget.widget_client_router, prefix="/widget", tags=["Widget"]
+)
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])

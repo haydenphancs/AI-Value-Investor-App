@@ -482,16 +482,25 @@ def test_a_split_quarter_is_not_reported_as_a_34_billion_dollar_purchase():
     from app.services.holders_service import HoldersService
 
     svc = HoldersService.__new__(HoldersService)
-    unrestated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=1.0)[0]
+    unrestated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=1.0)
     restated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=10.0)[0]
 
-    # the shape of the old bug, kept as the contrast
-    assert unrestated.change_in_millions > 30_000
-    assert unrestated.change_percent > 900
-
-    # restated: a rounding-level move, and the percent recomputed from the new basis
+    # TWO independent defences now, and this asserts both.
+    #
+    # 1. Told the ratio, the row is restated onto the post-split basis and reads correctly.
     assert restated.change_in_millions == pytest.approx(71.4, abs=1.0)
     assert restated.change_percent == pytest.approx(0.19, abs=0.05)
+
+    # 2. NOT told the ratio, the row is DROPPED rather than rendered. This used to be the
+    #    "shape of the old bug" contrast — it asserted `> 30_000` and `> 900`, i.e. that
+    #    the $34B row was produced. It is no longer produced at all: splits are now DERIVED
+    #    from price series and that derivation deliberately declines to name an adjustment
+    #    it cannot resolve, so `is_implausible_share_flow` has to hold the line on its own.
+    #    A 113.6M-share "move" on a 126.2M-share position is a corporate action, not a trade.
+    assert unrestated == [], (
+        "an unrestated split quarter must be suppressed, not rendered — the whole point "
+        "is that the $34B row never reaches a user by any path"
+    )
 
 
 def test_no_split_leaves_the_reported_numbers_untouched():
@@ -663,16 +672,27 @@ def test_an_unlicensed_analyst_source_hides_the_card_instead_of_denying_coverage
     assert entitlement_error("grades") is not None
     assert entitlement_error("price-target-consensus") is not None
 
+    from app.services._analyst_common import analyst_section_available
+
+    # Derived from the manifest, NOT hardcoded — so the card returns by itself if the package
+    # is ever repurchased, instead of staying dark until someone remembers. Asserted through
+    # the helper's BEHAVIOUR rather than by grepping for `entitlement_error(...)`, because the
+    # derivation now lives in `_analyst_common` where the chat tool and the report collector can
+    # share it, and a string match in one file would have to be rewritten every time it moves.
+    assert analyst_section_available() is False, (
+        "the helper does not reflect the manifest — every consumer keys off this one call"
+    )
+
     src = (
         __import__("pathlib").Path(__file__).resolve().parents[1]
         / "app/services/analyst_service.py"
     ).read_text()
     code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
 
-    # Derived from the manifest, NOT hardcoded — so the card returns by itself if the
-    # package is ever repurchased, instead of staying dark until someone remembers.
-    assert 'entitlement_error("grades")' in code
-    assert 'entitlement_error("price-target-consensus")' in code
+    assert "section_available = analyst_section_available()" in code, (
+        "analyst_service derives the flag itself again — a second copy of the entitlement "
+        "check is exactly how the chat tool and the report drifted from the card"
+    )
     assert "section_available=section_available" in code, (
         "the flag is computed but never returned — the response would still say has_coverage"
     )
@@ -713,8 +733,28 @@ def test_ios_hides_the_analyst_section_before_it_checks_coverage():
 
     avail = body.find("!ratingsData.sectionAvailable")
     cover = body.find("!ratingsData.hasCoverage")
+    est = body.find("ratingsData.estimatesAvailable")
     assert avail != -1, "the view no longer hides the section for an unlicensed source"
     assert cover != -1, "the genuine no-coverage state was removed — it is still correct when FMP has no data"
+
+    # Street estimates are a DIFFERENT, licensed dataset (FMP package 8). They must be
+    # checked FIRST: the two branches below are about the unlicensed ratings pair, and
+    # falling into either of them would hide forward revenue/EPS we actually have.
+    assert est != -1, (
+        "the Street-estimates branch is gone — `analyst-estimates` is entitled, so the "
+        "Analysis tab would render nothing while holding real forward consensus data"
+    )
+    assert est < avail, (
+        "sectionAvailable is checked before the estimates branch, so an unlicensed RATINGS "
+        "source hides the licensed ESTIMATES card with it"
+    )
+    # And the estimates branch must never be wired to `sectionAvailable`: that flag guards
+    # the zero-default consensus/target, and reusing it would re-render a HOLD at $0.00.
+    est_branch = body[est - 200:avail]
+    assert "sectionAvailable" not in est_branch, (
+        "the estimates branch reads sectionAvailable — that flag belongs to the ratings "
+        "half and gating estimates on it puts a fabricated $0.00 target back on screen"
+    )
     assert avail < cover, (
         "hasCoverage is checked BEFORE sectionAvailable, so an unlicensed source falls into "
         "the no-coverage card and the app states that no analyst covers Apple"

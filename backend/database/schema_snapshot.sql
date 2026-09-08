@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict V4iHbdHFKtXq7v2KuDDKenPEHQu9a1tzfIThjt82Z6qHFQV0erU0NyJZrvzU2Bh
+\restrict vG5AtHhUDDNFTFHQKMXflMa8UMcnBhlHRBMJf1XhVrKnj1djybYK3G5W4Ixjpsc
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -661,7 +661,6 @@ begin
     )
         returns jsonb
         language sql
-        set search_path to ''
     as $$
         select graphql.resolve(
             query := query,
@@ -936,6 +935,39 @@ CREATE FUNCTION pgbouncer.get_auth(p_usename text) RETURNS TABLE(username text, 
       WHERE rolname=$1 and rolcanlogin;
   END;
   $_$;
+
+
+--
+-- Name: account_auth_methods(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.account_auth_methods(p_user_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT CASE
+        WHEN NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = p_user_id) THEN NULL
+        ELSE jsonb_build_object(
+            'has_password', (
+                SELECT (u.encrypted_password IS NOT NULL AND u.encrypted_password <> '')
+                  FROM auth.users u
+                 WHERE u.id = p_user_id
+            ),
+            'providers', COALESCE((
+                SELECT array_agg(DISTINCT i.provider ORDER BY i.provider)
+                  FROM auth.identities i
+                 WHERE i.user_id = p_user_id
+            ), ARRAY[]::text[])
+        )
+    END;
+$$;
+
+
+--
+-- Name: FUNCTION account_auth_methods(p_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.account_auth_methods(p_user_id uuid) IS 'Returns {has_password, providers} for an account, or NULL if no auth.users row matches. has_password reads auth.users.encrypted_password (authoritative: an admin password write does not necessarily create an email identity). service_role only — see the REVOKE below.';
 
 
 --
@@ -6452,6 +6484,42 @@ COMMENT ON COLUMN public.lessons.story_content IS 'JSONB: {lessonLabel, lessonNu
 
 
 --
+-- Name: market_close_snapshot; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_close_snapshot (
+    symbol text NOT NULL,
+    trade_date date NOT NULL,
+    close numeric NOT NULL,
+    volume bigint,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    previous_close numeric,
+    previous_trade_date date
+);
+
+
+--
+-- Name: TABLE market_close_snapshot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.market_close_snapshot IS 'Most recent official close per symbol, ingested daily from FMP /stable/batch-eod. Supplies the denominator for batch day-change %, which the entitled company-screener cannot provide (it has no change field) and profile can only give one symbol at a time. Service-role only: a bulk close dump must not be readable with the shipped anon key (FMP ToS 2.6.1). Index/commodity/crypto/FX symbols are filtered out on ingest — they are not in any purchased package.';
+
+
+--
+-- Name: COLUMN market_close_snapshot.previous_close; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.market_close_snapshot.previous_close IS 'Official close of the session BEFORE `trade_date`. The day-change denominator when the market is shut and the live price already equals `close` — without it every change % reads 0.00%% overnight and at weekends.';
+
+
+--
+-- Name: COLUMN market_close_snapshot.previous_trade_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.market_close_snapshot.previous_trade_date IS 'Session date for `previous_close`. Stored so a stale or skipped ingest is visible in the data rather than only in the logs.';
+
+
+--
 -- Name: market_deep_dive_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8093,7 +8161,8 @@ CREATE TABLE realtime.messages (
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     inserted_at timestamp without time zone DEFAULT now() NOT NULL,
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    binary_payload bytea
+    binary_payload bytea,
+    skip_broadcast boolean DEFAULT false NOT NULL
 )
 PARTITION BY RANGE (inserted_at);
 
@@ -9163,6 +9232,14 @@ ALTER TABLE ONLY public.ip_intel_cache
 
 ALTER TABLE ONLY public.lessons
     ADD CONSTRAINT lessons_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: market_close_snapshot market_close_snapshot_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_close_snapshot
+    ADD CONSTRAINT market_close_snapshot_pkey PRIMARY KEY (symbol);
 
 
 --
@@ -10838,6 +10915,13 @@ CREATE INDEX idx_lessons_level ON public.lessons USING btree (level, sort_order)
 
 
 --
+-- Name: idx_market_close_snapshot_trade_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_market_close_snapshot_trade_date ON public.market_close_snapshot USING btree (trade_date);
+
+
+--
 -- Name: idx_market_insights_created; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11608,10 +11692,31 @@ CREATE INDEX idx_objects_bucket_id_name_lower ON storage.objects USING btree (bu
 
 
 --
+-- Name: idx_objects_current_version; Type: INDEX; Schema: storage; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_objects_current_version ON storage.objects USING btree (bucket_id, name COLLATE "C") WHERE (archived_at IS NULL);
+
+
+--
+-- Name: idx_objects_null_version; Type: INDEX; Schema: storage; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_objects_null_version ON storage.objects USING btree (bucket_id, name COLLATE "C") WHERE (NOT is_versioned);
+
+
+--
 -- Name: name_prefix_search; Type: INDEX; Schema: storage; Owner: -
 --
 
 CREATE INDEX name_prefix_search ON storage.objects USING btree (name text_pattern_ops);
+
+
+--
+-- Name: objects_bucket_id_name_version_key; Type: INDEX; Schema: storage; Owner: -
+--
+
+CREATE UNIQUE INDEX objects_bucket_id_name_version_key ON storage.objects USING btree (bucket_id, name COLLATE "C", version) NULLS NOT DISTINCT;
 
 
 --
@@ -13189,6 +13294,19 @@ CREATE POLICY lessons_service_all ON public.lessons USING ((auth.role() = 'servi
 
 
 --
+-- Name: market_close_snapshot; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.market_close_snapshot ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: market_close_snapshot market_close_snapshot_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY market_close_snapshot_service_all ON public.market_close_snapshot TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: market_deep_dive_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14381,5 +14499,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict V4iHbdHFKtXq7v2KuDDKenPEHQu9a1tzfIThjt82Z6qHFQV0erU0NyJZrvzU2Bh
+\unrestrict vG5AtHhUDDNFTFHQKMXflMa8UMcnBhlHRBMJf1XhVrKnj1djybYK3G5W4Ixjpsc
 

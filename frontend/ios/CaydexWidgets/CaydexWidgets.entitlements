@@ -3,7 +3,14 @@
 <plist version="1.0">
 <dict>
 	<!-- App Group — the ONLY thing this extension needs, and the only channel it has to
-	     the app. It performs no network call, no Keychain read, and holds no credential.
+	     the app. It performs no Keychain read and holds no SESSION.
+
+	     ⚠️ It DOES make one network call, as of 2026-09-07: `WidgetMarketFetcher` fetches
+	     `/widget/market-mover` so the tile stays fresh between app opens, authenticated with
+	     the market-scoped widget token the app publishes into this group. That token is not a
+	     session and cannot become one — the backend allow-lists `type == "access"` for bearers.
+	     The extension still needs no Keychain entitlement and no access group, which is what
+	     this file not growing a `keychain-access-groups` key is protecting.
 
 	     Must be byte-identical to ios.entitlements, ios-Release.entitlements and
 	     `WidgetSharedConfig.appGroupIdentifier`, and registered on BOTH App IDs

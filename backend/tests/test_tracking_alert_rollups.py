@@ -50,8 +50,55 @@ def _grade(firm, action, prev, new):
     }
 
 
+@pytest.fixture
+def licensed_analyst(monkeypatch):
+    """Pretend the analyst package is on the Order Form.
+
+    `_get_analyst_rating_alerts` is now gated on the entitlement manifest, because
+    `grades` answers 402 and the ungated version fanned out one doomed call per watchlist
+    ticker on every refresh. Without this fixture the roll-up tests below would pass
+    VACUOUSLY — the gate returns `[]` before any of the logic they exist to cover runs, so
+    even `test_analyst_maintains_are_filtered_out` would go green against a function that
+    had been deleted.
+
+    The logic is deliberately kept (hide, don't delete) so it returns the day the package
+    is bought; this fixture is what keeps it tested in the meantime.
+    """
+    monkeypatch.setattr(
+        "app.services.tracking_service.analyst_section_available", lambda: True
+    )
+
+
 @pytest.mark.asyncio
-async def test_analyst_surfaces_every_material_change_per_ticker():
+async def test_analyst_alerts_are_skipped_while_the_package_is_unlicensed():
+    """The gate itself. `grades` is 402, so the alert can never fire — and the ungated
+    path issued (and logged) one guaranteed failure per watchlist ticker to learn that."""
+    svc = TrackingService()
+
+    # ⚠️ A fake that RAISES proves nothing here, and the first version of this test used
+    # one: `_fetch_one` catches every exception and returns `[]`, so the assertion passed
+    # whether or not the gate existed. Mutation-testing caught it. Record the calls and
+    # assert on the CALL LIST — the observable difference is that no call is made at all.
+    calls: list = []
+
+    class _Recording:
+        async def get_grades(self, ticker, limit=20):
+            calls.append(ticker)
+            return [_grade("Goldman Sachs", "upgrade", "Neutral", "Buy")]
+
+    svc.fmp = _Recording()
+    from app.services._analyst_common import analyst_section_available
+
+    assert analyst_section_available() is False, "premise: the package is unlicensed"
+    assert await svc._get_analyst_rating_alerts(["CRM", "AAPL", "MSFT"]) == []
+    assert calls == [], (
+        f"the gate is gone — {len(calls)} guaranteed-402 call(s) were issued, one per "
+        "watchlist ticker, each caught and logged, to arrive at the same empty result"
+    )
+
+
+@pytest.mark.asyncio
+async def test_analyst_surfaces_every_material_change_per_ticker(licensed_analyst):
     svc = TrackingService()
     svc.fmp = _GradesFMP({
         "CRM": [
@@ -71,7 +118,7 @@ async def test_analyst_surfaces_every_material_change_per_ticker():
 
 
 @pytest.mark.asyncio
-async def test_analyst_dedups_same_firm_multiple_rows():
+async def test_analyst_dedups_same_firm_multiple_rows(licensed_analyst):
     svc = TrackingService()
     svc.fmp = _GradesFMP({
         "CRM": [
@@ -87,13 +134,28 @@ async def test_analyst_dedups_same_firm_multiple_rows():
 
 
 @pytest.mark.asyncio
-async def test_analyst_maintains_are_filtered_out():
+async def test_analyst_maintains_are_filtered_out(licensed_analyst):
+    """A 'maintain' is not news, so it must not raise an alert.
+
+    ⚠️ `assert alerts == []` ALONE is vacuous now, and mutation-testing proved it: the
+    entitlement gate also returns `[]`, so this passed with the licensed fixture removed —
+    i.e. while the filtering logic never ran at all. Assert that the fetch HAPPENED as
+    well, which is the one thing the gated path cannot produce.
+    """
     svc = TrackingService()
-    svc.fmp = _GradesFMP({
+    calls: list = []
+
+    class _Recording(_GradesFMP):
+        async def get_grades(self, ticker, limit=20):
+            calls.append(ticker)
+            return await super().get_grades(ticker, limit)
+
+    svc.fmp = _Recording({
         "CRM": [_grade("Barclays", "maintain", "Buy", "Buy")]  # non-material
     })
     svc.price = PriceFromFMPFake(svc.fmp)
     alerts = await svc._get_analyst_rating_alerts(["CRM"])
+    assert calls == ["CRM"], "the filtering logic never ran — this was gated, not filtered"
     assert alerts == []
 
 

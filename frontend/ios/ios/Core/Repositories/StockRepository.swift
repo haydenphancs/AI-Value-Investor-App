@@ -1224,6 +1224,15 @@ struct AnalystAnalysisDTO: Codable {
     let actionsSummary: AnalystActionsSummaryDTO
     let actions: [AnalystActionDTO]
 
+    // ── Street estimates ────────────────────────────────────────────────────────────
+    // A SEPARATE, entitled dataset (FMP package 8) behind its OWN flag. Every field is
+    // Optional: an older backend never sends them, and the card must not fail to decode.
+    // These deliberately do not affect `sectionAvailable` — see AnalystForecastsSection.
+    let estimatesAvailable: Bool?
+    let estimatesHaveCoverage: Bool?
+    let estimates: [AnalystEstimatePeriodDTO]?
+    let estimatesNextPeriod: String?
+
     enum CodingKeys: String, CodingKey {
         case symbol
         case hasCoverage = "has_coverage"
@@ -1240,6 +1249,44 @@ struct AnalystAnalysisDTO: Codable {
         case netNegative = "net_negative"
         case actionsSummary = "actions_summary"
         case actions
+        case estimatesAvailable = "estimates_available"
+        case estimatesHaveCoverage = "estimates_have_coverage"
+        case estimates
+        case estimatesNextPeriod = "estimates_next_period"
+    }
+}
+
+/// Street low/avg/high for one forecast line item.
+///
+/// Every field Optional because the backend sends `null`, never `0.0`, for an unknown
+/// number — a zero forecast printed beside a real analyst count is a fabricated
+/// measurement. Decoding it as a non-Optional `Double` would undo that at the boundary.
+struct AnalystEstimateRangeDTO: Codable {
+    let low: Double?
+    let avg: Double?
+    let high: Double?
+}
+
+struct AnalystEstimatePeriodDTO: Codable {
+    let fiscalPeriod: String
+    let date: String
+    let isForward: Bool
+    let revenue: AnalystEstimateRangeDTO?
+    let ebitda: AnalystEstimateRangeDTO?
+    let ebit: AnalystEstimateRangeDTO?
+    let netIncome: AnalystEstimateRangeDTO?
+    let eps: AnalystEstimateRangeDTO?
+    let numAnalystsRevenue: Int?
+    let numAnalystsEps: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case fiscalPeriod = "fiscal_period"
+        case date
+        case isForward = "is_forward"
+        case revenue, ebitda, ebit, eps
+        case netIncome = "net_income"
+        case numAnalystsRevenue = "num_analysts_revenue"
+        case numAnalystsEps = "num_analysts_eps"
     }
 }
 
@@ -1725,6 +1772,19 @@ extension AnalystAnalysisDTO {
             )
         }
 
+        let estimateModels: [AnalystEstimatePeriod] = (estimates ?? []).map {
+            AnalystEstimatePeriod(
+                fiscalPeriod: $0.fiscalPeriod,
+                date: $0.date,
+                isForward: $0.isForward,
+                revenue: AnalystEstimateRange(low: $0.revenue?.low, avg: $0.revenue?.avg,
+                                              high: $0.revenue?.high),
+                eps: AnalystEstimateRange(low: $0.eps?.low, avg: $0.eps?.avg,
+                                          high: $0.eps?.high),
+                analystCount: max($0.numAnalystsEps ?? 0, $0.numAnalystsRevenue ?? 0)
+            )
+        }
+
         return AnalystRatingsData(
             hasCoverage: hasCoverage ?? true,
             sectionAvailable: sectionAvailable ?? true,
@@ -1739,7 +1799,10 @@ extension AnalystAnalysisDTO {
             netPositive: netPositive,
             netNegative: netNegative,
             actionsSummary: summary,
-            actions: actionModels
+            actions: actionModels,
+            estimatesAvailable: (estimatesAvailable ?? false)
+                && (estimatesHaveCoverage ?? false),
+            estimates: estimateModels
         )
     }
 
@@ -2355,7 +2418,11 @@ struct SignalOfConfidenceResponseDTO: Codable {
             divInfo = DividendInfo(
                 exDividendDate: exDate,
                 paymentDate: payDate,
-                fiveYearAvgYield: dto.fiveYearAvgYield,
+                // 0.0 means the backend had too little history to average, not that the
+                // average IS zero — mapped to nil so the card renders an em dash rather
+                // than a confident "0.00%". The wire field stays a non-Optional Double
+                // because shipped builds decode it that way.
+                fiveYearAvgYield: dto.fiveYearAvgYield > 0 ? dto.fiveYearAvgYield : nil,
                 status: yieldStatus,
                 buybackStatus: bbStatus
             )

@@ -158,6 +158,113 @@ def decode_token(token: str) -> Optional[dict[str, Any]]:
         raise
 
 
+# Widget token
+# ============
+#
+# The Home Screen widget lives in the `CaydexWidgets` extension — a SEPARATE PROCESS that holds no
+# credential. Its only channel to the app is the App Group, and it cannot refresh anything: refresh
+# is main-actor and lives in the app (`.claude/rules/auth.md` §8). So it cannot carry the user's
+# access token in any useful way — those expire in 24 h at most and typically in an hour, which
+# would leave the tile frozen for exactly the users who never open the app, i.e. the ones the
+# self-refresh exists for.
+#
+# It still may not call an UNAUTHENTICATED market-data route: FMP's Order Form grants only
+# Access-Restricted External Display ("through the Licensee's authenticated platform"), and Public
+# External Display was declined on 2026-09-04. A signed-out 200 on market data is a contract breach.
+#
+# Hence a third token kind: long-lived, and scoped to exactly one route that returns MARKET-WIDE
+# data — no watchlist, no portfolio, no holdings, no PII. It proves an account exists. It is a
+# licence gate, not an identity, and `decode_widget_token` is the only thing that will ever accept
+# it — `_decode_access_token` (app/dependencies.py) allow-lists `type == "access"` precisely so this
+# token can never be replayed as a session bearer.
+#
+# REVOCATION is by expiry, by the app deleting it from the App Group when the session ends
+# (`WidgetRefreshService.clearForEndedSession`), and — globally — by rotating `SECRET_KEY`. It
+# deliberately does NOT participate in `_reject_if_password_changed_since_issue`: that check evicts
+# sessions, and this is not one. The proportionality argument rests entirely on the scope, so if
+# this token ever authorises a route carrying user data, that reasoning collapses and it needs a
+# server-side revocation list first.
+
+WIDGET_TOKEN_TYPE = "widget"
+WIDGET_TOKEN_SCOPE = "widget:market"
+# 90 days. The app renews opportunistically once fewer than 30 days remain (WidgetRefreshService),
+# so the window only matters for someone who does not open the app for three months — at which
+# point the tile falling back to its placeholder is the correct outcome, not a bug.
+WIDGET_TOKEN_EXPIRE_DAYS = 90
+
+
+def create_widget_token(user_id: str) -> str:
+    """Mint the widget's market-data credential for `user_id`.
+
+    Issued only by `GET /api/v1/widget/token`, which itself requires a real session.
+    """
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": user_id,
+            "type": WIDGET_TOKEN_TYPE,
+            "scope": WIDGET_TOKEN_SCOPE,
+            "iat": now,
+            "exp": now + timedelta(days=WIDGET_TOKEN_EXPIRE_DAYS),
+        },
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
+
+def widget_token_expires_at(token: str) -> Optional[datetime]:
+    """The `exp` of a widget token as an aware UTC datetime, or None if it is not readable.
+
+    Handed to the client so it can renew before expiry instead of discovering it via a 401 it has
+    no way to report.
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        exp = payload.get("exp")
+        return datetime.fromtimestamp(float(exp), tz=timezone.utc) if exp else None
+    except (JWTError, TypeError, ValueError):
+        return None
+
+
+def decode_widget_token(token: str) -> Optional[str]:
+    """Return the `sub` of a VALID widget token, else None. Never raises.
+
+    Verifies signature and expiry (via `jwt.decode`) and then BOTH the `type` and the `scope`
+    claims. Checking `scope` as well as `type` is not redundant: it is what stops a future,
+    broader widget-family token from silently inheriting this route by carrying the same `type`.
+
+    Never raises because the caller is a FastAPI dependency that must answer 401 for every
+    failure shape identically — a malformed header must not be distinguishable from an expired
+    token by anything the caller can observe.
+    """
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+    except JWTError as e:
+        logger.info("widget token rejected (%s: %s)", type(e).__name__, e)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != WIDGET_TOKEN_TYPE:
+        logger.warning(
+            "token of type %r presented as a widget credential — rejected",
+            payload.get("type"),
+        )
+        return None
+    if payload.get("scope") != WIDGET_TOKEN_SCOPE:
+        logger.warning(
+            "widget token with unexpected scope %r — rejected", payload.get("scope")
+        )
+        return None
+    sub = payload.get("sub")
+    return sub if isinstance(sub, str) and sub else None
+
+
 # Supabase JWT signing keys (JWKS)
 # ================================
 #

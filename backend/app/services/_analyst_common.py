@@ -37,6 +37,83 @@ _RATING_RANK = {
 }
 
 
+# ── Is there an analyst section at all? ───────────────────────────────
+#
+# FMP's package enforcement (2026-09-03) took `grades` and `price-target-consensus` with the
+# Analyst Ratings & Price Targets package, which the Order Form does not include. There is no
+# entitled substitute, so `analyst_service` answers with its zero defaults:
+# `consensus=HOLD, total_analysts=0, targets $0/$0/$0`.
+#
+# ⚠️ Those zeros are STRUCTURALLY INDISTINGUISHABLE from real data unless a caller checks, and
+# every caller that forgot has shipped a falsehood: the Analysis-tab card said no analyst covers
+# Apple, the chat tool handed Gemini "HOLD, $0 average target" on a credit-charged turn, and the
+# 20-credit report put the same sentence into its Stage-A prompt AND rendered our own DCF fair
+# value in a field labelled as the analyst price target.
+#
+# So the check lives here, once, next to the other helper both the service and the report share.
+# Any new consumer of an `AnalystAnalysisResponse` must call `analyst_is_usable` before reading a
+# number off it.
+
+_ANALYST_ENDPOINTS = ("grades", "price-target-consensus")
+
+
+def analyst_section_available() -> bool:
+    """True when the FMP licence actually permits fetching analyst data.
+
+    Derived from the entitlement manifest rather than hardcoded, so the section comes back on its
+    own if the package is ever purchased — no code change, no stale constant.
+
+    Imported lazily: `fmp_entitlements` pulls in configuration, and this module is deliberately a
+    leaf that `tracking_service` and the report collector can import without dragging the FMP
+    client in behind it.
+    """
+    from app.integrations.fmp_entitlements import entitlement_error  # noqa: PLC0415
+
+    return all(entitlement_error(name) is None for name in _ANALYST_ENDPOINTS)
+
+
+#: `analyst-estimates` is package 8 on the Order Form and IS entitled — a separate dataset
+#: from the ratings pair above, behind a separate predicate on purpose.
+_ESTIMATE_ENDPOINTS = ("analyst-estimates",)
+
+
+def analyst_estimates_available() -> bool:
+    """True when the licence permits fetching forward Street estimates.
+
+    ⚠️ Deliberately NOT folded into :func:`analyst_section_available`, and callers must not
+    treat one as implying the other. They cover different datasets and license differently:
+    estimates are forward revenue/EPS consensus with real analyst counts, and carry **no**
+    rating, **no** price target and **no** upgrade history. `chat_service` and the report
+    collector gate their prompts on the RATINGS predicate; telling a model it has a
+    consensus when it only has estimates is how it starts answering from memory.
+    """
+    from app.integrations.fmp_entitlements import entitlement_error  # noqa: PLC0415
+
+    return all(entitlement_error(name) is None for name in _ESTIMATE_ENDPOINTS)
+
+
+def analyst_is_usable(analysis) -> bool:
+    """True when `analysis` carries analyst numbers a caller may quote.
+
+    Three distinct states collapse to False here, and keeping them distinct matters only at the
+    UI layer (the card renders an honest "no analyst covers this" empty state for the middle one,
+    and nothing at all for the others):
+
+      * ``None``                    — the fetch failed outright
+      * ``section_available=False`` — we are not licensed to ask
+      * ``has_coverage=False``      — we asked and no analyst covers the ticker
+
+    For anything that GROUNDS a model or renders a number, all three mean the same thing: there
+    is nothing here, and a zero is not a measurement.
+    """
+    if analysis is None:
+        return False
+    return bool(
+        getattr(analysis, "section_available", True)
+        and getattr(analysis, "has_coverage", True)
+    )
+
+
 # ── Grade → distribution bucket ───────────────────────────────────────
 #
 # There used to be a SECOND, narrower table (`analyst_service._GRADE_TO_CATEGORY`)

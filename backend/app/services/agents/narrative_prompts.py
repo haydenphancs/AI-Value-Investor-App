@@ -1352,7 +1352,20 @@ def _wall_street_insight_prompt(
         if isinstance(n, int) and n > 0:
             dist_parts.append(f"{n} {label}")
     dist_str = (" — " + ", ".join(dist_parts)) if dist_parts else ""
-    rating_line = f"Consensus rating: {rating}{dist_str}"
+    # ⚠️ `rating` DEFAULTS to "hold" all the way from `_consensus_to_key(None)`, so with no
+    # coverage this line used to assert "Consensus rating: hold" to the model while the two
+    # lines around it correctly said there was none. The target line already degrades honestly
+    # ("no analyst coverage"); this one did not, and a stated rating is the half the model
+    # quotes. The distribution being empty is the same signal `ReportConsensusBar` gates its
+    # rating badge on (`hasAnalystDistribution || hasAnalystTargets`), so the prompt and the
+    # card now agree about when a rating exists.
+    if dist_parts or tgt:
+        rating_line = f"Consensus rating: {rating}{dist_str}"
+    else:
+        rating_line = (
+            "Consensus rating: none published — Caydex has no analyst ratings for this "
+            "company. Do not state or estimate one."
+        )
 
     # ── DCF valuation lens — DISTINCT from the analyst-target upside ────
     val_status = str(ws.get("valuation_status") or "").replace("_", " ")

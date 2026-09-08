@@ -76,6 +76,10 @@ from app.services.whale_service import WhaleService as _WhaleService  # noqa: E4
 # `_suspicious_split_tickers` is a @staticmethod on WhaleService; bind it to a plain
 # name so the call sites below read the same as the service's.
 _suspicious_split_tickers = _WhaleService._suspicious_split_tickers
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    window_for_range,
+)
 from app.services._whale_common import (  # noqa: E402
     SPLIT_SUPPRESS,
     restate_prev_shares_for_split,
@@ -516,11 +520,17 @@ class WhaleHydrator:
                     else None
                 )
                 curr_end = _quarter_end_date(year, quarter)
-                # Capped: an entire restated book would otherwise fan out one /splits
-                # call per suspect ticker with no bound at all.
+                # Capped: an entire restated book would otherwise fan out a lookup per
+                # suspect ticker with no bound at all. The cap matters MORE now, not less:
+                # a derived split costs two price-series calls instead of one /splits.
                 suspects = suspects[:_MAX_SPLIT_LOOKUPS]
+                from_date, to_date = window_for_range(prev_end, curr_end)
+                actions = corporate_actions_source(self)
                 split_lists = await asyncio.gather(
-                    *[_throttled(self.fmp.get_stock_splits(t)) for t in suspects],
+                    *[
+                        _throttled(actions.get_split_rows(t, from_date, to_date))
+                        for t in suspects
+                    ],
                     return_exceptions=True,
                 )
                 for t, sl in zip(suspects, split_lists):
@@ -528,7 +538,7 @@ class WhaleHydrator:
                         logger.warning("  Split lookup failed for %s: %s", t, sl)
                         continue
                     r = _split_ratio_in_window(sl, prev_end, curr_end)
-                    if r and r != 1.0:
+                    if r and abs(r - 1.0) > 1e-9:
                         split_ratios[t] = r
         except Exception as e:
             logger.warning(

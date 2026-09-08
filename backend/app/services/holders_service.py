@@ -24,9 +24,15 @@ from app.services._insider_common import (
     classify_insider_transaction,
     normalize_insider_name,
 )
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    recent_quarters,
+    window_for_quarters,
+)
 from app.services._whale_common import (
     parse_congress_amount_dollars,
     calc_13f_trade_dollars,
+    is_implausible_share_flow,
 )
 from app.utils.period_labels import latest_filed_13f_quarter
 from app.schemas.holders import (
@@ -445,7 +451,17 @@ class HoldersService:
             # did not, so across a split it reported the mechanical share multiplication
             # as a real trade — e.g. KLAC's 10:1 on 2026-06-12 made BlackRock's row read
             # "+$34.3B / +901.9%" when the true move was +236,583 shares (~+$71M).
-            self.fmp.get_stock_splits(ticker),
+            # Derived, not fetched: `/splits` is outside the FMP licence and answers 402,
+            # so this argument was silently `[]` and the KLAC row above was LIVE.
+            # `corporate_actions_source` returns FMP's own row shape, so
+            # `_quarter_split_ratios` below is unchanged.
+            # Bounded to the last four COMPLETED quarters: the 13F data quarter resolved
+            # below is at most two back (filings lag by up to 45 days), and ending on a
+            # finished quarter keeps the window CLOSED so it earns the long cache TTL
+            # instead of the short one a window touching today would get.
+            corporate_actions_source(self).get_split_rows(
+                ticker, *(window_for_quarters(recent_quarters(4)) or (None, None))
+            ),
             return_exceptions=True,
         )
 
@@ -880,6 +896,24 @@ class HoldersService:
                 last_reported = _safe_float(h, "lastSharesNumber", prev_shares)
                 prev_shares = max(last_reported * split_ratio, 0.0)
                 shares_change = total_shares - prev_shares
+            # Magnitude backstop, INDEPENDENT of whether the split was classified.
+            # Splits are now derived from price series, and that derivation deliberately
+            # refuses to name an adjustment it cannot resolve to a small rational. A
+            # spin-off needs no restatement (share counts are untouched, so the raw delta
+            # above is already right), but a reverse split outside the derivation's range
+            # — 1:150, 1:200, routine in delisting-defence microcaps — would otherwise
+            # reproduce exactly the KLAC row this function's docstring describes.
+            # `_build_institutional_flow_summary` has had this guard for a while; this
+            # per-holder path is the one that never did.
+            if is_implausible_share_flow(shares_change, total_shares):
+                logger.warning(
+                    "institutional activities: implausible share flow for %s "
+                    "(change=%.0f of %.0f held, split_ratio=%s) — dropping the row rather "
+                    "than rendering a corporate action as a trade",
+                    name, shares_change, total_shares, split_ratio,
+                )
+                continue
+
             implied_price = (
                 total_value / total_shares if total_shares > 0 else 0.0
             )
@@ -1999,9 +2033,18 @@ class HoldersService:
         if missing:
             # Split ratios for the quarters we're (re)computing, so a split
             # quarter's raw 13F change isn't mistaken for buying (see
-            # _compute_quarter_flow). One extra FMP call per build.
+            # _compute_quarter_flow).
+            #
+            # Derived from entitled price series (`/splits` is 402). ONE merged window
+            # across every missing quarter rather than one fetch each — the data is a
+            # single contiguous series, and `window_for_quarters` also backs the start off
+            # the quarter boundary so a split on a quarter's first trading day is not
+            # missed when that boundary falls on a weekend.
+            _win = window_for_quarters(missing)
             split_ratios = HoldersService._quarter_split_ratios(
-                await self.fmp.get_stock_splits(ticker), missing
+                await corporate_actions_source(self).get_split_rows(ticker, *_win)
+                if _win else [],
+                missing,
             )
             fmp_results = await asyncio.gather(
                 *[

@@ -268,9 +268,31 @@ def test_dividend_status_low_when_genuinely_below_its_average():
     assert info.status == "Low"   # 0.5 / 2.0 = 0.25
 
 
-def test_dividend_info_none_without_history():
+def test_dividend_info_is_none_only_for_a_genuine_non_payer():
+    """The gate is "does it pay a dividend", NOT "do we have per-payment history".
+
+    It used to be the latter, and on 2026-09-03 that silently turned the card off for
+    every ticker in the market: FMP's `/dividends` moved outside the signed Order Form and
+    answers 402, so `dividend_history` is permanently `[]`. Every number the card renders
+    comes from `data_points[].dividend_yield` — computed from cash-flow `dividendsPaid`
+    over historical market cap — and never touched `/dividends`.
+    """
     svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
-    assert svc._build_dividend_info([], 1.0, 1.0, 0.0, data_points=[]) is None
+
+    # A genuine non-payer: no history, no yield anywhere. Still None.
+    assert svc._build_dividend_info([], 0.0, 1.0, 0.0, data_points=[]) is None
+
+    # A real payer whose per-payment history is unavailable. Must RENDER.
+    info = svc._build_dividend_info([], 1.0, 1.0, 0.0, data_points=[])
+    assert info is not None, (
+        "a company with a 1% trailing dividend yield had its whole card hidden because "
+        "the unlicensed per-payment feed is empty"
+    )
+    # The one honest casualty: per-payment metadata is genuinely gone, so it is absent
+    # rather than invented. iOS renders "N/A" for a nil date.
+    assert info.ex_dividend_date is None
+    assert info.payment_date is None
+    assert info.status in {"Low", "Fair", "High", "Very High"}
 
 
 # ── 7. Point-in-time market cap for historical quarters ─────────────────────

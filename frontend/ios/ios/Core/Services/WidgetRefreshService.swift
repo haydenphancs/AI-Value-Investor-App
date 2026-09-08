@@ -208,10 +208,52 @@ final class WidgetRefreshService {
             return
         }
         log.info("widget refresh wrote market=\(m != nil) portfolio=\(p != nil)")
+        await renewWidgetTokenIfNeeded(client: client)
         // Stamped on COMPLETION, not on entry. Stamping first means a run that is
         // cancelled or fails still burns the next minute's allowance.
         lastRefresh = Date()
         lastRefreshIdentity = inFlightIdentity
+    }
+
+    // MARK: - The extension's credential
+
+    /// When the published widget token expires, as far as this process knows. Cached in memory
+    /// only: it is a renewal hint, and the token itself in the App Group is the source of truth.
+    private var widgetTokenExpiry: Date?
+
+    /// Renew inside this much of expiry. The token lives 90 days, so a user who opens the app
+    /// even once a month never falls off; someone who does not open it for three months loses
+    /// the tile, which is the correct outcome rather than a bug.
+    private static let widgetTokenRenewWindow: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Mint or renew the token the `CaydexWidgets` extension authenticates with.
+    ///
+    /// Runs only after a SUCCESSFUL refresh, which means the session is known good — minting off
+    /// a failed run would ask for a credential with one we just saw rejected.
+    ///
+    /// Best-effort by design: a failure here leaves the extension on its existing token (still
+    /// valid for up to 30 more days) and the app's own writes keep the tile current meanwhile.
+    /// It is logged rather than surfaced — `auth.md` §6 governs user-INITIATED actions, and
+    /// nobody tapped anything to get here.
+    private func renewWidgetTokenIfNeeded(client: APIClient) async {
+        let hasToken = WidgetAPIConfig.widgetToken != nil
+        if hasToken, let expiry = widgetTokenExpiry,
+           expiry.timeIntervalSinceNow > Self.widgetTokenRenewWindow {
+            return
+        }
+
+        do {
+            let response = try await client.request(
+                endpoint: .getWidgetToken, responseType: WidgetTokenResponse.self
+            )
+            WidgetAPIConfig.publishWidgetToken(response.token)
+            widgetTokenExpiry = ISO8601DateFormatter().date(from: response.expiresAt)
+            log.info("widget token published, expires \(response.expiresAt, privacy: .public)")
+        } catch {
+            // Not fatal, but never silent: if this keeps failing the tile quietly stops
+            // self-refreshing 90 days later, and nothing else would say why.
+            log.warning("widget token fetch failed: \(String(describing: error))")
+        }
     }
 
     private func fetch(_ endpoint: APIEndpoint, client: APIClient) async -> WidgetMoverSnapshot? {
@@ -230,12 +272,34 @@ final class WidgetRefreshService {
     /// Called when a session ends. See `.claude/rules/auth.md` §7: a device-global store
     /// that survives sign-out hands the next account the previous user's data — and a
     /// portfolio snapshot is visible on the Home Screen without even unlocking the app.
+    ///
+    /// ⚠️ `clearAll()`, not `clear()`. `clear()` keeps a non-empty MARKET snapshot, which was
+    /// right while market data was public and is wrong now: End-User Display Rights permit FMP
+    /// data only through an authenticated platform, so a signed-out device must not keep showing
+    /// prices. The widget token goes with it — leave it behind and the extension keeps
+    /// successfully refreshing FMP data onto a phone with no session.
     func clearForEndedSession() {
         inFlight?.cancel()
         // Drop any queued forced refresh too — otherwise the ended session's pending
         // request re-runs after cancellation and re-publishes their holdings.
         forcedRefreshPending = false
         lastRefresh = nil
-        WidgetSnapshotStore.clear()
+        widgetTokenExpiry = nil
+        WidgetAPIConfig.clearWidgetToken()
+        WidgetSnapshotStore.clearAll()
+    }
+}
+
+/// `GET /api/v1/widget/token` — the extension's market-scoped credential.
+///
+/// Decoded only by the APP. The extension never sees this type; it reads the raw string the app
+/// published into the App Group. Mirrors `WidgetTokenResponse` in `backend/app/schemas/widget.py`.
+struct WidgetTokenResponse: Codable, Sendable {
+    let token: String
+    let expiresAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case token
+        case expiresAt = "expires_at"
     }
 }

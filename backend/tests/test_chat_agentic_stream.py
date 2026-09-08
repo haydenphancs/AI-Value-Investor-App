@@ -198,9 +198,17 @@ def _tool_names(asset_type=None):
     }
 
 
-def test_declarations_default_to_the_full_equity_set():
+def test_declarations_default_to_the_full_equity_set(monkeypatch):
     """No asset type = no screen context, so any stock may come up. Also the safe default:
-    an unrecognised value must never silently strip a tool."""
+    an unrecognised value must never silently strip a tool.
+
+    The licence filter is pinned ON here because this test is about the ASSET-CLASS default, not
+    about entitlements — with the real manifest `get_analyst_analysis` is withheld from every
+    chat (see `test_chat_asset_awareness.py` §1b). Patch the binding `chat_tools` actually
+    resolves, which is its own module-level one."""
+    from app.services.agents import chat_tools as _ct
+
+    monkeypatch.setattr(_ct, "analyst_section_available", lambda: True)
     equity = {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"}
     assert _tool_names() == equity
     assert _tool_names("STOCK") == equity

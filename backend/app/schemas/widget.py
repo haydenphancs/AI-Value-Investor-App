@@ -264,5 +264,18 @@ class WidgetMoverPayload(BaseModel):
     runners_up: List[WidgetMoverResponse] = Field(default_factory=list)
 
 
+class WidgetTokenResponse(BaseModel):
+    """The Home Screen extension's market-data credential.
+
+    `expires_at` is ISO-8601 UTC and is carried so the client can renew BEFORE the token dies.
+    Without it the only way to learn a token expired is a 401 inside the widget process, which
+    has no error state and no way to tell the app — the tile would simply stop updating, which
+    is the exact failure this whole mechanism exists to remove.
+    """
+
+    token: str
+    expires_at: str
+
+
 WidgetMoverResponse.model_rebuild()
 WidgetMarketContextResponse.model_rebuild()

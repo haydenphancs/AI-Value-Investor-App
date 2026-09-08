@@ -657,9 +657,25 @@ class SignalOfConfidenceService:
         share_count_change: float = 0.0,
         data_points: Optional[List] = None,
     ) -> Optional[DividendInfoSchema]:
-        """Build DividendInfo from dividend history."""
+        """Build DividendInfo for a company that actually pays a dividend.
 
-        if not dividend_history:
+        ⚠️ THE GATE IS NOT `dividend_history`. It used to be, and that turned the whole
+        card off for EVERY ticker on 2026-09-03: FMP's `/dividends` went outside the signed
+        Order Form and answers 402, so `dividend_history` is now permanently `[]` — while
+        every number this card renders is still perfectly available. `five_year_avg_yield`
+        and `status` come from `data_points[].dividend_yield`, which
+        `_build_data_points` computes from cash-flow `dividendsPaid` over historical market
+        cap, and has never touched `/dividends` at all.
+
+        So the gate is "does this company pay a dividend", answered by the yield. The one
+        genuine loss is the per-payment metadata: the ex-dividend and payment dates below
+        degrade to None, and the iOS card already renders "N/A" for a nil date rather than
+        inventing one.
+        """
+        pays_dividend = t12m_dividend_yield > 0 or any(
+            getattr(dp, "dividend_yield", 0) > 0 for dp in (data_points or [])
+        )
+        if not dividend_history and not pays_dividend:
             return None
 
         # Sort descending by date to find most recent

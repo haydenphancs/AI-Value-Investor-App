@@ -39,6 +39,10 @@ from app.schemas.etf import (
     RelatedTickerResponse,
 )
 from app.utils.market_hours import market_status_fields, to_utc_instant
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    window_for_range,
+)
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -1062,10 +1066,31 @@ class ETFService:
         description = etf_info.get("description") or profile.get("description") or ""
         turnover = _finite_num(etf_info.get("turnover") or ref.get("turnover"))
 
-        # Dividend yield: prefer etf_info, then compute from lastDividend / price
+        # Dividend yield, computed from `profile.lastDividend` over the price.
+        #
+        # ⚠️ This used to read `etf_info.get("dividendYield") or quote.get("dividendYield")`
+        # first. BOTH of those are dead and had to be measured to find out: `etf/info`
+        # carries no dividend or yield key at all for any ETF (its keys are assetClass,
+        # assetsUnderManagement, avgVolume, description, domicile, etfCompany, expenseRatio,
+        # holdingsCount, inceptionDate, isActivelyTrading, isin, name, nav, navCurrency,
+        # sectorsList, securityCusip, symbol, updatedAt, website), and `quote` now comes
+        # from `price_service`, whose shaped row has no `dividendYield` either. The
+        # fallback below has silently been the only live path.
+        #
+        # ⚠️ `lastDividend` is the TRAILING-TWELVE-MONTH TOTAL despite the name — AAPL
+        # reports 1.06, exactly its `dividendPerShareTTM`. Reading it as one quarterly
+        # payment would understate the yield fourfold.
         last_div_dollar = _finite_num(profile.get("lastDividend") or profile.get("lastDiv"))
-        dividend_yield = _finite_num(etf_info.get("dividendYield") or quote.get("dividendYield"))
-        if not dividend_yield and last_div_dollar > 0 and price > 0:
+        dividend_yield = 0.0
+        # Known when we have both halves of the division. A fund that genuinely pays
+        # nothing reports lastDividend == 0 (measured on ARKK, GLD, SLV, USO) and is
+        # therefore KNOWN to yield zero — different from a missing price, which is not.
+        dividend_yield_known = (
+            last_div_dollar is not None
+            and _finite_num(price) is not None
+            and price > 0
+        )
+        if dividend_yield_known and last_div_dollar > 0:
             dividend_yield = round((last_div_dollar / price) * 100, 2)
 
         # Step 3 (build chart data) is gone: `chart_data` now arrives from `_get_chart`
@@ -1163,7 +1188,31 @@ class ETFService:
         else:
             last_payment = dividend_payments[0]
 
+        # Pay frequency from DERIVED ex-dividend dates.
+        #
+        # `dividends` is permanently `[]` — `/dividends` is outside the FMP licence — so
+        # this used to render "—" for every fund. The DATES are recoverable exactly from
+        # the entitled `dividend-adjusted` vs `/full` price series (verified: AAPL 6/6,
+        # KO / MSFT / JNJ / SCHD 6/6 each), and a frequency needs only dates. The AMOUNTS
+        # are NOT recoverable to the cent and are deliberately still absent.
+        #
+        # Best-effort: a fund whose per-payment yield sits below the detection floor
+        # (~0.04%) degrades to "—", which is what it already showed.
         pay_frequency = self._infer_pay_frequency(dividends)
+        if pay_frequency == "—":
+            try:
+                ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
+                    symbol, *window_for_range(None, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                )
+                if ex_dates:
+                    pay_frequency = self._infer_pay_frequency(
+                        [{"date": d} for d in ex_dates]
+                    )
+            except Exception as e:
+                logger.warning(
+                    "etf: ex-dividend date derivation failed for %s (%s: %s) — "
+                    "pay frequency stays unknown", symbol, type(e).__name__, e,
+                )
 
         net_yield = ETFNetYieldResponse(
             expense_ratio=expense_ratio,
@@ -1174,6 +1223,7 @@ class ETFService:
             verdict=net_yield_verdict,
             last_dividend_payment=last_payment,
             dividend_history=dividend_payments,
+            dividend_yield_known=dividend_yield_known,
         )
 
         # Step 10 (related ETFs) now arrives from `_get_related` in step 1 — it used to

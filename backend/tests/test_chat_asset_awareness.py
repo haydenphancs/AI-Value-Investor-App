@@ -31,6 +31,26 @@ def _svc() -> ChatService:
 # could only ever ADD the index tool on top, so a crypto chat could ask Wall Street for its
 # rating on Bitcoin.
 
+# ⚠️ This table is the ASSET-CLASS dimension only. A SECOND, independent filter now runs on top
+# of it: `get_analyst_analysis` is withheld whenever `grades` / `price-target-consensus` are
+# outside the FMP licence, which they are today — so with the real manifest, STOCK resolves to
+# two tools, not three. These tests pin the asset-class table, so they force the licence ON via
+# `licensed_analyst_data`; the licence dimension gets its own tests below.
+#
+# Patch target: `chat_tools.analyst_section_available`. `chat_tools` binds the name at import
+# time with a module-level `from … import`, so patching `_analyst_common` would not be seen
+# (`.claude/rules/testing.md`, "patch the binding the caller actually uses").
+
+@pytest.fixture
+def licensed_analyst_data(monkeypatch):
+    monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: True)
+
+
+@pytest.fixture
+def unlicensed_analyst_data(monkeypatch):
+    monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: False)
+
+
 _EXPECTED = {
     "STOCK":     {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"},
     "NORMAL":    {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"},
@@ -42,12 +62,12 @@ _EXPECTED = {
 
 
 @pytest.mark.parametrize("asset_type,expected", sorted(_EXPECTED.items()))
-def test_tool_set_per_asset_type(asset_type, expected):
+def test_tool_set_per_asset_type(asset_type, expected, licensed_analyst_data):
     assert set(chat_tools.tools_for_asset_type(asset_type)) == expected
 
 
 @pytest.mark.parametrize("asset_type", sorted(_EXPECTED))
-def test_declarations_match_the_table(asset_type):
+def test_declarations_match_the_table(asset_type, licensed_analyst_data):
     """The declaration builder must not drift from the name table it filters on."""
     names = {
         fd.name
@@ -64,12 +84,12 @@ def test_analyst_ratings_are_never_offered_for_an_unrated_asset(asset_type):
     assert "get_analyst_analysis" not in chat_tools.tools_for_asset_type(asset_type)
 
 
-def test_stock_keeps_every_equity_tool():
+def test_stock_keeps_every_equity_tool(licensed_analyst_data):
     """Anti-vacuity: a filter that returned {} for everything would pass the assertions above."""
     assert len(chat_tools.tools_for_asset_type("STOCK")) == 3
 
 
-def test_unknown_asset_type_falls_back_to_the_full_equity_set():
+def test_unknown_asset_type_falls_back_to_the_full_equity_set(licensed_analyst_data):
     """The safe direction — an unrecognised value must never silently strip a tool."""
     equity = _EXPECTED["STOCK"]
     for value in (None, "", "   ", "Fund", "nonsense"):
@@ -78,6 +98,50 @@ def test_unknown_asset_type_falls_back_to_the_full_equity_set():
 
 def test_asset_type_matching_is_case_insensitive():
     assert set(chat_tools.tools_for_asset_type("crypto")) == _EXPECTED["CRYPTO"]
+
+
+# ── 1b. The LICENCE dimension, independent of asset class ───────────────────
+#
+# `grades` and `price-target-consensus` are 402 under the signed Order Form, so
+# `analyst_service` answers `HOLD, 0 analysts, $0/$0/$0` for EVERY equity. Offering the model a
+# tool whose only possible answer is a fabricated consensus is worse than offering none: it
+# asserted "Wall Street's consensus on Apple is HOLD with a $0 average price target" on a
+# credit-charged turn. Removing the tool is what the asset-class table already does for a coin.
+
+
+@pytest.mark.parametrize("asset_type", ["STOCK", "NORMAL", None, "who-knows"])
+def test_the_analyst_tool_is_withheld_when_it_is_unlicensed(
+    asset_type, unlicensed_analyst_data
+):
+    assert "get_analyst_analysis" not in chat_tools.tools_for_asset_type(asset_type)
+    names = {
+        fd.name
+        for t in chat_tools.build_chat_tool_declarations(asset_type)
+        for fd in (t.function_declarations or [])
+    }
+    assert "get_analyst_analysis" not in names, (
+        "the declaration builder filters through `tools_for_asset_type`, so this can only "
+        "fail if someone gave it a second source of truth"
+    )
+
+
+def test_the_licence_filter_removes_ONLY_the_analyst_tool(unlicensed_analyst_data):
+    """Anti-vacuity, and the failure mode that would be worst: a filter that emptied the whole
+    toolset would satisfy every assertion above while silently taking the price chart and
+    sentiment with it — leaving the model with no data at all and no way to say why."""
+    assert set(chat_tools.tools_for_asset_type("STOCK")) == {
+        "get_stock_chart_data",
+        "get_sentiment_analysis",
+    }
+    assert set(chat_tools.tools_for_asset_type("INDEX")) == {"get_market_overview"}
+
+
+def test_the_analyst_tool_returns_the_moment_the_package_is_repurchased(
+    licensed_analyst_data,
+):
+    """Derived from the entitlement manifest, never hardcoded — so buying the package back is a
+    config change, not a code change. This is the assertion that proves the filter reads it."""
+    assert "get_analyst_analysis" in chat_tools.tools_for_asset_type("STOCK")
 
 
 # ── 2. Crypto sentiment must ask for CRYPTO news ────────────────────────────

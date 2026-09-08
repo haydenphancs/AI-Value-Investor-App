@@ -452,6 +452,21 @@ CURATION: dict[str, TableDoc] = {
              "non-intraday chart) — that is what let `_refresh_volatile` be deleted rather "
              "than fixed. The raw daily history is deliberately excluded: reading ~1 MB "
              "back is slower than re-fetching it from FMP."),
+    "public.corporate_action_cache": T("market-cache",
+        purpose="Stock splits and ex-dividend dates DERIVED from entitled price series, "
+                "because /splits and /dividends are outside the licence.",
+        key=("symbol", "kind", "from_date", "to_date", "events"),
+        note="Migration 159. FMP's package enforcement (2026-09-03) took away /splits, and "
+             "that is not cosmetic: with no split detected, a 13F position merely HELD "
+             "through a 10:1 reads as a purchase — KLAC's 10:1 made BlackRock's row show "
+             "+$34,275.0M / +901.88% against a true +$71M. Splits are now derived from "
+             "historical-price-eod/full vs /non-split-adjusted, whose ratio moves on any "
+             "corporate action; the classifier snaps it to a small rational so a SPIN-OFF "
+             "(which changes no share count) is not mistaken for a split. Only CLOSED "
+             "windows are stored and they never expire: FMP restates its adjusted series "
+             "after every action, but the ratio between two days INSIDE a finished window "
+             "is invariant under that rescaling. SERVICE-ROLE ONLY like 157/158 — derived "
+             "vendor data must not be readable with the anon key in the iOS binary."),
     "public.market_close_snapshot": T("market-cache",
         purpose="Most recent official close per symbol — the denominator for batch "
                 "day-change %.",

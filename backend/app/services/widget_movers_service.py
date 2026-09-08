@@ -71,6 +71,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
+from app.services._analyst_common import analyst_section_available
 from app.integrations.fmp import get_fmp_client
 from app.schemas.widget import (
     WidgetBasketResponse,
@@ -1030,6 +1031,10 @@ class WidgetMoversService:
         market-wide sibling wired, which is why this is scoped so tightly.
         """
         if not ranked:
+            return None
+        if not analyst_section_available():
+            # `grades` is outside the signed FMP Order Form (402). One guaranteed failure
+            # per widget refresh, logged as a warning, to arrive at None. Skip it.
             return None
         try:
             return await get_fmp_client().get_grades(ranked[0].ticker, limit=10)

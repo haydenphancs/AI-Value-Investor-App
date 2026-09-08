@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PrivacyInfo.xcprivacy — CaydexWidgets (app extension)
+
+  REQUIRED TO UPLOAD, SEPARATELY FROM THE APP'S. Apple evaluates a required-reason API
+  declaration per BINARY, and an app extension is its own binary inside the .ipa. The app
+  target's manifest at `ios/PrivacyInfo.xcprivacy` does not cover this one; without this file
+  the upload can fail ITMS-91053 naming CaydexWidgets specifically, which reads like an app
+  problem and is not.
+
+  This became necessary on 2026-09-07. The extension previously "performed no network call and
+  held no credential" — it only read the App Group — and even then it used UserDefaults, so
+  strictly it always needed a manifest. It now also authenticates a request with a widget token,
+  which is why the omission was worth fixing rather than noting.
+
+  Required-reason APIs: UserDefaults only. `UserDefaults(suiteName:)` in `WidgetAPIConfig`,
+  `WidgetSnapshotStore` and `MoversConfigurationIntent` — all against the shared App Group
+  `group.com.phan.caydex`, hence CA92.1 (access limited to the app group the process belongs
+  to), not 1C8F.1. Verified ABSENT from `CaydexWidgets/` and `Shared/`: file-timestamp APIs,
+  system boot time, disk space, and active-keyboard APIs.
+
+  Tracking: false. The extension links no SDK at all — its only dependencies are WidgetKit,
+  SwiftUI, AppIntents and Foundation.
+
+  NSPrivacyCollectedDataTypes is EMPTY, and that is a statement, not an oversight: the
+  extension SENDS nothing about the user. Its one request carries a market-scoped widget token
+  and returns a market-wide roll-up; it writes only to the shared container. Everything the app
+  collects is declared in the app target's manifest, which is where it belongs — Apple merges
+  the declarations across binaries, and restating them here would make the two drift.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- The App Group suite: the snapshot the app writes, the base-URL override,
+			     the market/holdings mode toggle, and the widget token. Reads and writes
+			     the shared container only — never the app's own defaults domain. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+</dict>
+</plist>

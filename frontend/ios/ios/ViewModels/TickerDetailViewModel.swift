@@ -1732,19 +1732,11 @@ class TickerDetailViewModel: ObservableObject {
     private var analysisContext: String? {
         var parts: [String] = []
 
-        if let ar = analystRatingsData {
-            parts.append("Analyst Consensus: \(ar.consensus.rawValue) (\(ar.totalAnalysts) analysts)")
-            parts.append("Price Target: Low $\(String(format: "%.0f", ar.priceTarget.lowPrice)), Avg $\(String(format: "%.0f", ar.priceTarget.averagePrice)), High $\(String(format: "%.0f", ar.priceTarget.highPrice))")
-            parts.append("Target Upside: \(ar.formattedUpside)")
-
-            let distStr = ar.distributions.map { "\($0.label): \($0.count)" }.joined(separator: ", ")
-            parts.append("Ratings: \(distStr)")
-
-            let recentActions = ar.actions.prefix(3)
-            if !recentActions.isEmpty {
-                let actStr = recentActions.map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }.joined(separator: "; ")
-                parts.append("Recent: \(actStr)")
-            }
+        // `groundingLines`, not the fields — it returns nil unless the analyst data is both
+        // licensed and actually covers this ticker. Spelling the fields out here is what put
+        // "HOLD, 0 analysts, $0 target" into a paid turn's context; see the accessor's own note.
+        if let analystLines = analystRatingsData?.groundingLines {
+            parts.append(contentsOf: analystLines)
         }
 
         if let ta = technicalAnalysisData {

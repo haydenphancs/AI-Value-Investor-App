@@ -671,6 +671,7 @@ def test_every_public_table_is_curated():
 # fails until the name is removed.
 _PENDING_MIGRATION_TABLES = {
     "public.market_close_snapshot",   # migration 157
+    "public.corporate_action_cache",  # migration 159
 }
 
 

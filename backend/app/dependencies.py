@@ -14,7 +14,12 @@ import logging
 from app.database import get_supabase
 from jose import JWTError
 
-from app.core.security import decode_token, verify_supabase_token, rate_limiter
+from app.core.security import (
+    decode_token,
+    decode_widget_token,
+    rate_limiter,
+    verify_supabase_token,
+)
 from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
 
@@ -132,31 +137,49 @@ def _reject_unverifiable_token(token: str, *, route: str) -> None:
 
 
 def _decode_access_token(token: str) -> dict:
-    """`decode_token`, but refuses a REFRESH token presented as an access credential.
+    """`decode_token`, but accepts ONLY a token minted as an access credential.
 
-    Both token kinds are signed with the same `SECRET_KEY` and differ only by a `"type"` claim
-    (`create_access_token` stamps `"access"`, `create_refresh_token` stamps `"refresh"` —
-    core/security.py). `decode_token` verifies signature and expiry and returns the payload
-    either way, and nothing downstream looked at `type`. So the refresh token — which the client
-    holds precisely because it is meant to be exchange-only — worked as a Bearer credential on
-    every authenticated route.
+    Every token this app mints is signed with the same `SECRET_KEY` and distinguished solely by a
+    `"type"` claim (`create_access_token` stamps `"access"`, `create_refresh_token` stamps
+    `"refresh"`, `create_widget_token` stamps `"widget"` — core/security.py). `decode_token`
+    verifies signature and expiry and returns the payload for all of them, and nothing downstream
+    looked at `type`. So the refresh token — which the client holds precisely because it is meant
+    to be exchange-only — worked as a Bearer credential on every authenticated route.
 
-    Two things that made this worse than a curiosity:
+    Two things that made that worse than a curiosity:
       * refresh tokens live `REFRESH_TOKEN_EXPIRE_MINUTES` (7 days) against the access token's
         24 hours, so it silently widens the window of any leaked credential, and
       * `POST /auth/refresh` is the one place that checks `password_changed_at`, so a refresh
         token used directly as an access token skipped the eviction check entirely.
 
+    ⚠️ **This is an ALLOW-LIST, and it must stay one.** It used to deny-list `"refresh"` and accept
+    everything else, which is only safe while exactly two token kinds exist. The widget token
+    (`type="widget"`, 90-day expiry, issued so the Home Screen extension can authenticate its one
+    market-data call) would have been waved through as a full session bearer on every authenticated
+    route — the same escalation described above, with a window 90x wider. A new token kind must now
+    opt IN here deliberately rather than inherit session rights by omission.
+
+    Tokens with no `type` at all are refused too. `create_access_token` has always stamped the
+    claim and access tokens expire in 24 h, so nothing legitimate is stranded; a typeless token is
+    either forged or from a mint that forgot to declare itself.
+
+    Supabase-issued tokens never reach the `type` check — they fail the `SECRET_KEY` signature
+    inside `decode_token` and fall through to the JWKS path unchanged.
+
     Raises `JWTError` (same as `decode_token`) so every existing call site's `except` behaves
-    unchanged: the caller falls through to the Supabase-token path and then to 401/guest.
+    unchanged: the caller falls through to the Supabase-token path and then to 401.
     """
     payload = decode_token(token)
-    if isinstance(payload, dict) and payload.get("type") == "refresh":
+    if not isinstance(payload, dict):
+        return payload
+    kind = payload.get("type")
+    if kind != "access":
         logger.warning(
-            "refresh token presented as an access credential (sub=%s) — rejected",
+            "token of type %r presented as an access credential (sub=%s) — rejected",
+            kind,
             payload.get("sub"),
         )
-        raise JWTError("refresh token is not valid as an access credential")
+        raise JWTError(f"token type {kind!r} is not valid as an access credential")
     return payload
 
 
@@ -190,6 +213,64 @@ async def get_current_user_id(
 
     _reject_unverifiable_token(token, route=route)
     raise AssertionError("unreachable — _reject_unverifiable_token always raises")
+
+
+# The header the Home Screen widget authenticates with. Not `Authorization`, deliberately: the
+# two credentials are not interchangeable, and giving the widget token its own header means a
+# route can never accept it by accident just because it reads a bearer.
+WIDGET_TOKEN_HEADER = "X-Caydex-Widget-Token"
+
+
+async def get_widget_caller(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    x_widget_token: Optional[str] = Header(None, alias=WIDGET_TOKEN_HEADER),
+    request: Request = None,
+) -> str:
+    """Resolve the caller of the widget's market-data route: a session OR a widget token.
+
+    ⚠️ **This is the only dependency in the app that accepts a non-session credential, and it
+    must stay attached to exactly one route.** `tests/test_widget_token_auth.py` pins that.
+
+    Why it exists: `CaydexWidgets` is a separate process with no credential and no way to refresh
+    one, but the route it calls serves FMP data, which End-User Display Rights permit only
+    "through the Licensee's authenticated platform" (auth.md §1a). So the widget needs *a*
+    credential, and the session token cannot be it — see the WIDGET TOKEN block in
+    `core/security.py` for the full argument.
+
+    Order matters. A **bearer is checked first and, if present, is decisive**: the app itself
+    calls this route through `APIClient`, and a present-but-invalid bearer must produce
+    `AUTH_TOKEN_INVALID` so the client refreshes and retries (auth.md §4). Falling back to the
+    widget header there would silently downgrade a signed-in user to the widget's identity — the
+    same "never quietly downgrade a failed credential" rule that §4 exists to enforce.
+
+    Returns the user id purely so the rate limiter can bucket per caller; the route itself is
+    market-wide and does not read it.
+    """
+    route = _route_of(request)
+
+    bearer = credentials.credentials.strip() if credentials else None
+    if bearer:
+        user_id = await _user_id_from_token(bearer)
+        if user_id:
+            return user_id
+        _reject_unverifiable_token(bearer, route=route)
+
+    token = (x_widget_token or "").strip()
+    if token:
+        user_id = decode_widget_token(token)
+        if user_id:
+            return user_id
+        logger.warning("widget: unverifiable widget token on %s", route)
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID,
+            message=f"Widget token failed verification on {route}",
+        )
+
+    logger.info("widget: no credential presented on %s", route)
+    raise auth_error(
+        ErrorCode.AUTH_REQUIRED,
+        message=f"No authentication credential presented for {route}",
+    )
 
 
 def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
@@ -682,6 +763,42 @@ ChatRateLimit = Depends(
 ReportRateLimit = Depends(
     IdentityRateLimitChecker("report", settings.REPORT_RATE_LIMIT_PER_MINUTE, 60)
 )
+
+
+class WidgetRateLimitChecker:
+    """Per-caller sliding window for the widget's market-data route.
+
+    ⚠️ It cannot use `StandardRateLimit`, and that is not a tuning preference. `StandardRateLimit`
+    keys off `get_optional_user_id`, which sees no `Authorization` header on a widget call and
+    therefore buckets on `guest:{guest_user_id_for(None)}` — the shared `GUEST_USER_ID`, since the
+    extension sends no `X-Guest-Id` either. Every widget on every device in the world would share
+    ONE 60-requests-per-minute window: a few hundred installs would 429 each other permanently,
+    and the tile has no error state in which to say so.
+
+    Keying on what `get_widget_caller` resolved gives each account its own window whichever
+    credential it presented. FastAPI caches the sub-dependency within a request, so the token is
+    verified once, not twice.
+    """
+
+    def __init__(self, max_requests: int = 60, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+
+    async def __call__(self, caller_id: str = Depends(get_widget_caller)) -> None:
+        if not rate_limiter.is_allowed(
+            f"widget:{caller_id}", self.max_requests, self.window_seconds
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Please try again later.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+
+
+# WidgetKit asks on `WidgetRefreshSchedule`'s cadence (~31/day measured), so 60/min is far above
+# anything the extension can legitimately produce; the window exists to bound a stolen token, not
+# to shape normal traffic.
+WidgetRateLimit = Depends(WidgetRateLimitChecker(60, 60))
 
 # Analytics gets its OWN bucket. Sharing StandardRateLimit's window would let a burst
 # of telemetry flushes 429 the user's REAL requests — instrumentation degrading the

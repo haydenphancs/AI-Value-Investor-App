@@ -26,6 +26,10 @@ from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.book_voice_prompt import book_display_title, render_book_voice
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
 from app.services.asset_class import detect_asset_class, trades_extended_hours
+from app.services._analyst_common import (
+    analyst_is_usable,
+    analyst_section_available,
+)
 from app.services.agents.chat_tools import tools_for_asset_type
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
@@ -1002,13 +1006,41 @@ class ChatService:
         """
         Fetch analyst analysis data for use in chat responses.
         Returns a dict summary suitable for Gemini to interpret.
+
+        ⚠️ BELT AND BRACES, not the primary guard. `tools_for_asset_type` already withholds
+        `get_analyst_analysis` when the section is unlicensed, so in the normal flow this is
+        never reached for a blocked ticker. It is written defensively anyway because
+        `model_dump()` on an unusable response is a LOADED GUN: it hands Gemini
+        `consensus="HOLD", total_analysts=0, low/average/high = 0.0` with nothing marking those
+        as absent, and the model reads them as measurements. That produced "Wall Street's
+        consensus on Apple is HOLD with a $0 average price target" on a credit-charged turn.
+
+        The unavailable answer is EXPLICIT rather than empty. An empty dict invites the model to
+        fall back on its training data and answer from memory; a stated "not available" makes it
+        decline, which is the honest outcome.
         """
         try:
             from app.services.analyst_service import get_analyst_service
 
             service = get_analyst_service()
             analysis = await service.get_analysis(ticker)
-            return analysis.model_dump()
+            if not analyst_is_usable(analysis):
+                logger.info(
+                    "analyst tool: nothing usable for %s (section_available=%s, "
+                    "has_coverage=%s) — returning the unavailable marker",
+                    ticker,
+                    getattr(analysis, "section_available", None),
+                    getattr(analysis, "has_coverage", None),
+                )
+                return {
+                    "available": False,
+                    "ticker": ticker,
+                    "message": (
+                        "Analyst ratings and price targets are not available for this ticker. "
+                        "Do not estimate, infer, or recall them — say they are unavailable."
+                    ),
+                }
+            return {"available": True, **analysis.model_dump()}
         except Exception as e:
             logger.error(f"Analyst data fetch failed for {ticker}: {e}")
             return {"error": str(e)}
@@ -1614,10 +1646,21 @@ class ChatService:
             + "You specialize in value investing education. "
             "When you have access to real stock data from the get_stock_chart_data tool, "
             "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
-            "analysis. When you have access to analyst data from the get_analyst_analysis tool, "
-            "incorporate the consensus rating, price targets, analyst counts, and "
-            "recent upgrade/downgrade actions into your analysis. "
-            "When you have access to sentiment data from the get_sentiment_analysis tool, "
+            "analysis. "
+            # Conditional on the LICENCE, not on the asset class. `get_analyst_analysis` is
+            # withheld entirely when `grades` / `price-target-consensus` are unentitled
+            # (`tools_for_asset_type`), and instructing a model to incorporate output from a
+            # tool it does not have is how it starts supplying that output from memory.
+            + (
+                "When you have access to analyst data from the get_analyst_analysis tool, "
+                "incorporate the consensus rating, price targets, analyst counts, and "
+                "recent upgrade/downgrade actions into your analysis. "
+                if analyst_section_available()
+                else "You have NO analyst ratings or price-target data. If asked about analyst "
+                "consensus, price targets, or upgrades/downgrades, say plainly that Caydex "
+                "does not have that data rather than estimating or recalling it. "
+            )
+            + "When you have access to sentiment data from the get_sentiment_analysis tool, "
             "incorporate the mood score, social mentions, and news sentiment into your analysis. "
             "Explain what the sentiment means in plain language. "
             "Write your response in clean markdown. "

@@ -67,6 +67,14 @@ struct ETFNetYield {
     let expenseRatio: Double
     let feeContext: String
     let dividendYield: Double
+    /// True when the backend could actually COMPUTE the yield.
+    ///
+    /// `dividendYield` is a non-Optional `Double` on the wire and 0.0 has to carry two
+    /// different meanings: a fund that genuinely distributes nothing (ARKK, GLD, SLV, USO
+    /// all report `lastDividend == 0`, so 0.00% is the correct answer) and a fund whose
+    /// price we failed to fetch (0.00% is then a fabricated measurement). The backend
+    /// tells us which; defaults true so an older backend behaves exactly as before.
+    var dividendYieldKnown: Bool = true
     let payFrequency: String
     let yieldContext: String
     let verdict: String
@@ -78,7 +86,8 @@ struct ETFNetYield {
     }
 
     var formattedDividendYield: String {
-        String(format: "%.2f%%", dividendYield)
+        guard dividendYieldKnown else { return "—" }
+        return String(format: "%.2f%%", dividendYield)
     }
 }
 

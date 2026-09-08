@@ -64,6 +64,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.utils.period_labels import quarterly_period_label
+from app.services._analyst_common import analyst_is_usable
 from app.schemas.analyst import (
     AnalystAnalysisResponse,
     AnalystConsensus,
@@ -3032,7 +3033,17 @@ def _build_capital_allocation_block(
         # that pays no dividend — so the report asserted weak buybacks for AMZN, BRK-B
         # and NFLX, three of the largest repurchasers on the market.
         "buyback_status": s.buyback_status,
-        "dividend_status": (div.status if div else "Fair"),
+        # "None", not "Fair". `div` is None only for a company that pays NO dividend, and
+        # calling that "Fair" asserts a verdict on a payout that does not exist. Same class
+        # of bug as the `buyback_status` fallback fixed directly above, and it was far
+        # wider: `_build_dividend_info` used to gate on the per-payment history, which FMP
+        # stopped licensing on 2026-09-03, so `div` was None for EVERY ticker and every
+        # 20-credit report asserted a dividend verdict it had never computed.
+        #
+        # The wire type is a non-Optional Swift `String`, so this cannot be null without
+        # crashing shipped builds; "None" is already the vocabulary that surface uses
+        # (ReportInsiderSection renders it whenever the yield is zero).
+        "dividend_status": (div.status if div else "None"),
         "dividend_yield": round(s.dividend_yield, 2),
         "buyback_yield": round(s.buyback_yield, 2),
         "total_yield": round(s.total_yield, 2),
@@ -3208,7 +3219,12 @@ def _build_wall_street_sections(
     consensus partial is missing only `wall_street_insight` (AI-written).
     """
     # ── Defaults if AnalystService is missing ─────────────────────────
-    if analyst is None:
+    # `analyst_is_usable` rather than `is None`: an unlicensed or uncovered response is present
+    # but carries only zero defaults, and reading them produces `consensus_rating="hold"` with
+    # nobody covering the stock. Collapsing it to the missing case is what makes `analyst_signal`
+    # below go False, which sends `ws_score_value` to None so `compute_quality_score`
+    # renormalizes the dimension out instead of voting a neutral 5.0.
+    if not analyst_is_usable(analyst):
         consensus_rating = "hold"
         target_price = 0.0
         low_target = 0.0
@@ -7870,7 +7886,17 @@ def build_financial_context(out: CollectedTickerData) -> str:
                 f"EPS ${_est_eps(est):.2f}"
             )
 
-    if out.analyst_analysis:
+    # ⚠️ `analyst_is_usable`, not `if out.analyst_analysis`. The response object is ALWAYS
+    # present and, since `grades` / `price-target-consensus` went 402, always carries
+    # `consensus=HOLD, total_analysts=0, targets 0.0/0.0/0.0`. The truthiness test therefore
+    # passed for every ticker and wrote
+    #
+    #     Analyst Consensus: HOLD (0 analysts)
+    #     Target avg/low/high: $0.00 / $0.00 / $0.00
+    #
+    # into the Stage-A prompt of a 20-CREDIT report, where the model reads it as measurement
+    # and reasons from it ("trading far below the Street's target", and worse).
+    if analyst_is_usable(out.analyst_analysis):
         a = out.analyst_analysis
         parts.append(
             f"\nAnalyst Consensus: {a.consensus.value} "
@@ -7885,6 +7911,14 @@ def build_financial_context(out: CollectedTickerData) -> str:
             f"  Last 12mo: {a.actions_summary.upgrades} upgrades, "
             f"{a.actions_summary.maintains} maintains, "
             f"{a.actions_summary.downgrades} downgrades"
+        )
+    else:
+        # Stated, not omitted. Silence invites the model to fill the gap from training data —
+        # it knows roughly what analysts said about Apple — and an invented consensus is the
+        # failure this branch exists to prevent, not merely a missing sentence.
+        parts.append(
+            "\nAnalyst Consensus: NOT AVAILABLE — no analyst ratings or price targets. "
+            "Do not estimate, infer or recall them; omit the topic."
         )
 
     # Institutions (13F) — the third leg of the Wall Street Consensus insight,

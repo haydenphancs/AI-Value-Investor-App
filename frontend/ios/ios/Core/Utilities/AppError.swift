@@ -141,6 +141,14 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// which ships no Mail app — no UI, no log, for the entire life of the file.
     case noAppToOpenURL(what: String)
 
+    /// A dataset the backend is not licensed to fetch (`FMP_NOT_ENTITLED`, HTTP 409).
+    ///
+    /// PERMANENT, not transient: the app hides unlicensed features rather than calling
+    /// them, so in normal operation this never reaches a user. It exists so that an
+    /// accidental blocked call is legible instead of arriving as `.apiError` — which is
+    /// unconditionally `.retry`, and retrying a contractual refusal can never succeed.
+    case featureUnavailable(message: String)
+
     // API errors (from backend)
     case apiError(code: String, message: String)
 
@@ -170,6 +178,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .purchaseRevoked: return "purchase_revoked"
         case .purchaseUnverified: return "purchase_unverified"
         case .noAppToOpenURL: return "no_app_to_open_url"
+        case .featureUnavailable: return "feature_unavailable"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
         }
@@ -217,6 +226,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Couldn’t Verify Purchase"
         case .noAppToOpenURL:
             return "Can’t Open That Here"
+        case .featureUnavailable:
+            return "Not Available"
         case .apiError:
             return "Error"
         case .unknown:
@@ -283,6 +294,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return message
         case .noAppToOpenURL(let what):
             return "This device has no app set up to open \(what)."
+        case .featureUnavailable(let message):
+            return message
         case .rateLimited(let seconds):
             return "Please wait \(seconds) seconds before trying again."
         case .apiError(_, let msg):
@@ -342,6 +355,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // NOT .retry: nothing on the device can service the URL, so a retry is guaranteed to
         // fail. NOT .contactSupport either — the link that failed may BE contact support.
         case .noAppToOpenURL:
+            return .goBack
+        // NOT .retry: a licence refusal is permanent, so an identical request can never
+        // succeed. Same reasoning as .noAppToOpenURL directly above.
+        case .featureUnavailable:
             return .goBack
         case .apiError, .unknown:
             return .retry
@@ -746,6 +763,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "FMP_UNAVAILABLE" || code == "GEMINI_UNAVAILABLE" {
                 return .serverError(statusCode: 503)
             }
+            // A dataset outside the signed FMP Order Form. Deliberately NOT left to fall
+            // through to `.apiError`, which is unconditionally `.retry` — this refusal is
+            // contractual and permanent, so retrying burns a call and shows the same error.
+            if code == "FMP_NOT_ENTITLED" {
+                return .featureUnavailable(message: message)
+            }
             // Deliberately `.apiError`, listed rather than left to fall through: for these
             // three the backend's own `user_message` is the best copy available AND `.retry`
             // is genuinely the right action (the report pipeline is worth another attempt,
@@ -899,6 +922,7 @@ extension AppError {
         case .purchaseRevoked:        return "purchase_revoked"
         case .purchaseUnverified:     return "purchase_unverified"
         case .noAppToOpenURL:      return "no_app_to_open_url"
+        case .featureUnavailable:  return "feature_unavailable"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.
         case .apiError(let code, _): return code

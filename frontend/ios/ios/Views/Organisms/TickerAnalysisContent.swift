@@ -32,6 +32,18 @@ struct TickerAnalysisContent: View {
                 CryptoFearGreedSection(data: fgData, selectedTimeframe: fgTimeframe)
             } else if !isFearGreedLoaded && analystRatingsData == nil {
                 analysisSectionPlaceholder(height: 280)
+            } else if let ratingsData = analystRatingsData,
+                      ratingsData.estimatesAvailable,
+                      !ratingsData.forwardEstimates.isEmpty {
+                // Street estimates — a DIFFERENT, licensed dataset. Checked FIRST because
+                // the two branches below are about the ratings half (`grades` /
+                // `price-target-consensus`), which is unlicensed and therefore all zeros;
+                // falling through to them would hide data we actually have.
+                //
+                // ⚠️ This deliberately does NOT read `sectionAvailable`. That flag guards
+                // the zero-default consensus and price target, and reusing it here would
+                // put a confident HOLD at $0.00 back on screen.
+                AnalystForecastsSection(ratingsData: ratingsData)
             } else if let ratingsData = analystRatingsData, !ratingsData.sectionAvailable {
                 // Nothing at all. The analyst packages (grades, price targets) are outside the
                 // signed FMP licence, so we cannot ask — and `noAnalystCoverageCard` would

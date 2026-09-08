@@ -49,6 +49,12 @@ class ErrorCode(str, Enum):
     # ── Upstream services ────────────────────────────────────────────
     FMP_RATE_LIMITED = "FMP_RATE_LIMITED"
     FMP_UNAVAILABLE = "FMP_UNAVAILABLE"
+    # A dataset outside the signed FMP Order Form (402 Restricted Endpoint). PERMANENT
+    # and contractual — retrying can never fix it, which is why it is not FMP_UNAVAILABLE.
+    # In normal operation a user should never see this: the architecture HIDES unlicensed
+    # features rather than calling them. Its job is to make an accidental blocked call
+    # legible in logs/Sentry instead of arriving mislabelled as an internal 500.
+    FMP_NOT_ENTITLED = "FMP_NOT_ENTITLED"
     GEMINI_QUOTA_EXCEEDED = "GEMINI_QUOTA_EXCEEDED"
     GEMINI_UNAVAILABLE = "GEMINI_UNAVAILABLE"
 
@@ -266,6 +272,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.FMP_UNAVAILABLE: (
         "Our market data provider is temporarily unavailable. Try again shortly."
     ),
+    ErrorCode.FMP_NOT_ENTITLED: (
+        "This information isn't available right now."
+    ),
     ErrorCode.GEMINI_QUOTA_EXCEEDED: (
         "AI analysis quota exceeded. Please try again in a few minutes."
     ),
@@ -470,6 +479,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.THEME_NOT_FOUND: 404,
     ErrorCode.FMP_RATE_LIMITED: 502,
     ErrorCode.FMP_UNAVAILABLE: 502,
+    ErrorCode.FMP_NOT_ENTITLED: 409,
     ErrorCode.GEMINI_QUOTA_EXCEEDED: 502,
     ErrorCode.GEMINI_UNAVAILABLE: 502,
     ErrorCode.DATA_INCOMPLETE: 502,
@@ -731,6 +741,17 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             return ErrorCode.GEMINI_QUOTA_EXCEEDED, _DEFAULT_STATUS[ErrorCode.GEMINI_QUOTA_EXCEEDED]
         return ErrorCode.GEMINI_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE]
 
+    # ── FMP entitlement refusal ───────────────────────────────────────
+    # MUST precede the generic FMP block. `classify_exception` matches on substrings of
+    # the class name, and "fmpnotentitledexception" does NOT contain "fmpexception"
+    # ("fmp" + "notentitledexception"), so before this branch existed the exception missed
+    # every FMP arm, missed the httpx arm (its module is app.integrations.fmp), missed
+    # every message heuristic, and fell through to REPORT_GENERATION_FAILED — a 500-class
+    # internal error for a permanent contractual condition. Same class of substring miss
+    # already recorded for `geminitimeout` / `degradedreporterror`.
+    if "fmpnotentitled" in cls:
+        return ErrorCode.FMP_NOT_ENTITLED, _DEFAULT_STATUS[ErrorCode.FMP_NOT_ENTITLED]
+
     # ── FMP typed exceptions (from app.integrations.fmp) ──────────────
     if (
         "fmpauthexception" in cls
@@ -806,6 +827,7 @@ def error_response_from_exception(
 _UPSTREAM_CODES = frozenset({
     ErrorCode.FMP_RATE_LIMITED,
     ErrorCode.FMP_UNAVAILABLE,
+    ErrorCode.FMP_NOT_ENTITLED,
     ErrorCode.GEMINI_QUOTA_EXCEEDED,
     ErrorCode.GEMINI_UNAVAILABLE,
     ErrorCode.TICKER_NOT_FOUND,

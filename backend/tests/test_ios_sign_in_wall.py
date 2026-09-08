@@ -37,6 +37,7 @@ _IOS = _REPO / "frontend" / "ios" / "ios"
 _APP = _IOS / "iosApp.swift"
 _APP_STATE = _IOS / "Core" / "State" / "AppState.swift"
 _WIDGET_REFRESH = _IOS / "Core" / "Services" / "WidgetRefreshService.swift"
+_WIDGET_STORE = _REPO / "frontend" / "ios" / "Shared" / "WidgetSnapshotStore.swift"
 _SIGNIN_SHEET = _IOS / "Views" / "Organisms" / "SignInRequiredSheet.swift"
 
 
@@ -155,12 +156,39 @@ def test_the_widget_snapshot_is_wiped_when_a_session_ends():
     inside the app.
     """
     clear = _decl_block(_strip_comments(_read(_WIDGET_REFRESH)), "func clearForEndedSession()")
-    assert "WidgetSnapshotStore.clear()" in clear, (
-        "clearForEndedSession no longer wipes the snapshot — FMP prices stay on the Home Screen"
+
+    # ⚠️ `clearAll()`, and this assertion was VACUOUS until 2026-09-07. It used to accept
+    # `WidgetSnapshotStore.clear()`, which nils the PORTFOLIO snapshot and deliberately KEEPS a
+    # non-empty market one — so the guard passed while the exact thing it names in its own
+    # docstring (FMP prices on a signed-out Home Screen) went on happening. Keeping the market
+    # blob was correct while `/widget/market-mover` was public; End-User Display Rights ended
+    # that. A test that asserts a call by NAME proves nothing about what the call does — see
+    # `.claude/rules/testing.md` §3.
+    assert "WidgetSnapshotStore.clearAll()" in clear, (
+        "clearForEndedSession no longer wipes BOTH snapshots — `clear()` keeps the market one, "
+        "so FMP prices stay on the Home Screen after sign-out"
+    )
+    # The other half of the same breach: with the token left behind, the extension keeps
+    # SUCCESSFULLY refreshing licensed market data onto a device with no session.
+    assert "WidgetAPIConfig.clearWidgetToken()" in clear, (
+        "the widget token outlives the session — the extension can still fetch FMP data"
     )
     assert "inFlight?.cancel()" in clear, (
         "an in-flight refresh is not cancelled, so it can re-publish the ended session's data "
         "immediately after the wipe"
+    )
+
+    # And prove `clearAll` is not itself a synonym for the half-wipe. Reading the store's own
+    # source is what closes the loop: the assertion above is a name, this is the behaviour.
+    store = _strip_comments(_read(_WIDGET_STORE))
+    clear_all = _decl_block(store, "static func clearAll()")
+    assert "removeObject(forKey: WidgetSharedConfig.snapshotKey)" in clear_all, (
+        "clearAll no longer removes the whole envelope"
+    )
+    plain_clear = _decl_block(store, "static func clear()")
+    assert "envelope.portfolio = nil" in plain_clear, (
+        "`clear()` changed shape — re-check that `clearForEndedSession` still needs clearAll; "
+        "this test's whole premise is that the two differ"
     )
     discard = _decl_block(
         _strip_comments(_read(_APP_STATE)), "func discardDataForEndedSession()"

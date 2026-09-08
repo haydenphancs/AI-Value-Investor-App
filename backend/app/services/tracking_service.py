@@ -35,7 +35,10 @@ from app.schemas.tracking import (
     InsiderTransactionItemResponse,
 )
 from app.services._insider_common import classify_for_alerts
-from app.services._analyst_common import classify_for_alerts as classify_analyst_for_alerts
+from app.services._analyst_common import (
+    analyst_section_available,
+    classify_for_alerts as classify_analyst_for_alerts,
+)
 from app.services._whale_common import (
     # Was a character-for-character clone below; the roll-up rule lives in ONE place.
     format_amount_short as _format_amount,
@@ -946,8 +949,24 @@ class TrackingService:
     async def _get_analyst_rating_alerts(
         self, watchlist_tickers: List[str]
     ) -> List[AlertResponse]:
-        """Roll all recent analyst grade changes into a single alert."""
+        """Roll all recent analyst grade changes into a single alert.
+
+        Gated on the entitlement manifest. `grades` is outside the signed FMP Order Form
+        and answers 402, so this used to fan out one guaranteed-to-fail call PER WATCHLIST
+        TICKER on every refresh, each one caught and logged as a warning — a 50-ticker
+        watchlist produced 50 log lines and 50 wasted coroutines to arrive at `[]`.
+        Skipping is not a behaviour change for the user (the alert could never fire), it
+        just makes the skip deliberate and quiet. Flips back on by itself if the package is
+        ever purchased.
+        """
         if not watchlist_tickers:
+            return []
+
+        if not analyst_section_available():
+            logger.debug(
+                "tracking: analyst rating alerts skipped for %d ticker(s) — the grades "
+                "endpoint is outside the FMP licence", len(watchlist_tickers),
+            )
             return []
 
         cutoff = datetime.now() - timedelta(days=14)

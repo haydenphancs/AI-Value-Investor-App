@@ -425,29 +425,41 @@ struct ReportConsensusBar: View {
 
     // MARK: - Momentum Section
 
+    /// Hidden entirely when there is no analyst data to count actions from.
+    ///
+    /// ⚠️ Gated on whether analyst coverage EXISTS, not on whether the counts are non-zero.
+    /// A genuine "0 upgrades, 0 downgrades over 12 months" is a real, useful fact about a
+    /// covered stock and must keep rendering. What must NOT render is the identical strip when
+    /// `grades` is unentitled — there every count is zero for every ticker in the market, and
+    /// "0 upgrades · 0 maintains · 0 downgrades" reads as "no analyst moved on this company"
+    /// when the truth is that we cannot see analyst actions at all. Same predicate the rating
+    /// badge above uses, so the two halves of the card can never disagree.
+    @ViewBuilder
     private var momentumSection: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            // Period label disambiguates from the chart's "2-Year Flow": these
-            // analyst actions are counted over the trailing 12 months
-            // (analyst_service._compute_actions_summary, 365-day cutoff).
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Momentum")
-                    .font(AppTypography.bodySmallEmphasis)
-                    .foregroundColor(AppColors.textSecondary)
-                Text("Past 12 Months")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
+        if consensus.hasAnalystDistribution || consensus.hasAnalystTargets {
+            VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                // Period label disambiguates from the chart's "2-Year Flow": these
+                // analyst actions are counted over the trailing 12 months
+                // (analyst_service._compute_actions_summary, 365-day cutoff).
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Momentum")
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textSecondary)
+                    Text("Past 12 Months")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
 
-            // Upgrades · Maintains · Downgrades in ONE gray card with "|"
-            // dividers (same ReportMetricsStrip as Capital Allocation / Congress
-            // / Short Selling). Count on top, label below; value colored by
-            // direction (green up / red down) in place of the old arrow icons.
-            ReportMetricsStrip(metrics: [
-                ReportMetricItem(label: "Upgrades", value: "\(consensus.momentumUpgrades)", valueColor: AppColors.bullish),
-                ReportMetricItem(label: "Maintains", value: "\(consensus.momentumMaintains)", valueColor: AppColors.textPrimary),
-                ReportMetricItem(label: "Downgrades", value: "\(consensus.momentumDowngrades)", valueColor: AppColors.bearish),
-            ])
+                // Upgrades · Maintains · Downgrades in ONE gray card with "|"
+                // dividers (same ReportMetricsStrip as Capital Allocation / Congress
+                // / Short Selling). Count on top, label below; value colored by
+                // direction (green up / red down) in place of the old arrow icons.
+                ReportMetricsStrip(metrics: [
+                    ReportMetricItem(label: "Upgrades", value: "\(consensus.momentumUpgrades)", valueColor: AppColors.bullish),
+                    ReportMetricItem(label: "Maintains", value: "\(consensus.momentumMaintains)", valueColor: AppColors.textPrimary),
+                    ReportMetricItem(label: "Downgrades", value: "\(consensus.momentumDowngrades)", valueColor: AppColors.bearish),
+                ])
+            }
         }
     }
 

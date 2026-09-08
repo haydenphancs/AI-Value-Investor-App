@@ -44,9 +44,15 @@ struct MoversConfigurationIntent: WidgetConfigurationIntent {
         IntentDescription("Choose whether the widget follows the market or your own holdings.")
     }
 
-    // Defaults to market because it needs no identity: `/widget/market-mover` is a
-    // public route, so a signed-out user who adds the widget still sees real content
-    // rather than a sign-in prompt on their Home Screen.
+    // Defaults to market because it is the mode the extension can keep fresh by itself: it
+    // authenticates `/widget/market-mover` with the widget token the app publishes, while
+    // holdings mode can only ever render what the app last wrote.
+    //
+    // ⚠️ This comment used to say market "needs no identity… so a signed-out user who adds the
+    // widget still sees real content". That is no longer true and must not be relied on: with
+    // no session there is no widget token, the fetch is skipped, and the snapshot is cleared on
+    // sign-out — so a signed-out Home Screen shows the placeholder. That is the intended render,
+    // not a regression; FMP data may not be displayed to an unauthenticated caller.
     @Parameter(title: "Show", default: .market)
     var mode: MoversMode
 }

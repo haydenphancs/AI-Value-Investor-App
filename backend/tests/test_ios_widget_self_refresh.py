@@ -16,14 +16,30 @@ the day, and the last scheduled entry was only +180m — so past three hours eve
 session LABEL stopped ageing. This one hid behind a comment about label-ageing that read
 like the whole story.
 
-WHAT IS *NOT* FIXED, DELIBERATELY: holdings mode still renders what the app wrote.
-`/widget/market-mover` takes no identity at all, so the extension may call it. Portfolio
-resolves the caller's own holdings, and `WidgetSnapshotStore.swift` documents three
-reasons the extension must never hold a credential — `auth.md` §8 (the client token and
-the Keychain deliberately diverge during `.restoring`), the inability to refresh an
-expired token from an extension, and that giving `GuestIdentity` a Keychain access group
-would make the existing read miss and silently abandon that install's data. A test that
-let portfolio fetch would be a test that broke all three.
+**3. 🔴 THE PREMISE OF THIS FILE WAS FALSE FOR A DAY.** It used to read: *"`/widget/
+market-mover` takes no identity at all, so the extension may call it."* The account-only
+redesign (2026-09-07) put `Depends(get_current_user_id)` on the widget router, and from
+that moment every extension fetch answered 401 — cause 1 was back, exactly as described
+above. **All sixteen tests here kept passing**, because every one is a pure source scan:
+they proved the CALL SITE existed and could not see that the call could never succeed.
+`test_ios_auth_policy_parity.py` could not see it either — the extension bypasses
+`APIClient`, so this request has no `APIEndpoint` case to pair with a backend dependency.
+
+That is the shape of vacuity `.claude/rules/testing.md` §3 warns about, arrived at from
+the other direction: not a scan that stopped matching, but a scan whose match stopped
+meaning anything. `tests/test_widget_token_auth.py` now covers it behaviourally — it
+issues the real request and asserts the status code — and this file keeps only the
+questions a scan can honestly answer.
+
+WHAT IS *NOT* FIXED, DELIBERATELY: holdings mode still renders what the app wrote. The
+extension authenticates market mode with a WIDGET TOKEN — long-lived, scoped to that one
+market-wide route, published into the App Group by the app. Portfolio resolves the
+caller's own holdings, the widget token cannot reach it, and `WidgetSnapshotStore.swift`
+documents three reasons the extension must never hold a SESSION — `auth.md` §8 (the client
+token and the Keychain deliberately diverge during `.restoring`), the inability to refresh
+an expired token from an extension, and that giving `GuestIdentity` a Keychain access
+group would make the existing read miss and silently abandon that install's data. A test
+that let portfolio fetch would be a test that broke all three.
 
 The CADENCE arithmetic is proven separately and properly by
 `frontend/ios/scripts/widget-refresh-schedule-check.sh`, which compiles the real
@@ -103,12 +119,28 @@ def test_the_fetch_is_gated_on_market_mode():
     )
 
 
-def test_only_the_public_route_is_ever_called():
+def test_only_the_market_route_is_ever_called():
+    """Renamed from `test_only_the_public_route_is_ever_called` — there is no public route
+    any more, and the old name is what made the false premise above read as settled fact."""
     src = _strip_comments(_APICONFIG.read_text()) + _strip_comments(_FETCHER.read_text())
     assert "market-mover" in src
     assert "portfolio-mover" not in src, (
-        "the extension now references the portfolio route, which requires an identity "
-        "it cannot hold"
+        "the extension now references the portfolio route, which requires a session "
+        "it cannot hold — and which its widget token deliberately cannot reach"
+    )
+
+
+def test_the_extension_fetch_is_authenticated():
+    """The half a source scan CAN still prove: the request carries a credential.
+
+    Whether that credential is ACCEPTED is a behavioural question and lives in
+    `tests/test_widget_token_auth.py`. Both halves are needed — this one fails if someone
+    strips the header, that one fails if the backend stops honouring it.
+    """
+    body = _decl_block(_strip_comments(_FETCHER.read_text()), "func fetchMarket()")
+    assert "forHTTPHeaderField: WidgetAPIConfig.tokenHeader" in body, (
+        "the extension's request goes out with no credential — the route answers 401 and the "
+        "tile silently freezes on whatever the app last wrote, with no error surface anywhere"
     )
 
 

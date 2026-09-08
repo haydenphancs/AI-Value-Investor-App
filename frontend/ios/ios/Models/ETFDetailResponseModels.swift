@@ -158,6 +158,9 @@ struct ETFNetYieldDTO: Decodable {
     let expenseRatio: Double
     let feeContext: String
     let dividendYield: Double
+    /// Optional so an older backend (which never sends it) keeps today's behaviour.
+    /// See `ETFNetYield.dividendYieldKnown` for why 0.0 is ambiguous on the wire.
+    let dividendYieldKnown: Bool?
     let payFrequency: String
     let yieldContext: String
     let verdict: String
@@ -168,6 +171,7 @@ struct ETFNetYieldDTO: Decodable {
         case expenseRatio = "expense_ratio"
         case feeContext = "fee_context"
         case dividendYield = "dividend_yield"
+        case dividendYieldKnown = "dividend_yield_known"
         case payFrequency = "pay_frequency"
         case yieldContext = "yield_context"
         case verdict
@@ -530,6 +534,7 @@ extension ETFDetailResponseDTO {
             expenseRatio: netYield.expenseRatio,
             feeContext: netYield.feeContext,
             dividendYield: netYield.dividendYield,
+            dividendYieldKnown: netYield.dividendYieldKnown ?? true,
             payFrequency: netYield.payFrequency,
             yieldContext: netYield.yieldContext,
             verdict: netYield.verdict,

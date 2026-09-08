@@ -159,7 +159,11 @@ enum BuybackStatus: String {
 struct DividendInfo {
     let exDividendDate: Date?
     let paymentDate: Date?
-    let fiveYearAvgYield: Double
+    /// Optional because it is genuinely unknown for a company with too little history —
+    /// the backend leaves it at 0.0 there, and "0.00%" on a trailing-average row reads as
+    /// a measured fact rather than an absence. Mapped to nil at the repository boundary
+    /// when the backend sends 0.
+    let fiveYearAvgYield: Double?
     let status: DividendYieldStatus
     let buybackStatus: BuybackStatus
 
@@ -178,7 +182,8 @@ struct DividendInfo {
     }
 
     var formattedYield: String {
-        String(format: "%.2f%%", fiveYearAvgYield)
+        guard let v = fiveYearAvgYield, v > 0 else { return "—" }
+        return String(format: "%.2f%%", v)
     }
 }
 

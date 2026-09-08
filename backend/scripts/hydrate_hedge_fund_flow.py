@@ -67,6 +67,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.config import settings  # noqa: E402,F401  (import triggers .env load)
 from app.database import get_supabase  # noqa: E402
 from app.integrations.fmp import FMPClient, FMPRateLimitException  # noqa: E402
+from app.services.corporate_actions_service import (  # noqa: E402
+    corporate_actions_source,
+    window_for_quarters,
+)
 from app.services.holders_service import (  # noqa: E402
     HoldersService,
     _REFRESH_RECENT_QUARTERS,
@@ -335,10 +339,19 @@ class HedgeFundFlowHydrator:
 
         # Split ratios so a split quarter's raw 13F change isn't read as buying
         # (FMP reports raw counts; see HoldersService._compute_quarter_flow).
+        #
+        # Derived from entitled price series — `/splits` is outside the licence and answers
+        # 402, so this was silently `[]` for every ticker. ONE merged window across all the
+        # quarters being fetched, not one per quarter. Costs two upstream calls instead of
+        # one, hence the += 2.
+        _win = window_for_quarters(to_fetch)
         async with self.sem:
             await self.limiter.acquire()
-            splits = await self.fmp.get_stock_splits(ticker)
-        self.stats["fmp_calls"] += 1
+            splits = (
+                await corporate_actions_source(self).get_split_rows(ticker, *_win)
+                if _win else []
+            )
+        self.stats["fmp_calls"] += 2
         split_ratios = HoldersService._quarter_split_ratios(splits, to_fetch)
 
         results = await asyncio.gather(

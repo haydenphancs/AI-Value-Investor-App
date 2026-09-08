@@ -39,6 +39,10 @@ _INFLIGHT_MODULES = [
     # sector strip, so concurrent callers must collapse to one — and a caller that times
     # out must not cancel it out from under the rest.
     "market_movers_service.py",
+    # A whale profile fans out over every suspect ticker at once and they collide on the
+    # same symbol constantly, so the derivation (two ~24 KB price pulls) must collapse to
+    # one — and a caller that times out must not cancel it for the rest.
+    "corporate_actions_service.py",
     "profit_power_service.py",
     "growth_service.py",
     "earnings_service.py",

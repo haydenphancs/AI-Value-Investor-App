@@ -547,6 +547,64 @@ class FMPClient:
 
         return await self._make_request("historical-price-eod/full", params=params)
 
+    async def get_historical_prices_non_split_adjusted(
+        self,
+        ticker: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """RAW daily prices, with NO split adjustment applied.
+
+        ⚠️ Rows carry ``adjOpen``/``adjHigh``/``adjLow``/``adjClose`` — NOT ``close``.
+        The ``adj`` prefix is FMP's field naming, not a description: these are the
+        UNadjusted prices actually printed on the tape that day.
+
+        Paired with :meth:`get_historical_prices` (which IS adjusted) this is how stock
+        splits are derived now that ``/splits`` is outside the licence — the ratio between
+        the two series changes on, and only on, a corporate action. The classifier that
+        turns that ratio into a split lives in ``services/corporate_actions_service.py``.
+        """
+        params: Dict[str, Any] = {"symbol": ticker.upper()}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        data = await self._make_request(
+            "historical-price-eod/non-split-adjusted", params=params
+        )
+        return data if isinstance(data, list) else []
+
+    async def get_historical_prices_dividend_adjusted(
+        self,
+        ticker: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Daily prices adjusted for DIVIDENDS as well as splits.
+
+        Same ``adjClose`` field shape as
+        :meth:`get_historical_prices_non_split_adjusted`.
+
+        Against :meth:`get_historical_prices` the ratio steps at every ex-dividend date,
+        which is how ex-dividend DATES are recovered now that ``/dividends`` is outside
+        the licence. Verified exact on AAPL (11/11 ex-dates).
+
+        ⚠️ The step SIZE implies an amount only to ~0.04-1.2%, which is not good enough
+        to print as money — KO's half-cent dividends do not round to the declared value.
+        Use the dates; take amounts from ``ratios`` (period=annual) instead.
+        """
+        params: Dict[str, Any] = {"symbol": ticker.upper()}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+
+        data = await self._make_request(
+            "historical-price-eod/dividend-adjusted", params=params
+        )
+        return data if isinstance(data, list) else []
+
     async def get_historical_market_cap(
         self,
         ticker: str,

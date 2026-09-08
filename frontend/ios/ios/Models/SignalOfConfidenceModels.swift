@@ -156,6 +156,23 @@ enum BuybackStatus: String {
 
 // MARK: - Dividend Info
 
+/// Dividends paid per share in one completed fiscal year.
+///
+/// ⚠️ `perShare == 0` is a MEASUREMENT, not a gap: the company paid nothing that year.
+/// Intel's series ends `0.3736, 0.0000` because it suspended its dividend, and that final
+/// zero is the most informative point in it. Years before a company ever paid are trimmed
+/// server-side, so a leading zero never reaches here and the two cannot be confused.
+struct AnnualDividend: Identifiable {
+    let year: String
+    let perShare: Double
+
+    var id: String { year }
+
+    /// Four decimals: real payouts run from NVDA's $0.0160 to XOM's $4.0026, and rounding
+    /// to cents would render a token dividend as $0.02 or, worse, $0.00.
+    var formatted: String { String(format: "$%.4f", perShare) }
+}
+
 struct DividendInfo {
     let exDividendDate: Date?
     let paymentDate: Date?
@@ -166,6 +183,31 @@ struct DividendInfo {
     let fiveYearAvgYield: Double?
     let status: DividendYieldStatus
     let buybackStatus: BuybackStatus
+
+    // ── Annual dividend amounts ──────────────────────────────────────────────────
+    // From the entitled `ratios` (period=annual). Defaulted so every existing
+    // construction site — previews, mocks, the buyback-only path — still compiles.
+    var annualDividends: [AnnualDividend] = []
+    /// Latest completed fiscal year's dividend per share.
+    var perShare: Double? = nil
+    var perShareYear: String? = nil
+    /// Total growth across the series. **Optional because it is often undefined**, and
+    /// zero would be a lie: a company that started paying inside the window (GOOGL, META,
+    /// both 2024) has no growth RATE. A company that cut to nothing does, and it is -100%.
+    var growthPct: Double? = nil
+    /// How many years the growth figure spans, so a label cannot claim "5Y" over one year.
+    var growthYears: Int? = nil
+
+    var formattedPerShare: String {
+        guard let v = perShare else { return "—" }
+        return String(format: "$%.4f", v)
+    }
+
+    /// e.g. "+27.1% over 5y", or nil when there is no defined rate to show.
+    var formattedGrowth: String? {
+        guard let pct = growthPct, let years = growthYears, years > 0 else { return nil }
+        return String(format: "%+.1f%% over %dy", pct, years)
+    }
 
     var formattedExDividendDate: String {
         guard let date = exDividendDate else { return "N/A" }
@@ -201,12 +243,25 @@ extension DividendInfo {
         payComponents.day = 16
         let payDate = Calendar.current.date(from: payComponents) ?? Date()
 
+        // Real measured KO figures, so the preview shows the shape the card ships with.
         return DividendInfo(
             exDividendDate: exDate,
             paymentDate: payDate,
             fiveYearAvgYield: 0.68,
             status: .low,
-            buybackStatus: .moderate
+            buybackStatus: .moderate,
+            annualDividends: [
+                AnnualDividend(year: "2020", perShare: 1.6407),
+                AnnualDividend(year: "2021", perShare: 1.6806),
+                AnnualDividend(year: "2022", perShare: 1.7597),
+                AnnualDividend(year: "2023", perShare: 1.8395),
+                AnnualDividend(year: "2024", perShare: 1.9399),
+                AnnualDividend(year: "2025", perShare: 2.0402),
+            ],
+            perShare: 2.0402,
+            perShareYear: "2025",
+            growthPct: 24.3,
+            growthYears: 5
         )
     }()
 }

@@ -23,13 +23,46 @@ struct DividendInfoCard: View {
                 value: dividendInfo.formattedExDividendDate
             )
 
-            divider
+            // Payment Date row — HIDDEN when unknown rather than showing "N/A" forever.
+            //
+            // The per-payment feed (`/dividends`) is outside the FMP licence, and unlike
+            // the ex-dividend date a payment date cannot be derived from price series, so
+            // this is permanently nil today. A row that reads "Payment Date  N/A" on
+            // every stock in the market is chrome, not information. Kept rather than
+            // deleted so it returns by itself if the package is ever bought.
+            if dividendInfo.paymentDate != nil {
+                divider
 
-            // Payment Date row
-            DividendInfoRow(
-                label: "Payment Date",
-                value: dividendInfo.formattedPaymentDate
-            )
+                DividendInfoRow(
+                    label: "Payment Date",
+                    value: dividendInfo.formattedPaymentDate
+                )
+            }
+
+            // Dividend per share — the amount itself, which this card never showed.
+            // From the entitled `ratios` (period=annual); exact against declared totals.
+            if dividendInfo.perShare != nil {
+                divider
+
+                DividendInfoRow(
+                    label: dividendInfo.perShareYear.map { "Dividend / Share (FY\($0))" }
+                        ?? "Dividend / Share",
+                    value: dividendInfo.formattedPerShare
+                )
+            }
+
+            // Growth across the series. Absent — not zero — when undefined: a company
+            // that began paying inside the window has no rate to report.
+            if let growth = dividendInfo.formattedGrowth {
+                divider
+
+                DividendInfoRow(
+                    label: "Dividend Growth",
+                    value: growth,
+                    valueColor: (dividendInfo.growthPct ?? 0) < 0
+                        ? AppColors.loss : AppColors.gain
+                )
+            }
 
             divider
 

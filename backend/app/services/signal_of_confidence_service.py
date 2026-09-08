@@ -24,14 +24,23 @@ from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import quarterly_period_label
 from app.schemas.signal_of_confidence import (
+    AnnualDividendSchema,
     DividendInfoSchema,
     SignalOfConfidenceDataPointSchema,
     SignalOfConfidenceResponse,
     SignalOfConfidenceSummarySchema,
 )
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    window_for_range,
+)
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
+
+#: Completed fiscal years of dividend history to request. Six spans a full cut-and-
+#: recover cycle (Intel went 1.4598 -> 0.0000 across four) without bloating the card.
+_ANNUAL_DIVIDEND_YEARS = 6
 
 # ── In-memory cache ───────────────────────────────────────────────
 _cache: Dict[str, Tuple[float, Any]] = {}
@@ -342,17 +351,30 @@ class SignalOfConfidenceService:
             quarterly_cashflow,
             quarterly_income,
             quote_data,
-            dividend_history,
+            annual_ratios,
             ec_raw,
             hist_mcap_raw,
+            ex_dividend_dates,
         ) = await asyncio.gather(
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=20),
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
             price_source(self).get_quote(ticker),
-            self.fmp.get_dividend_history(ticker, limit=40),
+            # Was `get_dividend_history`, which is outside the FMP licence and answered
+            # 402 on every request — a guaranteed failure occupying a slot in this gather.
+            # `ratios` (annual) is entitled and carries the dividend AMOUNTS instead.
+            self.fmp.get_financial_ratios(
+                ticker, period="annual", limit=_ANNUAL_DIVIDEND_YEARS
+            ),
             self.fmp.get_earning_calendar_full(ticker),
             self.fmp.get_historical_market_cap(
                 ticker, from_date=mcap_from, to_date=mcap_to, limit=2000
+            ),
+            # Ex-dividend DATES, derived from entitled price series. `/dividends` is 402,
+            # so this row read a permanent "N/A" on every dividend payer in the market.
+            # Dates come back exact (AAPL 6/6, KO / MSFT / JNJ 6/6 each); AMOUNTS do not
+            # and are taken from `annual_ratios` above instead.
+            corporate_actions_source(self).get_ex_dividend_dates(
+                ticker, *window_for_range(None, mcap_to)
             ),
             return_exceptions=True,
         )
@@ -367,12 +389,23 @@ class SignalOfConfidenceService:
         if isinstance(quote_data, Exception):
             logger.warning(f"Quote fetch failed for {ticker}: {quote_data}")
             quote_data = {}
-        if isinstance(dividend_history, Exception):
-            logger.warning(f"Dividend history fetch failed for {ticker}: {dividend_history}")
-            dividend_history = []
+        if isinstance(annual_ratios, Exception):
+            logger.warning(
+                "Annual ratios fetch failed for %s (%s: %s) — the dividend amounts and "
+                "growth are omitted; the yield and status still resolve from cash flow",
+                ticker, type(annual_ratios).__name__, annual_ratios,
+            )
+            annual_ratios = []
         if isinstance(ec_raw, Exception):
             logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
             ec_raw = []
+        if isinstance(ex_dividend_dates, Exception):
+            logger.warning(
+                "Ex-dividend date derivation failed for %s (%s: %s) — the date row is "
+                "hidden rather than guessed",
+                ticker, type(ex_dividend_dates).__name__, ex_dividend_dates,
+            )
+            ex_dividend_dates = []
         if isinstance(hist_mcap_raw, Exception):
             logger.warning(
                 f"Historical market cap fetch failed for {ticker}: {hist_mcap_raw} "
@@ -389,7 +422,7 @@ class SignalOfConfidenceService:
         # Ensure all are lists
         quarterly_cashflow = _as_list(quarterly_cashflow)
         quarterly_income = _as_list(quarterly_income)
-        dividend_history = _as_list(dividend_history)
+        annual_ratios = _as_list(annual_ratios)
         ec_raw = _as_list(ec_raw)
         hist_mcap_raw = _as_list(hist_mcap_raw)
 
@@ -410,11 +443,13 @@ class SignalOfConfidenceService:
 
         # Phase 4: build dividend info (optional)
         dividend_info = self._build_dividend_info(
-            dividend_history,
+            [],  # per-payment history is unlicensed; amounts come from `annual_ratios`
             summary.dividend_yield,
             summary.buyback_yield,
             summary.share_count_change,
             data_points=data_points,
+            annual_ratios=annual_ratios,
+            ex_dividend_dates=ex_dividend_dates,
         )
 
         # Phase 5: extract next earnings date for cache invalidation
@@ -649,6 +684,64 @@ class SignalOfConfidenceService:
 
     # ── Dividend info ─────────────────────────────────────────────
 
+    @staticmethod
+    def _build_annual_dividends(rows: Any) -> List[AnnualDividendSchema]:
+        """Dividends per share by completed fiscal year, oldest first.
+
+        Source is `ratios` (period=annual) — entitled, and verified exact against declared
+        totals (KO 2024 = 1.9399 against a declared $1.94; 2025 = 2.0402 against $2.04).
+
+        **Leading zeros are trimmed, interior and trailing zeros are kept.** The two look
+        identical in the raw feed and mean opposite things: META and GOOGL read
+        `0, 0, 0, 0, 2.0016, 2.1119` because they did not pay before 2024, while Intel
+        reads `1.4598, 0.7370, 0.3736, 0.0000` because it wound its dividend down and
+        suspended it. Rendering META's four $0.00 years would be noise; dropping Intel's
+        would delete the most important fact in the series. A company that has never paid
+        trims to nothing at all, which is how a non-payer ends up with no series rather
+        than a flat line at zero.
+        """
+        if not isinstance(rows, list):
+            return []
+        by_year: Dict[str, float] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            year = str(row.get("date") or "")[:4]
+            if len(year) != 4 or not year.isdigit():
+                continue
+            value = _safe_float(row, "dividendPerShare")
+            if value is None or value < 0:
+                continue
+            by_year[year] = value
+
+        series = [
+            AnnualDividendSchema(year=y, per_share=round(by_year[y], 4))
+            for y in sorted(by_year)
+        ]
+        first_paid = next((i for i, p in enumerate(series) if p.per_share > 0), None)
+        return [] if first_paid is None else series[first_paid:]
+
+    @staticmethod
+    def _dividend_growth(
+        series: List[AnnualDividendSchema],
+    ) -> Tuple[Optional[float], Optional[int]]:
+        """Total growth across the series, or ``(None, None)`` when it is undefined.
+
+        Undefined is not zero. The series always starts at the first paying year (see
+        above), so a company that began paying inside the window has exactly ONE point and
+        no rate — "+infinity%" is not a fact about GOOGL. A company that cut to nothing
+        does have one, and it is -100%, which is the number a reader most needs to see.
+        """
+        if len(series) < 2:
+            return None, None
+        first, last = series[0].per_share, series[-1].per_share
+        if first <= 0:
+            return None, None
+        years = int(series[-1].year) - int(series[0].year)
+        if years <= 0:
+            return None, None
+        return round((last / first - 1.0) * 100.0, 1), years
+
     def _build_dividend_info(
         self,
         dividend_history: List[Dict[str, Any]],
@@ -656,6 +749,8 @@ class SignalOfConfidenceService:
         t12m_buyback_yield: float,
         share_count_change: float = 0.0,
         data_points: Optional[List] = None,
+        annual_ratios: Optional[List[Dict[str, Any]]] = None,
+        ex_dividend_dates: Optional[List[str]] = None,
     ) -> Optional[DividendInfoSchema]:
         """Build DividendInfo for a company that actually pays a dividend.
 
@@ -672,11 +767,27 @@ class SignalOfConfidenceService:
         degrade to None, and the iOS card already renders "N/A" for a nil date rather than
         inventing one.
         """
-        pays_dividend = t12m_dividend_yield > 0 or any(
-            getattr(dp, "dividend_yield", 0) > 0 for dp in (data_points or [])
-        )
+        annual = self._build_annual_dividends(annual_ratios)
+        if annual:
+            pays_dividend = True
+        elif annual_ratios:
+            # We HAVE the authoritative per-share record and it says the company has never
+            # paid. Trust it over the cash-flow yield, which is not the same question: it
+            # is `dividendsPaid / market cap`, and that line picks up preferred and
+            # one-off distributions. Measured — TSLA, which has never paid a common
+            # dividend, shows a 0.01% trailing yield from a single quarter and used to
+            # render a whole dividend card of em dashes on the strength of it.
+            pays_dividend = False
+        else:
+            # No series at all (the `ratios` fetch failed). Fall back to the yield rather
+            # than hiding a real payer's card because one upstream call went down.
+            pays_dividend = (
+                t12m_dividend_yield > 0
+                or any(getattr(dp, "dividend_yield", 0) > 0 for dp in (data_points or []))
+            )
         if not dividend_history and not pays_dividend:
             return None
+        growth_pct, growth_years = self._dividend_growth(annual)
 
         # Sort descending by date to find most recent
         sorted_divs = sorted(
@@ -688,6 +799,12 @@ class SignalOfConfidenceService:
         # Most recent dividend entry
         latest = sorted_divs[0] if sorted_divs else {}
         ex_date = (latest.get("date") or "")[:10] or None
+        # Fall back to the DERIVED dates (newest first). Only the date is recoverable this
+        # way — the step size implies an amount to ~1%, which is not good enough to print
+        # as money, so `payment_date` below stays absent and the amounts come from
+        # `annual_ratios`.
+        if not ex_date and ex_dividend_dates:
+            ex_date = str(ex_dividend_dates[0])[:10] or None
         payment_date = (latest.get("paymentDate") or latest.get("payment_date") or "")[:10] or None
 
         # Historical average DIVIDEND yield from the quarterly data points.
@@ -757,6 +874,11 @@ class SignalOfConfidenceService:
             five_year_avg_yield=five_year_avg_yield,
             status=status,
             buyback_status=buyback_status,
+            annual_dividends=annual,
+            dividend_per_share=annual[-1].per_share if annual else None,
+            dividend_per_share_year=annual[-1].year if annual else None,
+            dividend_growth_pct=growth_pct,
+            dividend_growth_years=growth_years,
         )
 
 

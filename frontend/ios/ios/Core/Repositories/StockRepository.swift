@@ -2354,6 +2354,13 @@ struct DividendInfoDTO: Codable {
     let fiveYearAvgYield: Double
     let status: String
     let buybackStatus: String
+    // Annual dividend AMOUNTS, from the entitled `ratios` (period=annual). All Optional
+    // so an older backend, which never sends them, decodes exactly as it does today.
+    let annualDividends: [AnnualDividendDTO]?
+    let dividendPerShare: Double?
+    let dividendPerShareYear: String?
+    let dividendGrowthPct: Double?
+    let dividendGrowthYears: Int?
 
     enum CodingKeys: String, CodingKey {
         case exDividendDate = "ex_dividend_date"
@@ -2361,6 +2368,26 @@ struct DividendInfoDTO: Codable {
         case fiveYearAvgYield = "five_year_avg_yield"
         case status
         case buybackStatus = "buyback_status"
+        case annualDividends = "annual_dividends"
+        case dividendPerShare = "dividend_per_share"
+        case dividendPerShareYear = "dividend_per_share_year"
+        case dividendGrowthPct = "dividend_growth_pct"
+        case dividendGrowthYears = "dividend_growth_years"
+    }
+}
+
+/// Dividends paid per share in one completed fiscal year.
+///
+/// ⚠️ `perShare` of 0.0 is a real measurement — the company paid nothing that year. The
+/// backend trims years BEFORE a company started paying, so a leading zero never arrives
+/// and a trailing one (Intel suspending its dividend) is never confused with one.
+struct AnnualDividendDTO: Codable {
+    let year: String
+    let perShare: Double
+
+    enum CodingKeys: String, CodingKey {
+        case year
+        case perShare = "per_share"
     }
 }
 
@@ -2424,7 +2451,14 @@ struct SignalOfConfidenceResponseDTO: Codable {
                 // because shipped builds decode it that way.
                 fiveYearAvgYield: dto.fiveYearAvgYield > 0 ? dto.fiveYearAvgYield : nil,
                 status: yieldStatus,
-                buybackStatus: bbStatus
+                buybackStatus: bbStatus,
+                annualDividends: (dto.annualDividends ?? []).map {
+                    AnnualDividend(year: $0.year, perShare: $0.perShare)
+                },
+                perShare: dto.dividendPerShare,
+                perShareYear: dto.dividendPerShareYear,
+                growthPct: dto.dividendGrowthPct,
+                growthYears: dto.dividendGrowthYears
             )
         }
 

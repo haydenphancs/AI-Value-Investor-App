@@ -24,11 +24,31 @@ logger = logging.getLogger(__name__)
 # ── Gemini Function Declarations ──────────────────────────────────────────────
 
 
-def build_fmp_tool_declarations() -> types.Tool:
-    """Build Gemini Tool with FMP function declarations for agentic research."""
+def _dividend_history_licensed() -> bool:
+    """True when FMP's `dividends` endpoint is inside the signed Order Form.
 
-    return types.Tool(
-        function_declarations=[
+    Imported lazily so this module stays importable without dragging configuration in.
+    """
+    from app.integrations.fmp_entitlements import entitlement_error  # noqa: PLC0415
+
+    return entitlement_error("dividends") is None
+
+
+def build_fmp_tool_declarations() -> types.Tool:
+    """Build Gemini Tool with FMP function declarations for agentic research.
+
+    ⚠️ A tool whose dataset is unlicensed is OMITTED, not left to fail quietly.
+    `FMPClient.get_dividend_history` swallows the entitlement exception and returns `[]`,
+    so `fetch_dividend_history` handed the model `{"dividends": []}` with no error marker
+    — and the only honest reading of that payload is "this company has never paid a
+    dividend". A 20-credit report could assert exactly that about KO, JNJ or PG. Stage A
+    is also capped at four tool rounds, so one was being spent on a call structurally
+    guaranteed to return nothing.
+
+    Derived from the manifest, not hardcoded: buying "Market Calendar" restores the tool
+    with no further code change, matching `analyst_section_available`'s contract.
+    """
+    declarations = [
             types.FunctionDeclaration(
                 name="fetch_quarterly_financials",
                 description=(
@@ -54,27 +74,6 @@ def build_fmp_tool_declarations() -> types.Tool:
                         ),
                     },
                     required=["ticker", "statement_type"],
-                ),
-            ),
-            types.FunctionDeclaration(
-                name="fetch_dividend_history",
-                description=(
-                    "Fetch dividend payment history to analyze yield trends, "
-                    "payout ratio sustainability, and dividend growth rate."
-                ),
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "ticker": types.Schema(
-                            type=types.Type.STRING,
-                            description="Stock ticker symbol",
-                        ),
-                        "limit": types.Schema(
-                            type=types.Type.INTEGER,
-                            description="Number of dividend records (default 20)",
-                        ),
-                    },
-                    required=["ticker"],
                 ),
             ),
             types.FunctionDeclaration(
@@ -149,8 +148,32 @@ def build_fmp_tool_declarations() -> types.Tool:
                     required=["summary"],
                 ),
             ),
-        ]
-    )
+    ]
+    if _dividend_history_licensed():
+        declarations.append(
+                types.FunctionDeclaration(
+                    name="fetch_dividend_history",
+                    description=(
+                        "Fetch dividend payment history to analyze yield trends, "
+                        "payout ratio sustainability, and dividend growth rate."
+                    ),
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "ticker": types.Schema(
+                                type=types.Type.STRING,
+                                description="Stock ticker symbol",
+                            ),
+                            "limit": types.Schema(
+                                type=types.Type.INTEGER,
+                                description="Number of dividend records (default 20)",
+                            ),
+                        },
+                        required=["ticker"],
+                    ),
+                )
+        )
+    return types.Tool(function_declarations=declarations)
 
 
 # ── Tool Handlers ─────────────────────────────────────────────────────────────
@@ -184,6 +207,13 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
     async def fetch_dividend_history(args: Dict[str, Any]) -> Dict[str, Any]:
         ticker = args.get("ticker", "").upper()
         limit = int(args.get("limit", 20))
+        if not _dividend_history_licensed():
+            # Belt-and-braces: the declaration is omitted above, so Gemini should never
+            # reach here. If it does (a cached tool list, a hand-built call), an EXPLICIT
+            # marker is the difference between "we are not allowed to look" and "this
+            # company pays nothing" — `get_dividend_history` swallows the entitlement
+            # exception and returns `[]`, which reads as the latter.
+            return {"error": "not_licensed", "dividends": []}
         try:
             data = await fmp.get_dividend_history(ticker, limit)
             return {"dividends": data[:limit]}

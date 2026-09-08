@@ -25,7 +25,7 @@ import math
 import pytest
 
 from app.services.updates_materiality import _MIN_SIGMA_DAILY, move_score, move_z
-from app.services.widget_movers_service import rank_movers
+from app.services.widget_movers_service import _group_change, rank_movers
 
 
 def _row(ticker, change, sigma=None, **extra):
@@ -260,3 +260,86 @@ def test_no_ticker_appears_twice_and_the_headline_never_repeats_below_itself():
     tickers = [m.ticker for m in p.runners_up]
     assert len(tickers) == len(set(tickers)), tickers
     assert p.headline_mover.ticker not in tickers
+
+
+# ── A group that closed exactly flat is a MEASUREMENT ───────────────────────────────
+
+
+def test_a_group_at_exactly_zero_is_reported_flat_not_dropped():
+    """`finite(r.get("changesPercentage") or r.get("averageChange"))` — `0.0` is FALSY.
+
+    A sector or industry whose equal-weighted mean is exactly 0.0 fell through to
+    `averageChange`, which the entitled substitute
+    (`market_movers_service._group_performance`) does not emit at all. `finite(None)`
+    returned None and the caller's `if chg is not None` then DROPPED the group from the
+    market context — so a flat sector read downstream as "no signal" rather than "no
+    move". Reachable: the substitute publishes `round(mean, 4)`.
+    """
+    assert _group_change({"industry": "Semiconductors", "changesPercentage": 0.0}) == 0.0
+
+
+def test_the_legacy_average_change_key_is_still_honoured():
+    """FMP's retired snapshot spelled it `averageChange`; a cached row may still carry it."""
+    assert _group_change({"sector": "Technology", "averageChange": 1.5}) == 1.5
+
+
+@pytest.mark.parametrize("row, expected", [
+    ({"changesPercentage": None, "averageChange": 2.5}, 2.5),
+    ({"changesPercentage": float("nan"), "averageChange": 3.5}, 3.5),
+    ({"changesPercentage": float("inf"), "averageChange": 4.5}, 4.5),
+    ({"changesPercentage": "junk", "averageChange": 5.5}, 5.5),
+    ({"changesPercentage": -0.0}, -0.0),
+])
+def test_an_unusable_primary_falls_back_to_the_legacy_key(row, expected):
+    assert _group_change(row) == expected
+
+
+def test_a_row_with_no_usable_change_at_all_is_none():
+    """Absent stays absent — the caller must be able to skip it."""
+    assert _group_change({"industry": "Semiconductors"}) is None
+    assert _group_change({"changesPercentage": None, "averageChange": None}) is None
+    assert _group_change({}) is None
+
+
+# ── The cross-session age gate must not be disarmable by an absent date ─────────────
+
+
+def _industry_ctx(snapshot_date, session_date):
+    from app.services.widget_movers_service import _MarketContext
+
+    c = _MarketContext()
+    c.ticker_industry = {"NVDA": "Semiconductors"}
+    c.industry_available = True
+    c.industry_changes = {"semiconductors": -1.2}
+    c.industry_snapshot_date = snapshot_date
+    c.session_date = session_date
+    return c
+
+
+def test_a_same_session_industry_move_is_reported():
+    """Control — the gate must not simply suppress everything."""
+    assert _industry_ctx("2026-09-08", "2026-09-08").industry_for("NVDA") == ("Semiconductors", -1.2)
+
+
+@pytest.mark.parametrize("snapshot, session, why", [
+    ("2026-09-05", "2026-09-08", "Friday's move served on Monday"),
+    (None, "2026-09-08", "no date at all — the state that disarmed the gate"),
+    ("2026-09-08", None, "no session to compare against"),
+    (None, None, "neither known"),
+])
+def test_an_unverifiable_session_yields_the_name_without_a_number(snapshot, session, why):
+    """FAIL CLOSED. The guard used to short-circuit on `self.industry_snapshot_date`.
+
+    FMP's dated `industry-performance-snapshot` is outside the licence (402), and the
+    entitled substitute — screener rows grouped by industry — carried no `date`. So the
+    gate read green while printing a previous session's move as today's cause: at 07:00 ET
+    on a Monday the screener still reports Friday's close, so the average IS Friday's move,
+    and `daily_move_attribution` emitted "Aerospace & Defense fell 1.2%; NVDA went the
+    other way." That sentence is the one the guard's docstring says it exists to prevent.
+
+    `(name, None)` rather than `(name, stale_number)` is the whole point of this method.
+    """
+    name, change = _industry_ctx(snapshot, session).industry_for("NVDA")
+
+    assert name == "Semiconductors", "the industry NAME is never in doubt"
+    assert change is None, why

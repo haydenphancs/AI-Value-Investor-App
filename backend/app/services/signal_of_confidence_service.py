@@ -38,6 +38,33 @@ from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
+#: Bumped whenever `SignalOfConfidenceResponse` gains a field OR the way a stored value
+#: is computed changes. `_check_supabase_cache` refuses any row that does not carry the
+#: current value, so a formula fix reaches users on the next read instead of 24h later.
+#:
+#: 1 → pre-versioning rows (no key at all; they never match, which is the intent).
+#: 2 → adds `dividend_info.annual_dividends` / `dividend_per_share*`, and corrects the
+#:     `status` denominator to compare T12M against the 5-year average on the SAME
+#:     point-in-time basis (JNJ was reported "Low").
+#: 3 → the comparison baseline EXCLUDES its own numerator (it was self-referential, so a
+#:     40% dividend cut still read "Fair"), `_ABOUT_AVERAGE` sends a payer yielding its own
+#:     history to Fair rather than green, and `dividend_growth_pct` drops a partial first
+#:     paying year (GOOGL read +38.3% for a 0.20 -> 0.21 quarterly raise).
+_PAYLOAD_VERSION = 3
+
+#: Half-open ratio band treated as "about its own average", and therefore Fair rather
+#: than the green "High". See `_build_dividend_info` for why it is narrow.
+_ABOUT_AVERAGE = (0.97, 1.03)
+
+#: Quarters that make up the "trailing yield" the dividend verdict is about.
+_TRAILING_POINTS = 4
+
+#: Older quarters required before that trailing yield can be compared to a baseline at
+#: all. Fewer than this and the ratio has too little independent history to mean anything
+#: — `_build_dividend_info` falls back to the absolute yield ladder instead.
+_MIN_BASELINE_POINTS = 4
+
+
 #: Completed fiscal years of dividend history to request. Six spans a full cut-and-
 #: recover cycle (Intel went 1.4598 -> 0.0000 across four) without bloating the card.
 _ANNUAL_DIVIDEND_YEARS = 6
@@ -301,12 +328,27 @@ class SignalOfConfidenceService:
             # A default is the wrong tool for a value that must be COMPUTED, so detect
             # the drift and recompute instead of serving a plausible-looking guess.
             # Self-limiting: it stops mattering once every cached row is rewritten.
-            summary_json = (json_data or {}).get("summary") or {}
-            if "buyback_status" not in summary_json:
+            # A VERSION, not a key probe. The original guard tested
+            # `"buyback_status" not in summary`, which detects exactly one historical
+            # change and nothing since: rows written before `annual_dividends` existed
+            # pass it and are served for 24h with the field defaulted to `[]` ("no
+            # dividend history" for a dividend king), and — worse — rows written before
+            # the `status` denominator was corrected pass it while carrying a value that
+            # is simply WRONG (JNJ cached as "Low"). A key probe cannot see a changed
+            # formula at all. Bump `_PAYLOAD_VERSION` whenever a field is added OR a
+            # stored value's computation changes, and every stale row recomputes on its
+            # next read. Self-limiting, same as before.
+            version = (json_data or {}).get("payload_version")
+            if version != _PAYLOAD_VERSION:
                 logger.info(
-                    "Supabase cache STALE (pre-buyback_status schema) for %s", ticker
+                    "Supabase cache STALE for %s (payload_version=%r, want %d) — recomputing",
+                    ticker, version, _PAYLOAD_VERSION,
                 )
                 return None
+            # Not a response field; strip it so the model never sees it. (Pydantic v2
+            # ignores extras by default, but relying on that would break the moment
+            # someone sets `extra="forbid"`.)
+            json_data = {k: v for k, v in json_data.items() if k != "payload_version"}
 
             return SignalOfConfidenceResponse(**json_data)
 
@@ -325,7 +367,8 @@ class SignalOfConfidenceService:
             self.supabase.table("signal_of_confidence_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {**result.model_dump(),
+                                      "payload_version": _PAYLOAD_VERSION},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -685,6 +728,47 @@ class SignalOfConfidenceService:
     # ── Dividend info ─────────────────────────────────────────────
 
     @staticmethod
+    def _annual_dividend_map(rows: Any) -> Dict[str, float]:
+        """``{fiscal_year: dividendPerShare}`` from `ratios` (period=annual)."""
+        by_year: Dict[str, float] = {}
+        if not isinstance(rows, list):
+            return by_year
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            year = str(row.get("date") or "")[:4]
+            if len(year) != 4 or not year.isdigit():
+                continue
+            value = _safe_float(row, "dividendPerShare")
+            if value is None or value < 0:
+                continue
+            by_year[year] = value
+        return by_year
+
+    @staticmethod
+    def _initiation_observed(rows: Any, series: List[AnnualDividendSchema]) -> bool:
+        """True when the series' first paying year is one we watched the company START.
+
+        The discriminator for a PARTIAL first year. `dividendPerShare` is a full-calendar
+        -year total, so a company that initiates in Q2 or Q4 books a fraction of its
+        run-rate in that year — and `_build_annual_dividends` trims the leading zeros, so
+        that stub becomes `series[0]` and any growth measured from it is inflated.
+
+        Requires an OBSERVED zero in the immediately preceding year, not a guess from the
+        shape of the numbers. A mature payer whose window merely begins mid-stream has no
+        such zero and is left alone; inferring "partial" from a large year-two rise would
+        discard genuine raises.
+        """
+        if not series:
+            return False
+        by_year = SignalOfConfidenceService._annual_dividend_map(rows)
+        try:
+            prior = str(int(series[0].year) - 1)
+        except (TypeError, ValueError):
+            return False
+        return by_year.get(prior) == 0.0
+
+    @staticmethod
     def _build_annual_dividends(rows: Any) -> List[AnnualDividendSchema]:
         """Dividends per share by completed fiscal year, oldest first.
 
@@ -700,20 +784,7 @@ class SignalOfConfidenceService:
         trims to nothing at all, which is how a non-payer ends up with no series rather
         than a flat line at zero.
         """
-        if not isinstance(rows, list):
-            return []
-        by_year: Dict[str, float] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            year = str(row.get("date") or "")[:4]
-            if len(year) != 4 or not year.isdigit():
-                continue
-            value = _safe_float(row, "dividendPerShare")
-            if value is None or value < 0:
-                continue
-            by_year[year] = value
-
+        by_year = SignalOfConfidenceService._annual_dividend_map(rows)
         series = [
             AnnualDividendSchema(year=y, per_share=round(by_year[y], 4))
             for y in sorted(by_year)
@@ -724,6 +795,7 @@ class SignalOfConfidenceService:
     @staticmethod
     def _dividend_growth(
         series: List[AnnualDividendSchema],
+        first_year_partial: bool = False,
     ) -> Tuple[Optional[float], Optional[int]]:
         """Total growth across the series, or ``(None, None)`` when it is undefined.
 
@@ -731,7 +803,20 @@ class SignalOfConfidenceService:
         above), so a company that began paying inside the window has exactly ONE point and
         no rate — "+infinity%" is not a fact about GOOGL. A company that cut to nothing
         does have one, and it is -100%, which is the number a reader most needs to see.
+
+        ⚠️ `first_year_partial` drops that first year, and it matters more than it looks.
+        `dividendPerShare` is a full-CALENDAR-year total, so an initiation part-way
+        through the year books a fraction of the run-rate. Measured live: GOOGL 2024 =
+        0.60 (three $0.20 payments) against 2025 = 0.83 (0.20 + three 0.21) rendered
+        "Dividend Growth +38.3% over 1y" in the gain colour, for a per-quarter dividend
+        that went 0.20 -> 0.21. Worse for a Q4 initiation that is never raised again:
+        0.25 then 1.00 five years running reads "+300.0% over 5y" for a FLAT dividend.
+        Same class as the `0 -> N` case already handled by trimming; this one was missed
+        because a stub year is non-zero. Dropping it can leave fewer than two full years,
+        and then undefined is the honest answer — exactly as it already is above.
         """
+        if first_year_partial:
+            series = series[1:]
         if len(series) < 2:
             return None, None
         first, last = series[0].per_share, series[-1].per_share
@@ -787,7 +872,9 @@ class SignalOfConfidenceService:
             )
         if not dividend_history and not pays_dividend:
             return None
-        growth_pct, growth_years = self._dividend_growth(annual)
+        growth_pct, growth_years = self._dividend_growth(
+            annual, self._initiation_observed(annual_ratios, annual)
+        )
 
         # Sort descending by date to find most recent
         sorted_divs = sorted(
@@ -842,10 +929,75 @@ class SignalOfConfidenceService:
                 sum(annual_values) / len(annual_values), 2
             ) if annual_values else 0.0
 
-        # Dividend yield status: compare current T12M yield to 5-year average
-        if five_year_avg_yield > 0:
-            ratio = t12m_dividend_yield / five_year_avg_yield
-            if ratio < 0.7:
+        # Dividend yield status: compare the trailing yield to its own history.
+        #
+        # ⚠️ BOTH SIDES MUST USE THE SAME DENOMINATOR, and they did not. `t12m_dividend_yield`
+        # (the summary) divides the last four quarters' dividends by the **current** market
+        # cap, while `five_year_avg_yield` averages per-quarter yields each divided by that
+        # quarter's **point-in-time** cap. So a stock that merely re-rated upward scored low
+        # with no change whatsoever in its payout.
+        #
+        # Measured across 8 mega-caps, 4 changed verdict once the bases matched:
+        #   JNJ  Low -> Fair   (a dividend king reported as "Low")
+        #   MSFT Fair -> High     KO Fair -> High     WMT High -> Fair
+        #
+        # Same class as the bug the `five_year_avg_yield` comment above already fixed once
+        # (a div+buyback denominator under a dividend-only numerator) — one layer deeper.
+        # The verdict also reaches the 20-credit report via `capital_allocation.dividend_status`.
+        #
+        # `summary.dividend_yield` itself is untouched: it is a genuine current-cap yield and
+        # is rendered as such elsewhere. Only the COMPARISON is put on a consistent footing.
+        #
+        # ⚠️ AND THE BASELINE MUST EXCLUDE THE NUMERATOR. Putting the trailing window on a
+        # point-in-time basis fixed the units but made the ratio SELF-REFERENTIAL, because
+        # `five_year_avg_yield` averages ALL points — the same four among them. Measured on
+        # the intermediate version:
+        #   4 points (all we hold for a recent initiator) -> ratio is IDENTICALLY 1.0,
+        #     so a 0.05% token yield published as green "High";
+        #   8 flat points -> ratio exactly 1.0, the first value of the "High" bucket, and a
+        #     0.3% wiggle flipped the verdict Fair <-> High;
+        #   8 points across a 40% dividend CUT -> still "Fair", because ratio = 2B/(A+B)
+        #     compresses everything toward 1.0 and puts the ladder's ends out of reach.
+        # So the baseline is the OLDER points only. `five_year_avg_yield` keeps its meaning
+        # (the published trailing average over everything we hold) — only the comparison
+        # denominator changes.
+        #
+        # Below `_MIN_BASELINE_POINTS` older quarters there is no independent history to
+        # compare against, so the ratio is refused outright and the absolute ladder runs.
+        # A fabricated verdict from a degenerate ratio is worse than an absolute one.
+        points = list(data_points or [])
+        recent_points = points[-_TRAILING_POINTS:]
+        baseline_points = points[:-_TRAILING_POINTS]
+        comparable_t12m = (
+            round(sum(dp.dividend_yield for dp in recent_points) / len(recent_points), 2)
+            if recent_points
+            else t12m_dividend_yield
+        )
+        baseline_yield = (
+            round(sum(dp.dividend_yield for dp in baseline_points) / len(baseline_points), 2)
+            if len(baseline_points) >= _MIN_BASELINE_POINTS
+            else 0.0
+        )
+
+        if baseline_yield > 0:
+            ratio = comparable_t12m / baseline_yield
+            if _ABOUT_AVERAGE[0] <= ratio < _ABOUT_AVERAGE[1]:
+                # "Yielding what it always has" is FAIR, not green.
+                #
+                # The bare `>= 1.0 -> High` cut split hairs it cannot actually measure:
+                # T at 0.993 and VZ at 1.011 are 1.8% apart in trailing yield and were
+                # rendered in different colours, one of them as a positive signal. The
+                # basis fix above makes that boundary far more crowded than it used to
+                # be — matched denominators put a stable payer very close to 1.0 by
+                # construction, where the old mismatched ones scattered.
+                #
+                # Deliberately a NARROW band rather than a re-centred ladder. Measured
+                # over 20 real payers, re-centring to 0.85/1.15 moves 10 of them and
+                # drops JNJ (0.740) and CSCO (0.727) into "Low" — reintroducing exactly
+                # the dividend-king-reads-Low defect this whole section was fixing. The
+                # band moves one (VZ), which is the only genuine anomaly in the sample.
+                status = "Fair"
+            elif ratio < 0.7:
                 status = "Low"
             elif ratio < 1.0:
                 status = "Fair"

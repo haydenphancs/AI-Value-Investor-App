@@ -261,12 +261,28 @@ async def test_ingest_drops_every_unlicensed_symbol(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("close", [0, -1, float("nan"), float("inf"), None, "junk"])
 async def test_ingest_rejects_unusable_closes(monkeypatch, close):
+    """A row with an unusable close is DROPPED while the rest of the session is written.
+
+    ⚠️ This used to feed a lone `{"symbol": "AAPL", "close": <bad>}` row, which fails the
+    bellwether quorum — so the ingest bailed at the "no session" branch and the
+    `close is None or close <= 0` filter this test names was never reached. All six
+    parametrised values were equivalent no-ops asserting the same unrelated early return.
+    """
     captured: List[Dict[str, Any]] = []
-    _install(monkeypatch, _FakeFMP(eod=[{"symbol": "AAPL", "date": "2026-09-04", "close": close}]))
+    bad = {"symbol": "BADX", "date": "2026-09-04", "close": close, "volume": 1000}
+    _install(monkeypatch, _SessionFMP({
+        "2026-09-04": _session("2026-09-04", bad),
+        "2026-09-03": _session("2026-09-03", {**bad, "date": "2026-09-03"}),
+    }))
     monkeypatch.setattr(PriceService, "_upsert_closes",
                         staticmethod(lambda p: captured.extend(p) or len(p)))
-    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
-    assert captured == []
+    written = await PriceService().refresh_close_snapshot("2026-09-04")
+
+    symbols = [r["symbol"] for r in captured]
+    assert "BADX" not in symbols, f"a close of {close!r} was persisted"
+    # ...and the good rows still land, which is what proves the filter is per-row rather
+    # than an early return that happens to write nothing.
+    assert symbols == ["AAPL", "MSFT"] and written == 2
 
 
 @pytest.mark.asyncio
@@ -568,12 +584,72 @@ async def test_a_missing_prior_session_never_nulls_a_good_previous_close(monkeyp
     Skipping is always safe — the stored (close, previous_close) pair stays internally
     consistent and the loop retries within the hour.
     """
+    # ⚠️ THE FIXTURE MUST CARRY THE BELLWETHERS. It used to be a lone AAPL row, which
+    # fails `_is_us_session` (needs 2 of AAPL/MSFT/SPY) — so `refresh_close_snapshot`
+    # returned 0 from the "no session" branch and NEVER REACHED the `prev_by_symbol`
+    # guard this test is named for. It passed for the wrong reason, and the guard
+    # protecting a real production incident was untested. Verified:
+    #   _is_us_session([AAPL only])   -> False
+    #   _is_us_session([AAPL + MSFT]) -> True
     _install(monkeypatch, _SessionFMP({
-        "2026-09-04": [_eod("AAPL", "2026-09-04", 319.97)],
-        # nothing for any earlier session
+        "2026-09-04": _session("2026-09-04"),
+        # nothing for any earlier session — so the PRIOR fetch comes back empty and the
+        # abort guard is what has to stop the write.
     }))
     monkeypatch.setattr(PriceService, "_upsert_closes",
                         staticmethod(lambda p: pytest.fail(
                             "must not write — this would null previous_close on every row"
                         )))
     assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_prior_session_never_nulls_previous_close(monkeypatch):
+    """The abort must key on COVERAGE, not merely on emptiness.
+
+    The original guard fired only when the prior session was completely empty. A truncated
+    response — FMP returning a few hundred of ~65,000 rows — sailed past it, and every
+    symbol missing from that short list was written with `previous_close = NULL`. Same
+    destructive partial write as the 2026-09-07 incident, just quieter: it degrades a
+    fraction of the market instead of all of it, so nothing looks obviously broken.
+
+    Here the latest session has four symbols and the prior one covers a single symbol.
+    """
+    latest = _session(
+        "2026-09-04",
+        *[_eod(sym, "2026-09-04", 300.0) for sym in ("NVDA", "TSLA", "AMD", "GOOG")],
+    )                                                   # 6 symbols
+    # ⚠️ The truncated session must still carry the BELLWETHERS. A fixture without them
+    # fails `_is_us_session`, so `_fetch_latest_session` returns nothing and the ORIGINAL
+    # `if not prev_by_symbol` guard fires — the test would then pass without ever
+    # exercising the coverage floor it is named for. Caught by mutation-testing.
+    truncated = _session("2026-09-03")                  # 2 of 6 -> 33% coverage
+    _install(monkeypatch, _SessionFMP({
+        "2026-09-04": latest,
+        "2026-09-03": truncated,
+    }))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: pytest.fail(
+                            "wrote a truncated prior session — this nulls previous_close "
+                            "on every symbol it omits"
+                        )))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_prior_session_still_writes(monkeypatch):
+    """Anti-over-correction: the coverage floor must not block an ordinary ingest.
+
+    Real sessions differ a little at the edges (a halt, a new listing), so the floor is set
+    well below parity rather than at it.
+    """
+    captured: List[Dict[str, Any]] = []
+    _install(monkeypatch, _SessionFMP({
+        "2026-09-04": _session("2026-09-04", _eod("NVDA", "2026-09-04", 300.0)),
+        "2026-09-03": _session("2026-09-03"),          # 2 of 3 — a normal edge difference
+    }))
+    monkeypatch.setattr(PriceService, "_upsert_closes",
+                        staticmethod(lambda p: captured.extend(p) or len(p)))
+    assert await PriceService().refresh_close_snapshot("2026-09-04") == 3
+    with_prev = [r for r in captured if r["previous_close"] is not None]
+    assert {r["symbol"] for r in with_prev} == {"AAPL", "MSFT"}

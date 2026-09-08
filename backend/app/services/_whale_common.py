@@ -326,6 +326,16 @@ def format_amount_range(low: float, high: Optional[float]) -> str:
 # Distinct from "no restatement needed" (which returns prev_shares unchanged).
 SPLIT_SUPPRESS = object()
 
+#: How many tickers a single 13F diff may look up corporate actions for.
+#:
+#: Lives here for the reason this module exists: `hydrate_whales` and `whale_service`
+#: both bound the same fan-out, and a second copy of the number is how the annual-return
+#: formula drifted. Each lookup costs TWO price-series fetches (a derived split reads
+#: `/full` and `/non-split-adjusted`), and `whale_service._diff_quarters` runs on a user
+#: request — so an entire restated book, where every position looks like a share
+#: multiple, would otherwise fan out unbounded FMP calls inside one request.
+MAX_SPLIT_LOOKUPS = 25
+
 
 def restate_prev_shares_for_split(
     prev_shares: float, curr_shares: float, split_ratio: float
@@ -431,6 +441,12 @@ def calc_13f_trade_dollars(
     amount = abs(shares_change) * implied_price
 
     if amount < min_amount:
+        return (None, 0.0)
+
+    # A share count that did not move is not a trade in either direction. Reachable only
+    # where `min_amount == 0.0` — which is exactly `holders_service`'s Recent Activities
+    # call — so a perfect-wash quarter was rendered as a SALE of $0.
+    if shares_change == 0:
         return (None, 0.0)
 
     action = "BOUGHT" if shares_change > 0 else "SOLD"

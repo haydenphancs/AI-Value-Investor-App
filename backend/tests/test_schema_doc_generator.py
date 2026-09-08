@@ -669,10 +669,10 @@ def test_every_public_table_is_curated():
 # An entry here is a promise, not an exemption: once the migration is applied and
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
-_PENDING_MIGRATION_TABLES = {
-    "public.market_close_snapshot",   # migration 157
-    "public.corporate_action_cache",  # migration 159
-}
+# Empty, and that is the healthy steady state — both former entries (157
+# `market_close_snapshot`, 159 `corporate_action_cache`) are APPLIED and now appear in the
+# snapshot, so the real column-drift check below covers them again.
+_PENDING_MIGRATION_TABLES: set[str] = set()
 
 
 def test_pending_tables_are_really_still_pending():

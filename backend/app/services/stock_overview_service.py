@@ -1604,30 +1604,39 @@ class StockOverviewService:
         sector_name = profile.get("sector") or "N/A"
         industry = profile.get("industry") or "N/A"
 
-        # --- Sector performance (prefer 1Y, fallback to daily) ---
+        # --- Sector performance (DAILY) ---
+        # `oneYearPerformance` used to be preferred here. It came from FMP's
+        # `sector-performance-snapshot`, which is outside the signed Order Form and now
+        # answers 402; the entitled substitute is `market_movers_service._group_performance`
+        # (screener rows grouped by sector), which publishes a same-session equal-weighted
+        # mean and no 1-year column. Reading the absent key just returned 0.0 and fell
+        # through to the daily value on every call, so the branch was dead. Removed rather
+        # than left in place: the next reader would reasonably assume 1Y is live.
+        # The UI label is period-agnostic ("Sector Performance"), so nothing on screen
+        # claims a window this figure does not cover.
         sector_perf_value = 0.0
         if isinstance(sector_perf, list) and sector_perf:
-            logger.info(f"[SectorIndustry] sector_perf sample: {sector_perf[0]}")
+            logger.debug("[SectorIndustry] sector_perf sample: %s", sector_perf[0])
             for sp in sector_perf:
                 sp_sector = sp.get("sector", "")
                 if _normalize_sector(sp_sector) == _normalize_sector(sector_name):
-                    # Prefer 1Y performance, fallback to daily
-                    val = _safe_float(sp, "oneYearPerformance")
-                    if val == 0.0:
-                        val = (
-                            _safe_float(sp, "changesPercentage")
-                            or _safe_float(sp, "averageChangePercent")
-                            or _safe_float(sp, "changePercent")
-                            or _safe_float(sp, "change_percentage")
-                        )
+                    val = (
+                        _safe_float(sp, "changesPercentage")
+                        or _safe_float(sp, "averageChangePercent")
+                        or _safe_float(sp, "changePercent")
+                        or _safe_float(sp, "change_percentage")
+                    )
                     if val != 0.0:
                         sector_perf_value = val
-                        break
+                    # Break on the SECTOR match, not on a non-zero value: a sector that
+                    # genuinely closed flat is 0.0, and continuing past it used to leave
+                    # the loop scanning rows that can never match.
+                    break
 
         # --- Industry rank within sector ---
         industry_rank = "--"
         if industry_perf and isinstance(industry_perf, list):
-            logger.info(f"[SectorIndustry] industry_perf sample: {industry_perf[0] if industry_perf else 'empty'}")
+            logger.debug("[SectorIndustry] industry_perf sample: %s", industry_perf[0])
         if industry_perf and isinstance(industry_perf, list) and sector_name != "N/A":
             # Filter industries in the same sector, sorted by performance desc
             same_sector = [

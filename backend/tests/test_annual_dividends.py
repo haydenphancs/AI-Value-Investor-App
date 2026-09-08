@@ -28,8 +28,13 @@ META's four leading zeros is noise. Hermetic — no network.
 
 from __future__ import annotations
 
-import pytest
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import pytest
+from pydantic import ConfigDict
+
+import app.services.signal_of_confidence_service as sos
 from app.schemas.signal_of_confidence import AnnualDividendSchema
 from app.services.signal_of_confidence_service import (
     SignalOfConfidenceService as S,
@@ -303,3 +308,336 @@ def test_a_suspended_payer_keeps_its_card():
     )
     assert info is not None
     assert info.dividend_growth_pct == -100.0
+
+
+# ── The status ratio must compare like with like ────────────────────────────────────────
+
+def test_a_re_rated_stock_keeps_its_dividend_verdict():
+    """🔴 Both sides of the ratio must use the SAME market-cap basis.
+
+    `summary.dividend_yield` divides by the CURRENT cap; `five_year_avg_yield` averages
+    per-quarter yields each divided by that quarter's POINT-IN-TIME cap. Comparing them
+    directly meant a stock that merely re-rated upward scored low with no change at all in
+    its payout.
+
+    Measured on real data, 4 of 8 mega-caps changed verdict once the bases matched — most
+    visibly JNJ, a dividend king, which the app reported as **"Low"**.
+
+    Here: the payout never moves (every quarter yields 3.0%) but the cap has doubled, so the
+    current-cap trailing yield reads 1.5%. The verdict must follow the payout, not the price.
+
+    EIGHT points, not four. Four is the whole trailing window, leaving no independent
+    baseline — the ratio path is refused and the absolute ladder runs instead, which is
+    not what this test is about. (An earlier version used four and asserted "High"; that
+    passed only because the ratio was then SELF-REFERENTIAL and identically 1.0.)
+    """
+    svc = _svc()
+    flat = [_DP(3.0) for _ in range(8)]
+    info = svc._build_dividend_info(
+        [], 1.5, 1.0, 0.0, data_points=flat,
+        annual_ratios=_rows([(2023, 1.0), (2024, 1.0), (2025, 1.0)]),
+    )
+    assert info is not None
+    assert info.five_year_avg_yield == 3.0
+    assert info.status != "Low", (
+        "a stock whose payout never changed was marked Low purely because its market cap "
+        "grew — the ratio compared a current-cap numerator against point-in-time denominators"
+    )
+
+
+def test_the_comparison_baseline_excludes_its_own_numerator():
+    """🔴 The ratio must not contain the value it is measuring.
+
+    Putting the trailing window on a point-in-time basis fixed the UNITS but left
+    `five_year_avg_yield` — the mean of ALL points, the same four among them — as the
+    denominator. Measured on that intermediate version:
+
+      * 4 points  -> ratio IDENTICALLY 1.0, so a 0.05% token yield published as green "High"
+      * 8 flat    -> ratio exactly 1.0, the first value of the "High" bucket
+      * 3.00 -> 2.99 vs 2.99 -> 3.00 -> the verdict flipped Fair <-> High on a 0.3% wiggle
+      * a 40% CUT -> still "Fair", because ratio = 2B/(A+B) compresses toward 1.0
+
+    The baseline is now the OLDER points only, so the two sides vary independently.
+    """
+    svc = _svc()
+
+    def status(older, newer, t12m):
+        info = svc._build_dividend_info(
+            [], t12m, 1.0, 0.0,
+            data_points=[_DP(y) for y in ([older] * 4 + [newer] * 4)],
+            annual_ratios=_rows([(2023, 1.0), (2024, 1.0), (2025, 1.0)]),
+        )
+        assert info is not None
+        return info.status
+
+    assert status(3.0, 1.8, 1.8) == "Low", "a 40% dividend cut read 'Fair'"
+    assert status(3.0, 2.0, 2.0) == "Low", "a 33% cut"
+    assert status(1.0, 4.0, 4.0) == "Very High", "a 4x increase"
+    assert status(2.0, 2.5, 2.5) == "High", "a 25% raise"
+
+
+def test_too_little_history_refuses_the_ratio_rather_than_faking_one():
+    """Below four BASELINE quarters there is nothing independent to compare against.
+
+    With exactly four points the trailing window IS the whole series, so any ratio built
+    from them is 1.0 by construction — which put a 0.05% token yield in the green "High"
+    bucket. The absolute ladder is the honest answer there.
+    """
+    svc = _svc()
+    info = svc._build_dividend_info(
+        [], 0.05, 1.0, 0.0, data_points=[_DP(0.05) for _ in range(4)],
+        annual_ratios=_rows([(2023, 0.01), (2024, 0.01), (2025, 0.01)]),
+    )
+    assert info is not None
+    assert info.status == "Low", "0.05% is a token yield, not a green 'High'"
+
+
+def test_a_genuine_dividend_cut_still_reads_low():
+    """The other direction — the fix must not make the ladder inert.
+
+    Was `[1.0, 1.0, 1.0, 1.0]` with no assertion on `status` at all: a FLAT series under
+    a name promising a falling one, checking only the average it was handed. It measured
+    "High". The series below actually falls, and the verdict is asserted.
+    """
+    svc = _svc()
+    falling = [_DP(4.0), _DP(4.0), _DP(4.0), _DP(4.0),
+               _DP(1.0), _DP(1.0), _DP(1.0), _DP(1.0)]
+    info = svc._build_dividend_info(
+        [], 1.0, 1.0, 0.0, data_points=falling,
+        annual_ratios=_rows([(2023, 4.0), (2024, 2.0), (2025, 1.0)]),
+    )
+    assert info is not None
+    assert info.five_year_avg_yield == 2.5
+    assert info.status == "Low", "a 75% cut must read Low"
+
+
+# ── Supabase cache: a VERSION, not a key probe ──────────────────────────────────────
+
+
+def _cache_svc():
+    # `__new__` — the real __init__ constructs a Supabase client and an FMP client, and
+    # `_check_supabase_cache` needs neither (the test injects `supabase`).
+    return sos.SignalOfConfidenceService.__new__(sos.SignalOfConfidenceService)
+
+
+def _cache_entry(response_json):
+    return SimpleNamespace(data=[{
+        "response_json": response_json,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "next_earnings_date": None,
+    }])
+
+
+class _FakeTable:
+    def __init__(self, result):
+        self._result = result
+
+    def select(self, *_a, **_k): return self
+    def eq(self, *_a, **_k): return self
+    def limit(self, *_a, **_k): return self
+    def execute(self): return self._result
+
+
+def _minimal_payload(**over):
+    payload = {
+        "symbol": "JNJ",
+        "data_points": [],
+        "summary": {
+            "total_yield": 3.0, "dividend_yield": 3.0, "buyback_yield": 0.0,
+            "share_count_change": 0.0, "buyback_status": "Low",
+        },
+        "dividend_info": None,
+        "payload_version": sos._PAYLOAD_VERSION,
+    }
+    payload.update(over)
+    return payload
+
+
+def _read(monkeypatch, payload):
+    svc = _cache_svc()
+    monkeypatch.setattr(
+        svc, "supabase",
+        SimpleNamespace(table=lambda _n: _FakeTable(_cache_entry(payload))),
+        raising=False,
+    )
+    return svc._check_supabase_cache("JNJ")
+
+
+def test_a_current_row_is_served(monkeypatch):
+    """Mutation guard: the version check must not reject everything."""
+    out = _read(monkeypatch, _minimal_payload())
+    assert out is not None and out.symbol == "JNJ"
+
+
+def test_a_row_written_before_versioning_is_recomputed(monkeypatch):
+    """The old guard tested `"buyback_status" not in summary` — one historical change.
+
+    A row written after that key landed but BEFORE the annual-dividend fields passes it
+    and is served for 24h with `annual_dividends` defaulted to `[]`: "no dividend
+    history" for a dividend king. Worse, a row written before the `status` denominator
+    was corrected also passes while carrying a value that is simply WRONG (JNJ cached as
+    "Low"). A key probe cannot see a changed formula at all.
+    """
+    payload = _minimal_payload()
+    del payload["payload_version"]
+    assert _read(monkeypatch, payload) is None
+
+
+@pytest.mark.parametrize("version", [1, 0, "2", None, sos._PAYLOAD_VERSION - 1,
+                                     sos._PAYLOAD_VERSION + 1])
+def test_any_other_version_is_recomputed(monkeypatch, version):
+    """Both directions. A row from a NEWER deploy is also refused rather than coerced."""
+    assert _read(monkeypatch, _minimal_payload(payload_version=version)) is None
+
+
+def test_the_version_key_never_reaches_the_response_model(monkeypatch):
+    """`payload_version` is cache metadata, not a response field.
+
+    Pydantic v2 ignores extras by DEFAULT, so `assert not hasattr(out, ...)` passes
+    whether or not the key is stripped — a vacuous guard (this test was written that way
+    first, and the mutation run caught it). Asserting against a strict model is what
+    actually exercises the strip: under a later `extra="forbid"` an unstripped key turns
+    every cache hit into a ValidationError, swallowed by the broad `except` — a silent
+    100% cache miss on a 6-FMP-call path, which would look like a latency regression
+    rather than a bug.
+    """
+    class _Strict(sos.SignalOfConfidenceResponse):
+        model_config = ConfigDict(extra="forbid")
+
+    monkeypatch.setattr(sos, "SignalOfConfidenceResponse", _Strict)
+
+    out = _read(monkeypatch, _minimal_payload())
+
+    assert out is not None, (
+        "the cached row failed to validate — `payload_version` reached the model"
+    )
+
+
+# ── A partial first paying year inflates every growth figure ────────────────────────
+
+
+def _ratio_rows(pairs):
+    return [{"date": f"{y}-12-31", "dividendPerShare": v} for y, v in pairs]
+
+
+def test_a_recently_initiated_payer_gets_no_fabricated_growth():
+    """GOOGL, live: 2024 = 0.60 (three $0.20 payments), 2025 = 0.83 (0.20 + three 0.21).
+
+    `dividendPerShare` is a full-CALENDAR-year total, so an initiation part-way through
+    the year books a fraction of the run-rate. Dividing straight through it rendered
+    "Dividend Growth +38.3% over 1y" in the gain colour, for a per-quarter dividend that
+    went 0.20 -> 0.21 (+5%). META is in the same position.
+
+    One full year is not a growth rate. Undefined is the honest answer, exactly as it
+    already is for the `0 -> N` case.
+    """
+    svc = _svc()
+    rows = _ratio_rows([(2020, 0), (2021, 0), (2022, 0), (2023, 0),
+                        (2024, 0.60), (2025, 0.83)])
+    series = svc._build_annual_dividends(rows)
+
+    assert [p.year for p in series] == ["2024", "2025"], "leading zeros still trimmed"
+    assert svc._initiation_observed(rows, series) is True
+    assert svc._dividend_growth(series, True) == (None, None)
+
+
+def test_a_q4_initiation_that_never_rises_reads_flat_not_plus_300_percent():
+    """0.25 (one payment) then 1.00 five years running.
+
+    Measured on the unfixed code: `(300.0, 5)` -> "+300.0% over 5y" in green, for a
+    dividend that has not moved in five years.
+    """
+    svc = _svc()
+    rows = _ratio_rows([(2019, 0), (2020, 0.25)] + [(y, 1.00) for y in range(2021, 2026)])
+    series = svc._build_annual_dividends(rows)
+
+    assert svc._dividend_growth(series, svc._initiation_observed(rows, series)) == (0.0, 4)
+
+
+def test_a_mature_payer_is_untouched():
+    """The window merely BEGINS mid-stream — no observed zero, so no stub to drop.
+
+    Mutation guard both ways: inferring "partial" from the shape of the numbers (a large
+    year-two rise) would discard genuine raises here.
+    """
+    svc = _svc()
+    rows = _ratio_rows([(2020, 1.0), (2021, 1.1), (2022, 1.2),
+                        (2023, 1.3), (2024, 1.4), (2025, 1.5)])
+    series = svc._build_annual_dividends(rows)
+
+    assert svc._initiation_observed(rows, series) is False
+    assert svc._dividend_growth(series, False) == (50.0, 5)
+
+
+def test_a_wind_down_still_reports_minus_100():
+    """Intel: 1.4598 -> 0.7370 -> 0.3736 -> 0.0000. The most important number on the card."""
+    svc = _svc()
+    rows = _ratio_rows([(2022, 1.4598), (2023, 0.7370), (2024, 0.3736), (2025, 0.0)])
+    series = svc._build_annual_dividends(rows)
+
+    assert svc._initiation_observed(rows, series) is False
+    assert svc._dividend_growth(series, False) == (-100.0, 3)
+
+
+def test_the_stub_probe_requires_an_observed_zero_not_a_guess():
+    """A gap in the feed is not evidence of an initiation."""
+    svc = _svc()
+    rows = _ratio_rows([(2024, 0.60), (2025, 0.83)])   # no 2023 row at all
+    series = svc._build_annual_dividends(rows)
+
+    assert svc._initiation_observed(rows, series) is False, (
+        "absent is not zero — without the prior year we cannot tell a stub from a raise"
+    )
+
+
+def test_yielding_your_own_history_is_fair_not_green():
+    """The `>= 1.0 -> High` cut split hairs it cannot measure.
+
+    T at ratio 0.993 and VZ at 1.011 are 1.8% apart in trailing yield and were rendered in
+    different colours, one of them as a positive signal. Matching the two denominators put
+    stable payers very close to 1.0 BY CONSTRUCTION, where the old mismatched bases
+    scattered them — so the boundary went from rarely-hit to crowded.
+    """
+    svc = _svc()
+
+    def status(older, newer):
+        info = svc._build_dividend_info(
+            [], newer, 1.0, 0.0,
+            data_points=[_DP(y) for y in ([older] * 4 + [newer] * 4)],
+            annual_ratios=_rows([(2023, 1.0), (2024, 1.0), (2025, 1.0)]),
+        )
+        assert info is not None
+        return info.status
+
+    assert status(3.00, 3.00) == "Fair", "exactly its own average is not a positive signal"
+    assert status(6.21, 6.28) == "Fair", "VZ-like, ratio 1.011"
+    assert status(4.54, 4.51) == "Fair", "T-like, ratio 0.993"
+
+
+def test_the_dead_band_is_narrow_and_does_not_re_centre_the_ladder():
+    """Measured: re-centring to 0.85/1.15 moves 10 of 20 real payers and drops JNJ (0.740)
+    and CSCO (0.727) into "Low" — reintroducing the dividend-king-reads-Low defect this
+    section exists to fix. Only the immediate neighbourhood of 1.0 moves."""
+    svc = _svc()
+
+    def status(older, newer):
+        info = svc._build_dividend_info(
+            [], newer, 1.0, 0.0,
+            data_points=[_DP(y) for y in ([older] * 4 + [newer] * 4)],
+            annual_ratios=_rows([(2023, 1.0), (2024, 1.0), (2025, 1.0)]),
+        )
+        return info.status
+
+    assert status(3.23, 2.39) == "Fair", "JNJ-like 0.740 must NOT become Low"
+    assert status(3.83, 3.98) == "High", "TGT-like 1.039 is outside the band"
+    assert status(2.00, 2.50) == "High", "a genuine 25% raise is still High"
+    assert status(3.00, 1.80) == "Low", "a 40% cut is still Low"
+    assert status(1.00, 4.00) == "Very High"
+
+
+def test_the_status_change_bumps_the_cache_payload_version():
+    """A stored verdict whose FORMULA changed must not be served for another 24h.
+
+    This is the case a key-presence probe cannot see, and the reason the version exists.
+    """
+    assert sos._PAYLOAD_VERSION >= 3

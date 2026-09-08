@@ -75,12 +75,23 @@ EXPECTED: dict[str, int] = {
     #   +2 functions / +2 secdef -> claim_free_followup, grant_free_followup.
     # No new table (it hangs a column off chat_sessions), so nothing to curate; and no
     # new policy, because chat_sessions is already service-role-only.
-    "tables": 132,
-    "public": 97,
+    # Refreshed 2026-09-08 after re-dumping a snapshot that was three migrations stale.
+    # Every delta is accounted for — the snapshot diff itself contained ONLY
+    # corporate_action_cache, so the rest was drift that predated this change:
+    #   +1 table / +1 policy / +1 rls / +1 public -> market_close_snapshot (157), applied
+    #                                                before the previous dump but captured
+    #                                                in it without EXPECTED being moved
+    #   +1 table / +1 policy / +1 rls / +1 public -> corporate_action_cache (159), verified
+    #                                                live in Supabase (12 rows) on 2026-09-08
+    #   +1 function                               -> account_auth_methods (156)
+    # `secdef` did not move: 156's function is the one addition and it is not SECURITY
+    # DEFINER-counted here.
+    "tables": 134,
+    "public": 99,
     "fk": 28,
-    "policies": 195,
-    "rls": 97,
-    "functions": 42,
+    "policies": 197,
+    "rls": 99,
+    "functions": 43,
     "enums": 14,
     "views": 1,
 }

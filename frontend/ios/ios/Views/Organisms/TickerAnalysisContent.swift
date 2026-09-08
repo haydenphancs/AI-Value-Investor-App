@@ -26,24 +26,36 @@ struct TickerAnalysisContent: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
+            // Street estimates — an ADDITIVE SIBLING, not a branch in the chain below.
+            //
+            // ⚠️ This used to be the first arm of that `if/else if` chain, which made the
+            // two datasets mutually exclusive and inverted the convention the whole
+            // entitlement rebuild rests on. `fmp_entitlements` advertises repurchasing a
+            // package as "one line … nothing else changes", and `analyst.py` as "flips back
+            // to True on its own" — but in the post-repurchase state (sectionAvailable,
+            // hasCoverage and estimatesAvailable all true, which is every covered large cap)
+            // the chain short-circuited here and `AnalystRatingsSection` became UNREACHABLE.
+            // Buying the package back would have deleted consensus, the price-target range,
+            // the momentum chart, the distribution and the "More" entry point.
+            //
+            // They are different data — forward fundamentals vs ratings — and both belong on
+            // the tab. Rendered above the chain because it is the licensed half today.
+            //
+            // Deliberately does NOT read `sectionAvailable`: that flag guards the zero-default
+            // consensus and price target, and reusing it here would put a HOLD at $0.00 back
+            // on screen for a client that cannot update.
+            if let ratingsData = analystRatingsData,
+               ratingsData.estimatesAvailable,
+               !ratingsData.forwardEstimates.isEmpty {
+                AnalystForecastsSection(ratingsData: ratingsData)
+            }
+
             // Fear & Greed Index (crypto) OR Analyst Ratings (stocks)
             if let fgData = fearGreedData,
                let fgTimeframe = selectedFearGreedTimeframe {
                 CryptoFearGreedSection(data: fgData, selectedTimeframe: fgTimeframe)
             } else if !isFearGreedLoaded && analystRatingsData == nil {
                 analysisSectionPlaceholder(height: 280)
-            } else if let ratingsData = analystRatingsData,
-                      ratingsData.estimatesAvailable,
-                      !ratingsData.forwardEstimates.isEmpty {
-                // Street estimates — a DIFFERENT, licensed dataset. Checked FIRST because
-                // the two branches below are about the ratings half (`grades` /
-                // `price-target-consensus`), which is unlicensed and therefore all zeros;
-                // falling through to them would hide data we actually have.
-                //
-                // ⚠️ This deliberately does NOT read `sectionAvailable`. That flag guards
-                // the zero-default consensus and price target, and reusing it here would
-                // put a confident HOLD at $0.00 back on screen.
-                AnalystForecastsSection(ratingsData: ratingsData)
             } else if let ratingsData = analystRatingsData, !ratingsData.sectionAvailable {
                 // Nothing at all. The analyst packages (grades, price targets) are outside the
                 // signed FMP licence, so we cannot ask — and `noAnalystCoverageCard` would

@@ -37,10 +37,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.market_hours import session_trading_date
 from app.services.price_service import PriceService, _finite, price_source
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,14 @@ class MarketMoversService:
             if not future.done():
                 future.set_result(closes)
             return closes
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips `except Exception`
+            # below. Without this arm the future is never settled and every joiner
+            # parked on `asyncio.shield(...)` waits for the life of the process —
+            # while `finally` has already popped the key, so nothing can recover it.
+            if not future.done():
+                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            raise
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
@@ -120,7 +129,7 @@ class MarketMoversService:
         while True:
             rows = (
                 supabase.table("market_close_snapshot")
-                .select("symbol,close,previous_close")
+                .select("symbol,close,previous_close,trade_date")
                 .range(start, start + PAGE - 1)
                 .execute()
             ).data or []
@@ -174,10 +183,29 @@ class MarketMoversService:
             price = _finite(r.get("price"))
             if price is None or price <= 0:
                 continue
-            prev = PriceService._pick_denominator(price, closes.get(symbol))
+            snap = closes.get(symbol)
+            prev = PriceService._pick_denominator(price, snap)
             change_pct = None
             if prev is not None and prev > 0:
                 change_pct = (price / prev - 1) * 100.0
+            # WHICH SESSION this change describes. `_pick_denominator` already decides it:
+            # a price that has moved off the stored close belongs to a LATER session (so
+            # the change is the current one), while a price still equal to the stored
+            # close means the change is the one that close ENDED — `trade_date`.
+            #
+            # It matters premarket. At 07:00 ET on a Monday the screener still reports
+            # Friday's close, so this is FRIDAY's move; without the stamp the widget
+            # printed it as "Aerospace & Defense fell 1.2% today", the exact cross-session
+            # claim `widget_movers_service.industry_for`'s age gate exists to suppress —
+            # and that gate was inert because these rows carried no date at all.
+            change_session: Optional[str] = None
+            if change_pct is not None:
+                close = _finite((snap or {}).get("close"))
+                if close is not None and prev is not None and abs(prev - close) < 1e-12:
+                    # Denominator IS the latest stored close -> a later, live session.
+                    change_session = session_trading_date().isoformat()
+                else:
+                    change_session = str((snap or {}).get("trade_date") or "")[:10] or None
             # change_pct stays None when there is no usable previous close. Callers must
             # skip those rather than treat them as 0.0% — a fabricated flat day on a real
             # company is worse than an absent row.
@@ -190,6 +218,7 @@ class MarketMoversService:
                 "averageVolume": _finite(r.get("avgVolume")),   # profile spelling
                 "changePercentage": change_pct,
                 "changesPercentage": change_pct,
+                "changeSession": change_session,
                 "sector": r.get("sector"),
                 "industry": r.get("industry"),
                 "exchange": r.get("exchangeShortName") or r.get("exchange"),
@@ -214,6 +243,16 @@ class MarketMoversService:
     async def _group_performance(self, field: str) -> List[Dict[str, Any]]:
         universe = await self.get_universe()
         buckets: Dict[str, List[float]] = defaultdict(list)
+        # Which sector each industry sits in. `stock_overview_service` ranks a company's
+        # industry WITHIN its sector, and FMP's retired `industry-performance-snapshot`
+        # carried `sector` on every row. Dropping it here made that filter match nothing,
+        # so "Industry Rank" on the Overview tab was permanently "--". Counted rather than
+        # last-write-wins because the taxonomy is not guaranteed 1:1 and a single
+        # mislabelled constituent should not reassign the whole industry.
+        sectors: Dict[str, Counter] = defaultdict(Counter)
+        # Which session each group's members describe — see `changeSession` above. The
+        # MODE, because a handful of thinly-traded names can lag the rest of the group.
+        sessions: Dict[str, Counter] = defaultdict(Counter)
         for row in universe.values():
             # Companies only. A leveraged ETF's 3x move would swamp the average of the
             # sector it nominally tracks.
@@ -223,6 +262,13 @@ class MarketMoversService:
             change = row.get("changePercentage")
             if name and change is not None:
                 buckets[name].append(change)
+                sess = row.get("changeSession")
+                if sess:
+                    sessions[name][sess] += 1
+                if field == "industry":
+                    sec = (row.get("sector") or "").strip()
+                    if sec:
+                        sectors[name][sec] += 1
 
         out: List[Dict[str, Any]] = []
         for name, changes in buckets.items():
@@ -232,13 +278,20 @@ class MarketMoversService:
                 logger.debug("movers: dropping %s %r — only %d members",
                              field, name, len(changes))
                 continue
-            out.append({
+            entry: Dict[str, Any] = {
                 field: name,
                 # Equal-weighted, matching what FMP's snapshot returned (`averageChange`),
                 # so every downstream consumer reads the same magnitude it always did.
                 "changesPercentage": round(sum(changes) / len(changes), 4),
                 "constituents": len(changes),
-            })
+            }
+            if sessions[name]:
+                # `date` is the key FMP's retired snapshot used, so the age gate in
+                # `widget_movers_service.industry_for` reads it unchanged.
+                entry["date"] = sessions[name].most_common(1)[0][0]
+            if field == "industry" and sectors[name]:
+                entry["sector"] = sectors[name].most_common(1)[0][0]
+            out.append(entry)
         out.sort(key=lambda r: r["changesPercentage"], reverse=True)
         return out
 

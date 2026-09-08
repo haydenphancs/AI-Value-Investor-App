@@ -81,10 +81,21 @@ def test_diff_quarters_without_split_ratio_suppresses_rather_than_fabricating():
     svc = _svc()
     current = [_h("NVDA", 1_100_000, 10_000)]
     previous = [_h("NVDA", 900_000, 1_000)]
-    group = svc._diff_quarters(current, previous, "2024-06-30", 1_100_000)
-    assert group is None, (
-        "a 9,000-share change on a 10,000-share position is a corporate action, not a "
-        "trade; suppressing it is the whole point of the backstop"
+
+    # Told that the window carries an adjustment the classifier could not name, the
+    # fabricated trade is suppressed.
+    assert svc._diff_quarters(
+        current, previous, "2024-06-30", 1_100_000, None, {"NVDA"}
+    ) is None, "an unnameable corporate action must suppress rather than emit a trade"
+
+    # ⚠️ With NO corporate action in the window, the same move RENDERS. This arm used to
+    # assert suppression unconditionally, and that cost 10.1% of real 13F rows — measured
+    # over 1,000 rows across 10 mega-caps. The 50% threshold is calibrated for an AGGREGATE
+    # across holders; per position, a 10x move with no corporate action is a real trade.
+    group = svc._diff_quarters(current, previous, "2024-06-30", 1_100_000, None, set())
+    assert group is not None and group["trades"], (
+        "a large move with no corporate action must survive — suppressing it deletes the "
+        "highest-conviction trades the Whale tab exists to surface"
     )
 
 

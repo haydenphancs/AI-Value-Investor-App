@@ -219,8 +219,14 @@ async def test_company_profile_write_runs_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(svc, "_get_fundamentals", _fake_fundamentals)
     monkeypatch.setattr(svc, "_get_volatile", _fake_volatile)
     monkeypatch.setattr(svc, "_upsert_company_profile_db", _fake_profile_upsert)
-    monkeypatch.setattr(svc.fmp, "get_sector_performance", _empty_list)
-    monkeypatch.setattr(svc.fmp, "get_industry_performance", _empty_list)
+    # NOT `svc.fmp` — `stock_overview_service` reads these through
+    # `get_market_movers_service()`, never through the FMP client. FMP's
+    # `sector-performance-snapshot` / `industry-performance-snapshot` are outside the
+    # signed Order Form (402); the entitled substitute groups screener rows. Patching
+    # `svc.fmp` left the real service on the call path and neutralised nothing.
+    movers = sos.get_market_movers_service()
+    monkeypatch.setattr(movers, "get_sector_performance", _empty_list)
+    monkeypatch.setattr(movers, "get_industry_performance", _empty_list)
 
     async def _no_related(ticker):
         return []

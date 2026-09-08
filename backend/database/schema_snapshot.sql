@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict vG5AtHhUDDNFTFHQKMXflMa8UMcnBhlHRBMJf1XhVrKnj1djybYK3G5W4Ixjpsc
+\restrict evYnIooTr3DMDemHvaU13tyQgyN7xBTczilmMR73mYO1KAFFrjLWCtgw9ACU7Fm
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -5806,6 +5806,41 @@ CREATE TABLE public.competitor_intel_cache (
 
 
 --
+-- Name: corporate_action_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.corporate_action_cache (
+    symbol text NOT NULL,
+    kind text NOT NULL,
+    from_date date NOT NULL,
+    to_date date NOT NULL,
+    events jsonb DEFAULT '[]'::jsonb NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE corporate_action_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.corporate_action_cache IS 'Stock splits and ex-dividend dates derived from entitled FMP price series, because /splits and /dividends are outside the signed Order Form and answer 402. Rows cover a CLOSED date window only: the adjustment-factor ratio inside a finished window is invariant under FMP''s later restatements, so such a row never needs invalidating. Written by app/services/corporate_actions_service.py; read by whale_service, holders_service and the two 13F hydration scripts.';
+
+
+--
+-- Name: COLUMN corporate_action_cache.kind; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.corporate_action_cache.kind IS '"split" (derived vs /non-split-adjusted) or "dividend" (vs /dividend-adjusted).';
+
+
+--
+-- Name: COLUMN corporate_action_cache.events; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.corporate_action_cache.events IS 'JSONB array of {date, observed, numerator, denominator}. numerator/denominator are NULL for an adjustment that is not a nameable split ratio — a spin-off, or a reverse split outside the classifier range. An empty array is a MEANINGFUL result ("no split in this window") and is the answer to the large majority of queries.';
+
+
+--
 -- Name: credit_packs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8947,6 +8982,14 @@ ALTER TABLE ONLY public.competitor_intel_cache
 
 
 --
+-- Name: corporate_action_cache corporate_action_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.corporate_action_cache
+    ADD CONSTRAINT corporate_action_cache_pkey PRIMARY KEY (symbol, kind, from_date, to_date);
+
+
+--
 -- Name: credit_packs credit_packs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10597,6 +10640,13 @@ CREATE INDEX idx_competitor_intel_audit_ticker ON public.competitor_intel_audit 
 --
 
 CREATE INDEX idx_competitor_intel_cache_expires ON public.competitor_intel_cache USING btree (expires_at);
+
+
+--
+-- Name: idx_corporate_action_cache_symbol; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_corporate_action_cache_symbol ON public.corporate_action_cache USING btree (symbol, kind);
 
 
 --
@@ -12761,6 +12811,19 @@ CREATE POLICY competitor_intel_cache_service_write ON public.competitor_intel_ca
 
 
 --
+-- Name: corporate_action_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.corporate_action_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: corporate_action_cache corporate_action_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY corporate_action_cache_service_all ON public.corporate_action_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: credit_packs; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14499,5 +14562,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict vG5AtHhUDDNFTFHQKMXflMa8UMcnBhlHRBMJf1XhVrKnj1djybYK3G5W4Ixjpsc
+\unrestrict evYnIooTr3DMDemHvaU13tyQgyN7xBTczilmMR73mYO1KAFFrjLWCtgw9ACU7Fm
 

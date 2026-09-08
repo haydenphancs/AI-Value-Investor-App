@@ -201,3 +201,198 @@ async def test_a_screener_outage_yields_an_empty_universe_not_an_error(monkeypat
     monkeypatch.setattr(MarketMoversService, "_select_all_closes", staticmethod(lambda: {}))
     assert await MarketMoversService().get_universe() == {}
     assert await MarketMoversService().get_sector_performance() == []
+
+
+# ── Group performance: the fields downstream surfaces actually read ──────────────────
+#
+# `sector-performance-snapshot` / `industry-performance-snapshot` are outside the signed
+# FMP Order Form (verified 402), so `_group_performance` — screener rows grouped and
+# equal-weighted — is the substitute every consumer now reads. These pin the parts of that
+# row shape whose ABSENCE is silent: a missing key does not raise, it just makes a feature
+# quietly stop working.
+
+
+def _universe_row(symbol, *, sector, industry, change, is_etf=False):
+    return {
+        "symbol": symbol, "companyName": symbol, "price": 10.0,
+        "marketCap": 1e10, "volume": 1e6, "averageVolume": 1e6,
+        "changePercentage": change, "changesPercentage": change,
+        "sector": sector, "industry": industry, "exchange": "NASDAQ",
+        "isEtf": is_etf, "isFund": False,
+    }
+
+
+def _fake_universe(rows):
+    async def _get():
+        return {r["symbol"]: r for r in rows}
+    return _get
+
+
+@pytest.mark.asyncio
+async def test_industry_rows_carry_their_sector(monkeypatch):
+    """Without `sector`, Overview's "Industry Rank" is permanently "--".
+
+    `stock_overview_service._build_sector_industry` ranks a company's industry within its
+    SECTOR by filtering `industry_perf` on `ip.get("sector")`. FMP's retired snapshot
+    carried that key; the first substitute did not, so the filter matched nothing on every
+    request and the row rendered "--" for every ticker, with no error anywhere.
+    """
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert out, "expected one industry group"
+    assert out[0]["industry"] == "Semiconductors"
+    assert out[0]["sector"] == "Technology", (
+        "industry rows must carry their sector — Overview's Industry Rank filters on it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_mislabelled_constituent_does_not_reassign_the_industry(monkeypatch):
+    """The sector is the MODE, not last-write-wins.
+
+    FMP's taxonomy is not guaranteed 1:1 and a single row can carry a stray sector. Taking
+    whichever arrived last would move an entire industry out of the sector its members are
+    ranked in.
+    """
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    rows.append(_universe_row("ODD", sector="Industrials",
+                              industry="Semiconductors", change=1.0))
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert out[0]["sector"] == "Technology"
+
+
+@pytest.mark.asyncio
+async def test_sector_rows_do_not_carry_a_redundant_sector_key(monkeypatch):
+    """`_group_performance("sector")` already keys on `sector`; no self-referential extra."""
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("sector")
+
+    assert out[0]["sector"] == "Technology"
+    assert set(out[0]) == {"sector", "changesPercentage", "constituents"}
+
+
+@pytest.mark.asyncio
+async def test_an_industry_with_no_sector_on_any_row_is_still_published(monkeypatch):
+    """A missing sector degrades the RANK, never the performance row itself."""
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector=None, industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert out and out[0]["industry"] == "Semiconductors"
+    assert "sector" not in out[0]
+
+
+# ── Which session does a group's change describe? ───────────────────────────────────
+
+
+def _closed_universe(rows, closes):
+    """Rows straight from the screener, plus the stored close snapshot they price against."""
+    async def _get():
+        return {r["symbol"]: r for r in rows}
+    return _get, closes
+
+
+@pytest.mark.asyncio
+async def test_a_group_row_names_the_session_its_change_describes(monkeypatch):
+    """`widget_movers_service.industry_for` now FAILS CLOSED on a missing date.
+
+    FMP's `industry-performance-snapshot` carried a `date` and is outside the licence
+    (402). The substitute did not, so the widget's cross-session age gate short-circuited
+    and printed a previous session's move as today's cause. The gate is fail-closed now,
+    which makes this stamp load-bearing in the other direction too: drop it and industry
+    attribution disappears from every widget card.
+    """
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    for r in rows:
+        r["changeSession"] = "2026-09-05"
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert out[0]["date"] == "2026-09-05"
+
+
+@pytest.mark.asyncio
+async def test_the_session_stamp_is_the_mode_not_the_first_row(monkeypatch):
+    """A handful of thinly-traded members can lag the rest of the group."""
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS + 2)
+    ]
+    rows[0]["changeSession"] = "2026-09-04"          # one laggard, listed first
+    for r in rows[1:]:
+        r["changeSession"] = "2026-09-05"
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert out[0]["date"] == "2026-09-05"
+
+
+@pytest.mark.asyncio
+async def test_no_stamp_at_all_when_no_member_can_name_its_session(monkeypatch):
+    """Absent, not guessed. The consumer treats an unknown date as "do not print"."""
+    svc = MarketMoversService()
+    rows = [
+        _universe_row(f"T{i}", sector="Technology", industry="Semiconductors", change=1.0)
+        for i in range(mm._MIN_GROUP_MEMBERS)
+    ]
+    monkeypatch.setattr(svc, "get_universe", _fake_universe(rows))
+
+    out = await svc._group_performance("industry")
+
+    assert "date" not in out[0]
+
+
+@pytest.mark.parametrize("price, close, prev, expect_live, why", [
+    (100.0, 100.0, 98.0, False,
+     "premarket: the price still equals Friday's close, so the change IS Friday's move"),
+    (102.0, 100.0, 98.0, True,
+     "intraday: the price has moved off the stored close, so the change is the live one"),
+])
+def test_the_session_follows_the_denominator_the_picker_chose(price, close, prev,
+                                                              expect_live, why):
+    """The stamp is derived, not asserted.
+
+    `_pick_denominator` already decides this: a price that has moved off the stored close
+    belongs to a LATER session (so `close` is the denominator and the change is live),
+    while a price still equal to it means the change is the one that close ENDED. Neither
+    `session_trading_date()` nor the snapshot's `trade_date` alone is right — each is
+    wrong for half the day, which is why the finding's first suggested fix would not have
+    closed the hole.
+    """
+    from app.services.price_service import PriceService
+
+    picked = PriceService._pick_denominator(price, {"close": close, "previous_close": prev})
+
+    assert (picked == close) is expect_live, why

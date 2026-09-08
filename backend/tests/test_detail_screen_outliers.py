@@ -482,24 +482,67 @@ def test_a_split_quarter_is_not_reported_as_a_34_billion_dollar_purchase():
     from app.services.holders_service import HoldersService
 
     svc = HoldersService.__new__(HoldersService)
-    unrestated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=1.0)
-    restated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=10.0)[0]
 
-    # TWO independent defences now, and this asserts both.
-    #
-    # 1. Told the ratio, the row is restated onto the post-split basis and reads correctly.
+    # 1. Told the ratio — which is what the production path now passes — the row is
+    #    restated onto the post-split basis and reads correctly.
+    restated = svc._build_institutional_activities([_KLAC_BLACKROCK], split_ratio=10.0)[0]
     assert restated.change_in_millions == pytest.approx(71.4, abs=1.0)
     assert restated.change_percent == pytest.approx(0.19, abs=0.05)
 
-    # 2. NOT told the ratio, the row is DROPPED rather than rendered. This used to be the
-    #    "shape of the old bug" contrast — it asserted `> 30_000` and `> 900`, i.e. that
-    #    the $34B row was produced. It is no longer produced at all: splits are now DERIVED
-    #    from price series and that derivation deliberately declines to name an adjustment
-    #    it cannot resolve, so `is_implausible_share_flow` has to hold the line on its own.
-    #    A 113.6M-share "move" on a 126.2M-share position is a corporate action, not a trade.
-    assert unrestated == [], (
-        "an unrestated split quarter must be suppressed, not rendered — the whole point "
-        "is that the $34B row never reaches a user by any path"
+    # 2. No ratio, but the window carries an adjustment the classifier could not NAME
+    #    (a spin-off, or a reverse split outside its range) — suppress rather than render.
+    assert svc._build_institutional_activities(
+        [_KLAC_BLACKROCK], split_ratio=1.0, unclassified_action=True
+    ) == [], "an unnameable corporate action must suppress, not render a $34B row"
+
+    # 3. ⚠️ No ratio and NO corporate action — the row RENDERS.
+    #    This arm used to assert the opposite, and that was a 10.1% regression: measured
+    #    over 1,000 real 13F rows, suppressing on magnitude alone drops Citadel +212% in
+    #    XOM, UBS -62% and Barclays -34% in KO. A 90% move with no corporate action is an
+    #    ordinary conviction trade and is exactly what this section exists to show.
+    ungated = svc._build_institutional_activities(
+        [_KLAC_BLACKROCK], split_ratio=1.0, unclassified_action=False
+    )
+    assert len(ungated) == 1, (
+        "a large move with no corporate action must not be suppressed — the magnitude "
+        "threshold is calibrated for an AGGREGATE across holders, not for one position"
+    )
+
+
+def test_the_derived_split_ratio_actually_reaches_the_renderer():
+    """🔴 It did not. `inst_split_ratio` was computed and then DISCARDED.
+
+    `holders_service` resolves the quarter's split ratio, and the production call to
+    `_build_recent_activities` simply did not pass it — so the parameter fell back to its
+    `split_ratio: float = 1.0` default and every Recent Activities row was built unrestated.
+    KLAC's 10:1 therefore still rendered BlackRock at +$34,275.0M / +901.88% in production,
+    for months, while `test_a_split_quarter_is_not_reported_as_a_34_billion_dollar_purchase`
+    stayed green — because that test calls `_build_institutional_activities` DIRECTLY with a
+    ratio and never exercised the wiring in between.
+
+    That is the whole lesson: a unit test on the leaf proves nothing about the path to it.
+    Comment-stripped and bounded to the call itself.
+    """
+    import re
+    from pathlib import Path as _P
+
+    src = (_P(__file__).resolve().parents[1] / "app/services/holders_service.py").read_text()
+    code = "\n".join(
+        "" if l.strip().startswith("#") else re.sub(r"\s#.*$", "", l)
+        for l in src.splitlines()
+    )
+    start = code.index("recent = self._build_recent_activities(")
+    call = code[start: code.index(")", code.index("house_trades", start))]
+
+    assert "split_ratio=" in call, (
+        "the production Recent Activities call does not pass a split ratio, so every row "
+        "is built unrestated and a split reads as a purchase"
+    )
+    assert "inst_split_ratio" in call, (
+        "a split ratio is passed but not the one resolved for this quarter"
+    )
+    assert "unclassified_action=" in call, (
+        "the magnitude backstop is left ungated, which drops ~10% of real holder rows"
     )
 
 
@@ -1399,14 +1442,29 @@ def test_one_shared_compact_number_formatter():
 # for a further 24h. A default is the wrong tool for a value that must be COMPUTED.
 
 
-def _soc_cache_payload(*, with_buyback_status: bool) -> dict:
+def _soc_cache_payload(*, with_buyback_status: bool, versioned: bool = True) -> dict:
+    """A `signal_of_confidence_cache` row, as `_check_supabase_cache` reads it.
+
+    `versioned` reflects how the staleness guard works TODAY: the original
+    `"buyback_status" not in summary` probe was replaced by `_PAYLOAD_VERSION`, because a
+    key probe detects exactly one historical change and cannot see a changed FORMULA at
+    all (a row cached before the dividend-`status` denominator was corrected passed the
+    probe carrying a value that was simply wrong). A genuine pre-change row lacks BOTH,
+    which is why the stale case below still leaves the version off.
+    """
+    from app.services.signal_of_confidence_service import _PAYLOAD_VERSION
+
     summary = {
         "total_yield": 2.99, "dividend_yield": 0.0,
         "buyback_yield": 2.99, "share_count_change": -2.17,
     }
     if with_buyback_status:
         summary["buyback_status"] = "High"
-    return {"symbol": "NFLX", "data_points": [], "summary": summary, "dividend_info": None}
+    payload = {"symbol": "NFLX", "data_points": [], "summary": summary,
+               "dividend_info": None}
+    if versioned:
+        payload["payload_version"] = _PAYLOAD_VERSION
+    return payload
 
 
 def test_a_cached_row_without_buyback_status_is_treated_as_stale():
@@ -1434,7 +1492,9 @@ def test_a_cached_row_without_buyback_status_is_treated_as_stale():
         def __init__(self, payload): self._p = payload
         def table(self, *_a, **_k): return _Tbl(self._p)
 
-    svc.supabase = _SB(_soc_cache_payload(with_buyback_status=False))
+    svc.supabase = _SB(
+        _soc_cache_payload(with_buyback_status=False, versioned=False)
+    )
     assert svc._check_supabase_cache("NFLX") is None, (
         "a pre-schema-change cached row was served, so its missing buyback_status "
         "silently became the schema default 'Low'"

@@ -232,6 +232,48 @@ _ETF_REFERENCE: Dict[str, Dict[str, Any]] = {
 # ── Helpers ──────────────────────────────────────────────────────
 
 
+def dividend_yield_from_profile(
+    profile: Dict[str, Any], price: Any
+) -> Tuple[float, bool]:
+    """``(dividend_yield_pct, known)`` for an ETF, keeping "unknown" out of "zero".
+
+    THREE distinct states, and the first version of this collapsed two of them:
+
+    * a fund that genuinely distributes nothing -> ``(0.0, True)``. FMP reports
+      ``lastDividend == 0`` for these; measured on ARKK, GLD, SLV, USO.
+    * a fund we could not price, or whose profile leg failed -> ``(0.0, False)``. iOS
+      renders ``—`` and the card says "We couldn't confirm this fund's dividend yield."
+    * a real payer -> ``(pct, True)``.
+
+    ⚠️ Two traps, both of which shipped:
+
+    1. ``_finite_num`` returns its DEFAULT (0.0) on failure, never ``None``, so
+       ``_finite_num(x) is not None`` is a constant ``True``. The flag collapsed to
+       ``price > 0``, and a profile leg that 402'd or timed out published a confident
+       "0.00%" beside "This fund doesn't currently pay a dividend" — precisely the
+       fabrication the flag was added to prevent.
+    2. ``a or b`` folds a GENUINE zero into the missing case:
+       ``{"lastDividend": 0}`` -> ``0 or profile.get("lastDiv")`` -> ``None``. The two
+       states this docstring calls distinguishable were being merged at the source.
+
+    ⚠️ ``lastDividend`` is the TRAILING-TWELVE-MONTH TOTAL despite the name — AAPL
+    reports 1.06, exactly its ``dividendPerShareTTM``. Reading it as one quarterly
+    payment would understate the yield fourfold.
+    """
+    from app.services.chart_helper import _finite_or_none  # noqa: PLC0415
+
+    raw = (profile or {}).get("lastDividend")
+    if raw is None:
+        raw = (profile or {}).get("lastDiv")
+    last_div = _finite_or_none(raw)
+    priced = _finite_or_none(price)
+
+    known = last_div is not None and priced is not None and priced > 0
+    if known and last_div > 0:
+        return round((last_div / priced) * 100, 2), True
+    return 0.0, known
+
+
 def _finite_num(v: Any, default: float = 0.0) -> float:
     """Coerce to a finite float, or ``default``.
 
@@ -1080,18 +1122,13 @@ class ETFService:
         # ⚠️ `lastDividend` is the TRAILING-TWELVE-MONTH TOTAL despite the name — AAPL
         # reports 1.06, exactly its `dividendPerShareTTM`. Reading it as one quarterly
         # payment would understate the yield fourfold.
-        last_div_dollar = _finite_num(profile.get("lastDividend") or profile.get("lastDiv"))
-        dividend_yield = 0.0
-        # Known when we have both halves of the division. A fund that genuinely pays
-        # nothing reports lastDividend == 0 (measured on ARKK, GLD, SLV, USO) and is
-        # therefore KNOWN to yield zero — different from a missing price, which is not.
-        dividend_yield_known = (
-            last_div_dollar is not None
-            and _finite_num(price) is not None
-            and price > 0
-        )
-        if dividend_yield_known and last_div_dollar > 0:
-            dividend_yield = round((last_div_dollar / price) * 100, 2)
+        #
+        # ⚠️ TWO traps here, and the first version of this flag fell into both.
+        #
+        # See `dividend_yield_from_profile` — extracted so the three states can be
+        # exercised directly. The previous guard was source-scan-only and passed
+        # vacuously over a flag that was a tautology.
+        dividend_yield, dividend_yield_known = dividend_yield_from_profile(profile, price)
 
         # Step 3 (build chart data) is gone: `chart_data` now arrives from `_get_chart`
         # in step 1, which derives 5Y/ALL from the shared history instead of re-fetching
@@ -1163,6 +1200,16 @@ class ETFService:
         if expense_ratio <= 0:
             fee_context = "Expense ratio unavailable for this fund."
             net_yield_verdict = "We couldn't confirm this fund's fees."
+        elif not dividend_yield_known:
+            # ⚠️ UNKNOWN IS NOT ZERO, and this branch is the reason `dividend_yield_known`
+            # exists. It used to guard only the NUMBER: `formattedDividendYield` rendered
+            # "—", while the two sentences beside it were still chosen by
+            # `dividend_yield <= 0` and asserted a zero payout. So a fund whose price we
+            # simply could not fetch showed `Yield: —` directly above "This fund doesn't
+            # currently pay a dividend" — the exact fabrication the flag was added to stop.
+            # Mirrors the `expense_ratio <= 0` arm above, which already got this right.
+            fee_context = f"You pay ${fee_per_10k:.2f} per year on a $10,000 investment."
+            net_yield_verdict = "We couldn't confirm this fund's dividend yield."
         elif dividend_yield <= 0:
             fee_context = f"You pay ${fee_per_10k:.2f} per year on a $10,000 investment."
             net_yield_verdict = "This fund doesn't currently pay a dividend — you only pay its fees."
@@ -1219,7 +1266,12 @@ class ETFService:
             fee_context=fee_context,
             dividend_yield=dividend_yield,
             pay_frequency=pay_frequency,
-            yield_context=f"You earn ~${yield_per_10k:.0f} per year on a $10,000 investment.",
+            yield_context=(
+                f"You earn ~${yield_per_10k:.0f} per year on a $10,000 investment."
+                if dividend_yield_known
+                # "You earn ~$0" is a claim, not an absence. Same reasoning as the verdict.
+                else "We couldn't confirm this fund's dividend yield."
+            ),
             verdict=net_yield_verdict,
             last_dividend_payment=last_payment,
             dividend_history=dividend_payments,
@@ -1388,10 +1440,38 @@ class ETFService:
         # this screen 80 rows.
         raw_dividends = (await self._get_fundamentals(symbol)).get("dividends") or []
         if not raw_dividends:
-            logger.warning(f"No dividend data from FMP for {symbol}")
+            # `/dividends` is outside the FMP licence, so this is now the ONLY path — the
+            # per-payment feed is permanently empty. Amounts and payment dates are genuinely
+            # unrecoverable, but the ex-dividend DATES are exact from the entitled price
+            # series, and a frequency needs nothing else.
+            #
+            # ⚠️ This derivation was originally wired into the DETAIL card only, so the two
+            # screens contradicted each other: SPY's detail said "Pays Quarterly" while this
+            # endpoint said "—" and showed nothing. Same source, same answer, both places.
+            derived_frequency = "—"
+            try:
+                ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
+                    symbol,
+                    *window_for_range(
+                        None, datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    ),
+                )
+                if ex_dates:
+                    derived_frequency = self._infer_pay_frequency(
+                        [{"date": d} for d in ex_dates]
+                    )
+            except Exception as e:
+                logger.warning(
+                    "etf: ex-dividend date derivation failed for %s (%s: %s) — frequency "
+                    "stays unknown", symbol, type(e).__name__, e,
+                )
+            logger.info(
+                "No per-payment dividend data for %s (endpoint unlicensed); frequency "
+                "derived as %r", symbol, derived_frequency,
+            )
             return ETFDividendHistoryResponse(
                 symbol=symbol,
-                pay_frequency="—",
+                pay_frequency=derived_frequency,
                 total_dividends=0,
                 dividends=[],
             )

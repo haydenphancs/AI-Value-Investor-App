@@ -211,6 +211,17 @@ def _finite(value: Any) -> Optional[float]:
 
 # ── The classifier — pure, no I/O, so it tests without a network or a client ─────────────
 
+def _positive_int(value: Any) -> Optional[int]:
+    """A split term as a strictly-positive int, or None for anything else.
+
+    `bool` is rejected explicitly: it is an `int` subclass, so `True` would otherwise
+    become the numerator 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def _build_candidates() -> Tuple[Fraction, ...]:
     """Every plausible split ratio as a reduced fraction, built once at import.
 
@@ -383,6 +394,19 @@ def _quarter_bounds(year: int, quarter: int) -> Tuple[date, date]:
     return start, end
 
 
+def effective_window_for_quarter(year: int, quarter: int) -> Tuple[str, str]:
+    """``(from_excl, to_incl)`` naming exactly the period a 13F quarter describes.
+
+    The half-open shape matches `holders_service._quarter_split_ratios` and
+    `whale_service._split_ratio_in_window` ("prev quarter-end < date <= quarter-end"), so
+    the unclassified-adjustment gate and the split ratio it guards cover the SAME span.
+    Distinct from :func:`window_for_quarters`, which sizes the FETCH and is deliberately
+    wider — see :meth:`CorporateActionsService.has_unclassified_adjustment`.
+    """
+    start, end = _quarter_bounds(year, quarter)
+    return (start - timedelta(days=1)).isoformat(), end.isoformat()
+
+
 def window_for_quarters(pairs: Sequence[Tuple[int, int]]) -> Optional[Tuple[str, str]]:
     """One merged ``(from, to)`` covering every ``(year, quarter)`` asked for.
 
@@ -485,6 +509,26 @@ class CorporateActionsService:
 
         ``kind="split"`` compares against ``/non-split-adjusted`` (share-basis changes);
         ``kind="dividend"`` against ``/dividend-adjusted`` (ex-dividend dates).
+
+        A derivation that could not be performed reads as `[]` here — the same shape
+        callers have always received. Anything that must tell the two apart uses
+        :meth:`_events_or_none` instead; :meth:`has_unclassified_adjustment` does, because
+        for it "we could not look" has to arm the magnitude backstop rather than clear it.
+        """
+        return (await self._events_or_none(symbol, from_date, to_date, kind=kind)) or []
+
+    async def _events_or_none(
+        self,
+        symbol: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        *,
+        kind: str = "split",
+    ) -> Optional[List[AdjustmentEvent]]:
+        """As :meth:`get_adjustment_events`, but ``None`` when the derivation failed.
+
+        Nothing is cached in EITHER tier for a failure — see :meth:`_derive`. A blocked or
+        empty symbol still returns `[]`: that is a real, permanent answer, not a failure.
         """
         sym = (symbol or "").strip().upper()
         if not sym:
@@ -529,6 +573,21 @@ class CorporateActionsService:
                     events = None
             if events is None:
                 events = await self._derive(sym, from_date, to_date, kind)
+                if events is None:
+                    # DO NOT CACHE A FAILURE, in either tier. Persisting it writes a row
+                    # that is byte-identical to the legitimate "no adjustment in this
+                    # window", into a table with no expiry and no read-side freshness
+                    # predicate — so nothing could ever find or heal it again. The
+                    # in-memory tier is skipped for the same reason on a smaller clock
+                    # (`_EVENTS_TTL_CLOSED` is 6h). Re-derives on the next call instead.
+                    logger.warning(
+                        "corporate_actions: derivation degraded for %s %s %s..%s — "
+                        "caching NOTHING; callers must treat this as unknown, not as "
+                        "'no corporate action'", sym, kind, from_date, to_date,
+                    )
+                    if not future.done():
+                        future.set_result(None)
+                    return None
                 if closed:
                     try:
                         await self._db_put(sym, kind, from_date, to_date, events)
@@ -541,6 +600,14 @@ class CorporateActionsService:
             if not future.done():
                 future.set_result(events)
             return events
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips `except Exception`
+            # below. Without this arm the future is never settled and every joiner
+            # parked on `asyncio.shield(...)` waits for the life of the process —
+            # while `finally` has already popped the key, so nothing can recover it.
+            if not future.done():
+                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            raise
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
@@ -550,7 +617,24 @@ class CorporateActionsService:
 
     async def _derive(
         self, sym: str, from_date: Optional[str], to_date: Optional[str], kind: str
-    ) -> List[AdjustmentEvent]:
+    ) -> Optional[List[AdjustmentEvent]]:
+        """Derived events, or ``None`` when the derivation could not be performed.
+
+        ⚠️ ``None`` and ``[]`` MUST stay distinct all the way out of this module. `[]`
+        means "we looked and this window holds no adjustment" — the correct answer for the
+        large majority of queries, and worth caching forever. `None` means "we could not
+        look", and caching it is how a transient FMP 429 becomes a permanent, confident
+        lie: a stored `[]` is byte-identical to the legitimate answer, so no later query,
+        TTL or DELETE predicate can ever find it again.
+
+        The consequence is not cosmetic. A poisoned row makes `_split_ratio_in_window`
+        yield 1.0 (no restatement) AND `has_unclassified_adjustment` yield False (magnitude
+        backstop disarmed) — both failing OPEN, and the fail-closed handlers in
+        `whale_service` / `holders_service` never fire because a cached row raises nothing.
+        That is precisely the KLAC 10:1 rendering BlackRock at +$34,275.0M / +901.88%, and
+        `whale_service` writing that fabricated BOUGHT into `whale_trades`, which feeds
+        user alerts.
+        """
         fmp = get_fmp_client()
         is_dividend = kind == "dividend"
         raw_call = (
@@ -566,17 +650,15 @@ class CorporateActionsService:
 
         # BOTH legs or nothing. The derivation is a ratio between the two series, so one
         # leg alone cannot produce an answer — and must not be allowed to look like one.
-        # ⚠️ Degrading to `[]` here means "no split", which for the 13F callers means the
-        # raw quarter diff is kept. That is why `_whale_common.is_implausible_share_flow`
-        # is wired into those paths: it is the backstop that does not depend on this
-        # module succeeding. Logged at WARNING so a systematic failure is visible.
+        # Returns None, NOT `[]`: see the docstring. This used to return `[]`, which the
+        # caller then persisted as a permanent "no corporate action".
         for label, leg in (("full", full), (kind, raw)):
-            if isinstance(leg, Exception):
+            if isinstance(leg, BaseException):
                 logger.warning(
-                    "corporate_actions: %s leg failed for %s (%s: %s) — no events derived",
+                    "corporate_actions: %s leg failed for %s (%s: %s) — cannot derive",
                     label, sym, type(leg).__name__, leg,
                 )
-                return []
+                return None
 
         full_rows = full if isinstance(full, list) else (full or {}).get("historical", [])
         raw_rows = raw if isinstance(raw, list) else (raw or {}).get("historical", [])
@@ -590,8 +672,23 @@ class CorporateActionsService:
                         "corporate_actions: %s leg for %s returned rows for %s — refusing",
                         label, sym, got,
                     )
-                    return []
+                    return None
                 break
+
+        # A leg that came back EMPTY is a third route to the same poison, and the
+        # exception check above structurally cannot see it: `fmp.get_historical_prices_
+        # non_split_adjusted` coerces any non-list response to `[]`, so a 200-with-junk
+        # answers "successfully, with nothing". Two points are the minimum for a ratio
+        # SERIES, and any real closed window holds ~60 trading days — so a short leg means
+        # the derivation is broken, not that the market was quiet.
+        for rows, label in ((full_rows, "full"), (raw_rows, kind)):
+            if len(rows or []) < 2:
+                logger.warning(
+                    "corporate_actions: %s leg for %s returned %d rows over %s..%s — too "
+                    "short to derive a ratio series; refusing rather than reporting 'none'",
+                    label, sym, len(rows or []), from_date, to_date,
+                )
+                return None
 
         events = derive_adjustment_events(
             full_rows,
@@ -656,12 +753,31 @@ class CorporateActionsService:
             observed = _finite(item.get("observed"))
             if observed is None:
                 continue
+            # `numerator`/`denominator` get the same scrutiny as `observed`. They arrive
+            # from JSONB, which carries no type or range guarantee, and `is_split` is just
+            # "both are not None" — so `{"numerator": 10, "denominator": 0}` reads as a
+            # classified split and `AdjustmentEvent.ratio` raises ZeroDivisionError inside
+            # the restatement math, while a string pair raises TypeError. Neither is
+            # caught downstream. Dropping the pair degrades the event to UNCLASSIFIED,
+            # which is the conservative direction: an unclassified action ARMS the
+            # implausible-share-flow backstop rather than fabricating a share multiplier.
+            num, den = _positive_int(item.get("numerator")), _positive_int(item.get("denominator"))
+            if (num is None) != (den is None):
+                num = den = None
+            if num is None or den is None:
+                logger.warning(
+                    "corporate_actions: cache row for %s %s on %s has an unusable "
+                    "ratio (%r/%r) — treating the event as unclassified",
+                    sym, kind, item.get("date"),
+                    item.get("numerator"), item.get("denominator"),
+                )
+                num = den = None
             out.append(
                 AdjustmentEvent(
                     date=str(item["date"])[:10],
                     observed=observed,
-                    numerator=item.get("numerator"),
-                    denominator=item.get("denominator"),
+                    numerator=num,
+                    denominator=den,
                 )
             )
         return out
@@ -728,6 +844,80 @@ class CorporateActionsService:
             for ev in sorted(events, key=lambda e: e.date, reverse=True)
             if ev.is_split
         ]
+
+    async def has_unclassified_adjustment(
+        self,
+        symbol: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        *,
+        effective_from: Optional[str] = None,
+        effective_to: Optional[str] = None,
+    ) -> bool:
+        """True when this window holds an adjustment we could NOT resolve to a split ratio.
+
+        This is the signal the 13F magnitude backstop should key on. Suppressing a holder's
+        move purely because it is large is wrong at the per-holder level: measured against
+        real FMP 13F analytics (2026 Q2, 10 mega-caps, 1,000 rows), `|change| >= 50% of
+        shares held` fires on **10.1%** of rows — Citadel +212% in XOM, UBS -62%, Barclays
+        -34% in KO — none of which involve a corporate action at all. Those are the
+        highest-conviction trades on the screen.
+
+        The threshold is calibrated for an AGGREGATE across every holder, where a >50% net
+        move genuinely is implausible (`_build_institutional_flow_summary`,
+        `_compute_quarter_flow`). Per holder, doubling or halving a position is routine.
+
+        So the backstop is gated on this instead: it fires only when something happened in
+        the window that the classifier declined to name — a spin-off, or a reverse split
+        outside `_MAX_TERM`. Shares the cache with `get_split_rows`, so asking both costs
+        one fetch.
+
+        ⚠️ THE FETCH WINDOW IS NOT THE EFFECTIVE WINDOW, and conflating them made this
+        gate systematically over-wide. `from_date`/`to_date` size the DERIVATION: they are
+        deliberately generous so the cache is shared with `get_split_rows` and so a split
+        on the first trading day of the range still has a prior bar
+        (`_WINDOW_LEAD_DAYS`). The question being asked is narrower — "did something
+        unnameable happen in the period these 13F counts describe" — and every caller
+        already filters its split RATIO that way (`_quarter_split_ratios`,
+        `_split_ratio_in_window`, both `start_excl < date <= end_incl`).
+
+        Measured over-reach when they are conflated:
+          * Holders — fetch is four quarters (375 days) while the ratio is narrowed to the
+            single data quarter (91 days). T's WBD spin-off of 2025-07-01, named in this
+            module's docstring as unclassifiable, kept the gate True for a FULL YEAR of
+            subsequent quarters, arming the magnitude backstop on rows with no corporate
+            action anywhere near them — the 10.1% deletion this gate exists to prevent.
+          * Whale — `window_for_range` backs the start off by 10 days, so an event in the
+            previous quarter's last 10 days (~11% of every diff) flagged the current one,
+            while the ratio path correctly ignored it.
+
+        Pass `effective_from`/`effective_to` to filter events to `effective_from < date <=
+        effective_to`. Omitting them keeps the whole fetch window, which is right only
+        when the caller genuinely means it.
+        """
+        events = await self._events_or_none(symbol, from_date, to_date, kind="split")
+        if events is None:
+            # FAIL CLOSED. "We could not derive" is not "there is no corporate action" —
+            # and this is the single gate on the 13F magnitude backstop, so answering
+            # False here disarms it in all three writers at once. Returning True costs
+            # some suppressed rows on a transient upstream failure; returning False costs
+            # a fabricated multi-million-dollar BOUGHT in `whale_trades` and user alerts.
+            # `_whale_common` settles the trade-off: "a missing bar is recoverable; a
+            # fabricated BOUGHT that feeds an alert is not."
+            logger.warning(
+                "corporate_actions: cannot determine unclassified adjustments for %s "
+                "%s..%s — arming the magnitude backstop (fail-closed)",
+                symbol, from_date, to_date,
+            )
+            return True
+        lo = str(effective_from)[:10] if effective_from else None
+        hi = str(effective_to)[:10] if effective_to else None
+        return any(
+            not ev.is_split
+            and (lo is None or ev.date > lo)
+            and (hi is None or ev.date <= hi)
+            for ev in events
+        )
 
     async def get_ex_dividend_dates(
         self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None

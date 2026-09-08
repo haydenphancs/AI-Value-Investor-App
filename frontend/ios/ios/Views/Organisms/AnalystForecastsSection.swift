@@ -38,7 +38,7 @@ struct AnalystForecastsSection: View {
             )
 
             HStack(spacing: 0) {
-                Text("Fiscal year")
+                Text("Period ending")
                     .font(AppTypography.labelSmall)
                     .foregroundColor(AppColors.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -55,13 +55,22 @@ struct AnalystForecastsSection: View {
             ForEach(periods) { period in
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(period.fiscalPeriod)
+                        // ⚠️ The period END, not an invented "FY" name. `FY{year}` took
+                        // the calendar year the period ENDS in, but Target, Home Depot,
+                        // Lowe's and Kroger name a fiscal year by the year it BEGINS — so a
+                        // period ending 2027-01-31 is their fiscal 2026 while the column,
+                        // literally headed "Fiscal year", said FY2027. Walmart uses the
+                        // opposite convention, so no single rule is right for everyone.
+                        // The end date is unambiguous and needs no convention at all.
+                        Text(period.periodEndLabel)
                             .font(AppTypography.bodyEmphasis)
                             .foregroundColor(AppColors.textPrimary)
-                        // The count is shown per row rather than only in the header
-                        // because it genuinely varies by year — AAPL runs 29 analysts on
-                        // FY2027 and 8 on FY2029, and a far year is a much thinner claim.
-                        Text("\(period.analystCount) analysts")
+                        // Per-column counts, not one blended number. The two genuinely
+                        // differ — AMC's measured shape is 2 revenue analysts and 1 on EPS
+                        // — and collapsing them to `max()` advertised a single desk's EPS
+                        // as "2 analysts". A column below the floor shows no count at all
+                        // rather than borrowing its sibling's.
+                        Text(period.analystSummary)
                             .font(AppTypography.labelSmall)
                             .foregroundColor(AppColors.textSecondary)
                     }

@@ -258,14 +258,27 @@ def test_dividend_status_ignores_buybacks_in_the_average():
 
 
 def test_dividend_status_low_when_genuinely_below_its_average():
+    """A REAL decline: the recent quarters yield less than the older ones.
+
+    ⚠️ The fixture used to be eight identical 2.0 quarters with a 0.5 summary yield, and
+    asserted "Low" from `0.5 / 2.0`. That is not a company whose dividend fell — the payout
+    is flat across every quarter — it is the denominator-mismatch bug itself: the summary
+    divides by the CURRENT market cap while the average divides by each quarter's
+    POINT-IN-TIME cap, so a stock that merely re-rated upward scored "Low". Measured on real
+    data that mislabelled JNJ, a dividend king. The name claimed one thing and the fixture
+    encoded another.
+
+    Now the decline is in the data: four quarters at 2.0 followed by four at 0.5.
+    """
     svc = SignalOfConfidenceService.__new__(SignalOfConfidenceService)
+    falling = [_dp(2.0, 0.0) for _ in range(4)] + [_dp(0.5, 0.0) for _ in range(4)]
     info = svc._build_dividend_info(
         [{"date": "2026-01-05", "yield": 2.0}],
         0.5, 0.0, 0.0,
-        data_points=[_dp(2.0, 0.0) for _ in range(8)],
+        data_points=falling,
     )
-    assert info.five_year_avg_yield == 2.0
-    assert info.status == "Low"   # 0.5 / 2.0 = 0.25
+    assert info.five_year_avg_yield == 1.25          # mean of 2,2,2,2,0.5,0.5,0.5,0.5
+    assert info.status == "Low"                      # 0.5 / 1.25 = 0.4
 
 
 def test_dividend_info_is_none_only_for_a_genuine_non_payer():

@@ -1717,7 +1717,10 @@ extension AnalystAnalysisDTO {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        let parsedDate = dateFormatter.date(from: updatedDate) ?? Date()
+        // ⚠️ NO `?? Date()`. `updated_date` is legitimately "" — no grades at all, or a
+        // newest row whose `date` is null — and substituting today rendered
+        // "Updated On <today> ET" as if an analyst had just acted. nil hides the line.
+        let parsedDate = dateFormatter.date(from: updatedDate)
 
         let consensusEnum = AnalystConsensus(rawValue: consensus) ?? .hold
 
@@ -1766,7 +1769,11 @@ extension AnalystAnalysisDTO {
                 actionType: AnalystActionType(rawValue: dto.actionType) ?? .maintain,
                 date: dateFormatter.date(from: dto.date) ?? Date(),
                 previousRating: dto.previousRating.flatMap { Self.mapRatingType($0) },
-                newRating: Self.mapRatingType(dto.newRating) ?? .neutral,
+                // NO `?? .neutral`. An unmappable grade — including the backend's own
+                // "N/A" sentinel — is not a Neutral rating, and pretending otherwise fed
+                // a fabricated opinion to both the Actions list and the AI grounding.
+                newRating: Self.mapRatingType(dto.newRating),
+                newRatingLabel: dto.newRating,
                 previousPriceTarget: dto.previousPriceTarget,
                 newPriceTarget: dto.newPriceTarget
             )
@@ -1781,7 +1788,8 @@ extension AnalystAnalysisDTO {
                                               high: $0.revenue?.high),
                 eps: AnalystEstimateRange(low: $0.eps?.low, avg: $0.eps?.avg,
                                           high: $0.eps?.high),
-                analystCount: max($0.numAnalystsEps ?? 0, $0.numAnalystsRevenue ?? 0)
+                revenueAnalysts: $0.numAnalystsRevenue ?? 0,
+                epsAnalysts: $0.numAnalystsEps ?? 0
             )
         }
 
@@ -1810,18 +1818,23 @@ extension AnalystAnalysisDTO {
     private static func mapRatingType(_ raw: String) -> AnalystRatingType? {
         let lower = raw.lowercased().trimmingCharacters(in: .whitespaces)
         switch lower {
-        case "strong buy", "long term buy":
+        case "strong buy", "long term buy", "conviction buy":
             return .strongBuy
-        case "buy", "positive", "accumulate":
+        case "buy", "positive", "accumulate", "add":
             return .buy
         case "outperform", "overweight", "market outperform", "sector outperform":
             return .overweight
-        case "equal-weight", "equal weight":
+        case "equal-weight", "equal weight", "equalweight":
             return .equalWeight
         case "neutral", "hold", "market perform", "sector perform",
              "peer perform", "in-line", "in line", "perform", "sector weight":
             return .neutral
-        case "underperform", "underweight", "negative", "reduce":
+        case "underperform", "underweight", "negative", "reduce",
+             // ⚠️ `sector underperform` and `market underperform` are RANK 1 in the
+             // backend's `_RATING_RANK` — Sells. They were absent here, so they fell to
+             // the `default: nil` arm and the caller's `?? .neutral` turned a downgrade
+             // into "to Neutral" — including in the line fed to a credit-charged AI turn.
+             "sector underperform", "market underperform":
             return .underperform
         case "sell":
             return .sell

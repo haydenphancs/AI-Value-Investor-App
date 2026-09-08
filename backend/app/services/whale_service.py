@@ -19,7 +19,7 @@ import math
 import time as _time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Set, Tuple
 import logging
 
 from app.integrations.fmp import (
@@ -34,6 +34,7 @@ from app.services.corporate_actions_service import (
     window_for_range,
 )
 from app.services._whale_common import (
+    MAX_SPLIT_LOOKUPS as _MAX_SPLIT_LOOKUPS,
     parse_congress_amount_dollars,
     parse_congress_amount_bounds,
     sum_amount_bounds,
@@ -1903,8 +1904,30 @@ class WhaleService:
         # would degrade to a stale snapshot). Any error here just leaves split_ratios
         # empty → the raw diff, same as before.
         split_ratios: Dict[str, float] = {}
+        unclassified_tickers: Set[str] = set()
+        # Bound BEFORE the try: the fail-closed handler reads it, and the very first
+        # statement inside can raise — which would turn a recoverable lookup failure into
+        # a NameError that aborts 13F processing entirely.
+        suspects: List[str] = []
         try:
             suspects = self._suspicious_split_tickers(current_raw, prev_raw)
+            if len(suspects) > _MAX_SPLIT_LOOKUPS:
+                # Capped, and this path needs it MORE than the nightly hydrator that
+                # already caps at the same number: `_diff_quarters` runs on a USER
+                # REQUEST, and every suspect costs two price-series fetches (a derived
+                # split reads `/full` and `/non-split-adjusted`). An entire restated book
+                # — a fund that changed custodian, so every position looks like a share
+                # multiple — would fan out unbounded FMP calls inside one request and
+                # burn the rate-limit budget the rest of the app shares.
+                #
+                # Suppression fails OPEN for the overflow: those tickers get the raw diff
+                # (what shipped before any of this existed), never a fabricated ratio.
+                logger.warning(
+                    "whale: %d split suspects for %s Q%s — capping lookups at %d; the "
+                    "remainder keep their raw share diff",
+                    len(suspects), year, quarter, _MAX_SPLIT_LOOKUPS,
+                )
+                suspects = suspects[:_MAX_SPLIT_LOOKUPS]
             if suspects:
                 prev_end = (
                     _quarter_end_date(int(prev["year"]), int(prev["quarter"]))
@@ -1917,6 +1940,46 @@ class WhaleService:
                     *[actions.get_split_rows(t, from_date, to_date) for t in suspects],
                     return_exceptions=True,
                 )
+                # Which suspects carry an adjustment the classifier could NOT name (a
+                # spin-off, or a reverse split outside its range). Only those get the
+                # magnitude backstop below — see `has_unclassified_adjustment`. Shares the
+                # events cache with `get_split_rows`, so this costs no extra fetch.
+                #
+                # ⚠️ `from_date` is the FETCH window and is 10 days wider than the period
+                # being diffed (`_WINDOW_LEAD_DAYS`, so a split on the range's first
+                # trading day has a prior bar). The split RATIO is filtered back to
+                # `prev_end < d <= curr_end` by `_split_ratio_in_window`, and this gate
+                # has to match or it flags on the lead: an unnameable event in the
+                # PREVIOUS quarter's last 10 days — ~11% of every diff — armed the
+                # magnitude backstop for the current one, deleting real high-conviction
+                # 13F flow the ratio path had correctly ignored.
+                flag_results = await asyncio.gather(
+                    *[
+                        actions.has_unclassified_adjustment(
+                            t, from_date, to_date,
+                            effective_from=prev_end, effective_to=curr_end,
+                        )
+                        for t in suspects
+                    ],
+                    return_exceptions=True,
+                )
+                for t, flagged in zip(suspects, flag_results):
+                    # FAIL CLOSED on a per-ticker exception. `gather(return_exceptions=True)`
+                    # hands back the exception object, and `flagged is True` quietly read
+                    # that as "no corporate action" — "we could not check" encoded as "we
+                    # checked and there is nothing". The same derivation feeds
+                    # `split_ratios`, so a ticker that failed here usually has NO
+                    # restatement either: the one state where a fabricated
+                    # multi-million-dollar BOUGHT reaches `whale_trades` and user alerts.
+                    if flagged is True or isinstance(flagged, BaseException):
+                        if isinstance(flagged, BaseException):
+                            logger.warning(
+                                "whale: unclassified-adjustment probe failed for %s "
+                                "(%s: %s) — arming the magnitude backstop (fail-closed)",
+                                t, type(flagged).__name__, flagged,
+                            )
+                        unclassified_tickers.add(t)
+
                 for t, sl in zip(suspects, split_lists):
                     if isinstance(sl, BaseException):
                         logger.warning("Split lookup failed for %s: %s", t, sl)
@@ -1929,11 +1992,24 @@ class WhaleService:
                     if r and abs(r - 1.0) > 1e-9:
                         split_ratios[t] = r
         except Exception as e:
-            logger.warning("Split adjustment skipped for CIK %s: %s", cik, e)
+            # FAIL CLOSED for the whole batch, for the same reason as the per-ticker arm
+            # above: `split_ratios = {}` means NO restatement, so this is exactly the
+            # state that fabricates a split as a purchase. Zeroing the flags too disarmed
+            # the only remaining backstop. Every suspect is flagged instead — suspects are
+            # the tickers whose share counts already look like a share multiple, so the
+            # blast radius is bounded to them, and a withheld row is recoverable where a
+            # fabricated BOUGHT that feeds an alert is not.
+            logger.warning(
+                "whale: split adjustment failed for CIK %s (%s: %s) — arming the "
+                "magnitude backstop for all %d suspects (fail-closed)",
+                cik, type(e).__name__, e, len(suspects or []),
+            )
             split_ratios = {}
+            unclassified_tickers = set(suspects or [])
 
         trade_group = self._diff_quarters(
-            current_raw, prev_raw, filing_date, total_value, split_ratios
+            current_raw, prev_raw, filing_date, total_value, split_ratios,
+            unclassified_tickers,
         )
         behavior = self._generate_behavior_summary(trade_group, sector_data)
         sentiment = self._generate_sentiment_summary(
@@ -2164,6 +2240,7 @@ class WhaleService:
         filing_date: str,
         total_current_value: float,
         split_ratios: Optional[Dict[str, float]] = None,
+        unclassified_tickers: Optional[Set[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Diff two 13F snapshots to compute individual trades.
 
@@ -2253,10 +2330,20 @@ class WhaleService:
                 # `whale_trades` where it feeds user alerts. A missing bar is recoverable;
                 # a fabricated multi-million-dollar BOUGHT in someone's notifications is
                 # not. "No bar, not garbage."
-                if is_implausible_share_flow(curr_shares - prev_shares, curr_shares):
+                # ⚠️ GATED on an unnameable corporate action, NOT on magnitude alone.
+                # Ungated, this threshold drops 10.1% of real 13F holder rows — measured
+                # over 1,000 rows across 10 mega-caps — including Citadel +212% in XOM and
+                # UBS -62%, none of which involve a corporate action. It is calibrated for
+                # an AGGREGATE across holders (`_build_institutional_flow_summary`), where
+                # a >50% net move IS implausible; per position, doubling or halving is an
+                # ordinary conviction trade and exactly what this tab exists to show.
+                if ticker in (unclassified_tickers or set()) and is_implausible_share_flow(
+                    curr_shares - prev_shares, curr_shares
+                ):
                     logger.warning(
                         "whale diff: implausible share flow for %s (prev=%.0f curr=%.0f, "
-                        "split_ratio=%s) — suppressing rather than emitting a trade",
+                        "split_ratio=%s) alongside an UNCLASSIFIED corporate action — "
+                        "suppressing rather than emitting a trade",
                         ticker, prev_shares, curr_shares, split_ratios.get(ticker, 1.0),
                     )
                     continue

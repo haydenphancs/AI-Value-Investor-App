@@ -81,8 +81,36 @@ def test_the_call_form_scan_would_actually_catch_a_regression():
     )
 
 
+#: Entitled stand-ins for the pulse strip. Real equities, so `is_blocked_symbol` lets them
+#: through and the BATCHING property under test is actually exercised.
+_LICENSED_PULSE = [
+    {"symbol": "AAPL", "name": "Apple", "type": "stock"},
+    {"symbol": "MSFT", "name": "Microsoft", "type": "stock"},
+    {"symbol": "SPY", "name": "S&P 500 ETF", "type": "stock"},
+]
+
+
+def test_every_real_pulse_symbol_is_currently_unlicensed():
+    """The fact the two tests below must not paper over.
+
+    `^GSPC`, `^IXIC`, `^DJI`, `BTCUSD`, `GCUSD` and `CLUSD` are blocked at the SYMBOL level,
+    so Home's Market Pulse renders nothing today. That is a known, scoped gap — Phase 4
+    swaps them for ETF proxies — but it must be stated somewhere rather than hidden behind a
+    fake that answers for symbols the real service refuses. When Phase 4 lands, this test
+    flips and is the reminder to re-point the two tests below at the real strip.
+    """
+    import app.services.home_dashboard_service as hd
+    from app.integrations.fmp_entitlements import is_blocked_symbol
+
+    symbols = [c["symbol"] for c in hd._PULSE_SYMBOLS]
+    assert [s for s in symbols if is_blocked_symbol(s)] == symbols, (
+        "some pulse symbols are now licensed — re-point the batching tests at the real "
+        "strip instead of the stand-ins"
+    )
+
+
 @pytest.mark.asyncio
-async def test_market_pulse_issues_one_quote_request_for_every_tile():
+async def test_market_pulse_issues_one_quote_request_for_every_tile(monkeypatch):
     """Six tiles, one `batch-quote` request — not six `/quote` calls."""
     import app.services.home_dashboard_service as hd
 
@@ -110,11 +138,19 @@ async def test_market_pulse_issues_one_quote_request_for_every_tile():
 
     svc._fetch_sparkline = _no_spark
 
+    # ⚠️ Driven with LICENSED symbols. This test measures BATCHING, and it used to assert
+    # `len(tiles) == len(_PULSE_SYMBOLS)` against the real strip — every one of which
+    # (`^GSPC`, `^IXIC`, `^DJI`, `BTCUSD`, `GCUSD`, `CLUSD`) is blocked at the symbol level.
+    # `PriceService` returns `{}` for all six, so production renders ZERO tiles while this
+    # asserted six, because the fake was more permissive than the service it stands in for.
+    # The dead strip is Phase 4's job (ETF proxies); the test lying about it was not.
+    monkeypatch.setattr(hd, "_PULSE_SYMBOLS", _LICENSED_PULSE)
+
     tiles = await svc._build_pulse()
 
-    assert len(tiles) == len(hd._PULSE_SYMBOLS), "a tile was dropped"
+    assert len(tiles) == len(_LICENSED_PULSE), "a tile was dropped"
     assert calls["bulk"] == 1, f"expected ONE batch request, got {calls['bulk']}"
-    assert calls["bulk_symbols"] == len(hd._PULSE_SYMBOLS)
+    assert calls["bulk_symbols"] == len(_LICENSED_PULSE)
     assert calls["single"] == 0, (
         f"{calls['single']} per-symbol /quote calls survived — the pulse is still "
         "fanning out"
@@ -122,7 +158,7 @@ async def test_market_pulse_issues_one_quote_request_for_every_tile():
 
 
 @pytest.mark.asyncio
-async def test_pulse_falls_back_per_tile_when_the_batch_fails():
+async def test_pulse_falls_back_per_tile_when_the_batch_fails(monkeypatch):
     """Degrade a tile, never the strip.
 
     Anti-vacuity control for the test above: if the fallback were removed, a batch
@@ -152,9 +188,10 @@ async def test_pulse_falls_back_per_tile_when_the_batch_fails():
 
     svc._fetch_sparkline = _no_spark
 
+    monkeypatch.setattr(hd, "_PULSE_SYMBOLS", _LICENSED_PULSE)
     tiles = await svc._build_pulse()
-    assert len(tiles) == len(hd._PULSE_SYMBOLS), "a batch failure blanked the strip"
-    assert calls["single"] == len(hd._PULSE_SYMBOLS), "the per-tile fallback did not fire"
+    assert len(tiles) == len(_LICENSED_PULSE), "a batch failure blanked the strip"
+    assert calls["single"] == len(_LICENSED_PULSE), "the per-tile fallback did not fire"
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,11 @@ _RATE_LIMIT_BACKOFF_SECONDS = 10.0
 # These three are the probe. They are the most liquid US listings there are: if a real US
 # session happened, all three are in the payload. A quorum of two tolerates one symbol
 # being halted or renamed without falsely rejecting a genuine session.
+#: A healthy prior session covers nearly all of the latest one — both come from the same
+#: whole-market `batch-eod` call. Well below this is a truncated response, and writing it
+#: would null `previous_close` on every symbol it omits.
+_MIN_PREV_SESSION_COVERAGE = 0.5
+
 _US_SESSION_BELLWETHERS = ("AAPL", "MSFT", "SPY")
 _US_SESSION_QUORUM = 2
 
@@ -459,6 +464,14 @@ class PriceService:
             if not future.done():
                 future.set_result(universe)
             return universe
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips `except Exception`
+            # below. Without this arm the future is never settled and every joiner
+            # parked on `asyncio.shield(...)` waits for the life of the process —
+            # while `finally` has already popped the key, so nothing can recover it.
+            if not future.done():
+                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            raise
         except Exception as e:
             if not future.done():
                 future.set_exception(e)
@@ -583,6 +596,22 @@ class PriceService:
             (r.get("symbol") or "").upper(): _finite(r.get("close"))
             for r in prev_rows
         }
+        # ⚠️ COVERAGE, not just emptiness. The guard below used to fire only when the prior
+        # session was FULLY empty; a truncated one (say 500 of 65,000 rows) passed it, and
+        # every symbol missing from it was then written with `previous_close = NULL` — the
+        # same destructive partial write, just quieter. `batch-eod` is one call for the
+        # whole market, so a healthy prior session covers most of the latest one; anything
+        # far below that is a truncated response, not a real session.
+        coverage = (len(prev_by_symbol) / len(latest)) if latest else 0.0
+        if prev_by_symbol and coverage < _MIN_PREV_SESSION_COVERAGE:
+            logger.error(
+                "price_service: prior session %s covers only %.1f%% of the %d symbols in "
+                "%s (%d rows) — SKIPPING the write rather than nulling previous_close on "
+                "the rest",
+                prev_date, coverage * 100, len(latest), latest_date, len(prev_by_symbol),
+            )
+            return 0
+
         if not prev_by_symbol:
             # 🔴 ABORT rather than write. This upsert replaces the whole row, so writing
             # here would set `previous_close = NULL` on every symbol and DESTROY a good
@@ -623,7 +652,11 @@ class PriceService:
                 "trade_date": row.get("date") or latest_date,
                 "close": close,
                 "previous_close": prev_close if (prev_close or 0) > 0 else None,
-                "previous_trade_date": prev_date if prev_close else None,
+                # Same condition as `previous_close` above. They used to differ — `> 0` vs
+                # truthiness — so a NEGATIVE prior close wrote `previous_close = NULL`
+                # beside a non-null `previous_trade_date`: a row claiming we have
+                # yesterday's session while holding no usable denominator from it.
+                "previous_trade_date": prev_date if (prev_close or 0) > 0 else None,
                 "volume": int(volume) if volume is not None else None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
@@ -645,6 +678,25 @@ class PriceService:
             "%d unlicensed symbols skipped)",
             written, latest_date, prev_date, with_prev, skipped_blocked,
         )
+        # ⚠️ ALSO drop the movers close map. It lives in `market_movers_service`'s OWN
+        # module-level `_cache` under `movers:closes`, so clearing only this module's keys
+        # left it holding the pre-ingest snapshot. Its TTL (3600 s) equals the ingest loop's
+        # period, so whether the post-ingest warm in `main.py` saw the new rows came down to
+        # a few hundred milliseconds of drift — every scanner and every sector strip reads
+        # that map.
+        try:
+            from app.services.market_movers_service import (  # noqa: PLC0415
+                _cache as _movers_cache,
+            )
+
+            _movers_cache.pop("movers:closes", None)
+        except Exception as e:
+            logger.warning(
+                "price_service: could not invalidate the movers close map (%s: %s) — it "
+                "will serve the previous snapshot until its own TTL expires",
+                type(e).__name__, e,
+            )
+
         for key in [k for k in _cache if k.startswith("price:close:")]:
             _cache.pop(key, None)
         return written

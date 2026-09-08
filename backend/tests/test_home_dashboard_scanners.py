@@ -994,3 +994,83 @@ async def test_a_universe_past_fifty_symbols_is_fully_ranked(monkeypatch):
         "averageVolume and isEtf inline, so a fan-out is both a chunking hazard and "
         "N wasted calls"
     )
+
+
+# ── Heavy Traffic: an unknown change is not a flat day ───────────────────────────────
+
+
+def test_volume_rows_drops_a_row_whose_change_is_unknown():
+    """`round(change or 0.0, 2)` printed a fabricated flat day on the Home screen.
+
+    `change_percent` is a non-Optional float on the wire (shipped iOS builds decode a
+    plain `Double`), so an unknown change had nowhere to go but `0.0` — rendered as
+    "0.00%" in the gain colour on a stock that may be down 8%. The universe this reads
+    from states the rule itself: "Callers must skip those rather than treat them as 0.0%"
+    (`market_movers_service.get_universe`), and `_movers_rows` already skipped. This arm
+    was the outlier.
+    """
+    pm = {
+        "GME":  _profile("GME", mc=10e9, avg=10e6, price=24.0, volume=84e6,
+                         changePercentage=3.2),
+        "DARK": _profile("DARK", mc=10e9, avg=10e6, price=50.0, volume=90e6,
+                         changePercentage=None),
+    }
+    rows = _volume_rows(pm)
+
+    assert [r.symbol for r in rows] == ["GME"], (
+        "DARK has the higher RVOL but no usable change — it must be dropped, not "
+        "published at 0.00%"
+    )
+
+
+def test_volume_rows_keeps_a_genuine_flat_day():
+    """Mutation guard: 0.0 is a MEASUREMENT and must survive.
+
+    A truthiness filter would drop it, which is the mirror-image bug.
+    """
+    pm = {
+        "FLAT": _profile("FLAT", mc=10e9, avg=10e6, price=50.0, volume=90e6,
+                         changePercentage=0.0),
+    }
+    rows = _volume_rows(pm)
+
+    assert [r.symbol for r in rows] == ["FLAT"]
+    assert rows[0].change_percent == 0.0
+    assert math.copysign(1.0, rows[0].change_percent) > 0, "signed -0.0 paints green on iOS"
+
+
+def test_volume_rows_still_fills_every_slot_when_a_row_is_dropped():
+    """The filter runs BEFORE the top-N slice, so a dropped row does not cost a slot."""
+    pm = {"DARK": _profile("DARK", mc=10e9, avg=10e6, price=50.0, volume=99e6,
+                           changePercentage=None)}
+    for i in range(6):
+        pm[f"OK{i}"] = _profile(f"OK{i}", mc=10e9, avg=10e6, price=20.0,
+                                volume=(90 - i) * 1e6, changePercentage=1.0 + i)
+
+    rows = _volume_rows(pm)
+
+    assert "DARK" not in [r.symbol for r in rows]
+    assert len(rows) == min(6, svc._SCANNER_ROWS)
+
+
+def test_skeptical_money_drops_a_row_whose_change_is_unknown():
+    """Second half of the same defect as `_volume_rows`, in `_skeptical_money`.
+
+    `"change_percent": change or 0.0` fabricated a flat day for a heavily-shorted name —
+    the class of stock most likely to have moved. Verified against the enrichment loop
+    rather than the formatter, since that is where the quote is read.
+    """
+    import inspect
+    import re
+
+    code = "\n".join(
+        line for line in inspect.getsource(svc.HomeDashboardService).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+    assert not re.search(r'"change_percent":\s*change or 0\.0', code), (
+        "an unknown day-change is published as a confident 0.00%"
+    )
+    assert re.search(r"if change is None:\s*\n\s*continue", code), (
+        "the candidate must be skipped when its change cannot be determined"
+    )

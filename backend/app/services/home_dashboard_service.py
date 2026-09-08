@@ -587,7 +587,7 @@ def _volume_rows(
     both from the profile), keeping only genuinely unusual REAL companies
     (RVOL ≥ 2.0×, not an ETF/fund, marketCap ≥ $300M). Mega-caps at ~1× and
     micro-cap pumps fall out."""
-    scored: List[Tuple[float, str, float, Dict[str, Any]]] = []
+    scored: List[Tuple[float, str, float, float, Dict[str, Any]]] = []
     for symbol, p in profile_map.items():
         if not _is_quality_company(p):
             continue
@@ -597,19 +597,29 @@ def _volume_rows(
         price = _finite_float(p.get("price"))
         if price is None or price <= 0:
             continue
-        scored.append((rvol, symbol, price, p))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    out: List[ScannerRowResponse] = []
-    for i, (rvol, symbol, price, p) in enumerate(scored[:rows]):
         change = _parse_pct(p.get("changePercentage"))
         if change is None:
             change = _parse_pct(p.get("changesPercentage"))
+        if change is None:
+            # Dropped, not published as `0.0`. `change_percent` is a non-Optional float
+            # on the wire (shipped iOS builds decode a plain `Double`), so an unknown
+            # change had nowhere to go but a fabricated flat day — printed in the gain
+            # colour, on the Home screen, for a stock that may be down 8%. The universe
+            # this reads from says so itself: "Callers must skip those rather than treat
+            # them as 0.0%" (`market_movers_service.get_universe`). `_movers_rows` above
+            # already skips; this arm was the outlier. Filtered BEFORE the top-N slice so
+            # the leaderboard still fills every slot.
+            continue
+        scored.append((rvol, symbol, price, change, p))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    out: List[ScannerRowResponse] = []
+    for i, (rvol, symbol, price, change, p) in enumerate(scored[:rows]):
         out.append(ScannerRowResponse(
             rank=i + 1,
             symbol=symbol,
             name=p.get("companyName") or symbol,
             price=round(price, 2),
-            change_percent=round(change or 0.0, 2),
+            change_percent=round(change, 2) + 0.0,
             market_cap=_finite_float(p.get("marketCap")),
             volume_multiple=round(rvol, 1),
         ))
@@ -1269,11 +1279,18 @@ class HomeDashboardService:
             change = _parse_pct(q.get("changesPercentage"))
             if change is None:
                 change = _parse_pct(q.get("changePercentage"))
+            if change is None:
+                # Dropped, not published as `0.0` — the same rule `_volume_rows` and
+                # `_movers_from_universe` follow. `change_percent` is a non-Optional float
+                # on the wire, so an unknown had nowhere to go but a fabricated flat day,
+                # printed in the gain colour beside a real price. Heavily-shorted names
+                # are exactly the ones that move.
+                continue
             enriched.append({
                 "symbol": it["symbol"],
                 "name": q.get("name") or it["symbol"],
                 "price": price_f,
-                "change_percent": change or 0.0,
+                "change_percent": change,
                 "market_cap": market_cap,
                 "short_percent_of_float": it["short_percent_of_float"],
                 "settlement_date": it.get("settlement_date"),

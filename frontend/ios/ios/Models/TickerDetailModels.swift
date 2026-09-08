@@ -921,7 +921,7 @@ enum AnalystRatingType: String, CaseIterable {
     case overweight = "Overweight"
     case equalWeight = "Equal-Weight"
     case neutral = "Neutral"
-    case underperform = "Underpeform"
+    case underperform = "Underperform"
     case sell = "Sell"
     case strongSell = "Strong Sell"
 
@@ -955,9 +955,46 @@ struct AnalystAction: Identifiable {
     let actionType: AnalystActionType
     let date: Date
     let previousRating: AnalystRatingType?
-    let newRating: AnalystRatingType
+    /// `nil` when the backend's grade string maps to none of the known categories.
+    ///
+    /// ⚠️ This used to be non-Optional with a `?? .neutral` at the mapping site, which
+    /// INVENTED an opinion. `_build_actions` emits `newGrade or "N/A"`, and FMP also ships
+    /// labels neither backend table recognises ("mixed", "top pick", "average",
+    /// "mkt perform"). Every one of them rendered as "→ Neutral" and, through
+    /// `groundingLines`, was fed to a credit-charged Cay AI turn as a real rating. The
+    /// backend explicitly refuses that fold — `classify_grade` returns
+    /// `RATING_CATEGORY_UNKNOWN` so an unreadable opinion never reaches the distribution —
+    /// and the actions list was walking straight past its own policy.
+    let newRating: AnalystRatingType?
+    /// What the backend actually said, so an unmapped grade can still be SHOWN verbatim
+    /// rather than hidden or recoloured. Displaying the firm's own word is honest;
+    /// restating it as "Neutral" is not.
+    let newRatingLabel: String
     let previousPriceTarget: Double?
     let newPriceTarget: Double?
+
+    /// `newRatingLabel` defaults to the mapped rating's own wording, so the ~10 preview
+    /// literals below (which build from known enum cases) need no change. Only the
+    /// repository, which holds the backend's raw string, passes it explicitly.
+    init(
+        firmName: String,
+        actionType: AnalystActionType,
+        date: Date,
+        previousRating: AnalystRatingType?,
+        newRating: AnalystRatingType?,
+        newRatingLabel: String? = nil,
+        previousPriceTarget: Double?,
+        newPriceTarget: Double?
+    ) {
+        self.firmName = firmName
+        self.actionType = actionType
+        self.date = date
+        self.previousRating = previousRating
+        self.newRating = newRating
+        self.newRatingLabel = newRatingLabel ?? newRating?.rawValue ?? "—"
+        self.previousPriceTarget = previousPriceTarget
+        self.newPriceTarget = newPriceTarget
+    }
 
     var formattedDate: String {
         TickerDetailFormatters.slashDateFormatter.string(from: date)
@@ -1097,7 +1134,7 @@ struct AnalystRatingsData {
     /// longer license analyst data" is simply not the user's business.
     var sectionAvailable: Bool = true
     let totalAnalysts: Int
-    let updatedDate: Date
+    let updatedDate: Date?
     let consensus: AnalystConsensus
     let targetPrice: Double
     let targetUpside: Double
@@ -1119,7 +1156,8 @@ struct AnalystRatingsData {
     }
 
     var formattedUpdatedDate: String {
-        TickerDetailFormatters.slashDateFormatter.string(from: updatedDate)
+        guard let updatedDate else { return "" }
+        return TickerDetailFormatters.slashDateFormatter.string(from: updatedDate)
     }
 
     /// The analyst facts Cay AI may be told, or **nil when there are none to tell**.
@@ -1173,7 +1211,13 @@ struct AnalystRatingsData {
         if !recentActions.isEmpty {
             lines.append(
                 "Recent: " + recentActions
-                    .map { "\($0.firmName) \($0.actionType.rawValue) to \($0.newRating.rawValue)" }
+                    // compactMap, not map: an action whose grade did not map is OMITTED
+                    // from the AI grounding rather than asserted as "Neutral", mirroring
+                    // the backend's `RATING_CATEGORY_UNKNOWN`.
+                    .compactMap { action in
+                        guard let rating = action.newRating else { return nil }
+                        return "\(action.firmName) \(action.actionType.rawValue) to \(rating.rawValue)"
+                    }
                     .joined(separator: "; ")
             )
         }
@@ -1204,15 +1248,65 @@ struct AnalystEstimatePeriod: Identifiable {
     let isForward: Bool
     let revenue: AnalystEstimateRange
     let eps: AnalystEstimateRange
-    /// Contributing analysts — the honest denominator behind the word "Street".
-    let analystCount: Int
+    /// Contributing analysts, kept SEPARATE per line item.
+    ///
+    /// ⚠️ These used to be collapsed to `max(eps, revenue)` at the repository boundary, and
+    /// that walked straight around the `_MIN_ESTIMATE_ANALYSTS = 2` floor the backend
+    /// applies: AMC's measured shape is `revenue=2, eps=1`, which survives the gate on the
+    /// revenue count and was then rendered as "2 analysts" over an EPS column backed by a
+    /// SINGLE desk. The floor exists precisely so one desk is never called "the Street".
+    let revenueAnalysts: Int
+    let epsAnalysts: Int
+
+    /// The deeper of the two — safe for a heading that covers both columns, never for a
+    /// per-column label.
+    var analystCount: Int { max(revenueAnalysts, epsAnalysts) }
 
     var id: String { fiscalPeriod + date }
 
+    /// ⚠️ Was a private billions-only formatter, and it fabricated zeros. `String(format:
+    /// "$%.1fB", v / 1e9)` renders a real $42M revenue forecast as **"$0.0B"** — beside a
+    /// live analyst count, so it reads as a measurement — and squashes $80M and $149M both
+    /// to "$0.1B", a 25–50% error band. `CompactNumberFormat` tiers T/B/M/K and exists
+    /// because eight such private copies had already grown across the view layer.
+    /// "Jan 2027" — the fiscal period END, which the payload states directly. Preferred
+    /// over an invented "FY2027": fiscal-year NAMING is company-specific (Target names a
+    /// year by when it begins, Walmart by when it ends), so any single rule mislabels half
+    /// the market under a column headed "Fiscal year".
+    var periodEndLabel: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        guard let d = f.date(from: date) else { return fiscalPeriod }
+        let out = DateFormatter()
+        out.locale = Locale(identifier: "en_US_POSIX")
+        out.dateFormat = "MMM yyyy"
+        return out.string(from: d)
+    }
+
     var formattedRevenue: String {
         guard let v = revenue.avg else { return "—" }
-        let bn = v / 1_000_000_000
-        return bn >= 1000 ? String(format: "$%.2fT", bn / 1000) : String(format: "$%.1fB", bn)
+        return "$" + CompactNumberFormat.string(v)
+    }
+
+    /// Per-column analyst counts, or nil where a column is below the "Street" floor.
+    /// "29 analysts", or "rev 21 · eps 19" when the two columns disagree, or "" when both
+    /// are below the floor. Never a single number standing in for both.
+    var analystSummary: String {
+        if revenueAnalysts == epsAnalysts {
+            return revenueAnalysts >= 2 ? "\(revenueAnalysts) analysts" : ""
+        }
+        var parts: [String] = []
+        if let r = revenueAnalystsLabel { parts.append("rev \(r)") }
+        if let e = epsAnalystsLabel { parts.append("eps \(e)") }
+        return parts.joined(separator: " · ")
+    }
+
+    var revenueAnalystsLabel: String? {
+        revenueAnalysts >= 2 ? "\(revenueAnalysts)" : nil
+    }
+    var epsAnalystsLabel: String? {
+        epsAnalysts >= 2 ? "\(epsAnalysts)" : nil
     }
 
     var formattedEPS: String {
@@ -1232,15 +1326,18 @@ extension AnalystRatingsData {
             AnalystEstimatePeriod(
                 fiscalPeriod: "FY2026", date: "2026-09-27", isForward: true,
                 revenue: AnalystEstimateRange(low: 464e9, avg: 477.4e9, high: 490e9),
-                eps: AnalystEstimateRange(low: 8.4, avg: 8.83, high: 9.2), analystCount: 27),
+                eps: AnalystEstimateRange(low: 8.4, avg: 8.83, high: 9.2),
+                revenueAnalysts: 27, epsAnalysts: 27),
             AnalystEstimatePeriod(
                 fiscalPeriod: "FY2027", date: "2027-09-27", isForward: true,
                 revenue: AnalystEstimateRange(low: 500e9, avg: 521.4e9, high: 545e9),
-                eps: AnalystEstimateRange(low: 9.0, avg: 9.57, high: 10.2), analystCount: 29),
+                eps: AnalystEstimateRange(low: 9.0, avg: 9.57, high: 10.2),
+                revenueAnalysts: 29, epsAnalysts: 29),
             AnalystEstimatePeriod(
                 fiscalPeriod: "FY2029", date: "2029-09-27", isForward: true,
                 revenue: AnalystEstimateRange(low: nil, avg: nil, high: nil),
-                eps: AnalystEstimateRange(low: 11.5, avg: 12.34, high: 13.1), analystCount: 8),
+                eps: AnalystEstimateRange(low: 11.5, avg: 12.34, high: 13.1),
+                revenueAnalysts: 12, epsAnalysts: 8),
         ]
         return d
     }()

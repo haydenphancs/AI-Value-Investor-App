@@ -348,9 +348,15 @@ def _build_actions(grades: List[Dict], limit: int = 50) -> List[AnalystAction]:
         except (ValueError, TypeError):
             continue
         if dt < cutoff:
-            break  # Grades are sorted newest-first, so stop once past cutoff
+            # `continue`, not `break`. This assumed FMP returns grades strictly
+            # newest-first while its two siblings — `_compute_actions_summary` and
+            # `_compute_momentum` — iterate the whole list. One out-of-order row therefore
+            # desynchronised two panels on the SAME screen: the Actions list showed a
+            # single row while the summary beside it counted an upgrade AND a downgrade.
+            # The `limit=500` cap already bounds the work, so the early exit bought nothing.
+            continue
         previous = g.get("previousGrade") or None
-        new = g.get("newGrade", "N/A")
+        new = g.get("newGrade") or "N/A"        # present-but-null -> None, not the default
         action_type = _map_action(g.get("action", ""), previous, new)
         try:
             prev_pt = float(g["previousPriceTarget"]) if g.get("previousPriceTarget") is not None else None
@@ -361,7 +367,7 @@ def _build_actions(grades: List[Dict], limit: int = 50) -> List[AnalystAction]:
         except (TypeError, ValueError):
             new_pt = None
         actions.append(AnalystAction(
-            firm_name=g.get("gradingCompany", "Unknown"),
+            firm_name=g.get("gradingCompany") or "Unknown",
             action_type=action_type,
             date=date_str[:10],
             previous_rating=previous,
@@ -440,15 +446,33 @@ class AnalystService:
             n_rev = cls._opt_num(row.get("numAnalystsRevenue"))
             if max(n_eps or 0, n_rev or 0) < _MIN_ESTIMATE_ANALYSTS:
                 continue
+            # ⚠️ THE FLOOR APPLIES PER COLUMN, not to `max()`.
+            #
+            # FMP counts EPS and revenue contributors separately, and they diverge: AMC's
+            # measured shape is `numAnalystsRevenue=2, numAnalystsEps=1`. `max()` keeps
+            # the period — correctly, the revenue column is real — but every column was
+            # then emitted regardless, so the EPS figure was ONE desk's guess rendered in
+            # a card headed "Street Estimates". Worse, `epsAnalystsLabel` correctly
+            # returns nil below the floor, so it appeared with no count beside it at all:
+            # nothing on screen said it was a single opinion.
+            #
+            # `_MIN_ESTIMATE_ANALYSTS` exists precisely so one desk is never called "the
+            # Street". Nulled SERVER-SIDE rather than hidden in the view, so the report
+            # and chat collectors inherit the same rule instead of each re-deriving it.
+            # The `any(...)` check below then drops a period where nothing survived.
+            eps_ok = (n_eps or 0) >= _MIN_ESTIMATE_ANALYSTS
+            rev_ok = (n_rev or 0) >= _MIN_ESTIMATE_ANALYSTS
             period = AnalystEstimatePeriod(
                 fiscal_period=f"FY{raw_date[:4]}",
                 date=raw_date,
                 is_forward=raw_date > cutoff,
-                revenue=cls._range(row, "revenue"),
-                ebitda=cls._range(row, "ebitda"),
-                ebit=cls._range(row, "ebit"),
-                net_income=cls._range(row, "netIncome"),
-                eps=cls._range(row, "eps"),
+                # EBITDA / EBIT / net income are modelled off the revenue line, so they
+                # ride with its count — FMP publishes no separate contributor count.
+                revenue=cls._range(row, "revenue") if rev_ok else None,
+                ebitda=cls._range(row, "ebitda") if rev_ok else None,
+                ebit=cls._range(row, "ebit") if rev_ok else None,
+                net_income=cls._range(row, "netIncome") if rev_ok else None,
+                eps=cls._range(row, "eps") if eps_ok else None,
                 num_analysts_revenue=int(n_rev) if n_rev is not None else None,
                 num_analysts_eps=int(n_eps) if n_eps is not None else None,
             )

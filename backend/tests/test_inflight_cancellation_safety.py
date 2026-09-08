@@ -261,6 +261,60 @@ def test_every_resolve_is_guarded(module):
     )
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_does_not_strand_its_joiners():
+    """The EXECUTABLE proof behind the source rule above. Not a regex — a real hang.
+
+    This exists because the source rule is only as good as its correspondence to runtime
+    behaviour, and the previous version of that rule had none: it matched a `.done()`-guarded
+    `set_exception` that lives inside `except Exception`, an arm `CancelledError` skips.
+
+    Drives the real `price_service._get_universe` — the hottest shared fetch in the app, which
+    Home, the watchlist and the movers strip all block on. A leader is cancelled mid-fetch
+    (a client disconnect, a timeout, a task-group teardown) while a joiner is already parked
+    on `asyncio.shield(future)`. Before the fix the joiner waited forever AND the `finally`
+    had already popped the key, so no later caller could adopt or re-settle it.
+    """
+    from app.services import price_service as ps
+
+    started = asyncio.Event()
+
+    async def _blocks_forever():
+        started.set()
+        await asyncio.sleep(3600)
+        return []
+
+    svc = ps.PriceService()
+    svc._fetch_universe_pages = _blocks_forever
+    ps._cache.clear()
+    ps._inflight.clear()
+    try:
+        leader = asyncio.create_task(svc._get_universe())
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        joiner = asyncio.create_task(svc._get_universe())
+        await asyncio.sleep(0.05)          # let the joiner park on the shared future
+
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        # The joiner must reach SOME terminal state. Cancelled or raising is fine — the
+        # defect is waiting forever on a future nothing will ever settle.
+        try:
+            await asyncio.wait_for(joiner, timeout=2.0)
+        except (asyncio.CancelledError, Exception) as exc:
+            assert not isinstance(exc, asyncio.TimeoutError), (
+                "the joiner is still parked on a future the cancelled leader never "
+                "settled — every request sharing this fetch hangs for the life of the "
+                "process, and the in-flight key is already gone so nothing can recover it"
+            )
+        finally:
+            joiner.cancel()
+    finally:
+        ps._cache.clear()
+        ps._inflight.clear()
+
+
 @pytest.mark.parametrize("module", _INFLIGHT_MODULES)
 def test_cancellation_cannot_leave_a_future_pending(module):
     """A joiner must never be left waiting on something that will never settle.
@@ -290,15 +344,40 @@ def test_cancellation_cannot_leave_a_future_pending(module):
         pytest.skip(f"{module} does not create shared awaitables")
 
     if creates_future:
+        # Two valid shapes, and the previous version of this check conflated them:
+        #
+        #   (a) an explicit `except asyncio.CancelledError` / `except BaseException` arm, or
+        #   (b) a `finally:` block that settles a still-pending future — `finally` DOES run
+        #       on cancellation, so this is equally correct and is what 10 of the services
+        #       here actually use.
+        #
+        # ⚠️ The old rule accepted a third thing, and that made the whole file vacuous:
+        #
+        #     re.search(r"if not \w*fut\w*\.done\(\):\s*\n\s*\w*fut\w*\.set_...", src)
+        #
+        # unanchored, so it matched that line inside `except Exception` — an arm
+        # `CancelledError` skips, because it is a `BaseException`. Every leader has that
+        # line, so the assertion passed for all of them, including the three that genuinely
+        # strand their joiners. Anchoring shape (b) to the `finally` BODY is the whole fix;
+        # `test_a_cancelled_leader_does_not_strand_its_joiners` is the executable proof.
+        settles_in_finally = any(
+            re.search(r"if not \w+\.done\(\):", body)
+            and re.search(r"\.set_(result|exception)\(", body)
+            for body in re.findall(r"finally:\n((?:[ \t]+[^\n]*\n)+)", src)
+        )
         settles = (
             "except asyncio.CancelledError" in src
             or "except BaseException" in src
-            # A `finally` (or any tail) that resolves a still-pending future covers it too.
-            or re.search(r"if not \w*fut\w*\.done\(\):\s*\n\s*\w*fut\w*\.(set_exception|set_result|cancel)\(", src)
+            or settles_in_finally
         )
         assert settles, (
-            f"{module} creates a shared future but has no path that resolves it on "
-            f"CancelledError — joiners hang for the life of the process"
+            f"{module} creates a shared future but settles it only in `except Exception`, "
+            f"an arm `CancelledError` skips. A cancelled leader (client disconnect, "
+            f"timeout, task-group teardown) leaves every joiner parked on "
+            f"`asyncio.shield(future)` waiting for the life of the process, and "
+            f"`finally: pop` has already removed the key so no later caller can adopt or "
+            f"re-settle it. Add the arm (index_service.py) or settle in `finally` "
+            f"(auth_methods_service.py)."
         )
 
     if creates_task and not creates_future:

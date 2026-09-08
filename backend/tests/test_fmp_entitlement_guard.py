@@ -154,3 +154,42 @@ def test_every_substitution_names_a_blocked_path() -> None:
     """A substitution hint for a path that is not blocked is stale documentation."""
     stale = set(SUBSTITUTION) - set(BLOCKED_PATHS)
     assert not stale, f"SUBSTITUTION describes non-blocked path(s): {sorted(stale)}"
+
+
+# ── FX pairs quoted in a minor ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("symbol", [
+    "USDCAD", "USDCHF", "USDMXN", "USDSEK", "USDNOK", "USDTRY", "USDZAR",
+    "EURNOK", "EURCHF", "EURPLN", "GBPAUD", "AUDNZD", "CADJPY",
+])
+def test_pairs_quoted_in_a_minor_are_blocked(symbol):
+    """The suffix rule is QUOTE-currency-only and missed every one of these.
+
+    `BLOCKED_SYMBOL_SUFFIXES` lists USD/JPY/EUR/GBP/CNY, so `USDCAD` — which ends in
+    "CAD" — passed the guard and went out as a live request, answered 402, and surfaced
+    as an untyped upstream failure instead of a clean "not licensed" skip. Widening the
+    suffix set is the wrong repair: it would start matching real six-letter tickers by
+    their last three characters. Both halves being ISO-4217 is the exact test.
+    """
+    assert is_blocked_symbol(symbol) is True
+
+
+@pytest.mark.parametrize("symbol", [
+    "AAPL", "GOOGL", "BRK-B", "SHOP.TO", "NVDA", "MSFT", "ASML", "TSM",
+])
+def test_the_fx_rule_does_not_touch_real_equities(symbol):
+    assert is_blocked_symbol(symbol) is False
+
+
+def test_crypto_pairs_still_rely_on_the_suffix_rule():
+    """BTC/ETH/SOL are not ISO-4217, so the both-halves test cannot see them.
+
+    Pinned because deleting the suffix rule in favour of the "tighter" FX one would
+    silently unblock every crypto pair.
+    """
+    from app.integrations.fmp_entitlements import _is_fx_pair
+
+    assert _is_fx_pair("BTCUSD") is False
+    assert is_blocked_symbol("BTCUSD") is True
+    assert is_blocked_symbol("ETHUSD") is True

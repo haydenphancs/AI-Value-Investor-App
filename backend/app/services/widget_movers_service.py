@@ -284,10 +284,17 @@ class _MarketContext:
             return None, None
         if not self.industry_available:
             return name, None
+        # FAIL CLOSED on an unknown date. This used to short-circuit on the first clause,
+        # so a source that stamped no date disarmed the whole gate silently — which is
+        # exactly what happened when FMP's dated snapshot (402, outside the licence) was
+        # replaced by screener-derived rows carrying no `date` at all. The gate then read
+        # green while printing a previous session's move as "today", the one sentence its
+        # docstring says it exists to prevent. Same posture as `industry_available`: a
+        # thing we cannot verify is not a thing we assert.
         if (
-            self.industry_snapshot_date
-            and self.session_date
-            and self.industry_snapshot_date != self.session_date
+            not self.industry_snapshot_date
+            or not self.session_date
+            or self.industry_snapshot_date != self.session_date
         ):
             return name, None
         return name, self.industry_changes.get(name.strip().lower())
@@ -379,6 +386,26 @@ def deterministic_reason(change_percent: Optional[float], z: Optional[float]) ->
         f"{'Up' if pct > 0 else 'Down'} {abs(pct):.1f}% today — "
         f"about {z:.1f}× its normal daily range."
     )
+
+
+def _group_change(row: Dict[str, Any]) -> Optional[float]:
+    """The sector/industry move on a performance row, or None when there isn't one.
+
+    Written out rather than `finite(r.get("changesPercentage") or r.get("averageChange"))`
+    because `0.0` is FALSY: a group that closed exactly flat fell through to the
+    second key, which the entitled substitute
+    (`market_movers_service._group_performance`) does not emit at all, so `finite(None)`
+    returned None and the group was DROPPED from the context instead of reported flat.
+    Reachable: the substitute publishes `round(mean, 4)`, and a small industry can land
+    on 0.0000 exactly. A missing group silently removes it from attribution — the same
+    class of "absent reads as no-signal" bug the `*_available` flags below exist for.
+    """
+    for key in ("changesPercentage", "averageChange"):
+        if key in row:
+            value = finite(row.get(key))
+            if value is not None:
+                return value
+    return None
 
 
 def _same_sign(a: Optional[float], b: Optional[float]) -> bool:
@@ -927,6 +954,13 @@ class WidgetMoversService:
             # `_latest_perf_snapshot` deliberately walks back to the last trading day —
             # so on a Monday morning these are legitimately FRIDAY's numbers. Keep the
             # date; `industry_for` refuses to print a cross-session comparison as "today".
+            #
+            # `date` comes from `_group_performance`, which stamps the session its members'
+            # changes actually describe. It is NOT `session_trading_date()` and NOT the
+            # close snapshot's `trade_date` — either alone is wrong half the time. The
+            # producer derives it the same way `_pick_denominator` chooses: a price that
+            # has moved off the stored close belongs to the live session; a price still
+            # equal to it means the change is the one that close ended.
             snap_date: Optional[str] = None
             for r in rows or []:
                 if snap_date is None:
@@ -934,7 +968,7 @@ class WidgetMoversService:
                     if d:
                         snap_date = d[:10]
                 name = str(r.get("industry") or "").strip().lower()
-                chg = finite(r.get("changesPercentage") or r.get("averageChange"))
+                chg = _group_change(r)
                 if name and chg is not None:
                     out[name] = chg
             return out, snap_date
@@ -977,7 +1011,7 @@ class WidgetMoversService:
             out: List[Tuple[str, float]] = []
             for r in rows or []:
                 name = str(r.get("sector") or "").strip()
-                chg = finite(r.get("changesPercentage") or r.get("averageChange"))
+                chg = _group_change(r)
                 if name and chg is not None:
                     out.append((name, chg))
             return out

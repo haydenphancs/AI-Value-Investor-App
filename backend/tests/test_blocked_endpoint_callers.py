@@ -150,3 +150,55 @@ def test_the_blocked_wrappers_are_kept_not_deleted():
             "wrapper is what makes buying the package a one-line change"
         )
         assert inspect.iscoroutinefunction(getattr(FMPClient, wrapper))
+
+
+# ── An unlicensed dataset must not reach the LLM as an empty answer ─────────────────
+
+
+def test_the_dividend_history_tool_is_omitted_while_the_dataset_is_unlicensed():
+    """An empty payload and "no such data" are indistinguishable to a model.
+
+    `FMPClient.get_dividend_history` swallows the entitlement exception and returns `[]`,
+    so `fetch_dividend_history` handed Gemini `{"dividends": []}` with no error marker.
+    The only honest reading of that is "this company has never paid a dividend" — and a
+    20-credit report could then assert it about KO, JNJ or PG. Stage A is capped at four
+    tool rounds, so one was also being spent on a call guaranteed to return nothing.
+    """
+    from app.services.agents.fmp_tools import build_fmp_tool_declarations
+
+    names = [d.name for d in build_fmp_tool_declarations().function_declarations]
+
+    if entitlement_error("dividends") is None:
+        assert "fetch_dividend_history" in names, (
+            "the package is licensed again — the tool must come back with no code change"
+        )
+    else:
+        assert "fetch_dividend_history" not in names
+
+
+@pytest.mark.asyncio
+async def test_the_resolver_marks_the_refusal_explicitly_if_it_is_ever_reached():
+    """Belt-and-braces for a cached tool list or a hand-built call.
+
+    `{"error": "not_licensed"}` is the difference between "we are not allowed to look"
+    and "there is nothing to find".
+    """
+    from unittest.mock import MagicMock
+
+    from app.services.agents.fmp_tools import build_tool_handlers
+
+    if entitlement_error("dividends") is not None:
+        handlers = build_tool_handlers(MagicMock())
+        out = await handlers["fetch_dividend_history"]({"ticker": "KO"})
+        assert out.get("error") == "not_licensed"
+        assert out.get("dividends") == []
+
+
+def test_the_gate_reads_the_manifest_rather_than_a_hardcoded_flag():
+    """Same re-enable contract as `analyst_section_available` — the manifest is the truth."""
+    import inspect as _inspect
+
+    from app.services.agents import fmp_tools
+
+    src = _inspect.getsource(fmp_tools._dividend_history_licensed)
+    assert 'entitlement_error("dividends")' in src

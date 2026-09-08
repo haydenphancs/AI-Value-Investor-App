@@ -307,7 +307,30 @@ BLOCKED_COMMODITY_SYMBOLS: FrozenSet[str] = frozenset({
 
 # Crypto pairs (BTCUSD, ETHUSD, ...) and FX pairs (EURUSD, USDJPY, ...) are both blocked.
 # Anything ending in a major fiat code that is not a known equity is unavailable.
+#
+# This suffix rule alone is quote-currency-only, so it misses every pair QUOTED in a
+# minor: USDCAD, USDCHF, USDMXN, USDSEK, EURNOK all end in a code that is not listed and
+# sailed straight through the guard to a live 402. Widening the suffix set is the wrong
+# repair — it would start matching real 6-letter tickers by their last three characters.
+# `_FX_CODES` below is used for an exact BOTH-HALVES test instead.
 BLOCKED_SYMBOL_SUFFIXES: FrozenSet[str] = frozenset({"USD", "JPY", "EUR", "GBP", "CNY"})
+
+#: ISO-4217 codes FMP quotes as FX pairs. A 6-character symbol whose FIRST three and LAST
+#: three are both in this set is a currency pair — a far tighter test than a suffix match,
+#: which is why it can be applied to the base currency without risking a real ticker.
+#: Crypto pairs are NOT here (BTC/ETH/SOL are not ISO-4217); they stay on the suffix rule.
+_FX_CODES: FrozenSet[str] = frozenset({
+    "USD", "EUR", "JPY", "GBP", "AUD", "NZD", "CAD", "CHF", "CNY", "CNH", "HKD",
+    "SGD", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "RON", "TRY", "RUB", "ZAR",
+    "MXN", "BRL", "CLP", "COP", "ARS", "PEN", "INR", "IDR", "KRW", "TWD", "THB",
+    "PHP", "MYR", "VND", "ILS", "SAR", "AED", "QAR", "KWD", "BHD", "EGP", "NGN",
+    "KES", "MAD", "ISK", "UAH", "PKR", "BDT", "LKR",
+})
+
+
+def _is_fx_pair(s: str) -> bool:
+    """True for a 6-character ISO-4217/ISO-4217 pair such as ``USDCAD``."""
+    return len(s) == 6 and s[:3] in _FX_CODES and s[3:] in _FX_CODES
 
 # Endpoints where a symbol is looked up as market data, so symbol-level blocking bites.
 # Deliberately narrow: `profile` accepts an index symbol and simply returns [], and
@@ -325,6 +348,13 @@ def is_blocked_symbol(symbol: Optional[str]) -> bool:
     """
     if not symbol:
         return False
+    if not isinstance(symbol, str):
+        # This runs BEFORE the `try` in `_make_request`, so an `AttributeError` here escapes
+        # as an untyped exception rather than `FMPNotEntitledException` — and
+        # `classify_exception` then mislabels it `REPORT_GENERATION_FAILED` (a 500-class
+        # internal error) for what is really a caller passing the wrong type. Refuse the
+        # symbol instead: unknown shape, so we cannot show it is licensed.
+        return True
     s = symbol.strip().upper()
     if not s:
         return False
@@ -335,6 +365,10 @@ def is_blocked_symbol(symbol: Optional[str]) -> bool:
     # A 6-char pair like BTCUSD / EURUSD. Guard on length so a real equity whose
     # ticker merely ends in "USD" is not swept up.
     if len(s) >= 6 and any(s.endswith(x) for x in BLOCKED_SYMBOL_SUFFIXES):
+        return True
+    # Pairs quoted in a minor (USDCAD, USDCHF, USDMXN) end in a code the suffix rule
+    # cannot list without matching real tickers. Both halves being ISO-4217 is exact.
+    if _is_fx_pair(s):
         return True
     return False
 

@@ -32,7 +32,22 @@ class PriceFromFMPFake:
         self._fmp = fmp
 
     async def get_quote(self, symbol: str) -> Dict[str, Any]:
-        """Mirrors `PriceService.get_quote`, including its `{}`-on-miss contract."""
+        """Mirrors `PriceService.get_quote`, including its `{}`-on-miss contract.
+
+⚠️ DELIBERATELY DOES NOT apply `is_blocked_symbol`, unlike the real service.
+
+        That makes this fake more permissive than the thing it stands in for, and the cost
+        is real: every `_PULSE_SYMBOLS` entry (`^GSPC`, `BTCUSD`, `GCUSD`, ...) is blocked
+        at the symbol level, so Home renders ZERO Market Pulse tiles in production while a
+        test driven through here can assert six.
+
+        It stays permissive on purpose. Index, commodity and crypto are blocked wholesale
+        and their screens are Phase 4's job (ETF proxies); filtering here would turn ~34
+        tests across those surfaces red for a gap this fake cannot fix. The honest fix is
+        per-test: drive entitlement-sensitive assertions with LICENSED symbols and state
+        the gap explicitly — see `test_quote_batching.py`'s
+        `test_every_real_pulse_symbol_is_currently_unlicensed`.
+        """
         getter = getattr(self._fmp, "get_stock_price_quote", None)
         if getter is None:
             return {}

@@ -45,13 +45,15 @@ struct AnalystActionCard: View {
                             .font(AppTypography.iconTiny)
                             .foregroundColor(AppColors.textMuted)
 
-                        Text(action.newRating.rawValue)
+                        // Falls back to the firm's own wording when the grade maps to no
+                        // known category — shown verbatim, never restated as "Neutral".
+                        Text(action.newRating?.rawValue ?? action.newRatingLabel)
                             .font(AppTypography.label)
                             .foregroundColor(action.actionType.color)
                     }
                 } else {
                     // For initiated actions, just show new rating
-                    Text(action.newRating.rawValue)
+                    Text(action.newRating?.rawValue ?? action.newRatingLabel)
                         .font(AppTypography.label)
                         .foregroundColor(action.actionType.color)
                 }

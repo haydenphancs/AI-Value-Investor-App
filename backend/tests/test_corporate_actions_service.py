@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 from datetime import date, timedelta
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.services import corporate_actions_service as mod
@@ -377,3 +379,336 @@ def test_the_two_thresholds_stay_an_order_of_magnitude_apart():
     )
     # Above the measured worst noise (1.51e-04), below the smallest real payment (9.14e-04).
     assert 1.51e-4 < mod._DIVIDEND_FACTOR_EPS < 9.14e-4
+
+
+# ── Cache rows are DATA, not a trusted structure ────────────────────────────────────
+
+
+class _FakeTable:
+    """Minimum of the PostgREST builder chain `_db_get` walks."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def select(self, *_a, **_k): return self
+    def eq(self, *_a, **_k): return self
+    def limit(self, *_a, **_k): return self
+
+    def execute(self):
+        return SimpleNamespace(data=self._rows)
+
+
+def _stub_cache_rows(monkeypatch, events):
+    """Make `_db_get` read exactly `events` back out of the cache table."""
+    rows = [{"events": events}]
+    monkeypatch.setattr(
+        "app.database.get_supabase",
+        lambda: SimpleNamespace(table=lambda _n: _FakeTable(rows)),
+    )
+
+
+def _cache_event(**over):
+    ev = {"date": "2024-06-10", "observed": 10.0, "numerator": 10, "denominator": 1}
+    ev.update(over)
+    return ev
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    {"denominator": 0},                        # ZeroDivisionError in `.ratio`
+    {"numerator": 0},
+    {"denominator": -1},
+    {"numerator": "10", "denominator": "1"},   # TypeError in `.ratio`
+    {"numerator": 10.0, "denominator": 1.0},   # float terms are not a named ratio
+    {"numerator": True, "denominator": True},  # bool is an int subclass
+    {"numerator": 10, "denominator": None},    # half a ratio
+    {"numerator": None, "denominator": 2},
+])
+async def test_an_unusable_cached_ratio_degrades_to_unclassified(monkeypatch, bad):
+    """`observed` was validated through `_finite`; the split terms were forwarded raw.
+
+    `AdjustmentEvent.is_split` is only "both are not None", so `{"numerator": 10,
+    "denominator": 0}` read back as a CLASSIFIED split and `.ratio` raised
+    ZeroDivisionError inside the 13F restatement math — uncaught, on a user request.
+    A string pair raised TypeError the same way.
+
+    Dropping the pair is the conservative degradation: an unclassified event ARMS the
+    implausible-share-flow backstop instead of fabricating a share multiplier.
+    """
+    _stub_cache_rows(monkeypatch, [_cache_event(**bad)])
+    svc = mod.CorporateActionsService()
+
+    events = await svc._db_get("AAPL", "split", "2024-01-01", "2024-12-31")
+
+    assert events is not None and len(events) == 1
+    ev = events[0]
+    assert ev.is_split is False, f"{bad} must not read as a classified split"
+    assert ev.ratio is None
+    assert ev.observed == 10.0, "the observed factor is still a real measurement"
+
+
+@pytest.mark.asyncio
+async def test_a_well_formed_cached_ratio_survives(monkeypatch):
+    """Mutation guard: the validation must not reject everything."""
+    _stub_cache_rows(monkeypatch, [_cache_event()])
+    svc = mod.CorporateActionsService()
+
+    events = await svc._db_get("AAPL", "split", "2024-01-01", "2024-12-31")
+
+    assert events is not None and len(events) == 1
+    assert events[0].is_split is True
+    assert events[0].ratio == 10.0
+
+
+# ── The gate itself — the single point of failure for all three 13F writers ──────────
+#
+# `has_unclassified_adjustment` is what decides whether the magnitude backstop runs in
+# `holders_service`, `whale_service._diff_quarters` and `scripts/hydrate_whales`. It had
+# ZERO test coverage: every test that touched the backstop passed `unclassified_action` in
+# as a hand-set literal, so mutating this method's body to `return False` — or inverting
+# it, or switching `kind="split"` to `kind="dividend"` — left the whole suite green while
+# disabling the backstop in production everywhere at once.
+
+
+SPINOFF = [
+    ("2023-01-03", 52.89, 84.89),
+    ("2023-01-04", 55.99, 70.16),   # GE HealthCare, measured factor 1.280866 — unnameable
+]
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_true_for_an_adjustment_it_cannot_name(svc):
+    s, _ = svc(*_bars(SPINOFF))
+    assert await s.has_unclassified_adjustment("AAA", "2022-12-01", "2023-03-31") is True
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_false_for_a_cleanly_classified_split(svc):
+    """The other direction, and the one a constant-`True` mutation would break.
+
+    Asserting only the True case would survive `return True`, which arms the backstop
+    everywhere and silently deletes ~10% of real 13F holder rows.
+    """
+    s, _ = svc()  # TEN_TO_ONE
+    assert await s.has_unclassified_adjustment("AAA", "2024-01-01", "2024-06-30") is False
+
+
+@pytest.mark.asyncio
+async def test_the_gate_is_false_when_nothing_happened(svc):
+    flat = [("2024-05-01", 100.0, 100.0), ("2024-05-02", 101.0, 101.0),
+            ("2024-05-03", 102.0, 102.0)]
+    s, _ = svc(*_bars(flat))
+    assert await s.has_unclassified_adjustment("AAA", "2024-01-01", "2024-06-30") is False
+
+
+@pytest.mark.asyncio
+async def test_the_gate_asks_about_splits_not_dividends(svc):
+    """Pinned because `kind="dividend"` is a one-word mutation that stays green elsewhere.
+
+    The dividend derivation uses a ~4e-4 threshold, so on the split fixture it reports a
+    stream of tiny adjustments and the gate would answer True for every ticker that has
+    ever paid a dividend.
+    """
+    s, fake = svc(*_bars(SPINOFF))
+    await s.has_unclassified_adjustment("AAA", "2022-12-01", "2023-03-31")
+    mod._cache.clear()
+    as_split = await s.get_adjustment_events("AAA", "2022-12-01", "2023-03-31", kind="split")
+    assert len(as_split) == 1 and as_split[0].is_split is False
+
+
+@pytest.mark.asyncio
+async def test_the_gate_shares_the_split_rows_fetch(svc):
+    """"costs no extra fetch" is a load-bearing claim — both writers ask for both."""
+    s, fake = svc(*_bars(SPINOFF))
+    await s.get_split_rows("AAA", "2022-12-01", "2023-03-31")
+    calls_after_first = len(fake.calls)
+
+    await s.has_unclassified_adjustment("AAA", "2022-12-01", "2023-03-31")
+
+    assert len(fake.calls) == calls_after_first, "the gate re-fetched instead of reusing"
+
+
+# ── Effective window: the fetch window is NOT the question being asked ───────────────
+
+
+@pytest.mark.asyncio
+async def test_an_event_outside_the_effective_window_does_not_arm_the_gate(svc):
+    """The over-reach both 13F callers had.
+
+    Holders fetched four quarters (375 days) while narrowing its split RATIO to the single
+    data quarter (91), so T's WBD spin-off of 2025-07-01 kept the gate True for a full year
+    of later quarters. Whale's fetch is 10 days wider than the diffed period, so an event
+    in the previous quarter's last 10 days — ~11% of every diff — flagged this one.
+    """
+    s, _ = svc(*_bars(SPINOFF))  # the unnameable event is dated 2023-01-04
+
+    armed = await s.has_unclassified_adjustment("AAA", "2022-12-01", "2023-03-31")
+    assert armed is True, "control: it IS inside the fetch window"
+
+    narrowed = await s.has_unclassified_adjustment(
+        "AAA", "2022-12-01", "2023-03-31",
+        effective_from="2023-01-31", effective_to="2023-03-31",
+    )
+    assert narrowed is False, "the event predates the period being diffed"
+
+
+@pytest.mark.asyncio
+async def test_the_effective_window_start_is_exclusive(svc):
+    """`from_excl < date <= to_incl`, matching `_quarter_split_ratios` and
+    `_split_ratio_in_window`. An off-by-one here re-attributes an event to the wrong
+    quarter, which is the whole class of bug this parameter exists to close."""
+    s, _ = svc(*_bars(SPINOFF))
+
+    assert await s.has_unclassified_adjustment(
+        "AAA", "2022-12-01", "2023-03-31",
+        effective_from="2023-01-04", effective_to="2023-03-31",
+    ) is False, "an event ON the exclusive start belongs to the PREVIOUS period"
+
+    assert await s.has_unclassified_adjustment(
+        "AAA", "2022-12-01", "2023-03-31",
+        effective_from="2023-01-03", effective_to="2023-01-04",
+    ) is True, "and ON the inclusive end it belongs to this one"
+
+
+def test_the_quarter_effective_window_is_the_quarter_not_the_fetch():
+    from app.services.corporate_actions_service import (
+        effective_window_for_quarter,
+        window_for_quarters,
+    )
+
+    assert effective_window_for_quarter(2026, 2) == ("2026-03-31", "2026-06-30")
+    # The fetch window is deliberately wider — it needs a bar BEFORE the period starts.
+    fetch = window_for_quarters([(2026, 2)])
+    assert fetch is not None and fetch[0] < "2026-03-31"
+
+
+# ── A FAILED derivation must never be persisted as "no corporate action" ────────────
+#
+# The blocker this section exists for. `_derive` degraded to `[]` on four paths, and
+# `get_adjustment_events` then wrote that into `corporate_action_cache` for any CLOSED
+# window. A stored `[]` is BYTE-IDENTICAL to the legitimate "no adjustment here" — the
+# answer to the large majority of queries — so no later query, TTL or DELETE predicate
+# could ever find it again. Migration 159 has no `expires_at` and `_db_get` applies no
+# freshness predicate, so the row is authoritative forever.
+#
+# The damage is not cosmetic: a poisoned row makes `_split_ratio_in_window` yield 1.0 (no
+# restatement) AND `has_unclassified_adjustment` yield False (magnitude backstop
+# disarmed). Both fail OPEN, and every fail-closed handler in `whale_service` /
+# `holders_service` keys on an EXCEPTION — a cached row raises nothing. That reproduces
+# KLAC's 10:1 rendering BlackRock at +$34,275.0M / +901.88%, written into `whale_trades`,
+# which feeds user alerts.
+
+
+class _RecordingDB:
+    def __init__(self):
+        self.writes = []
+
+    async def put(self, sym, kind, from_date, to_date, events):
+        self.writes.append((sym, kind, from_date, to_date, list(events)))
+
+    async def get(self, *a, **k):
+        return None
+
+
+def _degradable(monkeypatch, svc_factory, **fmp_kwargs):
+    """A service whose FMP legs degrade in the requested way, recording every db write."""
+    s, fake = svc_factory(**fmp_kwargs)
+    db = _RecordingDB()
+    monkeypatch.setattr(s, "_db_get", db.get)
+    monkeypatch.setattr(s, "_db_put", db.put)
+    return s, db
+
+
+CLOSED = ("2024-01-01", "2024-06-30")   # ends in the past -> `closed` is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs, why", [
+    ({"full_exc": RuntimeError("429 rate limited")}, "the /full leg rate-limited"),
+    ({"raw_exc": RuntimeError("429 rate limited")}, "the /non-split-adjusted leg failed"),
+])
+async def test_a_failed_leg_writes_nothing_to_the_cache(monkeypatch, svc, kwargs, why):
+    s, db = _degradable(monkeypatch, svc, **kwargs)
+
+    events = await s.get_adjustment_events("AAA", *CLOSED)
+
+    assert events == [], "the public contract still hands callers a list"
+    assert db.writes == [], f"{why}: a degraded derivation was PERSISTED as 'no split'"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_leg_writes_nothing_either(monkeypatch, svc):
+    """The route the exception check structurally cannot see.
+
+    `fmp.get_historical_prices_non_split_adjusted` coerces any non-list response to `[]`,
+    so a 200-with-junk answers "successfully, with nothing" — no exception is raised.
+    """
+    s, db = _degradable(monkeypatch, svc, full=_bars(TEN_TO_ONE)[0], raw=[])
+
+    assert await s.get_adjustment_events("AAA", *CLOSED) == []
+    assert db.writes == []
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_mismatch_writes_nothing_either(monkeypatch, svc):
+    full, raw = _bars(TEN_TO_ONE)
+    wrong = [dict(r, symbol="BBB") for r in raw]
+    s, db = _degradable(monkeypatch, svc, full=full, raw=wrong)
+
+    assert await s.get_adjustment_events("AAA", *CLOSED) == []
+    assert db.writes == []
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_empty_result_IS_still_persisted(monkeypatch, svc):
+    """The anti-over-correction control, and the case the migration exists for.
+
+    "No split in this window" is the answer to the large majority of queries and is worth
+    storing forever. Refusing to cache it would defeat the whole table.
+    """
+    flat = [("2024-05-01", 100.0, 100.0), ("2024-05-02", 101.0, 101.0),
+            ("2024-05-03", 102.0, 102.0)]
+    full, raw = _bars(flat)
+    s, db = _degradable(monkeypatch, svc, full=full, raw=raw)
+
+    assert await s.get_adjustment_events("AAA", *CLOSED) == []
+    assert len(db.writes) == 1
+    assert db.writes[0][4] == [], "an empty list from a REAL derivation must be stored"
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_derivation_is_not_cached_in_memory_either(monkeypatch, svc):
+    """`_EVENTS_TTL_CLOSED` is 6h — long enough to matter on its own."""
+    s, db = _degradable(monkeypatch, svc, full_exc=RuntimeError("429"))
+
+    await s.get_adjustment_events("AAA", *CLOSED)
+    key = f"ca:split:AAA:{CLOSED[0]}:{CLOSED[1]}"
+
+    assert mod._cache_get(key, mod._EVENTS_TTL_CLOSED) is None, (
+        "a failure was cached in-process and will be served as 'no split' for 6 hours"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [
+    {"full_exc": RuntimeError("429")},
+    {"raw_exc": RuntimeError("429")},
+    {"full": _bars(TEN_TO_ONE)[0], "raw": []},
+])
+async def test_the_gate_fails_closed_when_the_derivation_degrades(monkeypatch, svc, kwargs):
+    """`has_unclassified_adjustment` is the SINGLE gate on the 13F magnitude backstop.
+
+    Answering False on a derivation failure disarms it in all three writers at once, and
+    no fail-closed handler catches it because nothing raised.
+    """
+    s, _ = _degradable(monkeypatch, svc, **kwargs)
+
+    assert await s.has_unclassified_adjustment("AAA", *CLOSED) is True
+
+
+@pytest.mark.asyncio
+async def test_the_gate_still_answers_false_on_a_real_clean_split(monkeypatch, svc):
+    """Mutation guard: fail-closed must not become always-closed."""
+    s, _ = _degradable(monkeypatch, svc)   # TEN_TO_ONE, a cleanly classified 10:1
+
+    assert await s.has_unclassified_adjustment("AAA", *CLOSED) is False

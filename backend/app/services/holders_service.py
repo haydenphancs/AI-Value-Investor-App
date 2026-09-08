@@ -25,6 +25,7 @@ from app.services._insider_common import (
     normalize_insider_name,
 )
 from app.services.corporate_actions_service import (
+    effective_window_for_quarter,
     corporate_actions_source,
     recent_quarters,
     window_for_quarters,
@@ -33,6 +34,8 @@ from app.services._whale_common import (
     parse_congress_amount_dollars,
     calc_13f_trade_dollars,
     is_implausible_share_flow,
+    restate_prev_shares_for_split,
+    SPLIT_SUPPRESS,
 )
 from app.utils.period_labels import latest_filed_13f_quarter
 from app.schemas.holders import (
@@ -539,6 +542,45 @@ class HoldersService:
         inst_split_ratio = self._quarter_split_ratios(
             stock_splits, [(data_year, data_quarter)]
         ).get((data_year, data_quarter), 1.0)
+        # Did anything happen IN THE DATA QUARTER that the classifier declined to name?
+        # Only then does the per-holder magnitude backstop apply — see the comment at its
+        # site.
+        #
+        # ⚠️ The fetch window (four quarters) is NOT the question. `inst_split_ratio` just
+        # above is narrowed to the single data quarter, and the gate has to cover the same
+        # span or it fires on rows that have nothing to do with any corporate action. At
+        # 375 days vs 91, T's WBD spin-off of 2025-07-01 kept the gate True through a full
+        # year of later quarters — arming the magnitude backstop that deletes 10.1% of
+        # real holder rows, which is precisely what the gate was introduced to stop.
+        # The wide fetch stays: it shares the cache with `get_split_rows` above.
+        eff_from, eff_to = effective_window_for_quarter(data_year, data_quarter)
+        try:
+            inst_unclassified = await corporate_actions_source(
+                self
+            ).has_unclassified_adjustment(
+                ticker,
+                *(window_for_quarters(recent_quarters(4)) or (None, None)),
+                effective_from=eff_from,
+                effective_to=eff_to,
+            )
+        except Exception as e:
+            # FAIL CLOSED. This used to be `False` ("not suppressing"), which encodes
+            # "we could not check" as "we checked and there is nothing" — house rule #1
+            # at the boolean level. And it is worse than it looks: the split RATIO comes
+            # from the same derivation, so the failure that blinds this probe also leaves
+            # `inst_split_ratio` at 1.0 with no restatement at all. That is exactly the
+            # state that renders BlackRock's KLAC row as +$34,275.0M / +901.88%, so it is
+            # the moment the backstop matters most, not least.
+            #
+            # The cost is bounded and recoverable: for one ticker, on a transient error,
+            # some large rows are withheld. `_whale_common` states the trade-off already —
+            # "a missing bar is recoverable; a fabricated multi-million dollar BOUGHT that
+            # feeds an alert is not."
+            logger.warning(
+                "holders: unclassified-adjustment probe failed for %s (%s: %s) — arming "
+                "the magnitude backstop (fail-closed)", ticker, type(e).__name__, e,
+            )
+            inst_unclassified = True
 
         recent = self._build_recent_activities(
             institutional_holders, insider_trading, insider_roster, current_price,
@@ -546,6 +588,14 @@ class HoldersService:
             daily_prices=daily_prices,
             senate_trades=senate_for_ticker,
             house_trades=house_for_ticker,
+            # 🔴 THESE TWO WERE MISSING. `inst_split_ratio` was computed above and then
+            # DISCARDED — `_build_recent_activities` defaults `split_ratio` to 1.0, so the
+            # restatement never reached the renderer and KLAC's 10:1 still rendered
+            # BlackRock as +$34,275.0M / +901.88% against a true +$71M. The unit test that
+            # covers this calls `_build_institutional_activities` directly with a ratio, so
+            # it passed while the production path had none.
+            split_ratio=inst_split_ratio,
+            unclassified_action=inst_unclassified,
         )
 
         # Build live smart money data
@@ -802,10 +852,12 @@ class HoldersService:
         senate_trades: Optional[List[Dict[str, Any]]] = None,
         house_trades: Optional[List[Dict[str, Any]]] = None,
         split_ratio: float = 1.0,
+        unclassified_action: bool = False,
     ) -> RecentActivitiesSchema:
         # Build institutional activities (all, before truncation)
         all_inst_activities = self._build_institutional_activities(
-            inst_holders, split_ratio=split_ratio
+            inst_holders, split_ratio=split_ratio,
+            unclassified_action=unclassified_action,
         )
         # Flow summary: prefer aggregate data from ALL institutions (not just top 15)
         flow_summary = self._build_institutional_flow_summary(
@@ -860,7 +912,10 @@ class HoldersService:
         )
 
     def _build_institutional_activities(
-        self, holders: List[Dict[str, Any]], split_ratio: float = 1.0
+        self,
+        holders: List[Dict[str, Any]],
+        split_ratio: float = 1.0,
+        unclassified_action: bool = False,
     ) -> List[InstitutionalActivitySchema]:
         """Convert institutional holder analytics into recent activity entries.
 
@@ -894,6 +949,33 @@ class HoldersService:
             prev_shares = max(total_shares - shares_change, 0.0)
             if split_ratio and split_ratio > 0 and split_ratio != 1.0:
                 last_reported = _safe_float(h, "lastSharesNumber", prev_shares)
+                # ⚠️ DIRECT restatement, deliberately NOT `restate_prev_shares_for_split`.
+                #
+                # That helper resolves an ambiguity this caller does not have. It weighs
+                # H0 "the feed is already split adjusted" against H1 "the feed is raw",
+                # which is a real question for `_compute_quarter_flow` and both whale
+                # writers — they diff two INDEPENDENTLY FETCHED quarterly snapshots. Here
+                # `sharesNumber` and `lastSharesNumber` arrive in the SAME row of the same
+                # response, and FMP's own `changeInSharesNumberPercentage` of +901.88% on
+                # BlackRock's KLAC row across the 10:1 is the proof that it does not
+                # restate. H0 is structurally impossible on this input.
+                #
+                # Routing through it anyway was a WRONG-SIGN fabrication, not a rounding
+                # error. A holder that sold 46% across a 10:1 reports last=100,000
+                # curr=540,000, so `ratio_obs` = 5.4: not within 15% of 10, and just under
+                # the 5.5 midpoint — so the helper took its "did not move toward the split"
+                # branch and returned the RAW PRE-SPLIT 100,000. The row rendered
+                # +$39.6M BOUGHT / +440.0% for a holder that actually sold $41.4M.
+                # Anything worse than -45% on a 10:1 (or -25% on a 2:1) landed there.
+                # Symmetrically, a holder whose real move merely exceeded ±15% tripped
+                # `SPLIT_SUPPRESS` and was deleted from the top-15 outright.
+                #
+                # The magnitude backstop cannot cover either: it is gated on
+                # `unclassified_action`, and a 10:1 snaps cleanly, so nothing is
+                # unclassified. And it could not be ungated here — `|change| >= 50% of
+                # shares HELD` is measured against the CURRENT holding, so a legitimate
+                # -46% sell (460k of a restated 1.0M, against 540k held) reads implausible
+                # and would be deleted just the same.
                 prev_shares = max(last_reported * split_ratio, 0.0)
                 shares_change = total_shares - prev_shares
             # Magnitude backstop, INDEPENDENT of whether the split was classified.
@@ -905,11 +987,19 @@ class HoldersService:
             # reproduce exactly the KLAC row this function's docstring describes.
             # `_build_institutional_flow_summary` has had this guard for a while; this
             # per-holder path is the one that never did.
-            if is_implausible_share_flow(shares_change, total_shares):
+            # ⚠️ GATED on `unclassified_action`, NOT on magnitude alone. Ungated, this
+            # threshold drops 10.1% of real 13F holder rows — measured over 1,000 rows
+            # across 10 mega-caps — including Citadel +212% in XOM, UBS -62% and Barclays
+            # -34% in KO, none of which involve a corporate action. It is calibrated for an
+            # AGGREGATE across holders (`_build_institutional_flow_summary` at :1033,
+            # `_compute_quarter_flow` at :1831), where a >50% net move genuinely is
+            # implausible. Per holder, doubling or halving a position is an ordinary
+            # conviction trade — precisely what this section exists to surface.
+            if unclassified_action and is_implausible_share_flow(shares_change, total_shares):
                 logger.warning(
                     "institutional activities: implausible share flow for %s "
-                    "(change=%.0f of %.0f held, split_ratio=%s) — dropping the row rather "
-                    "than rendering a corporate action as a trade",
+                    "(change=%.0f of %.0f held, split_ratio=%s) alongside an UNCLASSIFIED "
+                    "corporate action — dropping the row rather than rendering it as a trade",
                     name, shares_change, total_shares, split_ratio,
                 )
                 continue
@@ -929,9 +1019,16 @@ class HoldersService:
 
             # FMP's percentage is computed off the RAW (pre-split) prior count, so
             # across a split it reports the multiplication — KLAC 10:1 gave +901.88% for
-            # a holder who barely moved. Recompute from the restated basis whenever we
-            # restated it; otherwise keep FMP's value.
-            if split_ratio and split_ratio > 0 and split_ratio != 1.0 and prev_shares > 0:
+            # a holder who barely moved. Compute it from `prev_shares`, which is the
+            # restated basis in a split quarter and FMP's own reconstructed prior count
+            # otherwise, so the percentage always agrees with the dollar figure beside it.
+            #
+            # FMP's field is the FALLBACK, not the primary, and only where the division
+            # is undefined (a brand-new position has no prior count to grow from). It used
+            # to be the primary with a `0.0` default, so a row missing both spellings
+            # published a confident "0.00%" next to a real multi-million-dollar change —
+            # an unknown rendered as a measurement.
+            if prev_shares > 0:
                 change_pct = (total_shares - prev_shares) / prev_shares * 100
             else:
                 change_pct = _safe_float(h, "changeInSharesNumberPercentage",

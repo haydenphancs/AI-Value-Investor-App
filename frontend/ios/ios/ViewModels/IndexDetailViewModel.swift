@@ -230,7 +230,7 @@ class IndexDetailViewModel: ObservableObject {
                     print("✅ [IndexDetailVM] Removed \(indexSymbol) from watchlist")
                 } else {
                     try await APIClient.shared.request(
-                        endpoint: .addToWatchlist(stockId: indexSymbol)
+                        endpoint: .addToWatchlist(stockId: indexSymbol, assetType: "index")
                     )
                     print("✅ [IndexDetailVM] Added \(indexSymbol) to watchlist")
                 }

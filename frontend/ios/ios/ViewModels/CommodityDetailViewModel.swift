@@ -593,7 +593,7 @@ class CommodityDetailViewModel: ObservableObject {
                     print("✅ [CommodityDetailVM] Removed \(commoditySymbol) from watchlist")
                 } else {
                     try await apiClient.request(
-                        endpoint: .addToWatchlist(stockId: commoditySymbol)
+                        endpoint: .addToWatchlist(stockId: commoditySymbol, assetType: "commodity")
                     )
                     print("✅ [CommodityDetailVM] Added \(commoditySymbol) to watchlist")
                 }

@@ -176,3 +176,48 @@ def uses_coingecko_price(symbol: Optional[str]) -> bool:
     # correct, and wrong the moment that coin depegs. FX is blocked on FMP and has no
     # licensed substitute, so it must stay absent rather than borrow a lookalike.
     return not _is_fx_pair(str(symbol or "").strip().upper())
+
+
+def canonical_stored_symbol(symbol: Optional[str], asset_type: Optional[str] = None) -> str:
+    """The form a symbol must be PERSISTED in, so it is never ambiguous later.
+
+    ⚠️ A bare coin ticker is genuinely ambiguous and the app knows it: `search_stocks`
+    deliberately returns BOTH rows for "BTC" — "Bitcoin" from `_CRYPTO_NAMES` and
+    "Grayscale Bitcoin Mini Trust ETF" from FMP — because each of BTC/ETH/SOL is also a
+    real US listing. Both used to be stored as the identical string "BTC", after which
+    nothing downstream could tell which the user meant, and the price shown was whichever
+    source the routing happened to pick.
+
+    Seven of the sixteen bare symbols collide with live securities:
+        BTC/ETH -> Grayscale mini-trust ETFs, XRP -> Bitwise ETF (AMEX)
+        LTC -> LTC Properties (a REIT), BCH -> Banco de Chile, ATOM -> Atomera (NASDAQ)
+
+    Resolution: COINS are stored in the PAIR form ("BTCUSD"), which is what
+    `uses_coingecko_price` already routes to CoinGecko, leaving the bare form to mean the
+    listed security. `CryptoSymbol.bare()` on iOS and `_normalize_crypto_symbol` on the
+    backend both already accept either form, so nothing downstream needs to change.
+
+    `asset_type` is the client's own statement of intent and wins when it is given. When
+    it is absent — an older build that predates this field — a bare symbol that names a
+    coin we can price is resolved toward the COIN, because that is what the app's own
+    conventions say it means: search lists the coin first for an exact match, the crypto
+    screen's star writes the bare form, and `_BARE_CRYPTO_SYMBOLS` classifies it as crypto.
+    """
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return s
+    declared = (asset_type or "").strip().lower()
+
+    # An explicit non-crypto declaration is decisive: this is the listed security.
+    if declared and declared != "crypto":
+        return s
+
+    if declared == "crypto" or s in _BARE_CRYPTO_SYMBOLS:
+        # Already a pair (or an unrelated symbol) — leave it alone.
+        if s.endswith("USD") and len(s) > 3:
+            return s
+        from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+
+        if s in SYMBOL_TO_COINGECKO_ID:
+            return f"{s}USD"
+    return s

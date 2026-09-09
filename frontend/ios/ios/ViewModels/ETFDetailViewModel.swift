@@ -428,7 +428,7 @@ class ETFDetailViewModel: ObservableObject {
                     print("✅ [ETFDetailVM] Removed \(etfSymbol) from watchlist")
                 } else {
                     try await APIClient.shared.request(
-                        endpoint: .addToWatchlist(stockId: etfSymbol)
+                        endpoint: .addToWatchlist(stockId: etfSymbol, assetType: "etf")
                     )
                     print("✅ [ETFDetailVM] Added \(etfSymbol) to watchlist")
                 }

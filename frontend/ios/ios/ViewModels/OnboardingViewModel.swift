@@ -171,7 +171,7 @@ final class OnboardingViewModel: ObservableObject {
 
     private func add(_ symbol: String) async {
         do {
-            try await apiClient.request(endpoint: .addToWatchlist(stockId: symbol))
+            try await apiClient.request(endpoint: .addToWatchlist(stockId: symbol, assetType: nil))
         } catch {
             // Intentionally non-fatal, and deliberately NOT rolled back in the UI: the
             // user's intent is recorded locally, and un-checking a chip they just

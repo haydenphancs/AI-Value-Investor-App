@@ -1388,7 +1388,7 @@ struct AddAssetSheet: View {
         Task { @MainActor in
             do {
                 try await APIClient.shared.request(
-                    endpoint: .addToWatchlist(stockId: result.ticker)
+                    endpoint: .addToWatchlist(stockId: result.ticker, assetType: result.type)
                 )
                 print("[AddAsset] ✅ Added \(result.ticker) to watchlist")
                 // Watchlist add succeeded — also push the ticker into the

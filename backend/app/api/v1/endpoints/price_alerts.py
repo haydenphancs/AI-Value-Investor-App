@@ -36,6 +36,7 @@ from app.services.price_alert_service import (
     PriceAlertUnavailable,
     get_price_alert_service,
 )
+from app.services.asset_class import canonical_stored_symbol
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,18 @@ async def create_price_alert(
     seeds it on the next cycle. Refusing to create an alert because a quote call blipped
     would be a much worse trade.
     """
+    # Canonicalise the ticker before the seed quote AND before the row is written, using
+    # the asset_type the client already sends. A bare coin ticker is ambiguous — "BTC" is
+    # both Bitcoin and the Grayscale ETF — so an alert stored bare would be evaluated by
+    # the sweeper against whichever the price routing picked, not the one the user was
+    # looking at. See `asset_class.canonical_stored_symbol`.
+    _raw_ticker = request.ticker
+    request.ticker = canonical_stored_symbol(request.ticker, request.asset_type)
+    if request.ticker != str(_raw_ticker or "").upper().strip():
+        logger.info(
+            "price alerts: normalised %s -> %s (asset_type=%s)",
+            _raw_ticker, request.ticker, request.asset_type,
+        )
     seed = None
     try:
         quotes = await price_source().get_quotes_list([request.ticker.upper()])

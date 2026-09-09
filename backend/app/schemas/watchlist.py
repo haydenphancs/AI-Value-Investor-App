@@ -14,6 +14,14 @@ class WatchlistItemResponse(BaseModel):
 
 class AddToWatchlistRequest(BaseModel):
     stock_id: str  # ticker symbol - frontend sends as "stock_id"
+    # What the CLIENT says this is ("crypto" / "stock" / "etf" / ...). Optional so the
+    # currently-shipped build, which does not send it, keeps working.
+    #
+    # It exists to disambiguate a bare coin ticker: search deliberately returns BOTH
+    # "BTC — Bitcoin" and "BTC — Grayscale Bitcoin Mini Trust ETF", and without this the
+    # two were stored as the same string and nothing downstream could tell them apart.
+    # See `asset_class.canonical_stored_symbol`.
+    asset_type: Optional[str] = None
 
 
 class RemoveFromWatchlistRequest(BaseModel):

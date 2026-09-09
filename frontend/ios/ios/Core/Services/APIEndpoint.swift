@@ -271,7 +271,15 @@ enum APIEndpoint: Sendable {
 
     // MARK: - Watchlist
     case getWatchlist
-    case addToWatchlist(stockId: String)
+    /// `assetType` disambiguates a bare coin ticker at the WRITE boundary.
+    ///
+    /// Search deliberately returns BOTH "BTC — Bitcoin" and "BTC — Grayscale Bitcoin
+    /// Mini Trust ETF", and each of BTC/ETH/SOL/LTC/BCH/ATOM/XRP is also a real US
+    /// listing — so a bare symbol alone cannot say which the user picked. The backend
+    /// stores a declared crypto as the PAIR form ("BTCUSD"), leaving the bare form to
+    /// mean the listed security. Deliberately NOT optional-with-a-default: every call
+    /// site should have to state what it is adding.
+    case addToWatchlist(stockId: String, assetType: String?)
     case removeFromWatchlist(stockId: String)
 
     // MARK: - Tracking
@@ -970,8 +978,8 @@ enum APIEndpoint: Sendable {
                 threshold: threshold, isActive: isActive, repeatMode: repeatMode
             )
 
-        case .addToWatchlist(let stockId):
-            return AddToWatchlistRequest(stockId: stockId)
+        case .addToWatchlist(let stockId, let assetType):
+            return AddToWatchlistRequest(stockId: stockId, assetType: assetType)
 
         case .completeLearnItem(_, let key), .uncompleteLearnItem(_, let key):
             return CompleteLearnItemRequest(key: key)
@@ -1490,6 +1498,10 @@ nonisolated struct DeviceRegisterRequestBody: Encodable, Sendable {
 
 nonisolated struct AddToWatchlistRequest: Encodable, Sendable {
     let stockId: String
+    /// Omitted from the JSON when nil, so the body is byte-identical to the old one for
+    /// callers that genuinely cannot say (the backend then resolves a bare coin ticker
+    /// toward the coin, matching the app's own search ordering).
+    let assetType: String?
 }
 
 nonisolated struct RemoveFromWatchlistRequest: Encodable, Sendable {

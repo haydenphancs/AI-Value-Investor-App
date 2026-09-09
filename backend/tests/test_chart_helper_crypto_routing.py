@@ -120,7 +120,14 @@ async def test_an_upstream_error_returns_empty_rather_than_propagating(monkeypat
         async def get_market_chart(self, *a, **kw):
             raise RuntimeError("coingecko down")
 
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: _Boom())
+    from app.integrations import coingecko as _cg
+    from app.services import crypto_service as _cs
+
+    async def _boom(_self, *a, **k):
+        raise RuntimeError("coingecko down")
+
+    monkeypatch.setattr(_cg.CoinGeckoClient, "get_market_chart", _boom)
+    _cs._cache.clear()
     out = await chart_helper._fetch_crypto_chart_data("BTCUSD", "3M", "daily")
     assert out == [], "a CoinGecko failure must degrade to an empty chart, not raise"
 
@@ -128,10 +135,12 @@ async def test_an_upstream_error_returns_empty_rather_than_propagating(monkeypat
 @pytest.mark.asyncio
 async def test_the_equity_path_never_touches_coingecko(monkeypatch):
     """Anti-vacuity: AAPL must still go to FMP."""
-    def _explode():
+    from app.integrations import coingecko as _cg
+
+    async def _explode(_self, *a, **k):
         raise AssertionError("an equity symbol reached the CoinGecko branch")
 
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", _explode)
+    monkeypatch.setattr(_cg.CoinGeckoClient, "get_market_chart", _explode)
 
     calls = []
 
@@ -154,16 +163,37 @@ async def test_the_equity_path_never_touches_coingecko(monkeypatch):
 # These drive the real function instead.
 
 class _RecordingCoinGecko:
+    """Records the upstream call.
+
+    ⚠️ Patched onto `CoinGeckoClient.get_market_chart` at the CLASS level, not onto
+    `get_coingecko_client`. The crypto chart path now goes through
+    `crypto_service._cg_history` — the CACHED reader — which holds its own client
+    instance captured in `CryptoService.__init__`, so replacing the factory function
+    would not intercept it and the call would escape to the network.
+    """
+
     def __init__(self, rows=None):
         self.calls = []
         self._rows = rows if rows is not None else [
             [1_757_000_000_000, 79_000.0], [1_757_000_300_000, 79_100.0],
         ]
 
-    async def get_market_chart(self, base, days, interval=None):
-        self.calls.append((base, days, interval))
-        return {"prices": self._rows,
-                "total_volumes": [[ts, 1.0] for ts, _ in self._rows]}
+    def install(self, monkeypatch):
+        from app.integrations import coingecko as _cg
+
+        recorder = self
+
+        async def _spy(_self, base, days, interval=None):
+            recorder.calls.append((base, days, interval))
+            return {"prices": recorder._rows,
+                    "total_volumes": [[ts, 1.0] for ts, _ in recorder._rows]}
+
+        monkeypatch.setattr(_cg.CoinGeckoClient, "get_market_chart", _spy)
+        # The cached reader would otherwise serve a previous test's rows and record zero
+        # calls, making every assertion below vacuous.
+        from app.services import crypto_service as _cs
+        _cs._cache.clear()
+        return self
 
 
 class _ExplodingFMP:
@@ -178,8 +208,7 @@ class _ExplodingFMP:
 @pytest.mark.parametrize("range_code", ["1D", "1W", "3M", "1Y", "5Y", "ALL"])
 async def test_a_crypto_pair_never_reaches_fmp_on_any_range(monkeypatch, range_code):
     """The regression: every one of these raised FMPNotEntitledException."""
-    cg = _RecordingCoinGecko()
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+    cg = _RecordingCoinGecko().install(monkeypatch)
 
     rows = await fetch_chart_data(_ExplodingFMP(), "BTCUSD", range_code, None,
                                   extended_hours=True)
@@ -191,8 +220,7 @@ async def test_a_crypto_pair_never_reaches_fmp_on_any_range(monkeypatch, range_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("range_code,expected_days", [("1D", 1), ("1W", 7)])
 async def test_intraday_ranges_ask_for_their_own_window(monkeypatch, range_code, expected_days):
-    cg = _RecordingCoinGecko()
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+    cg = _RecordingCoinGecko().install(monkeypatch)
     await fetch_chart_data(_ExplodingFMP(), "BTCUSD", range_code, None)
     base, days, interval = cg.calls[-1]
     assert base == "BTC", f"CoinGecko takes the BARE base, got {base!r}"
@@ -206,8 +234,7 @@ async def test_long_ranges_take_the_daily_series_not_seven_days_of_hourly(monkey
     """The misrouting bug, asserted behaviourally rather than by source text."""
     from app.config import settings
 
-    cg = _RecordingCoinGecko()
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+    cg = _RecordingCoinGecko().install(monkeypatch)
     await fetch_chart_data(_ExplodingFMP(), "BTCUSD", range_code, None)
     _base, days, interval = cg.calls[-1]
     assert interval == "daily", f"{range_code} must ask for DAILY bars, got {interval!r}"
@@ -218,10 +245,12 @@ async def test_long_ranges_take_the_daily_series_not_seven_days_of_hourly(monkey
 @pytest.mark.asyncio
 async def test_a_bare_ticker_that_is_a_real_security_still_goes_to_fmp(monkeypatch):
     """`BTC` is the Grayscale ETF — it must NOT be routed to CoinGecko."""
-    def _explode():
+    from app.integrations import coingecko as _cg
+
+    async def _explode(_self, *a, **k):
         raise AssertionError("bare BTC (the Grayscale ETF) reached CoinGecko")
 
-    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", _explode)
+    monkeypatch.setattr(_cg.CoinGeckoClient, "get_market_chart", _explode)
 
     hit = []
 
@@ -235,3 +264,47 @@ async def test_a_bare_ticker_that_is_a_real_security_still_goes_to_fmp(monkeypat
 
     await fetch_chart_data(_FMP(), "BTC", "3M", None)
     assert hit, "bare BTC must still be served by FMP"
+
+
+# ── the CACHE is the whole point on this path ───────────────────────────────
+
+@pytest.mark.asyncio
+async def test_repeated_polls_cost_one_upstream_call(monkeypatch):
+    """`CryptoDetailViewModel` polls `/stocks/{t}/chart` every 30 SECONDS while open.
+
+    Calling the CoinGecko client directly here bypassed the cached reader entirely, so a
+    single continuously-open crypto screen was ~2 calls/minute — about 86,000/month
+    against a plan the rest of this codebase sizes as 2.3 calls/minute sustained
+    (100,000/month). A handful of concurrent viewers would have saturated the limiter and
+    starved the price-alert sweeper along with it.
+    """
+    cg = _RecordingCoinGecko().install(monkeypatch)
+    fmp = _ExplodingFMP()
+
+    for _ in range(3):
+        rows = await fetch_chart_data(fmp, "BTCUSD", "1D", None, extended_hours=True)
+        assert rows, "the cached reader must still return the series"
+
+    assert len(cg.calls) == 1, (
+        f"3 polls cost {len(cg.calls)} upstream calls — the cache is being bypassed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_crypto_chart_goes_through_the_cached_reader(monkeypatch):
+    """Structural: the call must be `_cg_history`, not the raw client.
+
+    `_cg_history` is what owns the TTLs (120s intraday / 1h daily) and the `_inflight`
+    dedup; the raw client has only in-flight dedup, which cannot help requests 30s apart.
+    """
+    seen = []
+
+    async def _spy(_self, symbol, days, *, intraday=False):
+        seen.append((symbol, days, intraday))
+        return [{"date": "2026-09-09 10:00:00", "close": 1.0, "volume": 1.0}]
+
+    from app.services.crypto_service import CryptoService
+
+    monkeypatch.setattr(CryptoService, "_cg_history", _spy)
+    await fetch_chart_data(_ExplodingFMP(), "BTCUSD", "1D", None)
+    assert seen == [("BTC", 1, True)], f"did not reach the cached reader: {seen}"

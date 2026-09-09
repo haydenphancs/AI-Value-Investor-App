@@ -916,7 +916,7 @@ class TickerDetailViewModel: ObservableObject {
                     print("✅ TickerDetailVM: Removed \(tickerSymbol) from watchlist")
                 } else {
                     try await APIClient.shared.request(
-                        endpoint: .addToWatchlist(stockId: tickerSymbol)
+                        endpoint: .addToWatchlist(stockId: tickerSymbol, assetType: "stock")
                     )
                     Analytics.shared.track(.watchlistAdded, ["ticker": .string(tickerSymbol)])
                     print("✅ TickerDetailVM: Added \(tickerSymbol) to watchlist")

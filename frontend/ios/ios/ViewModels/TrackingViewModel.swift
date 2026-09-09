@@ -1010,7 +1010,7 @@ class TrackingViewModel: ObservableObject {
 
             do {
                 try await apiClient.request(
-                    endpoint: .addToWatchlist(stockId: result.ticker)
+                    endpoint: .addToWatchlist(stockId: result.ticker, assetType: result.type)
                 )
                 print("[TrackingVM] ✅ Added \(symbol) to watchlist via search star")
             } catch {

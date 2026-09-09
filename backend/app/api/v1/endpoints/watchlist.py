@@ -15,6 +15,7 @@ from app.dependencies import get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.services.tracking_service import invalidate_feed_cache
 from app.services._classification_common import classification_from_profile
+from app.services.asset_class import canonical_stored_symbol
 from app.schemas.watchlist import (
     AddToWatchlistRequest,
     RemoveFromWatchlistRequest,
@@ -57,8 +58,18 @@ async def add_to_watchlist(
     supabase: Client = Depends(get_supabase),
 ):
     """Add a stock to user's watchlist. Fetches company info from FMP."""
-    ticker = request.stock_id.upper().strip()
+    # Canonicalise BEFORE anything else — the duplicate check, the insert and every
+    # later read all key on this string, so normalising later would leave both forms in
+    # the table. Coins are stored as the PAIR form so a bare ticker can keep meaning the
+    # listed security of the same name (BTC = Grayscale's ETF, BTCUSD = Bitcoin).
+    raw = request.stock_id.upper().strip()
+    ticker = canonical_stored_symbol(raw, request.asset_type)
     user_id = user["id"]
+    if ticker != raw:
+        logger.info(
+            "[Watchlist] normalised %s -> %s (asset_type=%s) so the row is unambiguous",
+            raw, ticker, request.asset_type,
+        )
     logger.info("[Watchlist] POST add ticker=%s for user=%s", ticker, user_id)
 
     if not ticker:
@@ -265,7 +276,9 @@ async def remove_from_watchlist(
     supabase: Client = Depends(get_supabase),
 ):
     """Remove a stock from user's watchlist."""
-    ticker = request.stock_id.upper().strip()
+    # Same normalisation as the add path — otherwise a row stored as BTCUSD
+    # could never be removed by a client still sending BTC.
+    ticker = canonical_stored_symbol(request.stock_id, getattr(request, 'asset_type', None))
     user_id = user["id"]
     logger.info("[Watchlist] DELETE ticker=%s for user=%s", ticker, user_id)
 

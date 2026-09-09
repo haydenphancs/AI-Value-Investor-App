@@ -389,8 +389,7 @@ async def _fetch_crypto_chart_data(
     """
     from datetime import date as _date
 
-    from app.services.coingecko_adapter import crypto_base_symbol, market_chart_to_rows
-    from app.integrations.coingecko import get_coingecko_client
+    from app.services.coingecko_adapter import crypto_base_symbol
 
     base = crypto_base_symbol(symbol)
     intraday_days = {"1D": 1, "1W": 7}.get(range_code)
@@ -400,8 +399,19 @@ async def _fetch_crypto_chart_data(
     days = intraday_days if intraday_days else min(daily_range_days(range_code), cap_days)
 
     try:
-        payload = await get_coingecko_client().get_market_chart(
-            base, days, interval=None if intraday_days else "daily"
+        # ⚠️ Go through `_cg_history`, NOT the client directly — it is the CACHED reader
+        # (120s intraday / 1h daily, keyed on symbol+days+granularity, with `_inflight`
+        # dedup). Calling `get_market_chart` here bypassed all of that on the single
+        # hottest crypto path in the app: `CryptoDetailViewModel` polls
+        # `/stocks/{t}/chart` every 30 SECONDS while the screen is open and the default
+        # range is 1D, so one continuously-open screen was ~2 calls/minute — about
+        # 86,000/month against a plan the rest of this codebase sizes as **2.3
+        # calls/minute sustained** (100,000/month). A handful of concurrent viewers would
+        # have saturated the limiter and starved the price-alert sweeper with it.
+        from app.services.crypto_service import get_crypto_service
+
+        rows = await get_crypto_service()._cg_history(
+            base, days, intraday=bool(intraday_days)
         )
     except Exception as e:
         logger.warning(
@@ -409,8 +419,6 @@ async def _fetch_crypto_chart_data(
             symbol, range_code, type(e).__name__, e,
         )
         return []
-
-    rows = market_chart_to_rows(payload, intraday=bool(intraday_days))
     if intraday_days:
         return rows
     # Daily: trim to the requested window (the fetch is capped, not windowed).

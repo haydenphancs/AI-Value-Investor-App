@@ -392,7 +392,7 @@ class CryptoDetailViewModel: ObservableObject {
                     print("✅ [CryptoDetailVM] Removed \(cryptoSymbol) from watchlist")
                 } else {
                     try await apiClient.request(
-                        endpoint: .addToWatchlist(stockId: cryptoSymbol)
+                        endpoint: .addToWatchlist(stockId: cryptoSymbol, assetType: "crypto")
                     )
                     print("✅ [CryptoDetailVM] Added \(cryptoSymbol) to watchlist")
                 }

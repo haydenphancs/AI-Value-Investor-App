@@ -276,7 +276,7 @@ final class UpdatesViewModel: ObservableObject {
             return
         }
         do {
-            try await apiClient.request(endpoint: .addToWatchlist(stockId: ticker))
+            try await apiClient.request(endpoint: .addToWatchlist(stockId: ticker, assetType: nil))
             print("✅ UpdatesVM: Added \(ticker) to watchlist")
             await loadTabs()
         } catch {

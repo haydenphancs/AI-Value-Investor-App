@@ -85,6 +85,87 @@ class PriceFromFMPFake:
         }
 
 
+class FakeCoinGecko:
+    """A CoinGecko stand-in for `price_service`'s crypto quote path.
+
+    WHY THIS EXISTS
+    ---------------
+    Phase 5 routes crypto quotes to CoinGecko instead of dropping them, and
+    `PriceService._crypto_quotes` degrades to `{}` on ANY exception so that a CoinGecko
+    outage cannot break the equity half of a mixed batch. That is right in production and
+    a trap in tests: the hermetic guard raises `NetworkCallInTests`, the degrade swallows
+    it, and a test asserting `== {}` goes green **because the network was blocked** rather
+    than because the code refused the symbol. That exact false pass was observed on
+    `test_blocked_symbols_return_none_without_calling_fmp[BTCUSD]` before this fake existed.
+
+    So: stub it, never let it reach the socket.
+
+        monkeypatch.setattr(price_service_module, "get_coingecko_client",
+                            lambda: FakeCoinGecko({"BTC": 78_813.0}))
+
+    ⚠️ `price_service` imports `get_coingecko_client` INSIDE the method (a function-scoped
+    import), so it resolves from the SOURCE module on every call — patch
+    `app.integrations.coingecko.get_coingecko_client`, not a name on `price_service`.
+    See `.claude/rules/testing.md` on picking the right binding.
+    """
+
+    def __init__(
+        self,
+        prices: Dict[str, float] | None = None,
+        *,
+        fail: bool = False,
+        omit_change: bool = False,
+        null_price: bool = False,
+    ):
+        # Keyed by BARE base symbol ("BTC"), which is what `resolve_coin_id` takes.
+        self.prices = dict(prices or {})
+        self.fail = fail
+        # `omit_change` drops `price_change_24h`, so previousClose has no reference.
+        # `null_price` returns a row whose `current_price` is None — CoinGecko does
+        # this for a coin it lists but cannot currently price. Both exist so the
+        # DEGRADED branches are reachable from a test; without them those guards
+        # pass mutation-testing vacuously.
+        self.omit_change = omit_change
+        self.null_price = null_price
+        self.markets_calls: List[List[str]] = []
+        self.resolve_calls: List[str] = []
+
+    async def resolve_coin_id(self, symbol: str) -> Any:
+        self.resolve_calls.append(symbol)
+        base = (symbol or "").strip().upper()
+        # Mirror the real map's shape: an id per known coin, None for the rest.
+        return f"fake-{base.lower()}" if base in self.prices else None
+
+    async def get_markets(self, symbols: Sequence[str], *, sparkline: bool = False):
+        """ONE call for the batch, exactly like the real client."""
+        if self.fail:
+            raise RuntimeError("coingecko down")
+        self.markets_calls.append(list(symbols))
+        rows = []
+        for sym in symbols:
+            base = (sym or "").strip().upper()
+            price = self.prices.get(base)
+            if price is None:
+                continue
+            # `id` is what the adapter keys on — never `symbol`, because MATIC and POL
+            # share an id. Ordering is deliberately REVERSED against the request to keep
+            # any positional zip honest.
+            row = {
+                "id": f"fake-{base.lower()}",
+                "symbol": base.lower(),
+                "name": f"{base} coin",
+                "current_price": None if self.null_price else price,
+                "price_change_24h": price * 0.01,
+                "price_change_percentage_24h": 1.0,
+                "total_volume": 1_000_000.0,
+                "market_cap": price * 1_000.0,
+            }
+            if self.omit_change:
+                row.pop("price_change_24h")
+            rows.append(row)
+        return list(reversed(rows))
+
+
 class MoversFromFMPFake:
     """Adapts a legacy FMP-shaped test fake to the `market_movers_service` interface.
 

@@ -1576,6 +1576,10 @@ struct VolumeAnalysisDTO: Codable {
     let volumeTrend: String
     let obv: Double
     let moneyFlowIndex: Double
+    /// Optional so a payload predating the field still decodes; absent means the
+    /// old contract, where the number was always real. See money_flow_index_known
+    /// in backend/app/schemas/technical_analysis.py.
+    let moneyFlowIndexKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case currentVolume = "current_volume"
@@ -1584,6 +1588,7 @@ struct VolumeAnalysisDTO: Codable {
         case volumeTrend = "volume_trend"
         case obv
         case moneyFlowIndex = "money_flow_index"
+        case moneyFlowIndexKnown = "money_flow_index_known"
     }
 
     func toDisplayModel() -> VolumeAnalysisData {
@@ -1593,7 +1598,8 @@ struct VolumeAnalysisDTO: Codable {
             avgVolume30d: avgVolume30d,
             volumeTrend: VolumeTrend(rawValue: volumeTrend) ?? .stable,
             obv: obv,
-            moneyFlowIndex: moneyFlowIndex
+            moneyFlowIndex: moneyFlowIndex,
+            moneyFlowIndexKnown: moneyFlowIndexKnown ?? true
         )
     }
 }

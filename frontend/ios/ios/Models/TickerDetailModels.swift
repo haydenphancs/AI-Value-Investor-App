@@ -60,6 +60,13 @@ enum ChartTimeRange: String, CaseIterable {
     case threeMonths = "3M"
     case sixMonths = "6M"
     case oneYear = "1Y"
+    /// Crypto only — see `ChartAssetContext.allowedRanges`.
+    ///
+    /// ⚠️ `ChartTimeRange` is ONE enum shared by all five detail screens, so adding a
+    /// case here puts a 2Y pill on the equity, ETF, index and commodity pickers too —
+    /// and their backends reject "2Y" with a 400. `allowedRanges` is what keeps this
+    /// case off those screens; the two must never be changed apart.
+    case twoYears = "2Y"
     case fiveYears = "5Y"
     case all = "ALL"
 
@@ -73,6 +80,7 @@ enum ChartTimeRange: String, CaseIterable {
         case .threeMonths:  return [.daily, .weekly]
         case .sixMonths:    return [.daily, .weekly]
         case .oneYear:      return [.daily, .weekly, .monthly]
+        case .twoYears:     return [.daily, .weekly, .monthly]
         case .fiveYears:    return [.weekly, .monthly]
         case .all:          return [.weekly, .monthly]
         }
@@ -86,6 +94,7 @@ enum ChartTimeRange: String, CaseIterable {
         case .threeMonths:  return .daily
         case .sixMonths:    return .daily
         case .oneYear:      return .daily
+        case .twoYears:     return .daily
         case .fiveYears:    return .weekly
         case .all:          return .monthly
         }
@@ -99,6 +108,7 @@ enum ChartTimeRange: String, CaseIterable {
         case .threeMonths:  return 4
         case .sixMonths:    return 4
         case .oneYear:      return 4
+        case .twoYears:     return 5
         case .fiveYears:    return 5
         case .all:          return 4
         }
@@ -121,7 +131,9 @@ enum ChartTimeRange: String, CaseIterable {
             return ChartDateFormatters.weekday.string(from: date)            // "Mon"
         case .threeMonths, .sixMonths:
             return ChartDateFormatters.dayMonth.string(from: date)           // "Jan 15"
-        case .oneYear:
+        case .oneYear, .twoYears:
+            // monthYear, not year: 2Y is DAILY bars spanning two calendar years, so a
+            // year-only label would repeat itself across the whole axis.
             return ChartDateFormatters.monthYear.string(from: date)          // "Mar '25"
         case .fiveYears:
             return ChartDateFormatters.year.string(from: date)               // "2023"
@@ -144,7 +156,7 @@ enum ChartTimeRange: String, CaseIterable {
             return ChartDateFormatters.weekdayFull.string(from: date)        // "Monday, Mar 7"
         case .threeMonths, .sixMonths:
             return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
-        case .oneYear, .fiveYears, .all:
+        case .oneYear, .twoYears, .fiveYears, .all:
             return ChartDateFormatters.fullDate.string(from: date)           // "Mar 7, 2025"
         }
     }
@@ -1763,6 +1775,11 @@ struct VolumeAnalysisData {
     let volumeTrend: VolumeTrend
     let obv: Double
     let moneyFlowIndex: Double
+    /// False when the price source carries no intraday high/low (CoinGecko crypto
+    /// history is close+volume only), so MFI could not be computed. The wire field
+    /// is a non-Optional Double that shipped builds decode, so the honest signal is
+    /// this companion flag — the UI must hide the row, not print the placeholder.
+    var moneyFlowIndexKnown: Bool = true
 
     var formattedCurrentVolume: String {
         formatVolume(currentVolume)

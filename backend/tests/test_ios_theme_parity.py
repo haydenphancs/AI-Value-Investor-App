@@ -625,15 +625,15 @@ def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
 # 2.28 defect the original `*Fill` migration was written to fix. So a site inked with the
 # wrong family's token is a real regression, not a style nit, and the rule below runs
 # once per family with that family's required and banned inks.
-# ⚠️ 2026-09-08: `alertOrangeFill` MOVED to the inverse family. It is the credit-card fill,
-# and it is the ONLY one that moved: a frozen fill is capped at L*49.9 by white ink, and the
-# card still read as dark there, so its dark arm went bright (#F97316) and its ink flipped to
-# near-black. The other four stayed FROZEN at the white-ink ceiling deliberately — 82 of the
-# 90 ink sites are `primaryFill`, so moving it would have inverted every primary button, send
-# button and selected chip in the app, which is a product decision and not a contrast one.
-_INVERSE_INK_FILLS = ("gainFill", "lossFill", "alertOrangeFill")
+# ⚠️ 2026-09-08: all five fills were lightened to the WHITE-INK CEILING and none changed family.
+# Two attempts to go past it were made and reverted — an ADAPTIVE orange (#F97316 in dark),
+# which read as YELLOW and made the appearances differ, and a BRIGHT-FROZEN one (#DB582C with a
+# near-black `textOnBrightFill`), which was legible and correct but gave up white text. The
+# constraint that keeps reasserting itself: white ink pins any fill at L*<=49.9, and the next
+# legal step up is +4 L* away because near-black ink cannot start until L*>=53.6.
+_INVERSE_INK_FILLS = ("gainFill", "lossFill")
 _ONACCENT_INK_FILLS = ("primaryFill", "cautionFill", "accentCyanFill",
-                       "alertPurpleFill",
+                       "alertPurpleFill", "alertOrangeFill",
                        "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
                        "primaryGraphic")
 _FILL_TOKENS = _INVERSE_INK_FILLS + _ONACCENT_INK_FILLS
@@ -886,20 +886,11 @@ def test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart():
         a, b = tokens[fill], tokens[text]
         assert (a.light, a.light_a, a.dark, a.dark_a) == (b.light, b.light_a, b.dark, b.dark_a), \
             f"{fill} has drifted from {text}: {a.light}/{a.dark} vs {b.light}/{b.dark}"
-    # `alertOrangeFill` is adaptive too as of 2026-09-08, but is NOT byte-equal to its text
-    # twin: its light arm is pushed to the white-ink ceiling (#CD4B1D, 4.55) rather than
-    # inherited from `alertOrange` (#C2410C). Only the dark arm is shared. Asserted here so
-    # that intentional asymmetry cannot be "tidied" into byte-equality.
-    ao, ao_text = tokens["alertOrangeFill"], tokens["alertOrange"]
-    assert ao.light != ao.dark, "alertOrangeFill went frozen again — the credit card needs the bright dark arm"
-    assert ao.dark == ao_text.dark, f"alertOrangeFill dark {ao.dark} should track alertOrange {ao_text.dark}"
-    assert ao.light != ao_text.light, (
-        "alertOrangeFill's light arm was re-derived from alertOrange; it is deliberately "
-        "lighter (the white-ink ceiling), which is what answers the 'card looks dark' report")
-
-    # ...and the four that stayed FROZEN must NOT be adaptive, or they silently joined the
-    # wrong family. `primaryFill` is the one that matters: 82 of the 90 ink sites are its.
-    for fill in ("primaryFill", "cautionFill", "accentCyanFill", "alertPurpleFill"):
+    # ...and the frozen five must NOT be adaptive, or they silently joined the wrong family.
+    # `alertOrangeFill` is here on purpose: it was moved to the adaptive family on 2026-09-08
+    # and moved straight back, because the bright dark arm read as yellow.
+    for fill in ("primaryFill", "cautionFill", "accentCyanFill",
+                 "alertPurpleFill", "alertOrangeFill"):
         t = tokens[fill]
         assert t.light == t.dark, f"{fill} became adaptive but still declares carries: .onAccent"
 
@@ -2232,6 +2223,87 @@ def test_the_faded_fill_rule_fires_on_the_regression_it_exists_for():
     assert tokens["textOnFill"].light == tokens["textOnAccent"].light, \
         "the two contract inks no longer tie in light — rule B can now speak there, re-check it"
     assert tokens["textOnFill"].dark != tokens["textOnAccent"].dark
+
+
+def _declaring_struct_body(lines, member: str) -> str | None:
+    """The brace-matched body of the struct that declares `member`, or None.
+
+    Scoping matters here: these cards live in files holding several unrelated views, and an
+    ink belonging to a sibling view is not a violation of this card's contract.
+    """
+    decl = next((i for i, (_, l) in enumerate(lines)
+                 if re.match(rf"^\s*(?:private\s+|fileprivate\s+|internal\s+|public\s+|static\s+)*"
+                             rf"(?:var|let)\s+{re.escape(member)}\b", l)), None)
+    if decl is None:
+        return None
+    start = next((i for i in range(decl, -1, -1) if _STRUCT.match(lines[i][1])), None)
+    if start is None:
+        return None
+    depth, out = 0, []
+    for _, line in lines[start:]:
+        out.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0 and len(out) > 1:
+            break
+    return "\n".join(out)
+
+
+# A card whose surface comes from a MEMBER — `private let gradientColors = [AppColors.x, x]`
+# painted 70+ lines below via `LinearGradient(colors: gradientColors)` — is INVISIBLE to
+# `_opaque_surface_violations`. Two independent reasons, both structural rather than regex
+# slips: that scanner pairs an ink with a background inside a ±6-line window, and these cards
+# declare their ink at the top of the `VStack` and their background at the very bottom; and
+# its `member_re` only matches a member passed DIRECTLY as `.fill(member)`, not one reached
+# through a gradient's `colors:` label.
+#
+# Discovered by mutation on 2026-09-08 — reverting `CreditsBalanceCard` to the old white ink
+# left the whole module green. That matters because the three credit cards are the ONLY
+# consumers of the `.onBright` family, so without this the newest ink contract had no guard
+# at all. Widening the ±6 window is a redesign of that scanner; this covers the shape directly.
+def test_a_gradient_member_card_inks_with_its_fills_declared_family():
+    """A file that paints its surface from a surface-valued MEMBER must ink with exactly the
+    family that member's fill declares — checked file-wide, because the ink and the background
+    are too far apart for the windowed scanner to pair them."""
+    tokens = _declared_tokens(_sections()[0])
+    contracts = {sp["name"]: sp["carries"] for sp in _specs(_sections()[2]) if sp["carries"]}
+    members = _members_by_source()
+
+    checked, problems = [], []
+    for member, by_file in members.items():
+        for rel, toks in by_file.items():
+            fills = {t for t in toks if t in contracts}
+            if len(fills) != 1:
+                continue
+            fill = fills.pop()
+            want = contracts[fill]
+            # BRACE-BOUND to the struct that declares the member. A file-wide scan is what
+            # a first draft did, and it produced two false positives immediately —
+            # `ProfileView` holds several unrelated views, and `TrackingView` has a member
+            # literally named `background`. Neither ink was on the member's surface.
+            body = _declaring_struct_body(_code_lines(_IOS / rel), member)
+            if body is None:
+                continue
+            if f"colors: {member}" not in body and f"({member})" not in body:
+                continue
+            found = set(_CONTRACT_INK.findall(body))
+            if not found:
+                continue
+            checked.append((rel, member, fill, want))
+            if stray := found - {want}:
+                problems.append(
+                    f"{rel}: paints `{member}` from `{fill}` (declares `{want}`) but inks with "
+                    f"{sorted(stray)} — white on a .onBright fill is 3.86, near-black on a "
+                    f".onAccent one is ~3.8; the families are not interchangeable")
+
+    # Anti-vacuity: the three credit cards are the reason this exists, so if the resolver
+    # stops finding them the guard has quietly stopped guarding.
+    seen = {rel for rel, *_ in checked}
+    for required in ("Views/Molecules/CreditsBalanceCard.swift",
+                     "Views/Molecules/LearnCreditsCard.swift"):
+        assert required in seen, (
+            f"{required} is no longer reached by this guard — the member resolver or the "
+            f"`colors:` shape changed, and the .onBright contract is unguarded again")
+    assert not problems, "\n".join(sorted(problems))
 
 
 def test_a_contract_ink_measures_against_the_surface_it_actually_sits_on():

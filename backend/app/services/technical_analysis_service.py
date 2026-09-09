@@ -18,6 +18,7 @@ import pandas as pd
 import ta as ta_lib
 from fastapi import HTTPException
 
+from app.config import settings
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.technical_analysis import (
     FibonacciLevel,
@@ -48,7 +49,10 @@ _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 43_200  # 12 hours in seconds
 _CACHE_TTL_CRYPTO = 14_400  # 4 hours — crypto is 24/7 and more volatile
 
-TOTAL_INDICATORS = 18
+# NOTE: there is deliberately no TOTAL_INDICATORS constant. The indicator count is
+# per-frame (see `computed_total` in _compute_signals) because a source without
+# intraday high/low ships fewer rows, and a constant denominator both miscounts them
+# and makes the extreme verdicts unreachable.
 
 
 def _cache_get(key: str, ttl: float = _CACHE_TTL) -> Optional[Any]:
@@ -312,14 +316,44 @@ class TechnicalAnalysisService:
         to_date = datetime.utcnow().strftime("%Y-%m-%d")
         from_date = (datetime.utcnow() - timedelta(days=600)).strftime("%Y-%m-%d")
 
-        raw = await self.fmp.get_historical_prices(ticker, from_date, to_date)
-
-        # Parse FMP response
+        # ── Source gate ──────────────────────────────────────────────────────────
+        # FMP 402s every `…USD` crypto pair, so crypto history comes from CoinGecko. The
+        # FMP branch is preserved and reachable via `CRYPTO_PRICE_SOURCE=fmp`.
+        #
+        # ⚠️ CoinGecko's `market_chart` carries CLOSE AND VOLUME ONLY. The high/low
+        # columns are created as all-NaN rather than left absent, because the final
+        # `df[["open","high","low","close","volume"]]` would otherwise raise **KeyError**
+        # — a hard 500, not a graceful degrade — and `_daily_to_weekly`'s
+        # `.agg({"high":"max", ...})` would too.
         historical: List[Dict[str, Any]] = []
-        if isinstance(raw, dict):
-            historical = raw.get("historical", [])
-        elif isinstance(raw, list):
-            historical = raw
+        from app.services.asset_class import detect_asset_class
+
+        _is_crypto_source = (
+            detect_asset_class(ticker) == "crypto"
+            and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
+        )
+        if _is_crypto_source:
+            from app.integrations.coingecko import get_coingecko_client
+            from app.services.coingecko_adapter import market_chart_to_rows
+
+            base = ticker.upper()
+            for suffix in ("USDT", "USD"):
+                if base.endswith(suffix) and len(base) > len(suffix):
+                    base = base[: -len(suffix)]
+                    break
+            days = min(600, max(1, int(settings.CRYPTO_HISTORY_YEARS) * 365))
+            payload = await get_coingecko_client().get_market_chart(
+                base, days, interval="daily"
+            )
+            historical = market_chart_to_rows(payload, intraday=False)
+        else:
+            raw = await self.fmp.get_historical_prices(ticker, from_date, to_date)
+
+            # Parse FMP response
+            if isinstance(raw, dict):
+                historical = raw.get("historical", [])
+            elif isinstance(raw, list):
+                historical = raw
 
         if not historical:
             raise HTTPException(
@@ -337,6 +371,13 @@ class TechnicalAnalysisService:
         for col in ["open", "high", "low", "close", "volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            else:
+                # PRESENT-but-NaN, never absent. The return below selects these five
+                # columns by name; a missing one is a KeyError (HTTP 500), while a NaN
+                # column flows through pandas and lets each indicator decide for itself
+                # whether it can be computed. `_indicator_inputs_available` below is what
+                # turns that NaN into an omitted row rather than a fabricated number.
+                df[col] = float("nan")
 
         # Prefer adjClose when available and positive
         if "adjClose" in df.columns:
@@ -392,6 +433,10 @@ class TechnicalAnalysisService:
         high = df["high"]
         low = df["low"]
         volume = df["volume"]
+        # A source with no intraday range leaves these all-NaN (see
+        # `_fetch_daily_ohlcv_uncached`). `.notna().any()` rather than a column check:
+        # the columns are always PRESENT, because their absence is a KeyError.
+        _has_high_low = bool(high.notna().any() and low.notna().any())
         current_price = float(close.iloc[-1])
 
         # ── Moving Averages (10) ─────────────────────────────
@@ -521,18 +566,42 @@ class TechnicalAnalysisService:
             ),
         ]
 
+        # ── Drop the indicators this source cannot compute ───
+        #
+        # CoinGecko's `market_chart` carries close and volume but NO intraday high/low,
+        # so five of the eight oscillators have no real inputs. Substituting close for
+        # high/low would invent a range that was never observed; emitting them as
+        # NEUTRAL would be worse still (see the gauge note below). They are removed.
+        if not _has_high_low:
+            _needs_high_low = {"Stoch(14,3)", "ADX(14)", "Williams %R", "CCI(14)", "ATR(14)"}
+            dropped = [o.name for o in osc_list if o.name in _needs_high_low]
+            osc_list = [o for o in osc_list if o.name not in _needs_high_low]
+            logger.info(
+                "Technical analysis: omitting %s — this price source carries no "
+                "intraday high/low", ", ".join(dropped),
+            )
+
         # ── Gauge scoring ────────────────────────────────────
         # NET score: BUY pulls up, SELL pulls down, NEUTRAL sits at the 0.5 midpoint.
         # The old `buy_count / TOTAL_INDICATORS` counted ONLY buys, so an all-NEUTRAL
         # set (e.g. a freshly-listed ticker with <15 candles → every indicator None →
         # NEUTRAL) collapsed to gauge 0.0 → a fabricated "Strong Sell", and every
         # NEUTRAL indicator was silently scored as bearish (systematic bearish bias).
+        #
+        # 🔴 The denominator is the number of indicators ACTUALLY COMPUTED, not the
+        # constant 18. With five dropped, a hardcoded 18 leaves five phantom neutrals in
+        # `neutral_count` and — worse — caps the gauge's reachable range at
+        # [0.5 − 13/36, 0.5 + 13/36] = [0.139, 0.861], so crypto could **never** reach
+        # STRONG BUY or STRONG SELL however unanimous the real signals were. Every crypto
+        # verdict would sit systematically closer to neutral, and "N of 18" would count
+        # rows that were never shipped.
         all_signals = [m.signal for m in ma_list] + [o.signal for o in osc_list]
+        computed_total = len(all_signals) or 1
         buy_count = sum(1 for s in all_signals if s == IndicatorSignal.BUY)
         sell_count = sum(1 for s in all_signals if s == IndicatorSignal.SELL)
-        neutral_count = TOTAL_INDICATORS - buy_count - sell_count
+        neutral_count = computed_total - buy_count - sell_count
         gauge_value = min(
-            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * TOTAL_INDICATORS))
+            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * computed_total))
         )
         signal = _gauge_to_signal(gauge_value)
 
@@ -548,7 +617,9 @@ class TechnicalAnalysisService:
         result = TechnicalIndicatorResult(
             signal=signal,
             matching_indicators=matching,
-            total_indicators=TOTAL_INDICATORS,
+            # The wire number must match the rows actually shipped — iOS renders it
+            # verbatim as "N of M indicators".
+            total_indicators=computed_total,
         )
         return result, gauge_value, ma_list, osc_list
 
@@ -723,13 +794,22 @@ class TechnicalAnalysisService:
         obv_val = _safe_float(obv_series.iloc[-1]) or 0.0
         obv_normalized = obv_val / 1_000_000  # in millions
 
-        # MFI
+        # MFI needs high/low. Where the source has none, say so instead of defaulting.
         mfi_val: float = 50.0
-        if len(df) >= 14:
+        mfi_known = False
+        _has_hl = bool(df["high"].notna().any() and df["low"].notna().any())
+        if len(df) >= 14 and _has_hl:
             mfi_series = ta_lib.volume.MFIIndicator(
                 df["high"], df["low"], df["close"], df["volume"], window=14
             ).money_flow_index()
-            mfi_val = _safe_float(mfi_series.iloc[-1]) or 50.0
+            computed = _safe_float(mfi_series.iloc[-1])
+            if computed is not None:
+                mfi_val, mfi_known = computed, True
+        if not mfi_known:
+            logger.info(
+                "Money Flow Index unavailable (high/low absent or too few bars) — "
+                "flagged unknown rather than reported as a neutral 50"
+            )
 
         return VolumeAnalysisData(
             current_volume=round(current_vol, 0),
@@ -738,6 +818,7 @@ class TechnicalAnalysisService:
             volume_trend=trend,
             obv=round(obv_normalized, 2),
             money_flow_index=round(mfi_val, 2),
+            money_flow_index_known=mfi_known,
         )
 
     @staticmethod
@@ -747,13 +828,22 @@ class TechnicalAnalysisService:
         window = df.tail(lookback)
 
         # high/low can be all-NaN (df is dropna'd on close only) → float(NaN) poisons
-        # the REQUIRED FibonacciLevel.value → 500. Degrade to the last close so every
-        # level stays finite (a flat, non-meaningful retracement rather than a crash).
+        # the REQUIRED FibonacciLevel.value → 500.
         high = _safe_float(window["high"].max())
         low = _safe_float(window["low"].min())
         if high is None or low is None:
-            fallback = _safe_float(df["close"].iloc[-1]) or 0.0
-            high = low = fallback
+            # ⚠️ Emit NO levels rather than a flat retracement.
+            #
+            # This used to fall back to `high = low = last close`, which makes `diff` 0
+            # and every one of the seven levels the SAME price — a fully-drawn Fibonacci
+            # card in which 0.0%, 38.2% and 100% are identical. That is not a degraded
+            # chart, it is a fabricated one. `levels` is a plain list on both sides, so an
+            # empty one is decodable by every shipped build and renders nothing.
+            logger.info(
+                "Fibonacci retracement unavailable — no intraday high/low in this "
+                "price source; emitting no levels rather than a flat retracement"
+            )
+            return FibonacciRetracementData(timeframe="52-Week Levels", levels=[])
         diff = high - low
 
         fib_ratios = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]

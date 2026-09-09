@@ -57,6 +57,11 @@ class ErrorCode(str, Enum):
     FMP_NOT_ENTITLED = "FMP_NOT_ENTITLED"
     GEMINI_QUOTA_EXCEEDED = "GEMINI_QUOTA_EXCEEDED"
     GEMINI_UNAVAILABLE = "GEMINI_UNAVAILABLE"
+    # CoinGecko is the crypto price/history source (FMP's crypto package is not on the
+    # Order Form). Provider-named like the FMP_*/GEMINI_* families, because the client
+    # action differs per provider: a CoinGecko outage leaves EQUITY surfaces working.
+    COINGECKO_RATE_LIMITED = "COINGECKO_RATE_LIMITED"
+    COINGECKO_UNAVAILABLE = "COINGECKO_UNAVAILABLE"
 
     # ── Data / pipeline ──────────────────────────────────────────────
     DATA_INCOMPLETE = "DATA_INCOMPLETE"
@@ -278,6 +283,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.GEMINI_QUOTA_EXCEEDED: (
         "AI analysis quota exceeded. Please try again in a few minutes."
     ),
+    ErrorCode.COINGECKO_RATE_LIMITED: (
+        "Crypto data is rate limited right now. Try again in a moment."
+    ),
+    ErrorCode.COINGECKO_UNAVAILABLE: (
+        "Our crypto data provider is temporarily unavailable. Try again shortly."
+    ),
     ErrorCode.GEMINI_UNAVAILABLE: (
         "The AI analysis engine is temporarily unavailable. Try again shortly."
     ),
@@ -412,6 +423,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.FMP_UNAVAILABLE: "retry_later",
     ErrorCode.GEMINI_QUOTA_EXCEEDED: "retry_later",
     ErrorCode.GEMINI_UNAVAILABLE: "retry_later",
+    ErrorCode.COINGECKO_RATE_LIMITED: "retry_later",
+    ErrorCode.COINGECKO_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
@@ -482,6 +495,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.FMP_NOT_ENTITLED: 409,
     ErrorCode.GEMINI_QUOTA_EXCEEDED: 502,
     ErrorCode.GEMINI_UNAVAILABLE: 502,
+    ErrorCode.COINGECKO_RATE_LIMITED: 502,
+    ErrorCode.COINGECKO_UNAVAILABLE: 502,
     ErrorCode.DATA_INCOMPLETE: 502,
     ErrorCode.REPORT_GENERATION_FAILED: 502,
     ErrorCode.REPORT_NOT_FOUND: 404,
@@ -752,6 +767,26 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     if "fmpnotentitled" in cls:
         return ErrorCode.FMP_NOT_ENTITLED, _DEFAULT_STATUS[ErrorCode.FMP_NOT_ENTITLED]
 
+    # ── CoinGecko typed exceptions (from app.integrations.coingecko) ──
+    #
+    # Ordered BEFORE the FMP block: `CoinGeckoRateLimitException` contains "ratelimit"
+    # and would otherwise need the FMP branch not to claim it first. Range-exceeded maps
+    # to DATA_INCOMPLETE, not to UNAVAILABLE — the plan's 2-year window is a permanent
+    # fact, and telling a user to "try again shortly" for data that will never exist is
+    # the same dishonesty as a fabricated zero.
+    if "coingeckorangeexceeded" in cls:
+        return ErrorCode.DATA_INCOMPLETE, _DEFAULT_STATUS[ErrorCode.DATA_INCOMPLETE]
+    if "coingecko" in cls:
+        if "ratelimit" in cls:
+            return (
+                ErrorCode.COINGECKO_RATE_LIMITED,
+                _DEFAULT_STATUS[ErrorCode.COINGECKO_RATE_LIMITED],
+            )
+        return (
+            ErrorCode.COINGECKO_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.COINGECKO_UNAVAILABLE],
+        )
+
     # ── FMP typed exceptions (from app.integrations.fmp) ──────────────
     if (
         "fmpauthexception" in cls
@@ -825,6 +860,8 @@ def error_response_from_exception(
 # which detail endpoints keep mapping to their own generic 502 so we don't
 # mislabel it with report-pipeline copy).
 _UPSTREAM_CODES = frozenset({
+    ErrorCode.COINGECKO_RATE_LIMITED,
+    ErrorCode.COINGECKO_UNAVAILABLE,
     ErrorCode.FMP_RATE_LIMITED,
     ErrorCode.FMP_UNAVAILABLE,
     ErrorCode.FMP_NOT_ENTITLED,

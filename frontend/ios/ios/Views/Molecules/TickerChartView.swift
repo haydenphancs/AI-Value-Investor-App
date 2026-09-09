@@ -58,6 +58,12 @@ struct TickerChartView: View {
         case .threeMonths:  displayStart = calendar.date(byAdding: .month, value: -3, to: now)
         case .sixMonths:    displayStart = calendar.date(byAdding: .month, value: -6, to: now)
         case .oneYear:      displayStart = calendar.date(byAdding: .year, value: -1, to: now)
+        // 2Y is the crypto source's hard cap, so the backend sends exactly the
+        // visible window with NO warm-up bars ahead of it. `warmupCount` therefore
+        // resolves to 0 here and MA(200) does not draw on this range — deliberate,
+        // and the alternative was a ~14-month visible window under a "2Y" label.
+        // MA(50) still draws. See `daily_range_days` in chart_helper.py.
+        case .twoYears:     displayStart = calendar.date(byAdding: .year, value: -2, to: now)
         case .fiveYears:    displayStart = calendar.date(byAdding: .year, value: -5, to: now)
         case .all:          displayStart = nil
         }
@@ -241,7 +247,9 @@ struct TickerChartView: View {
             HStack(spacing: 4) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 2) {
-                        ForEach(ChartTimeRange.allCases, id: \.rawValue) { range in
+                        // Per-asset, NOT `allCases`: 2Y exists only for crypto, whose
+                        // source caps at two years. Every other screen's backend 400s it.
+                        ForEach(assetContext.allowedRanges, id: \.rawValue) { range in
                             TimeRangeButton(range: range, isSelected: selectedRange == range) {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     selectedRange = range

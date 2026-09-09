@@ -51,6 +51,8 @@ from app.services._earnings_common import (
     timing_sentence,
     alert_report_time,
 )
+from app.config import settings
+from app.services.asset_class import detect_asset_class
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -609,9 +611,30 @@ class TrackingService:
                 # consistent with the chart the user sees when they open the
                 # ticker — the old path drew a ~1-month daily-EOD line, which
                 # looked nothing like the 1D chart.
-                bars = await fetch_chart_data(
-                    self.fmp, ticker, "1D", extended_hours=extended_hours
-                )
+                # ── Source gate ──────────────────────────────────────────
+                # FMP 402s every crypto pair, so this raised
+                # FMPNotEntitledException for a coin and the row fell to the
+                # except below — an empty sparkline beside a live price. The FMP
+                # branch is preserved and reachable via `CRYPTO_PRICE_SOURCE=fmp`.
+                #
+                # `market_chart?days=1` is the 5-minute series, the same one the
+                # crypto detail 1D chart now draws, so the card and the chart one
+                # tap away agree. The adapter emits ET wall-clock timestamps,
+                # which is what the `last_day` prefix match below assumes.
+                if (
+                    detect_asset_class(ticker) == "crypto"
+                    and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
+                ):
+                    from app.services.crypto_service import get_crypto_service
+                    from app.services.coingecko_adapter import crypto_base_symbol
+
+                    bars = await get_crypto_service()._cg_history(
+                        crypto_base_symbol(ticker), 1, intraday=True
+                    )
+                else:
+                    bars = await fetch_chart_data(
+                        self.fmp, ticker, "1D", extended_hours=extended_hours
+                    )
                 if not bars:
                     # Honest empty — never fabricate. iOS SparklineView draws
                     # nothing for an empty/1-point series.

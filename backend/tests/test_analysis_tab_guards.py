@@ -97,13 +97,43 @@ def test_volume_analysis_all_nan_volume_is_finite():
     assert math.isfinite(vol.obv) and math.isfinite(vol.money_flow_index)
 
 
-# ── Fibonacci: all-NaN high/low → finite levels ──────────────────────────────
+# ── Fibonacci: all-NaN high/low → NO levels (was: seven identical ones) ──────
 
-def test_fibonacci_all_nan_high_low_is_finite():
+def test_fibonacci_all_nan_high_low_emits_no_levels():
+    """A source with no intraday range must not draw a retracement at all.
+
+    ⚠️ The contract here got STRICTER, and this test was rewritten with it. It used
+    to assert `fib.levels and all(isfinite(...))`, pinning a fallback of
+    `high = low = last close`. That is finite — the original JSON-safety intent,
+    which still holds below — but it makes `diff` zero, so all seven levels are the
+    SAME price: a fully-drawn Fibonacci card in which 0.0%, 38.2% and 100% coincide.
+    That is a fabricated chart, not a degraded one, and it is exactly what a
+    close-only crypto history (CoinGecko `market_chart`) would render.
+
+    Emitting nothing is the honest degrade: `levels` is a plain list on both sides,
+    so an empty one decodes in every shipped iOS build and draws no card.
+    """
     svc = object.__new__(TechnicalAnalysisService)
     df = _df([(10.0, np.nan, np.nan, 10.0 + i, 1000.0) for i in range(30)])
     fib = svc._compute_fibonacci(df)
-    assert fib.levels and all(math.isfinite(l.value) for l in fib.levels)
+    assert fib.levels == []
+    # The original intent, preserved: nothing non-finite can reach the wire.
+    assert all(math.isfinite(l.value) for l in fib.levels)
+    # The label must not change shape with data availability — same string as the
+    # populated branch, so the card never renders under a different heading.
+    assert fib.timeframe == "52-Week Levels"
+
+
+def test_fibonacci_with_real_high_low_still_draws_seven_distinct_levels():
+    """The equity path is untouched: real high/low still yields a full retracement."""
+    svc = object.__new__(TechnicalAnalysisService)
+    df = _df([(10.0, 10.0 + i + 1.0, 10.0 + i - 1.0, 10.0 + i, 1000.0) for i in range(30)])
+    fib = svc._compute_fibonacci(df)
+    assert len(fib.levels) == 7
+    assert all(math.isfinite(l.value) for l in fib.levels)
+    # Distinct — the degenerate flat retracement above would collapse these to 1.
+    assert len({l.value for l in fib.levels}) == 7
+    assert fib.timeframe == "52-Week Levels"
 
 
 # ── MA classifier: MA == 0 must not ZeroDivisionError ────────────────────────

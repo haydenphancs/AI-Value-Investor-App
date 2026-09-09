@@ -106,7 +106,7 @@ async def get_crypto_fear_greed():
 @router.get("/{symbol}/core", response_model=CryptoCoreResponse)
 async def get_crypto_core(
     symbol: str,
-    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$"),
+    chart_range: str = Query("3M", alias="range", pattern="^(1D|1W|3M|6M|1Y|2Y|5Y|ALL)$"),
     interval: Optional[str] = Query(
         None,
         alias="interval",
@@ -147,7 +147,7 @@ async def get_crypto_detail(
     chart_range: str = Query(
         "3M",
         alias="range",
-        pattern="^(1D|1W|3M|6M|1Y|5Y|ALL)$",
+        pattern="^(1D|1W|3M|6M|1Y|2Y|5Y|ALL)$",
     ),
     interval: Optional[str] = Query(
         None,
@@ -335,8 +335,11 @@ async def get_crypto_technical_analysis(symbol: str):
     """
     Get technical analysis gauge data for a crypto symbol.
 
-    Computes 18 indicators (10 MAs + 8 oscillators) on daily and weekly
-    timeframes, producing a 0-1 gauge value and overall signal.
+    Computes the indicators the price source can actually support on daily and
+    weekly timeframes, producing a 0-1 gauge value and overall signal, and reports
+    how many were computed in `total_indicators`. CoinGecko's crypto history has no
+    intraday high/low, so five of the eight oscillators are omitted rather than
+    fabricated — see technical_analysis_service._compute_timeframe_signal.
     Uses W-SUN weekly resampling (crypto trades 24/7).
     """
     symbol = _normalize_crypto_symbol(symbol)
@@ -348,10 +351,16 @@ async def get_crypto_technical_analysis(symbol: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Crypto technical analysis failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail="Crypto technical analysis unavailable"
+        logger.error(
+            "Crypto technical analysis failed for %s: %s: %s", symbol,
+            type(e).__name__, e, exc_info=True,
         )
+        # Was a bare HTTPException(500) — a generic "Something went wrong" that
+        # discarded the typed exception. Crypto history now comes from CoinGecko, so
+        # a rate limit or outage arrives as CoinGeckoRateLimitException /
+        # CoinGeckoUnavailableException; only this mapper turns those into the
+        # COINGECKO_* error codes with a retry_later action that iOS can act on.
+        return error_response_from_exception(e, ticker=symbol, step="crypto_technical_analysis")
 
 
 @router.get(
@@ -374,7 +383,10 @@ async def get_crypto_technical_analysis_detail(symbol: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Crypto TA detail failed for {symbol}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail="Crypto technical analysis detail unavailable"
+        logger.error(
+            "Crypto TA detail failed for %s: %s: %s", symbol,
+            type(e).__name__, e, exc_info=True,
         )
+        # Same reasoning as the gauge route above: preserve the typed CoinGecko
+        # failure instead of collapsing it to a bare 500.
+        return error_response_from_exception(e, ticker=symbol, step="crypto_technical_detail")

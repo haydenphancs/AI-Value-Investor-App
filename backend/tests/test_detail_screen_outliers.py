@@ -254,10 +254,16 @@ def test_sector_aggregates_survives_a_null_date():
 
 # ── 6. Non-finite reaching a REQUIRED response float ─────────────────────────
 
-def test_crypto_related_builder_survives_non_finite_quotes():
+def test_crypto_related_builder_omits_a_row_it_cannot_price():
     """`x or 0` does not guard a NaN (it is truthy), so it reached the REQUIRED
-    RelatedCryptoResponse floats and 500'd the whole crypto detail screen. The commodity
-    twin was fixed for this; the crypto one was not."""
+    RelatedCryptoResponse floats and 500'd the whole crypto detail screen.
+
+    ⚠️ The contract CHANGED with the CoinGecko move, and it got stricter. This used to
+    assert the row survived with `price == 0` — the NaN was neutralised but the row still
+    rendered, so when FMP began refusing crypto pairs all six related coins shipped
+    "$0.00 +0.00%": six confident, wrong prices. `RelatedCryptoDTO.price` is a
+    non-Optional Double on iOS, so a null is not available and OMITTING the row is the
+    only honest signal. The strip already renders a shorter list correctly."""
     from app.services.crypto_service import CryptoService
 
     svc = CryptoService.__new__(CryptoService)
@@ -265,8 +271,25 @@ def test_crypto_related_builder_survives_non_finite_quotes():
         [{"symbol": "ETHUSD", "price": float("nan"), "changePercentage": float("inf")}],
         ["ETH"],
     )
-    assert out and out[0].price == 0 and out[0].change_percent == 0
-    assert _renders(out)
+    assert out == [], "an unpriceable related coin must be omitted, not zeroed"
+
+    # ...and a priced row still comes through, so the omission is not a blanket drop.
+    ok = svc._build_related_cryptos(
+        [{"symbol": "ETHUSD", "price": 2500.0, "changePercentage": 1.5}], ["ETH"],
+    )
+    assert len(ok) == 1 and ok[0].price == 2500.0
+    assert _renders(ok)
+
+
+@pytest.mark.parametrize("bad_price", [None, 0, -1.0, float("nan"), float("inf")])
+def test_no_related_row_ever_renders_a_zero_price(bad_price):
+    from app.services.crypto_service import CryptoService
+
+    svc = CryptoService.__new__(CryptoService)
+    out = svc._build_related_cryptos(
+        [{"symbol": "ETHUSD", "price": bad_price, "changePercentage": 1.0}], ["ETH"],
+    )
+    assert all(r.price > 0 for r in out)
 
 
 def test_crypto_related_builder_prefers_the_stable_spelling():

@@ -65,15 +65,40 @@ class Settings(BaseSettings):
     FMP_API_KEY: str
     FMP_BASE_URL: str = "https://financialmodelingprep.com/stable"
 
-    # CoinGecko (Demo API — free tier, 30 calls/min, 10K/month)
+    # CoinGecko — the crypto price/history source (Basic plan: 300/min, 100K/month)
     COINGECKO_API_KEY: str = ""
     # Paid plans live on pro-api.coingecko.com; the Demo plan on api.coingecko.com. The
     # integration derives the auth header from this value (`CoinGeckoClient._auth_header`),
     # so changing plan is this one variable — never set a header separately.
-    COINGECKO_BASE_URL: str = "https://api.coingecko.com/api/v3"
-    # Default is the safety margin under the free Demo plan's 30/min. A paid plan allows far
-    # more; leaving this at 25 throttles a paid key to demo speed.
-    COINGECKO_MAX_CALLS_PER_MINUTE: int = 25
+    #
+    # ⚠️ DEFAULTS TO THE PAID HOST ON PURPOSE. It used to default to `api.coingecko.com`,
+    # and that default is a silent-failure machine: the demo host serves the public
+    # endpoints ANONYMOUSLY with HTTP 200, so a deployment with no `COINGECKO_BASE_URL`
+    # looked perfectly healthy while running on the free tier with the paid key ignored —
+    # rate-limited to demo speed and capped at demo history. Verified 2026-09-08: our key
+    # answers `/key` with `{"plan":"Basic",...}` on the pro host and error 10010 on the
+    # demo one. A demo key needs the demo host set explicitly; the paid path is the default
+    # because it is the one that fails LOUDLY when misconfigured.
+    COINGECKO_BASE_URL: str = "https://pro-api.coingecko.com/api/v3"
+    # Matches the Basic plan's published 300/min. This was 25 (a margin under the free
+    # Demo plan's 30) — twelve times slower than what we pay for, and invisible because
+    # the limiter just sleeps.
+    COINGECKO_MAX_CALLS_PER_MINUTE: int = 300
+
+    # ── Crypto data source ────────────────────────────────────────────────────────
+    # FMP's crypto package is NOT on the Order Form, so every `…USD` pair 402s. Crypto
+    # price + history therefore come from CoinGecko.
+    #
+    # This is a kill switch, not a migration flag: every FMP crypto call site is still
+    # present and reachable by setting this to "fmp" — nothing was deleted, so buying the
+    # package back is one environment variable. Same posture as `FMPClient`'s entitlement
+    # manifest ("nothing is deleted, so buying a package later re-enables the feature").
+    CRYPTO_PRICE_SOURCE: str = "coingecko"       # "coingecko" | "fmp"
+    # CoinGecko Basic serves 2 years of history and answers HTTP 401 (error 10012) past
+    # it. EVERY long-horizon crypto surface derives its reachability from this one number
+    # — chart ranges, the 3Y/5Y/10Y/All-Time performance rows, the benchmark CAGR card.
+    # Raise it to 10 if we ever move to the Analyst plan; do not scatter year literals.
+    CRYPTO_HISTORY_YEARS: int = 2
 
     # FRED (Federal Reserve Economic Data) — free tier ~120 req/min.
     # Used to ground the Macro module in real CPI / Fed Funds / yield-curve

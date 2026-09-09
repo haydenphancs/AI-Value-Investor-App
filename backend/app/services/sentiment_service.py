@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # `ticker_news_cache` is owned by NewsCacheService; borrow ITS ttl so the two writers cannot
 # drift. A longer value here silently freezes the News tab (see `_persist_articles`).
 from app.services.news_cache_service import CACHE_TTL_HOURS as _NEWS_CACHE_TTL_HOURS
+from app.config import settings
+from app.services.asset_class import detect_asset_class
 from app.services.price_service import price_source
 
 _NEWS_CACHE_TTL = timedelta(hours=_NEWS_CACHE_TTL_HOURS)
@@ -582,11 +584,38 @@ class SentimentService:
     async def _fetch_historical_prices(
         self, ticker: str
     ) -> List[Dict[str, Any]]:
-        """Fetch ~10 days of historical prices for 7-day return calc."""
+        """Fetch ~10 days of historical prices for 7-day return calc.
+
+        ⚠️ A degraded return here is NOT harmless. `_compute_price_sentiment_7d` maps an
+        empty list to **50**, which the UI renders as a confident "Neutral" — a
+        fabricated fact rather than a missing one. FMP 402s every crypto pair, so before
+        the source gate below every coin's momentum arm silently reported neutral.
+        """
         try:
             now = datetime.now(timezone.utc)
             from_date = (now - timedelta(days=12)).strftime("%Y-%m-%d")
             to_date = now.strftime("%Y-%m-%d")
+
+            # ── Source gate ───────────────────────────────────────────────────────
+            # The FMP branch is preserved verbatim and reachable via
+            # `CRYPTO_PRICE_SOURCE=fmp`; nothing here is deleted.
+            if (
+                detect_asset_class(ticker) == "crypto"
+                and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
+            ):
+                from app.integrations.coingecko import get_coingecko_client
+                from app.services.coingecko_adapter import (
+                    crypto_base_symbol,
+                    market_chart_to_rows,
+                )
+
+                payload = await get_coingecko_client().get_market_chart(
+                    crypto_base_symbol(ticker), 12, interval="daily"
+                )
+                hist = market_chart_to_rows(payload, intraday=False)
+                hist.sort(key=lambda p: p.get("date") or "")
+                return hist
+
             raw = await self.fmp.get_historical_prices(ticker, from_date, to_date)
             if isinstance(raw, dict):
                 hist = raw.get("historical", [])

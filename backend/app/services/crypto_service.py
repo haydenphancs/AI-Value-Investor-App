@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.database import get_supabase
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.coingecko import get_coingecko_client, CoinGeckoClient
@@ -494,6 +495,31 @@ _AI_CACHE_TTL_SECONDS = 1800  # 30 minutes for AI-generated stories
 # is least-recently-written; a miss just re-fetches (no correctness impact).
 _CACHE_MAX_ENTRIES = 1024
 
+# ── CoinGecko TTLs ───────────────────────────────────────────────
+# Call volume is the binding constraint now: 100,000/month is 2.3 calls/MINUTE sustained,
+# not the 300/min burst ceiling. Each tier is sized to how fast its data can actually move.
+# Ranges served from an INTRADAY CoinGecko series, and the `days` each asks for.
+# A map, not an `in (...)` test plus a ternary, so the range set and its window can
+# never drift apart. Branch on THIS, never on `resolve_interval(...) != "daily"`:
+# DEFAULT_INTERVALS maps 5Y→"weekly" and ALL→"monthly", so an interval test sweeps
+# those in and silently serves 7 days of hourly bars under a 5-year label.
+_INTRADAY_RANGES = {"1D": 1, "1W": 7}
+
+# Ranges that ask for more history than CoinGecko Basic can serve (2 years). They are
+# clamped to the cap and logged; iOS stops offering them for crypto in favour of 2Y.
+_OVER_CAP_RANGES = frozenset({"5Y", "ALL"})
+
+_CG_DAILY_TTL = 3600        # settled daily bars; only the trailing point moves
+_CG_INTRADAY_TTL = 120      # the live 1D/1W chart
+_CG_OHLC_TTL = 21600        # 6h — 4-day candles, nothing changes faster
+_CG_MARKETS_TTL = 120       # related coins / tracking rows, shared across users
+
+
+async def _empty_list() -> list:
+    """An already-satisfied awaitable, so a gated-off leg can still sit in the gather
+    without restructuring it (the same shape `home_service._empty_list` uses)."""
+    return []
+
 
 def _round_close(v: float) -> float:
     """Round a close price with precision proportional to its magnitude.
@@ -673,6 +699,153 @@ class CryptoService:
         self.coingecko: CoinGeckoClient = get_coingecko_client()
         self.supabase = get_supabase()
 
+    # ── Source gate ──────────────────────────────────────────────
+    #
+    # FMP's crypto package is not on the Order Form, so every `…USD` pair 402s and the
+    # price/history source is CoinGecko. The FMP branches below are KEPT and reachable:
+    # set `CRYPTO_PRICE_SOURCE=fmp` and every one of them runs again, unchanged. Nothing
+    # was deleted, so buying the package back is one environment variable — the same
+    # posture `FMPClient`'s entitlement manifest takes ("nothing is deleted, so buying a
+    # package later re-enables the feature").
+
+    @staticmethod
+    def _fmp_crypto_enabled() -> bool:
+        return str(settings.CRYPTO_PRICE_SOURCE or "").lower() == "fmp"
+
+    @staticmethod
+    def _history_days_cap() -> int:
+        """The furthest back any crypto surface may look, in days.
+
+        ONE source for every long-horizon decision — chart ranges, the 3Y/5Y/10Y/All-Time
+        performance rows, the benchmark CAGR window. Scattering `365 * N` literals is how
+        a 15-year assumption survived into a 2-year world.
+        """
+        return max(1, int(settings.CRYPTO_HISTORY_YEARS) * 365)
+
+    # ── CoinGecko-backed history ─────────────────────────────────
+
+    async def _cg_history(
+        self, symbol: str, days: int, *, intraday: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Daily (or intraday) rows in the app's FMP-shaped row format.
+
+        Cached per (symbol, days, granularity). ⚠️ The cache key carries the SOURCE: a
+        rolling deploy with `CRYPTO_PRICE_SOURCE` mixed across pods would otherwise let
+        CoinGecko-shaped rows (close+volume, no OHLC) be read by FMP-shaped code, or the
+        reverse — a shape mismatch that renders as missing highs rather than an error.
+        """
+        from app.services.coingecko_adapter import market_chart_to_rows
+
+        days = min(int(days), self._history_days_cap())
+        key = f"cg:hist:{symbol.upper()}:{days}:{'i' if intraday else 'd'}"
+        cached = _cache_get(key, _CG_INTRADAY_TTL if intraday else _CG_DAILY_TTL)
+        if cached is not None:
+            return cached
+        payload = await self.coingecko.get_market_chart(
+            symbol, days, interval=None if intraday else "daily"
+        )
+        rows = market_chart_to_rows(payload, intraday=intraday)
+        if rows:
+            _cache_set(key, rows)
+        return rows
+
+    async def _cg_52_week_band(
+        self, symbol: str
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """True 52-week high/low, from `/ohlc?days=365`.
+
+        `market_chart` carries **no high/low at all**, so a close-only band understates
+        both extremes — measured on BTC: $124,740/$58,566 from closes versus the real
+        $126,080/$57,779. `/ohlc`'s candles are coarse (4-day at this range, and CoinGecko
+        offers nothing finer on Basic), but each candle's high/low ARE true intraday
+        extremes over its bucket, so the max/min across 365 days is a genuine 52-week band.
+        One extra call, cached for hours.
+        """
+        from app.services.coingecko_adapter import ohlc_to_rows
+
+        key = f"cg:ohlc365:{symbol.upper()}"
+        cached = _cache_get(key, _CG_OHLC_TTL)
+        if cached is None:
+            coin_id = await self.coingecko.resolve_coin_id(symbol)
+            if not coin_id:
+                return None, None
+            raw = await self.coingecko._make_request(
+                f"coins/{coin_id}/ohlc", params={"vs_currency": "usd", "days": 365}
+            )
+            cached = ohlc_to_rows(raw)
+            if cached:
+                _cache_set(key, cached)
+        highs = [r["high"] for r in cached if r.get("high") and r["high"] > 0]
+        lows = [r["low"] for r in cached if r.get("low") and r["low"] > 0]
+        return (max(highs) if highs else None), (min(lows) if lows else None)
+
+    async def _cg_related_quotes(self, symbols: List[str]) -> List[Dict[str, Any]]:
+        """Related-coin quotes, shaped exactly like `price_service` emits them.
+
+        ONE `/coins/markets` request for the whole set, replacing six blocked per-symbol
+        FMP quotes.
+
+        Two things this must not get wrong:
+
+        * **Key on the coin ID, never the returned symbol.** `MATIC` and `POL` both
+          resolve to `polygon-ecosystem-token`, CoinGecko answers with one canonical
+          symbol, and `/coins/markets` orders by market cap rather than request order —
+          so keying by symbol or zipping positionally drops a coin. MATIC appears in six
+          `_RELATED_CRYPTOS` sets, i.e. six screens with a permanently missing row.
+        * **Emit through `PriceService._shape`.** Callers across the app read
+          `changePercentage` AND the legacy `changesPercentage`, and `_shape` emits both
+          on purpose. A hand-rolled dict that carries only one spelling produces alerts
+          that never fire and rows that read 0.00% — invisible in every test.
+        """
+        from app.services.coingecko_adapter import markets_rows_by_id
+        from app.services.price_service import PriceService
+
+        wanted = [s for s in symbols if s]
+        if not wanted:
+            return []
+        key = "cg:markets:" + ",".join(sorted({s.upper() for s in wanted}))
+        cached = _cache_get(key, _CG_MARKETS_TTL)
+        if cached is not None:
+            return cached
+
+        pairs: List[Tuple[str, str]] = []
+        for sym in wanted:
+            coin_id = await self.coingecko.resolve_coin_id(sym)
+            if coin_id:
+                pairs.append((sym, coin_id))
+        if not pairs:
+            return []
+        rows = await self.coingecko.get_markets([s for s, _ in pairs])
+        by_id = markets_rows_by_id(rows)
+
+        out: List[Dict[str, Any]] = []
+        for sym, coin_id in pairs:
+            row = by_id.get(coin_id)
+            if not row:
+                continue
+            price = row.get("current_price")
+            change_pct = row.get("price_change_percentage_24h")
+            change_abs = row.get("price_change_24h")
+            prev = None
+            if isinstance(price, (int, float)) and isinstance(change_abs, (int, float)):
+                prev = price - change_abs
+            out.append(PriceService._shape(
+                # The caller's map is keyed on the `…USD` pair spelling.
+                symbol=f"{sym.upper()}USD",
+                name=row.get("name"),
+                price=price,
+                previous_close=prev,
+                change=change_abs,
+                change_pct=change_pct,
+                volume=row.get("total_volume"),
+                avg_volume=None,
+                market_cap=row.get("market_cap"),
+                exchange="CRYPTO",
+            ))
+        if out:
+            _cache_set(key, out)
+        return out
+
     # ── Two-tier cache for CoinGecko fundamentals ────────────────
 
     async def _get_coin_fundamentals(self, symbol: str) -> Dict[str, Any]:
@@ -835,9 +1008,13 @@ class CryptoService:
         crypto_name = profile_meta.get("name", symbol)
         _has_curated_profile = bool(profile_meta)
 
-        # ── Step 1: Parallel fetches (CoinGecko + FMP) ────────────
+        # ── Step 1: Parallel fetches ──────────────────────────────
         today = datetime.now(tz=timezone.utc).date()
-        from_date = (today - timedelta(days=365 * 15)).isoformat()  # 15 years for full All Time history
+        # The window is derived from the plan cap, not a literal. It was `365 * 15` — a
+        # 15-year assumption that survived into a 2-year world and silently relabelled
+        # "last 2 years" as "All Time".
+        history_days = self._history_days_cap()
+        from_date = (today - timedelta(days=history_days)).isoformat()
         to_date = today.isoformat()
 
         # Related crypto symbols
@@ -845,11 +1022,27 @@ class CryptoService:
         related_symbols = [s for s in related_symbols if s != symbol][:6]
         related_fmp_symbols = [f"{s}USD" for s in related_symbols]
 
-        # CoinGecko for fundamentals, FMP for chart/news/related
         coin_data_task = self._get_coin_fundamentals(symbol)
-        hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
-        news_task = self.fmp.get_stock_news(fmp_symbol, limit=10)
-        related_task = price_source(self).get_quotes_list(related_fmp_symbols)
+
+        # ── The source gate. FMP's branches are preserved verbatim ────────────────
+        if self._fmp_crypto_enabled():
+            hist_task = self.fmp.get_historical_prices(fmp_symbol, from_date, to_date)
+            related_task = price_source(self).get_quotes_list(related_fmp_symbols)
+        else:
+            hist_task = self._cg_history(symbol, history_days)
+            related_task = self._cg_related_quotes(related_symbols)
+
+        # `news/stock` for a crypto pair is REDUNDANT, not broken: it is entitled and
+        # returns real Bitcoin news (verified 200, same rows as `news/crypto`). But iOS's
+        # `CryptoDetailResponse.toModel()` discards `newsArticles` entirely — the News tab
+        # calls `GET /crypto/{symbol}/news` instead — so this call has been doing a full
+        # round trip per detail request for a field nobody reads. Gated off rather than
+        # deleted; the builder below still runs if it is ever turned back on.
+        news_task = (
+            self.fmp.get_stock_news(fmp_symbol, limit=10)
+            if self._fmp_crypto_enabled()
+            else _empty_list()
+        )
 
         coin_data, hist_raw, news_raw, related_raw = await asyncio.gather(
             coin_data_task, hist_task, news_task, related_task,
@@ -948,11 +1141,20 @@ class CryptoService:
         # `_fmt(None)` and `_pct(None)` already render "—", so the five rows degrade
         # to honest em-dashes instead of disappearing (a missing row reads as a
         # layout bug; an em-dash reads as "we don't know", which is the truth).
-        # CoinGecko CAN serve a real 52-week window via /coins/{id}/market_chart —
-        # that is Phase 5, deliberately not reached for here.
+        # ⚠️ Phase 5 note: `market_chart` carries close and volume and **no high/low at
+        # all**, so the daily-history path below yields nothing on the CoinGecko source
+        # and these five rows would be em-dashes forever. `/ohlc?days=365` is the answer:
+        # its candles are coarse (4-day at that range, and Basic offers nothing finer)
+        # but each candle's high/low ARE true intraday extremes over its bucket, so the
+        # max/min across the year is a genuine 52-week band. Measured on BTC: $126,080 /
+        # $57,779 from /ohlc versus $124,740 / $58,566 from closes — the close-only
+        # version understates both ends, which is precisely the kind of quietly-wrong
+        # number this phase exists to remove.
         year_high: Optional[float] = None
         year_low: Optional[float] = None
-        if historical:
+        if not self._fmp_crypto_enabled():
+            year_high, year_low = await self._cg_52_week_band(symbol)
+        if (year_high is None or year_low is None) and historical:
             from app.services.chart_helper import _finite_or_none
             one_year_ago = (today - timedelta(days=365)).isoformat()
             year_prices = [
@@ -1018,7 +1220,26 @@ class CryptoService:
             if len(historical) > 365 * 5
             else None
         )
-        all_time_return = _compute_all_time_return(historical)
+        # 🔴 "All Time" is only true if the history REACHES all time.
+        #
+        # `_compute_all_time_return` means "first row → last row". Against a 15-year FMP
+        # pull that was approximately true. Against CoinGecko Basic's hard 730-day cap it
+        # is false for every coin older than two years: Bitcoin rendered "All Time
+        # +37.58%" meaning "the last 24 months", with a non-Optional Double on the wire so
+        # nothing crashed — it was simply a confident wrong number under the most
+        # authoritative-sounding label on the card.
+        #
+        # 3Y/5Y/10Y need no equivalent guard: `_compute_return` already returns None when
+        # `len(historical) <= days_back`, and 1095 > 730. Only the unbounded one lies.
+        _history_reaches_all_time = self._fmp_crypto_enabled()
+        all_time_return = (
+            _compute_all_time_return(historical) if _history_reaches_all_time else None
+        )
+        if not _history_reaches_all_time:
+            logger.debug(
+                "Crypto %s: All-Time return suppressed — the %d-day source cannot "
+                "express it", symbol, self._history_days_cap(),
+            )
         ten_year_return = (
             _compute_return(historical, 365 * 10)
             if len(historical) > 365 * 10
@@ -1099,9 +1320,46 @@ class CryptoService:
         # ── Step 4: Build chart data ──────────────────────────────
         from app.services.chart_helper import fetch_chart_data, resolve_interval
         resolved = resolve_interval(chart_range, interval)
-        if resolved != "daily" or chart_range == "ALL":
-            chart_data = await fetch_chart_data(self.fmp, fmp_symbol, chart_range, interval, extended_hours=True)
+        if self._fmp_crypto_enabled():
+            # Preserved verbatim; reachable via `CRYPTO_PRICE_SOURCE=fmp`.
+            if resolved != "daily" or chart_range == "ALL":
+                chart_data = await fetch_chart_data(self.fmp, fmp_symbol, chart_range, interval, extended_hours=True)
+            else:
+                chart_data = self._extract_chart_data(historical, chart_range)
+        elif chart_range in _INTRADAY_RANGES:
+            # INTRADAY (1D / 1W). This branch used to call FMP unconditionally, which
+            # now raises FMPNotEntitledException — so opening a crypto screen on 1D or
+            # 1W failed the whole detail build with an exception rather than degrading.
+            #
+            # CoinGecko's `market_chart` gives 5-minute granularity at days=1 and hourly
+            # at days=7, which is the same shape `fetch_chart_data` returned. Timestamps
+            # are converted to ET wall-clock by the adapter, because `_bar_minute_of_day`
+            # and the iOS `inputDateTimeFormatter` both read bar strings as
+            # America/New_York — formatting them as UTC shifts every bar 4-5 hours.
+            #
+            # ⚠️ Branch on the RANGE, never on `resolved != "daily"`. `DEFAULT_INTERVALS`
+            # maps 5Y→"weekly" and ALL→"monthly", so an interval test sends both of those
+            # down here too and serves SEVEN DAYS of hourly bars under a "5Y" label —
+            # plausible, confidently wrong, and worse than the exception it replaced.
+            _days = _INTRADAY_RANGES[chart_range]
+            chart_data = self._chart_rows_from(
+                await self._cg_history(symbol, _days, intraday=True)
+            )
         else:
+            # DAILY and long-horizon. `historical` is the CoinGecko series, already
+            # capped at CRYPTO_HISTORY_YEARS, and `_extract_chart_data` windows it.
+            #
+            # 5Y / ALL therefore render the cap (2 years) rather than five years or the
+            # whole history. The bars are REAL — only the window is shorter than the pill
+            # claims — which is why iOS stops offering those two ranges for crypto and
+            # offers 2Y instead. Logged so the clamp is visible rather than assumed.
+            if chart_range in _OVER_CAP_RANGES:
+                logger.info(
+                    "crypto chart: %s requested for %s but CoinGecko Basic caps history "
+                    "at %d years — serving the full %d-year window instead",
+                    chart_range, symbol, settings.CRYPTO_HISTORY_YEARS,
+                    settings.CRYPTO_HISTORY_YEARS,
+                )
             chart_data = self._extract_chart_data(historical, chart_range)
 
         # ── Step 5: Build key statistics ──────────────────────────
@@ -1192,6 +1450,29 @@ class CryptoService:
         def _filter_from(prices: list, cutoff: str) -> list:
             return [p for p in prices if (p.get("date") or "")[:10] >= cutoff]
 
+        # 🔴 The whole card is suppressed when the history cannot span it.
+        #
+        # A long-run CAGR needs a long run. On CoinGecko Basic the series is 730 days, and
+        # the arithmetic below then lies twice over: `len(hist_5y) >= 252` is TRUE for 730
+        # rows, so it takes the five-year branch; and `since_iso == alltime_since_iso`
+        # (same series) makes `window_label` resolve to **"All-time"**. The card would
+        # read "All-time · Since Sep 2024" — a two-year window wearing an all-time label,
+        # beside a benchmark measured over the same two years.
+        #
+        # `benchmark_summary` is `Optional` on the wire and iOS gates the section on
+        # `if let`, so omitting it hides the card cleanly. The builder below is untouched
+        # and runs again the moment the source can reach far enough back.
+        _benchmark_window_days = self._history_days_cap()
+        _suppress_benchmark = (
+            not self._fmp_crypto_enabled() and _benchmark_window_days < 365 * 5
+        )
+        if _suppress_benchmark:
+            logger.debug(
+                "Crypto %s: benchmark CAGR card suppressed — a %d-day history cannot "
+                "express a 5-year or all-time annualised return",
+                symbol, _benchmark_window_days,
+            )
+
         bench_rows = (spy_hist if symbol == "BTC" else btc_hist) or []
         bench_name = "S&P 500" if symbol == "BTC" else "Bitcoin (BTC)"
         _label = f"crypto:{symbol}"
@@ -1219,7 +1500,7 @@ class CryptoService:
         # nothing like five years.
         window_label = "All-time" if since_iso == alltime_since_iso else "5-year"
 
-        if asset_annual is None:
+        if _suppress_benchmark or asset_annual is None:
             # Nothing measurable to compare — omit the whole block rather than publish a
             # 0.0% that reads as a real result. iOS gates the section on `if let`.
             benchmark = None
@@ -1265,6 +1546,36 @@ class CryptoService:
         )
 
     # ── Chart helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _chart_rows_from(rows: List[Dict]) -> List[Dict]:
+        """Sanitize already-windowed rows into chart points.
+
+        The intraday sibling of `_extract_chart_data`: same output shape and the same
+        guarantees, minus the date cutoff, because an intraday CoinGecko series is
+        already exactly the requested window.
+
+        Both the finite guard and `_round_close` are load-bearing. A NaN/Inf token in
+        any field serializes to invalid JSON and 500s the whole crypto detail, and a
+        plain `round(close, 2)` collapses every sub-penny coin (SHIB near $0.00000495,
+        PEPE, BONK) to 0.0 — which drew a flat line on the axis.
+        """
+        from app.services.chart_helper import _finite_or_none
+
+        out: List[Dict] = []
+        for p in rows or []:
+            close = _finite_or_none(p.get("close") or p.get("adjClose"))
+            if close is None or close <= 0:
+                continue
+            out.append({
+                "date": p.get("date"),
+                "open": _finite_or_none(p.get("open")),
+                "high": _finite_or_none(p.get("high")),
+                "low": _finite_or_none(p.get("low")),
+                "close": _round_close(close),
+                "volume": _finite_or_none(p.get("volume")),
+            })
+        return out
 
     def _extract_chart_data(
         self, historical: List[Dict], chart_range: str
@@ -1830,10 +2141,22 @@ Separate each category with "===CATEGORY===" followed by the category name.
             rel_change = _finite_or_none(q.get("changePercentage"))
             if rel_change is None:
                 rel_change = _finite_or_none(q.get("changesPercentage"))
+            # ⚠️ OMIT the row rather than zeroing it. This used to append unconditionally
+            # with `price = rel_price if ... else 0`, so when FMP started refusing crypto
+            # pairs all six related coins rendered "$0.00 +0.00%" — six confident, wrong
+            # prices. `RelatedCryptoDTO.price` is a non-Optional Double on iOS, so a null
+            # is not available and omission from the array is the only honest signal;
+            # the strip already renders a shorter list correctly.
+            if rel_price is None or rel_price <= 0:
+                logger.warning(
+                    "Related crypto %s has no usable price — omitting the row rather "
+                    "than rendering $0.00", sym,
+                )
+                continue
             result.append(RelatedCryptoResponse(
                 symbol=sym,
                 name=name,
-                price=rel_price if rel_price is not None else 0,
+                price=rel_price,
                 change_percent=rel_change if rel_change is not None else 0,
             ))
 

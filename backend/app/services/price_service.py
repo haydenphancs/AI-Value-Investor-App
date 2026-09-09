@@ -55,7 +55,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import FMPRateLimitException, get_fmp_client
+from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
+from app.services.asset_class import detect_asset_class
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,13 @@ _UNIVERSE_TTL = 60.0
 
 # A single profile is cheap; this only collapses the duplicate calls a single screen makes.
 _QUOTE_TTL = 30.0
+
+# Crypto quotes come from CoinGecko, whose Basic plan is 100,000 calls/MONTH — a
+# sustained 2.3/minute, not the 300/minute burst ceiling. That budget, not latency, is
+# what sets this TTL: one `/coins/markets` call serves a whole batch, so 60s costs at
+# most ~43k/month if something rebuilds every minute forever. In-process only, per
+# invariant #2 — a live price is never written to Supabase.
+_CRYPTO_QUOTE_TTL = 60.0
 
 # Previous closes move once per session. Held for an hour so a restart re-reads Supabase
 # rather than the 11.7 MB bulk endpoint.
@@ -129,6 +138,16 @@ def _cache_get(key: str, ttl: float) -> Optional[Any]:
 
 def _cache_set(key: str, value: Any) -> None:
     _cache[key] = (time.time(), value)
+
+
+async def _empty_quote_map() -> Dict[str, Dict[str, Any]]:
+    """An awaitable `{}` — `asyncio.gather` needs a coroutine, not a plain dict.
+
+    Defined at module level rather than inlined as a lambda so it cannot be
+    collaterally deleted by a block edit without `test_no_undefined_globals.py`
+    catching it (see the `_empty_list` incident).
+    """
+    return {}
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -333,9 +352,16 @@ class PriceService:
         sym = (symbol or "").strip().upper()
         if not sym:
             return {}
+        if self._crypto_quotes_enabled() and detect_asset_class(sym) == "crypto":
+            # Crypto is blocked on FMP but licensed on CoinGecko. Route it rather than
+            # returning {} — this is the path a single-symbol caller (a Tracking row, a
+            # price-alert baseline at creation time) takes, and {} is what made a BTC
+            # alert get created with a NULL baseline that could never trigger.
+            rows = await self._crypto_quotes([sym])
+            return rows.get(sym, {})
         if is_blocked_symbol(sym):
-            # Index / commodity / crypto / FX. Empty so the caller hides the surface;
-            # raising here would turn "not covered" into an error page.
+            # Index / commodity / FX. Empty so the caller hides the surface; raising
+            # here would turn "not covered" into an error page.
             logger.debug("price_service: %s is outside the FMP licence", sym)
             return {}
 
@@ -370,13 +396,27 @@ class PriceService:
         "no data" and drop the row, exactly as it did when batch-quote omitted a symbol.
         """
         wanted = {(s or "").strip().upper() for s in symbols if s and s.strip()}
-        wanted = {s for s in wanted if not is_blocked_symbol(s)}
-        if not wanted:
+        # SPLIT, don't just drop. `is_blocked_symbol` is about the FMP LICENCE, and it
+        # is true for indices, commodities, FX *and* crypto alike — but crypto is the
+        # one class with a licensed alternative source. Dropping it here is what made
+        # crypto price alerts never fire (silently: no symbol, no observation, no log),
+        # Tracking rows render $0.00, and the iOS widget blank a coin.
+        #
+        # This is the single choke point for all 18 `get_quotes_list` call sites, so
+        # fixing it here fixes every surface at once and consistently, rather than
+        # 18 partial migrations that drift apart.
+        crypto = {
+            s for s in wanted
+            if self._crypto_quotes_enabled() and detect_asset_class(s) == "crypto"
+        }
+        wanted = {s for s in wanted if not is_blocked_symbol(s)} - crypto
+        if not wanted and not crypto:
             return {}
 
-        universe, closes = await asyncio.gather(
+        universe, closes, crypto_rows = await asyncio.gather(
             self._get_universe(),
             self.get_close_snapshots(wanted),
+            self._crypto_quotes(crypto) if crypto else _empty_quote_map(),
             return_exceptions=True,
         )
         if isinstance(universe, Exception):
@@ -387,8 +427,14 @@ class PriceService:
             logger.warning("price_service: previous closes unavailable: %s: %s",
                            type(closes).__name__, closes)
             closes = {}
+        if isinstance(crypto_rows, Exception):
+            # Degrade the crypto half only — an equity batch must not fail because
+            # CoinGecko is down.
+            logger.warning("price_service: crypto quotes unavailable: %s: %s",
+                           type(crypto_rows).__name__, crypto_rows)
+            crypto_rows = {}
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: Dict[str, Dict[str, Any]] = dict(crypto_rows or {})
         for sym in wanted:
             row = universe.get(sym)
             if row is None:
@@ -397,7 +443,7 @@ class PriceService:
             if quote is not None and quote.get("price") is not None:
                 out[sym] = quote
 
-        missing = wanted - set(out)
+        missing = wanted - set(out)   # `wanted` already excludes crypto
         if missing:
             # The screener covers actively-traded US listings above the cap. Anything else
             # — a foreign listing, a sub-$50M microcap, a brand-new ticker — falls through
@@ -411,6 +457,143 @@ class PriceService:
                     out[quote["symbol"]] = quote
 
         return out
+
+    # ── Crypto quotes (CoinGecko) ─────────────────────────────────────────
+
+    @staticmethod
+    def _crypto_quotes_enabled() -> bool:
+        """False restores the pre-Phase-5 behaviour exactly: crypto is simply dropped.
+
+        The FMP crypto paths are HIDDEN, not removed — set `CRYPTO_PRICE_SOURCE=fmp`
+        and every call site here reverts to what it did before, so buying FMP's crypto
+        package back is one environment variable plus its entitlement manifest entry.
+        """
+        return str(getattr(settings, "CRYPTO_PRICE_SOURCE", "coingecko") or "").lower() != "fmp"
+
+    async def _crypto_quotes(self, symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """Quote-shaped rows for crypto pairs, keyed by the symbol the caller asked for.
+
+        ONE `/coins/markets` request covers the whole batch — price, 24h change, volume,
+        market cap and the 52-week band — so a six-coin watchlist costs one credit, not
+        six. That matters: the monthly budget is the binding constraint, not the rate
+        limit.
+
+        Three things here are load-bearing:
+
+        * **Rows are keyed by COIN ID, never by `row["symbol"]`.** MATIC and POL both
+          resolve to `polygon-ecosystem-token` and CoinGecko answers with one canonical
+          symbol, so keying by symbol drops the other. `/coins/markets` also sorts by
+          market cap rather than request order, so positional zipping is wrong too.
+        * **Every row goes out through `_shape`**, so both the `changePercentage` and
+          `changesPercentage` spellings exist. Consumers are split roughly evenly
+          between them, and a hand-rolled dict silently never fires a price alert.
+        * **A missing price OMITS the row** rather than emitting 0.0 (invariant #1).
+          Callers already treat an absent symbol as "no data" and hide the surface.
+        """
+        wanted = [(s or "").strip().upper() for s in symbols if s and str(s).strip()]
+        if not wanted:
+            return {}
+
+        key = "price:crypto:" + ",".join(sorted(set(wanted)))
+        hit = _cache_get(key, _CRYPTO_QUOTE_TTL)
+        if hit is not None:
+            return hit
+        if key in _inflight:
+            # Shielded: a caller that times out must not cancel the shared fetch and
+            # leave every other awaiter with a CancelledError.
+            return await asyncio.shield(_inflight[key])
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _inflight[key] = future
+        try:
+            from app.integrations.coingecko import get_coingecko_client
+            from app.services.coingecko_adapter import (
+                crypto_base_symbol,
+                markets_rows_by_id,
+            )
+
+            client = get_coingecko_client()
+            # Resolve first so we can map the response back by id. Tier 1 is a free
+            # dict lookup for the ~110 symbols we ship, so this is normally free.
+            id_by_symbol: Dict[str, str] = {}
+            for sym in dict.fromkeys(wanted):
+                coin_id = await client.resolve_coin_id(crypto_base_symbol(sym))
+                if coin_id:
+                    id_by_symbol[sym] = coin_id
+            if not id_by_symbol:
+                _cache_set(key, {})
+                if not future.done():
+                    future.set_result({})
+                return {}
+
+            rows = await client.get_markets(
+                [crypto_base_symbol(s) for s in id_by_symbol]
+            )
+            by_id = markets_rows_by_id(rows)
+
+            out: Dict[str, Dict[str, Any]] = {}
+            for sym, coin_id in id_by_symbol.items():
+                row = by_id.get(coin_id)
+                if not isinstance(row, dict):
+                    continue
+                price = _finite(row.get("current_price"))
+                if price is None:
+                    # Unknown price → omit. Never a fabricated $0.00.
+                    continue
+                change = _finite(row.get("price_change_24h"))
+                change_pct = _finite(row.get("price_change_percentage_24h"))
+                # previousClose is DERIVED, never defaulted: an absent 24h change means
+                # the reference is unknown, and `price - 0` would put the dashed
+                # reference line exactly on the last tick — plausible and wrong.
+                previous_close = (price - change) if change is not None else None
+                out[sym] = self._shape(
+                    symbol=sym,
+                    name=row.get("name"),
+                    price=price,
+                    previous_close=previous_close,
+                    change=change,
+                    change_pct=change_pct,
+                    volume=_finite(row.get("total_volume")),
+                    avg_volume=None,
+                    market_cap=_finite(row.get("market_cap")),
+                    exchange="CRYPTO",
+                    # 52-week band deliberately OMITTED. `/coins/markets` carries `atl`
+                    # and `ath`, which are ALL-TIME, not 52-week — labelling Bitcoin's
+                    # 2013 low as a "52-Week Low" is precisely the $67.81 bug this
+                    # rebuild removed. `_shape` omits the keys entirely when None, which
+                    # keeps each caller's `.get("yearLow", 0)` default reachable. The
+                    # real band comes from `crypto_service._cg_52_week_band` (/ohlc).
+                )
+
+            _cache_set(key, out)
+            if not future.done():
+                future.set_result(out)
+            return out
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it SKIPS `except Exception` below.
+            # A joiner is parked on `asyncio.shield(_inflight[key])`, and `finally` has
+            # already popped the key — so if the leader dies without resolving the
+            # future, that joiner waits forever with nothing able to recover it. Resolve
+            # it with an exception (never a result: a cancelled fetch produced no data,
+            # and handing back `{}` would look like "this coin has no price").
+            if not future.done():
+                future.set_exception(RuntimeError("shared crypto fetch was cancelled"))
+            raise
+        except Exception as e:
+            # Never let a CoinGecko failure break the equity path that shares the batch.
+            # Deliberately a RESULT, not an exception: the caller's contract is "a symbol
+            # I could not price is absent", and `get_quotes` gathers this leg with
+            # `return_exceptions=True` alongside the equity legs.
+            logger.warning(
+                "price_service: crypto quotes unavailable for %d symbol(s) (%s: %s)",
+                len(wanted), type(e).__name__, e,
+            )
+            if not future.done():
+                future.set_result({})
+            return {}
+        finally:
+            _inflight.pop(key, None)
 
     async def get_quotes_list(self, symbols: Sequence[str]) -> List[Dict[str, Any]]:
         """`get_quotes` as a LIST — the drop-in shape for `get_batch_quotes_bulk`.

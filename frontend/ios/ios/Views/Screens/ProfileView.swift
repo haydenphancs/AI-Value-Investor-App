@@ -376,7 +376,7 @@ struct ProfileView: View {
                                 Text("Add Credits")
                                     .font(AppTypography.captionEmphasis)
                             }
-                            .foregroundColor(AppColors.textOnFill)
+                            .foregroundColor(AppColors.textOnAccent)
                             .padding(.horizontal, AppSpacing.md)
                             .padding(.vertical, AppSpacing.xs)
                             .background(
@@ -881,7 +881,7 @@ struct CreditInfoPill: View {
 // MARK: - Upgrade Card
 
 struct UpgradeCard: View {
-    // `alertOrangeFill` (#CB491A both modes), never `alertOrange` — the ink below is constant
+    // `alertOrangeFill` (#CD4B1D both modes), never `alertOrange` — the ink below is constant
     // white, and a fill that lightens in dark drops it to 2.80.
     private let gradientColors = [
         AppColors.alertOrangeFill,
@@ -894,8 +894,8 @@ struct UpgradeCard: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xxs) {
                     // `textOnAccent` (constant white), NOT `textPrimary` — that is #0F172A in
                     // LIGHT and #FFFFFF in dark, so it inverted against a fill that did not and
-                    // rendered near-black on orange at 3.43:1 in light. 4.66 now, both modes.
-                    // ⚠️ No `.opacity()`: white at 0.8 on this fill is 3.54, below AA.
+                    // rendered near-black on orange at 3.43:1 in light. 4.55 now, both modes.
+                    // ⚠️ No `.opacity()`: white at 0.8 on this fill is 3.45, below AA.
                     HStack(spacing: AppSpacing.xs) {
                         Image(systemName: "bolt.fill")
                             .font(AppTypography.iconSmall)

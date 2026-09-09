@@ -181,79 +181,85 @@ struct AppColors {
     // `auditManifest` via `carries:`.
     //
     // (a) FROZEN + `textOnAccent` (white) — primaryFill, cautionFill, accentCyanFill,
-    //     alertPurpleFill, alertOrangeFill. Frozen means ONE value in BOTH modes.
+    //     alertPurpleFill, alertOrangeFill. ONE value in BOTH modes.
     //
-    //     It USED to be that colour's light-mode TEXT value, which fell straight out of the
-    //     maths: a value chosen to give 4.5:1 as dark ink on white is, by definition, dark
-    //     enough to give 4.5:1 under white ink. **That is no longer true of any of the five.**
-    //     The 2026-09 pass below calibrated each against the white-ink floor ALONE, which buys
-    //     lightness a text token cannot have — a text token must ALSO clear 4.5 on
-    //     `cardBackgroundLight` #EDF0F5, which costs about 0.6 of ratio more than white does.
+    //     It USED to be that colour's light-mode TEXT value, which fell out of the maths: a
+    //     value chosen to give 4.5:1 as dark ink on white is, by definition, dark enough to
+    //     give 4.5:1 under white ink. **That is no longer true of any of them.** The 2026-09
+    //     pass calibrated each against the white-ink floor ALONE, which buys lightness a text
+    //     token cannot have — a text token must ALSO clear 4.5 on `cardBackgroundLight`
+    //     #EDF0F5, about 0.6 of ratio dearer than white.
     //
-    //     ⚠️ CONSEQUENCE: a frozen fill is NOT text-safe any more. All five measure 4.07-4.08
-    //     on `cardBackgroundLight` — below AA. Never reuse a `*Fill` value as a text token,
-    //     and never "restore" a fill from its twin (`primaryFill` #2C6BF3 vs `primaryBlue`
-    //     #2563EB, `cautionFill` #A16810 vs `caution` #9A6100, `accentCyanFill` #207E9A vs
-    //     `accentCyan` #0E7490, `alertPurpleFill` #9948EE vs `alertPurple` #7E22CE,
-    //     `alertOrangeFill` #CB491A vs `alertOrange` #C2410C). Pinned by
-    //     `test_no_frozen_fill_is_byte_equal_to_its_text_counterpart`, which exists because
-    //     following the OLD version of this paragraph would silently revert the pass.
+    //     ⚠️ CONSEQUENCE: a frozen fill is NOT text-safe. They measure ~4.07 on
+    //     `cardBackgroundLight` — below AA. Never reuse a `*Fill` value as a text token, and
+    //     never "restore" one from its twin (`primaryFill` #2E6DF6 vs `primaryBlue` #2563EB,
+    //     `cautionFill` #A36A14 vs `caution` #9A6100, `accentCyanFill` #23809D vs `accentCyan`
+    //     #0E7490, `alertPurpleFill` #9B4AF0 vs `alertPurple` #7E22CE, `alertOrangeFill`
+    //     #CD4B1D vs `alertOrange` #C2410C). Pinned by
+    //     `test_no_frozen_fill_is_byte_equal_to_its_text_counterpart`.
     //
     // (b) ADAPTIVE + `textOnFill` (white in light, near-black in dark) — gainFill and
-    //     lossFill, which are byte-equal to `gain`/`loss`. Freezing them was correct for
-    //     contrast and wrong for the product: the Learn tab ended up with a BRIGHT green
-    //     progress bar (a 3:1 graphic, so it may be light) sitting beside a DARK green
-    //     "Resume Lessons" button — one hue at two lightnesses, 2.9x apart, in one card.
-    //     Darkening the INK instead of the fill fixes the look and improves contrast:
-    //     `textOnFill` on gain is 5.42 light / 7.79 dark, on loss 5.55 / 6.41, and the
-    //     tile-vs-card step goes 2.89 -> 6.89.
+    //     lossFill, byte-equal to `gain`/`loss`. Freezing them was correct for contrast and
+    //     wrong for the product: the Learn tab ended up with a BRIGHT green progress bar (a
+    //     3:1 graphic, so it may be light) beside a DARK green "Resume Lessons" button — one
+    //     hue at two lightnesses, 2.9x apart, in one card. Darkening the INK instead fixes the
+    //     look and improves contrast: `textOnFill` on gain is 5.42 light / 7.79 dark, on loss
+    //     5.55 / 6.41, and the tile-vs-card step goes 2.89 -> 6.89.
     //
-    // WHY ONE INK CANNOT SERVE BOTH: `textOnFill`'s dark arm on the frozen primaryFill
-    // is 3.4:1, and `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 —
-    // WORSE than the defect below that created this whole family. A site inked with the
-    // other family's token is a real regression. `test_text_tokens_never_sit_on_a_fill`
-    // enforces the split per family.
+    // WHY ONE INK CANNOT SERVE BOTH: `textOnFill`'s dark arm on a frozen fill is ~3.8, and
+    // `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 — WORSE than the defect that
+    // created this family. `test_text_tokens_never_sit_on_a_fill` enforces the split.
     //
     // These were silently broken app-wide before, in BOTH modes:
     //   white on primaryBlue #3B82F6  = 3.68:1  (15 buttons)
     //   white on bearish    #EF4444   = 3.35:1  (4 destructive buttons)
     //   white on bullish    #22C55E   = 2.28:1
     //
-    // ━━━ THE 2026-09 LIGHTENING PASS, AND WHY IT IS SMALL ━━━
+    // ━━━ THE 2026-09 LIGHTENING PASS ━━━
     //
     // A TestFlight tester reported the orange Credit Balance card "looks dark" and asked for
-    // the rest to be checked too. The five FROZEN fills were retuned; the two ADAPTIVE ones
-    // could not be. Both halves of that are worth knowing, because the obvious next request
-    // is "make them lighter still" and the answer to that is no.
+    // the rest to be checked too. All five went to the white-ink ceiling:
     //
-    //   primaryFill      #2563EB -> #2C6BF3   +2.8 L*   5.17 -> 4.66
-    //   cautionFill      #9A6100 -> #A16810   +2.7 L*   5.14 -> 4.66
-    //   accentCyanFill   #0E7490 -> #207E9A   +3.9 L*   5.36 -> 4.65
-    //   alertPurpleFill  #7E22CE -> #9948EE  +11.1 L*   6.98 -> 4.65
-    //   alertOrangeFill  #C2410C -> #CB491A   +2.9 L*   5.18 -> 4.66
+    //   primaryFill      #2563EB -> #2E6DF6   +3.6 L*   5.17 -> 4.53
+    //   cautionFill      #9A6100 -> #A36A14   +3.5 L*   5.14 -> 4.54
+    //   accentCyanFill   #0E7490 -> #23809D   +4.7 L*   5.36 -> 4.52
+    //   alertPurpleFill  #7E22CE -> #9B4AF0  +11.8 L*   6.98 -> 4.53
+    //   alertOrangeFill  #C2410C -> #CD4B1D   +3.6 L*   5.18 -> 4.55
     //
     // THE CEILING IS WCAG, NOT TASTE. White ink at 4.5:1 pins a fill's relative luminance at
-    // Y <= 0.1833, i.e. L* <= 49.9. Four of the five sat at L* 45.1-46.2 (purple was the
-    // outlier at 37.9 — see below) and all now sit at L*~49, taking 73-92% of the theoretical
-    // room (mean 79%, purple 92%) with 0.15 of ratio kept as margin. There is no further
-    // lightening available while `textOnAccent` stays white — and because contrast is
-    // SYMMETRIC, that same ceiling governs the reverse direction too: `alertOrangeFill` is the
-    // INK on the white "Add More Credits" button (CreditsBalanceCard), so lightening the fill
-    // and lightening that text are the same edit with the same limit. Going lighter than this
-    // requires the INK to move family, which is a different and much larger change.
+    // Y <= 0.1833, i.e. L* <= 49.9. Four of the five sat at L* 45.1-46.2 and purple at 37.9;
+    // all now sit at L* ~49.7. Because contrast is SYMMETRIC that ceiling governs the reverse
+    // direction too — a fill used as INK on a white surface is the same measurement, which is
+    // why the credit cards' white CTA button and their fill move together. PURPLE moved
+    // furthest because it was the OUTLIER, not because it was treated differently: at 6.98 /
+    // L*37.9 it sat 8 L* below the others and read as darker.
     //
-    // WHY PURPLE MOVED FOUR TIMES AS FAR. It was not a bigger lightening in spirit — it was the
-    // only one that was out of family. Every other frozen fill was tuned to ~4.5-5.4:1; purple
-    // sat at 6.98, i.e. L*37.9 against everyone else's ~46, so a purple avatar read as visibly
-    // darker than the blue one beside it. All five now land at L*~49. The fills are a SET, and
-    // that is the property being maintained here.
+    // ⚠️ GOING PAST THE CEILING WAS TRIED TWICE AND REVERTED BOTH TIMES. Keep this, because the
+    // request "make it a bit lighter" recurs and the honest answer is "not without giving
+    // something up":
     //
-    // WHY gainFill / lossFill DID NOT MOVE. Their binding constraint is not their own ink. They
-    // are byte-equal to the `gain`/`loss` TEXT tokens (asserted, not assumed — see
-    // `test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart`), and those measure 4.75
-    // and 4.86 as TEXT on `cardBackgroundLight` #EDF0F5. Lightening the fill drags the text
-    // token with it and puts body copy under AA on every nested card. 0.25 of ratio is not a
-    // lightening budget. Their dark arms are already bright by construction.
+    //   1. ADAPTIVE — bright #F97316 in dark only, near-black ink there. +14.8 L*, measures
+    //      6.33, passes every guard. Rejected on sight: at that lightness the orange reads as
+    //      YELLOW, and light and dark stopped matching.
+    //   2. BRIGHT-FROZEN — #DB582C in both modes with a near-black `textOnBrightFill`.
+    //      +4.6 L*, measures 4.60, legible and consistent. Rejected because it gives up WHITE
+    //      TEXT, which is the look the card is built around.
+    //
+    // ⚠️ AND THERE IS NO MIDDLE. A CONTRAST DEAD ZONE separates the two: white ink needs
+    // L* <= 49.9, near-black ink cannot start until L* >= 53.6, and nothing in the palette
+    // clears AA in between. A fill cannot get "slightly" lighter than the ceiling — it must
+    // jump ~4 L* AND change ink family in one move. #CD4B1D is the ceiling, and with white
+    // text it is the end of the road.
+    //
+    // ⚠️ Moving `primaryFill` the same way was also proposed and declined: 82 of the app's 90
+    // fill-ink sites are its, so it would turn every primary button, send button and selected
+    // chip light with near-black text.
+    //
+    // ⚠️ gainFill/lossFill cannot be lightened AT ALL. Their binding constraint is not their
+    // own ink but the twin TEXT token on `cardBackgroundLight`, where `gain` measures 4.75 and
+    // `loss` 4.86. Lightening the fill drags the text token with it (the byte-equality is
+    // asserted) and puts body copy under AA on every nested card.
+    //
     static let primaryFill = Color(lightHex: "2E6DF6", darkHex: "2E6DF6")
     /// ADAPTIVE — byte-equal to `gain`. Carries `textOnFill`, NOT `textOnAccent`.
     ///
@@ -285,7 +291,7 @@ struct AppColors {
     /// The token behind the Credit Balance card, and the one a TestFlight tester reported
     /// as "looks dark" (2026-08-24). Lightened from #C2410C (+2.9 L*), which is very nearly
     /// all the room white ink allows — see the FILLS header for why that ceiling is hard.
-    static let alertOrangeFill = Color(lightHex: "CD4B1D", darkHex: "F97316")
+    static let alertOrangeFill = Color(lightHex: "CD4B1D", darkHex: "CD4B1D")
 
     // ━━━ ALERTS ━━━
     static let alertOrange = Color(lightHex: "C2410C", darkHex: "F97316")
@@ -662,7 +668,7 @@ extension AppColors {
         TokenSpec("cautionFill", cautionFill, .text, on: [], carries: .onAccent),
         TokenSpec("accentCyanFill", accentCyanFill, .text, on: [], carries: .onAccent),
         TokenSpec("alertPurpleFill", alertPurpleFill, .text, on: [], carries: .onAccent),
-        TokenSpec("alertOrangeFill", alertOrangeFill, .text, on: [], carries: .onFill),
+        TokenSpec("alertOrangeFill", alertOrangeFill, .text, on: [], carries: .onAccent),
 
         // Graphic role — 3:1.
         TokenSpec("gainGraphic", gainGraphic, .graphic, on: ["background", "cardBackground"]),

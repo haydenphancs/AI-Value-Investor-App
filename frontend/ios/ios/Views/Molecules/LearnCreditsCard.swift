@@ -11,8 +11,9 @@ struct LearnCreditsCard: View {
     let balance: CreditBalance
     var onAddCredits: (() -> Void)?
 
-    // `alertOrangeFill` (#CB491A in BOTH modes), never `alertOrange` — see CreditsBalanceCard,
-    // which this card duplicates almost line for line.
+    // `alertOrangeFill` (#CD4B1D both modes) — see CreditsBalanceCard, which this card
+    // duplicates almost line for line and which records why two attempts to go lighter than
+    // the white-ink ceiling were reverted.
     private let gradientColors = [
         AppColors.alertOrangeFill,
         AppColors.alertOrangeFill
@@ -21,8 +22,8 @@ struct LearnCreditsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header — `textOnAccent`, not `textPrimary`: the latter is #0F172A in LIGHT and
-            // #FFFFFF in dark, so it inverted against a fill that did not (3.43 light).
-            // ⚠️ No `.opacity()` on the card body — white at 0.8 is 3.54 here, below AA.
+            // #FFFFFF in dark, so it inverted against a fill that did not (3.43 light). 4.55 now.
+            // ⚠️ No `.opacity()` on the card body — white at 0.8 is 3.45 here, below AA.
             Text("Credit Balance")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textOnAccent)
@@ -31,7 +32,7 @@ struct LearnCreditsCard: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textOnAccent)
 
-            // Credits Display — on a 0.2 black scrim, so 0.8 still clears AA (4.85 — only 0.35 over the floor, and no guard measures this composite).
+            // Credits Display — on a 0.2 black scrim, so 0.8 still clears AA (4.74).
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .lastTextBaseline, spacing: AppSpacing.sm) {
                     Text("\(balance.credits)")

@@ -48,6 +48,7 @@ from app.services.price_alert_engine import (
 )
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
+from app.services.asset_class import detect_asset_class
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -374,12 +375,24 @@ class PriceAlertService:
         base = f"pa:{rule.get('id')}"
         return base if repeat_mode == "once" else f"{base}:{trading_date_et()}"
 
-    async def evaluate_once(self) -> Dict[str, int]:
-        """One evaluation cycle. Never raises."""
+    async def evaluate_once(self, *, only_round_the_clock: bool = False) -> Dict[str, int]:
+        """One evaluation cycle. Never raises.
+
+        `only_round_the_clock` narrows the universe to assets that trade when the US
+        equity session is closed — crypto today. The loop passes it outside 04:00-20:00
+        ET so a Bitcoin alert can still fire at 3am, which is most of the time a 24/7
+        asset actually moves. It defaults to False so every existing caller (and test)
+        keeps its exact previous behaviour and stays independent of wall-clock time.
+        """
         stats = {"tickers": 0, "rules": 0, "fired": 0, "sent": 0}
 
         tickers = await asyncio.to_thread(self._active_universe)
+        if only_round_the_clock:
+            tickers = [t for t in tickers if detect_asset_class(t) == "crypto"]
         if not tickers:
+            # Short-circuit BEFORE the quote call. Outside market hours with no crypto
+            # alert on file this is the common case, and CoinGecko's budget is
+            # 100,000 calls/MONTH — a wasted call per minute overnight is 14% of it.
             return stats
         stats["tickers"] = len(tickers)
 
@@ -465,18 +478,27 @@ def get_price_alert_service() -> PriceAlertService:
 async def run_price_alert_loop() -> None:
     """Background loop: evaluate every active rule on a short cadence.
 
-    Gated on `session_phase() != "closed"`, i.e. 04:00-20:00 ET — the extended session,
-    not just regular hours, because a threshold crossed in pre-market is exactly the kind
-    of move a user set an alert for. Outside that window there are no new prices, and the
-    first cycle after the open catches gap crossings correctly (the engine treats
-    yesterday's close → today's open as a genuine crossing).
+    Inside 04:00-20:00 ET (`session_phase() != "closed"`) every rule is evaluated — the
+    extended session, not just regular hours, because a threshold crossed in pre-market
+    is exactly the kind of move a user set an alert for.
+
+    OUTSIDE that window the cycle still runs, narrowed to round-the-clock assets. Crypto
+    trades 24/7, so gating it on the NYSE calendar meant a Bitcoin alert could not fire
+    overnight or at any point over a weekend — the majority of the hours the asset
+    actually moves. An alert that cannot fire on a 24/7 asset is worse than not offering
+    one, so the gate is lifted for exactly those symbols and no others.
+
+    The narrowed cycle costs one batched CoinGecko call per interval, and only when a
+    crypto rule exists — `evaluate_once` returns before the quote call otherwise.
+    Measured against the 100,000/month budget: ~14,400/month at the 60s default.
     """
     await asyncio.sleep(30)
     interval = max(settings.PRICE_ALERT_INTERVAL_SECONDS, 15)
     while True:
         try:
-            if session_phase() != "closed":
-                await get_price_alert_service().evaluate_once()
+            await get_price_alert_service().evaluate_once(
+                only_round_the_clock=(session_phase() == "closed"),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:

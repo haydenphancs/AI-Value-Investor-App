@@ -755,12 +755,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // burn another rejected call. `retryAfter` cannot come from the payload — APIClient
             // drops `details` when it builds `.businessError` — so 60s is the standing default,
             // matching the 429 branch of `validateResponse`.
-            if code == "FMP_RATE_LIMITED" || code == "GEMINI_QUOTA_EXCEEDED" {
+            if code == "FMP_RATE_LIMITED" || code == "GEMINI_QUOTA_EXCEEDED"
+                || code == "COINGECKO_RATE_LIMITED" {
                 return .rateLimited(retryAfter: 60)
             }
             // Upstream down. Honestly a server-side failure, and `.serverError` already says
             // "we're experiencing technical difficulties" with a retry — which IS right here.
-            if code == "FMP_UNAVAILABLE" || code == "GEMINI_UNAVAILABLE" {
+            // CoinGecko joins these: it is the crypto price/history source now that FMP's
+            // crypto package is off the Order Form. Same client action — an outage there
+            // leaves every equity surface working, so this is a retry, not a dead app.
+            if code == "FMP_UNAVAILABLE" || code == "GEMINI_UNAVAILABLE"
+                || code == "COINGECKO_UNAVAILABLE" {
                 return .serverError(statusCode: 503)
             }
             // A dataset outside the signed FMP Order Form. Deliberately NOT left to fall

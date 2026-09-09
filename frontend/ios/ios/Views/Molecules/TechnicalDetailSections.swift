@@ -142,14 +142,20 @@ struct VolumeAnalysisSection: View {
                     valueColor: volumeData.obvColor
                 )
 
-                Divider()
-                    .overlay(AppColors.cardBackgroundLight)
+                // MFI needs intraday high/low. Where the price source has none the
+                // backend flags it unknown and the wire still carries a 50.0 for the
+                // non-Optional Double — rendering that would state a confident
+                // "Neutral 50" that was never measured. Hide the row instead.
+                if volumeData.moneyFlowIndexKnown {
+                    Divider()
+                        .overlay(AppColors.cardBackgroundLight)
 
-                VolumeMetricRow(
-                    label: "Money Flow Index",
-                    value: volumeData.formattedMFI,
-                    valueColor: AppColors.textPrimary
-                )
+                    VolumeMetricRow(
+                        label: "Money Flow Index",
+                        value: volumeData.formattedMFI,
+                        valueColor: AppColors.textPrimary
+                    )
+                }
             }
         }
     }

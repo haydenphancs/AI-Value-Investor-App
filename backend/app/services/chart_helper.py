@@ -220,6 +220,13 @@ def daily_range_days(range_code: str) -> int:
         "3M": 90 + _WARMUP_CALENDAR_DAYS,
         "6M": 180 + _WARMUP_CALENDAR_DAYS,
         "1Y": 365 + _WARMUP_CALENDAR_DAYS,
+        # 2Y carries NO MA(200) warm-up, and that is deliberate rather than an omission.
+        # It exists for crypto, whose source (CoinGecko Basic) caps history at exactly
+        # 730 days — so 730 + 320 is unreachable and asking for it returns 730 anyway.
+        # Spending the window on warm-up instead would shorten the VISIBLE range to ~14
+        # months under a "2Y" label. MA(50) still draws; MA(200) does not, on this range
+        # only. See CRYPTO_HISTORY_YEARS.
+        "2Y": 365 * 2,
         "5Y": 365 * 5 + _WARMUP_CALENDAR_DAYS,
         "ALL": 99999,
     }.get(range_code, 90 + _WARMUP_CALENDAR_DAYS)
@@ -232,6 +239,7 @@ DEFAULT_INTERVALS = {
     "3M": "daily",
     "6M": "daily",
     "1Y": "daily",
+    "2Y": "daily",
     "5Y": "weekly",
     "ALL": "monthly",
 }
@@ -243,6 +251,7 @@ ALLOWED_INTERVALS = {
     "3M": {"daily", "weekly"},
     "6M": {"daily", "weekly"},
     "1Y": {"daily", "weekly", "monthly"},
+    "2Y": {"daily", "weekly", "monthly"},
     "5Y": {"weekly", "monthly"},
     "ALL": {"weekly", "monthly"},
 }
@@ -272,6 +281,7 @@ def compute_date_range(range_code: str) -> Tuple[Optional[str], str]:
         "3M": timedelta(days=90),
         "6M": timedelta(days=180),
         "1Y": timedelta(days=365),
+        "2Y": timedelta(days=365 * 2),
         "5Y": timedelta(days=365 * 5),
     }
 

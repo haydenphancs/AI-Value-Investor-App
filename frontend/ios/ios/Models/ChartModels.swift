@@ -121,6 +121,33 @@ enum ChartAssetContext {
     var supportsExtendedHours: Bool {
         self != .crypto
     }
+
+    /// The time-range pills this asset's screen may offer.
+    ///
+    /// `ChartTimeRange` is a single enum shared by all five detail screens, so it cannot
+    /// express "2Y exists, but only for crypto". This does — the same way
+    /// `supportsExtendedHours` already gates a per-asset chart behaviour.
+    ///
+    /// Two independent reasons a pill must not appear:
+    ///
+    /// * **The backend would 400 it.** Only `crypto.py` accepts "2Y"; the equity, ETF,
+    ///   index and commodity range patterns are `^(1D|1W|3M|6M|1Y|5Y|ALL)$`.
+    /// * **The data does not exist.** Crypto history comes from CoinGecko Basic, which
+    ///   caps at two years. A 5Y or ALL pill there renders a two-year series under a
+    ///   five-year label — a pill that draws the wrong window is the same defect class
+    ///   as one that draws an empty chart.
+    var allowedRanges: [ChartTimeRange] {
+        switch self {
+        case .crypto:
+            // 2Y replaces 5Y/ALL, which the source cannot serve.
+            return [.oneDay, .oneWeek, .threeMonths, .sixMonths, .oneYear, .twoYears]
+        case .stock, .etf, .index, .commodity:
+            // Everything except 2Y. Written as an explicit filter rather than a literal
+            // list so a future range added to `ChartTimeRange` reaches these screens
+            // automatically, exactly as `allCases` did before this property existed.
+            return ChartTimeRange.allCases.filter { $0 != .twoYears }
+        }
+    }
 }
 
 // MARK: - Chart Settings

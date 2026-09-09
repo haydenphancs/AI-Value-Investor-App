@@ -133,6 +133,77 @@ def test_short_symbols_are_not_mistaken_for_fx_pairs(symbol: str) -> None:
     assert is_blocked_symbol(symbol) is False
 
 
+@pytest.mark.parametrize("symbol", ["PIUSD", "OPUSD", "ZKUSD"])
+def test_two_char_coin_bases_are_blocked_despite_the_length_floor(symbol: str) -> None:
+    """A 5-char pair with a 2-char base is still crypto, and still 402s.
+
+    The `len(s) >= 6` floor above cannot see these. Pi, Optimism and zkSync are real
+    coins, so every quote for them went out to FMP, came back 402, and surfaced at
+    ERROR — while `detect_asset_class` had always classified them as crypto. The two
+    classifiers disagreed about the same symbol.
+
+    The repair is membership in `SYMBOL_TO_COINGECKO_ID`, not a lower floor: the base
+    either names a coin we can price or it does not. `test_short_symbols_...` above
+    stays green precisely because X and A are not coins.
+    """
+    assert is_blocked_symbol(symbol) is True
+
+
+def test_every_known_coin_pair_is_blocked_on_both_suffixes() -> None:
+    """No coin in the map may reach FMP under either quote convention.
+
+    Assert over the whole map rather than a sample, so adding a 2-char-base coin
+    cannot silently reopen the gap.
+    """
+    from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+
+    leaked = [
+        f"{base}{suffix}"
+        for base in SYMBOL_TO_COINGECKO_ID
+        for suffix in ("USD", "USDT")
+        if not is_blocked_symbol(f"{base}{suffix}")
+    ]
+    assert leaked == [], f"these coin pairs would reach FMP: {leaked}"
+
+
+@pytest.mark.parametrize("symbol", ["QTUMUSD", "WAVESUSD"])
+def test_long_tail_coin_pairs_still_rely_on_the_length_rule(symbol: str) -> None:
+    """The coin-map arm must ADD coverage, never replace the length rule.
+
+    The hardcoded map is the top ~110 coins only, so a long-tail pair is caught by
+    `len(s) >= 6` alone. Without this test, deleting the length rule entirely left
+    the whole file green — the map arm happens to cover BTCUSD/ETHUSD, which is
+    what the other crypto tests assert. Verified by hand: these two bases are
+    absent from SYMBOL_TO_COINGECKO_ID, so this is the rule's unique coverage.
+    """
+    from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+
+    base = symbol[: -len("USD")]
+    assert base not in SYMBOL_TO_COINGECKO_ID, (
+        f"{base} joined the coin map — this test no longer pins the length rule; "
+        "pick another long-tail base"
+    )
+    assert is_blocked_symbol(symbol) is True
+
+
+def test_the_coin_map_rule_agrees_with_detect_asset_class() -> None:
+    """The two classifiers must not disagree about any coin in the map.
+
+    This divergence is what the bug was: one module calling a symbol crypto while
+    the other let it through to a provider that cannot serve it.
+    """
+    from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+    from app.services.asset_class import detect_asset_class
+
+    disagreements = [
+        pair
+        for base in SYMBOL_TO_COINGECKO_ID
+        for pair in (f"{base}USD",)
+        if detect_asset_class(pair) == "crypto" and not is_blocked_symbol(pair)
+    ]
+    assert disagreements == [], f"classified crypto but not blocked: {disagreements}"
+
+
 # ------------------------------------------------------------------------------- paths
 
 def test_normalize_path_folds_the_chart_template() -> None:

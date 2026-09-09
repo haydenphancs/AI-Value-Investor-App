@@ -103,6 +103,17 @@ class VolumeAnalysisData(BaseModel):
     volume_trend: VolumeTrend
     obv: float
     money_flow_index: float
+    # False when MFI could not be COMPUTED, as opposed to being a genuine 50.
+    #
+    # MFI needs intraday high/low, and CoinGecko's `market_chart` carries none — so on
+    # the crypto path the calculation used to fall to its `or 50.0` default and render a
+    # confident "Neutral 50" that was a hardcoded constant, not a measurement.
+    #
+    # A DEFAULTED, NON-NULLABLE bool rather than making `money_flow_index` Optional:
+    # shipped iOS builds decode that field as a plain `Double`, and the backend deploys
+    # before the client, so a null there would crash the Technical Analysis sheet on
+    # every already-installed copy. Same three-state pattern as `dividend_yield_known`.
+    money_flow_index_known: bool = True
 
 
 class FibonacciLevel(BaseModel):

@@ -24,6 +24,7 @@ import pytest
 
 import app.services.price_service as ps_module
 from app.services.price_service import PriceService, _cache, _finite
+from tests._price_fakes import FakeCoinGecko
 
 
 @pytest.fixture(autouse=True)
@@ -109,11 +110,133 @@ async def test_single_quote_carries_change_and_derives_previous_close(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("symbol", ["^GSPC", "GCUSD", "BTCUSD", "EURUSD"])
+@pytest.mark.parametrize("symbol", ["^GSPC", "GCUSD", "EURUSD"])
 async def test_blocked_symbols_return_none_without_calling_fmp(monkeypatch, symbol):
+    """Index / commodity / FX have NO licensed source, so they stay empty.
+
+    ⚠️ BTCUSD was a member of this list and has deliberately moved to the test below.
+    Crypto is blocked on FMP but licensed on CoinGecko, so `{}` is no longer the right
+    answer for it — see `test_crypto_is_routed_to_coingecko_not_refused`.
+    """
     fake = _install(monkeypatch, _FakeFMP())
     assert await PriceService().get_quote(symbol) == {}
     assert fake.profile_calls == [], "an unlicensed symbol must not reach FMP at all"
+
+
+@pytest.mark.asyncio
+async def test_crypto_is_routed_to_coingecko_not_refused(monkeypatch):
+    """A crypto pair must come back with a REAL price, and must not touch FMP.
+
+    Returning `{}` here is what made crypto price alerts silently never fire, Tracking
+    rows render $0.00, and a BTC alert get created with a NULL baseline.
+
+    ⚠️ This test MUST stub CoinGecko. Without a stub the hermetic guard raises
+    `NetworkCallInTests`, `_crypto_quotes` swallows it (deliberately — an outage must
+    not break the equity half of a mixed batch), and the old `== {}` assertion passed
+    for entirely the wrong reason. That false pass was real and is why `FakeCoinGecko`
+    exists.
+    """
+    _cache.clear()
+    fmp = _install(monkeypatch, _FakeFMP())
+    cg = FakeCoinGecko({"BTC": 78_813.0})
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+
+    quote = await PriceService().get_quote("BTCUSD")
+
+    assert quote["symbol"] == "BTCUSD"
+    assert quote["price"] == 78_813.0
+    # Both spellings, or roughly half the consumers read a blank field.
+    assert quote["changePercentage"] == quote["changesPercentage"] == 1.0
+    # previousClose is DERIVED from the 24h change, never defaulted to the price
+    # itself (which would put the dashed reference line exactly on the last tick).
+    assert quote["previousClose"] == pytest.approx(78_813.0 - 788.13)
+    assert fmp.profile_calls == [], "crypto must not reach FMP even now that it resolves"
+
+
+@pytest.mark.asyncio
+async def test_a_coingecko_outage_degrades_crypto_without_breaking_equities(monkeypatch):
+    """A mixed batch must still serve its equity half when CoinGecko is down."""
+    _cache.clear()
+    _install(monkeypatch, _FakeFMP(screener=[_screener_row("AAPL", 319.97)]))
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    monkeypatch.setattr(
+        "app.integrations.coingecko.get_coingecko_client",
+        lambda: FakeCoinGecko({"BTC": 1.0}, fail=True),
+    )
+
+    rows = await PriceService().get_quotes(["AAPL", "BTCUSD"])
+
+    assert "BTCUSD" not in rows, "an unknown price must be ABSENT, never a fabricated 0.0"
+    assert rows["AAPL"]["price"] == 319.97, "the equity half must survive the outage"
+
+
+@pytest.mark.asyncio
+async def test_a_crypto_batch_costs_exactly_one_upstream_call(monkeypatch):
+    """The binding constraint is 100k calls/MONTH, so batching is a budget invariant."""
+    _cache.clear()
+    _install(monkeypatch, _FakeFMP())
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    cg = FakeCoinGecko({"BTC": 1.0, "ETH": 2.0, "SOL": 3.0})
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+
+    rows = await PriceService().get_quotes(["BTCUSD", "ETHUSD", "SOLUSD"])
+
+    assert set(rows) == {"BTCUSD", "ETHUSD", "SOLUSD"}
+    assert len(cg.markets_calls) == 1, f"fanned out into {len(cg.markets_calls)} calls"
+
+
+@pytest.mark.asyncio
+async def test_previous_close_is_omitted_when_the_24h_change_is_unknown(monkeypatch):
+    """`price - 0` would put the dashed reference line exactly on the last tick.
+
+    That reads as "flat since yesterday" — plausible, confident, and fabricated.
+    An unknown reference must be None (invariant #1), which every consumer already
+    guards for.
+    """
+    _cache.clear()
+    _install(monkeypatch, _FakeFMP())
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client",
+                        lambda: FakeCoinGecko({"BTC": 78_813.0}, omit_change=True))
+
+    quote = (await PriceService().get_quotes(["BTCUSD"]))["BTCUSD"]
+
+    assert quote["price"] == 78_813.0
+    assert quote["previousClose"] is None, "an unknown reference must not equal the price"
+    assert quote["change"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_no_price_is_omitted_never_rendered_as_zero(monkeypatch):
+    """CoinGecko lists coins it cannot currently price; `$0.00` is the shipped bug."""
+    _cache.clear()
+    _install(monkeypatch, _FakeFMP())
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client",
+                        lambda: FakeCoinGecko({"BTC": 78_813.0}, null_price=True))
+
+    rows = await PriceService().get_quotes(["BTCUSD"])
+
+    assert rows == {}, f"an unpriceable coin must be ABSENT, got {rows}"
+
+
+@pytest.mark.asyncio
+async def test_rows_are_keyed_by_coin_id_not_response_order(monkeypatch):
+    """`/coins/markets` sorts by market cap, so a positional zip misattributes prices.
+
+    `FakeCoinGecko` returns its rows REVERSED against the request for exactly this
+    reason — a zip-based implementation would hand BTC's price to SOL.
+    """
+    _cache.clear()
+    _install(monkeypatch, _FakeFMP())
+    monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    cg = FakeCoinGecko({"BTC": 78_813.0, "SOL": 103.63})
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client", lambda: cg)
+
+    rows = await PriceService().get_quotes(["BTCUSD", "SOLUSD"])
+
+    assert rows["BTCUSD"]["price"] == 78_813.0
+    assert rows["SOLUSD"]["price"] == 103.63
 
 
 @pytest.mark.asyncio
@@ -193,10 +316,20 @@ async def test_a_row_with_no_real_price_is_dropped_entirely(monkeypatch, bad_pri
 
 @pytest.mark.asyncio
 async def test_batch_excludes_unlicensed_symbols(monkeypatch):
+    """Index / commodity stay excluded. BTCUSD no longer belongs in that list.
+
+    ⚠️ This test kept BTCUSD in its input and asserted it was excluded, which stayed
+    green after crypto started routing to CoinGecko — but only because the hermetic
+    guard blocked the socket and `_crypto_quotes` swallowed the error. Stub CoinGecko
+    so the assertion means what it says, and assert crypto is now PRESENT.
+    """
+    _cache.clear()
     _install(monkeypatch, _FakeFMP(screener=[_screener_row("AAPL", 100.0)]))
     monkeypatch.setattr(PriceService, "_select_closes", staticmethod(lambda syms: []))
+    monkeypatch.setattr("app.integrations.coingecko.get_coingecko_client",
+                        lambda: FakeCoinGecko({"BTC": 78_813.0}))
     out = await PriceService().get_quotes(["AAPL", "^GSPC", "BTCUSD", "GCUSD"])
-    assert set(out) == {"AAPL"}
+    assert set(out) == {"AAPL", "BTCUSD"}, "crypto is licensed on CoinGecko now"
 
 
 @pytest.mark.asyncio

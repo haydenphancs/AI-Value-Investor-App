@@ -321,6 +321,10 @@ BLOCKED_COMMODITY_SYMBOLS: FrozenSet[str] = frozenset({
 # `_FX_CODES` below is used for an exact BOTH-HALVES test instead.
 BLOCKED_SYMBOL_SUFFIXES: FrozenSet[str] = frozenset({"USD", "JPY", "EUR", "GBP", "CNY"})
 
+# The authoritative list of coins we can actually price. Imported for the base-symbol
+# test in `is_blocked_symbol`; `coingecko` imports only `app.config`, so no cycle.
+from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID  # noqa: E402
+
 #: ISO-4217 codes FMP quotes as FX pairs. A 6-character symbol whose FIRST three and LAST
 #: three are both in this set is a currency pair — a far tighter test than a suffix match,
 #: which is why it can be applied to the base currency without risking a real ticker.
@@ -372,6 +376,21 @@ def is_blocked_symbol(symbol: Optional[str]) -> bool:
     # ticker merely ends in "USD" is not swept up.
     if len(s) >= 6 and any(s.endswith(x) for x in BLOCKED_SYMBOL_SUFFIXES):
         return True
+    # ...but the length floor is blind to a TWO-character base. PIUSD / OPUSD /
+    # ZKUSD are 5 chars and are real coins (Pi, Optimism, zkSync), so they sailed
+    # past the rule above, went out to FMP, came back 402 and surfaced at ERROR on
+    # every single call. `detect_asset_class` has always called them crypto
+    # (`len > 3`), so the two classifiers disagreed about the same symbol.
+    #
+    # Lowering the floor to 4 or 5 is the wrong repair — it starts guessing, and
+    # `test_short_symbols_are_not_mistaken_for_fx_pairs` pins XUSD/AUSD as real
+    # tickers that must stay unblocked. Membership in the coin map is EXACT: the
+    # base either names a coin we can price on CoinGecko or it does not.
+    for _suffix in ("USDT", "USD"):
+        if s.endswith(_suffix) and len(s) > len(_suffix):
+            if s[: -len(_suffix)] in SYMBOL_TO_COINGECKO_ID:
+                return True
+            break
     # Pairs quoted in a minor (USDCAD, USDCHF, USDMXN) end in a code the suffix rule
     # cannot list without matching real tickers. Both halves being ISO-4217 is exact.
     if _is_fx_pair(s):

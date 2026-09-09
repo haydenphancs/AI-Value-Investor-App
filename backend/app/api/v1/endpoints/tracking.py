@@ -40,6 +40,7 @@ from app.schemas.tracking import (
     BulkHoldingUpdateItem,
 )
 from app.services._classification_common import classification_from_profile
+from app.services.asset_class import canonical_stored_symbol
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService
 from app.utils.supabase_errors import is_transient_supabase_error
@@ -141,7 +142,17 @@ async def add_holding(
             user_message="Amount can't be negative.",
         )
 
-    ticker = request.ticker.upper()
+    # Canonicalise, exactly as `POST /watchlist` and the price-alert create do. Without
+    # this, "BTC" + asset_type="crypto" writes a BARE row alongside the pair-form row —
+    # re-creating the ambiguity migration 160 removed, through ordinary use. A bare coin
+    # ticker is also a real listed security for seven of the sixteen (BTC is the Grayscale
+    # ETF, SOL is Emeren Group), so the two spellings must stay distinct.
+    ticker = canonical_stored_symbol(request.ticker, request.asset_type)
+    if ticker != request.ticker.upper():
+        logger.info(
+            "[Tracking] normalised %s -> %s (asset_type=%s) so the row is unambiguous",
+            request.ticker, ticker, request.asset_type,
+        )
 
     # Enrich with FMP profile + current price. The profile also seeds the
     # diversification signals (industry / market_cap / beta) so Portfolio
@@ -230,13 +241,35 @@ async def update_holding(
             user_message="Nothing to update.",
         )
 
+    # Resolve RAW first, then the canonical form — never canonical-only.
+    #
+    # This is a LOOKUP, not a create, and after migration 160 the two spellings name
+    # DIFFERENT assets: "BTC" is the Grayscale Bitcoin Mini Trust ETF, "BTCUSD" is Bitcoin.
+    # Canonicalising unconditionally would make a holder of the ETF unable to edit their own
+    # row (404), while raw-only leaves a client that still says "BTC" for the coin unable to
+    # edit theirs. Trying raw and then canonical is correct for both, because only one of the
+    # two rows can exist per user per spelling.
+    raw_ticker = ticker.upper()
+    canonical = canonical_stored_symbol(raw_ticker, request.asset_type)
     result = (
         supabase.table("watchlist_items")
         .update(updates)
         .eq("user_id", user["id"])
-        .eq("ticker", ticker.upper())
+        .eq("ticker", raw_ticker)
         .execute()
     )
+    if not result.data and canonical != raw_ticker:
+        logger.info(
+            "[Tracking] no %s row for user=%s — retrying as %s",
+            raw_ticker, user["id"], canonical,
+        )
+        result = (
+            supabase.table("watchlist_items")
+            .update(updates)
+            .eq("user_id", user["id"])
+            .eq("ticker", canonical)
+            .execute()
+        )
 
     if not result.data:
         return make_error_response(

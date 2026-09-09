@@ -173,3 +173,53 @@ def test_the_migration_dedupes_on_the_full_unique_key():
     assert "DELETE FROM price_alerts" in alerts_block, "split did not isolate the alerts block"
     assert "b.kind = a.kind" in alerts_block
     assert "b.threshold IS NOT DISTINCT FROM a.threshold" in alerts_block
+
+
+# ── the tracking write paths (added after migration 160) ─────────────────────
+#
+# `POST /tracking/holdings` and `PUT /tracking/holdings/{ticker}` both write
+# `watchlist_items.ticker` and neither canonicalised. That is not a cosmetic gap: the POST
+# re-creates a BARE row beside the migrated pair-form one, undoing migration 160 through
+# ordinary use, and the PUT 404s for a client that still says "BTC" for the coin.
+
+def _tracking_source():
+    """`tracking.py` with comments stripped — the notes beside these fixes name every token
+    a naive scan greps for, so an unstripped scan passes on prose after a revert."""
+    import inspect
+    from app.api.v1.endpoints import tracking
+
+    raw = inspect.getsource(tracking)
+    return "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+
+
+def test_the_holdings_create_path_canonicalises():
+    src = _tracking_source()
+    assert "canonical_stored_symbol(request.ticker, request.asset_type)" in src, (
+        "POST /tracking/holdings can re-create a bare crypto row, undoing migration 160"
+    )
+    assert "ticker = request.ticker.upper()\n" not in src, "the raw .upper() path is back"
+
+
+def test_the_holdings_update_path_tries_raw_before_canonical():
+    """RAW first is load-bearing. After migration 160 the two spellings name DIFFERENT
+    assets — "BTC" is the Grayscale ETF, "BTCUSD" is Bitcoin — so canonicalising
+    unconditionally would stop an ETF holder editing their own row."""
+    src = _tracking_source()
+    assert "raw_ticker" in src and "canonical_stored_symbol(raw_ticker" in src
+    # raw must be attempted first
+    assert src.index('.eq("ticker", raw_ticker)') < src.index('.eq("ticker", canonical)')
+
+
+@pytest.mark.parametrize("bare,declared,expected", [
+    ("BTC", "crypto", "BTCUSD"),
+    ("btc", "crypto", "BTCUSD"),
+    ("BTC", None, "BTCUSD"),          # bare-list membership, the migration's own guess
+    ("BTC", "Stock", "BTC"),          # a declared equity stays the security
+    ("BTCUSD", "crypto", "BTCUSD"),   # already canonical
+    ("AAPL", None, "AAPL"),
+    ("AAPL", "crypto", "AAPL"),       # not a known coin — never invent a pair
+])
+def test_the_canonicaliser_the_tracking_paths_now_use(bare, declared, expected):
+    from app.services.asset_class import canonical_stored_symbol
+
+    assert canonical_stored_symbol(bare, declared) == expected

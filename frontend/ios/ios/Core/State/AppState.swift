@@ -458,6 +458,14 @@ final class AppState {
         // interceptor) so a TRANSIENT failure is never mistaken for a dead session.
         do {
             let profile = try await fetchCurrentUserNoRetry()
+            // Re-check AFTER the await. The failure paths below already do this (see
+            // `enterRestoringWindow`); the SUCCESS path did not, which is the whole bug —
+            // a sign-out (or a sign-in as somebody else) that landed during the fetch was
+            // silently undone by these two lines.
+            guard generation == credentialGeneration else {
+                print("ℹ️ [AppState] restore superseded mid-flight — discarding the fetched profile")
+                return
+            }
             applyProfile(profile)
             await establishAuthenticatedSession(userId: profile.id)
             return
@@ -1010,6 +1018,17 @@ final class AppState {
     /// (they need the token to still be set, so they fire before it is cleared).
     func signOut() {
         Task { [authService] in await authService?.signOut() }
+        // Invalidate any restore already in flight.
+        //
+        // ⚠️ This counter is bumped by signIn / signUp / completeSocialSignIn but WAS NOT
+        // bumped here, so `performRestore` — which captures it before `await
+        // fetchCurrentUserNoRetry()` — could not see a sign-out. ProfileView deliberately
+        // offers Sign Out during `.restoring`, so the window is not theoretical: the
+        // profile fetch would return after the sign-out had cleared everything, take the
+        // success path, and drive the app back to `.authenticated` carrying the EX-USER's
+        // profile with no token on the wire. Nothing recovers that — every healing trigger
+        // is gated on `auth.status != .authenticated`.
+        credentialGeneration &+= 1
         invalidateIdentity(nil)
         auth.status = .unauthenticated
         user = UserState()

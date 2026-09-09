@@ -110,11 +110,21 @@ final class PortfolioStore: ObservableObject {
         await task.value
     }
 
+    /// Bumped by `reset()`. A load that started under the previous session refuses to
+    /// publish, because cancellation cannot un-finish a request that already resolved.
+    private var identityEpoch = 0
+
     private func performLoad() async {
+        // Captured BEFORE the request. `reset()` bumps it, so a load issued under the
+        // previous session cannot publish that session's rows after sign-out.
+        let epoch = identityEpoch
         isLoading = true
         defer {
             isLoading = false
-            hasLoadedOnce = true
+            // Only claim "loaded" for the session that actually asked. Otherwise a
+            // superseded load marks the NEW session as loaded and its first real refresh
+            // is skipped.
+            if epoch == identityEpoch { hasLoadedOnce = true }
         }
 
         do {
@@ -122,6 +132,15 @@ final class PortfolioStore: ObservableObject {
                 endpoint: .getPortfolios,
                 responseType: PortfolioListResponseDTO.self
             )
+            // The sign-out may have landed while this was in flight. The request went out
+            // with the still-armed bearer, so it returns the EX-USER's portfolios —
+            // publishing them refills the store `reset()` just cleared and re-writes their
+            // active id to the device-global UserDefaults key, which is precisely the bleed
+            // `reset()` exists to stop.
+            guard epoch == identityEpoch else {
+                print("[PortfolioStore] ↩︎ discarding a load from an ended session")
+                return
+            }
             let loaded = response.portfolios
                 .map { $0.toPortfolio() }
                 .sorted { $0.sortOrder < $1.sortOrder }
@@ -203,6 +222,12 @@ final class PortfolioStore: ObservableObject {
     /// names in the picker, and their ticker membership driving the filtered asset and alert
     /// lists. Same class as the Learn stores and followed whales; same funnel.
     func reset() {
+        // Bump FIRST and cancel, so an in-flight load fails its epoch check below rather
+        // than refilling the store after this clears it. Cancellation alone is not enough:
+        // a task already past its await still runs its completion branch.
+        identityEpoch &+= 1
+        loadTask?.cancel()
+        loadTask = nil
         portfolios = []
         activePortfolioId = nil
         hasLoadedOnce = false

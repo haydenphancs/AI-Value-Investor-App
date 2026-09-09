@@ -783,7 +783,20 @@ class IndexService:
             return db
 
         historical = await self._get_history(symbol)
-        derived = self._derive_from_history(historical)
+        try:
+            derived = self._derive_from_history(historical)
+        except Exception as e:
+            # Containment, not a substitute for the guard above. `_build_index_detail`
+            # gathers this leg WITHOUT `return_exceptions=True`, so anything raised here
+            # takes the entire screen down — and because the history is already cached,
+            # it would do so on every request until that cache expired. An empty bundle
+            # renders the stats as absent, which is the honest degrade.
+            logger.exception(
+                "Index derived stats failed for %s (%s: %s) — serving the screen "
+                "without them rather than failing the whole build",
+                symbol, type(e).__name__, e,
+            )
+            return {}
 
         # Degradation gate: an empty history yields a bundle of zeros and Nones, which
         # would pin an empty Performance card and a blank 200-day average for 12 hours.
@@ -801,11 +814,38 @@ class IndexService:
     @staticmethod
     def _derive_from_history(historical: List[Dict]) -> Dict[str, Any]:
         """Pure: daily history -> the JSON-serialisable scalars the sections need."""
-        vols = [d.get("volume", 0) for d in historical[-30:] if d.get("volume")]
+        from app.services.chart_helper import _finite_or_none
+
+        # Filter ONCE here rather than guarding each helper below: `_compute_average`,
+        # `_compute_return` and `_compute_ytd_return` all dereference `p.get(...)`, so a
+        # single non-dict element in a malformed upstream list would AttributeError out of
+        # whichever ran first. One filter makes this function total for any list input.
+        historical = [d for d in (historical or []) if isinstance(d, dict)]
+
+        # ⚠️ `if d.get("volume")` is NOT a guard, and `int()` is where it detonates.
+        # This upstream emits bare NaN / Infinity JSON tokens (see the comment in
+        # `_build_index_detail`), `json.loads` parses them, and **NaN is TRUTHY** — so a
+        # single poisoned row survived the filter, made `sum(vols)` non-finite, and
+        # `int(NaN)` raised ValueError (Infinity → OverflowError, a string volume →
+        # TypeError). That escaped `_get_derived` into `_build_index_detail`'s gather,
+        # which has no `return_exceptions=True`, so the WHOLE index screen 502'd.
+        #
+        # And it was STICKY: `_get_history` caches the raw rows for 12h BEFORE this runs,
+        # so every retry rebuilt from the same poisoned list and failed identically for
+        # the full TTL. `chart_helper._normalize_prices` guards the same field from the
+        # same endpoint; this derived path simply never got it.
+        vols = [
+            v for v in (
+                _finite_or_none(d.get("volume"))
+                for d in historical[-30:]
+            )
+            if v is not None and v > 0
+        ]
+        avg_volume_30d = _finite_or_none(sum(vols) / len(vols)) if vols else None
         return {
             "avg_50": _compute_average(historical, 50),
             "avg_200": _compute_average(historical, 200),
-            "avg_volume_30d": int(sum(vols) / len(vols)) if vols else 0,
+            "avg_volume_30d": int(avg_volume_30d) if avg_volume_30d is not None else 0,
             "ytd_return": _compute_ytd_return(historical),
             "one_month_return": _compute_return(historical, 21),
             "one_year_return": _compute_return(historical, 252),

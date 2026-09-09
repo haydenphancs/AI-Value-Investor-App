@@ -1141,6 +1141,28 @@ class CryptoService:
                         change = round(price - _prev, 6)
                         change_pct = round(((price - _prev) / _prev) * 100, 4)
 
+        # Both legs share ONE provider now, so they fail together — refuse rather than
+        # ship a zero.
+        #
+        # ⚠️ The recovery above is dead in exactly the case it was written for. Its comment
+        # says "the FMP `historical` fetch succeeds independently", which stopped being
+        # true when history moved to CoinGecko: a 429 that empties `market_data` empties
+        # `historical` too, so `if not price and historical` never runs and `price` stays
+        # 0.0. The screen then shipped "$0.00 / +0.00%" as a measured fact for a live coin.
+        #
+        # `get_crypto_core` already refuses in this situation ("a $0.00 header is worse
+        # than a skeleton"), and index/commodity detail do the same. Typed, so the endpoint
+        # maps it to COINGECKO_UNAVAILABLE (502, retry_later) instead of a generic 500.
+        if not price or price <= 0:
+            if self._fmp_crypto_enabled():
+                raise ValueError(f"crypto detail has no usable price for {symbol}")
+            from app.integrations.coingecko import CoinGeckoUnavailableException
+
+            raise CoinGeckoUnavailableException(
+                f"no usable price for {symbol}: both the fundamentals and the history "
+                f"legs returned nothing"
+            )
+
         # Absent stays absent — see `_usd_opt`. These render "—" rather than "$0.00".
         day_high = _usd_opt("high_24h")
         day_low = _usd_opt("low_24h")

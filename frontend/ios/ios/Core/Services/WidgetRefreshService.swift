@@ -242,10 +242,21 @@ final class WidgetRefreshService {
             return
         }
 
+        let epoch = sessionEpoch
         do {
             let response = try await client.request(
                 endpoint: .getWidgetToken, responseType: WidgetTokenResponse.self
             )
+            // If the session ended while this was in flight, publishing now would hand a
+            // SIGNED-OUT device a fresh 90-day `scope="widget:market"` credential — one
+            // that `clearForEndedSession` had just wiped, and that serves FMP data which
+            // End-User Display Rights permit only through an authenticated platform
+            // (auth.md §8a). Revocation for this token kind is expiry plus this local
+            // clear, so re-publishing it defeats the only mechanism there is.
+            guard epoch == sessionEpoch else {
+                log.info("widget token discarded — the session ended mid-request")
+                return
+            }
             WidgetAPIConfig.publishWidgetToken(response.token)
             widgetTokenExpiry = ISO8601DateFormatter().date(from: response.expiresAt)
             log.info("widget token published, expires \(response.expiresAt, privacy: .public)")
@@ -278,7 +289,13 @@ final class WidgetRefreshService {
     /// data only through an authenticated platform, so a signed-out device must not keep showing
     /// prices. The widget token goes with it — leave it behind and the extension keeps
     /// successfully refreshing FMP data onto a phone with no session.
+    /// Bumped whenever a session ends, so a token request already in flight refuses to
+    /// publish. `inFlight?.cancel()` alone cannot close this: a request whose response has
+    /// already been received still resumes its continuation and runs to completion.
+    private var sessionEpoch = 0
+
     func clearForEndedSession() {
+        sessionEpoch &+= 1
         inFlight?.cancel()
         // Drop any queued forced refresh too — otherwise the ended session's pending
         // request re-runs after cancellation and re-publishes their holdings.

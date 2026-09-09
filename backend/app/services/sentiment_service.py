@@ -244,6 +244,10 @@ class SentimentService:
         # ── Price momentum scores ─────────────────────────────
         price_score_24h = self._compute_price_sentiment(price_data)
         price_score_7d = self._compute_price_sentiment_7d(hist_prices)
+        # Did the price arm actually MEASURE anything? Both helpers return the neutral
+        # sentinel 50 for empty input, which is indistinguishable from a real neutral
+        # reading — so availability has to be judged from the inputs, not the scores.
+        has_price_data = bool(price_data) or bool(hist_prices)
 
         # ── 24-hour window ────────────────────────────────────────
         (news_score_24h, news_cur_24h, news_prev_24h,
@@ -320,6 +324,24 @@ class SentimentService:
             news_neutral_7d=news_neut_7d,
             social_data_available=has_social_24h or has_social_7d,
         )
+
+        # ⚠️ REFUSE TO CACHE A TOTAL FAILURE. If no arm produced a signal, every score
+        # above is the neutral sentinel 50, and `_score_to_mood(50)` renders a confident
+        # "Neutral" — a fabricated fact, not an absence. Caching it makes that fabrication
+        # STICKY for the full TTL, so a 60-second CoinGecko rate-limit becomes 15 minutes
+        # of wrong sentiment on every crypto screen.
+        #
+        # This is the "a cached failure is byte-identical to a real empty answer" trap: no
+        # TTL can fix it, the WRITER has to refuse. Returning uncached means the next
+        # request retries.
+        if not (has_news_24h or has_social_24h or has_news_7d or has_social_7d
+                or has_price_data):
+            logger.warning(
+                "Sentiment for %s had NO usable signal (news/social/price all empty) — "
+                "returning a neutral reading UNCACHED so the next request retries",
+                ticker,
+            )
+            return response
 
         _cache_set(f"sentiment:{ticker}", response)
         return response

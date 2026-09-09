@@ -247,7 +247,14 @@ final class PushNotificationManager {
     /// Re-stashing the token as pending is what actually heals it: `flushPendingToken()` runs on
     /// the next successful auth, and `device_tokens.token` is UNIQUE, so re-registering MOVES
     /// the row to the new account rather than duplicating it.
+    /// Bumped whenever a session ends. A registration POST issued under the previous
+    /// session refuses to record its result, because cancellation cannot un-finish a
+    /// request that already resolved.
+    private var registrationEpoch = 0
+
     func clearLocalRegistrationForEndedSession() {
+        // Bump FIRST: an in-flight POST must not be allowed to overwrite what this does.
+        registrationEpoch &+= 1
         guard let token = registeredToken else { return }
         registeredToken = nil
         pendingToken = token
@@ -261,14 +268,30 @@ final class PushNotificationManager {
             return
         }
         let environment = apnsEnvironment
+        let epoch = registrationEpoch
         Task {
             do {
                 _ = try await repository.registerDevice(token: token, environment: environment)
+                // The session may have ended while this was in flight. Recording it then
+                // does two harmful things at once: it re-binds the phone to the ENDED
+                // account, and — worse — `pendingToken = nil` wipes the stash that
+                // `clearLocalRegistrationForEndedSession` just set, so the NEXT account to
+                // sign in on this device never registers and silently receives no push
+                // notifications at all, with nothing anywhere to explain why.
+                guard epoch == registrationEpoch else {
+                    #if DEBUG
+                    print("ℹ️ [Push] discarding a registration from an ended session")
+                    #endif
+                    return
+                }
                 pendingToken = nil   // clear ONLY on confirmed success
                 registeredToken = token
             } catch {
                 // Keep the token so flushPendingToken() can retry — a transient
                 // offline/5xx must not permanently drop the device registration.
+                // Skipped for a superseded session: the stash belongs to whoever is
+                // signed in now, and clearLocalRegistrationForEndedSession already set it.
+                guard epoch == registrationEpoch else { return }
                 pendingToken = token
                 // Release-visible: silently means no push notifications, ever, with nothing
                 // anywhere to explain why.

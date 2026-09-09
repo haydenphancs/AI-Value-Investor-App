@@ -2626,34 +2626,26 @@ def _altman_z(
     """
     if not balance or not income:
         return None
-    b, i = balance[0], income[0]
-    total_assets = _safe_float(b, "totalAssets")
-    if total_assets <= 0:
-        return None
-    total_liab = _num_or_none(b.get("totalLiabilities"))
-    if total_liab is None or total_liab <= 0:
-        return None
 
-    wc = (
-        _safe_float(b, "totalCurrentAssets")
-        - _safe_float(b, "totalCurrentLiabilities")
-    )
-    re_earn = _safe_float(b, "retainedEarnings")
-    ebit = _safe_float(i, "operatingIncome")
+    # 🔴 Delegated to the ONE implementation. This was a third transcription of the
+    # formula, and this module's `_safe_float` DEFAULTS TO 0.0 — so an absent
+    # `operatingIncome` (weight 3.3), `revenue` (weight 1.0) or `mktCap` (weight 0.6)
+    # arrived as a hard zero and was scored as a real measurement. The docstring above
+    # already promised the opposite ("returns None when inputs are unusable"); only the
+    # zero-asset case actually did it. This one is the worst-placed of the four copies:
+    # its Z is FROZEN into the report and re-used for the per-period history, so a wrong
+    # value is never recomputed.
+    #
+    # `_num_or_none` (not `_safe_float`) for the market cap, so "absent" survives the trip
+    # rather than being flattened to 0.0 before the canonical function can see it.
+    from app.services.health_check_service import _compute_z_score
+
     mkt_cap = (
         mkt_cap_override if mkt_cap_override is not None
-        else _safe_float(profile, "mktCap")
+        else _num_or_none((profile or {}).get("mktCap"))
     )
-    sales = _safe_float(i, "revenue")
-
-    z = (
-        1.2 * (wc / total_assets)
-        + 1.4 * (re_earn / total_assets)
-        + 3.3 * (ebit / total_assets)
-        + 0.6 * (mkt_cap / total_liab)
-        + 1.0 * (sales / total_assets)
-    )
-    return round(z, 2)
+    # ndigits=2 keeps this caller's published precision — the report has always shown two.
+    return _compute_z_score(balance[0], income[0], mkt_cap, ndigits=2)
 
 
 def _hist_list(historical: Any) -> List[Dict[str, Any]]:

@@ -590,7 +590,17 @@ class ETFService:
 
         # Degradation gate: a bundle where every call failed would pin an empty Holdings
         # tab, a blank expense ratio and a dashed dividend row for 12 hours.
-        if not any([bundle["etf_info"], bundle["holders"], bundle["profile"]]):
+        #
+        # ⚠️ Test the VALUES, not the container. `bundle["profile"]` is a projection over
+        # nine FIXED keys, so an empty upstream profile still yields
+        # `{"companyName": None, "beta": None, ...}` — a nine-key dict, which is TRUTHY.
+        # That made this gate dead code: `any([...])` was always True, so an
+        # every-call-failed bundle was cached for 12h in memory AND upserted to Supabase,
+        # exactly the outcome the gate exists to prevent.
+        _profile_has_data = any(
+            v is not None for v in (bundle["profile"] or {}).values()
+        )
+        if not any([bundle["etf_info"], bundle["holders"], _profile_has_data]):
             logger.warning(
                 "ETF fundamentals NOT cached for %s — every upstream call failed; "
                 "will rebuild on the next request", symbol,

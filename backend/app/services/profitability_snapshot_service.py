@@ -212,6 +212,32 @@ class ProfitabilitySnapshotService:
             logger.info(f"Profitability snapshot cache MISS for {ticker} — computing")
             result = await self._compute(ticker)
 
+            # ── Degradation gate ────────────────────────────────────────────────
+            # `_profitability_score(None, ...)` returns the sentinel 3 ("neutral if no
+            # data"), so when every upstream leg fails all five sub-scores are 3, the
+            # weighted mean is exactly 3.0, and the card renders a confident
+            # "3/5 Moderate" beside five em-dashes. That is a fabricated verdict, and
+            # caching it made it STICKY for the full 24h TTL in Supabase — a transient
+            # FMP 429 pinning a made-up rating on a stock for a day.
+            #
+            # Serve it (the em-dashes are honest about the metrics) but do NOT persist,
+            # so the next request retries. Same shape as the gate in
+            # `stock_overview_service`, which this service was missing.
+            _measured = [
+                m for m in (result.metrics or [])
+                if getattr(m, "value", None) not in (None, "", "—")
+            ]
+            if not _measured:
+                logger.warning(
+                    "Profitability snapshot NOT cached for %s — every metric is absent, "
+                    "so the %s/5 rating is the neutral sentinel rather than a measurement. "
+                    "Serving it uncached so the next request retries.",
+                    ticker, getattr(result, "rating", "?"),
+                )
+                if not future.done():
+                    future.set_result(result)
+                return result
+
             # Persist to Supabase in background thread
             asyncio.get_running_loop().run_in_executor(
                 None, self._upsert_supabase_cache, ticker, result,

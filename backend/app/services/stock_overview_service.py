@@ -1493,26 +1493,38 @@ class StockOverviewService:
         self, bs: Dict, inc: Dict, cf: Dict, fr: Dict, km: Dict,
         market_cap: float,
     ) -> SnapshotItemResponse:
-        # Altman Z-Score components
-        total_assets = _safe_float(bs, "totalAssets")
-        total_liab = _safe_float(bs, "totalLiabilities")
-        current_assets = _safe_float(bs, "totalCurrentAssets")
-        current_liab = _safe_float(bs, "totalCurrentLiabilities")
-        retained_earnings = _safe_float(bs, "retainedEarnings")
-        ebit = _safe_float(inc, "operatingIncome") or _safe_float(inc, "ebitda")
-        revenue = _safe_float(inc, "revenue")
+        # Altman Z-Score — ONE implementation, shared with `health_check_service`.
+        #
+        # 🔴 This was a second, independently written copy, and it still carried the exact
+        # defect its twin was fixed for: every missing term was substituted with **0**
+        # (`… if market_cap else 0`, and the same for `ebit` and `revenue`). Because this
+        # module's `_safe_float` returns `0.0` rather than `None` for an absent field, a
+        # failed quote AND profile fetch — logged upstream as a warning only — valued the
+        # equity at zero and dropped the 0.6-weighted term entirely. On Apple-shaped inputs
+        # that is Z=8.9 ("fortress") rendered as Z=2.1 ("Grey zone. Moderate financial
+        # stress signals"), and `z_score` also drives `rating` 1-5 for the whole Health
+        # card. `revenue` (weight 1.0) and `ebit` (weight **3.3**) had the same hole.
+        #
+        # Two behaviour changes fall out of sharing, and both are corrections:
+        #   • The `or _safe_float(inc, "ebitda")` fallback is gone. EBITDA is not EBIT — it
+        #     adds back D&A — so it overstated the heaviest-weighted term whenever
+        #     `operatingIncome` was absent (or an honest 0, which `or` also swallows).
+        #   • A missing market cap / EBIT / revenue now OMITS the metric (rating 0, "—")
+        #     instead of publishing a confident distress verdict.
+        #
+        # Imported inside the method: module-scope would couple two large services at
+        # import time for one helper, and this mirrors how the rest of the file defers.
+        from app.services.health_check_service import _compute_z_score
 
-        z_score = None
-        if total_assets and total_assets > 0 and total_liab > 0:
-            wc = current_assets - current_liab
-            z_score = (
-                1.2 * (wc / total_assets)
-                + 1.4 * (retained_earnings / total_assets if retained_earnings else 0)
-                + 3.3 * (ebit / total_assets if ebit else 0)
-                + 0.6 * (market_cap / total_liab if market_cap else 0)
-                + 1.0 * (revenue / total_assets if revenue else 0)
-            )
-            z_score = round(z_score, 1)
+        # `_compute_z_score` reads the raw dicts with its OWN Optional-returning
+        # `_safe_float`, so "absent" survives the trip; passing this module's 0.0-defaulted
+        # locals would re-introduce the substitution one layer up.
+        z_score = _compute_z_score(bs, inc, market_cap if market_cap else None)
+
+        # Still needed BELOW, for the FCF-margin row — it is not a Z-Score input here any
+        # more. (`test_no_undefined_globals` caught the deletion: `ast.parse` and importing
+        # the module both stay green on a name that is only read inside a function.)
+        revenue = _safe_float(inc, "revenue")
 
         # Interest coverage
         interest_coverage = _safe_float(fr, "interestCoverage") or _safe_float(km, "interestCoverage")
@@ -1545,7 +1557,12 @@ class StockOverviewService:
             rating = 0  # unavailable if can't compute
 
         metrics = [
-            SnapshotMetricResponse(name="Altman Z-Score", value=f"{z_score}" if z_score else "—"),
+            # `is not None`, not truthiness: a genuine Z of exactly 0.0 is a MEASURED
+            # deep-distress reading and must not render as "no data".
+            SnapshotMetricResponse(
+                name="Altman Z-Score",
+                value=f"{z_score}" if z_score is not None else "—",
+            ),
             SnapshotMetricResponse(
                 name="Interest Coverage",
                 value=f"{interest_coverage:.1f}x" if interest_coverage else "—"

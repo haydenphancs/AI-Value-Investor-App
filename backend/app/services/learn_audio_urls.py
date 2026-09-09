@@ -57,7 +57,22 @@ _SIGNED_MARKER = "/storage/v1/object/sign/"
 # oracle for another user's private research report — served to anyone on Pro.
 #
 # Anything not listed here parses to None, i.e. "leave the value exactly as found".
-_SIGNABLE_BUCKETS = frozenset({"journey-media", "money-moves-media", "book-media"})
+#
+# ⚠️ **This union is the OUTER boundary, and on its own it is not the whole gate.** The three
+# products are not equally entitled: Journey narration is FREE on every tier including
+# signed-out guests (`entitlements.JOURNEY_AUDIO_UNLOCKED_TIERS`), while Books and Money Moves
+# are Pro/Max. A module-wide allowlist therefore let `GET /learn/journey` — the free route —
+# hand a free caller a signed `book-media` URL, if one authored `story_content` card pointed
+# there. That is the SAME row-edit threat the paragraph above describes, aimed one bucket
+# closer in, and it defeats the paid gate rather than leaking another user's report.
+#
+# So every entry point takes an `allowed` set naming the ONE bucket that call site is
+# entitled to sign, and `allowed` may only ever NARROW this union (`_narrow` intersects).
+# Fail-closed: the parameter is REQUIRED, so a new caller has to state its product.
+JOURNEY_BUCKET = "journey-media"
+MONEY_MOVES_BUCKET = "money-moves-media"
+BOOK_BUCKET = "book-media"
+_SIGNABLE_BUCKETS = frozenset({JOURNEY_BUCKET, MONEY_MOVES_BUCKET, BOOK_BUCKET})
 
 # Ceiling on how long a CALLER waits for one bucket's mint. A hung Storage call must not hold
 # the Learn tab open — the caller degrades to the stored URL instead.
@@ -109,8 +124,22 @@ def _lock_for(bucket: str) -> asyncio.Lock:
     return lock
 
 
-def parse_storage_url(url: Optional[str]) -> Optional[Tuple[str, str]]:
+def _narrow(allowed: Iterable[str]) -> Set[str]:
+    """Intersect a caller's requested buckets with the module allowlist.
+
+    Intersecting rather than trusting means a call site can only ever ask for LESS than
+    `_SIGNABLE_BUCKETS`; no argument can widen the boundary.
+    """
+    return {b for b in allowed if b in _SIGNABLE_BUCKETS}
+
+
+def parse_storage_url(
+    url: Optional[str], *, allowed: Iterable[str],
+) -> Optional[Tuple[str, str]]:
     """Pure: split a public Supabase Storage URL into ``(bucket, object_path)``.
+
+    ``allowed`` names the bucket(s) THIS call site may sign — one product, not the module's
+    union. See the `_SIGNABLE_BUCKETS` comment for why that distinction is load-bearing.
 
     Returns ``None`` — meaning "leave this value exactly as it is" — for every input that
     isn't a public Storage object URL: an empty/None value, a URL that is ALREADY signed, a
@@ -141,6 +170,15 @@ def parse_storage_url(url: Optional[str]) -> Optional[Tuple[str, str]]:
         logger.warning(
             "learn_audio_urls: refusing to sign outside the Learn buckets (bucket=%s) — "
             "check the authored content row that produced this URL", bucket,
+        )
+        return None
+    if bucket not in _narrow(allowed):
+        # Inside the Learn buckets but not THIS product's. Distinct message from the one
+        # above because the diagnosis differs: this is a cross-product row edit, and on the
+        # free Journey route it would be a paid-narration bypass.
+        logger.warning(
+            "learn_audio_urls: refusing to sign %s from a call site scoped to %s — a Learn "
+            "content row points at another product's bucket", bucket, sorted(_narrow(allowed)),
         )
         return None
     return bucket, object_path
@@ -249,8 +287,15 @@ async def _sign_bucket(bucket: str, paths: Set[str]) -> Dict[str, str]:
         }
 
 
-async def sign_many(pairs: Iterable[Tuple[str, str]]) -> Dict[Tuple[str, str], str]:
+async def sign_many(
+    pairs: Iterable[Tuple[str, str]], *, allowed: Iterable[str],
+) -> Dict[Tuple[str, str], str]:
     """Mint (or reuse) signed URLs for every ``(bucket, object_path)`` given.
+
+    ``allowed`` is re-checked HERE and not only in `parse_storage_url`, because this is the
+    function that touches the service-role key — and `book_audio_service` reaches it with
+    hand-built pairs that never pass through the parser at all. A pair outside the set is
+    dropped with a warning, exactly as an unsignable URL is.
 
     One `create_signed_urls` round trip per bucket per 100 paths — NOT one per URL. Journey
     alone carries ~207 clips, so per-URL signing would be ~207 sequential round trips on a
@@ -262,8 +307,15 @@ async def sign_many(pairs: Iterable[Tuple[str, str]]) -> Dict[Tuple[str, str], s
     now = time.time()
     result: Dict[Tuple[str, str], str] = {}
     wanted: Dict[str, Set[str]] = {}
+    scope = _narrow(allowed)
 
     for bucket, object_path in pairs:
+        if bucket not in scope:
+            logger.warning(
+                "learn_audio_urls: dropping pair for bucket=%s at a call site scoped to %s",
+                bucket, sorted(scope),
+            )
+            continue
         hit = _cached(bucket, object_path, now)
         if hit is not None:
             result[(bucket, object_path)] = hit
@@ -290,17 +342,11 @@ async def sign_many(pairs: Iterable[Tuple[str, str]]) -> Dict[Tuple[str, str], s
     return result
 
 
-async def sign_url(url: Optional[str]) -> Optional[str]:
-    """Convenience: sign ONE public Storage URL, or return it untouched.
-
-    Returns the input unchanged when it isn't a public Storage URL or when signing failed —
-    never ``None`` for a non-empty input, so a caller can always assign the result back.
-    """
-    parsed = parse_storage_url(url)
-    if parsed is None:
-        return url
-    signed = await sign_many([parsed])
-    return signed.get(parsed, url)
+# NOTE: a single-URL `sign_url` convenience used to live here with no call sites. It was
+# removed rather than given an `allowed` argument, for the reason `learn_audio_gate` states
+# about `redact_journey`: unused security code rots and gets rewired by accident, and this
+# one would have been the only entry point a future caller could reach without naming a
+# product. `sign_many([pair], allowed=...)` is the one-URL form.
 
 
 def reset_cache_for_tests() -> None:

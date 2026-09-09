@@ -9,6 +9,7 @@ on every request.
 
 import asyncio
 import logging
+import math
 import statistics
 import time
 from datetime import datetime, timezone
@@ -165,12 +166,27 @@ METRIC_CONFIGS: List[Dict[str, str]] = [
 # ── Helpers ───────────────────────────────────────────────────────
 
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
-    """Safely extract a float value from a dict."""
+    """Safely extract a FINITE float value from a dict.
+
+    🔴 `except (ValueError, TypeError)` does NOT catch a NaN: `float("NaN")` and
+    `float(float("nan"))` both succeed. Without the `isfinite` check a NaN reached the
+    winsorizer, and `max(-500.0, min(500.0, nan))` evaluates to **500.0** — every
+    comparison against NaN is False, so `min` and `max` both return their other operand.
+    A missing field therefore became the single most extreme positive growth reading in
+    the sample and dragged the sector median up, silently and permanently (historical
+    benchmark rows are never recomputed).
+
+    It also defeats the YoY guard upstream: `prev_val != 0` is True for NaN, so
+    `(nan - nan) / abs(nan) * 100` is admitted as a growth rate.
+
+    `profit_power_service._safe_float` has had this guard all along; this twin did not.
+    """
     val = record.get(key)
     if val is None:
         return None
     try:
-        return float(val)
+        f = float(val)
+        return f if math.isfinite(f) else None
     except (ValueError, TypeError):
         return None
 
@@ -309,8 +325,19 @@ def _compute_qoq_for_records(
 
 
 def _winsorize(values: List[float], floor: float = WINSORIZE_FLOOR, ceil: float = WINSORIZE_CEIL) -> List[float]:
-    """Cap extreme values to prevent outliers from distorting the median."""
-    return [max(floor, min(ceil, v)) for v in values]
+    """Cap extreme values to prevent outliers from distorting the median.
+
+    Non-finite values are DROPPED, not clamped. Clamping is the trap: `min(ceil, nan)`
+    returns `ceil` and `max(floor, ceil)` returns `ceil`, so a NaN silently becomes the
+    ceiling — the most extreme admissible reading — rather than being excluded. Inf clamps
+    to the ceiling too, which is at least directionally honest but is still a fabricated
+    magnitude from a near-zero denominator.
+
+    Kept here as well as in `_safe_float` because the `computed` metrics are reconstructed
+    from raw building blocks (`_compute_ratio_values`) and can produce a non-finite ratio
+    from perfectly finite inputs.
+    """
+    return [max(floor, min(ceil, v)) for v in values if math.isfinite(v)]
 
 
 # ── Ratio reconstruction (for "computed" metric type) ────────────
@@ -756,6 +783,14 @@ class SectorBenchmarkService:
                 )
                 metric_type = metric_config["type"]
                 for period_label, values in period_values.items():
+                    # Filter BEFORE the sample-size gate, not after. `_winsorize` now drops
+                    # non-finite values, so gating on the raw list and reporting
+                    # `len(cleaned)` would publish a median whose stored `sample_size` is
+                    # below MIN_SAMPLE_SIZE — a row that reads as authoritative and is not.
+                    # (`_compute_ratio_values` builds `computed` metrics from raw parts and
+                    # can emit a non-finite ratio from finite inputs, so this is reachable
+                    # even with `_safe_float` guarded.)
+                    values = [v for v in values if math.isfinite(v)]
                     if len(values) < MIN_SAMPLE_SIZE:
                         continue
                     # Skip periods already stored (historical benchmarks never change)
@@ -789,6 +824,18 @@ class SectorBenchmarkService:
                         # direct ratios + fcf_margin (a signed decimal margin):
                         # no multiple-clamp, keep sign (negatives are real).
                         cleaned = values
+                    # Belt and braces: the branches above can only ever SHRINK the list
+                    # (winsorize drops non-finite), so re-check rather than trust that the
+                    # gate above still holds. A median over 2 companies published as a
+                    # sector benchmark is worse than no row.
+                    if len(cleaned) < MIN_SAMPLE_SIZE:
+                        logger.warning(
+                            "  %s/%s/%s: %d of %d values survived cleaning (min %d) — "
+                            "skipping rather than publishing a thin median",
+                            sector, metric_config["name"], period_label,
+                            len(cleaned), len(values), MIN_SAMPLE_SIZE,
+                        )
+                        continue
                     rows_to_upsert.append({
                         "sector": sector,
                         # This service writes only SECTOR-aggregate rows → industry=''.

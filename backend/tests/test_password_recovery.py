@@ -290,13 +290,18 @@ async def test_reset_password_rejects_a_verified_response_with_no_user():
 
 
 @pytest.mark.asyncio
-async def test_reset_password_surfaces_a_failed_update_as_500():
+async def test_reset_password_surfaces_a_failed_update_as_a_typed_error():
     with pytest.raises(HTTPException) as ei:
         await auth_ep.reset_password(
             ResetPasswordRequest(email=_EMAIL, code="123456", new_password=_GOOD_PASSWORD),
             _FakeRequest(), FakeSupabase(fail=("update",)),
         )
-    assert ei.value.status_code == 500
+    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
+    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
+    # sentence. Asserted on the CODE rather than the status — the identifier is the
+    # contract, the number is incidental.
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert ei.value.status_code == 503
 
 
 @pytest.mark.asyncio

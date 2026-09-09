@@ -36,6 +36,9 @@ def _stats(**over):
         day_high=None, day_low=None, year_high=126_080.0, year_low=57_779.0,
         circulating_supply=None, total_supply=None, max_supply=21_000_000,
         fdv=None, symbol="BTC",
+        # Required (no default) so a dropped thread is a TypeError rather than a silent
+        # revert to a fabricated "No Cap" — see `test_crypto_max_supply_tristate.py`.
+        max_supply_known=True,
     )
     base.update(over)
     groups = object.__new__(CryptoService)._build_key_statistics(**base)

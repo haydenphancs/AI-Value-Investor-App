@@ -778,8 +778,17 @@ async def session_exchange(
             "session-exchange: no app user row for verified Supabase user=%s (%s: %s)",
             user_id, type(e).__name__, e,
         )
-        raise HTTPException(
-            status_code=500, detail="Your account isn't ready yet. Please try again."
+        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
+        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
+        # hardcoded and generic — so a string detail here means the specific sentence below
+        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
+        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
+        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
+        # stored credential — the token is fine; the identity-store operation is not.
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="session-exchange found no app user row for a verified Supabase user",
+            user_message="Your account isn't ready yet. Please try again.",
         )
 
     logger.info("Session exchange succeeded for user=%s", user_id)
@@ -913,9 +922,17 @@ async def reset_password(
             "Password update failed after a VERIFIED reset code for user=%s: %s: %s",
             user_id, type(e).__name__, e,
         )
-        raise HTTPException(
-            status_code=500,
-            detail="We couldn't set your new password. Please try again.",
+        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
+        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
+        # hardcoded and generic — so a string detail here means the specific sentence below
+        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
+        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
+        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
+        # stored credential — the token is fine; the identity-store operation is not.
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="password update failed after a verified reset code",
+            user_message="We couldn't set your new password. Please try again.",
         )
 
     # 3. Evict sessions issued before this moment.
@@ -1089,9 +1106,17 @@ async def change_password(
             "change-password: update failed for user=%s: %s: %s",
             user_id, type(e).__name__, e, exc_info=True,
         )
-        raise HTTPException(
-            status_code=500,
-            detail="We couldn't change your password. Please try again.",
+        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
+        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
+        # hardcoded and generic — so a string detail here means the specific sentence below
+        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
+        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
+        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
+        # stored credential — the token is fine; the identity-store operation is not.
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="change-password: admin.update_user_by_id failed",
+            user_message="We couldn't change your password. Please try again.",
         )
 
     _mark_password_changed(supabase, user_id)
@@ -1244,9 +1269,17 @@ async def set_password(
             "set-password: admin update failed for user=%s: %s: %s",
             user_id, type(e).__name__, e, exc_info=True,
         )
-        raise HTTPException(
-            status_code=500,
-            detail="We couldn't set your password. Please try again.",
+        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
+        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
+        # hardcoded and generic — so a string detail here means the specific sentence below
+        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
+        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
+        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
+        # stored credential — the token is fine; the identity-store operation is not.
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="set-password: admin.update_user_by_id failed",
+            user_message="We couldn't set your password. Please try again.",
         )
 
     _mark_password_changed(supabase, user_id)

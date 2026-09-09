@@ -457,7 +457,12 @@ async def test_session_exchange_refuses_when_no_app_user_row_exists(monkeypatch)
             SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(),
             FakeSupabase(fail=("lookup",)),
         )
-    assert ei.value.status_code == 500
+    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
+    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
+    # sentence. Asserted on the CODE rather than the status — the identifier is the
+    # contract, the number is incidental.
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert ei.value.status_code == 503
 
 
 @pytest.mark.asyncio

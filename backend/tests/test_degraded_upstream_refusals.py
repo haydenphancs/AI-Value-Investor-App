@@ -163,10 +163,41 @@ def test_sentiment_refuses_to_cache_when_no_arm_produced_a_signal():
     )
 
 
-def test_price_availability_is_derived_from_inputs_not_from_the_score():
+def test_price_availability_is_derived_from_what_was_measured():
+    """This used to require `has_price_data = bool(price_data) or bool(hist_prices)`, on the
+    grounds that "a `price_score != 50` test would misread a genuine neutral as a failure".
+
+    That was correct WHILE both price helpers returned 50 for empty input — 50 meant either
+    "flat" or "no data" and the two were indistinguishable. They now return **None** when
+    unmeasurable and 50 only for a genuinely flat move, so reading the scores is strictly
+    better than inferring from the inputs. The old expression was wrong twice:
+
+      • it was true for a payload that was non-empty but UNUSABLE (a quote carrying no
+        change field, a one-row history), and
+      • it was ONE flag across BOTH windows, so a present 24h quote made the 7-day arm look
+        measured when it had no history at all — which is exactly the case that let a
+        fabricated Neutral carry 30-45% of the 7-day blend.
+    """
     from app.services import sentiment_service
 
-    src = inspect.getsource(sentiment_service.SentimentService.get_sentiment)
-    assert "has_price_data = bool(price_data) or bool(hist_prices)" in src, (
-        "a `price_score != 50` test would misread a genuine neutral as a failure"
+    raw = inspect.getsource(sentiment_service.SentimentService.get_sentiment)
+    # ⚠️ COMMENT-STRIPPED before the NEGATIVE assertion. The note beside the fix names the
+    # retired expression, so an unstripped scan fails on the explanation of the bug — and,
+    # symmetrically, a positive scan would PASS on prose after a revert. This suite has now
+    # tripped over its own commentary three times.
+    src = "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+    assert (
+        "has_price_data = price_score_24h is not None or price_score_7d is not None" in src
+    ), "availability must come from the scores now that they can express 'unmeasured'"
+    assert "bool(price_data) or bool(hist_prices)" not in src, (
+        "the input-shaped test is back — it cannot tell 'unusable' from 'present'"
     )
+
+
+def test_a_genuine_neutral_is_still_reported_as_available():
+    """The reason the input-shaped test existed in the first place: a truly flat week must
+    NOT be classified as a failure, or the response stops being cached for a real reading."""
+    from app.services.sentiment_service import SentimentService as _S
+
+    assert _S._compute_price_sentiment({"changePercentage": 0.0}) == 50
+    assert _S._compute_price_sentiment_7d([{"close": 100.0}] * 8) == 50

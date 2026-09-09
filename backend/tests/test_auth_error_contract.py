@@ -218,8 +218,9 @@ def test_auth_py_raises_no_bare_string_401s():
     simply untrue: a wrong current password read as an expired session, and a failed Apple
     sign-in read as "Email or password is incorrect" for a flow with no password in it.
 
-    Scoped to 401s on purpose — the 400/429/500 raises in this file are fine as strings, and
-    the `HTTPException` handler stays deliberately narrow for the ~100 such raises elsewhere.
+    500s are covered by the sibling test below; 400/429 string raises in this file are still
+    fine, and the `HTTPException` handler stays deliberately narrow for the ~100 such raises
+    elsewhere in the app.
     """
     src = (Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "auth.py")
     offenders = []
@@ -238,6 +239,41 @@ def test_auth_py_raises_no_bare_string_401s():
     assert not offenders, (
         "use auth_error(ErrorCode.AUTH_*, ...) so iOS can decode the reason:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+def test_auth_py_raises_no_bare_string_500s():
+    """The same defect one status class up, and it shipped in four places.
+
+    This docstring used to read "the 400/429/500 raises in this file are fine as strings".
+    They are not. iOS's `case 500...599` arm tries `APIErrorResponse` first and otherwise
+    falls back to `APIError.serverError(statusCode:)`, whose copy is hardcoded and generic —
+    so a carefully worded sentence like "We couldn't change your password. Please try again."
+    was written, serialised, and then discarded, and the failure reached the client with no
+    machine-readable code at all.
+
+    All four are now `auth_error(ErrorCode.AUTH_UNAVAILABLE, …)` (503, `retry_later`, does NOT
+    clear the credential) carrying their own `user_message`.
+
+    400/429 are deliberately still allowed: `validateResponse`'s default arm decodes the
+    structured body AND falls back to FastAPI's `{"detail": …}`, so a string survives there.
+    """
+    src = (Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "auth.py")
+    offenders = []
+    lines = src.read_text().splitlines()
+    for i, raw in enumerate(lines, 1):
+        # Comment-stripped: the note beside each fix names the retired pattern, and this
+        # suite has twice failed on its own explanation of a bug.
+        line = raw.split("#", 1)[0]
+        if "HTTPException" not in line:
+            continue
+        window = " ".join(l.split("#", 1)[0] for l in lines[i - 1:i + 2])
+        if re.search(r"status_code\s*=\s*5\d\d|HTTPException\(\s*5\d\d", window):
+            offenders.append(f"auth.py:{i}: {raw.strip()}")
+
+    assert not offenders, (
+        "use auth_error(ErrorCode.AUTH_*, ...) so iOS decodes the reason instead of "
+        "showing its generic server-error copy:\n  " + "\n  ".join(offenders)
     )
 
 

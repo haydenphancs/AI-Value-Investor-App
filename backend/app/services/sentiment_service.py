@@ -34,6 +34,23 @@ from app.services.social_mentions_service import get_social_mentions_service
 
 logger = logging.getLogger(__name__)
 
+
+def _finite(value: Any) -> Optional[float]:
+    """A finite float, or None.
+
+    `except (TypeError, ValueError)` does NOT catch a NaN — `float("NaN")` succeeds — and a
+    NaN then defeats every downstream guard too, because all comparisons against it are
+    False. That is how a NaN close reached `round(nan)` (a ValueError, so a 500) instead of
+    degrading to "unknown".
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
 # `ticker_news_cache` is owned by NewsCacheService; borrow ITS ttl so the two writers cannot
 # drift. A longer value here silently freezes the News tab (see `_persist_articles`).
 from app.services.news_cache_service import CACHE_TTL_HOURS as _NEWS_CACHE_TTL_HOURS
@@ -244,10 +261,13 @@ class SentimentService:
         # ── Price momentum scores ─────────────────────────────
         price_score_24h = self._compute_price_sentiment(price_data)
         price_score_7d = self._compute_price_sentiment_7d(hist_prices)
-        # Did the price arm actually MEASURE anything? Both helpers return the neutral
-        # sentinel 50 for empty input, which is indistinguishable from a real neutral
-        # reading — so availability has to be judged from the inputs, not the scores.
-        has_price_data = bool(price_data) or bool(hist_prices)
+        # Did the price arm actually MEASURE anything? Both helpers now answer None for an
+        # unusable input, so this is read from the SCORES rather than inferred from the
+        # inputs. The old `bool(price_data) or bool(hist_prices)` was true for a payload
+        # that was non-empty but unusable — a quote with no change field, a one-row history
+        # — and it was also a single flag across BOTH windows, so a present 24h quote made
+        # the 7-day arm look measured when it had no history at all.
+        has_price_data = price_score_24h is not None or price_score_7d is not None
 
         # ── 24-hour window ────────────────────────────────────────
         (news_score_24h, news_cur_24h, news_prev_24h,
@@ -652,24 +672,38 @@ class SentimentService:
             return []
 
     @staticmethod
-    def _compute_price_sentiment_7d(hist_prices: List[Dict]) -> int:
+    def _compute_price_sentiment_7d(hist_prices: List[Dict]) -> Optional[int]:
         """
         Derive a 0-100 sentiment score from 7-day price momentum.
 
         Computes the % change from ~7 days ago to latest close,
         then maps it the same way as daily: -5% → ~15, 0% → 50, +5% → ~85.
-        Falls back to 50 (neutral) if insufficient data.
+
+        🔴 Returns **None**, not 50, when the window cannot be measured. 50 is the exact
+        middle of the scale, so `_score_to_mood(50)` renders a confident "Neutral" — and an
+        unmeasurable price arm then carried 30-45% of the combined weight while asserting
+        a fact. `_fetch_historical_prices`' own docstring has flagged this since the crypto
+        gate went in; this is the other half of that fix, and it applies to equities too
+        (FMP returns a short or empty series for recent listings and thin names).
         """
         if not hist_prices or len(hist_prices) < 2:
-            return 50
+            return None
 
-        latest_close = hist_prices[-1].get("close") or hist_prices[-1].get("adjClose")
+        latest_close = _finite(
+            hist_prices[-1].get("close") or hist_prices[-1].get("adjClose")
+        )
         # Find the price closest to 7 days ago
         target_idx = max(0, len(hist_prices) - 8)  # ~7 trading days back
-        start_close = hist_prices[target_idx].get("close") or hist_prices[target_idx].get("adjClose")
+        start_close = _finite(
+            hist_prices[target_idx].get("close")
+            or hist_prices[target_idx].get("adjClose")
+        )
 
-        if not latest_close or not start_close or start_close == 0:
-            return 50
+        # `is None` rather than truthiness, and finite-checked above: a NaN close defeats
+        # BOTH `not x` and `x == 0` (every comparison against NaN is False), so it reached
+        # `round(nan)` — a ValueError, i.e. a 500 rather than a degraded reading.
+        if latest_close is None or start_close is None or start_close == 0:
+            return None
 
         pct_change_7d = ((latest_close - start_close) / start_close) * 100
         # Use same mapping as daily but with gentler scaling (7d moves are larger)
@@ -821,22 +855,29 @@ class SentimentService:
     # ── Price momentum scoring ──────────────────────────────────
 
     @staticmethod
-    def _compute_price_sentiment(price_data: Dict) -> int:
+    def _compute_price_sentiment(price_data: Dict) -> Optional[int]:
         """
         Derive a 0-100 sentiment score from price momentum.
 
         Uses changesPercentage (daily % change) as the primary signal.
         Maps roughly: -5% or worse → ~15, 0% → 50, +5% or better → ~85.
-        Always available since FMP's quote endpoint works per-ticker.
+
+        🔴 Returns **None** when there is no quote. The old docstring said "Always
+        available since FMP's quote endpoint works per-ticker" — that stopped being true
+        when entitlement enforcement began 402ing whole symbol classes, and the `return 50`
+        it justified is a fabricated "Neutral" rather than an absence.
         """
         if not price_data:
-            return 50
+            return None
 
-        pct_change = (
+        pct_change = _finite(
             price_data.get("changePercentage")
-            or price_data.get("changesPercentage")
-            or 0
+            if price_data.get("changePercentage") is not None
+            else price_data.get("changesPercentage")
         )
+        # An absent change is unknown, NOT a flat day: `or 0` mapped both to exactly 50.
+        if pct_change is None:
+            return None
 
         # Map % change to 0-100 using a sigmoid-like curve
         # Clamp to reasonable range and scale
@@ -852,7 +893,7 @@ class SentimentService:
         social_score: int,
         has_social: bool,
         has_news: bool,
-        price_score: int = 50,
+        price_score: Optional[int] = None,
     ) -> int:
         """
         Combine sentiment signals with adaptive weighting.
@@ -861,7 +902,29 @@ class SentimentService:
         News + price only: 55% news + 45% price
         Social + price only: 55% social + 45% price
         Price only: 100% price
+
+        With the price arm UNMEASURABLE (`price_score is None`) the remaining arms are
+        renormalised rather than blended against the neutral sentinel. Passing 50 in place
+        of "unknown" gave a fabricated Neutral 30-45% of the vote and pulled every real
+        reading toward the middle — the direction that most often flips a Bullish/Bearish
+        verdict to Neutral, which is the one the UI treats as a fact.
+
+        The price-PRESENT weights are unchanged on purpose: 55/45 is not a renormalisation
+        of 40/30/30, so deriving them would silently move every existing score.
         """
+        if price_score is None:
+            if has_news and has_social:
+                # 40 : 30 renormalised over the two that remain.
+                return max(0, min(100, round(
+                    news_score * (0.40 / 0.70) + social_score * (0.30 / 0.70)
+                )))
+            if has_news:
+                return max(0, min(100, round(news_score)))
+            if has_social:
+                return max(0, min(100, round(social_score)))
+            # Nothing measured at all. 50 is the only value left, and the caller REFUSES TO
+            # CACHE this response precisely so the fabrication cannot become sticky.
+            return 50
         if has_news and has_social:
             return max(0, min(100, round(
                 news_score * 0.40

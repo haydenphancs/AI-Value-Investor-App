@@ -646,7 +646,9 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     return summed
 
 
-def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
+def _compute_z_score(
+    bs: Dict, inc: Dict, mcap: Optional[float], *, ndigits: int = 1,
+) -> Optional[float]:
     """Compute Altman Z-Score from balance sheet, income, and market cap.
 
     Returns None — so the caller OMITS the metric — whenever a term that
@@ -659,6 +661,14 @@ def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[flo
     confident verdict that also moved overall_rating and was cached for 24h.
     The same reasoning applies to EBIT and revenue, which ``_sum_ttm_income``
     drops entirely when any one quarter lacks the field.
+
+    ⚠️ **This is the ONE implementation.** It was fixed here and three other copies were
+    left carrying the original bug — `health_snapshot_service`, `stock_overview_service`
+    and `agents/ticker_report_data_collector` each had their own transcription, and each
+    still substituted 0 for a missing market cap / EBIT / revenue. They all delegate here
+    now; `ndigits` exists so a caller can keep its own published precision (the report
+    collector rounds to 2) without needing a private copy of the formula.
+    `tests/test_altman_z_single_implementation.py` fails the build on a fifth copy.
     """
     ta = _safe_float(bs, "totalAssets")
     tl = _safe_float(bs, "totalLiabilities")
@@ -697,7 +707,7 @@ def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[flo
         + 0.6 * (mcap / tl)
         + 1.0 * (rev / ta)
     )
-    return round(z, 1)
+    return round(z, ndigits)
 
 
 def _zscore_gauge(z: float) -> float:

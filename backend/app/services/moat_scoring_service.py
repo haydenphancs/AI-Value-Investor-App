@@ -656,7 +656,7 @@ class MoatScoringService:
         drivers = [
             _build_higher_better_driver(
                 "gross_margin",
-                self._gross_margin_pct(latest_ratios),
+                self._gross_margin_ratio(latest_ratios),
                 medians.get("gross_margin"),
             ),
             _build_higher_better_driver(
@@ -679,7 +679,7 @@ class MoatScoringService:
         drivers = [
             _build_higher_better_driver(
                 "operating_margin",
-                self._operating_margin_pct(latest_ratios),
+                self._operating_margin_ratio(latest_ratios),
                 medians.get("operating_margin"),
             ),
             _build_higher_better_driver(
@@ -751,22 +751,43 @@ class MoatScoringService:
 
     # ── Focal-value extractors ───────────────────────────────────────
 
-    def _gross_margin_pct(self, ratios: Optional[Dict[str, Any]]) -> Optional[float]:
-        """Gross margin as percentage. FMP's grossProfitMargin is 0-1
-        scale; multiply to match sector_benchmarks scale (percentage).
+    def _gross_margin_ratio(self, ratios: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Gross margin on the SAME 0-1 scale `sector_benchmarks` stores.
+
+        ⚠️ Renamed from `_gross_margin_pct`, and the `* 100.0` removed, because the two
+        were in direct contradiction: the docstring said "multiply to match
+        sector_benchmarks scale (percentage)" while the comment one line below said
+        "sector_benchmarks stores them in the same 0-1 scale, so no scaling needed" — and
+        the code multiplied.
+
+        The stored data settles it. `gross_margin` medians read from production are
+        0.3419-0.3991 for Consumer Cyclical and top out at 1.082 (Insurance - Life), i.e.
+        DECIMALS. Feeding a percentage against those made the ratio ~100x too large and
+        the driver saturated: a 6%-margin distributor and a 46%-margin firm BOTH scored
+        10.0/10, so `gross_margin` contributed nothing to Brand Power for any company
+        whose margin exceeded ~2% of revenue — essentially all of them.
+
+        Not every "…to revenue" benchmark is a decimal, which is why this was easy to get
+        wrong: `rd_to_revenue` and `sga_to_revenue` really are stored as PERCENTAGES
+        (Biotechnology's R&D median is 200.0 — pre-revenue biotechs genuinely spend 200%
+        of revenue on R&D), and their helpers correctly multiply. Check the stored medians
+        before changing any of these.
         """
         v = _safe_float(ratios or {}, "grossProfitMargin")
         if v is None:
             return None
-        # FMP convention: ratios are 0-1 (e.g., 0.40 = 40%). sector_benchmarks
-        # stores them in the same 0-1 scale, so no scaling needed.
-        return v * 100.0
+        return v
 
-    def _operating_margin_pct(self, ratios: Optional[Dict[str, Any]]) -> Optional[float]:
+    def _operating_margin_ratio(self, ratios: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Operating margin on the stored 0-1 scale — see `_gross_margin_ratio`.
+
+        `operating_margin` medians read from production are 0.0319-0.0821 for Consumer
+        Cyclical, so a percentage here saturated this driver exactly as it did above.
+        """
         v = _safe_float(ratios or {}, "operatingProfitMargin")
         if v is None:
             return None
-        return v * 100.0
+        return v
 
     def _rd_to_revenue_pct(self, inc: Optional[Dict[str, Any]]) -> Optional[float]:
         if not inc:

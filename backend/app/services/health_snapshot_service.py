@@ -144,14 +144,37 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
     but we re-sort here defensively. Skips a field if any of the last 4
     quarters is missing it (rather than partial-summing 2 or 3 quarters,
     which would understate the TTM number and silently corrupt ratios).
+
+    🔴 That last sentence used to be false. Below four quarters the function fell back to
+    `sorted_q = quarterly[:4]` — which is the SAME records, minus the sort — under the
+    comment "Better to expose partial data than render '—' for new tickers". So a company
+    with two filings (a recent IPO, or a symbol FMP holds partial history for — GMRS
+    returns exactly 2 quarterly records, verified live) had its **half-year** EBIT and
+    revenue summed and published as a trailing-twelve-month figure.
+
+    That is not a cosmetic understatement. Altman Z weights `ebit/assets` at **3.3** and
+    `revenue/assets` at 1.0, so halving both numerators can move the verdict a whole band,
+    and the Z is 40% of this card's rating. `_compute_z_score` already OMITS the metric
+    when a field is absent — that is the honest degradation, and this makes it fire.
+    `health_check_service._sum_ttm_income` was fixed for exactly this; the twin was not.
     """
+    if not isinstance(quarterly, list):
+        logger.warning(
+            "health_snapshot TTM: expected a list of income statements, got %s",
+            type(quarterly).__name__,
+        )
+        return {}
+    quarterly = [r for r in quarterly if isinstance(r, dict)]
     if not quarterly:
         return {}
     sorted_q = sorted(quarterly, key=lambda r: r.get("date") or "", reverse=True)[:4]
     if len(sorted_q) < 4:
-        # Fall back to whatever quarters we have, weighted by sum count.
-        # Better to expose partial data than render "—" for new tickers.
-        sorted_q = quarterly[:4]
+        logger.warning(
+            "health_snapshot TTM: need 4 quarters, got %d — omitting the TTM totals "
+            "rather than publishing a partial-period sum as trailing-twelve-month",
+            len(sorted_q),
+        )
+        return {}
     summed: Dict[str, float] = {}
     for field in (
         "operatingIncome", "interestExpense", "revenue",
@@ -166,31 +189,32 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
             vals.append(v)
         if vals:
             summed[field] = sum(vals)
+        else:
+            # A partial sum would understate a TTM flow figure, so the field is dropped —
+            # but dropping it SILENTLY is how a downstream `or 0` fabricated a zero EBIT.
+            logger.warning(
+                "health_snapshot TTM: %r missing in at least one of the last 4 quarters "
+                "— field omitted from the TTM sum", field,
+            )
     return summed
 
 
 def _compute_z_score(bs: Dict, inc: Dict, mcap: Optional[float]) -> Optional[float]:
-    """Compute Altman Z-Score from balance sheet, income, and market cap."""
-    ta = _safe_float(bs, "totalAssets")
-    tl = _safe_float(bs, "totalLiabilities")
-    ca = _safe_float(bs, "totalCurrentAssets")
-    cl = _safe_float(bs, "totalCurrentLiabilities")
-    re = _safe_float(bs, "retainedEarnings")
-    ebit = _safe_float(inc, "operatingIncome")
-    rev = _safe_float(inc, "revenue")
+    """Compute Altman Z-Score — delegated to the ONE implementation.
 
-    if not ta or ta <= 0 or not tl or tl <= 0:
-        return None
+    🔴 This was a byte-for-byte transcription of the pre-fix version, kept green by having
+    its own tests: `(ebit or 0)`, `(mcap or 0)` and `(rev or 0)` substituted **0** for a
+    missing term, so a failed profile fetch valued the equity at zero and turned a fortress
+    balance sheet into "Grey zone. Moderate financial stress signals". The Z also feeds
+    `_zscore_rating`, which is 40% of this card's rating.
 
-    wc = (ca or 0) - (cl or 0)
-    z = (
-        1.2 * (wc / ta)
-        + 1.4 * ((re or 0) / ta)
-        + 3.3 * ((ebit or 0) / ta)
-        + 0.6 * ((mcap or 0) / tl)
-        + 1.0 * ((rev or 0) / ta)
-    )
-    return round(z, 1)
+    Same name and signature as before, so every call site here is unchanged; only the
+    substitution is gone. See `health_check_service._compute_z_score` for the full
+    reasoning and `tests/test_altman_z_single_implementation.py` for the anti-drift guard.
+    """
+    from app.services.health_check_service import _compute_z_score as _canonical
+
+    return _canonical(bs, inc, mcap)
 
 
 def _zscore_rating(z: Optional[float]) -> int:

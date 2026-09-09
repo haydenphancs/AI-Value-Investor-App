@@ -2976,6 +2976,10 @@ def _btc_stats(**kw):
         year_high=None, year_low=None,
         circulating_supply=1.98e7, total_supply=1.98e7, max_supply=2.1e7,
         fdv=1.6e12, symbol="BTC",
+        # Required (no default): a default of True is fail-OPEN and would let a dropped
+        # thread silently restore the fabricated "No Cap" — see
+        # `test_crypto_max_supply_tristate.py`.
+        max_supply_known=True,
     )
     base.update(kw)
     return CryptoService.__new__(CryptoService)._build_key_statistics(**base)[2].statistics

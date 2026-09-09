@@ -18,7 +18,7 @@ import re
 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
-from app.schemas.common import normalize_fmp_response, normalize_fmp_list
+from app.schemas.common import normalize_fmp_response, normalize_fmp_list, sanitize_non_finite
 from app.api.error_response import (
     ErrorCode,
     error_response_from_exception,
@@ -661,7 +661,20 @@ async def get_stock_details(ticker: str):
                 if fwd_eps and float(fwd_eps) > 0:
                     response["pe_forward"] = round(float(price) / float(fwd_eps), 2)
 
-        return response
+        # Sanitise AGAIN, at the exit.
+        #
+        # `normalize_fmp_response` above sanitised only the ONE dict it was handed. Every
+        # field written after it — float_shares, percent_insiders, percent_institutional,
+        # eps, pe, shares_outstanding, avg_volume, pe_forward — comes from a DIFFERENT FMP
+        # call and goes in raw via `float(...)`, which happily accepts a non-finite.
+        #
+        # FMP emits bare `NaN` / `Infinity` tokens, `json.loads` parses them, and the
+        # value is then truthy (surviving `x or 0`) with every comparison False (surviving
+        # `if x <= 0`). It reaches `JSONResponse`, which renders with allow_nan=False, and
+        # raises INSIDE the renderer — after this function's try/except has already
+        # returned. The result is a bare 500 for the whole screen that nothing can catch
+        # and nothing logs usefully. A no-op for well-formed data.
+        return sanitize_non_finite(response)
     except HTTPException:
         raise
     except Exception as e:
@@ -803,7 +816,20 @@ async def get_stock_quote(ticker: str):
             if avg_vol is not None:
                 response["avg_volume"] = float(avg_vol)
 
-        return response
+        # Sanitise AGAIN, at the exit.
+        #
+        # `normalize_fmp_response` above sanitised only the ONE dict it was handed. Every
+        # field written after it — float_shares, percent_insiders, percent_institutional,
+        # eps, pe, shares_outstanding, avg_volume, pe_forward — comes from a DIFFERENT FMP
+        # call and goes in raw via `float(...)`, which happily accepts a non-finite.
+        #
+        # FMP emits bare `NaN` / `Infinity` tokens, `json.loads` parses them, and the
+        # value is then truthy (surviving `x or 0`) with every comparison False (surviving
+        # `if x <= 0`). It reaches `JSONResponse`, which renders with allow_nan=False, and
+        # raises INSIDE the renderer — after this function's try/except has already
+        # returned. The result is a bare 500 for the whole screen that nothing can catch
+        # and nothing logs usefully. A no-op for well-formed data.
+        return sanitize_non_finite(response)
     except HTTPException:
         raise
     except Exception as e:

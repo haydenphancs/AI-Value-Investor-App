@@ -56,7 +56,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.schemas.journey import JourneyLessonResponse, JourneyResponse
 from app.schemas.money_moves import MoneyMovesResponse
-from app.services.learn_audio_urls import parse_storage_url, sign_many
+from app.services.learn_audio_urls import (
+    JOURNEY_BUCKET,
+    MONEY_MOVES_BUCKET,
+    parse_storage_url,
+    sign_many,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,21 +149,26 @@ def _money_moves_audio_urls(response: MoneyMovesResponse) -> List[str]:
     ]
 
 
-async def _signed_by_url(urls: List[str]) -> Dict[str, str]:
+async def _signed_by_url(urls: List[str], *, allowed: Set[str]) -> Dict[str, str]:
     """Map each public Storage URL to its signed replacement.
 
     A URL that isn't a public Storage object (already signed, third-party, malformed) and a
     URL whose signing failed are both simply ABSENT — callers leave those untouched, which
     is today's behaviour rather than a broken or missing clip.
+
+    ``allowed`` is the ONE bucket this product may sign. It is a required argument because
+    the products are not equally entitled: Journey narration is free on every tier, Books and
+    Money Moves are Pro/Max, so a Journey payload that named a `book-media` object would
+    otherwise have this function hand a free caller a signed paid clip.
     """
     by_pair: Dict[Tuple[str, str], List[str]] = {}
     for url in urls:
-        parsed = parse_storage_url(url)
+        parsed = parse_storage_url(url, allowed=allowed)
         if parsed is not None:
             by_pair.setdefault(parsed, []).append(url)
     if not by_pair:
         return {}
-    signed = await sign_many(by_pair.keys())
+    signed = await sign_many(by_pair.keys(), allowed=allowed)
     out: Dict[str, str] = {}
     for pair, originals in by_pair.items():
         replacement = signed.get(pair)
@@ -174,7 +184,9 @@ async def sign_journey(response: JourneyResponse) -> JourneyResponse:
     Returned unchanged (and NOT copied) when there is nothing to rewrite — safe precisely
     because nothing was modified.
     """
-    mapping = await _signed_by_url(_journey_audio_urls(response))
+    mapping = await _signed_by_url(
+        _journey_audio_urls(response), allowed={JOURNEY_BUCKET},
+    )
     if not mapping:
         return response
     lessons: List[JourneyLessonResponse] = []
@@ -226,7 +238,9 @@ def _sign_story_content(
 
 async def sign_money_moves(response: MoneyMovesResponse) -> MoneyMovesResponse:
     """Return a NEW MoneyMovesResponse whose article ``audioUrl``s are signed. Never mutates."""
-    mapping = await _signed_by_url(_money_moves_audio_urls(response))
+    mapping = await _signed_by_url(
+        _money_moves_audio_urls(response), allowed={MONEY_MOVES_BUCKET},
+    )
     if not mapping:
         return response
     articles = []

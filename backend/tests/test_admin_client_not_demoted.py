@@ -315,7 +315,12 @@ async def test_change_password_would_fail_on_the_demoted_client():
     demoted = _AliasedSupabase()
     with pytest.raises(HTTPException) as exc:
         await _change_password(demoted, demoted)
-    assert exc.value.status_code == 500
+    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
+    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
+    # sentence. Asserted on the CODE rather than the status — the identifier is the
+    # contract, the number is incidental.
+    assert exc.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert exc.value.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -334,7 +339,12 @@ async def test_reset_password_would_fail_on_the_demoted_client():
     demoted = _AliasedSupabase()
     with pytest.raises(HTTPException) as exc:
         await _reset_password(demoted, demoted)
-    assert exc.value.status_code == 500
+    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
+    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
+    # sentence. Asserted on the CODE rather than the status — the identifier is the
+    # contract, the number is incidental.
+    assert exc.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert exc.value.status_code == 503
 
 
 @pytest.mark.asyncio

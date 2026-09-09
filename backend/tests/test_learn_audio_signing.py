@@ -103,13 +103,13 @@ def _money_moves(audio=_MM_AUDIO, **kw) -> MoneyMovesResponse:
 ])
 def test_only_the_three_learn_buckets_are_signable(bucket):
     url = f"https://xyz.supabase.co/storage/v1/object/public/{bucket}/secret/thing.pdf"
-    assert urls.parse_storage_url(url) is None
+    assert urls.parse_storage_url(url, allowed=urls._SIGNABLE_BUCKETS) is None
 
 
 @pytest.mark.parametrize("bucket", ["journey-media", "money-moves-media", "book-media"])
 def test_the_learn_buckets_parse(bucket):
     url = f"https://xyz.supabase.co/storage/v1/object/public/{bucket}/audio/x.m4a"
-    assert urls.parse_storage_url(url) == (bucket, "audio/x.m4a")
+    assert urls.parse_storage_url(url, allowed=urls._SIGNABLE_BUCKETS) == (bucket, "audio/x.m4a")
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_a_foreign_bucket_url_survives_signing_untouched(fake_sign):
     "https://xyz.supabase.co/storage/v1/object/public/book-media",
 ])
 def test_parse_returns_none_for_anything_that_is_not_a_public_learn_object(value):
-    assert urls.parse_storage_url(value) is None
+    assert urls.parse_storage_url(value, allowed=urls._SIGNABLE_BUCKETS) is None
 
 
 # ── non-mutation on the ENTITLED path (P0) ───────────────────────────────────
@@ -348,7 +348,7 @@ async def test_a_failing_chunk_keeps_the_signatures_already_minted(monkeypatch):
 
     monkeypatch.setattr(urls, "_sign_batch_sync", _flaky)
     pairs = [("journey-media", f"audio/c{i}.m4a") for i in range(207)]
-    signed = await urls.sign_many(pairs)
+    signed = await urls.sign_many(pairs, allowed={urls.JOURNEY_BUCKET})
 
     assert len(signed) == 200, f"expected the 2 good chunks to survive, got {len(signed)}"
     # And they are banked, so the next request only asks for the 7 that are still missing.
@@ -426,3 +426,91 @@ async def test_a_card_without_narration_survives_signing_byte_identically(fake_s
     out = await sign_journey(_journey())
     completion = out.lessons[0].story_content["cards"][2]
     assert completion == {"type": "completion", "headline": "Done", "text": "You finished."}
+
+
+# ── the SECOND boundary: one product may not sign another's bucket ───────────
+#
+# The allowlist above is module-wide, and the three products are NOT equally entitled:
+# Journey narration is free on every tier including signed-out guests, Books and Money Moves
+# are Pro/Max. So `book-media` being module-signable is not the same as it being signable
+# FROM the free Journey route — and a single authored `story_content` row edit is all it
+# takes to aim one there. These pin the narrowing.
+
+@pytest.mark.parametrize("foreign", [
+    "https://xyz.supabase.co/storage/v1/object/public/book-media/audio/10_x.m4a",
+    "https://xyz.supabase.co/storage/v1/object/public/money-moves-media/audio/enron.m4a",
+])
+@pytest.mark.asyncio
+async def test_the_free_journey_route_cannot_mint_a_paid_products_url(fake_sign, foreign):
+    """The concrete bypass: a Journey card pointing at a Pro-gated clip. `/learn/journey` is
+    reachable by a signed-out guest, so signing this would hand paid narration away."""
+    out = await sign_journey(_journey(audio=foreign))
+    assert out.lessons[0].story_content["cards"][0]["audioUrl"] == foreign
+    assert fake_sign == [], "the service role was asked to sign another product's bucket"
+
+
+@pytest.mark.asyncio
+async def test_money_moves_cannot_mint_a_book_url(fake_sign):
+    foreign = "https://xyz.supabase.co/storage/v1/object/public/book-media/audio/10_x.m4a"
+    out = await sign_money_moves(_money_moves(audio=foreign))
+    assert out.articles[0]["audioUrl"] == foreign
+    assert fake_sign == []
+
+
+@pytest.mark.asyncio
+async def test_each_product_still_signs_its_own_bucket(fake_sign):
+    """The narrowing must not break the thing it is narrowing."""
+    j = await sign_journey(_journey())
+    assert "/object/sign/journey-media/" in j.lessons[0].story_content["cards"][0]["audioUrl"]
+    m = await sign_money_moves(_money_moves())
+    assert "/object/sign/money-moves-media/" in m.articles[0]["audioUrl"]
+    assert sorted(b for b, _ in fake_sign) == ["journey-media", "money-moves-media"]
+
+
+@pytest.mark.asyncio
+async def test_sign_many_re_checks_the_scope_on_hand_built_pairs(fake_sign):
+    """`book_audio_service` builds its pairs from a build-time catalog and never goes through
+    `parse_storage_url`, so the parser's check alone would not cover it. The service-role call
+    itself has to enforce the scope."""
+    pairs = [("journey-media", "audio/a.m4a"), ("book-media", "audio/10_x.m4a")]
+    signed = await urls.sign_many(pairs, allowed={urls.JOURNEY_BUCKET})
+    assert set(signed) == {("journey-media", "audio/a.m4a")}
+    assert fake_sign == [("journey-media", ["audio/a.m4a"])]
+
+
+def test_allowed_can_only_narrow_never_widen():
+    """A caller cannot smuggle a bucket in through the argument — `_narrow` intersects."""
+    assert urls._narrow({"research-pdfs", "avatars"}) == set()
+    assert urls._narrow({"book-media", "research-pdfs"}) == {"book-media"}
+    url = "https://xyz.supabase.co/storage/v1/object/public/research-pdfs/u/r.pdf"
+    assert urls.parse_storage_url(url, allowed={"research-pdfs"}) is None
+
+
+@pytest.mark.parametrize("bucket,scope", [
+    ("book-media", "journey-media"),
+    ("money-moves-media", "journey-media"),
+    ("journey-media", "book-media"),
+])
+def test_the_parser_itself_refuses_a_cross_product_bucket(bucket, scope):
+    """Direct, because `sign_many`'s own re-check MASKS this one end-to-end: deleting the
+    parser's check leaves every scenario test green, since the pair is dropped one layer
+    later. Both layers are wanted — the parser's is what produces the diagnosable
+    "content row points at another product's bucket" log — so both need their own test.
+
+    Note this cannot be written with a bucket outside `_SIGNABLE_BUCKETS`: the pre-existing
+    union check catches those first, which is how a test here would go vacuous.
+    """
+    url = f"https://xyz.supabase.co/storage/v1/object/public/{bucket}/audio/x.m4a"
+    assert bucket in urls._SIGNABLE_BUCKETS, "pick an in-union bucket or this is vacuous"
+    assert urls.parse_storage_url(url, allowed={scope}) is None
+
+
+def test_the_one_url_convenience_stays_deleted():
+    """`sign_url` had zero call sites and no product scope. If it comes back it must come
+    back with an `allowed` argument, or it is a hole around every check above."""
+    fn = getattr(urls, "sign_url", None)
+    if fn is not None:
+        import inspect
+        assert "allowed" in inspect.signature(fn).parameters, (
+            "sign_url is back without a product scope"
+        )

@@ -24,12 +24,14 @@ from pathlib import Path
 from typing import Dict, List
 
 from app.schemas.learn_books_audio import BookAudioURLResponse, BooksAudioResponse
-from app.services.learn_audio_urls import sign_many
+from app.services.learn_audio_urls import BOOK_BUCKET, sign_many
 
 logger = logging.getLogger(__name__)
 
 _MANIFEST_DIR = Path(__file__).resolve().parents[2] / "data" / "book_audio"
-_BUCKET = "book-media"
+# Aliased, not re-typed: `sign_many`'s allowlist and the pairs it is handed must name the
+# same bucket, and two string literals can drift.
+_BUCKET = BOOK_BUCKET
 
 
 def _load_catalog() -> Dict[int, str]:
@@ -101,7 +103,7 @@ async def get_books_audio(*, unlocked: bool, tier_required: str | None) -> Books
         )
 
     pairs = [(_BUCKET, object_path) for object_path in BOOK_AUDIO_CATALOG.values()]
-    signed = await sign_many(pairs)
+    signed = await sign_many(pairs, allowed={BOOK_BUCKET})
 
     books: List[BookAudioURLResponse] = []
     for order in sorted(BOOK_AUDIO_CATALOG):

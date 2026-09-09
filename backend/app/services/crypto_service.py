@@ -11,6 +11,7 @@ Serves the CryptoDetailView screen on iOS.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -517,6 +518,59 @@ _CG_DAILY_TTL = 3600        # settled daily bars; only the trailing point moves
 _CG_INTRADAY_TTL = 120      # the live 1D/1W chart
 _CG_OHLC_TTL = 21600        # 6h — 4-day candles, nothing changes faster
 _CG_MARKETS_TTL = 120       # related coins / tracking rows, shared across users
+_CG_LIVE_MD_TTL = 60        # the re-hydrated header/statistics row on a DB-cache hit
+
+# ── NEVER PERSIST A LIVE PRICE (`price_service.py` invariant #2) ──────────────────────
+#
+# `crypto_fundamentals_cache` rows live `_DB_CACHE_TTL_HOURS` (12h), and `/coins/{id}`'s
+# `market_data` carries the LIVE price, the 24h change, the 24h high/low, market cap and
+# volume. Persisting that blob whole meant a crypto header whose 5-minute memory entry had
+# expired painted a **12-hour-old** price as the current one — and the Key Statistics column
+# agreed with it, so nothing on screen looked stale. That is the same defect the ETF / index
+# / commodity decompositions removed by deleting `_refresh_volatile` outright.
+#
+# So the DB tier stores the DURABLE half only, and a DB hit re-hydrates the volatile half
+# from ONE live `/coins/markets` row. A full miss needs no overlay — `/coins/{id}` is fresh
+# by definition — so the call budget only moves on the DB-hit path: 0 → 1 light call per
+# symbol per minute, in exchange for the heavy `/coins/{id}` the DB tier still saves.
+#
+# ⚠️ Every name here must exist on a `/coins/markets` row too, or stripping it makes the
+# field permanently absent instead of live. `test_crypto_live_price_not_persisted.py` pins
+# that correspondence both ways.
+_VOLATILE_MARKET_DATA_FIELDS = (
+    "current_price",
+    "price_change_24h",
+    "price_change_percentage_24h",
+    "market_cap",
+    "total_volume",
+    "high_24h",
+    "low_24h",
+    "last_updated",
+)
+# Which of those are `{currency: value}` dicts on `/coins/{id}` (bare floats on
+# `/coins/markets`) versus bare floats on both. Getting this backwards is the silent-0 trap
+# `_usd` documents: a bare float handed to `_usd` hits its `not isinstance(sub, dict)` arm.
+_VOLATILE_CURRENCY_KEYED = frozenset({
+    "current_price", "market_cap", "total_volume", "high_24h", "low_24h",
+})
+
+
+def strip_volatile_market_data(data: Any) -> Any:
+    """Pure: a deep copy of a `/coins/{id}` payload with every price-derived field removed.
+
+    Deep-copied because the argument is also the in-memory tier's object; popping in place
+    would blank the header for every caller until the next upstream fetch.
+    """
+    if not isinstance(data, dict):
+        return data
+    out = copy.deepcopy(data)
+    md = out.get("market_data")
+    if isinstance(md, dict):
+        for field in _VOLATILE_MARKET_DATA_FIELDS:
+            md.pop(field, None)
+    out["_volatile_stripped"] = True
+    return out
+
 
 
 async def _empty_list() -> list:
@@ -617,7 +671,25 @@ def _fmt(value: Optional[float], decimals: int = 2) -> str:
         return f"${value / 1_000_000:.2f}M"
     if abs(value) >= 1:
         return f"${value:,.{decimals}f}"
-    return f"${value:.6f}"
+
+    # Sub-dollar: precision PROPORTIONAL to magnitude, on the same ladder `_round_close`
+    # uses — so a coin's Key Statistics and its chart agree on how much precision a price
+    # has (2 dp at/above $1, 6 dp down to $0.0001, 10 dp below).
+    #
+    # A flat 6 dp was wrong twice over on exactly the coins this branch exists for:
+    #   • SHIB's 24h High 5.4123e-06 and 24h Low 5.3891e-06 BOTH rendered "$0.000005" —
+    #     a real intraday range shown as a dead flat line, on the row whose only job is
+    #     to show the range.
+    #   • Anything under 1e-6 rendered "$0.000000" — a fabricated zero, the same defect
+    #     as the "$0.00 Market Cap" this screen was rewritten to stop publishing.
+    places = 6 if abs(value) >= 0.0001 else 10
+    text = f"{value:.{places}f}"
+    if "." in text:
+        # Trim the padding the fixed width adds, but never below 2 dp: "$0.5" reads as a
+        # truncation, and an exact 0.0 must still render "$0.00" rather than "$0.".
+        whole, _, frac = text.rstrip("0").partition(".")
+        text = f"{whole}.{frac.ljust(2, '0')}"
+    return f"${text}"
 
 
 def _fmt_supply(value: Optional[float], symbol: str = "") -> str:
@@ -856,7 +928,8 @@ class CryptoService:
         """
         Two-tier cache for CoinGecko coin data:
           Tier 1: in-memory (5 min TTL)
-          Tier 2: Supabase crypto_fundamentals_cache (6h TTL)
+          Tier 2: Supabase crypto_fundamentals_cache (`_DB_CACHE_TTL_HOURS`),
+                  DURABLE fields only — the price half is re-hydrated live
           Miss:   CoinGecko API call → cache in both tiers
         """
         mem_key = f"cg_fundamentals:{symbol}"
@@ -867,10 +940,13 @@ class CryptoService:
             logger.debug(f"CoinGecko mem cache hit for {symbol}")
             return cached
 
-        # Tier 2: Supabase
+        # Tier 2: Supabase — DURABLE fields only. The row can be 12h old, so the
+        # price-derived half is re-hydrated live before anything reads it. See
+        # `_VOLATILE_MARKET_DATA_FIELDS`.
         db_data = await asyncio.to_thread(self._check_crypto_cache_db, symbol)
         if db_data is not None:
             logger.debug(f"CoinGecko DB cache hit for {symbol}")
+            db_data = await self._rehydrate_volatile(symbol, db_data)
             _cache_set(mem_key, db_data)
             return db_data
 
@@ -886,7 +962,11 @@ class CryptoService:
         return coin_data or {}
 
     def _check_crypto_cache_db(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Check Supabase crypto_fundamentals_cache (6h TTL)."""
+        """Check Supabase crypto_fundamentals_cache (`_DB_CACHE_TTL_HOURS`).
+
+        The row is stripped of every price-derived field on the way out — see
+        `_VOLATILE_MARKET_DATA_FIELDS`.
+        """
         try:
             row = (
                 self.supabase.table("crypto_fundamentals_cache")
@@ -905,19 +985,104 @@ class CryptoService:
                         datetime.now(timezone.utc) - cached_at
                     ).total_seconds() / 3600
                     if age_hours < _DB_CACHE_TTL_HOURS:
-                        return row.data[0].get("response_json")
+                        # Stripped on the READ as well as the write. The write-side strip
+                        # only protects rows persisted AFTER this deploy; rows already in
+                        # the table still hold a live price and would otherwise keep
+                        # serving it for up to _DB_CACHE_TTL_HOURS. Cheap, and it makes
+                        # the invariant hold without a data migration.
+                        return strip_volatile_market_data(
+                            row.data[0].get("response_json")
+                        )
                     logger.debug(f"Crypto DB cache expired for {symbol} ({age_hours:.1f}h)")
         except Exception as e:
             logger.warning(f"Crypto DB cache read failed for {symbol}: {e}")
         return None
 
+    async def _rehydrate_volatile(
+        self, symbol: str, durable: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Overlay a live `/coins/markets` row onto a DURABLE (price-stripped) payload.
+
+        Every volatile field on the result comes from the live row or is ABSENT — there is
+        no path on which a persisted number survives. That is why the strip runs here too
+        rather than only at the read: it makes the guarantee a property of this function,
+        so an outage degrades to "unknown" instead of to a 12-hour-old price. Consumers
+        already render an absent field as "—" (`_usd_opt`), and `get_crypto_core` raises
+        rather than paint a `$0.00` header.
+        """
+        if not isinstance(durable, dict):
+            return durable
+        out = strip_volatile_market_data(durable)
+        row = await self._live_markets_row(symbol)
+        if not row:
+            logger.info(
+                "crypto_service: no live row for %s — serving durable fundamentals with "
+                "no price rather than the persisted (up to %dh old) one",
+                symbol, _DB_CACHE_TTL_HOURS,
+            )
+            return out
+
+        md = out.get("market_data")
+        if not isinstance(md, dict):
+            md = {}
+            out["market_data"] = md
+        for field in _VOLATILE_MARKET_DATA_FIELDS:
+            value = row.get(field)
+            if value is None:
+                # Absent stays absent. Writing a 0 here is the exact fabrication the
+                # strip exists to prevent.
+                continue
+            md[field] = (
+                {"usd": value} if field in _VOLATILE_CURRENCY_KEYED else value
+            )
+        out.pop("_volatile_stripped", None)
+        return out
+
+    async def _live_markets_row(self, symbol: str) -> Dict[str, Any]:
+        """One live `/coins/markets` row for `symbol`, memoised for `_CG_LIVE_MD_TTL`.
+
+        Keyed by COIN ID, not by `row["symbol"]` — MATIC and POL both resolve to
+        `polygon-ecosystem-token` and CoinGecko answers with one canonical symbol, so a
+        symbol key drops the other. Returns {} on any failure; never raises.
+        """
+        from app.services.coingecko_adapter import crypto_base_symbol, markets_rows_by_id
+
+        base = crypto_base_symbol(symbol)
+        if not base:
+            return {}
+        key = f"cg:live_md:{base}"
+        cached = _cache_get(key, _CG_LIVE_MD_TTL)
+        if cached is not None:
+            return cached
+        try:
+            coin_id = await self.coingecko.resolve_coin_id(base)
+            if not coin_id:
+                return {}
+            rows = await self.coingecko.get_markets([base])
+            row = markets_rows_by_id(rows).get(coin_id)
+            if not isinstance(row, dict):
+                return {}
+            _cache_set(key, row)
+            return row
+        except Exception as e:
+            logger.warning(
+                "crypto_service: live market row unavailable for %s (%s: %s)",
+                symbol, type(e).__name__, e,
+            )
+            return {}
+
     def _upsert_crypto_cache_db(self, symbol: str, data: Dict[str, Any]) -> None:
-        """Upsert CoinGecko response into Supabase cache."""
+        """Upsert CoinGecko response into Supabase cache — DURABLE fields only.
+
+        `strip_volatile_market_data` is applied HERE, at the persistence boundary, rather
+        than at the read: a row already written with a price would otherwise stay a live
+        price for 12h after the fix deployed.
+        """
         try:
             self.supabase.table("crypto_fundamentals_cache").upsert(
                 {
                     "symbol": symbol,
-                    "response_json": data,
+                    "response_json": strip_volatile_market_data(data),
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="symbol",
@@ -935,7 +1100,8 @@ class CryptoService:
 
         The full build gathers CoinGecko fundamentals + a 15-YEAR FMP history + news +
         six related quotes. Only the first of those is needed to paint the header, and it
-        is already two-tier cached (5 min memory / 6h Supabase), so this answers well
+        is already two-tier cached (5 min memory / `_DB_CACHE_TTL_HOURS` Supabase, the
+        latter re-hydrated live), so this answers well
         inside the 1.27s the full build measured cold.
 
         `chart_range` / `interval` are accepted for call-site symmetry with the other
@@ -1170,7 +1336,22 @@ class CryptoService:
         market_cap = _usd_opt("market_cap")
         circulating_supply = md.get("circulating_supply")
         total_supply = md.get("total_supply")
-        max_supply_cg = md.get("max_supply")  # None if no cap
+        # ⚠️ `None` here is AMBIGUOUS and the two meanings render differently:
+        #   • CoinGecko answered and the coin has no cap  → "No Cap" (a fact)
+        #   • `md` is {} because /coins/{id} degraded     → unknown, must render "—"
+        # `md.get(...)` collapses both to None, and the old `if max_supply else "No Cap"`
+        # then published the degraded case as a FACT — the same class as the fabricated
+        # "$0.00 Market Cap" the `_usd_opt` rewrite removed one screen over. So carry the
+        # measurement separately, exactly as `benchmark_available` / `mfi_known` do.
+        max_supply_cg = md.get("max_supply")  # None = no cap OR not measured
+        max_supply_known = (
+            # A curated profile is authoritative in BOTH directions: the table encodes
+            # `"max_supply": None` for the genuinely uncapped coins (ETH, XRP, …).
+            symbol in _CRYPTO_PROFILES
+            # Otherwise only an actual answer counts. `in` rather than truthiness: an
+            # explicit JSON null IS the "no cap" answer.
+            or (isinstance(md, dict) and "max_supply" in md)
+        )
         fdv = _usd_opt("fully_diluted_valuation")
 
         # 52-week band, from the ONLY source that can express a 52-week window:
@@ -1389,31 +1570,65 @@ class CryptoService:
             btc_md = btc_coin_data.get("market_data", {}) if isinstance(btc_coin_data, dict) else {}
             bench_1m = btc_md.get("price_change_percentage_30d")
             bench_1y = btc_md.get("price_change_percentage_1y")
-            # For YTD, 3Y, 5Y, All Time — compute from BTC historical
+            # For YTD, 3Y, 5Y, All Time — compute from BTC historical.
+            #
+            # 🔴 This leg was still on FMP, which 402s every `…USD` crypto pair since
+            # enforcement went live 2026-09-03. So `btc_hist` was ALWAYS `[]` and the
+            # "vs BTC" YTD / 3Y / 5Y / All-Time rows were silently absent on every
+            # altcoin screen — invisible, because an omitted row is also what a genuinely
+            # short history produces. The coin's OWN history was moved to CoinGecko in
+            # this phase; its benchmark was left behind.
+            #
+            # Routed through `_cg_history`, the same cached reader the chart uses, so the
+            # benchmark and the chart cannot disagree about BTC's prices. The FMP path is
+            # GATED, not deleted — flipping `CRYPTO_PRICE_SOURCE=fmp` restores it verbatim.
             btc_fmp_symbol = "BTCUSD"
-            btc_hist_cache_key = f"btc_hist:{from_date}:{to_date}"
+            # ⚠️ The SOURCE is in the key. The two paths produce differently shaped rows
+            # (FMP carries OHLC, CoinGecko carries close+volume only), and during a rolling
+            # deploy with `CRYPTO_PRICE_SOURCE` mixed across pods one pod's rows would be
+            # read by the other's code — a shape mismatch that renders as missing data
+            # rather than an error. Same reasoning as `_cg_history`'s key.
+            _hist_source = "fmp" if self._fmp_crypto_enabled() else "cg"
+            btc_hist_cache_key = f"btc_hist:{_hist_source}:{from_date}:{to_date}"
             btc_hist = _cache_get(btc_hist_cache_key, 3600)
             if btc_hist is None:
                 try:
-                    btc_raw = await self.fmp.get_historical_prices(btc_fmp_symbol, from_date, to_date)
-                    if isinstance(btc_raw, dict):
-                        btc_hist = btc_raw.get("historical", [])
-                    elif isinstance(btc_raw, list):
-                        btc_hist = btc_raw
+                    if self._fmp_crypto_enabled():
+                        btc_raw = await self.fmp.get_historical_prices(btc_fmp_symbol, from_date, to_date)
+                        if isinstance(btc_raw, dict):
+                            btc_hist = btc_raw.get("historical", [])
+                        elif isinstance(btc_raw, list):
+                            btc_hist = btc_raw
+                        else:
+                            btc_hist = []
                     else:
-                        btc_hist = []
+                        btc_hist = await self._cg_history("BTC", history_days)
+                    btc_hist = list(btc_hist or [])
                     btc_hist.sort(key=lambda p: p.get("date") or "")
                     if btc_hist:
                         _cache_set(btc_hist_cache_key, btc_hist)
                 except Exception as e:
-                    logger.warning(f"BTC historical fetch failed: {e}")
+                    logger.warning(
+                        "BTC benchmark history unavailable for the %s screen (%s: %s) — "
+                        "the vs-BTC YTD/3Y/5Y rows are omitted; the rest is unaffected",
+                        symbol, type(e).__name__, e,
+                    )
                     btc_hist = []
             if btc_hist:
                 bench_ytd = _compute_ytd_return(btc_hist)
                 bench_3y = _compute_return(btc_hist, 365 * 3) if len(btc_hist) > 365 * 3 else None
                 bench_5y = _compute_return(btc_hist, 365 * 5) if len(btc_hist) > 365 * 5 else None
                 bench_10y = _compute_return(btc_hist, 365 * 10) if len(btc_hist) > 365 * 10 else None
-                bench_all = _compute_all_time_return(btc_hist)
+                # Same suppression as the coin's own All-Time row a few lines above, and
+                # for the identical reason: `_compute_all_time_return` is "first row →
+                # last row", which over a 730-day cap is "the last two years" published
+                # under the most authoritative label on the card. 3Y/5Y/10Y need no guard
+                # (`_compute_return` returns None once `len <= days_back`, and 1095 > 730);
+                # only the unbounded one lies.
+                bench_all = (
+                    _compute_all_time_return(btc_hist)
+                    if _history_reaches_all_time else None
+                )
 
         # ── Step 4: Build chart data ──────────────────────────────
         from app.services.chart_helper import fetch_chart_data, resolve_interval
@@ -1473,6 +1688,7 @@ class CryptoService:
             circulating_supply=circulating_supply,
             total_supply=total_supply,
             max_supply=max_supply_cg or profile_meta.get("max_supply"),
+            max_supply_known=max_supply_known,
             fdv=fdv,
             symbol=symbol,
         )
@@ -1730,6 +1946,7 @@ class CryptoService:
     def _build_supply_stats(
         self, *, circulating_supply, total_supply, max_supply,
         fdv, market_cap, avg_volume, symbol,
+        max_supply_known: bool,   # required — see `_build_key_statistics`
     ) -> List[KeyStatisticItem]:
         """Build supply column, skipping redundant stats."""
         stats = []
@@ -1750,11 +1967,19 @@ class CryptoService:
                 value=_fmt_supply(total_supply, symbol),
             ))
 
-        # Max Supply
-        stats.append(KeyStatisticItem(
-            label="Max Supply",
-            value=_fmt_supply(max_supply, symbol) if max_supply else "No Cap",
-        ))
+        # Max Supply — THREE states, not two.
+        #
+        # "No Cap" is a claim about the coin's monetary policy, and publishing it because
+        # `/coins/{id}` degraded is a fabricated fact, not a formatting nicety. It only
+        # renders when the absence was actually MEASURED (`max_supply_known`); otherwise
+        # the row degrades to "—" like every other unknown on this screen.
+        if max_supply:
+            _max_supply_value = _fmt_supply(max_supply, symbol)
+        elif max_supply_known:
+            _max_supply_value = "No Cap"
+        else:
+            _max_supply_value = "—"
+        stats.append(KeyStatisticItem(label="Max Supply", value=_max_supply_value))
 
         stats.append(KeyStatisticItem(
             label="Fully Diluted Val.",
@@ -1774,6 +1999,10 @@ class CryptoService:
         self, *, price, market_cap, volume, avg_volume,
         day_high, day_low, year_high, year_low,
         circulating_supply, total_supply, max_supply, fdv, symbol,
+        # No default, deliberately. A default of True is fail-OPEN: dropping the argument
+        # anywhere along the thread silently restores the fabricated "No Cap". Required
+        # makes that a TypeError instead.
+        max_supply_known: bool,
     ) -> List[KeyStatisticsGroupResponse]:
         # None-safe on BOTH operands: either being unknown makes the ratio unknown, and
         # "0.00%" is a claim (a coin with no trading) rather than an absence. `market_cap`
@@ -1803,6 +2032,7 @@ class CryptoService:
                 circulating_supply=circulating_supply,
                 total_supply=total_supply,
                 max_supply=max_supply,
+                max_supply_known=max_supply_known,
                 fdv=fdv,
                 market_cap=market_cap,
                 avg_volume=avg_volume,
@@ -2251,12 +2481,25 @@ Separate each category with "===CATEGORY===" followed by the category name.
         for sym in expected_symbols:
             fmp_sym = f"{sym}USD"
             q = quote_map.get(fmp_sym, {})
-            # Use curated name, or derive from CoinGecko ID (e.g. "bitcoin" → "Bitcoin")
+            # Name, in order of authority. ⚠️ The CoinGecko **id** is NOT a name source.
+            #
+            # It used to be the fallback (`cg_id.replace("-", " ").title()`), and an id is a
+            # historical, immutable SLUG — so that published the project's OLD name as the
+            # coin's name, with no way to tell from the screen that it was wrong:
+            #     SNX   → "havven"                  → "Havven"      (it is Synthetix)
+            #     STX   → "blockstack"              → "Blockstack"  (it is Stacks)
+            #     MATIC → "polygon-ecosystem-token" → "Polygon Ecosystem Token"
+            #     BNB   → "binancecoin"             → "Binancecoin"
+            # …and it mangled the rest ("Curve Dao Token", "Crypto Com Chain", "Fetch Ai").
+            #
+            # The quote row already carries CoinGecko's CURRENT display name — `_shape` is
+            # given `row["name"]` from `/coins/markets` — so the correct value was one
+            # `.get` away the whole time. Falling back to the bare symbol is honest; a
+            # stale project name is not.
             name = _CRYPTO_PROFILES.get(sym, {}).get("name")
             if not name:
-                from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
-                cg_id = SYMBOL_TO_COINGECKO_ID.get(sym, "")
-                name = cg_id.replace("-", " ").title() if cg_id else sym
+                q_name = q.get("name")
+                name = q_name.strip() if isinstance(q_name, str) and q_name.strip() else sym
             # `x or 0` does NOT guard a non-finite: an FMP NaN token is truthy, so it
             # sails through and lands in these REQUIRED response floats — Starlette then
             # renders with allow_nan=False and 500s the WHOLE crypto detail screen from

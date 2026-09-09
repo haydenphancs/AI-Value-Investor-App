@@ -322,7 +322,15 @@ class _FakeIndustryTAM:
 def test_brand_power_above_median_scores_high():
     """Gross margin and P/S both 2× sector median → 7.5 + 7.5 = 7.5 avg."""
     svc = _make_service_with_fake_medians({
-        "gross_margin": 40.0,   # sector median 40%
+        # ⚠️ DECIMAL, not a percentage. `sector_benchmarks` stores gross_margin /
+        # operating_margin as 0-1 (`type: "direct"` straight from FMP's ratios, no
+        # x100) — production medians read 0.34-0.40 for Consumer Cyclical. These
+        # fakes previously used 40.0 / 15.0, which is how the 100x scale bug in
+        # `_gross_margin_pct` survived: the tests validated the code against
+        # fabricated medians on a scale the table never uses, and both drivers
+        # saturated at 10.0/10 against real data.
+        # sga_to_revenue and ps_ratio are NOT on this scale and are unchanged.
+        "gross_margin": 0.40,   # sector median 40%, stored as a decimal
         "ps_ratio": 4.0,        # sector median P/S 4x
     })
     results = svc.score(
@@ -344,7 +352,15 @@ def test_brand_power_above_median_scores_high():
 
 def test_cost_advantage_with_three_metrics_resolves_high_confidence():
     svc = _make_service_with_fake_medians({
-        "operating_margin": 15.0,
+        # ⚠️ DECIMAL, not a percentage. `sector_benchmarks` stores gross_margin /
+        # operating_margin as 0-1 (`type: "direct"` straight from FMP's ratios, no
+        # x100) — production medians read 0.34-0.40 for Consumer Cyclical. These
+        # fakes previously used 40.0 / 15.0, which is how the 100x scale bug in
+        # `_gross_margin_pct` survived: the tests validated the code against
+        # fabricated medians on a scale the table never uses, and both drivers
+        # saturated at 10.0/10 against real data.
+        # sga_to_revenue and ps_ratio are NOT on this scale and are unchanged.
+        "operating_margin": 0.15,
         "asset_turnover": 0.8,
         "sga_to_revenue": 25.0,
     })
@@ -500,8 +516,8 @@ def test_year_selection_prefers_year_with_n_gte_20():
     Technology deferred_revenue_to_revenue scenario from production."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
-            "2025": {"median": 40.0, "n": 85},   # preferred — n high enough
-            "2026": {"median": 99.0, "n": 12},   # noisy partial year — skip
+            "2025": {"median": 0.40, "n": 85},   # preferred — n high enough
+            "2026": {"median": 0.99, "n": 12},  # noisy partial year — skip (decimal)
         },
         "ps_ratio": {
             "2025": {"median": 4.0, "n": 85},
@@ -536,7 +552,7 @@ def test_year_selection_falls_back_to_n_gte_10_when_no_preferred():
     noise but better than dropping the metric entirely)."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
-            "2024": {"median": 40.0, "n": 15},   # acceptable fallback
+            "2024": {"median": 0.40, "n": 15},   # acceptable fallback
             "2023": {"median": 38.0, "n": 6},    # too low — skip
         },
         "ps_ratio": {
@@ -566,7 +582,7 @@ def test_year_selection_returns_none_when_all_below_acceptable():
     is too unstable to score against."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
-            "2025": {"median": 40.0, "n": 6},
+            "2025": {"median": 0.40, "n": 6},
             "2024": {"median": 38.0, "n": 5},
         },
         "ps_ratio": {
@@ -600,9 +616,12 @@ def test_year_selection_picks_latest_among_preferred():
     latest one (most recent fundamentals)."""
     svc = _make_service_with_multi_year({
         "gross_margin": {
-            "2023": {"median": 30.0, "n": 70},
-            "2024": {"median": 35.0, "n": 80},
-            "2025": {"median": 40.0, "n": 85},   # latest with n>=20 → pick this
+            # Decimal scale, like the rest of this file — this test only asserts WHICH
+            # YEAR is chosen, so the values just need to be distinguishable, but keeping
+            # the scale consistent stops a future reader copying the wrong one.
+            "2023": {"median": 0.30, "n": 70},
+            "2024": {"median": 0.35, "n": 80},
+            "2025": {"median": 0.40, "n": 85},   # latest with n>=20 → pick this
         },
         "ps_ratio": {
             "2025": {"median": 4.0, "n": 85},
@@ -622,14 +641,15 @@ def test_year_selection_picks_latest_among_preferred():
     brand = results[PILLAR_BRAND]
     drivers = {d.metric: d for d in brand.drivers}
     assert drivers["gross_margin"].period_used == "2025"
-    assert drivers["gross_margin"].sector_median == 40.0
+    assert drivers["gross_margin"].sector_median == 0.40
 
 
 def test_pillar_drivers_to_dict_includes_period_and_sample_size():
     """Audit output exposes period_used + sample_size so we can debug
     'why is the median so weird' without re-running the query."""
     svc = _make_service_with_multi_year({
-        "gross_margin": {"2025": {"median": 40.0, "n": 85}},
+        # decimal scale — see the note above
+        "gross_margin": {"2025": {"median": 0.40, "n": 85}},
         "ps_ratio": {"2025": {"median": 4.0, "n": 85}},
     })
     results = svc.score(

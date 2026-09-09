@@ -34,7 +34,10 @@ httpx[socks]==0.28.1
 # opens httpx.AsyncClient(http2=True); APNs only speaks HTTP/2).
 h2>=4.1.0
 
-# WebSocket (for live price streaming)
+# WebSocket transport. NOT ours: pulled in by `google-genai` and supabase `realtime`
+# (`pip show websockets` → Required-by). The app itself opens no socket — the FMP
+# live-price stream was deleted 2026-09-08 (streaming is excluded from the Order Form),
+# so do not restore a streaming client on the strength of this pin.
 websockets>=12.0
 
 # Email validation

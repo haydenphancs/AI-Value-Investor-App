@@ -127,3 +127,58 @@ def test_recompute_never_overwrites_a_real_tam_with_a_placeholder():
         "if the pre-read fails we cannot tell which rows are good — skip rather than risk "
         "clobbering them"
     )
+
+
+# ── The flag itself, not just the function that consumes it ──────────────────
+#
+# Everything above tests `_fallback_macro_headline` GIVEN a `measured` flag. Nothing
+# tested how that flag is COMPUTED — and that gap is the whole reason the macro outage
+# was invisible for the length of the enforcement window.
+#
+# `macro_measured` read `bool(out.fred_indicators)` alone. There are TWO deterministic
+# tiers; the market-indicator one (oil / gold / volatility / rates / dollar) returned []
+# on every report from 2026-09-03, and the FRED half vouched for it. The report then
+# printed "Benign macro backdrop — no indicators tripping risk thresholds" over a tier it
+# had never read: exactly the sentence this file exists to forbid, through the one door
+# it did not cover.
+
+def _macro_measured_expr() -> str:
+    """The assignment line, comments stripped so the explanation cannot satisfy a scan."""
+    import inspect
+
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
+
+    src = inspect.getsource(TickerReportDataCollector.assemble_report)
+    for line in src.splitlines():
+        code = line.split("#", 1)[0].strip()
+        if code.startswith("macro_measured"):
+            return code
+    raise AssertionError("`macro_measured =` not found in assemble_report — scan drifted")
+
+
+def test_measured_requires_BOTH_deterministic_tiers():
+    expr = _macro_measured_expr()
+    assert "fred_indicators" in expr, "the FRED tier is no longer consulted"
+    assert "macro_indicators" in expr, (
+        "the market-indicator tier does not gate `macro_measured` — a totally dead tier "
+        "would again be reported as a benign backdrop"
+    )
+    assert " and " in expr, (
+        f"the two tiers must both be required; `or` lets either vouch for the other: {expr!r}"
+    )
+
+
+def test_one_dead_tier_is_enough_to_stop_claiming_a_benign_backdrop():
+    """The behavioural half — the source scan above cannot prove the semantics."""
+    from app.services.agents.ticker_report_data_collector import _fallback_macro_headline
+
+    for fred_rows, fmp_rows in (([], [{"symbol": "WTI"}]), ([{"series_id": "DGS10"}], []), ([], [])):
+        measured = bool(fred_rows) and bool(fmp_rows)
+        assert measured is False
+        out = _fallback_macro_headline("low", [], measured=measured)
+        assert "benign" not in out.lower(), (
+            "an all-clear derived from a tier that was never read"
+        )
+    # ...and with both tiers alive, an empty factor set IS a real all-clear.
+    both = _fallback_macro_headline("low", [], measured=True)
+    assert "unavailable" not in both.lower()

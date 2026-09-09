@@ -165,7 +165,7 @@ struct CryptoDetailView: View {
             Task { await priceAlerts.loadIfStale() }
         }
         .onDisappear {
-            viewModel.disconnectLivePrice()
+            viewModel.stopLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
         .confirmationDialog("Options", isPresented: $showMoreOptions) {

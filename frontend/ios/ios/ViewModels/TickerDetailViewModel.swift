@@ -89,9 +89,6 @@ class TickerDetailViewModel: ObservableObject {
     @Published var stockDetail: StockDetail?
     @Published var stockQuote: StockQuote?
 
-    // MARK: - Live Price
-    let livePriceManager = LivePriceWebSocketManager()
-
     // MARK: - Private Properties
 
     private let tickerSymbol: String
@@ -153,7 +150,11 @@ class TickerDetailViewModel: ObservableObject {
                 self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
-                if range.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                // Gated on the interval ALONE. This used to also require
+                // `livePriceManager.isConnected`; with the FMP stream gone that
+                // conjunct would be permanently false and the intraday chart would
+                // never refresh again.
+                if range.defaultInterval.isIntraday {
                     self.startChartRefreshTimer()
                 } else {
                     self.stopChartRefreshTimer()
@@ -191,45 +192,6 @@ class TickerDetailViewModel: ObservableObject {
                     guard let self = self else { return }
                     await self.fetchChartData(self.tickerSymbol, range: self.selectedChartRange)
                 }
-            }
-            .store(in: &cancellables)
-
-        // Observe live price updates from WebSocket and apply to tickerData + chart
-        livePriceManager.$livePrice
-            .compactMap { $0 }
-            .sink { [weak self] newPrice in
-                guard let self = self, var data = self.tickerData else { return }
-                data.currentPrice = newPrice
-                // `??` only guards nil, so a socket tick carrying 0.0 used to overwrite
-                // the correct REST day-change with a flat +0.00%. The backend now sends
-                // null when it has no previous close to compare against; this keeps the
-                // client honest even against an older backend that still sends 0.0
-                // alongside a moving price (a real 0.00 change with a price that is not
-                // the previous close is not a day-change we should trust).
-                if let liveChange = self.livePriceManager.livePriceChange, liveChange != 0 {
-                    data.priceChange = liveChange
-                }
-                if let livePct = self.livePriceManager.livePriceChangePercent, livePct != 0 {
-                    data.priceChangePercent = livePct
-                }
-
-                // Update last chart candle for intraday ranges
-                if self.chartSettings.selectedInterval.isIntraday,
-                   !data.chartPricePoints.isEmpty {
-                    let lastIndex = data.chartPricePoints.count - 1
-                    let last = data.chartPricePoints[lastIndex]
-                    let updatedPoint = StockPricePoint(
-                        date: last.date,
-                        close: newPrice,
-                        open: last.open,
-                        high: max(last.high ?? newPrice, newPrice),
-                        low: min(last.low ?? newPrice, newPrice),
-                        volume: last.volume
-                    )
-                    data.chartPricePoints[lastIndex] = updatedPoint
-                }
-
-                self.tickerData = data
             }
             .store(in: &cancellables)
     }
@@ -371,7 +333,7 @@ class TickerDetailViewModel: ObservableObject {
             // Start live price streaming + chart refresh if market is active
             if let status = self.tickerData?.marketStatus,
                MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                self.connectLivePrice()
+                self.startLivePriceUpdates()
                 self.startChartRefreshTimer()
             }
 
@@ -407,74 +369,33 @@ class TickerDetailViewModel: ObservableObject {
 
     // MARK: - Live Price
 
-    func connectLivePrice() {
-        // Token comes from APIClient, not the Keychain.
-        //
-        // These two deliberately DIVERGE: on a transient restore failure `AppState` disarms the
-        // client token while leaving the Keychain entry intact, so a Keychain reader
-        // authenticates as the real account while the whole UI says "guest". A direct reader
-        // also never sees a mid-session refresh. One source of truth instead.
-        Task { [weak self] in
-            guard let self else { return }
-            let token = await APIClient.shared.currentAuthToken()
-            self.livePriceManager.connect(ticker: self.tickerSymbol, authToken: token)
-            // Inside the Task: the REST fallback's behaviour depends on whether we actually had
-            // a credential, which is only known after the actor hop.
-            self.startQuotePollFallback(hasToken: token != nil)
-        }
-    }
-
-    func disconnectLivePrice() {
-        livePriceManager.disconnect()
-        stopChartRefreshTimer()
-        stopQuotePoll()
-    }
-
-    // MARK: - REST Quote Polling Fallback
-
-    /// Starts REST polling as a standby price source alongside the WebSocket.
+    /// Starts the 15-second REST price refresh.
     ///
-    /// The loop RUNS FOR THE LIFE OF THE SCREEN and idles while the socket is healthy —
-    /// it does not exit when the socket connects. It used to `return` at that point,
-    /// which made it a one-shot: `LivePriceWebSocketManager` gives up permanently after
-    /// `maxReconnectAttempts` (3) consecutive failed handshakes, and `reconnectAttempts`
-    /// is only reset by a `price_update` that can no longer arrive. So one outage longer
-    /// than ~7 seconds — a lift, a Wi-Fi→LTE handoff, a Railway redeploy — killed the
-    /// socket for the session, and the fallback had already returned. Nothing observes
-    /// `isConnected` going false, so the header price froze at the last tick while the
-    /// 30-second chart refresh kept drawing NEW candles: two contradicting prices for the
-    /// same stock on the same screen, with no error, no spinner and nothing in the UI to
-    /// suggest a stale number. Idling costs one `isConnected` check every 15s.
-    private func startQuotePollFallback(hasToken: Bool) {
+    /// Was `connectLivePrice()`, which opened an FMP WebSocket and treated this poll as a
+    /// standby. The stream is gone — streaming is excluded from the FMP Order Form and the
+    /// socket had been answering `401` and then going silent anyway — so REST polling is
+    /// now the ONLY price source, not a fallback. It therefore runs unconditionally: every
+    /// `isConnected` check below was removed rather than left to evaluate false, because a
+    /// `false` there used to mean "the socket is down, poll now" and silently reading as
+    /// "poll forever" by accident is not something the next reader should have to infer.
+    func startLivePriceUpdates() {
         quotePollTask?.cancel()
         quotePollTask = Task { [weak self] in
-            // If we had a token, give WebSocket 5 seconds to connect before polling.
-            // (Only a DELAY — never an exit. See the note above.)
-            if hasToken {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
-            }
-
-            print("📡 TickerDetailVM: REST quote standby armed for \(self?.tickerSymbol ?? "")")
-
             while !Task.isCancelled {
                 guard let self = self else { break }
                 guard MarketHoursUtil.isMarketActive() else {
                     try? await Task.sleep(nanoseconds: 60_000_000_000)
                     continue
                 }
-
-                // Socket healthy → stay armed but silent. `continue` (not `return`):
-                // this is the only thing left if the socket dies later.
-                if self.livePriceManager.isConnected {
-                    try? await Task.sleep(nanoseconds: 15_000_000_000)
-                    continue
-                }
-
                 await self.pollQuotePrice()
                 try? await Task.sleep(nanoseconds: 15_000_000_000) // 15 seconds
             }
         }
+    }
+
+    func stopLivePriceUpdates() {
+        stopChartRefreshTimer()
+        stopQuotePoll()
     }
 
     private func stopQuotePoll() {
@@ -489,10 +410,6 @@ class TickerDetailViewModel: ObservableObject {
             // 120s quote cache it advanced the header price at most once every two
             // minutes while presenting as a 15-second live feed.
             let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol, maxAge: 0)
-            // The WebSocket may have connected DURING this fetch. It's the
-            // authoritative + fresher source, so drop this (now-stale) REST quote
-            // rather than clobbering the live price during the connect handoff.
-            guard !self.livePriceManager.isConnected else { return }
             guard var data = self.tickerData, let price = quote.price else { return }
 
             data.currentPrice = price

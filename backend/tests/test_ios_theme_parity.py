@@ -193,7 +193,7 @@ def _surface_registry(palette: str, manifest: str) -> dict[str, Token]:
 #              are bright and the ink must be near-black `textOnFill` (7.79 / 6.41).
 #              White on them would be 2.28 / 2.77.
 #   .onAccent  the five frozen fills + the server `.fill` role — dark in both modes, ink
-#              is white `textOnAccent`. Near-black on frozen `primaryFill` is only 3.35,
+#              is white `textOnAccent`. Near-black on frozen `primaryFill` is only 3.81,
 #              which is exactly why ONE ink cannot serve both.
 #
 # `test_fill_ink_enum_matches_the_swift` pins this against the Swift enum by identity.
@@ -621,13 +621,19 @@ def test_no_bare_swiftui_colours_as_ink_or_opaque_fill():
 # The other five stay frozen-dark in both modes and keep white `textOnAccent`.
 #
 # ONE INK CANNOT SERVE BOTH: `textOnFill`'s dark arm on the frozen `primaryFill` #2563EB
-# is 3.35, and `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 — WORSE than the
+# is 3.81, and `textOnAccent` on the adaptive dark arms is 2.28 / 2.77 — WORSE than the
 # 2.28 defect the original `*Fill` migration was written to fix. So a site inked with the
 # wrong family's token is a real regression, not a style nit, and the rule below runs
 # once per family with that family's required and banned inks.
-_INVERSE_INK_FILLS = ("gainFill", "lossFill")
+# ⚠️ 2026-09-08: `alertOrangeFill` MOVED to the inverse family. It is the credit-card fill,
+# and it is the ONLY one that moved: a frozen fill is capped at L*49.9 by white ink, and the
+# card still read as dark there, so its dark arm went bright (#F97316) and its ink flipped to
+# near-black. The other four stayed FROZEN at the white-ink ceiling deliberately — 82 of the
+# 90 ink sites are `primaryFill`, so moving it would have inverted every primary button, send
+# button and selected chip in the app, which is a product decision and not a contrast one.
+_INVERSE_INK_FILLS = ("gainFill", "lossFill", "alertOrangeFill")
 _ONACCENT_INK_FILLS = ("primaryFill", "cautionFill", "accentCyanFill",
-                       "alertPurpleFill", "alertOrangeFill",
+                       "alertPurpleFill",
                        "gainGraphic", "lossGraphic", "cautionGraphic", "accentGraphic",
                        "primaryGraphic")
 _FILL_TOKENS = _INVERSE_INK_FILLS + _ONACCENT_INK_FILLS
@@ -638,8 +644,8 @@ _ALWAYS_BANNED_ON_FILL = ("textPrimary", "textSecondary", "textMuted")
 
 # {family: (accepted inks, additionally banned inks)}.
 #
-# Each family accepts EXACTLY ONE ink. `textOnAccent` on an adaptive fill is 2.28/2.77 in
-# dark and `textOnFill` on a frozen one is 3.35 — both are real regressions, so neither
+# Each family accepts EXACTLY ONE ink. `textOnAccent` on an adaptive fill is 2.15-2.80 in
+# dark and `textOnFill` on an on-accent one is ~3.8 — both are real regressions, so neither
 # family may borrow the other's token. (During the sweep that produced this state the
 # inverse family temporarily accepted both; that relaxation is gone, and
 # `test_neither_fill_family_accepts_the_other_family_ink` proves it stays gone.)
@@ -880,11 +886,73 @@ def test_each_adaptive_fill_is_byte_equal_to_its_text_counterpart():
         a, b = tokens[fill], tokens[text]
         assert (a.light, a.light_a, a.dark, a.dark_a) == (b.light, b.light_a, b.dark, b.dark_a), \
             f"{fill} has drifted from {text}: {a.light}/{a.dark} vs {b.light}/{b.dark}"
-    # ...and the frozen five must NOT be adaptive, or they silently joined the wrong family.
-    for fill in ("primaryFill", "cautionFill", "accentCyanFill",
-                 "alertPurpleFill", "alertOrangeFill"):
+    # `alertOrangeFill` is adaptive too as of 2026-09-08, but is NOT byte-equal to its text
+    # twin: its light arm is pushed to the white-ink ceiling (#CD4B1D, 4.55) rather than
+    # inherited from `alertOrange` (#C2410C). Only the dark arm is shared. Asserted here so
+    # that intentional asymmetry cannot be "tidied" into byte-equality.
+    ao, ao_text = tokens["alertOrangeFill"], tokens["alertOrange"]
+    assert ao.light != ao.dark, "alertOrangeFill went frozen again — the credit card needs the bright dark arm"
+    assert ao.dark == ao_text.dark, f"alertOrangeFill dark {ao.dark} should track alertOrange {ao_text.dark}"
+    assert ao.light != ao_text.light, (
+        "alertOrangeFill's light arm was re-derived from alertOrange; it is deliberately "
+        "lighter (the white-ink ceiling), which is what answers the 'card looks dark' report")
+
+    # ...and the four that stayed FROZEN must NOT be adaptive, or they silently joined the
+    # wrong family. `primaryFill` is the one that matters: 82 of the 90 ink sites are its.
+    for fill in ("primaryFill", "cautionFill", "accentCyanFill", "alertPurpleFill"):
         t = tokens[fill]
         assert t.light == t.dark, f"{fill} became adaptive but still declares carries: .onAccent"
+
+
+# Each frozen fill and the TEXT token it was originally derived from. Before the 2026-09
+# lightening these were byte-equal by construction, and `AppTheme.swift` said so in the
+# paragraph the rules file designates as the authority on what a frozen fill IS.
+_FROZEN_FILL_TWINS = (
+    ("primaryFill",     "primaryBlue"),
+    ("cautionFill",     "caution"),
+    ("accentCyanFill",  "accentCyan"),
+    ("alertPurpleFill", "alertPurple"),
+    ("alertOrangeFill", "alertOrange"),
+)
+
+
+def test_no_frozen_fill_is_byte_equal_to_its_text_counterpart():
+    """The inverse of the adaptive rule above, and it exists because the OLD definition of a
+    frozen fill — "that colour's light-mode TEXT value used in both modes" — is now false for
+    all five, while still reading as an instruction.
+
+    A fill only has to clear 4.5:1 under white ink. A TEXT token has to clear 4.5:1 on
+    `cardBackgroundLight` #EDF0F5 as well, which costs ~0.6 of ratio more. So calibrating a
+    fill against white alone buys real lightness (that is what the 2026-09 pass spent), and it
+    makes the fill NO LONGER TEXT-SAFE: all five now measure ~4.08 on `cardBackgroundLight`.
+
+    Without this test, an editor following the old paragraph could "restore" any fill from its
+    twin and silently revert the pass with the whole suite green — nothing else compares these
+    two values. Asserted as STRICTLY LIGHTER rather than merely unequal, because the direction
+    is the invariant: a fill calibrated for white ink alone must sit above the text-safe value.
+    """
+    tokens = _declared_tokens(_sections()[0])
+    for fill, text in _FROZEN_FILL_TWINS:
+        f, t = tokens[fill], tokens[text]
+        assert f.light != t.light, (
+            f"{fill} is byte-equal to {text} (#{f.light}) again — the frozen fills were "
+            f"deliberately lightened above their text tokens in 2026-09; see the FILLS "
+            f"header in AppTheme.swift before changing this"
+        )
+        lf = _luminance(_rgb(f.light))
+        lt = _luminance(_rgb(t.light))
+        assert lf > lt, (
+            f"{fill} #{f.light} is DARKER than its text token {text} #{t.light}. A frozen "
+            f"fill is calibrated against white ink alone and must sit above the text-safe "
+            f"value; darker means someone re-derived it from the text token."
+        )
+        # And the reason reuse-as-ink is banned: it no longer clears AA on a nested card.
+        on_nested = _ratio(_rgb(f.light), _rgb(tokens["cardBackgroundLight"].light))
+        assert on_nested < 4.5, (
+            f"{fill} now clears 4.5 on cardBackgroundLight ({on_nested:.2f}) — if that is "
+            f"deliberate, the 'NOT text-safe' warning in AppTheme.swift and ios-swiftui.md "
+            f"is stale and must be updated with it"
+        )
 
 
 # A member whose VALUE is a fill — `InvestorLevel.fillColor`, `QualityBand.fillColor`,
@@ -1082,7 +1150,7 @@ def _stored_ink_pair_problems(rel: str, bindings: dict) -> list[str]:
                        f"its paired ink is only {sorted(inks)} — white on those is 2.28/2.77")
         if fills & frozen and "textOnAccent" not in inks:
             out.append(f"{rel}: `{name}` is assigned {sorted(fills & frozen)} (FROZEN) but its "
-                       f"paired ink is only {sorted(inks)} — near-black on those is 3.35")
+                       f"paired ink is only {sorted(inks)} — near-black on those is 3.81")
         if (stray := inks - {"textOnFill", "textOnAccent"}):
             out.append(f"{rel}: `{name}`'s paired ink is assigned {sorted(stray)}, which is not "
                        f"a contract ink for a fill")
@@ -2115,7 +2183,7 @@ def test_the_opaque_surface_rule_fires_on_the_regression_it_exists_for():
             .foregroundColor(AppColors.textOnAccent)
             .background(
                 LinearGradient(
-                    colors: [AppColors.alertOrangeFill, AppColors.alertOrangeFill],
+                    colors: [AppColors.alertPurpleFill, AppColors.alertPurpleFill],
                     startPoint: .leading, endPoint: .trailing
                 )
             )

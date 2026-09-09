@@ -67,9 +67,6 @@ class IndexDetailViewModel: ObservableObject {
     @Published var chartDataVersion: Int = 0
     @Published var chartEventDates: ChartEventDates?
 
-    // Live Price
-    let livePriceManager = LivePriceWebSocketManager()
-
     // News pagination
     @Published var isNewsLoading: Bool = false
     @Published var hasMoreNews: Bool = false
@@ -129,7 +126,9 @@ class IndexDetailViewModel: ObservableObject {
                 self.chartSettings.selectedInterval = newRange.defaultInterval
                 self.suppressIntervalReload = false
 
-                if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                // Interval alone: the `isConnected` conjunct this used to carry would be
+                // permanently false now the FMP stream is gone, freezing the intraday chart.
+                if newRange.defaultInterval.isIntraday {
                     self.startChartRefreshTimer()
                 } else {
                     self.stopChartRefreshTimer()
@@ -155,34 +154,6 @@ class IndexDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe live price updates → update indexData in real-time
-        livePriceManager.$livePrice
-            .compactMap { $0 }
-            .sink { [weak self] newPrice in
-                guard let self = self, var data = self.indexData else { return }
-                data.currentPrice = newPrice
-                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
-                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
-
-                // Update last chart candle for intraday ranges
-                if self.chartSettings.selectedInterval.isIntraday,
-                   !data.chartPricePoints.isEmpty {
-                    let lastIndex = data.chartPricePoints.count - 1
-                    let last = data.chartPricePoints[lastIndex]
-                    let updatedPoint = StockPricePoint(
-                        date: last.date,
-                        close: newPrice,
-                        open: last.open,
-                        high: max(last.high ?? newPrice, newPrice),
-                        low: min(last.low ?? newPrice, newPrice),
-                        volume: last.volume
-                    )
-                    data.chartPricePoints[lastIndex] = updatedPoint
-                }
-
-                self.indexData = data
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Public Methods
@@ -195,11 +166,10 @@ class IndexDetailViewModel: ObservableObject {
             guard let self = self else { return }
             // One-time setup that must NOT be gated on the detail request token: a
             // range change during the initial fetch supersedes it, and the stale
-            // response then skipped the connect, leaving the index with no live
-            // updates / no 30s refresh until a manual refresh. connectLivePrice is
-            // independent of the response, so start streaming here. The timer + the
-            // WebSocket both self-gate on market hours, so this is a no-op when closed.
-            self.connectLivePrice()
+            // response then skipped this, leaving the index with no 30s refresh until a
+            // manual refresh. Independent of the response, so start it here. The timer
+            // self-gates on market hours, so this is a no-op when closed.
+            self.startLivePriceUpdates()
             self.startChartRefreshTimer()
             // Fast core, in parallel with the full detail: whichever lands first paints.
             async let coreTask: () = self.loadCore()
@@ -343,20 +313,15 @@ class IndexDetailViewModel: ObservableObject {
 
     // MARK: - Live Price
 
-    func connectLivePrice() {
-        // See TickerDetailViewModel.connectLivePrice for why this reads APIClient rather than
-        // the Keychain. Note the old `guard let … else { return }` meant a guest got NO live
-        // price at all and no fallback — the stream is public for these symbols, so connect
-        // regardless and let the token be nil.
-        Task { [weak self] in
-            guard let self else { return }
-            let token = await APIClient.shared.currentAuthToken()
-            self.livePriceManager.connect(ticker: self.indexSymbol, authToken: token)
-        }
+    /// Was `connectLivePrice()`. Its comment claimed "the stream is public for these
+    /// symbols" — untrue since the account-only wall, and moot now: FMP excludes streaming
+    /// from the Order Form, `_TICKER_RE` never accepted a `^` symbol anyway, and the socket
+    /// answered 401. The 30s live-slice timer is the whole mechanism.
+    func startLivePriceUpdates() {
+        startChartRefreshTimer()
     }
 
-    func disconnectLivePrice() {
-        livePriceManager.disconnect()
+    func stopLivePriceUpdates() {
         stopChartRefreshTimer()
     }
 
@@ -602,13 +567,7 @@ class IndexDetailViewModel: ObservableObject {
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard token == self.chartRequestToken, let current = self.indexData else { return }
 
-            self.indexData = light.merged(
-                into: current,
-                livePrice: self.livePriceManager.livePrice,
-                liveChange: self.livePriceManager.livePriceChange,
-                liveChangePercent: self.livePriceManager.livePriceChangePercent,
-                includeChart: includeChart
-            )
+            self.indexData = light.merged(into: current, includeChart: includeChart)
             if includeChart, !light.chartData.isEmpty {
                 self.chartDataVersion += 1
             }

@@ -256,6 +256,12 @@ SUBSTITUTION: Dict[str, str] = {
     "grades": "no entitled substitute — render an honest empty state",
     "price-target-consensus": "no entitled substitute — render an honest empty state",
     "sp500-constituent": "backend/data/benchmark_universe.json",
+    # The other two index rosters have no substitute at all — nothing in the repo
+    # lists Dow-30 or Nasdaq-Composite membership, and the membership LIST is
+    # itself the litigated subject matter (Dow Jones v. CBOT). The index screens
+    # fall back to their ETF's published holding count instead.
+    "dowjones-constituent": "no entitled substitute — use the ETF's holding count",
+    "nasdaq-constituent": "no entitled substitute — use the ETF's holding count",
     "earning-call-transcript": "no entitled substitute — omit the section",
 }
 

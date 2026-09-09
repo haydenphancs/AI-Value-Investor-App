@@ -330,7 +330,6 @@ def test_file_symbol_pointers_resolve() -> None:
 _CURATED_SWIFT = [
     ("APIClient",                 "frontend/ios/ios/Core/Services/APIClient.swift"),
     ("TaskPollingManager",        "frontend/ios/ios/Core/Services/TaskPollingManager.swift"),
-    ("LivePriceWebSocketManager", "frontend/ios/ios/Core/Services/LivePriceWebSocketManager.swift"),
     ("NetworkMonitor",            "frontend/ios/ios/Core/Services/NetworkMonitor.swift"),
     ("KeychainService",           "frontend/ios/ios/Core/Services/AuthService.swift"),
     ("StockRepository",           "frontend/ios/ios/Core/Repositories/StockRepository.swift"),

@@ -106,8 +106,14 @@ from app.services.market_movers_service import get_market_movers_service
 logger = logging.getLogger(__name__)
 
 MARKET_SCOPE = "__MARKET__"
-# The index whose daily move is the "whole market" leg of the attribution.
-MARKET_INDEX_SYMBOL = "^GSPC"
+# The instrument whose daily move is the "whole market" leg of the attribution.
+#
+# ⚠️ A SECOND definition of this name — `updates_insight_sweeper` has its own, and they
+# must agree. `^GSPC` is outside the FMP licence, so this leg was permanently absent:
+# `_MarketContext.for_tickers` set `market_available=False` and every widget card lost
+# its "moved with the market" attribution. Re-pointed at the same entitled proxy the
+# sweeper uses, so both read one instrument.
+MARKET_INDEX_SYMBOL = "SPY"
 
 # The market band, in render order. Labels live HERE, not on the client: an already
 # installed widget cannot learn a new index's display name without an app update.
@@ -115,10 +121,13 @@ MARKET_INDEX_SYMBOL = "^GSPC"
 # These ride the universe batch quote (`get_batch_quotes_bulk` chunks at 300, the
 # universe is capped at 200), so the whole band costs ZERO additional FMP calls — it is
 # in fact one call FEWER than before, because `^GSPC` used to be fetched separately.
+# Labels stay SERVER-side (see above): an already-installed widget cannot learn a new
+# display name, so re-pointing these ships without an app update — which is exactly what
+# makes the honest relabel affordable here.
 _INDEX_SYMBOLS: List[Tuple[str, str]] = [
-    (MARKET_INDEX_SYMBOL, "S&P 500"),
-    ("^IXIC", "Nasdaq"),
-    ("^DJI", "Dow"),
+    (MARKET_INDEX_SYMBOL, "S&P 500 ETF"),
+    ("ONEQ", "Nasdaq Comp ETF"),
+    ("DIA", "Dow ETF"),
 ]
 
 # How many tickers we will rank. The sweeper's own ceiling is 200; matching it means

@@ -29,12 +29,14 @@ import SwiftUI
 ///
 /// 1. **`pinnedViews` forces the predecessor walk EVERY FRAME**, because the pinned header's
 ///    offset has to be recomputed as you scroll. That is exactly the walk a resize restarts.
-/// 2. **A live-price websocket tick is a resize.** The detail view models sink
-///    `livePriceManager.$livePrice` into `indexData.price`, which flows through `headerData` into
-///    this container's FIRST child — the very subview the pinned offset is measured against. So
-///    the invalidation fired continuously, with no user interaction beyond scrolling, which is
-///    why the TestFlight report (*"I cant scroll this screen to the bottom. It's like shaking."*)
-///    arrived with nothing on the screen expanded.
+/// 2. **A live-price tick is a resize.** The detail view models write a refreshed price into
+///    `indexData.price`, which flows through `headerData` into this container's FIRST child —
+///    the very subview the pinned offset is measured against. So the invalidation fired
+///    continuously, with no user interaction beyond scrolling, which is why the TestFlight
+///    report (*"I cant scroll this screen to the bottom. It's like shaking."*) arrived with
+///    nothing on the screen expanded. (The tick was a `livePriceManager.$livePrice` sink at
+///    the time; the FMP WebSocket is gone, but the 30s REST refresh writes the same field, so
+///    the hazard is unchanged.)
 ///
 /// The laziness was buying nothing: two children, everything from already-decoded `@Published`
 /// state, and no `AsyncImage` reachable from any Overview tab. The News tab keeps its own

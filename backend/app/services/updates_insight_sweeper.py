@@ -75,8 +75,20 @@ from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
-# The market index whose move drives the market card and the anti-stampede guard.
-MARKET_INDEX_SYMBOL = "^GSPC"
+# The market instrument whose move drives the market card and the anti-stampede guard.
+#
+# ⚠️ RE-ARMS THE MWCB GUARD. `^GSPC` is outside the FMP licence, so `market_change` was
+# permanently `None` — and the Market-Wide Circuit Breaker check in
+# `updates_materiality._decide_inner` reads `mkt is not None and abs(mkt)/100 >= 0.07`,
+# which fails OPEN. That guard exists so a ≥7% market crash produces ONE macro card
+# instead of N per-ticker restatements of the same story; disarmed, a real crash day
+# would emit up to `_PER_CYCLE_REGEN_CAP` (8) Gemini cards per cycle. A live cost AND
+# quality regression that no test could see, because "no card" and "guard never fired"
+# look identical on a calm tape.
+#
+# Also the symbol the daily σ precompute writes (`main.py`), which the same gate reads
+# for its volatility-relative move tier.
+MARKET_INDEX_SYMBOL = "SPY"
 
 # How many watchlist tickers to sweep. Ordered by watcher count, so the cap
 # drops the least-watched names first.

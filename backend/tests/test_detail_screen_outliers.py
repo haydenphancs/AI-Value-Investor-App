@@ -918,24 +918,32 @@ def test_index_does_not_benchmark_itself():
     )
 
 
-def test_index_profiles_do_not_all_share_the_sp_return():
-    """Anti-vacuity control for the test above.
+def test_the_constant_that_could_be_echoed_no_longer_exists():
+    """Stronger successor to the anti-vacuity control that used to sit here.
 
-    If every index carried the same `avg_annual_return`, echoing it would be
-    harmless and the fix meaningless. Prove the constants genuinely differ.
-    """
+    That control proved the per-index `avg_annual_return` constants genuinely DIFFERED,
+    so echoing one under the S&P's label was a real bug rather than a harmless no-op.
+    The field has since been deleted outright — it was defined on all three profiles and
+    read by nothing — so the bug is now unreachable by construction, which is a better
+    guarantee than "the constants differ". Assert the absence instead, or a future
+    re-add would silently restore the footgun with no test standing against it."""
     from app.services.index_service import _INDEX_PROFILES
 
-    returns = {
-        sym: p.get("avg_annual_return")
-        for sym, p in _INDEX_PROFILES.items()
-        if p.get("avg_annual_return") is not None
-    }
-    assert len(set(returns.values())) > 1, (
-        f"expected differing per-index returns, got {returns}"
+    assert _INDEX_PROFILES, "anti-vacuity: the profile table itself went missing"
+    offenders = [s for s, p in _INDEX_PROFILES.items() if "avg_annual_return" in p]
+    assert not offenders, (
+        f"`avg_annual_return` is back on {offenders} — it is the constant that used to "
+        "be rendered as the S&P benchmark on every index screen"
     )
-    # The S&P's own constant is the only correct value for an S&P benchmark row.
-    assert returns.get("^GSPC") != returns.get("^IXIC")
+    # And the benchmark row is still deliberately absent rather than self-referential.
+    import inspect
+    from app.services import index_service
+
+    src = "\n".join(
+        l for l in inspect.getsource(index_service).splitlines()
+        if not l.strip().startswith("#")
+    )
+    assert 'sp_benchmark=profile_meta.get("avg_annual_return"' not in src
 
 
 # ── 16. Market status knows the market calendar ──────────────────────
@@ -1403,7 +1411,13 @@ def test_commodity_screen_actually_refreshes():
     that never ran, and the quote was frozen for the life of the screen."""
     code = _swift_code(_IOS / "ViewModels" / "CommodityDetailViewModel.swift")
     assert "chartRefreshTask = Task" in code, "chartRefreshTask is still a dead stub"
-    assert "LivePriceWebSocketManager()" in code
+    # This used to also assert `LivePriceWebSocketManager()`. The FMP stream is gone
+    # (excluded from the Order Form, and it had been answering 401 in silence), so the
+    # 30s timer is the ONLY thing refreshing this screen — which makes the assertion
+    # below stronger, not weaker.
+    assert "LivePriceWebSocketManager" not in code, "the FMP WebSocket is back"
+    assert "startChartRefreshTimer()" in _func_body(code, "func startLivePriceUpdates()"), \
+        "startLivePriceUpdates no longer arms the refresh timer — the screen would freeze"
 
     timer = _func_body(code, "func startChartRefreshTimer()")
     # NOT gated on the US EQUITY session: these are continuously-quoted futures, and
@@ -1412,7 +1426,7 @@ def test_commodity_screen_actually_refreshes():
         "the commodity refresh is gated on US equity hours"
 
     view = _swift_code(_IOS / "Views" / "Screens" / "CommodityDetailView.swift")
-    assert "disconnectLivePrice()" in view, "the socket outlives the screen"
+    assert "stopLivePriceUpdates()" in view, "the refresh timer outlives the screen"
 
 
 def test_one_shared_compact_number_formatter():
@@ -1622,8 +1636,15 @@ async def test_browsing_every_range_shares_one_history_fetch(monkeypatch):
         await svc.get_commodity_detail("GCUSD", chart_range=rng)
 
     by_sym = calls["hist_by_symbol"]
-    assert by_sym.get("GCUSD") == 1, (
-        f"the 972 KB history was fetched {by_sym.get('GCUSD')}x, not once"
+    # GLD, not GCUSD: FMP 402s every `*USD` futures code, so the gold screen is served
+    # by the physically-backed fund (drift vs spot is its expense ratio and nothing
+    # else). The caching property under test is unchanged — one fetch for seven ranges.
+    assert by_sym.get("GLD") == 1, (
+        f"the 972 KB history was fetched {by_sym.get('GLD')}x, not once: {by_sym}"
+    )
+    assert "GCUSD" not in by_sym, (
+        "the blocked futures code reached FMP — `is_blocked_symbol` refuses it, so the "
+        "screen would degrade to no history at all"
     )
     assert calls["news"] == 0, "the dead news call is back — it always returns []"
     # SPY is the BENCHMARK series, not this commodity's data — it replaced a hardcoded
@@ -1734,12 +1755,33 @@ def test_every_served_commodity_classifies_as_a_commodity():
     src = (_Path(__file__).resolve().parents[1] / "app" / "services" /
            "commodity_service.py").read_text()
     roots = _re.findall(r'^    "([A-Z]{2})":\s*\{', src, _re.M)
-    assert len(roots) >= 14, f"expected the commodity profile table, found {roots}"
+    # Phase 4 cut the served set from 14 to 6. The eight withdrawn screens had no honest
+    # source: KC/CT/CC have no live proxy at all (every candidate ETN is delisted), and
+    # HG/ZW/ZC/ZS/SB have only futures-based funds, whose roll yield makes them a
+    # different asset (measured drift vs the underlying: +11 to +46pp over 5.5 years).
+    assert set(roots) == {"GC", "SI", "PL", "PA", "CL", "NG"}, (
+        f"the served commodity set changed: {sorted(roots)}"
+    )
 
     misclassified = [
         f"{r}USD" for r in roots if detect_asset_class(f"{r}USD") != "commodity"
     ]
     assert not misclassified, f"served commodities classified as non-commodity: {misclassified}"
+
+    # ⚠️ The WITHDRAWN roots must STILL classify as commodities. `asset_class` drives
+    # market-hours handling and news routing, and a watchlist row saved before the change
+    # can still arrive — dropping them from the classifier would send `KCUSD` through the
+    # generic `endswith("USD")` crypto rule instead of refusing it as a commodity.
+    from app.services.commodity_service import _WITHDRAWN_COMMODITIES
+
+    assert set(_WITHDRAWN_COMMODITIES) == {"KC", "CT", "CC", "HG", "ZW", "ZC", "ZS", "SB"}
+    still_classified = [
+        f"{r}USD" for r in _WITHDRAWN_COMMODITIES
+        if detect_asset_class(f"{r}USD") == "commodity"
+    ]
+    assert len(still_classified) == len(_WITHDRAWN_COMMODITIES), (
+        f"a withdrawn commodity lost its classification: {still_classified}"
+    )
 
 
 def test_backend_and_ios_agree_on_the_commodity_set():
@@ -1794,7 +1836,8 @@ async def test_tier2_survives_a_restart_without_refetching_the_history(monkeypat
     svc.fmp, calls = _fake_fmp_counter()
     svc.price = PriceFromFMPFake(svc.fmp)
     cold = await svc.get_commodity_detail("GCUSD", chart_range="3M")
-    assert calls["hist_by_symbol"].get("GCUSD") == 1
+    assert calls["hist_by_symbol"].get("GLD") == 1
+    assert "GCUSD" not in calls["hist_by_symbol"], "the blocked futures code reached FMP"
     assert store, "nothing was persisted to tier 2"
 
     # A deploy: the in-process tier is gone, Supabase survives.
@@ -2586,8 +2629,11 @@ async def test_index_concurrent_viewers_share_one_build(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_index_a_priceless_build_is_not_cached(monkeypatch):
-    """A failed quote must not pin "$0.00 (+0.00%)" for the whole TTL."""
+async def test_index_a_dead_quote_recovers_the_settled_close_instead_of_zero(monkeypatch):
+    """This used to assert `current_price == 0` and merely refuse to CACHE it — i.e. the
+    $0.00 was still RETURNED, just freshly recomputed each time. `_build_index_detail`
+    now recovers the last settled close from the history it already holds, matching
+    `commodity_service`, so there is no zero to decline to cache."""
     from app.services import index_service as M
 
     svc, _ = _index_svc(monkeypatch)
@@ -2598,10 +2644,44 @@ async def test_index_a_priceless_build_is_not_cached(monkeypatch):
 
     svc.fmp.get_stock_price_quote = dead_quote
     resp = await svc.get_index_detail("^GSPC", chart_range="3M")
-    assert resp.current_price == 0
-    assert not [k for k in M._cache if k.startswith("^GSPC_3M")], "a priceless build was cached"
-    # ...but the sections it DID get are still cached, so the retry is cheap.
+
+    # The fake's history is 4000 rows ending at 4500.0 + 3999*0.1.
+    assert resp.current_price == pytest.approx(4899.9), (
+        "a dead quote should surface the last settled close, not a zero and not the "
+        "start of the history"
+    )
+    assert resp.current_price > 0
+    # A real settled close is legitimately cacheable — the gate only rejects a zero.
     assert "idx:derived:^GSPC" in M._cache
+
+
+@pytest.mark.asyncio
+async def test_index_with_neither_quote_nor_history_raises_and_caches_nothing(monkeypatch):
+    """The residual of the case above: nothing to recover FROM. It must fail loudly with
+    the typed upstream error rather than paint $0.00 under a live "market open" badge —
+    and it must leave no assembled build behind for the next caller to be served."""
+    from app.services import index_service as M
+    from app.integrations.fmp import FMPUnavailableException
+
+    svc, _ = _index_svc(monkeypatch)
+    _isolate_index_tier2(monkeypatch)
+
+    async def dead_quote(_sym):
+        raise RuntimeError("FMP 429")
+
+    async def dead_hist(_sym, _f, _t):
+        raise RuntimeError("FMP 402 Restricted Endpoint")
+
+    svc.fmp.get_stock_price_quote = dead_quote
+    svc.fmp.get_historical_prices = dead_hist
+
+    with pytest.raises(FMPUnavailableException):
+        await svc.get_index_detail("^GSPC", chart_range="3M")
+
+    assert not [k for k in M._cache if k.startswith("^GSPC_3M")], (
+        "a build that could not be priced was cached"
+    )
+    assert not M._inflight, "the in-flight entry was stranded by the raise"
 
 
 @pytest.mark.asyncio
@@ -2854,3 +2934,173 @@ def test_revenue_composition_scan_is_not_vacuous():
     assert len(_func_body(code, "var netProfit: Double")) < len(code) / 4
     # A body that genuinely lacks a token must not report it.
     assert "reportedNetIncome" not in _func_body(code, "var isProfit: Bool")
+
+
+# ── 26. A 52-week label must describe a 52-week window ───────────────────────
+#
+# `crypto_service` fell back to CoinGecko's ALL-TIME ath/atl when the daily history
+# was empty. FMP has 402'd every `…USD` pair since 2026-09-03, so "empty" became the
+# only state, and BTC's detail screen shipped "52-Week Low $67.81" — Bitcoin's 2013
+# all-time low — with "From 52W Low +115,804.73%" beside it. Fabricated financial
+# data, invisible to the suite because both branches return a well-formed float.
+
+def _btc_stats(**kw):
+    from app.services.crypto_service import CryptoService
+
+    base = dict(
+        price=78_595.0, market_cap=1.5e12, volume=3e10, avg_volume=3e10,
+        day_high=79_000.0, day_low=77_000.0,
+        year_high=None, year_low=None,
+        circulating_supply=1.98e7, total_supply=1.98e7, max_supply=2.1e7,
+        fdv=1.6e12, symbol="BTC",
+    )
+    base.update(kw)
+    return CryptoService.__new__(CryptoService)._build_key_statistics(**base)[2].statistics
+
+
+def test_an_underivable_52_week_window_renders_em_dashes_not_a_number():
+    rows = {s.label: s.value for s in _btc_stats()}
+    # Anti-vacuity: prove we are looking at the 52-week column at all.
+    assert "52-Week High" in rows and "From 52W Low" in rows, "scan drifted off column 3"
+    for label, value in rows.items():
+        assert value == "—", f"{label} fabricated {value!r} from a window we never measured"
+
+
+def test_the_all_time_fallback_is_gone_from_the_source():
+    """The values above can only be honest if nothing re-supplies ath/atl upstream."""
+    import inspect
+    from app.services import crypto_service
+
+    src = inspect.getsource(crypto_service)
+    code = "\n".join(
+        line for line in src.splitlines() if not line.strip().startswith("#")
+    )
+    assert '_usd("ath")' not in code, "the all-time-high fallback is back"
+    assert '_usd("atl")' not in code, "the all-time-low fallback is back — this is the BTC $67.81 bug"
+
+
+def test_a_real_52_week_window_still_computes():
+    """The guard must not have flattened the healthy path to em-dashes."""
+    rows = {s.label: s.value for s in _btc_stats(year_high=100_000.0, year_low=50_000.0)}
+    assert rows["52-Week High"] == "$100,000.00"
+    assert rows["52-Week Low"] == "$50,000.00"
+    assert rows["52-Week % Range"] == "100.00%"
+    assert rows["From 52W High"].startswith("-") and rows["From 52W Low"].startswith("+")
+
+
+@pytest.mark.parametrize("hi,lo", [(None, 50_000.0), (100_000.0, None), (0.0, 0.0), (100_000.0, 0.0)])
+def test_a_half_known_or_zero_band_never_divides(hi, lo):
+    """`None > 0` raises and `x / 0` raises — either would 500 the whole screen."""
+    rows = {s.label: s.value for s in _btc_stats(year_high=hi, year_low=lo)}
+    assert rows["52-Week % Range"] == "—"
+    if not lo:
+        assert rows["From 52W Low"] == "—"
+    if not hi:
+        assert rows["From 52W High"] == "—"
+
+
+# ── 27. An index with no data must fail loudly, not paint $0.00 ──────────────
+#
+# `get_index_core` refused a zero price and `get_index_detail` refused to CACHE a
+# priceless build, but nothing stopped `_build_index_detail` RETURNING one: all 12
+# quote reads default to 0, so every `^` symbol shipped a 200 carrying
+# `current_price=0.0 / +0.00%` beside a `market_status` of "open". Runtime-verified
+# as the steady state, not a rare failure. `commodity_service` already had the
+# recover-or-raise; this is index catching up.
+
+def _index_svc_stubbed(quote, history):
+    """A real IndexService with only its fan-out stubbed — the code under test is live."""
+    from app.services import index_service as M
+
+    M._cache.clear()
+    M._inflight.clear()
+    svc = M.IndexService.__new__(M.IndexService)
+
+    async def _quote(symbol): return quote
+    async def _hist(symbol): return history
+    async def _chart(symbol, chart_range, interval): return []
+    async def _sector(): return []
+    async def _const(symbol, fallback=0): return fallback
+    async def _derived(symbol): return {}
+    async def _pe(): return 0
+
+    svc._get_quote, svc._get_history, svc._get_chart = _quote, _hist, _chart
+    svc._get_sector_performance, svc._get_constituent_count = _sector, _const
+    svc._get_derived, svc._get_pe = _derived, _pe
+    return svc
+
+
+def _build_index_stub(quote, history, symbol="^GSPC"):
+    return asyncio.run(
+        _index_svc_stubbed(quote, history)._build_index_detail(symbol, chart_range="3M", interval=None)
+    )
+
+
+def test_a_blocked_index_raises_instead_of_shipping_zero():
+    from app.integrations.fmp import FMPUnavailableException
+
+    with pytest.raises(FMPUnavailableException) as ei:
+        _build_index_stub({}, [])            # what price_service returns for every `^` symbol
+    assert "^GSPC" in str(ei.value)
+
+
+def test_a_dead_quote_recovers_the_last_settled_close():
+    """`_fetch_all_daily` is OLDEST-first, so the newest close is the LAST row. Reading
+    from the wrong end would silently serve a price from the start of the history."""
+    r = _build_index_stub({}, [
+        {"date": "2026-09-02", "close": 6500.0},
+        {"date": "2026-09-03", "close": 6600.0},
+        {"date": "2026-09-04", "close": 6650.0},   # <- newest
+    ])
+    assert r.current_price == 6650.0, "picked the wrong end of an oldest-first history"
+    assert r.price_change == pytest.approx(50.0)
+
+
+def test_a_healthy_quote_is_untouched_by_the_recovery_path():
+    r = _build_index_stub({"price": 6650.0, "change": 50.0, "changePercentage": 0.76},
+               [{"date": "2026-09-04", "close": 1.0}])
+    assert r.current_price == 6650.0 and r.price_change == pytest.approx(50.0)
+    assert r.price_change_percent == pytest.approx(0.76)
+
+
+@pytest.mark.parametrize("rows", [
+    [],                                                  # nothing at all
+    [{"date": "2026-09-04", "close": 0.0}],              # a zero close is not a price
+    [{"date": "2026-09-04", "close": float("nan")}],     # NaN is truthy — `or 0` misses it
+    [{"date": "2026-09-04", "close": float("inf")}],
+    [{"date": "2026-09-04", "close": -12.0}],            # negative close
+    ["not-a-dict", None],                                # malformed upstream rows
+])
+def test_unusable_history_raises_rather_than_recovering_junk(rows):
+    from app.integrations.fmp import FMPUnavailableException
+
+    with pytest.raises(FMPUnavailableException):
+        _build_index_stub({}, rows)
+
+
+def test_a_single_usable_close_recovers_without_a_change():
+    """One row means a level but no delta — the delta must stay 0, not be invented."""
+    r = _build_index_stub({}, [{"date": "2026-09-04", "close": 6650.0}])
+    assert r.current_price == 6650.0
+    assert r.price_change == 0 and r.price_change_percent == 0
+
+
+def test_index_core_raises_the_typed_upstream_error_not_a_bare_value_error():
+    """A bare ValueError classified as REPORT_GENERATION_FAILED — a 500-class code
+    meaning "we broke", for a case that is really "the upstream has nothing"."""
+    from app.api.error_response import classify_exception
+    from app.integrations.fmp import FMPUnavailableException
+
+    code, _ = classify_exception(FMPUnavailableException("index core has no usable price"))
+    assert code.value == "FMP_UNAVAILABLE"
+    assert classify_exception(ValueError("x"))[0].value == "REPORT_GENERATION_FAILED"
+
+    import inspect
+    from app.services import index_service
+
+    src = "\n".join(
+        l for l in inspect.getsource(index_service.IndexService.get_index_core).splitlines()
+        if not l.strip().startswith("#")
+    )
+    assert "FMPUnavailableException(" in src, "index core no longer raises the typed error"
+    assert "raise ValueError(" not in src, "the bare ValueError is back"

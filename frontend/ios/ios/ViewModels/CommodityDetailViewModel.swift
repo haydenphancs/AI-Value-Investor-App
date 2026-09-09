@@ -96,8 +96,8 @@ class CommodityDetailViewModel: ObservableObject {
     /// Mirrors IndexDetailViewModel. The commodity screen previously had NO live price
     /// path at all — `chartRefreshTask` below was declared and never assigned, so the
     /// quote was frozen for the entire life of the screen while the field implied a
-    /// refresh that never ran.
-    let livePriceManager = LivePriceWebSocketManager()
+    /// refresh that never ran. The 30s timer is what fixed that, and with the FMP
+    /// WebSocket gone it is the whole mechanism.
     private var chartRefreshTask: Task<Void, Never>?
     /// Monotonic token for detail/chart fetches. Each captures the value before
     /// awaiting and only applies its result if still current — so a slow
@@ -136,8 +136,6 @@ class CommodityDetailViewModel: ObservableObject {
                 Task { await self.refreshLiveSlice(includeChart: true) }
             }
             .store(in: &cancellables)
-
-        observeLivePrice()
     }
 
     // MARK: - Data Loading
@@ -150,10 +148,9 @@ class CommodityDetailViewModel: ObservableObject {
             guard let self = self else { return }
             // One-time setup, deliberately NOT gated on the detail request token: a
             // range change during the initial fetch supersedes it, and a stale response
-            // would then skip the connect and leave the screen with no live updates and
-            // no 30s refresh. Both the socket and the timer self-gate, so this is cheap
-            // when the market for this symbol is shut.
-            self.connectLivePrice()
+            // would then skip this and leave the screen with no 30s refresh. The timer
+            // self-gates, so this is cheap when the market for this symbol is shut.
+            self.startLivePriceUpdates()
             // Fast core, in parallel with the full detail: whichever lands first paints.
             async let coreTask: () = self.loadCore()
             async let detailTask: () = self.fetchCommodityDetail()
@@ -277,36 +274,16 @@ class CommodityDetailViewModel: ObservableObject {
 
     // MARK: - Live Price
 
-    /// Merge socket ticks into `commodityData`. Every field falls back to what the REST
-    /// load produced, so if the upstream feed never ticks for this symbol the screen
-    /// still shows the 30s-refreshed values rather than blanking.
-    private func observeLivePrice() {
-        livePriceManager.$livePrice
-            .compactMap { $0 }
-            .sink { [weak self] newPrice in
-                guard let self = self, var data = self.commodityData else { return }
-                data.currentPrice = newPrice
-                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
-                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
-                self.commodityData = data
-            }
-            .store(in: &cancellables)
-    }
-
-    func connectLivePrice() {
-        // Reads APIClient rather than the Keychain — the two deliberately diverge during
-        // session restore, and the stream is public for these symbols, so connect even
-        // when the token is nil rather than leaving a guest with no live price.
-        Task { [weak self] in
-            guard let self else { return }
-            let token = await APIClient.shared.currentAuthToken()
-            self.livePriceManager.connect(ticker: self.commoditySymbol, authToken: token)
-        }
+    /// Was `connectLivePrice()`, paired with an `observeLivePrice()` Combine sink. Its
+    /// comment claimed "the stream is public for these symbols" — untrue since the
+    /// account-only wall, and moot now: streaming is excluded from the FMP Order Form and
+    /// the socket answered 401. The 30s live-slice refresh is the whole mechanism, and it
+    /// already fell back to the REST values whenever the feed did not tick.
+    func startLivePriceUpdates() {
         startChartRefreshTimer()
     }
 
-    func disconnectLivePrice() {
-        livePriceManager.disconnect()
+    func stopLivePriceUpdates() {
         stopChartRefreshTimer()
     }
 
@@ -373,10 +350,12 @@ class CommodityDetailViewModel: ObservableObject {
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard gen == self.detailRequestGen, var data = self.commodityData else { return }
 
-            data.currentPrice = livePriceManager.livePrice ?? light.currentPrice
-            data.priceChange = livePriceManager.livePriceChange ?? light.priceChange
-            data.priceChangePercent =
-                livePriceManager.livePriceChangePercent ?? light.priceChangePercent
+            // Straight from the fresh REST slice. These were
+            // `livePriceManager.livePrice ?? light.currentPrice` — the socket override
+            // was always nil, so the `??` always chose exactly this.
+            data.currentPrice = light.currentPrice
+            data.priceChange = light.priceChange
+            data.priceChangePercent = light.priceChangePercent
             data.marketStatus = CommodityMarketStatus(backend: light.marketStatus)
             data.keyStatisticsGroups = light.keyStatisticsGroups.map { $0.toModel() }
             // Keep the previous list when the refresh returns none — a 60s cache miss on

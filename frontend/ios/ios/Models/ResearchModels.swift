@@ -431,7 +431,7 @@ struct TrendingAnalysis: Identifiable, Hashable {
     /// The ink `iconFillColor` requires. Stored rather than derived because this member spans
     /// BOTH fill families — `gainFill` is adaptive and needs near-black, the frozen fills need
     /// white — and a `Color` value cannot be asked at runtime which family it came from.
-    /// One ink cannot serve both: near-black on frozen `primaryFill` is 3.35:1.
+    /// One ink cannot serve both: near-black on frozen `primaryFill` is 3.81:1.
     let iconFillInk: Color
 
     init(title: String, description: String, companies: [TrendingCompany], interestPercent: Int, iconName: String, systemIconName: String, iconBackgroundColor: Color, iconFillColor: Color, iconFillInk: Color) {

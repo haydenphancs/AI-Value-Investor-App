@@ -38,7 +38,7 @@ struct UserAvatar: View {
 
     /// Ink for `backgroundColor`, INDEX FOR INDEX with the palette above. Slots 1 and 5 are the
     /// ADAPTIVE `gainFill`/`lossFill` and need near-black in dark; the other four are frozen and
-    /// need white. One ink cannot serve both — near-black on frozen `primaryFill` is 3.35.
+    /// need white. One ink cannot serve both — near-black on frozen `primaryFill` is 3.81.
     /// Mirrors `WhaleAvatarView.backgroundInk`, which is the same construction.
     private var backgroundInk: Color {
         let inks: [Color] = [

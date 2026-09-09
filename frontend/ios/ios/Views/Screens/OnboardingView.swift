@@ -358,9 +358,14 @@ private struct FlowChips: View {
                         }
                         Text(item.symbol)
                             .font(AppTypography.bodySmallEmphasis)
+                        // ⚠️ NO `.opacity()` on the selected arm: white at 0.8 on `primaryFill`
+                        // is 3.56:1, below AA (3.90 before the 2026-09 lightening — already
+                        // failing). This is the first-run watchlist picker, so it is the first
+                        // screen a new user sees. `FlowOptionChips` renders the same control
+                        // without the alpha and is the reference.
                         Text(item.name)
                             .font(AppTypography.caption)
-                            .foregroundColor(on ? AppColors.textOnAccent.opacity(0.8) : AppColors.textMuted)
+                            .foregroundColor(on ? AppColors.textOnAccent : AppColors.textMuted)
                     }
                     .foregroundColor(on ? AppColors.textOnAccent : AppColors.textPrimary)
                     .padding(.horizontal, AppSpacing.md)

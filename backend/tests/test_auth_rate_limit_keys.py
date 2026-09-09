@@ -11,7 +11,6 @@ off it:
     register:{ip}    5/min   → unlimited Supabase confirmation emails to an arbitrary address
     oauth:/exchange:{ip}     → unlimited
     forgot:ip:/reset:ip:     → the IP half voided (the email half still held)
-    live_price _MAX_CONNECTIONS_PER_KEY → the anonymous WebSocket cap voided
 
 Rotating one header per request produced a brand-new bucket every time, so the limiter
 returned True on every call and the 429 never fired.
@@ -149,43 +148,3 @@ def test_email_key_is_normalized_so_case_cannot_dodge_the_limit():
     src = _auth_source()
     assert '(request.email or "").strip().lower()' in src
 
-
-def test_websocket_cap_keys_on_something_the_caller_cannot_choose():
-    """The connection cap must not be resettable by the client.
-
-    ⚠️ REWRITTEN 2026-09-07, and the requirement got STRONGER rather than weaker.
-
-    This used to assert `trusted_client_ip(websocket)` appears in the source, because the
-    socket accepted ANONYMOUS connections and an anonymous caller could only be bucketed by
-    address — and the naive address (uvicorn's `websocket.client`, i.e. the leftmost
-    `X-Forwarded-For` entry under `--forwarded-allow-ips='*'`) is caller-supplied, so
-    rotating it gave every connection a fresh bucket and voided the cap entirely.
-
-    The socket now REFUSES an unauthenticated connection before `accept()`, so every
-    connection has a `user_id` from a signed JWT. That is strictly less forgeable than any
-    address, and the IP fallback became unreachable, so it was removed. Asserting the old
-    mechanism would now fail on code that satisfies the actual invariant better.
-
-    What is pinned instead: the cap keys on the authenticated identity, and nothing
-    caller-supplied is used for it.
-    """
-    from pathlib import Path
-
-    src = (
-        Path(__file__).resolve().parents[1]
-        / "app" / "api" / "v1" / "endpoints" / "live_price.py"
-    ).read_text(encoding="utf-8")
-
-    assert "conn_key = user_id" in src, (
-        "the WebSocket connection cap must key on the authenticated user id"
-    )
-    # `websocket.client` is the spoofable one the original bug used; `trusted_client_ip`
-    # was the fix for it. Neither should be feeding the cap now.
-    for spoofable in ("websocket.client", "x-forwarded-for", "X-Forwarded-For"):
-        assert f"conn_key = {spoofable}" not in src, (
-            f"the cap must not key on {spoofable!r} — a caller can choose it"
-        )
-    assert "await websocket.close(code=1008" in src, (
-        "an unauthenticated caller must be refused, which is what makes a user-id-keyed "
-        "cap sufficient in the first place"
-    )

@@ -11,7 +11,6 @@ Design:
 """
 
 import asyncio
-import random
 import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
@@ -28,6 +27,8 @@ from app.schemas.home import (
     HomeFeedResponse,
 )
 from app.services.price_service import price_source
+from app.services.price_window import normalize_history
+from app.services.chart_helper import _finite_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,15 @@ def _cache_set(key: str, value: Any) -> None:
 
 # ── Configuration ────────────────────────────────────────────────────
 
+# A SECOND hardcoded strip, with different membership from Home's `_PULSE_SYMBOLS`
+# (no Dow, no crude). Same four blocked symbols, same zero tiles. Re-pointed at the same
+# entitled funds and named after them for the same reason — see `_PULSE_SYMBOLS` for the
+# measured proxy fidelity and why Bitcoin waits for Phase 5.
 DEFAULT_MARKET_TICKERS: List[Dict[str, str]] = [
-    {"symbol": "^GSPC", "name": "S&P 500", "type": "index"},
-    {"symbol": "^IXIC", "name": "Nasdaq", "type": "index"},
-    {"symbol": "BTCUSD", "name": "Bitcoin", "type": "crypto"},
-    {"symbol": "GCUSD", "name": "Gold", "type": "commodity"},
+    {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
+    {"symbol": "ONEQ", "name": "Nasdaq Composite ETF", "type": "etf"},
+    {"symbol": "DIA", "name": "Dow Jones ETF", "type": "etf"},
+    {"symbol": "GLD", "name": "Gold ETF", "type": "etf"},
 ]
 
 # DERIVED from persona_config — the single source of truth. This used to be a
@@ -108,19 +113,6 @@ def _normalize_iso_date(date_str: Optional[str]) -> Optional[str]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _synthetic_sparkline(positive: bool) -> List[float]:
-    """Fallback sparkline when historical prices are unavailable."""
-    data: List[float] = []
-    value = random.uniform(90.0, 110.0)
-    for _ in range(20):
-        change = random.uniform(-3.0, 3.0)
-        trend = 0.5 if positive else -0.5
-        value += change + trend
-        value = max(80.0, min(120.0, value))
-        data.append(round(value, 2))
-    return data
 
 
 async def _empty_list() -> list:
@@ -210,28 +202,36 @@ class HomeService:
             data = await self.fmp.get_historical_prices(
                 symbol, from_date=from_date, to_date=to_date,
             )
+            # ⚠️ An empty list, NOT a generated one. This used to fall back to
+            # `_synthetic_sparkline`, which built a 20-point series out of
+            # `random.uniform(-3.0, 3.0)` and returned it as this instrument's price
+            # history — a chart of random numbers, indistinguishable on screen from a
+            # real one, drawn most often precisely when the real data was unavailable.
+            # The tile renders without a sparkline; it does not render a fictional one.
             if not data:
-                return _synthetic_sparkline(True)
+                logger.warning("Sparkline for %s: no history returned", symbol)
+                return []
 
-            # FMP /stable/historical-price-eod/full returns either a flat
-            # list or a {"historical": [...]} dict depending on plan tier.
-            # Normalize so we don't .get() on a list (silent .warning() spam).
-            if isinstance(data, list):
-                historical = data
-            elif isinstance(data, dict):
-                historical = data.get("historical", []) or []
-            else:
-                historical = []
+            # Shared normalizer — this was the third inline copy of it.
+            historical = normalize_history(data)
             if not historical:
-                return _synthetic_sparkline(True)
+                logger.warning("Sparkline for %s: history had no usable rows", symbol)
+                return []
 
-            # historical is newest-first; take 20, reverse for oldest-first
-            prices = [float(day.get("close") or 0) for day in historical[:20]]
+            # `historical` is newest-first here (the RAW response, not
+            # `_fetch_all_daily`'s sorted output) — take 20, reverse for oldest-first.
+            # Finite-guard: a NaN close is truthy, survives `or 0`, and serializes as an
+            # invalid JSON token that fails the iOS decode of the whole feed.
+            prices = [
+                c for c in (
+                    _finite_or_none(day.get("close")) for day in historical[:20]
+                ) if c is not None and c > 0
+            ]
             prices.reverse()
             return [round(p, 2) for p in prices]
         except Exception as exc:
-            logger.warning("Sparkline for %s failed: %s", symbol, exc)
-            return _synthetic_sparkline(True)
+            logger.warning("Sparkline for %s failed: %s: %s", symbol, type(exc).__name__, exc)
+            return []
 
     # ── Market Insight ───────────────────────────────────────────
 
@@ -269,7 +269,9 @@ class HomeService:
 
         # 2. Fallback: derive from S&P 500 quote
         try:
-            quote = await price_source(self).get_quote("^GSPC")
+            # SPY, not `^GSPC`: the index symbol is outside the licence, so this
+            # returned {} and the whole headline fell through to None.
+            quote = await price_source(self).get_quote("SPY")
             if not quote:
                 return None
 

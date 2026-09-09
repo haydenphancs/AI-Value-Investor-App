@@ -60,7 +60,7 @@ from app.services.price_volatility import (  # noqa: E402  (import-after-import 
     _z_score_for_window,
 )
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.utils.period_labels import quarterly_period_label
@@ -88,6 +88,7 @@ from app.services.sector_aggregates_service import (
 )
 from app.services.agents.persona_scoring import compute_quality_score
 from app.services.price_service import price_source
+from app.services.price_window import normalize_history
 
 logger = logging.getLogger(__name__)
 
@@ -136,32 +137,74 @@ _SEGMENT_META_KEYS = {
 }
 
 
-# ── Macro indicators (PR 4) ───────────────────────────────────────────
+# ── Macro indicators ──────────────────────────────────────────────────
 #
-# Per-request snapshot of the FMP-tradeable macro signals that anchor
-# the Macro & Geopolitical module's risk factors. Symbol formats follow
-# FMP conventions (commodities: <BASE>USD, FX: <BASE><QUOTE>, indices:
-# ^<TICKER>). Symbols that FMP can't resolve gracefully degrade — the
-# `_build_macro_risk_factors_from_indicators` builder skips any whose
-# `change_1m_pct` we couldn't fetch, rather than emitting a fake risk.
+# Per-request snapshot of the macro signals that anchor the Macro & Geopolitical
+# module's risk factors.
 #
-# Roughly ordered by signal strength for the average equity holder:
-#   * WTI crude — energy costs, inflation pass-through
-#   * Gold — flight-to-safety, real-rate / dollar pressure proxy
-#   * Copper — global industrial demand
-#   * VIX — market volatility regime
-#   * 10Y Treasury — risk-free rate, the discount denominator
-#   * USD Index — multinational FX translation
-_MACRO_SYMBOLS: Tuple[str, ...] = (
-    "CLUSD",  # WTI Crude oil
-    "GCUSD",  # Gold
-    "HGUSD",  # Copper
-    "SIUSD",  # Silver
-    "^VIX",   # CBOE Volatility Index
-    "^TNX",   # 10-year Treasury yield
-    "DXY",    # USD index
-    "EURUSD", "USDJPY", "USDCNY",  # Major FX
+# ⚠️ THIS LIST IS NOT A LIST OF FMP SYMBOLS ANY MORE, AND THAT IS THE WHOLE POINT.
+#
+# It used to be `("CLUSD","GCUSD","HGUSD","SIUSD","^VIX","^TNX","DXY","EURUSD",
+# "USDJPY","USDCNY")`, fetched with `stock-price-change` + `quote`. Under FMP's
+# 2026-09-03 enforcement that produced **zero** rows on **every** report, and it was
+# dead on TWO independent axes — fixing either one alone changes nothing:
+#
+#   1. **The ENDPOINT.** `stock-price-change` belongs to the "Real-time Market Data"
+#      package, which is not on the Order Form. `get_stock_price_change` swallowed the
+#      refusal into `{}` (`fmp.py`), so `_one()` returned None for all ten and the
+#      builder short-circuited on an empty list.
+#   2. **The SYMBOLS.** `_raise_if_not_entitled` enforces separately on the symbol for
+#      `historical-price-eod` and `historical-chart`, so re-pointing at the entitled
+#      history endpoint would 402 for 9 of the 10 anyway.
+#      `tests/test_fmp_entitlement_guard.py` already pins that.
+#
+# So each series now names a source that is actually licensed, and four of the original
+# ten are simply gone because NOTHING read them (`SIUSD`, `EURUSD`, `USDJPY`, `USDCNY`
+# appeared only in the tuple — 40% of the fan-out was pure waste).
+#
+# Copper is dropped rather than re-pointed: its only proxies are futures-based, and
+# `documents/legal/fmp-16-datasets-build-or-free.md` rules those out because they lie
+# (measured 5.5Y drift vs the underlying: CPER +11pp, and the same class of instrument
+# gives USO +202pp vs WTI and UNG −70pp vs Henry Hub).
+#
+# The keys are deliberately NOT the old FMP tickers. A row keyed `"^VIX"` that actually
+# carries SPY realized volatility is exactly the kind of quiet mislabelling this whole
+# phase exists to remove.
+_MacroSpec = NamedTuple(
+    "_MacroSpec",
+    [("key", str), ("label", str), ("source", str), ("ref", str)],
 )
+
+_MACRO_SERIES: Tuple[_MacroSpec, ...] = (
+    # WTI crude — energy costs, inflation pass-through.
+    # FRED/EIA spot: no copyright notice, daily, back to 1986, and the actual benchmark
+    # rather than a contango-dragged fund. ~5 business days stale, which is noise in a
+    # 3-month window (and why nothing here reads a 1-day change).
+    _MacroSpec("WTI", "WTI crude", "fred", "DCOILWTICO"),
+    # Gold — flight-to-safety / real-rate proxy. No clean DAILY FRED series exists
+    # (the IMF ones are monthly, copyrighted, and ~2 months behind), so this uses the
+    # physically-backed ETF, whose only drift vs spot is its expense ratio
+    # (GLD vs IAU measured −1.8pp over 5.5 years).
+    # Label names the INSTRUMENT: this row's `level` is GLD's share price (~$400),
+    # not gold spot (~$4,000/oz). Only the % windows are used, but a future consumer
+    # that printed the level under a bare "Gold" label would fabricate a gold price.
+    _MacroSpec("GOLD", "Gold (GLD ETF)", "etf", "GLD"),
+    # Equity volatility regime. NOT the VIX — see `realized_volatility_pct`.
+    _MacroSpec("VOL", "S&P 500 realized volatility", "realized_vol", "SPY"),
+    # 10-year Treasury yield — the discount denominator.
+    _MacroSpec("UST10Y", "10-year Treasury yield", "fred", "DGS10"),
+    # Broad trade-weighted dollar. `DXY` was never obtainable: FMP answers 200 with an
+    # EMPTY list for it, so no package purchase would have fixed that one either.
+    _MacroSpec("USD", "Broad US dollar index", "fred", "DTWEXBGS"),
+)
+
+#: Cache-key and iteration order. Kept under the old name because the snapshot cache key
+#: and several tests are built from it.
+_MACRO_SYMBOLS: Tuple[str, ...] = tuple(spec.key for spec in _MACRO_SERIES)
+
+#: How much history each source pulls. 400 calendar days covers the 1Y window with
+#: enough slack for weekends, holidays and FRED's publication lag.
+_MACRO_HISTORY_DAYS: int = 400
 
 # ── Shared market-wide macro snapshot cache ───────────────────────────
 # These symbols are identical for EVERY ticker, so without a shared cache
@@ -888,48 +931,108 @@ class TickerReportDataCollector:
         return await asyncio.shield(task)
 
     async def _fetch_macro_indicators_uncached(self) -> List[Dict[str, Any]]:
-        """Fetch the latest level + multi-period changes per macro symbol.
+        """Fetch the latest level + 5D/1M/3M/1Y windows for each `_MACRO_SERIES` entry.
 
-        Two parallel FMP calls per symbol:
-          * `stock-price-change` for 5D/1M/3M/1Y % windows
-          * `quote` for the current price level (needed for VIX
-            level-based tiering — a 35→36 reading is HIGH stress
-            even though the Δ is tiny)
-        Failures degrade silently — missing symbols just drop out
-        rather than corrupt the parallel gather.
+        One licensed call per series — FRED `get_observations` (6h-cached in
+        `integrations/fred.py`) or FMP `historical-price-eod/full` for the two entitled
+        ETF-backed series — then every window is computed locally by
+        `price_window.window_change_pct`, which sorts by date and bisects on the calendar
+        rather than trusting row order or an observation index.
+
+        Replaces two calls per symbol to `stock-price-change` + `quote`, BOTH of which
+        were refused (see the `_MACRO_SERIES` note). A failure degrades to a dropped row
+        rather than corrupting the gather — but unlike before it is LOGGED at warning,
+        because "the whole tier silently returned []" is precisely how this stayed broken
+        through 6,000 green tests.
         """
-        async def _one(sym: str) -> Optional[Dict[str, Any]]:
+        from app.services.price_window import (
+            series_from_observations,
+            series_from_rows,
+            window_change_pct,
+            latest_value,
+        )
+        from app.services.price_volatility import realized_volatility_pct
+
+        today = datetime.now(timezone.utc).date()
+        start = (today - timedelta(days=_MACRO_HISTORY_DAYS)).isoformat()
+        end = today.isoformat()
+
+        async def _series(spec: "_MacroSpec") -> List[Tuple[Any, float]]:
+            if spec.source == "fred":
+                from app.integrations.fred import get_fred_client
+
+                client = get_fred_client()
+                if not client.is_configured:
+                    return []
+                # `limit` is part of the FRED cache key, so keep it stable across calls.
+                obs = await client.get_observations(spec.ref, limit=_MACRO_HISTORY_DAYS)
+                return series_from_observations(obs)
+            rows = await self.fmp.get_historical_prices(spec.ref, start, end)
+            return series_from_rows(rows)
+
+        async def _one(spec: "_MacroSpec") -> Optional[Dict[str, Any]]:
             try:
-                change_row, quote_row = await asyncio.gather(
-                    self.fmp.get_stock_price_change(sym),
-                    price_source().get_quote(sym),
-                    return_exceptions=True,
-                )
-                if isinstance(change_row, Exception) or not isinstance(
-                    change_row, dict
-                ) or not change_row:
+                series = await _series(spec)
+                if not series:
+                    logger.warning(
+                        "macro series %s (%s:%s) returned no usable observations — "
+                        "the factor it feeds will be omitted",
+                        spec.key, spec.source, spec.ref,
+                    )
                     return None
-                quote_dict = quote_row if isinstance(quote_row, dict) else {}
-                level = _num_or_none(
-                    quote_dict.get("price") or quote_dict.get("previousClose")
-                )
+
+                if spec.source == "realized_vol":
+                    closes = [v for _, v in series]
+                    level = realized_volatility_pct(closes)
+                    if level is None:
+                        logger.warning(
+                            "macro series %s: not enough history for realized "
+                            "volatility (%d closes)", spec.key, len(closes),
+                        )
+                        return None
+                    # The trend arm compares today's vol with a month ago's, computed
+                    # the same way — NOT the price change of SPY, which is a different
+                    # quantity and would read as "volatility fell" on a rally.
+                    prior = realized_volatility_pct(closes[:-21]) if len(closes) > 42 else None
+                    change_1m = (
+                        round((level / prior - 1.0) * 100.0, 4)
+                        if prior and prior > 0 else None
+                    )
+                    return {
+                        "symbol": spec.key,
+                        "label": spec.label,
+                        "level": level,
+                        "change_5d_pct": None,
+                        "change_1m_pct": change_1m,
+                        "change_3m_pct": None,
+                        "change_1y_pct": None,
+                    }
+
                 return {
-                    "symbol": sym,
-                    "level": level,
-                    "change_5d_pct": _num_or_none(change_row.get("5D")),
-                    "change_1m_pct": _num_or_none(change_row.get("1M")),
-                    "change_3m_pct": _num_or_none(change_row.get("3M")),
-                    "change_1y_pct": _num_or_none(change_row.get("1Y")),
+                    "symbol": spec.key,
+                    "label": spec.label,
+                    "level": latest_value(series),
+                    "change_5d_pct": window_change_pct(series, 5),
+                    "change_1m_pct": window_change_pct(series, 30),
+                    "change_3m_pct": window_change_pct(series, 90),
+                    "change_1y_pct": window_change_pct(series, 365),
                 }
             except Exception as e:
                 logger.warning(
-                    f"macro indicator fetch failed for {sym}: "
-                    f"{type(e).__name__}: {e}"
+                    "macro indicator fetch failed for %s (%s:%s): %s: %s",
+                    spec.key, spec.source, spec.ref, type(e).__name__, e,
                 )
                 return None
 
-        results = await asyncio.gather(*[_one(s) for s in _MACRO_SYMBOLS])
-        return [r for r in results if r is not None]
+        results = await asyncio.gather(*[_one(spec) for spec in _MACRO_SERIES])
+        rows = [r for r in results if r is not None]
+        if not rows:
+            logger.error(
+                "macro indicator tier produced NOTHING for any of %s — every "
+                "deterministic macro factor will be missing from this report",
+                list(_MACRO_SYMBOLS),
+            )
+        return rows
 
     async def _fetch_dependent(self, out: CollectedTickerData) -> None:
         """Second-pass fetches that depend on first-pass data resolving.
@@ -2146,12 +2249,22 @@ class TickerReportDataCollector:
         ]
         full_factor_set = fred_factors + fmp_factors + grounded_kept
 
-        # Was the authoritative macro tier actually read? `fred_indicators` is the raw
-        # FRED payload; empty means either unconfigured (see `_warn_unconfigured_once` in
-        # integrations/fred.py) or a total upstream failure. Either way the deterministic
-        # inflation / interest-rate / recession / credit categories are simply ABSENT, and
-        # the report must not present that as an all-clear.
-        macro_measured = bool(out.fred_indicators)
+        # Was the deterministic macro tier actually read?
+        #
+        # ⚠️ This keyed on `fred_indicators` ALONE, and that was the bug that hid the
+        # whole outage. There are TWO deterministic tiers, and the second one — the
+        # market-indicator snapshot behind oil, gold, volatility, rates and the dollar —
+        # returned `[]` on EVERY report from 2026-09-03 (both its endpoint and its symbols
+        # were outside the licence). `macro_measured` still read True off the FRED half,
+        # so `_fallback_macro_headline` printed "Benign macro backdrop — no indicators
+        # tripping risk thresholds": an all-clear derived from data that was never read,
+        # which is the exact sentence `test_macro_degradation_honesty.py` exists to forbid.
+        # It never caught it because it tests that function GIVEN a flag, and nothing
+        # tested how the flag is computed.
+        #
+        # Both tiers now have to be empty before we claim to have measured nothing, and
+        # neither may vouch for the other.
+        macro_measured = bool(out.fred_indicators) and bool(out.macro_indicators)
 
         macro_sector = (out.profile or {}).get("sector")
         threat_level, composite = _compute_macro_threat(
@@ -2544,13 +2657,14 @@ def _altman_z(
 
 
 def _hist_list(historical: Any) -> List[Dict[str, Any]]:
-    """FMP /historical-price-eod/full returns either a flat list or a
-    {"historical": [...]} dict depending on plan tier. Normalize."""
-    if isinstance(historical, list):
-        return historical
-    if isinstance(historical, dict):
-        return historical.get("historical", []) or []
-    return []
+    """FMP `historical-price-eod/full`: a flat list on some plan tiers, a
+    ``{"historical": [...]}`` dict on others.
+
+    Delegates to the shared implementation. This had been copy-pasted three times with
+    byte-identical docstrings; a fourth consumer (Phase 4's macro re-point) is what made
+    that worth collapsing. Kept as a module-level name because tests patch it.
+    """
+    return normalize_history(historical)
 
 
 def _latest_completed_close(historical: Any) -> Tuple[Optional[date], Optional[float]]:
@@ -6096,18 +6210,35 @@ def _beta(sector: Optional[str], risk_group: str) -> float:
 def _build_macro_risk_factors_from_indicators(
     indicators: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Translate the FMP macro indicator snapshot into MacroRiskFactor
-    entries.
+    """Translate the macro indicator snapshot into MacroRiskFactor entries.
 
-    Calibration is shifted vs PR 4: oil/gold/DXY now use 3-month
-    windows (regime shifts, not weekly noise) and VIX is gated on
-    *absolute level* not 1-month % change — a 35 → 36 reading is
-    HIGH stress even though the Δ is invisible. The 3M window prefers
-    `change_3m_pct` from the new dict shape; falls back to
-    `change_1m_pct` if 3M is unavailable.
+    Oil/gold/rates/dollar are gated on a 3-month window (regime shifts, not weekly
+    noise); volatility is gated on an absolute LEVEL, because a 35 → 36 reading is
+    HIGH stress even though the Δ is invisible. The 3M window prefers `change_3m_pct`
+    and falls back to `change_1m_pct`.
 
-    Each emitted factor carries `_risk_group` for `_compute_macro_threat`
-    sector β lookup.
+    Each emitted factor carries `_risk_group` for `_compute_macro_threat` sector β lookup.
+
+    ⚠️ **Two sets of bands were re-derived when the sources changed** (see `_MACRO_SERIES`).
+    A band calibrated for one instrument is not transferable to a different one, and
+    carrying the old numbers over would have silently changed how often each card fires:
+
+    * **Volatility** was the Cboe VIX (implied); it is now SPY realized volatility. These
+      are different quantities — correlation on levels is only +0.35. Bands were
+      percentile-matched against `VIXCLS` over 2016-01-01→2026-09-05 (n≈2,663 sessions):
+      VIX 16/22/30/40 sit at the 43.0/77.7/94.3/98.6th percentiles, which map to realized
+      **11.1 / 18.6 / 27.8 / 51.3**, rounded to 11 / 18.5 / 28 / 50. Sanity check on the
+      day of the change: VIX 15.3 (below its old floor) and realized 8.0 (below the new
+      one) — both correctly emit nothing.
+    * **The dollar** was `DXY`; it is now FRED's BROAD trade-weighted index, which is
+      less volatile because it spans 26 currencies rather than 6. Measured over the same
+      window, the old 2/5/8/12 bands land at the **56.7 / 93.6 / 99.8 / 100.0th**
+      percentiles on the broad index — i.e. the top two tiers become unreachable.
+      Percentile-matched to UUP (a DXY tracker) they become **1.5 / 4 / 6 / 9**.
+
+    Oil and rates keep their bands: FRED `DCOILWTICO` is the same WTI benchmark the old
+    `CLUSD` quoted, and a % change in `DGS10` is the same quantity as a % change in
+    `^TNX`. Gold keeps its bands because GLD's only drift from spot is its expense ratio.
     """
     if not indicators:
         return []
@@ -6122,7 +6253,7 @@ def _build_macro_risk_factors_from_indicators(
         return None if v is None else float(v)
 
     # ── WTI Crude oil — 3-mo % (energy shock window) ────────────────
-    oil = by_sym.get("CLUSD")
+    oil = by_sym.get("WTI")
     if oil:
         change_3m = _three_month(oil)
         if change_3m is not None:
@@ -6145,7 +6276,7 @@ def _build_macro_risk_factors_from_indicators(
                 })
 
     # ── Gold — 3-mo % (flight-to-safety / risk-off proxy) ───────────
-    gold = by_sym.get("GCUSD")
+    gold = by_sym.get("GOLD")
     if gold:
         change_3m = _three_month(gold)
         if change_3m is not None:
@@ -6168,36 +6299,31 @@ def _build_macro_risk_factors_from_indicators(
                         "_risk_group": "credit",
                     })
 
-    # ── Copper — 1-mo % (industrial demand collapse signal) ────────
-    copper = by_sym.get("HGUSD")
-    if copper and copper.get("change_1m_pct") is not None:
-        change = float(copper["change_1m_pct"])
-        if change <= -5.0:
-            sev, sev_int, impact = _classify_indicator_severity(
-                abs(change), (5.0, 10.0, 20.0, 30.0),
-            )
-            if sev_int >= 2:
-                out.append({
-                    "category": "supply_chain",
-                    "title": "Industrial Demand Weakness",
-                    "impact": round(impact, 2),
-                    "trend": "worsening",
-                    "severity": sev,
-                    "description": (
-                        f"Copper {change:.1f}% MoM — Dr. Copper signaling slowing "
-                        "industrial activity."
-                    ),
-                    "_risk_group": "manufacturing",
-                })
+    # ── Copper / "Industrial Demand Weakness" — REMOVED, not re-pointed ────
+    #
+    # FMP 402s `HGUSD`, and copper has no honest substitute. The only entitled proxies
+    # are futures-based funds, whose roll drag makes them a different asset: CPER drifted
+    # +11pp from copper over 5.5 years, and its siblings are far worse (USO +202pp vs
+    # WTI, UNG −70pp vs Henry Hub). FRED's copper series is monthly, IMF-copyrighted and
+    # ~2 months stale — useless for a 1-month industrial-demand signal.
+    #
+    # `documents/legal/fmp-16-datasets-build-or-free.md` rules this DROP. Do not "restore"
+    # it with CPER: a wrong number under a "Dr. Copper" heading is worse than no card.
+    # `supply_chain` therefore no longer appears in `deterministic_categories`, so a
+    # web-grounded supply-chain factor is free to surface in its place.
 
-    # ── VIX — absolute LEVEL (volatility regime) ────────────────────
-    vix = by_sym.get("^VIX")
-    if vix and vix.get("level") is not None:
-        vix_level = float(vix["level"])
+    # ── Equity volatility — absolute LEVEL (volatility regime) ──────
+    # REALIZED, not implied. The description says so: it used to print
+    # "VIX at 15.3", and printing a Cboe index level is display of licensed IP whose
+    # FRED reprint permission runs to FRED, not to us. Bands are percentile-matched,
+    # not inherited — see this function's docstring.
+    vol = by_sym.get("VOL")
+    if vol and vol.get("level") is not None:
+        vol_level = float(vol["level"])
         sev, sev_int, impact = _classify_indicator_severity(
-            vix_level, (16.0, 22.0, 30.0, 40.0),
+            vol_level, (11.0, 18.5, 28.0, 50.0),
         )
-        change_1m = vix.get("change_1m_pct")
+        change_1m = vol.get("change_1m_pct")
         if sev_int >= 2:
             out.append({
                 "category": "volatility",  # market-regime / equity-vol front
@@ -6209,16 +6335,22 @@ def _build_macro_risk_factors_from_indicators(
                 ),
                 "severity": sev,
                 "description": (
-                    f"VIX at {vix_level:.1f} — equity vol regime "
+                    f"S&P 500 realized volatility {vol_level:.1f}% annualized — "
+                    f"equity vol regime "
                     f"{'in stress band.' if sev_int >= 3 else 'above benign-cycle norms.'}"
                 ),
                 "_risk_group": "vix",
             })
 
-    # ── 10Y Treasury yield 3-mo move (^TNX, FMP-side rate move) ────
-    # The FRED block already emits a level-based factor; this catches
-    # sharp moves between the monthly FRED snapshots.
-    tnx = by_sym.get("^TNX")
+    # ── 10Y Treasury yield, 3-month MOVE ────────────────────────────
+    # Distinct from the FRED block's DGS10 factor, which scores the LEVEL. This one
+    # scores the CHANGE, so a yield that is high-but-stable and one that has just
+    # repriced 20% are not the same card. Both now read the same series.
+    #
+    # ⚠️ The comment here used to justify this as catching "sharp moves between the
+    # monthly FRED snapshots". That rationale was void: `DGS10` is a DAILY series.
+    # The real justification is level-vs-change, above.
+    tnx = by_sym.get("UST10Y")
     if tnx:
         change_3m = _three_month(tnx)
         if change_3m is not None and abs(change_3m) >= 8.0:
@@ -6241,12 +6373,14 @@ def _build_macro_risk_factors_from_indicators(
                 })
 
     # ── USD index — 3-mo % (multinational FX translation risk) ─────
-    dxy = by_sym.get("DXY")
+    dxy = by_sym.get("USD")
     if dxy:
         change_3m = _three_month(dxy)
         if change_3m is not None:
+            # Re-derived for the BROAD index — the old DXY bands put the top two tiers
+            # at the 99.8th percentile and beyond here. See the docstring.
             sev, sev_int, impact = _classify_indicator_severity(
-                abs(change_3m), (2.0, 5.0, 8.0, 12.0),
+                abs(change_3m), (1.5, 4.0, 6.0, 9.0),
             )
             if sev_int >= 2:
                 out.append({
@@ -6256,8 +6390,8 @@ def _build_macro_risk_factors_from_indicators(
                     "trend": "worsening" if change_3m > 0 else "improving",
                     "severity": sev,
                     "description": (
-                        f"DXY {'+' if change_3m >= 0 else ''}{change_3m:.1f}% over "
-                        "3 months — "
+                        f"US dollar index {'+' if change_3m >= 0 else ''}{change_3m:.1f}% "
+                        "over 3 months — "
                         f"{'foreign-revenue translation drag.' if change_3m > 0 else 'tailwind for international revenue.'}"
                     ),
                     "_risk_group": "fx",

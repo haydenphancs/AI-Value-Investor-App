@@ -30,9 +30,13 @@ struct DateBadge: View {
                 .font(AppTypography.dataHeading)
                 .foregroundColor(AppColors.textOnAccent)
 
+            // ⚠️ NO `.opacity()` here: white at 0.8 on `primaryFill` composites to 3.56:1,
+            // below AA. It was 3.90 before the 2026-09 fill lightening — already failing, and
+            // the lighter fill deepened it. `captionSmallEmphasis` against the `dataHeading`
+            // above already carries the hierarchy. Same resolution as CreditsBalanceCard.
             Text(month)
                 .font(AppTypography.captionSmallEmphasis)
-                .foregroundColor(AppColors.textOnAccent.opacity(0.8))
+                .foregroundColor(AppColors.textOnAccent)
         }
         .frame(width: 48, height: 48)
         // `primaryFill`, not `alertBlue` (which forwards to the TEXT-safe `primaryBlue`,

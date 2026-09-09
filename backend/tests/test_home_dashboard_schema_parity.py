@@ -343,7 +343,7 @@ async def test_build_returns_all_symbols_mapped_and_validated():
     # Order + identity preserved from the configured universe.
     assert [p.symbol for p in resp.pulse] == [c["symbol"] for c in _PULSE_SYMBOLS]
     first = resp.pulse[0]
-    assert first.name == "S&P 500" and first.type == "index"
+    assert first.name == "S&P 500 ETF" and first.type == "etf"
     assert first.spark == [100.0, 101.0, 102.0]     # latest-session intraday, oldest-first
     assert first.previous_close == 100.0            # → dashed reference line on iOS
     assert first.change_percent == 1.23
@@ -377,7 +377,7 @@ async def test_symbol_failure_drops_only_that_tile():
     svc, fake = _fresh_service()
 
     async def flaky_quote(ticker: str):
-        if ticker == "BTCUSD":
+        if ticker == "GLD":
             raise RuntimeError("FMP boom")
         return {"price": 42.0, "changesPercentage": 0.5}
 
@@ -385,7 +385,7 @@ async def test_symbol_failure_drops_only_that_tile():
     resp = await svc.get_dashboard()
 
     symbols = {p.symbol for p in resp.pulse}
-    assert "BTCUSD" not in symbols                       # the one failure dropped
+    assert "GLD" not in symbols    # the one failure dropped
     assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1    # everyone else survives
 
 
@@ -401,7 +401,7 @@ async def test_pulse_non_finite_price_drops_tile_and_never_serializes_nan():
     svc, _fake = _fresh_service()
 
     async def nan_quote(ticker: str):
-        if ticker == "^GSPC":
+        if ticker == "SPY":
             return {"price": float("nan"), "changesPercentage": 0.5, "previousClose": 100.0}
         # A non-finite CHANGE (not price) must degrade to 0.0, not drop the tile.
         return {"price": 42.0, "changesPercentage": float("inf"), "previousClose": 41.0}
@@ -410,7 +410,7 @@ async def test_pulse_non_finite_price_drops_tile_and_never_serializes_nan():
     resp = await svc.get_dashboard()
 
     symbols = {p.symbol for p in resp.pulse}
-    assert "^GSPC" not in symbols                    # NaN-price tile dropped
+    assert "SPY" not in symbols  # NaN-price tile dropped
     assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1
     for p in resp.pulse:
         assert _m.isfinite(p.price) and p.price > 0
@@ -445,30 +445,44 @@ async def test_pulse_sparkline_window_follows_the_asset_class(monkeypatch):
     monkeypatch.setattr(hds, "fetch_chart_data", spy_fetch)
     await svc.get_dashboard()
 
-    by_symbol = {c["symbol"]: c["type"] for c in _PULSE_SYMBOLS}
+    by_symbol = {c["symbol"]: c["type"] for c in hds._PULSE_SYMBOLS}
     for symbol, kind in by_symbol.items():
         expected = kind in ("crypto", "commodity")
         assert seen[symbol] is expected, f"{symbol} ({kind}) window mismatch"
 
 
+#: A MIXED strip, injected only by the two asset-class tests below.
+#:
+#: The shipped `_PULSE_SYMBOLS` is entitled ETFs only — Phase 4 dropped the `^`/futures
+#: tiles and Bitcoin waits for Phase 5's CoinGecko move — so the real strip can no longer
+#: exercise the crypto/commodity branch. That BRANCH still exists and Phase 5 will put
+#: Bitcoin back through it, so these two keep driving it explicitly rather than being
+#: deleted along with the symbols that used to reach it.
+_MIXED_PULSE = [
+    {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
+    {"symbol": "BTCUSD", "name": "Bitcoin", "type": "crypto"},
+    {"symbol": "GCUSD", "name": "Gold", "type": "commodity"},
+]
+
+
 @pytest.mark.asyncio
-async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices():
+async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices(monkeypatch):
     """The behavioural half of the test above: same upstream bars, different series."""
+    monkeypatch.setattr(hds, "_PULSE_SYMBOLS", _MIXED_PULSE)
     svc, _fake = _fresh_service()
     resp = await svc.get_dashboard()
     tiles = {p.symbol: p for p in resp.pulse}
 
-    # ^GSPC (index) → only the 09:30–16:00 ET bars.
-    assert tiles["^GSPC"].spark == [100.0, 101.0, 102.0]
+    # SPY (equity/ETF hours) → only the 09:30–16:00 ET bars.
+    assert tiles["SPY"].spark == [100.0, 101.0, 102.0]
     # BTCUSD (crypto) → the 02:00 and 20:00 ET bars survive too.
     assert tiles["BTCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
-    # GCUSD / CLUSD are continuously-quoted futures — same treatment as crypto.
+    # A continuously-quoted future gets the same treatment as crypto.
     assert tiles["GCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
-    assert tiles["CLUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
 
 
 @pytest.mark.asyncio
-async def test_pulse_span_window_follows_the_asset_class_too():
+async def test_pulse_span_window_follows_the_asset_class_too(monkeypatch):
     """The SPAN must use the same window the bars were fetched with.
 
     `extended_hours` has to reach BOTH halves of `_fetch_sparkline`: the fetch
@@ -478,13 +492,14 @@ async def test_pulse_span_window_follows_the_asset_class_too():
     bell reads as nearly finished at lunchtime while its own detail chart shows
     half a day left.
     """
+    monkeypatch.setattr(hds, "_PULSE_SYMBOLS", _MIXED_PULSE)
     svc, _fake = _fresh_service()
     resp = await svc.get_dashboard()
     tiles = {p.symbol: p for p in resp.pulse}
 
     # The fake feed's last bar is 20:00 ET for the 24/7 tiles and 12:00 for the
-    # index (later bars are clipped by the regular-hours filter).
-    index = tiles["^GSPC"]
+    # equity-hours one (later bars are clipped by the regular-hours filter).
+    index = tiles["SPY"]
     crypto = tiles["BTCUSD"]
 
     # Index: 12:00 bar + 5min interval, on a 390-minute session.
@@ -573,7 +588,7 @@ async def test_partial_pulse_is_not_pinned_for_the_full_ttl():
     svc, _fake = _fresh_service()
 
     async def flaky_quote(ticker: str):
-        if ticker == "BTCUSD":
+        if ticker == "GLD":
             raise RuntimeError("FMP boom")
         return {"price": 42.0, "changesPercentage": 0.5, "previousClose": 41.0}
 

@@ -971,12 +971,18 @@ class FMPClient:
                 # Compute 1Y return
                 one_year_pct = 0.0
                 current_price = quote.get("price", 0)
-                # FMP stable returns list directly, legacy returns {"historical": [...]}
-                hist_list = hist if isinstance(hist, list) else (hist.get("historical", []) if isinstance(hist, dict) else [])
-                if hist_list and current_price:
-                    # Use the earliest data point as the 1Y-ago price
-                    old_price = hist_list[0].get("close") or hist_list[-1].get("close")
-                    if old_price and old_price > 0:
+                # The 1Y anchor is the OLDEST close in the ~10-day window fetched around
+                # this date, and the raw FMP response is NEWEST-first — so the old
+                # `hist_list[0].get("close") or hist_list[-1].get("close")` read the
+                # newest row of that window first, i.e. the wrong end of an
+                # order-dependent list. `series_from_rows` sorts by date, so the anchor
+                # is the oldest point no matter which order FMP hands back.
+                from app.services.price_window import series_from_rows
+
+                series = series_from_rows(hist)
+                if series and current_price:
+                    old_price = series[0][1]
+                    if old_price > 0:
                         one_year_pct = round(((current_price - old_price) / old_price) * 100, 2)
                 output.append({
                     "sector": sector,

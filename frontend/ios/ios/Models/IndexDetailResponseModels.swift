@@ -297,19 +297,18 @@ extension IndexQuoteResponse {
     /// `performancePeriods` and `benchmarkSummary` are left untouched because a 30-second
     /// refresh cannot change them.
     ///
-    /// `livePrice` WINS over the REST snapshot when the socket has ticked — a tick is now,
-    /// a snapshot is up to 45 seconds old. See `ETFQuoteResponseDTO.merged`.
+    /// Took `livePrice` / `liveChange` / `liveChangePercent` overrides from the FMP
+    /// WebSocket, applied as `livePrice ?? currentPrice`. The stream is gone, so those
+    /// were always nil and the `??` always fell through to this slice's own REST value —
+    /// which is the correct behaviour, and is now simply what it does.
     func merged(
         into data: IndexDetailData,
-        livePrice: Double?,
-        liveChange: Double?,
-        liveChangePercent: Double?,
         includeChart: Bool
     ) -> IndexDetailData {
         var out = data
-        out.currentPrice = livePrice ?? currentPrice
-        out.priceChange = liveChange ?? priceChange
-        out.priceChangePercent = liveChangePercent ?? priceChangePercent
+        out.currentPrice = currentPrice
+        out.priceChange = priceChange
+        out.priceChangePercent = priceChangePercent
         out.marketStatus = marketStatus.resolvedMarketStatus
         out.keyStatisticsGroups = keyStatisticsGroups.map { group in
             KeyStatisticsGroup(statistics: group.statistics.map {

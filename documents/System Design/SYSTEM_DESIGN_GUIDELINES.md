@@ -272,7 +272,11 @@ The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint
 `services/home_dashboard_service.py` (+ `services/signals_service.py`). Four
 sections in one call to minimize round-trips:
 
-1. **Market Pulse** — indices + BTC + commodities (live quote + 1D intraday sparkline).
+1. **Market Pulse** — five entitled index/commodity ETFs (live quote + 1D intraday
+   sparkline). Was indices + BTC + commodities directly; FMP 402s every `^` symbol and
+   every `*USD` futures code, so the strip rendered ZERO tiles. Tiles are named after
+   the fund whose price they carry ("S&P 500 ETF", not "S&P 500" — SPY trades near
+   $770 against an index near 6,600). Bitcoin returns with the CoinGecko move.
 2. **Daily Scanners** — movers / heavy-volume / short-interest leaderboards.
 3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers.
 4. **Emerging Frontiers themes** — editorial megatrend cards from the `trending_themes`
@@ -642,8 +646,7 @@ The shipped shape, in one line:
 Built by `app/api/error_response.py::make_error_body` / `make_error_response` / `auth_error`, with
 `classify_exception` and `error_response_from_exception` mapping a typed service/integration
 exception onto an `ErrorCode` and its HTTP status. 18 of the 23 endpoint modules import it, with 44
-`error_response_from_exception` call sites; the remainder are a WebSocket (close codes, no body) and
-always-200 fire-and-forget analytics.
+`error_response_from_exception` call sites; the remainder are always-200 fire-and-forget analytics.
 
 Run `/list-error-codes` to verify every backend code has an iOS `AppError` branch.
 
@@ -1799,6 +1802,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | Aug 2026 | User-selectable appearance (System / Dark / Light), every token adaptive | A "colour that works in both modes" is what made light mode fail WCAG AA across ~2,700 call sites | Dark-only (the prior shipped state) |
 | Aug 2026 | A notification registry as the single source of truth | 12 of the original 13 toggles wrote a preference nothing read; the inverse shipped too (kinds with no toggle) | Per-sender ad-hoc preference keys |
 | Aug 2026 | Three transports coexist, chosen per latency budget | Supersedes "polling over WebSocket for v1": report status polls (3s), chat streams (SSE), live price pushes (WS) | One transport for everything |
+| 2026-09-08 | The live-price WebSocket is REMOVED; price refresh is REST polling only | Streaming is excluded from the FMP Order Form (ToS §2.10 monitor-and-terminate), and the socket was already inert — FMP answered `{"event":"subscribe","status":401}` and went silent, while `_fmp_reader` discarded the reply with no log at any level and `ping_interval=20` held the upstream socket open. No entitlement guard existed on that path, so `GCUSD`/`BTCUSD` still opened an FMP socket. Zero functional cost: every consumer already had a REST fallback, which is now the only path and runs unconditionally | Keep the socket behind an entitlement guard; buy a streaming package |
+| 2026-09-08 | Index, commodity and macro surfaces are served by ENTITLED PROXIES, and every label names the instrument it prices | FMP's Index and Commodity packages are not on the Order Form, so `^GSPC`/`GCUSD`/`^VIX` all 402 — Market Pulse showed 0 of 6 tiles, index detail shipped `$0.00` under a live badge, and the AI report's macro module emitted 0 of 6 deterministic factors while printing "Benign macro backdrop". Index screens now use SPY/ONEQ/DIA (ONEQ not QQQ: QQQ is the Nasdaq-100, TE 4.55% vs 1.28%); commodities went 14 → 6 (energy from FRED spot, metals from physically-backed funds; the other eight had only delisted or futures-based proxies, which drift +11 to +202pp from the thing they are named after); macro reads FRED + entitled ETFs plus SPY realized volatility in place of the Cboe-copyrighted VIX. Relabelling is the load-bearing half: a fund's price under a commodity's name is fabricated data | Buy the Indexes + Commodities packages; keep the screens on futures-based ETF proxies |
 | 2026-08-27 | Report thinking budget capped at 0, both stages, separately configurable | Measured −66% cost/report; the failure mode is a clipped sentence, not a wrong number. The two post-assembly syntheses stay UNCAPPED | Model default (uncapped); a single shared setting |
 
 ---

@@ -79,13 +79,31 @@ logger = logging.getLogger(__name__)
 
 # ── Market Pulse universe ─────────────────────────────────────────────
 # Order is meaningful — it drives the card order in the iOS strip.
+# Every one of these was a blocked symbol — `^GSPC`, `^IXIC`, `^DJI`, `BTCUSD`, `GCUSD`,
+# `CLUSD` — so `price_service.get_quote` short-circuited on all six and the strip rendered
+# ZERO tiles. It is the first thing on the first screen.
+#
+# ⚠️ The tiles are now ETFs, and the `name` says so. A tile reading "S&P 500 · $770" would
+# be off by a factor of ten against an index near 6,600; the fund's own name and price
+# agree with each other. Proxy fidelity is measured — SPY TE 1.15%, DIA 0.81%, ONEQ 1.28%
+# against a SPY-vs-VOO floor of 0.78% — and `^IXIC` uses ONEQ, NOT QQQ, because QQQ tracks
+# the Nasdaq-100 (TE 4.55%, +2.54pp/yr) while this tile is the Composite.
+#
+# Gold is the physically-backed fund (drift = expense ratio). Crude is dropped rather than
+# proxied: USO ran +202pp against WTI over 5.5 years, which is roll yield, not tracking.
+# FRED's WTI spot is not usable HERE — the tiles carry a live intraday sparkline and FRED
+# publishes ~5 business days behind.
+#
+# BITCOIN is deliberately absent until Phase 5 moves crypto to CoinGecko. Leaving a
+# permanently-unresolvable symbol in this list would pin `len(pulse) < len(_PULSE_SYMBOLS)`
+# forever, which downgrades the cache TTL and logs a degradation warning on every build —
+# masking the real degradation signal this strip depends on.
 _PULSE_SYMBOLS: List[Dict[str, str]] = [
-    {"symbol": "^GSPC", "name": "S&P 500", "type": "index"},
-    {"symbol": "^IXIC", "name": "Nasdaq", "type": "index"},
-    {"symbol": "^DJI", "name": "Dow Jones", "type": "index"},
-    {"symbol": "BTCUSD", "name": "Bitcoin", "type": "crypto"},
-    {"symbol": "GCUSD", "name": "Gold", "type": "commodity"},
-    {"symbol": "CLUSD", "name": "Crude Oil", "type": "commodity"},
+    {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
+    {"symbol": "ONEQ", "name": "Nasdaq Composite ETF", "type": "etf"},
+    {"symbol": "DIA", "name": "Dow Jones ETF", "type": "etf"},
+    {"symbol": "IWM", "name": "Russell 2000 ETF", "type": "etf"},
+    {"symbol": "GLD", "name": "Gold ETF", "type": "etf"},
 ]
 
 _SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart

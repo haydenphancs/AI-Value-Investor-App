@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from app.integrations.fmp import (
     FMPClient,
+    FMPNotEntitledException,
     FMPUnavailableException,
     get_fmp_client,
 )
@@ -61,6 +62,9 @@ _cache: Dict[str, tuple] = {}
 _CACHE_TTL_SECONDS = 300  # default when a caller declares nothing
 
 # Per-section TTLs, ordered by how fast the underlying data really moves.
+#: FRED depth for a commodity screen. ~10y of daily prints covers the ALL range
+#: (DCOILWTICO starts 1986, DHHNGSP 1997) without a per-range cache miss.
+_FRED_OBSERVATION_LIMIT: int = 4000
 _QUOTE_TTL = 45          # live price / intraday key-stat rows
 _RELATED_TTL = 60        # sibling commodity quotes — same data class, less prominent
 _INTRADAY_CHART_TTL = 60 # 1D/1W bars; the only genuinely per-range fetch
@@ -99,7 +103,7 @@ def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
 _inflight: Dict[str, asyncio.Future] = {}
 
 
-def _commodity_market_status() -> str:
+def _commodity_market_status(symbol: str = "") -> str:
     """Honest open/closed string for commodity futures (was hardcoded "Market Open",
     which showed a live status on weekends/holidays over a stale last close).
 
@@ -110,6 +114,25 @@ def _commodity_market_status() -> str:
     string to a closed state, so this never over-claims 'open'). The ~1h daily break
     is intentionally treated as open to avoid false 'closed' during active sessions.
     """
+    # A FRED-sourced screen (WTI, Henry Hub) shows a SETTLED EIA spot print published
+    # ~5 business days behind — measured 2026-09-08: DCOILWTICO newest 2026-09-01. Even
+    # while the futures pit is open, the number on screen is not live, and "Market Open"
+    # over it is the same false-liveness the index `$0.00` badge was. iOS maps any
+    # non-"Market Open" string to a closed state, so this degrades cleanly on shipped
+    # builds with no client change.
+    if symbol and _source_of(symbol) == _COMMODITY_SOURCE_FRED:
+        return "Market Closed"
+
+    # An ETF-sourced screen (GLD / SLV / PPLT / PALL) shows the FUND's price, and a fund
+    # keeps EQUITY hours — not the ~23h futures session this function was written for.
+    # Reporting the futures session over an ETF price would claim the number on screen
+    # was live at 03:00 ET, when the last trade was 16:00 the previous day. Same class of
+    # error as the index "$0.00 under a live badge", just in the other direction.
+    if symbol and _source_of(symbol) == _COMMODITY_SOURCE_ETF and _get_meta(symbol):
+        from app.utils.market_hours import SESSION_CLOSED, session_phase
+
+        return "Market Closed" if session_phase() == SESSION_CLOSED else "Market Open"
+
     now = datetime.now(tz=ZoneInfo("America/New_York"))
     weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
     hour = now.hour
@@ -124,38 +147,120 @@ def _commodity_market_status() -> str:
 
 # ── Commodity metadata ────────────────────────────────────────────
 
+# ── Commodity screens: fourteen became six, and every one names its source ──────
+#
+# FMP 402s all fourteen `*USD` futures codes (`BLOCKED_COMMODITY_SYMBOLS`) — commodity
+# market data is a package that is not on the Order Form. Each surviving screen is served
+# by something entitled, and the eight that had no honest source were REMOVED rather than
+# re-pointed at something that lies.
+#
+# 🔴 REMOVED — no proxy exists (every candidate ETN is DELISTED, verified 2026-09-08:
+#    `isActivelyTrading=false`, zero rows on `historical-price-eod/full`):
+#      KC coffee  — JO, JJOFF, SGG   all empty
+#      CT cotton  — BAL, JJCTF       all empty
+#      CC cocoa   — NIB, CHOC        all empty
+#    ⚠️ `COCO` is NOT cocoa. It is **The Vita Coco Company, Inc.**, a NASDAQ beverage
+#    stock that trades happily and would have rendered a coconut-water share price under
+#    a "Cocoa" heading. A ticker that resolves is not a proxy that is correct.
+#
+# 🔴 REMOVED — a proxy exists but it is futures-based, and futures funds are a different
+#    asset from the commodity. Measured drift vs the underlying benchmark, 2021-01→2026-07:
+#      HG copper   CPER  +10.7pp
+#      ZC corn     CORN  +12.6pp
+#      ZS soybeans SOYB  +37.1pp
+#      SB sugar    CANE  +46.2pp
+#      ZW wheat    WEAT  −20.5pp
+#    (For scale, the same structure gives USO **+202pp** vs WTI and UNG **−69.9pp** vs
+#    Henry Hub — roll yield, not tracking error.) `fmp-16-datasets-build-or-free.md`
+#    rules these DROP. Do not "restore" one: a wrong number under a commodity heading is
+#    worse than an absent screen.
+#
+# ✅ KEPT — energy from FRED spot, metals from PHYSICALLY-BACKED funds, which hold the
+#    metal itself and so have no roll at all (GLD vs IAU drifts −1.8pp over 5.5 years,
+#    i.e. the expense-ratio difference and nothing else).
+#
+# ⚠️ FRED's EIA series publish ~5 BUSINESS DAYS behind (measured 2026-09-08: DCOILWTICO
+#    newest 2026-09-01, while FRED's own DGS10 was at 09-04). That is noise inside a
+#    3-month macro window but NOT acceptable under a live badge, so a `fred`-sourced
+#    screen reports its as-of date and never claims an open market.
+_COMMODITY_SOURCE_FRED = "fred"
+_COMMODITY_SOURCE_ETF = "etf"
+
 _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
     "GC": {
-        "name": "Gold",
+        "name": "SPDR Gold Shares",
         "fmp_symbol": "GCUSD",
+        "source": _COMMODITY_SOURCE_ETF,
+        "ref": "GLD",
+        "ref_name": "SPDR Gold Shares",
         "category": "metals",
         "exchange": "COMEX",
         "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
         "contract_size": "100 troy ounces",
-        "unit": "troy_ounce",
+        "unit": "share",
         "tick_size": "$0.10",
         "major_producers": "China, Australia, Russia, USA, Canada",
         "major_consumers": "China, India, USA, Germany, Turkey",
-        "description": "Gold is a precious metal widely regarded as a store of value and safe-haven asset. Prices are driven by inflation expectations, interest rates, geopolitical risk, and US dollar strength. Central banks hold gold as reserve assets, and demand spans jewelry, electronics, and investment products.",
-        "related": ["SIUSD", "HGUSD", "PLUSD", "PAUSD"],
+        "description": "SPDR Gold Shares (GLD) is an exchange-traded fund that holds physical gold. Prices shown here are the FUND'S SHARE PRICE, not the gold spot price — a share represents a fraction of an ounce. Gold is a precious metal widely regarded as a store of value and safe-haven asset. Prices are driven by inflation expectations, interest rates, geopolitical risk, and US dollar strength. Central banks hold gold as reserve assets, and demand spans jewelry, electronics, and investment products.",
+        "related": ["SIUSD", "PLUSD", "PAUSD"],
     },
     "SI": {
-        "name": "Silver",
+        "name": "iShares Silver Trust",
         "fmp_symbol": "SIUSD",
+        "source": _COMMODITY_SOURCE_ETF,
+        "ref": "SLV",
+        "ref_name": "iShares Silver Trust",
         "category": "metals",
         "exchange": "COMEX",
         "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
         "contract_size": "5,000 troy ounces",
-        "unit": "troy_ounce",
+        "unit": "share",
         "tick_size": "$0.005",
         "major_producers": "Mexico, Peru, China, Poland, Chile",
         "major_consumers": "USA, India, Japan, China, Germany",
-        "description": "Silver is both a precious and industrial metal. It is used in electronics, solar panels, medical devices, and jewelry. Silver prices correlate with gold but are more volatile due to its dual nature as a store of value and industrial commodity.",
-        "related": ["GCUSD", "HGUSD", "PLUSD", "PAUSD"],
+        "description": "iShares Silver Trust (SLV) is an exchange-traded fund that holds physical silver. Prices shown here are the FUND'S SHARE PRICE, not the silver spot price — a share represents a fraction of an ounce. Silver is both a precious and industrial metal. It is used in electronics, solar panels, medical devices, and jewelry. Silver prices correlate with gold but are more volatile due to its dual nature as a store of value and industrial commodity.",
+        "related": ["GCUSD", "PLUSD", "PAUSD"],
+    },
+    "PL": {
+        "name": "abrdn Physical Platinum Shares",
+        "fmp_symbol": "PLUSD",
+        "source": _COMMODITY_SOURCE_ETF,
+        "ref": "PPLT",
+        "ref_name": "abrdn Physical Platinum Shares ETF",
+        "category": "metals",
+        "exchange": "NYMEX",
+        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
+        "contract_size": "50 troy ounces",
+        "unit": "share",
+        "tick_size": "$0.10",
+        "major_producers": "South Africa, Russia, Zimbabwe, Canada, USA",
+        "major_consumers": "China, Europe, Japan, USA",
+        "description": "abrdn Physical Platinum Shares (PPLT) is an exchange-traded fund that holds physical platinum. Prices shown here are the FUND'S SHARE PRICE, not the platinum spot price — a share represents a fraction of an ounce. Platinum is a rare precious metal used heavily in automotive catalytic converters, jewelry, and industrial applications. Supply is concentrated in South Africa, making prices sensitive to mining disruptions and energy costs there.",
+        "related": ["PAUSD", "GCUSD", "SIUSD"],
+    },
+    "PA": {
+        "name": "abrdn Physical Palladium Shares",
+        "fmp_symbol": "PAUSD",
+        "source": _COMMODITY_SOURCE_ETF,
+        "ref": "PALL",
+        "ref_name": "abrdn Physical Palladium Shares ETF",
+        "category": "metals",
+        "exchange": "NYMEX",
+        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
+        "contract_size": "100 troy ounces",
+        "unit": "share",
+        "tick_size": "$0.50",
+        "major_producers": "Russia, South Africa, Canada, USA, Zimbabwe",
+        "major_consumers": "China, Europe, USA, Japan",
+        "description": "abrdn Physical Palladium Shares (PALL) is an exchange-traded fund that holds physical palladium. Prices shown here are the FUND'S SHARE PRICE, not the palladium spot price — a share represents a fraction of an ounce. Palladium is a precious metal used primarily in gasoline-engine catalytic converters. Supply is highly concentrated in Russia and South Africa, and prices are sensitive to auto production cycles and substitution with platinum.",
+        "related": ["PLUSD", "GCUSD", "SIUSD"],
     },
     "CL": {
         "name": "Crude Oil WTI",
         "fmp_symbol": "CLUSD",
+        "source": _COMMODITY_SOURCE_FRED,
+        "ref": "DCOILWTICO",
+        "ref_name": "WTI spot, Cushing OK (EIA via FRED)",
         "category": "energy",
         "exchange": "NYMEX",
         "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
@@ -163,13 +268,16 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "unit": "barrel",
         "tick_size": "$0.01",
         "major_producers": "USA, Saudi Arabia, Russia, Canada, Iraq",
-        "major_consumers": "USA, China, India, Japan, South Korea",
-        "description": "West Texas Intermediate (WTI) crude oil is the primary benchmark for US oil pricing. Prices are influenced by OPEC+ production decisions, global demand growth, geopolitical tensions in oil-producing regions, and US inventory levels.",
-        "related": ["NGUSD", "HGUSD"],
+        "major_consumers": "USA, China, India, Japan, Russia",
+        "description": "West Texas Intermediate (WTI) is the US benchmark crude oil grade, priced at Cushing, Oklahoma. Prices respond to OPEC+ supply decisions, US shale output, inventory data, and global demand expectations.",
+        "related": ["NGUSD"],
     },
     "NG": {
         "name": "Natural Gas",
         "fmp_symbol": "NGUSD",
+        "source": _COMMODITY_SOURCE_FRED,
+        "ref": "DHHNGSP",
+        "ref_name": "Henry Hub spot (EIA via FRED)",
         "category": "energy",
         "exchange": "NYMEX",
         "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
@@ -178,149 +286,18 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "tick_size": "$0.001",
         "major_producers": "USA, Russia, Iran, Qatar, Canada",
         "major_consumers": "USA, Russia, China, Iran, Japan",
-        "description": "Natural gas is a fossil fuel used for heating, electricity generation, and industrial processes. Prices are highly seasonal, driven by weather patterns, storage levels, LNG export demand, and production trends in major basins like the Permian and Appalachian.",
-        "related": ["CLUSD", "HGUSD"],
+        "description": "Henry Hub natural gas is the North American benchmark. Prices are driven by weather-linked heating and cooling demand, storage levels, LNG export volumes, and associated production from oil drilling.",
+        "related": ["CLUSD"],
     },
-    "HG": {
-        "name": "Copper",
-        "fmp_symbol": "HGUSD",
-        "category": "metals",
-        "exchange": "COMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "25,000 pounds",
-        "unit": "pound",
-        "tick_size": "$0.0005",
-        "major_producers": "Chile, Peru, China, DRC, USA",
-        "major_consumers": "China, USA, Germany, Japan, South Korea",
-        "description": "Copper is a key industrial metal often called 'Dr. Copper' for its ability to signal economic health. It is essential for construction, electronics, electric vehicles, and renewable energy infrastructure. Prices reflect global manufacturing activity and infrastructure spending.",
-        "related": ["GCUSD", "SIUSD", "PLUSD"],
-    },
-    "PL": {
-        "name": "Platinum",
-        "fmp_symbol": "PLUSD",
-        "category": "metals",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "50 troy ounces",
-        "unit": "troy_ounce",
-        "tick_size": "$0.10",
-        "major_producers": "South Africa, Russia, Zimbabwe",
-        "major_consumers": "Europe, Japan, China, USA",
-        "description": "Platinum is a rare precious metal used primarily in catalytic converters, jewelry, and industrial applications. Supply is concentrated in South Africa, making prices sensitive to mining disruptions and automotive demand trends.",
-        "related": ["PAUSD", "GCUSD", "SIUSD"],
-    },
-    "PA": {
-        "name": "Palladium",
-        "fmp_symbol": "PAUSD",
-        "category": "metals",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "100 troy ounces",
-        "unit": "troy_ounce",
-        "tick_size": "$0.05",
-        "major_producers": "Russia, South Africa, Canada, USA",
-        "major_consumers": "USA, China, Europe, Japan",
-        "description": "Palladium is a precious metal primarily used in gasoline vehicle catalytic converters. Its price is driven by automotive demand, emission regulations, and supply constraints from Russia and South Africa.",
-        "related": ["PLUSD", "GCUSD", "SIUSD"],
-    },
-    "ZW": {
-        "name": "Wheat",
-        "fmp_symbol": "ZWUSD",
-        "category": "agriculture",
-        "exchange": "CBOT",
-        "trading_hours": "Sun–Fri 7:00 PM – 7:45 AM, 8:30 AM – 1:20 PM CT",
-        "contract_size": "5,000 bushels",
-        "unit": "bushel",
-        "tick_size": "$0.0025",
-        "major_producers": "China, India, Russia, USA, France",
-        "major_consumers": "China, India, Russia, USA, Pakistan",
-        "description": "Wheat is a staple grain and one of the most widely traded agricultural commodities. Prices are influenced by global weather patterns, planting conditions, export policies, and geopolitical factors affecting key producing regions.",
-        "related": ["ZCUSD", "ZSUSD"],
-    },
-    "ZC": {
-        "name": "Corn",
-        "fmp_symbol": "ZCUSD",
-        "category": "agriculture",
-        "exchange": "CBOT",
-        "trading_hours": "Sun–Fri 7:00 PM – 7:45 AM, 8:30 AM – 1:20 PM CT",
-        "contract_size": "5,000 bushels",
-        "unit": "bushel",
-        "tick_size": "$0.0025",
-        "major_producers": "USA, China, Brazil, Argentina, Ukraine",
-        "major_consumers": "USA, China, Brazil, EU, Mexico",
-        "description": "Corn is the most produced grain globally, used for animal feed, ethanol production, and food products. Prices are driven by US crop conditions, ethanol mandates, global demand, and competition with soybeans for acreage.",
-        "related": ["ZWUSD", "ZSUSD"],
-    },
-    "ZS": {
-        "name": "Soybeans",
-        "fmp_symbol": "ZSUSD",
-        "category": "agriculture",
-        "exchange": "CBOT",
-        "trading_hours": "Sun–Fri 7:00 PM – 7:45 AM, 8:30 AM – 1:20 PM CT",
-        "contract_size": "5,000 bushels",
-        "unit": "bushel",
-        "tick_size": "$0.0025",
-        "major_producers": "Brazil, USA, Argentina, China, India",
-        "major_consumers": "China, USA, Brazil, Argentina, EU",
-        "description": "Soybeans are a versatile crop used for animal feed (soybean meal), cooking oil, and biodiesel. Prices are highly influenced by Chinese import demand, South American harvest conditions, and US planting decisions.",
-        "related": ["ZCUSD", "ZWUSD"],
-    },
-    "KC": {
-        "name": "Coffee",
-        "fmp_symbol": "KCUSD",
-        "category": "consumables",
-        "exchange": "ICE",
-        "trading_hours": "Mon–Fri 4:15 AM – 1:30 PM ET",
-        "contract_size": "37,500 pounds",
-        "unit": "pound",
-        "tick_size": "$0.0005",
-        "major_producers": "Brazil, Vietnam, Colombia, Indonesia, Ethiopia",
-        "major_consumers": "EU, USA, Japan, Brazil, Canada",
-        "description": "Coffee is the world's second most traded commodity after crude oil. Arabica coffee futures are particularly sensitive to Brazilian weather conditions, as Brazil produces roughly 40% of global supply.",
-        "related": ["SBUSD", "CCUSD"],
-    },
-    "SB": {
-        "name": "Sugar",
-        "fmp_symbol": "SBUSD",
-        "category": "consumables",
-        "exchange": "ICE",
-        "trading_hours": "Mon–Fri 3:30 AM – 1:00 PM ET",
-        "contract_size": "112,000 pounds",
-        "unit": "pound",
-        "tick_size": "$0.0001",
-        "major_producers": "Brazil, India, Thailand, China, Australia",
-        "major_consumers": "India, EU, China, USA, Brazil",
-        "description": "Sugar is a widely consumed agricultural commodity used in food, beverages, and ethanol production. Brazilian production and Indian export policies are key price drivers, along with weather and government subsidies.",
-        "related": ["KCUSD", "CCUSD"],
-    },
-    "CC": {
-        "name": "Cocoa",
-        "fmp_symbol": "CCUSD",
-        "category": "consumables",
-        "exchange": "ICE",
-        "trading_hours": "Mon–Fri 4:45 AM – 1:30 PM ET",
-        "contract_size": "10 metric tons",
-        "unit": "ton",
-        "tick_size": "$1.00",
-        "major_producers": "Ivory Coast, Ghana, Indonesia, Ecuador, Cameroon",
-        "major_consumers": "EU, USA, Russia, Brazil, Japan",
-        "description": "Cocoa is the primary raw material for chocolate production. Prices are heavily influenced by weather and disease in West Africa (which produces over 60% of global cocoa), along with grinding demand and speculative positioning.",
-        "related": ["KCUSD", "SBUSD"],
-    },
-    "CT": {
-        "name": "Cotton",
-        "fmp_symbol": "CTUSD",
-        "category": "consumables",
-        "exchange": "ICE",
-        "trading_hours": "Mon–Fri 9:00 PM – 2:20 PM ET",
-        "contract_size": "50,000 pounds",
-        "unit": "pound",
-        "tick_size": "$0.0001",
-        "major_producers": "China, India, USA, Brazil, Pakistan",
-        "major_consumers": "China, India, Bangladesh, Vietnam, Turkey",
-        "description": "Cotton is a soft commodity used primarily in the textile industry. Prices are driven by global textile demand, US and Indian crop conditions, Chinese stockpile levels, and competition with synthetic fibers.",
-        "related": ["KCUSD", "SBUSD"],
-    },
+}
+
+#: Screens deliberately withdrawn in Phase 4, with the reason surfaced to the caller.
+#: Kept as data rather than deleted silently: these symbols still exist in
+#: `asset_class._COMMODITY_SYMBOLS` (which classifies them for market-hours and news
+#: routing) and can still arrive from a watchlist row saved before the change.
+_WITHDRAWN_COMMODITIES: Dict[str, str] = {
+    "KC": "coffee", "CT": "cotton", "CC": "cocoa",
+    "HG": "copper", "ZW": "wheat", "ZC": "corn", "ZS": "soybeans", "SB": "sugar",
 }
 
 
@@ -343,6 +320,38 @@ def _resolve_name(symbol: str) -> str:
 def _get_meta(symbol: str) -> Dict[str, Any]:
     symbol = symbol.upper().replace("USD", "")
     return _COMMODITY_PROFILES.get(symbol, {})
+
+
+def _root(symbol: str) -> str:
+    return (symbol or "").upper().replace("USD", "")
+
+
+def _raise_if_withdrawn(symbol: str) -> None:
+    """Refuse a screen we deliberately stopped covering, with the reason.
+
+    Raising the CONTRACTUAL exception rather than the transient one matters: retrying
+    can never help, and `FMP_NOT_ENTITLED` is the code iOS already branches on. Without
+    this the symbol would fall through to `{root}USD`, get refused by the entitlement
+    guard anyway, and surface as a generic upstream error that invites a retry loop.
+    """
+    root = _root(symbol)
+    reason = _WITHDRAWN_COMMODITIES.get(root)
+    if reason:
+        raise FMPNotEntitledException(
+            f"{reason.title()} ({root}) is no longer covered: FMP's commodity package is "
+            f"not on the Order Form, and every available proxy is either delisted or a "
+            f"futures fund whose roll yield makes it a different asset."
+        )
+
+
+def _source_of(symbol: str) -> str:
+    return (_get_meta(symbol) or {}).get("source") or _COMMODITY_SOURCE_ETF
+
+
+def _ref_of(symbol: str) -> str:
+    """The entitled instrument or FRED series actually behind this screen."""
+    meta = _get_meta(symbol) or {}
+    return meta.get("ref") or _resolve_fmp_symbol(symbol)
 
 
 
@@ -460,6 +469,7 @@ class CommodityService:
         symbol = symbol.upper().strip()
         if len(symbol) > 3 and symbol.endswith("USD"):
             symbol = symbol[:-3]
+        _raise_if_withdrawn(symbol)
         fmp_symbol = _resolve_fmp_symbol(symbol)
         commodity_name = _resolve_name(symbol)
 
@@ -520,7 +530,7 @@ class CommodityService:
             current_price=round(price, 2),
             price_change=round(change, 2),
             price_change_percent=round(change_pct, 2),
-            market_status=_commodity_market_status(),
+            market_status=_commodity_market_status(fmp_symbol),
             chart_data=chart_data,
         )
 
@@ -654,12 +664,16 @@ class CommodityService:
         cached = _cache_get(key)
         if cached is not None:
             return cached
+        source, ref = _source_of(fmp_symbol), _ref_of(fmp_symbol)
         try:
-            quote = await price_source(self).get_quote(fmp_symbol)
+            if source == _COMMODITY_SOURCE_FRED:
+                quote = await self._fred_quote(ref)
+            else:
+                quote = await price_source(self).get_quote(ref)
         except Exception as e:
             logger.warning(
-                "Commodity quote fetch failed for %s: %s: %s",
-                fmp_symbol, type(e).__name__, e,
+                "Commodity quote fetch failed for %s (%s:%s): %s: %s",
+                fmp_symbol, source, ref, type(e).__name__, e,
             )
             return {}
         if not isinstance(quote, dict) or not quote:
@@ -684,13 +698,17 @@ class CommodityService:
         cached = _cache_get(key)
         if cached is not None:
             return cached
+        source, ref = _source_of(fmp_symbol), _ref_of(fmp_symbol)
         try:
-            from app.services.chart_helper import _fetch_all_daily
-            historical = await _fetch_all_daily(self.fmp, fmp_symbol)
+            if source == _COMMODITY_SOURCE_FRED:
+                historical = await self._fred_history(ref)
+            else:
+                from app.services.chart_helper import _fetch_all_daily
+                historical = await _fetch_all_daily(self.fmp, ref)
         except Exception as e:
             logger.warning(
-                "Commodity history fetch failed for %s: %s: %s",
-                fmp_symbol, type(e).__name__, e,
+                "Commodity history fetch failed for %s (%s:%s): %s: %s",
+                fmp_symbol, source, ref, type(e).__name__, e,
             )
             return []
         if not historical:
@@ -700,6 +718,58 @@ class CommodityService:
         historical.sort(key=lambda p: p.get("date") or "")
         _cache_set(key, historical, _HISTORY_TTL)
         return historical
+
+    async def _fred_observations(self, series_id: str):
+        """Raw FRED observations, oldest-first, or [] when FRED is unconfigured/down.
+
+        `limit` is part of FRED's cache key, so it is a constant: a screen that asked for
+        a different depth per range would miss the 6h cache on every range change.
+        """
+        from app.integrations.fred import get_fred_client
+        from app.services.price_window import series_from_observations
+
+        client = get_fred_client()
+        if not client.is_configured:
+            logger.warning(
+                "FRED is not configured — commodity series %s cannot be served", series_id
+            )
+            return []
+        obs = await client.get_observations(series_id, limit=_FRED_OBSERVATION_LIMIT)
+        return series_from_observations(obs)
+
+    async def _fred_history(self, series_id: str) -> List[Dict[str, Any]]:
+        """FRED spot as history rows.
+
+        CLOSE ONLY, deliberately. A daily spot series carries one settled value per day;
+        emitting `open=high=low=close` would render a candle asserting an intraday range
+        that was never observed. The chart layer already treats open/high/low as optional
+        and draws a line, and `_fmt`/`_fmt_vol` render a missing volume as "—".
+        """
+        return [
+            {"date": d.isoformat(), "close": v}
+            for d, v in await self._fred_observations(series_id)
+        ]
+
+    async def _fred_quote(self, series_id: str) -> Dict[str, Any]:
+        """A quote shaped like `price_service._shape`, built from the last two prints.
+
+        Omits `dayHigh`/`dayLow`/`volume`/`open` rather than zeroing them — the same rule
+        `price_service` follows for its 52-week band: a key that is PRESENT-but-zero
+        defeats the caller's `or 0` default and renders "$0.00", while an ABSENT key
+        renders "—".
+        """
+        series = await self._fred_observations(series_id)
+        if not series:
+            return {}
+        as_of, price = series[-1]
+        row: Dict[str, Any] = {"price": price, "asOf": as_of.isoformat()}
+        if len(series) >= 2:
+            prev = series[-2][1]
+            row["previousClose"] = prev
+            if prev > 0:
+                row["change"] = round(price - prev, 6)
+                row["changePercentage"] = round((price / prev - 1.0) * 100.0, 4)
+        return row
 
     async def _get_spy_history(self) -> List[Dict[str, Any]]:
         """S&P 500 daily history, oldest-first — the benchmark every commodity is scored
@@ -859,8 +929,14 @@ class CommodityService:
         cached = _cache_get(key)
         if cached is not None:
             return cached
+        # Fetch the REF, keep the commodity code as the identity. `related_symbols` are
+        # `*USD` futures codes — every one is refused by `is_blocked_symbol`, so quoting
+        # them directly returned `{}` for all of them and "People Also Check" rendered
+        # empty on every commodity screen. The tuple keeps the original symbol so the row
+        # still links to the commodity screen rather than to the fund.
+        refs = [_ref_of(s) for s in related_symbols]
         results = await asyncio.gather(
-            *[price_source(self).get_quote(s) for s in related_symbols],
+            *[price_source(self).get_quote(r) for r in refs],
             return_exceptions=True,
         )
         related_quotes = [
@@ -965,16 +1041,26 @@ class CommodityService:
         cached = _cache_get(key)
         if cached is not None:
             return cached
+        # A FRED-sourced screen has NO intraday: the series is one settled value per
+        # day, published ~5 business days behind. Returning [] leaves the 1D/1W pills
+        # empty, which is the honest answer — synthesising bars from a single daily
+        # close would invent an intraday range that was never observed.
+        if _source_of(fmp_symbol) == _COMMODITY_SOURCE_FRED:
+            logger.info(
+                "Commodity %s is FRED-sourced (daily spot) — no intraday bars for %s",
+                fmp_symbol, chart_range,
+            )
+            return []
         try:
             # Commodities trade nearly 24h — do NOT apply the equity 09:30-16:00 ET
             # regular-hours filter (it would gut a ~23h market to a 6.5h slice).
             bars = await fetch_chart_data(
-                self.fmp, fmp_symbol, chart_range, interval, extended_hours=True
+                self.fmp, _ref_of(fmp_symbol), chart_range, interval, extended_hours=True
             )
         except Exception as e:
             logger.warning(
-                "Commodity intraday chart failed for %s %s: %s: %s",
-                fmp_symbol, chart_range, type(e).__name__, e,
+                "Commodity intraday chart failed for %s (ref %s) %s: %s: %s",
+                fmp_symbol, _ref_of(fmp_symbol), chart_range, type(e).__name__, e,
             )
             return []
         if bars:
@@ -990,6 +1076,7 @@ class CommodityService:
         symbol = symbol.upper().strip()
         if len(symbol) > 3 and symbol.endswith("USD"):
             symbol = symbol[:-3]
+        _raise_if_withdrawn(symbol)
         fmp_symbol = _resolve_fmp_symbol(symbol)
         commodity_name = _resolve_name(symbol)
         meta = _get_meta(symbol)
@@ -1289,7 +1376,7 @@ class CommodityService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
-            market_status=_commodity_market_status(),
+            market_status=_commodity_market_status(fmp_symbol),
             chart_data=chart_data,
             key_statistics_groups=key_statistics_groups,
             performance_periods=performance_periods,

@@ -33,9 +33,12 @@ struct GenerateAnalysisButton: View {
                     }
                 }
 
+                // ⚠️ NO `.opacity(0.8)`: it inherits `textOnAccent` from the modifier below and
+                // sits on `primaryFill`, where white at 0.8 is 3.56:1 — below AA, and this is the
+                // primary paid CTA. It measured 3.90 before the 2026-09 fill lightening, i.e. it
+                // was already failing. `caption` against `headingSmall` is the hierarchy.
                 Text("Uses \(cost.credits) Credits")
                     .font(AppTypography.caption)
-                    .opacity(0.8)
             }
             // The disabled state was `textOnAccent` on `AppColors.textMuted` — a TEXT
             // token used as a fill, which lightens to #9CA3AF in dark and put the label

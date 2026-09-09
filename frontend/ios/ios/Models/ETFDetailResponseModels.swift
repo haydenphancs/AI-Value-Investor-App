@@ -416,20 +416,18 @@ extension ETFQuoteResponseDTO {
     /// holdings — are left exactly as they were, because they are range-independent and
     /// cannot change between two 30-second refreshes.
     ///
-    /// `livePrice` WINS over the REST snapshot when the socket has ticked: a tick is now, a
-    /// snapshot is up to 45 seconds old. Falling back to REST keeps the header alive for
-    /// symbols whose feed never ticks, which is the reason the poll exists at all.
+    /// Took `livePrice` / `liveChange` / `liveChangePercent` overrides from the FMP
+    /// WebSocket, applied as `livePrice ?? currentPrice`. The stream is gone, so those
+    /// were always nil and the `??` always fell through to this slice's own REST value —
+    /// which is the correct behaviour, and is now simply what it does.
     func merged(
         into data: ETFDetailData,
-        livePrice: Double?,
-        liveChange: Double?,
-        liveChangePercent: Double?,
         includeChart: Bool
     ) -> ETFDetailData {
         var out = data
-        out.currentPrice = livePrice ?? currentPrice
-        out.priceChange = liveChange ?? priceChange
-        out.priceChangePercent = liveChangePercent ?? priceChangePercent
+        out.currentPrice = currentPrice
+        out.priceChange = priceChange
+        out.priceChangePercent = priceChangePercent
         out.marketStatus = marketStatus.resolvedMarketStatus
         out.keyStatistics = keyStatistics.map {
             KeyStatistic(label: $0.label, value: $0.value,

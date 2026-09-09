@@ -38,9 +38,9 @@ _SECTORS = [
 
 def _rows(**overrides):
     base = {
-        "^GSPC": {"symbol": "^GSPC", "changePercentage": -0.62, "price": 6412.1},
-        "^IXIC": {"symbol": "^IXIC", "changePercentage": -0.91, "price": 21340.5},
-        "^DJI": {"symbol": "^DJI", "changePercentage": -0.30, "price": 44812.0},
+        "SPY": {"symbol": "SPY", "changePercentage": -0.62, "price": 6412.1},
+        "ONEQ": {"symbol": "ONEQ", "changePercentage": -0.91, "price": 21340.5},
+        "DIA": {"symbol": "DIA", "changePercentage": -0.30, "price": 44812.0},
     }
     base.update(overrides)
     return base
@@ -52,13 +52,13 @@ def _rows(**overrides):
 def test_the_band_carries_every_index_in_declared_order():
     mc = build_market_context(_rows(), _SECTORS, sector_available=True)
     assert [i.symbol for i in mc.indices] == [s for s, _ in _INDEX_SYMBOLS]
-    assert [i.label for i in mc.indices] == ["S&P 500", "Nasdaq", "Dow"]
+    assert [i.label for i in mc.indices] == ["S&P 500 ETF", "Nasdaq Comp ETF", "Dow ETF"]
 
 
 def test_the_label_comes_from_the_server_not_the_symbol():
     """An installed widget cannot learn a new index's display name on its own."""
     mc = build_market_context(_rows(), _SECTORS, sector_available=True)
-    assert mc.indices[0].label == "S&P 500" and mc.indices[0].symbol == "^GSPC"
+    assert mc.indices[0].label == "S&P 500 ETF" and mc.indices[0].symbol == "SPY"
 
 
 def test_breadth_counts_only_sectors_that_are_up():
@@ -71,7 +71,7 @@ def test_breadth_counts_only_sectors_that_are_up():
 
 def test_the_sentence_never_contradicts_the_numbers():
     mc = build_market_context(_rows(), _SECTORS, sector_available=True)
-    assert "S&P 500 fell 0.6%" in mc.text
+    assert "S&P 500 ETF fell 0.6%" in mc.text
     assert "3 of 11 sectors up" in mc.text
 
 
@@ -111,22 +111,22 @@ def test_everything_failing_yields_no_band_at_all():
 @pytest.mark.parametrize("bad", [None, float("nan"), float("inf"), "n/a", {}])
 def test_an_unreadable_change_is_dropped_not_zeroed(bad):
     mc = build_market_context(
-        _rows(**{"^GSPC": {"symbol": "^GSPC", "changePercentage": bad, "price": None}}),
+        _rows(**{"SPY": {"symbol": "SPY", "changePercentage": bad, "price": None}}),
         _SECTORS, sector_available=True,
     )
     syms = [i.symbol for i in mc.indices]
-    assert "^GSPC" not in syms, "an index with no readable number must not be rendered as 0"
-    assert "^IXIC" in syms, "the other indices must survive"
+    assert "SPY" not in syms, "an index with no readable number must not be rendered as 0"
+    assert "ONEQ" in syms, "the other indices must survive"
 
 
 def test_a_flat_index_is_described_as_flat_not_fallen():
     """`_dir_word` answers rose/fell; neither is true of a flat tape, and
     "fell 0.0%" contradicts itself in a single phrase."""
     mc = build_market_context(
-        _rows(**{"^GSPC": {"symbol": "^GSPC", "changePercentage": 0.0, "price": 6400.0}}),
+        _rows(**{"SPY": {"symbol": "SPY", "changePercentage": 0.0, "price": 6400.0}}),
         _SECTORS, sector_available=True,
     )
-    assert "S&P 500 flat" in mc.text
+    assert "S&P 500 ETF flat" in mc.text
     assert "fell 0.0%" not in mc.text
 
 
@@ -156,7 +156,7 @@ def test_the_band_serialises_without_nan_or_infinity():
 
 def test_percentages_are_rounded_for_the_wire():
     mc = build_market_context(
-        _rows(**{"^GSPC": {"symbol": "^GSPC", "changePercentage": -0.6234567, "price": 1.23456}}),
+        _rows(**{"SPY": {"symbol": "SPY", "changePercentage": -0.6234567, "price": 1.23456}}),
         _SECTORS, sector_available=True,
     )
     assert mc.indices[0].change_percent == -0.62
@@ -165,8 +165,8 @@ def test_percentages_are_rounded_for_the_wire():
 
 def test_a_missing_index_row_does_not_shift_the_others():
     mc = build_market_context(
-        {"^DJI": {"symbol": "^DJI", "changePercentage": -0.30, "price": 44812.0}},
+        {"DIA": {"symbol": "DIA", "changePercentage": -0.30, "price": 44812.0}},
         _SECTORS, sector_available=True,
     )
-    assert [i.symbol for i in mc.indices] == ["^DJI"]
-    assert mc.indices[0].label == "Dow"
+    assert [i.symbol for i in mc.indices] == ["DIA"]
+    assert mc.indices[0].label == "Dow ETF"

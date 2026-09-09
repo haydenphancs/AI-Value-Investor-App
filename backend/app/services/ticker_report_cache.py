@@ -162,7 +162,16 @@ TABLE_NAME = "ticker_report_cache"
 #     the annual values — the "additive field laundered stale rows into a confident wrong
 #     value" trap. The floor forces a fresh collect so the fix is not invisible on every
 #     already-cached ticker. Kept a recent PAST instant, per the paragraph above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 8, 26, 1, 0, 0, tzinfo=timezone.utc)
+# 2026-09-08: bumped for the macro-indicator re-source. Every report cached before this
+#     baked a macro module with ZERO deterministic market factors — `stock-price-change`
+#     was outside the licence and so were 9 of the 10 symbols, so oil / gold / volatility
+#     / rates / dollar were all silently absent, and `macro_measured` (keyed only on the
+#     FRED half) let the report print "Benign macro backdrop" over them. The sources are
+#     now FRED + entitled ETFs and the flag reads both tiers, but a cached row keeps the
+#     old baked `macro_data` — and an all-clear that was never measured is exactly what
+#     must not survive a deploy. This is also a FORMULA change, not just new fields (two
+#     severity band sets were re-derived), which a key-presence probe cannot see.
+CACHE_SCHEMA_FLOOR = datetime(2026, 9, 8, 1, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Close-aligned cache freshness ───────────────────────────────────

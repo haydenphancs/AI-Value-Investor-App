@@ -26,7 +26,6 @@ from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openfda import close_openfda_client
 from app.integrations.uspto import close_uspto_client
-from app.services.live_price_manager import get_live_price_manager
 from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
 
 logging.basicConfig(
@@ -315,9 +314,6 @@ async def lifespan(app: FastAPI):
                     task.get_name(), type(result).__name__, result,
                 )
         logger.info("Stopped %d background tasks", len(pending))
-
-    # Graceful shutdown: close live price WebSocket connections
-    await get_live_price_manager().shutdown()
 
     # Close persistent HTTP clients.
     #

@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
@@ -40,62 +40,105 @@ logger = logging.getLogger(__name__)
 
 # ── Static index profile metadata ────────────────────────────────
 
+# ── Index screens are served by their ETF proxy, and say so ──────────
+#
+# FMP answers 402 for every `^`-prefixed symbol: index market data is a separate package
+# that is not on the Order Form, and `is_blocked_symbol` refuses these before any HTTP
+# call. So each screen is backed by an ordinary, entitled ETF instead.
+#
+# ⚠️ THE RELABELLING IS THE FEATURE, NOT A SIDE EFFECT. SPY trades near $770 while the
+# S&P 500 index sits near 6,600 — an order of magnitude apart. Showing SPY's price under
+# an "S&P 500" heading would be the same class of fabrication as the BTC 52-week low this
+# phase removed, so every user-visible field below describes the FUND: its name, its
+# inception, its provider, its holding count. `documents/legal/fmp-16-datasets-build-or-free.md`
+# accepts the cost explicitly ("users see ~600 not ~6,000").
+#
+# Proxy choice is measured, not assumed (all vs FRED daily series, 1Y to 2026-09-05,
+# against a SPY-vs-VOO measurement floor of TE 0.78%):
+#
+#   ^GSPC → SPY   corr 0.9959  TE 1.15%  gap −0.09pp   ✅ at the floor
+#   ^DJI  → DIA   corr 0.9979  TE 0.81%  gap −0.27pp   ✅ at the floor
+#   ^IXIC → ONEQ  corr 0.9976  TE 1.28%  gap +0.06pp   ✅
+#
+# 🔴 NOT QQQ for `^IXIC`. QQQ tracks the Nasdaq-**100**; this screen is the Nasdaq
+# **Composite**. Measured against FRED `NASDAQCOM`: QQQ scores corr 0.9728, TE 4.55% and
+# a +2.54pp 1-year gap — four times ONEQ's tracking error, and wrong index besides. ONEQ
+# (Fidelity Nasdaq Composite Index ETF) is entitled and tracks the right thing.
+#
+# `historical_avg_pe` stays an INDEX statistic — it anchors the valuation snapshot's
+# "vs 10-year average" line, the fund's own P/E is the same number by construction, and
+# it is a long-run average rather than a licensed live level.
 _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
     "^GSPC": {
-        "name": "S&P 500",
+        "proxy_symbol": "SPY",
+        "name": "SPDR S&P 500 ETF Trust",
         "description": (
-            "The S&P 500 Index is a market-capitalization-weighted index of "
-            "500 leading publicly traded companies in the U.S. It is widely "
-            "regarded as the best single gauge of large-cap U.S. equities and "
-            "serves as the foundation for a wide range of investment products."
+            "SPDR S&P 500 ETF Trust (SPY) is an exchange-traded fund that tracks "
+            "the S&P 500 Index — a market-capitalization-weighted index of 500 "
+            "leading publicly traded U.S. companies. Prices and returns shown here "
+            "are the fund's own, which track the index closely but are not identical "
+            "to it."
         ),
-        "exchange": "NYSE / NASDAQ",
+        "exchange": "NYSE Arca",
         "number_of_constituents": 503,
         "weighting_methodology": "Market-Cap Weighted",
-        "inception_date": "March 4, 1957",
-        "index_provider": "S&P Dow Jones Indices",
-        "website": "www.spglobal.com",
+        "inception_date": "January 22, 1993",
+        "index_provider": "State Street Global Advisors",
+        "website": "www.ssga.com",
         "historical_avg_pe": 21.0,
         "historical_period": "10-year",
-        "avg_annual_return": 10.5,
     },
     "^IXIC": {
-        "name": "Nasdaq Composite",
+        "proxy_symbol": "ONEQ",
+        "name": "Fidelity Nasdaq Composite Index ETF",
         "description": (
-            "The Nasdaq Composite Index measures the performance of more than "
-            "3,000 stocks listed on the Nasdaq stock exchange. It is heavily "
-            "weighted toward technology companies and serves as a key barometer "
-            "for the tech sector and growth stocks."
+            "Fidelity Nasdaq Composite Index ETF (ONEQ) tracks the Nasdaq Composite "
+            "Index, which measures more than 3,000 stocks listed on the Nasdaq "
+            "exchange and is heavily weighted toward technology. Prices and returns "
+            "shown here are the fund's own, which track the index closely but are not "
+            "identical to it."
         ),
         "exchange": "NASDAQ",
         "number_of_constituents": 3000,
         "weighting_methodology": "Market-Cap Weighted",
-        "inception_date": "February 5, 1971",
-        "index_provider": "Nasdaq, Inc.",
-        "website": "www.nasdaq.com",
+        "inception_date": "September 25, 2003",
+        "index_provider": "Fidelity Investments",
+        "website": "www.fidelity.com",
         "historical_avg_pe": 25.0,
         "historical_period": "10-year",
-        "avg_annual_return": 12.2,
     },
     "^DJI": {
-        "name": "Dow Jones Industrial Average",
+        "proxy_symbol": "DIA",
+        "name": "SPDR Dow Jones Industrial Average ETF Trust",
         "description": (
-            "The Dow Jones Industrial Average (DJIA) is a price-weighted index "
-            "of 30 prominent U.S. companies. One of the oldest and most widely "
-            "followed equity indices, it is often cited as a proxy for the "
-            "overall health of the U.S. stock market."
+            "SPDR Dow Jones Industrial Average ETF Trust (DIA) tracks the Dow Jones "
+            "Industrial Average, a price-weighted index of 30 prominent U.S. "
+            "companies. Prices and returns shown here are the fund's own, which "
+            "track the index closely but are not identical to it."
         ),
-        "exchange": "NYSE / NASDAQ",
+        "exchange": "NYSE Arca",
         "number_of_constituents": 30,
         "weighting_methodology": "Price Weighted",
-        "inception_date": "May 26, 1896",
-        "index_provider": "S&P Dow Jones Indices",
-        "website": "www.spglobal.com",
+        "inception_date": "January 14, 1998",
+        "index_provider": "State Street Global Advisors",
+        "website": "www.ssga.com",
         "historical_avg_pe": 18.0,
         "historical_period": "10-year",
-        "avg_annual_return": 9.8,
     },
 }
+
+
+def _proxy_for(symbol: str) -> str:
+    """The entitled ETF that actually serves this screen.
+
+    Falls back to the symbol itself so an unprofiled `^`-symbol keeps hitting the
+    entitlement guard and failing loudly, rather than silently resolving to something
+    plausible. `indices.py`'s route regex accepts far more than the three profiled
+    symbols, so this path is reachable.
+    """
+    profile = _INDEX_PROFILES.get((symbol or "").upper())
+    return (profile or {}).get("proxy_symbol") or symbol
+
 
 # ── Per-section in-memory cache ──────────────────────────────────
 #
@@ -579,11 +622,17 @@ class IndexService:
         cached = _cache_get(key)
         if cached is not None:
             return cached
+        # The PROXY is what FMP will answer for; `symbol` stays the cache key and the
+        # user-facing identity. Passing `symbol` here returned `{}` for every index —
+        # `price_service.get_quote` short-circuits on `is_blocked_symbol` — which is what
+        # painted "$0.00" under a live badge.
+        proxy = _proxy_for(symbol)
         try:
-            quote = await price_source(self).get_quote(symbol)
+            quote = await price_source(self).get_quote(proxy)
         except Exception as e:
             logger.warning(
-                "Index quote fetch failed for %s: %s: %s", symbol, type(e).__name__, e
+                "Index quote fetch failed for %s (proxy %s): %s: %s",
+                symbol, proxy, type(e).__name__, e,
             )
             return {}
         if not isinstance(quote, dict) or not quote:
@@ -620,11 +669,11 @@ class IndexService:
         try:
             try:
                 from app.services.chart_helper import _fetch_all_daily
-                historical = await _fetch_all_daily(self.fmp, symbol)
+                historical = await _fetch_all_daily(self.fmp, _proxy_for(symbol))
             except Exception as e:
                 logger.warning(
-                    "Index history fetch failed for %s: %s: %s",
-                    symbol, type(e).__name__, e,
+                    "Index history fetch failed for %s (proxy %s): %s: %s",
+                    symbol, _proxy_for(symbol), type(e).__name__, e,
                 )
                 historical = []
             if historical:
@@ -688,12 +737,17 @@ class IndexService:
             _cache_set(key, db["count"], _CONSTITUENTS_TTL)
             return db["count"]
 
+        # NOT proxied. `sp500-constituent` / `nasdaq-constituent` / `dowjones-constituent`
+        # are the "Indexes" package and stay 402 whatever symbol you pass, so this always
+        # takes the fallback — the fund's published holding count from `_INDEX_PROFILES`.
+        # That is now a statement about the ETF, which is what the screen describes.
         try:
             rows = await self.fmp.get_index_constituents(symbol)
         except Exception as e:
             logger.warning(
-                "Index constituents fetch failed for %s: %s: %s",
-                symbol, type(e).__name__, e,
+                "Index constituents fetch failed for %s: %s: %s — using the fund's "
+                "published holding count (%s)",
+                symbol, type(e).__name__, e, fallback,
             )
             return fallback
         count = len(rows) if isinstance(rows, list) else 0
@@ -884,11 +938,13 @@ class IndexService:
         if cached is not None:
             return cached
         try:
-            raw_chart = await fetch_chart_data(self.fmp, symbol, chart_range, interval)
+            raw_chart = await fetch_chart_data(
+                self.fmp, _proxy_for(symbol), chart_range, interval
+            )
         except Exception as e:
             logger.warning(
-                "Index intraday chart failed for %s %s: %s: %s",
-                symbol, chart_range, type(e).__name__, e,
+                "Index intraday chart failed for %s (proxy %s) %s: %s: %s",
+                symbol, _proxy_for(symbol), chart_range, type(e).__name__, e,
             )
             return []
         points = _points(raw_chart if isinstance(raw_chart, list) else [])
@@ -1048,7 +1104,16 @@ class IndexService:
             # fetches core with `try?`, so this simply leaves the skeleton up until the
             # full response lands. Same judgement as the degraded-build gate in
             # `get_index_detail`, one step earlier.
-            raise ValueError(f"index core has no usable price for {symbol}")
+            #
+            # TYPED, not a bare ValueError: `classify_exception` has no rule for
+            # ValueError, so it fell through to `REPORT_GENERATION_FAILED` — a
+            # 500-class code that `_UPSTREAM_CODES` excludes, i.e. "we broke"
+            # rather than "the upstream has nothing". This is the latter, and the
+            # full build one layer out now raises the same exception for the same
+            # reason, so the two paths report identically.
+            raise FMPUnavailableException(
+                f"index core has no usable price for {symbol}"
+            )
 
         change = _q("change")
         # `changePercentage` (singular) is the /stable spelling; `changesPercentage` is
@@ -1145,6 +1210,58 @@ class IndexService:
 
         price = _q("price")
         change = _q("change")
+
+        # A failed quote must NOT become "$0.00" under a live "market open" badge.
+        #
+        # `_get_quote` swallows every failure to `{}` (and `price_service.get_quote`
+        # short-circuits to `{}` for any symbol outside the FMP licence), after which
+        # each `_q(...)` above defaults to 0 and the response below ships
+        # `current_price=0.0, price_change=0.0, price_change_percent=0.0` beside a
+        # `market_status` that says "open". Runtime-verified for every `^` symbol —
+        # this was the steady state, not a rare failure.
+        #
+        # `get_index_core` already refuses this (it raises rather than paint $0.00) and
+        # `get_index_detail`'s gate already refuses to CACHE a priceless build — but
+        # nothing stopped this function RETURNING one. Recover the last settled close,
+        # else fail loudly with the typed exception the endpoint maps to
+        # `FMP_UNAVAILABLE`, so the user gets a retryable error instead of a fabricated
+        # number. Mirrors `commodity_service._build_commodity_detail`.
+        #
+        # Unlike commodity's twin this awaits `_get_history` rather than peeking at the
+        # Tier-1 cache: `_get_derived` can be answered from Tier-2 without ever
+        # populating `idx:hist:`, so a cache-only read would raise on a cold process
+        # that could have recovered. `_get_history` is Tier-1 cached AND `_inflight`
+        # deduped and returns `[]` rather than raising, so the warm path costs a dict
+        # lookup and the blocked-symbol path still lands on the raise below.
+        if price <= 0:
+            historical = await self._get_history(symbol)
+            last_close = None
+            prev_close_hist = None
+            for row in reversed(historical):  # `_fetch_all_daily` is oldest-first
+                if not isinstance(row, dict):
+                    continue
+                c = _finite_or_none(row.get("close") or row.get("adjClose"))
+                if c is None or c <= 0:
+                    continue
+                if last_close is None:
+                    last_close = c
+                else:
+                    prev_close_hist = c
+                    break
+            if last_close is None:
+                raise FMPUnavailableException(
+                    f"No usable quote or price history for index {symbol}"
+                )
+            logger.warning(
+                "Index %s quote unavailable — falling back to last historical close "
+                "%.4f (chart data is still live)", symbol, last_close,
+            )
+            price = last_close
+            if prev_close_hist:
+                change = last_close - prev_close_hist
+                quote = dict(quote or {})
+                quote.setdefault("previousClose", prev_close_hist)
+
         # FMP `/stable` renamed the daily move to the SINGULAR `changePercentage`;
         # `changesPercentage` is the dead /api/v3 spelling. Reading only the plural made
         # `price_change_percent` 0.0 on EVERY index response — the header badge showed

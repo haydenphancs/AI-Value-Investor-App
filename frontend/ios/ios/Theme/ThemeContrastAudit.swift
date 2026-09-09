@@ -129,7 +129,7 @@ enum ThemeContrastAudit {
                 // Two families exist: the frozen fills carry white, while the adaptive
                 // `gainFill`/`lossFill` carry near-black `textOnFill` in dark. Measuring
                 // the wrong one is silently backwards — white on the adaptive dark arms
-                // is 2.28/2.77 and near-black on a frozen fill is 3.35.
+                // is 2.28/2.77 and near-black on a frozen fill is 3.81.
                 if let ink = spec.carries {
                     let fill = resolve(spec.color, style)
                     let inkColor = resolve(ink.color, style)

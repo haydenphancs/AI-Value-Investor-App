@@ -325,14 +325,15 @@ struct PaywallView: View {
                     Text(isThisPlan ? "Processing\u{2026}" : "Choose \(plan.displayName)")
                 }
                 .font(AppTypography.bodyEmphasis)
-                .foregroundColor(AppColors.textOnAccent)
+                .foregroundColor(AppColors.textOnFill)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, AppSpacing.md)
                 .background(
                     RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                        // `alertOrangeFill`, not `alertOrange`: this button carries
-                        // constant-white `textOnAccent`, and the text token lightens to
-                        // #F97316 in dark where white on it is 2.80. 5.18 both modes now.
+                        // `alertOrangeFill`, not `alertOrange`. As of 2026-09-08 this fill is
+                        // ADAPTIVE: #CD4B1D light under white ink (4.55), #F97316 dark under
+                        // near-black `textOnFill` (6.33). White on the dark arm would be 2.80,
+                        // which is why the ink above is `textOnFill` and not `textOnAccent`.
                         .fill(AppColors.alertOrangeFill)
                 )
             }

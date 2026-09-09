@@ -105,12 +105,11 @@ def test_goldilocks_is_low_for_both_sectors():
         _fred("BAMLH0A0HYM2", latest=2.8),                   # < 3 → skip
     ]
     fmp_rows = [
-        _fmp("CLUSD", change_3m_pct=2.0, change_1m_pct=1.0),
-        _fmp("GCUSD", change_3m_pct=1.0, change_1m_pct=0.5),
-        _fmp("HGUSD", change_1m_pct=-2.0),
-        _fmp("^VIX", level=12.0, change_1m_pct=-5.0),
-        _fmp("^TNX", change_3m_pct=2.0, change_1m_pct=1.0),
-        _fmp("DXY", change_3m_pct=-1.0, change_1m_pct=-0.5),
+        _fmp("WTI", change_3m_pct=2.0, change_1m_pct=1.0),
+        _fmp("GOLD", change_3m_pct=1.0, change_1m_pct=0.5),
+        _fmp("VOL", level=8.0, change_1m_pct=-5.0),          # benign (<11)
+        _fmp("UST10Y", change_3m_pct=2.0, change_1m_pct=1.0),
+        _fmp("USD", change_3m_pct=-1.0, change_1m_pct=-0.5),  # benign (<1.5)
     ]
     for sector in ("Technology", "Financial Services"):
         merged, tier, composite, vital = _run(fred_rows, fmp_rows, sector)
@@ -137,8 +136,8 @@ def _late_cycle_fixtures():
         _fred("BAMLH0A0HYM2", latest=5.0),                       # HIGH (4-6)
     ]
     fmp_rows = [
-        _fmp("^VIX", level=25.0, change_1m_pct=20.0),            # ELEV (22-30)
-        _fmp("DXY", change_3m_pct=3.5, change_1m_pct=1.0),       # ELEV (2-5)
+        _fmp("VOL", level=22.0, change_1m_pct=20.0),            # ELEV (18.5-28)
+        _fmp("USD", change_3m_pct=3.5, change_1m_pct=1.0),       # ELEV (1.5-4)
     ]
     return fred_rows, fmp_rows
 
@@ -182,9 +181,9 @@ def test_inflation_peak_is_high_or_severe():
         _fred("BAMLH0A0HYM2", latest=5.4),                         # HIGH (4-6)
     ]
     fmp_rows = [
-        _fmp("CLUSD", change_3m_pct=28.0, change_1m_pct=10.0),    # HIGH (20-35)
-        _fmp("^VIX", level=29.0, change_1m_pct=8.0),               # ELEV (22-30)
-        _fmp("DXY", change_3m_pct=7.0, change_1m_pct=2.5),         # HIGH (5-8)
+        _fmp("WTI", change_3m_pct=28.0, change_1m_pct=10.0),      # HIGH (20-35)
+        _fmp("VOL", level=26.0, change_1m_pct=8.0),                # ELEV (18.5-28)
+        _fmp("USD", change_3m_pct=7.0, change_1m_pct=2.5),         # HIGH (6-9)
     ]
     _, tech_tier, tech_comp, tech_vital = _run(
         fred_rows, fmp_rows, "Technology",
@@ -224,10 +223,9 @@ def test_lehman_lands_severe_or_critical_for_both_sectors():
         _fred("BAMLH0A0HYM2", latest=9.5),                         # CRIT (>8)
     ]
     fmp_rows = [
-        _fmp("CLUSD", change_3m_pct=-28.0, change_1m_pct=-12.0),  # HIGH (|28|)
-        _fmp("^VIX", level=36.0, change_1m_pct=40.0),               # HIGH (30-40)
-        _fmp("DXY", change_3m_pct=8.0, change_1m_pct=3.0),          # HIGH (8-12)
-        _fmp("HGUSD", change_1m_pct=-15.0),                          # HIGH
+        _fmp("WTI", change_3m_pct=-28.0, change_1m_pct=-12.0),    # HIGH (|28|)
+        _fmp("VOL", level=35.0, change_1m_pct=40.0),                # HIGH (28-50)
+        _fmp("USD", change_3m_pct=9.5, change_1m_pct=3.0),          # SEVERE (>=9)
     ]
     _, tech_tier, tech_comp, tech_vital = _run(
         fred_rows, fmp_rows, "Technology",
@@ -269,8 +267,8 @@ def test_broad_high_stack_without_severe_fronts_caps_at_high():
         _fred("DGS10", latest=4.7),                        # HIGH (4.5-5.5)
     ]
     fmp_rows = [
-        _fmp("CLUSD", change_3m_pct=-24.0, change_1m_pct=-9.0),  # HIGH oil move (|24|)
-        _fmp("^VIX", level=24.0, change_1m_pct=10.0),             # ELEV (22-30)
+        _fmp("WTI", change_3m_pct=-24.0, change_1m_pct=-9.0),    # HIGH oil move (|24|)
+        _fmp("VOL", level=22.0, change_1m_pct=10.0),              # ELEV (18.5-28)
     ]
     # Energy: oil β=1.5 is the case most likely to over-read the tail into severe.
     _, tier, comp, _ = _run(fred_rows, fmp_rows, "Energy")

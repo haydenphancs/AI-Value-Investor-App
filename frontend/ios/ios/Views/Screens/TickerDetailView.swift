@@ -198,15 +198,15 @@ struct TickerDetailView: View {
             Task { await priceAlerts.loadIfStale() }
         }
         .onDisappear {
-            viewModel.disconnectLivePrice()
+            viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            viewModel.disconnectLivePrice()
+            viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             if let status = viewModel.tickerData?.marketStatus,
                MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                viewModel.connectLivePrice()
+                viewModel.startLivePriceUpdates()
             }
         }
         .backSwipe { handleBackTapped() }

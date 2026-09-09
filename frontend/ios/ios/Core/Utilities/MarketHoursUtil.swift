@@ -130,8 +130,12 @@ enum MarketHoursUtil {
         return bareCryptoSymbols.contains(sid)
     }
 
-    /// Determine if a given `MarketStatus` represents an active session
-    /// where live price streaming is useful.
+    /// Determine if a given `MarketStatus` represents an active session where refreshing
+    /// the live price is useful.
+    ///
+    /// Named for the FMP WebSocket, which is gone — streaming is excluded from the Order
+    /// Form. The predicate is unchanged and still load-bearing: it gates the 15s/30s REST
+    /// refresh timers on all five detail screens, which are now the only price source.
     static func shouldStreamLivePrice(for status: MarketStatus) -> Bool {
         switch status {
         case .open, .preMarket, .afterHours:

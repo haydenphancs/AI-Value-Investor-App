@@ -232,7 +232,10 @@ async def test_index_core_never_pulls_the_daily_history(rng, interval):
     assert resp.chart_data == []
     assert resp.current_price == 27.31
     assert resp.symbol == "^GSPC"
-    assert resp.index_name == "S&P 500"          # from the static profile, no fetch
+    # The FUND's name, not the index's. These screens are served by an entitled ETF
+    # (FMP 402s every `^` symbol) and SPY trades near $770 against an index near
+    # 6,600 — so the header has to name what the price actually is.
+    assert resp.index_name == "SPDR S&P 500 ETF Trust"   # static profile, no fetch
 
 
 @pytest.mark.asyncio

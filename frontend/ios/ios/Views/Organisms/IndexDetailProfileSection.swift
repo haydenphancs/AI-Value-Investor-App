@@ -65,11 +65,18 @@ struct IndexDetailProfileSection: View {
                     .frame(height: 1)
 
                 // Info rows
+                // These screens are served by an ETF that tracks the index (FMP 402s every
+                // `^` symbol — index data is a package we did not buy), so the header, the
+                // price and the chart are all the FUND's. Two labels are therefore explicit
+                // about which of the two each row describes: "Inception Date" beside a fund
+                // name reads as the fund's, and 1957 is the S&P 500's — while "Index
+                // Provider" is not the fund's sponsor. Ambiguity here is how a screen
+                // quietly asserts something untrue.
                 CompanyProfileRow(label: "Exchange", value: profile.exchange)
-                CompanyProfileRow(label: "Constituents", value: profile.formattedConstituents)
+                CompanyProfileRow(label: "Index Constituents", value: profile.formattedConstituents)
                 CompanyProfileRow(label: "Weighting", value: profile.weightingMethodology)
-                CompanyProfileRow(label: "Inception Date", value: profile.inceptionDate)
-                CompanyProfileRow(label: "Index Provider", value: profile.indexProvider)
+                CompanyProfileRow(label: "Fund Inception", value: profile.inceptionDate)
+                CompanyProfileRow(label: "Fund Sponsor", value: profile.indexProvider)
 
                 // Divider
                 Rectangle()

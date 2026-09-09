@@ -80,7 +80,6 @@ class CryptoDetailViewModel: ObservableObject {
     private let cryptoSymbol: String
     private let apiClient = APIClient.shared
     private let stockRepository: StockRepository = .shared
-    let livePriceManager = LivePriceWebSocketManager()
     private var chartRefreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     /// Monotonic token for full-detail fetches (initial load / refresh / chart-range
@@ -139,34 +138,6 @@ class CryptoDetailViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe live price updates from WebSocket and apply to cryptoData + chart
-        livePriceManager.$livePrice
-            .compactMap { $0 }
-            .sink { [weak self] newPrice in
-                guard let self = self, var data = self.cryptoData else { return }
-                data.currentPrice = newPrice
-                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
-                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
-
-                // Update last chart candle for intraday ranges
-                if self.chartSettings.selectedInterval.isIntraday,
-                   !data.chartPricePoints.isEmpty {
-                    let lastIndex = data.chartPricePoints.count - 1
-                    let last = data.chartPricePoints[lastIndex]
-                    let updatedPoint = StockPricePoint(
-                        date: last.date,
-                        close: newPrice,
-                        open: last.open,
-                        high: max(last.high ?? newPrice, newPrice),
-                        low: min(last.low ?? newPrice, newPrice),
-                        volume: last.volume
-                    )
-                    data.chartPricePoints[lastIndex] = updatedPoint
-                }
-
-                self.cryptoData = data
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Data Loading
@@ -194,7 +165,7 @@ class CryptoDetailViewModel: ObservableObject {
             // initial load permanently dropped live price (crypto is 24/7!), the
             // chart-refresh timer, News, Analysis, and the watchlist star until a manual
             // refresh. Only the cryptoData paint stays gen-guarded (mirrors Commodity VM).
-            self.connectLivePrice()
+            self.startLivePriceUpdates()
             self.startChartRefreshTimer()
             // Fast core, in parallel with the full detail below: whichever lands
             // first paints. Deliberately NOT gen-guarded on its own — `loadCore`
@@ -512,18 +483,14 @@ class CryptoDetailViewModel: ObservableObject {
 
     // MARK: - Live Price
 
-    func connectLivePrice() {
-        // See TickerDetailViewModel.connectLivePrice.
-        let fmpSymbol = CryptoSymbol.pair(cryptoSymbol)
-        Task { [weak self] in
-            guard let self else { return }
-            let token = await APIClient.shared.currentAuthToken()
-            self.livePriceManager.connect(ticker: fmpSymbol, authToken: token)
-        }
+    /// Was `connectLivePrice()`. FMP 402s every `…USD` crypto pair and excludes streaming
+    /// from the Order Form, so the socket could never have carried a crypto tick. The 30s
+    /// chart-refresh timer is the whole mechanism.
+    func startLivePriceUpdates() {
+        startChartRefreshTimer()
     }
 
-    func disconnectLivePrice() {
-        livePriceManager.disconnect()
+    func stopLivePriceUpdates() {
         stopChartRefreshTimer()
     }
 

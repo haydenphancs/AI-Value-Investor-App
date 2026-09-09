@@ -761,7 +761,7 @@ Tokens carry a **role**, and picking the wrong one is the recurring bug:
 | Role | Floor | Tokens | Use for |
 |---|---|---|---|
 | **text** | 4.5:1 | `textPrimary/Secondary/Muted`, `gain`, `loss`, `caution`, `primaryBlue`, `accentCyan`, `alertOrange`, `alertPurple` | anything read as text or a meaningful icon |
-| **fill** | white-on ≥4.5:1 | `primaryFill`, `gainFill`, `lossFill`, `cautionFill`, `accentCyanFill` | a saturated background that `textOnAccent` sits on |
+| **fill** | its declared ink ≥4.5:1 | frozen (white `textOnAccent`): `primaryFill`, `cautionFill`, `accentCyanFill`, `alertPurpleFill`, `alertOrangeFill` · adaptive (`textOnFill`): `gainFill`, `lossFill` | a saturated background that carries ink — **never text on a surface** (the frozen five measure ~4.08 on `cardBackgroundLight`) |
 | **graphic** | 3:1 | `gainGraphic`, `lossGraphic`, `cautionGraphic`, `accentGraphic`, `primaryGraphic` | chart strokes/bars/series — **never text** |
 
 Core values:
@@ -778,11 +778,18 @@ Core values:
 | `loss` | `#CC1F1F` | `#F87171` |
 | `caution` | `#9A6100` | `#F59E0B` |
 | `primaryBlue` | `#2563EB` | `#60A5FA` |
-| `primaryFill` | `#2563EB` | `#2563EB` |
+| `primaryFill` | `#2C6BF3` | `#2C6BF3` |
+| `alertOrangeFill` | `#CB491A` | `#CB491A` |
+| `alertPurpleFill` | `#9948EE` | `#9948EE` |
 | `border` / `divider` | `#101828` @14% | `#FFFFFF` @10% |
 
-A **fill token is that colour's light-mode text value used in both modes** — a
-value dark enough to read on white is dark enough to carry white ink.
+A **frozen fill token is one value used in both modes**, carrying white
+`textOnAccent`. It began as the colour's light-mode text value — dark enough to
+read on white is dark enough to carry white ink — but the five frozen fills were
+retuned upward in 2026-09 and no longer track their text token: `primaryBlue`
+stayed `#2563EB` while `primaryFill` moved to `#2C6BF3`. **White ink is the
+ceiling**: 4.5:1 pins a fill at `L* ≤ 49.9`, and all five now sit at `L* ≈ 49`.
+There is no further lightening available without changing the ink.
 
 Cards are separated from the page by a **border, not luminance** (`#FFFFFF` on
 `#F4F5F8` is 1.09:1, and no design system separates them by luminance). Use

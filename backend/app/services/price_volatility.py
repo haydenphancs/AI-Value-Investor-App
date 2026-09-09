@@ -76,6 +76,42 @@ def _std_dev_pop(values: List[float]) -> Optional[float]:
     return sigma if math.isfinite(sigma) else None
 
 
+_TRADING_DAYS_PER_YEAR: int = 252
+_REALIZED_VOL_WINDOW: int = 21  # ~1 trading month, the standard short-horizon window
+
+
+def realized_volatility_pct(
+    prices: List[float], window: int = _REALIZED_VOL_WINDOW
+) -> Optional[float]:
+    """Annualized realized volatility, in percent, over the trailing `window` sessions.
+
+    `prices` is oldest→newest. Returns None — never 0.0 — when there is not enough
+    history: a flat 0% volatility reading would classify as the calmest possible market
+    rather than as "unknown", and the caller's severity bands would then emit a
+    confident all-clear built on nothing.
+
+    ⚠️ This is REALIZED volatility, and it is NOT interchangeable with the VIX, which is
+    IMPLIED. Measured against FRED `VIXCLS` over the trailing year: correlation on levels
+    is only **+0.35**, and the ranges barely overlap (realized 5.4–19.7 vs VIX 13.5–31.1)
+    because implied carries a variance risk premium. Any severity band calibrated for the
+    VIX has to be re-derived for this, not reused.
+
+    It is used because the VIX itself cannot be: FMP 402s `^VIX`, no ETF tracks it
+    honestly (VIXY scores TE 77.3% against the index, a −37.9pp 1-year gap — roll decay,
+    not tracking), and FRED's `VIXCLS` carries a Cboe copyright whose reprint permission
+    runs to FRED rather than to us. SPY's own daily history is entitled and free of all
+    three problems.
+    """
+    if window < 2 or len(prices) < window + 1:
+        return None
+    returns = _daily_returns(prices[-(window + 1):])
+    sigma_daily = _std_dev_pop(returns)
+    if sigma_daily is None or sigma_daily <= 0:
+        return None
+    annualized = sigma_daily * (_TRADING_DAYS_PER_YEAR ** 0.5) * 100.0
+    return round(annualized, 4) if math.isfinite(annualized) else None
+
+
 def _z_score_for_window(
     move_pct: float, sigma_daily: Optional[float], days: int,
 ) -> Optional[float]:

@@ -44,7 +44,7 @@ struct RatingBadge: View {
     /// Ink for `backgroundColor`, mirroring its branches EXACTLY. `gainFill`/`lossFill`
     /// are ADAPTIVE (bright in dark) and need near-black `textOnFill`; `primaryFill` and
     /// `cautionFill` are frozen and need white. One ink cannot serve both — near-black on
-    /// frozen `primaryFill` is 3.35:1.
+    /// frozen `primaryFill` is 3.81:1.
     private var foregroundInk: Color {
         if maxRating >= 100 {
             return QualityBand.forScore(Int(rating.rounded())).fillInk

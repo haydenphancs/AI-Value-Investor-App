@@ -11,7 +11,7 @@ struct LearnCreditsCard: View {
     let balance: CreditBalance
     var onAddCredits: (() -> Void)?
 
-    // `alertOrangeFill` (#C2410C in BOTH modes), never `alertOrange` — see CreditsBalanceCard,
+    // `alertOrangeFill` (#CB491A in BOTH modes), never `alertOrange` — see CreditsBalanceCard,
     // which this card duplicates almost line for line.
     private let gradientColors = [
         AppColors.alertOrangeFill,
@@ -22,7 +22,7 @@ struct LearnCreditsCard: View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
             // Header — `textOnAccent`, not `textPrimary`: the latter is #0F172A in LIGHT and
             // #FFFFFF in dark, so it inverted against a fill that did not (3.43 light).
-            // ⚠️ No `.opacity()` on the card body — white at 0.8 is 3.85 here, below AA.
+            // ⚠️ No `.opacity()` on the card body — white at 0.8 is 3.54 here, below AA.
             Text("Credit Balance")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textOnAccent)
@@ -31,7 +31,7 @@ struct LearnCreditsCard: View {
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textOnAccent)
 
-            // Credits Display — on a 0.2 black scrim, so 0.8 still clears AA (5.21).
+            // Credits Display — on a 0.2 black scrim, so 0.8 still clears AA (4.85 — only 0.35 over the floor, and no guard measures this composite).
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 HStack(alignment: .lastTextBaseline, spacing: AppSpacing.sm) {
                     Text("\(balance.credits)")
@@ -68,7 +68,7 @@ struct LearnCreditsCard: View {
                     Text("Add More Credits")
                         .font(AppTypography.bodySmallEmphasis)
                 }
-                // Inverse CTA: constant-white button carrying the brand orange, 5.18 both modes.
+                // Inverse CTA: constant-white button carrying the brand orange, 4.66 both modes.
                 // Was `alertOrange` on `textPrimary` — BOTH halves inverted, giving a near-black
                 // button with rust text in light (3.43).
                 .foregroundColor(AppColors.alertOrangeFill)

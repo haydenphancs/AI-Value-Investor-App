@@ -592,7 +592,7 @@ struct AIChatScreen: View {
                     // Was a hardcoded `Color.white` box with `.black` ink. This bar sits
                     // on the app page next to a `.cardSurface()` field, so in LIGHT a
                     // white box on a white card had nothing to separate it. `primaryFill`
-                    // + `textOnAccent` is the palette's primary-action pairing (5.17:1)
+                    // + `textOnAccent` is the palette's primary-action pairing (4.66:1)
                     // and reads as a button in both appearances.
                     .background(AppColors.primaryFill)
                     .cornerRadius(AppCornerRadius.medium)

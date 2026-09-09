@@ -92,9 +92,10 @@ final class HomeRepository: HomeRepositoryProtocol {
     /// Watchlist tiles are labelled with the SYMBOL ("ORCL"), not the company name
     /// ("Oracle Corporation").
     ///
-    /// Market Pulse wants the opposite — "S&P 500" is what that instrument is called, and
-    /// "^GSPC" would be noise — which is why this is a second mapper rather than a change
-    /// to `mapPulse`. The two strips share `MarketPulseCard`, so the choice has to be made
+    /// Market Pulse wants the opposite — "S&P 500 ETF" is what that instrument is called,
+    /// and "SPY" would be noise — which is why this is a second mapper rather than a
+    /// change to `mapPulse`. (The strip used to carry index symbols; FMP 402s those, so
+    /// it now carries the entitled funds and names them accordingly.) The two strips share `MarketPulseCard`, so the choice has to be made
     /// here at the mapping boundary and not in the view: the card stays dumb and renders
     /// whatever `name` it is handed.
     ///
@@ -498,24 +499,25 @@ final class MockHomeRepository: HomeRepositoryProtocol {
     // MARK: - Market Pulse
 
     static let pulse: [MarketPulseItem] = [
-        MarketPulseItem(name: "S&P 500", symbol: "^GSPC", type: .index,
-                        priceText: "6,952.40", changeText: "+0.62%", isPositive: true,
+        // Mirrors the SHIPPED strip (`home_dashboard_service._PULSE_SYMBOLS`): entitled
+        // ETFs, named after the fund whose price they show, because FMP 402s every `^`
+        // index and `*USD` futures symbol. A preview that still showed "S&P 500 6,952"
+        // would be the only place in the app asserting an index level we cannot serve.
+        MarketPulseItem(name: "S&P 500 ETF", symbol: "SPY", type: .etf,
+                        priceText: "765.96", changeText: "-0.55%", isPositive: false,
                         spark: spark([28, 24, 26, 18, 21, 13, 16, 8])),
-        MarketPulseItem(name: "Nasdaq", symbol: "^IXIC", type: .index,
-                        priceText: "23,840.10", changeText: "+0.94%", isPositive: true,
+        MarketPulseItem(name: "Nasdaq Composite ETF", symbol: "ONEQ", type: .etf,
+                        priceText: "104.12", changeText: "-0.33%", isPositive: false,
                         spark: spark([30, 27, 22, 24, 16, 18, 11, 6])),
-        MarketPulseItem(name: "Dow Jones", symbol: "^DJI", type: .index,
-                        priceText: "44,265.80", changeText: "+0.18%", isPositive: true,
+        MarketPulseItem(name: "Dow Jones ETF", symbol: "DIA", type: .etf,
+                        priceText: "528.03", changeText: "-1.13%", isPositive: false,
                         spark: spark([22, 24, 20, 22, 19, 21, 17, 15])),
-        MarketPulseItem(name: "Bitcoin", symbol: "BTCUSD", type: .crypto,
-                        priceText: "112,430", changeText: "-1.85%", isPositive: false,
+        MarketPulseItem(name: "Russell 2000 ETF", symbol: "IWM", type: .etf,
+                        priceText: "294.67", changeText: "-0.45%", isPositive: false,
                         spark: spark([9, 13, 11, 17, 15, 21, 19, 27])),
-        MarketPulseItem(name: "Gold", symbol: "GCUSD", type: .commodity,
-                        priceText: "3,486.20", changeText: "+0.41%", isPositive: true,
+        MarketPulseItem(name: "Gold ETF", symbol: "GLD", type: .etf,
+                        priceText: "399.72", changeText: "-1.73%", isPositive: false,
                         spark: spark([24, 22, 25, 19, 21, 17, 18, 13])),
-        MarketPulseItem(name: "Crude Oil", symbol: "CLUSD", type: .commodity,
-                        priceText: "70.95", changeText: "-0.77%", isPositive: false,
-                        spark: spark([12, 10, 16, 14, 19, 17, 22, 25])),
     ]
 
     // MARK: - Scanner: Today's Top Movers

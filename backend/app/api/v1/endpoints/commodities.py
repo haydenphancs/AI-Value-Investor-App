@@ -268,7 +268,11 @@ async def get_commodity_quote(
             "Commodity quote failed for %s: %s: %s", symbol, type(e).__name__, e,
             exc_info=True,
         )
-        raise error_response_from_exception(e, resource=f"commodity {symbol}")
+        # `error_response_from_exception` RETURNS a JSONResponse and takes no
+        # `resource=` kwarg — so this raised TypeError from inside the handler and
+        # every failure on this route became an untyped 500 with no error body.
+        # The two sibling routes in this file already do it correctly.
+        return error_response_from_exception(e, ticker=symbol, step="commodity_quote")
 
 
 @router.get("/{symbol}", response_model=CommodityDetailResponse)

@@ -61,7 +61,6 @@ class ETFDetailViewModel: ObservableObject {
     @Published var chartDataVersion: Int = 0
 
     // MARK: - Live Price
-    let livePriceManager = LivePriceWebSocketManager()
     private var chartRefreshTask: Task<Void, Never>?
 
     // MARK: - Private Properties
@@ -124,7 +123,9 @@ class ETFDetailViewModel: ObservableObject {
                 self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
-                if newRange.defaultInterval.isIntraday && self.livePriceManager.isConnected {
+                // Interval alone: the `isConnected` conjunct this used to carry would be
+                // permanently false now the FMP stream is gone, freezing the intraday chart.
+                if newRange.defaultInterval.isIntraday {
                     self.startChartRefreshTimer()
                 } else {
                     self.stopChartRefreshTimer()
@@ -143,35 +144,6 @@ class ETFDetailViewModel: ObservableObject {
                 // Skip the reload the range sink already owns (see suppress flag).
                 guard !self.suppressIntervalReload else { return }
                 Task { await self.fetchChartForRange(self.selectedChartRange) }
-            }
-            .store(in: &cancellables)
-
-        // Observe live price updates from WebSocket and apply to etfData + chart
-        livePriceManager.$livePrice
-            .compactMap { $0 }
-            .sink { [weak self] newPrice in
-                guard let self = self, var data = self.etfData else { return }
-                data.currentPrice = newPrice
-                data.priceChange = self.livePriceManager.livePriceChange ?? data.priceChange
-                data.priceChangePercent = self.livePriceManager.livePriceChangePercent ?? data.priceChangePercent
-
-                // Update last chart candle for intraday ranges
-                if self.chartSettings.selectedInterval.isIntraday,
-                   !data.chartPricePoints.isEmpty {
-                    let lastIndex = data.chartPricePoints.count - 1
-                    var lastPoint = data.chartPricePoints[lastIndex]
-                    lastPoint = StockPricePoint(
-                        date: lastPoint.date,
-                        close: newPrice,
-                        open: lastPoint.open,
-                        high: max(lastPoint.high ?? newPrice, newPrice),
-                        low: min(lastPoint.low ?? newPrice, newPrice),
-                        volume: lastPoint.volume
-                    )
-                    data.chartPricePoints[lastIndex] = lastPoint
-                }
-
-                self.etfData = data
             }
             .store(in: &cancellables)
     }
@@ -324,13 +296,7 @@ class ETFDetailViewModel: ObservableObject {
             // Drop a stale response so rapid range switching can't clobber a newer range.
             guard token == self.chartRequestToken, let current = self.etfData else { return }
 
-            self.etfData = light.merged(
-                into: current,
-                livePrice: self.livePriceManager.livePrice,
-                liveChange: self.livePriceManager.livePriceChange,
-                liveChangePercent: self.livePriceManager.livePriceChangePercent,
-                includeChart: includeChart
-            )
+            self.etfData = light.merged(into: current, includeChart: includeChart)
             if includeChart, !light.chartData.isEmpty {
                 self.chartDataVersion += 1
             }
@@ -339,16 +305,16 @@ class ETFDetailViewModel: ObservableObject {
         }
     }
 
-    /// Start live-price streaming + the chart-refresh timer if the market is active
-    /// and we aren't already streaming. Idempotent, so any path that paints etfData
-    /// (initial fetch OR a range change that supersedes it) can call it without
-    /// double-connecting — closing the race where a fast range tap during the initial
-    /// load left the ETF with no live price.
+    /// Start the 30-second live-slice refresh if the market is active. Idempotent — any
+    /// path that paints etfData (initial fetch OR a range change that supersedes it) can
+    /// call it, and `startChartRefreshTimer` cancels before it re-arms.
+    ///
+    /// The `!livePriceManager.isConnected` guard that opened this is gone with the socket.
+    /// It must NOT be replaced by anything that can latch: it used to mean "not streaming
+    /// yet", and the timer it guards is now the only thing refreshing the price.
     private func maybeStartStreaming() {
-        guard !livePriceManager.isConnected,
-              let status = etfData?.marketStatus,
+        guard let status = etfData?.marketStatus,
               MarketHoursUtil.shouldStreamLivePrice(for: status) else { return }
-        connectLivePrice()
         startChartRefreshTimer()
     }
 
@@ -397,19 +363,12 @@ class ETFDetailViewModel: ObservableObject {
 
     // MARK: - Live Price
 
-    func connectLivePrice() {
-        // See TickerDetailViewModel.connectLivePrice. Also drops the `?? ""` — an empty string
-        // is not a credential, and passing one only worked because the socket manager happens to
-        // skip an empty `?token=`.
-        Task { [weak self] in
-            guard let self else { return }
-            let token = await APIClient.shared.currentAuthToken()
-            self.livePriceManager.connect(ticker: self.etfSymbol, authToken: token)
-        }
+    /// Was `connectLivePrice()`. The 30s live-slice timer is the whole mechanism now.
+    func startLivePriceUpdates() {
+        startChartRefreshTimer()
     }
 
-    func disconnectLivePrice() {
-        livePriceManager.disconnect()
+    func stopLivePriceUpdates() {
         stopChartRefreshTimer()
     }
 

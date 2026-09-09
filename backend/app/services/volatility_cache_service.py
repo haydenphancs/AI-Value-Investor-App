@@ -31,6 +31,7 @@ from app.integrations.fmp import (
     get_fmp_client,
 )
 from app.services.price_volatility import _BASELINE_DAYS, _daily_returns, _std_dev_pop
+from app.services.price_window import normalize_history
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,14 @@ _mem: Dict[str, Tuple[float, Optional[float]]] = {}
 
 
 def _hist_list(historical: Any) -> List[Dict[str, Any]]:
-    """FMP /historical-price-eod/full returns a flat list or {"historical":[...]}."""
-    if isinstance(historical, list):
-        return historical
-    if isinstance(historical, dict):
-        return historical.get("historical", []) or []
-    return []
+    """FMP `historical-price-eod/full`: a flat list on some plan tiers, a
+    ``{"historical": [...]}`` dict on others.
+
+    Delegates to the shared implementation. This had been copy-pasted three times with
+    byte-identical docstrings; a fourth consumer (Phase 4's macro re-point) is what made
+    that worth collapsing. Kept as a module-level name because tests patch it.
+    """
+    return normalize_history(historical)
 
 
 def _chronological_closes(historical: Any) -> List[float]:

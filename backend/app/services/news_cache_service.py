@@ -66,7 +66,10 @@ MARKET_SCOPE = "__MARKET__"
 # but carries no symbols; the index basket supplies "S&P 500 hits resistance"
 # style coverage. Deliberately EXCLUDES `news/stock-latest`: it is a firehose of
 # small-cap earnings-call recaps that, sorted by recency, bury the market story.
-MARKET_INDEX_SYMBOLS = "SPY,QQQ,DIA,^GSPC,^IXIC"
+# The `^` entries are outside the licence and QQQ is the Nasdaq-100, not the Composite
+# this feed is about. `news/stock` is not symbol-gated so they did not break the feed,
+# but they steered it: two of five symbols contributing nothing and one the wrong index.
+MARKET_INDEX_SYMBOLS = "SPY,ONEQ,DIA,IWM"
 
 # How far back a sweeper REFRESH reaches. Must be >= the span a cold
 # `get_stock_news(limit=50)` returns (~3-4 days), or the refresh re-stamps only
@@ -92,7 +95,17 @@ def is_crypto_scope(scope: str) -> bool:
     out at the 6h TTL between views.
     """
     s = (scope or "").upper()
-    return len(s) > 3 and s.endswith(("USD", "USDT")) and s not in ("GCUSD", "SIUSD")
+    # Was a two-element literal `("GCUSD", "SIUSD")`, so CL/NG/HG/PL/PA **and every
+    # grain** matched the generic `endswith("USD")` rule and were routed to the CRYPTO
+    # news feed. Derive from the entitlement set instead, which is the one place the
+    # full commodity roster is enumerated.
+    from app.integrations.fmp_entitlements import BLOCKED_COMMODITY_SYMBOLS
+
+    return (
+        len(s) > 3
+        and s.endswith(("USD", "USDT"))
+        and s not in BLOCKED_COMMODITY_SYMBOLS
+    )
 
 
 def _sanitize_published_at(value: Any) -> Optional[str]:

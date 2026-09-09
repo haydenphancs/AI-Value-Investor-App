@@ -128,5 +128,8 @@ def test_sweeper_does_not_pass_a_narrower_window_or_limit():
 
 def test_market_index_basket_covers_sp500_and_nasdaq():
     syms = MARKET_INDEX_SYMBOLS.upper()
-    assert "SPY" in syms and "^GSPC" in syms
-    assert "QQQ" in syms and "^IXIC" in syms
+    # The `^` entries are outside the FMP licence and QQQ is the Nasdaq-100, not
+    # the Composite this feed is about — the basket is entitled ETFs only now.
+    assert "SPY" in syms and "DIA" in syms
+    assert "ONEQ" in syms, "QQQ tracks the wrong index for a Composite feed"
+    assert not [x for x in syms if x.startswith("^")], f"blocked symbols: {syms}"

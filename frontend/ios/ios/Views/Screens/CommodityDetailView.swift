@@ -164,15 +164,15 @@ struct CommodityDetailView: View {
         // Socket lifecycle, mirroring IndexDetailView. Without these the connection
         // outlives the screen and keeps ticking in the background.
         .onDisappear {
-            viewModel.disconnectLivePrice()
+            viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            viewModel.disconnectLivePrice()
+            viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             // Commodities are continuously-quoted futures, so unlike the equity screens
             // there is no market-status gate here — reconnect whenever we come forward.
-            viewModel.connectLivePrice()
+            viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {

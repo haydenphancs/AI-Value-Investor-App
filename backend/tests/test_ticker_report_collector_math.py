@@ -904,85 +904,125 @@ async def test_intraday_chart_skipped_for_typical_move():
 # ── Macro snapshot: shared cross-ticker cache ─────────────────────────
 
 
+def _macro_rows(n: int = 400, *, start: float = 100.0, step: float = 0.05):
+    """`n` daily rows ending today, NEWEST-first like the raw FMP response."""
+    from datetime import date as _date, timedelta as _td
+
+    today = _date.today()
+    return [
+        {"date": (today - _td(days=i)).isoformat(), "close": start + (n - i) * step}
+        for i in range(n)
+    ]
+
+
 class _FakeMacroFMP:
-    """Minimal FMP stand-in that counts calls, so we can prove the macro
-    snapshot is fetched once and reused — never per-ticker. (Testing rules:
-    no live FMP — inject inline.)"""
+    """FMP stand-in that counts calls, so we can prove the macro snapshot is fetched
+    once and reused — never per-ticker.
+
+    ⚠️ This used to stub `get_stock_price_change` and `get_stock_price_quote`. Neither
+    is called by production any more — and `get_stock_price_quote` never was: the
+    collector called the module-level `price_source().get_quote`, so `quote_calls` was
+    incremented by nothing and asserted by nothing. A fake that answers for a method the
+    code does not call is how a dead path stays green, which is exactly what happened to
+    this module for the whole of the enforcement window.
+    """
 
     def __init__(self) -> None:
-        self.change_calls = 0
-        self.quote_calls = 0
+        self.history_calls = 0
 
-    async def get_stock_price_change(self, sym: str) -> dict:
-        self.change_calls += 1
-        return {"5D": 1.0, "1M": 2.0, "3M": 3.0, "1Y": 4.0}
-
-    async def get_stock_price_quote(self, sym: str) -> dict:
-        self.quote_calls += 1
-        return {"price": 100.0}
+    async def get_historical_prices(self, symbol: str, from_date=None, to_date=None):
+        self.history_calls += 1
+        return _macro_rows()
 
 
-@pytest.mark.asyncio
-async def test_macro_snapshot_shared_across_tickers():
-    """The market-wide macro snapshot is fetched ONCE and reused — a second
-    ticker's report hits the shared cache with zero new FMP calls. Guards
-    the cross-ticker efficiency optimization (FMP calls + latency)."""
+class _FakeFREDClient:
+    """Stubs the FRED leg. `_fetch_macro_indicators_uncached` does a FUNCTION-SCOPED
+    `from app.integrations.fred import get_fred_client`, so that name resolves from the
+    SOURCE module on every call — patch `app.integrations.fred.get_fred_client`, not a
+    binding on the collector (see `.claude/rules/testing.md` §hermeticity)."""
+
+    is_configured = True
+
+    def __init__(self) -> None:
+        self.observation_calls = 0
+
+    async def get_observations(self, series_id: str, *, limit: int = 13):
+        self.observation_calls += 1
+        return [
+            type("_Obs", (), {"date": r["date"], "value": r["close"]})()
+            for r in _macro_rows()
+        ]
+
+
+@pytest.fixture
+def macro_fakes(monkeypatch):
+    """Both legs stubbed, both counters exposed. Also clears the module caches so the
+    tests do not inherit each other's snapshot."""
+    import app.integrations.fred as fred_mod
     from app.services.agents.ticker_report_data_collector import (
-        TickerReportDataCollector,
-        _MACRO_SYMBOLS,
-        _macro_snapshot_cache,
-        _macro_snapshot_inflight,
+        _macro_snapshot_cache, _macro_snapshot_inflight,
     )
+
+    _macro_snapshot_cache.clear()
+    _macro_snapshot_inflight.clear()
+    fmp, fred = _FakeMacroFMP(), _FakeFREDClient()
+    monkeypatch.setattr(fred_mod, "get_fred_client", lambda: fred)
+    yield fmp, fred
     _macro_snapshot_cache.clear()
     _macro_snapshot_inflight.clear()
 
-    fake = _FakeMacroFMP()
-    collector = TickerReportDataCollector(fmp=fake)
+
+@pytest.mark.asyncio
+async def test_macro_snapshot_shared_across_tickers(macro_fakes):
+    """The market-wide macro snapshot is fetched ONCE and reused — a second
+    ticker's report hits the shared cache with zero new FMP calls. Guards
+    the cross-ticker efficiency optimization (FMP calls + latency)."""
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
+
+    fmp, fred = macro_fakes
+    collector = TickerReportDataCollector(fmp=fmp)
 
     first = await collector._fetch_macro_indicators()
-    assert len(first) == len(_MACRO_SYMBOLS)
-    cold_calls = fake.change_calls
-    assert cold_calls == len(_MACRO_SYMBOLS)          # one cold fetch
+    # Assert on the IDENTIFIERS, not `len(_MACRO_SYMBOLS)`. The old assertion was
+    # self-relative: it stayed green if the tuple shrank to a single series, which is
+    # precisely the failure this module actually suffered.
+    assert {r["symbol"] for r in first} == {"WTI", "GOLD", "VOL", "UST10Y", "USD"}
+    cold_fmp, cold_fred = fmp.history_calls, fred.observation_calls
+    assert cold_fmp == 2, "GOLD + VOL are the two entitled ETF-backed series"
+    assert cold_fred == 3, "WTI + UST10Y + USD come from FRED"
 
     # A different ticker's report — must reuse the snapshot, not re-fetch.
     second = await collector._fetch_macro_indicators()
     assert second == first
-    assert fake.change_calls == cold_calls            # zero extra FMP calls
-
-    _macro_snapshot_cache.clear()
-    _macro_snapshot_inflight.clear()
+    assert (fmp.history_calls, fred.observation_calls) == (cold_fmp, cold_fred)
 
 
 @pytest.mark.asyncio
-async def test_macro_snapshot_dedups_concurrent_fetches():
+async def test_macro_snapshot_dedups_concurrent_fetches(macro_fakes):
     """A burst of concurrent reports must trigger ONE underlying fetch via
     the `_inflight` dedup, not one per caller (thundering-herd guard)."""
-    from app.services.agents.ticker_report_data_collector import (
-        TickerReportDataCollector,
-        _MACRO_SYMBOLS,
-        _macro_snapshot_cache,
-        _macro_snapshot_inflight,
-    )
-    _macro_snapshot_cache.clear()
-    _macro_snapshot_inflight.clear()
+    from app.services.agents.ticker_report_data_collector import TickerReportDataCollector
 
-    class _SlowFakeFMP(_FakeMacroFMP):
-        async def get_stock_price_change(self, sym: str) -> dict:
-            await asyncio.sleep(0)  # yield so callers overlap before caching
-            return await super().get_stock_price_change(sym)
+    fmp, fred = macro_fakes
 
-    fake = _SlowFakeFMP()
-    collector = TickerReportDataCollector(fmp=fake)
+    class _SlowFMP(type(fmp)):
+        async def get_historical_prices(self, symbol, from_date=None, to_date=None):
+            # A real suspension point, so the callers genuinely overlap before the
+            # first one writes the cache. Without it the gather runs each coroutine to
+            # completion in turn and the dedup is never exercised.
+            await asyncio.sleep(0)
+            return await super().get_historical_prices(symbol, from_date, to_date)
+
+    slow = _SlowFMP()
+    collector = TickerReportDataCollector(fmp=slow)
 
     results = await asyncio.gather(
         *[collector._fetch_macro_indicators() for _ in range(5)]
     )
     # Five concurrent callers → exactly one full fetch, not five.
-    assert fake.change_calls == len(_MACRO_SYMBOLS)
+    assert slow.history_calls == 2 and fred.observation_calls == 3
     assert all(r == results[0] for r in results)
-
-    _macro_snapshot_cache.clear()
-    _macro_snapshot_inflight.clear()
+    assert {r["symbol"] for r in results[0]} == {"WTI", "GOLD", "VOL", "UST10Y", "USD"}
 
 
 # ── Sector aggregates: HHI math ───────────────────────────────────────
@@ -2555,7 +2595,7 @@ def test_macro_oil_spike_emits_high_severity_energy():
     """Oil up 25% over 3 months → HIGH-severity energy risk (bands
     10/20/35/50 → 25 lands in HIGH)."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", change_3m_pct=25.0),
+        _ind("WTI", change_3m_pct=25.0),
     ])
     assert len(factors) == 1
     f = factors[0]
@@ -2571,7 +2611,7 @@ def test_macro_oil_drop_emits_under_magnitude_band():
     bands surface it as a risk factor (downside oil shocks signal
     demand collapse / disinflation surprise, both market-moving)."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", change_3m_pct=-25.0),
+        _ind("WTI", change_3m_pct=-25.0),
     ])
     assert len(factors) == 1
     assert factors[0]["severity"] == "high"
@@ -2581,7 +2621,7 @@ def test_macro_oil_drop_emits_under_magnitude_band():
 def test_macro_oil_small_move_low_severity():
     """3% oil move is normal noise — no card emitted (dead-band)."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", change_3m_pct=3.0),
+        _ind("WTI", change_3m_pct=3.0),
     ])
     assert factors == []
 
@@ -2589,7 +2629,7 @@ def test_macro_oil_small_move_low_severity():
 def test_macro_gold_rally_signals_flight_to_safety():
     """Gold up 5% over 3 months → flight-to-safety, currency category."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("GCUSD", change_3m_pct=5.0),
+        _ind("GOLD", change_3m_pct=5.0),
     ])
     assert any(f["category"] == "currency" for f in factors)
 
@@ -2597,50 +2637,83 @@ def test_macro_gold_rally_signals_flight_to_safety():
 def test_macro_gold_quiet_does_not_emit():
     """Sub-3% 3M gold move is too quiet to justify a card."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("GCUSD", change_3m_pct=1.0),
+        _ind("GOLD", change_3m_pct=1.0),
     ])
     assert factors == []
 
 
-def test_macro_copper_decline_signals_demand_weakness():
-    """Copper down 10% MoM → industrial demand weakness, supply_chain category."""
+def test_macro_copper_factor_is_gone_and_stays_gone():
+    """"Industrial Demand Weakness" was REMOVED, not re-pointed.
+
+    FMP 402s `HGUSD` and copper's only entitled proxies are futures-based, whose roll
+    drag makes them a different asset (measured: CPER +11pp vs copper over 5.5 years;
+    the same structure gives USO +202pp vs WTI and UNG −70pp vs Henry Hub). FRED's
+    copper series is monthly, IMF-copyrighted and ~2 months stale.
+
+    This asserts the DROP rather than deleting the tests, so re-adding a copper card on
+    a lying proxy fails the build instead of passing silently."""
+    for row in (_ind("HGUSD", change_1m_pct=-10.0), _ind("CPER", change_1m_pct=-10.0)):
+        assert _build_macro_risk_factors_from_indicators([row]) == []
+
+    import inspect
+    from app.services.agents import ticker_report_data_collector as M
+
+    src = "\n".join(
+        l for l in inspect.getsource(M._build_macro_risk_factors_from_indicators).splitlines()
+        if not l.strip().startswith("#")
+    )
+    assert "supply_chain" not in src, "the copper/industrial-demand factor is back"
+
+
+def test_macro_volatility_level_emits_volatility_card():
+    """SPY REALIZED volatility at 30 → HIGH-stress regime (bands 11/18.5/28/50).
+
+    The bands moved with the quantity: this used to read the Cboe VIX (implied) at
+    16/22/30/40. Realized and implied are not interchangeable — measured correlation on
+    levels is only +0.35 — so the bands were percentile-matched against VIXCLS over
+    2016→2026 rather than carried across. A VIX-era 32 would now be only 'elevated'."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("HGUSD", change_1m_pct=-10.0),
-    ])
-    assert any(f["category"] == "supply_chain" for f in factors)
-
-
-def test_macro_copper_rally_does_not_emit():
-    """Copper up is good for industrial demand; no risk card."""
-    factors = _build_macro_risk_factors_from_indicators([
-        _ind("HGUSD", change_1m_pct=8.0),
-    ])
-    assert factors == []
-
-
-def test_macro_vix_level_emits_volatility_card():
-    """VIX at 32 → HIGH-stress regime (bands 16/22/30/40 → 32 ≥ 30).
-    Note: the rework switched from % Δ to absolute level — a 35→36
-    reading is HIGH stress even though the delta is invisible."""
-    factors = _build_macro_risk_factors_from_indicators([
-        _ind("^VIX", level=32.0, change_1m_pct=10.0),
+        _ind("VOL", level=30.0, change_1m_pct=10.0),
     ])
     assert len(factors) == 1
     assert factors[0]["severity"] in ("high", "severe")
+    assert factors[0]["category"] == "volatility"
+
+
+def test_the_volatility_card_never_calls_itself_the_vix():
+    """Printing a Cboe index level is display of licensed IP; FRED's VIXCLS reprint
+    permission runs to FRED, not to us. The card must name what it actually measured."""
+    factors = _build_macro_risk_factors_from_indicators([
+        _ind("VOL", level=30.0, change_1m_pct=10.0),
+    ])
+    desc = factors[0]["description"]
+    assert "VIX" not in desc, f"the card still claims to be the VIX: {desc!r}"
+    assert "realized" in desc.lower() and "30.0%" in desc
+
+
+def test_a_calm_realized_reading_emits_nothing():
+    """8% realized (the reading on the day this shipped) is below the 11 floor."""
+    assert _build_macro_risk_factors_from_indicators([
+        _ind("VOL", level=8.0, change_1m_pct=-40.0),
+    ]) == []
 
 
 def test_macro_treasury_yield_jump_emits_rate_risk():
     """10Y Treasury 3-mo move ≥8% trips the FMP-side rate factor."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("^TNX", change_3m_pct=10.0),
+        _ind("UST10Y", change_3m_pct=10.0),
     ])
     assert any(f["category"] == "interest_rates" for f in factors)
 
 
-def test_macro_dxy_strength_signals_translation_drag():
-    """Dollar up 4% over 3 months → ELEV multinational FX risk."""
+def test_macro_dollar_strength_signals_translation_drag():
+    """Broad dollar up 4% over 3 months → multinational FX risk.
+
+    Bands were re-derived for the BROAD trade-weighted index (26 currencies), which is
+    less volatile than DXY (6): the old 2/5/8/12 land at the 56.7/93.6/99.8/100.0th
+    percentiles here, i.e. the top two tiers become unreachable."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("DXY", change_3m_pct=4.0),
+        _ind("USD", change_3m_pct=4.0),
     ])
     assert any(f["category"] == "currency" for f in factors)
 
@@ -2649,7 +2722,7 @@ def test_macro_indicator_with_missing_change_skipped():
     """Indicator without any change/level fields is silently skipped —
     better than emitting a fake risk."""
     factors = _build_macro_risk_factors_from_indicators([
-        {"symbol": "CLUSD", "level": None, "change_1m_pct": None,
+        {"symbol": "WTI", "level": None, "change_1m_pct": None,
          "change_3m_pct": None, "change_1y_pct": None, "change_5d_pct": None},
     ])
     assert factors == []
@@ -2660,16 +2733,18 @@ def test_macro_full_basket_realistic_scenario():
     risk factors covering energy, rates, vol — confirming the basket
     fans out across categories rather than collapsing to one."""
     factors = _build_macro_risk_factors_from_indicators([
-        _ind("CLUSD", change_3m_pct=22.0),       # oil bid → HIGH
-        _ind("GCUSD", change_3m_pct=10.0),       # gold flight → HIGH
-        _ind("HGUSD", change_1m_pct=-12.0),      # copper weakness → HIGH
-        _ind("^VIX", level=28.0,                # vol elevated
+        _ind("WTI", change_3m_pct=22.0),         # oil bid → HIGH
+        _ind("GOLD", change_3m_pct=10.0),        # gold flight → HIGH
+        _ind("VOL", level=28.0,                  # realized vol → HIGH band floor
              change_1m_pct=20.0),
-        _ind("^TNX", change_3m_pct=18.0),        # rates higher → HIGH
-        _ind("DXY", change_3m_pct=6.0),          # USD stronger → HIGH
-        _ind("SIUSD", change_1m_pct=5.0),        # silver — no rule
+        _ind("UST10Y", change_3m_pct=18.0),      # rates higher → HIGH
+        _ind("USD", change_3m_pct=6.0),          # dollar stronger → HIGH
+        _ind("HGUSD", change_1m_pct=-12.0),      # copper — factor REMOVED, must be inert
+        _ind("SIUSD", change_1m_pct=5.0),        # silver — never had a rule
     ])
-    assert 4 <= len(factors) <= 6
+    # Five live series, and the two retired ones must contribute nothing.
+    assert len(factors) == 5, [f["title"] for f in factors]
+    assert "supply_chain" not in {f["category"] for f in factors}
     categories = {f["category"] for f in factors}
     assert "energy" in categories
     assert "interest_rates" in categories
@@ -2906,7 +2981,7 @@ def test_fred_blocks_fmp_yield_curve_when_both_emit():
         _fred("T10Y2Y", latest=-0.45),
     ])
     fmp = _build_macro_risk_factors_from_indicators([
-        _ind("^TNX", 8.0),
+        _ind("UST10Y", 8.0),
     ])
     merged = _merge_macro_risk_factors(fred, fmp)
     titles = [f["title"] for f in merged]

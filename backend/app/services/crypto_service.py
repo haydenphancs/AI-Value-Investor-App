@@ -931,26 +931,57 @@ class CryptoService:
         max_supply_cg = md.get("max_supply")  # None if no cap
         fdv = _usd("fully_diluted_valuation")
 
-        # 52-week from historical data (more accurate than ATH/ATL)
-        year_high = 0
-        year_low = 0
+        # 52-week band, from the ONLY source that can express a 52-week window:
+        # the daily history. `None` when it cannot be derived — never a stand-in.
+        #
+        # ⚠️ There was a fallback to CoinGecko's ALL-TIME `ath`/`atl` here, for the
+        # case where `historical` came back empty. That case was rare when it was
+        # written and is now the ONLY case: FMP 402s every `…USD` crypto pair since
+        # enforcement went live 2026-09-03, so `historical` is always empty and the
+        # all-time figures became the only ones ever shown — under a "52-Week" label.
+        # Bitcoin's atl is $67.81, set in 2013, which rendered live as
+        # "52-Week Low $67.81 / From 52W Low +115,804.73% / 52-Week % Range
+        # 185,831.28%". An all-time extreme is not a 52-week extreme, and no TTL or
+        # refresh can make it one — the WRITER has to refuse, so it does.
+        #
+        # An unknown number is None, never a substitute (price_service.py:37-45).
+        # `_fmt(None)` and `_pct(None)` already render "—", so the five rows degrade
+        # to honest em-dashes instead of disappearing (a missing row reads as a
+        # layout bug; an em-dash reads as "we don't know", which is the truth).
+        # CoinGecko CAN serve a real 52-week window via /coins/{id}/market_chart —
+        # that is Phase 5, deliberately not reached for here.
+        year_high: Optional[float] = None
+        year_low: Optional[float] = None
         if historical:
+            from app.services.chart_helper import _finite_or_none
             one_year_ago = (today - timedelta(days=365)).isoformat()
             year_prices = [
                 p for p in historical
                 if (p.get("date") or "") >= one_year_ago
             ]
             if year_prices:
-                highs = [p.get("high", 0) or 0 for p in year_prices]
-                lows = [p.get("low", 0) or 0 for p in year_prices if (p.get("low", 0) or 0) > 0]
-                year_high = max(highs) if highs else 0
-                year_low = min(lows) if lows else 0
+                # Finite-guard BOTH ends. A NaN high is truthy and slips past a bare
+                # `or 0`, and `max()` propagates it into the response as an invalid
+                # JSON `NaN` token — the decode crash this file already guards
+                # against in `_compute_return`.
+                highs = [
+                    h for h in (_finite_or_none(p.get("high")) for p in year_prices)
+                    if h is not None and h > 0
+                ]
+                lows = [
+                    lo for lo in (_finite_or_none(p.get("low")) for p in year_prices)
+                    if lo is not None and lo > 0
+                ]
+                year_high = max(highs) if highs else None
+                year_low = min(lows) if lows else None
 
-        # Fallback to CoinGecko ATH/ATL if no historical data
-        if year_high == 0:
-            year_high = _usd("ath")
-        if year_low == 0:
-            year_low = _usd("atl")
+        if year_high is None or year_low is None:
+            logger.warning(
+                "Crypto %s: no 52-week window derivable from %d historical rows — "
+                "omitting the 52-week statistics rather than substituting all-time "
+                "ATH/ATL, which would mislabel a multi-year extreme as 52-week",
+                symbol, len(historical or []),
+            )
 
         # Avg volume from FMP (CoinGecko doesn't provide 30D avg directly)
         # Compute 30-day average volume from historical data
@@ -1339,22 +1370,37 @@ class CryptoService:
                 avg_volume=avg_volume,
                 symbol=symbol,
             )),
-            # Column 3: Historical (52-week from FMP historical + CoinGecko fallback)
+            # Column 3: Historical (52-week, from daily history only — see above)
             KeyStatisticsGroupResponse(statistics=[
+                # `year_high` / `year_low` are Optional now — None means the 52-week
+                # window could not be derived, and every row below renders "—".
+                # `is not None and > 0` rather than a bare truthiness test so the
+                # guard survives a mutation that reintroduces a 0.0 sentinel.
                 KeyStatisticItem(label="52-Week High", value=_fmt(year_high)),
                 KeyStatisticItem(
                     label="From 52W High",
-                    value=_pct(((price - year_high) / year_high * 100) if year_high > 0 else None),
+                    value=_pct(
+                        ((price - year_high) / year_high * 100)
+                        if year_high is not None and year_high > 0 else None
+                    ),
                 ),
                 KeyStatisticItem(label="52-Week Low", value=_fmt(year_low)),
                 KeyStatisticItem(
                     label="From 52W Low",
-                    value=_pct(((price - year_low) / year_low * 100) if year_low > 0 else None),
+                    value=_pct(
+                        ((price - year_low) / year_low * 100)
+                        if year_low is not None and year_low > 0 else None
+                    ),
                     is_highlighted=True,
                 ),
                 KeyStatisticItem(
                     label="52-Week % Range",
-                    value=f"{((year_high - year_low) / year_low * 100):.2f}%" if year_low > 0 and year_high > 0 else "—",
+                    value=(
+                        f"{((year_high - year_low) / year_low * 100):.2f}%"
+                        if year_low is not None and year_low > 0
+                        and year_high is not None and year_high > 0
+                        else "—"
+                    ),
                 ),
             ]),
         ]

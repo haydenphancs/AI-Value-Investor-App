@@ -54,7 +54,7 @@ enum InvestorLevel: String, CaseIterable {
     /// The ink `fillColor` requires, mirroring that switch CASE FOR CASE.
     /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
     /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
-    /// serve both — near-black on frozen `primaryFill` is 3.35:1 and white on the
+    /// serve both — near-black on frozen `primaryFill` is 3.81:1 and white on the
     /// adaptive dark arms is 2.28/2.77.
     var fillInk: Color {
         switch self {
@@ -151,7 +151,8 @@ enum MoneyMoveCategory: String, CaseIterable {
     /// foreground call sites, e.g. TrendingAnalysisDetailView), and the text-safe values
     /// LIGHTEN in dark: white on `gain` #22C55E is 2.28:1, on `loss` #F87171 2.77:1, on
     /// `alertPurple` #C084FC 2.64:1 — all far under the 4.5 floor. The `*Fill` tokens keep
-    /// the light value in both modes, giving 5.42 / 5.55 / 6.98. Pair this with
+    /// the light value in both modes, giving 5.42 / 5.55; `alertPurpleFill` is frozen at an
+    /// independently calibrated 4.65. Pair this with
     /// `AppColors.textOnAccent`, never `.white` or `textPrimary` directly.
     var iconFillColor: Color {
         switch self {
@@ -181,7 +182,7 @@ enum MoneyMoveCategory: String, CaseIterable {
     /// The ink `iconFillColor` requires, mirroring that switch CASE FOR CASE.
     /// `gainFill`/`lossFill` are ADAPTIVE (bright in dark) and need near-black
     /// `textOnFill`; the frozen fills need white `textOnAccent`. One ink cannot
-    /// serve both — near-black on frozen `primaryFill` is 3.35:1 and white on the
+    /// serve both — near-black on frozen `primaryFill` is 3.81:1 and white on the
     /// adaptive dark arms is 2.28/2.77.
     var iconFillInk: Color {
         switch self {

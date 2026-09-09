@@ -1255,10 +1255,32 @@ class CommodityService:
         # Rebuilt from the persisted bundle. `_build_performance` baselines off the last
         # historical close (never the live quote), so its output is a pure function of the
         # history and round-trips through Tier 2 unchanged.
-        performance_periods = [
-            PerformancePeriodResponse(**row)
-            for row in (derived.get("performance_periods") or [])
-        ]
+        # Per-row, not a comprehension that raises.
+        #
+        # These rows come back from the Supabase Tier-2 bundle, so their shape is whatever
+        # the build that WROTE them used. `PerformancePeriodResponse(**row)` raises on a
+        # non-dict, a missing required field, or an unexpected key — and unwrapped, that
+        # escapes `_build_commodity_detail` and 500s the whole commodity screen for every
+        # cached symbol until the TTL expires. Adding one required field to this model
+        # would do it on the very next deploy.
+        #
+        # Every sibling cache (growth, profit_power, holders, the snapshot services)
+        # already wraps its rehydration so a shape mismatch degrades instead of raising —
+        # see the payload-version note in `valuation_snapshot_service`. This one did not.
+        performance_periods = []
+        _bad_rows = 0
+        for row in (derived.get("performance_periods") or []):
+            try:
+                performance_periods.append(PerformancePeriodResponse(**row))
+            except Exception:
+                _bad_rows += 1
+        if _bad_rows:
+            logger.warning(
+                "Commodity %s: %d persisted performance row(s) no longer match "
+                "PerformancePeriodResponse — omitted. If the whole section is empty after "
+                "a deploy, the cached bundle predates a schema change and needs a bump.",
+                symbol, _bad_rows,
+            )
 
         # ── Step 6: Build news ────────────────────────────────────
         news_articles = []

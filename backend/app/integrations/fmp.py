@@ -2285,6 +2285,9 @@ class FMPClient:
         if not tickers:
             return []
         sem = asyncio.Semaphore(10)
+        # Collected rather than logged per-symbol: this fans out over up to 50 tickers, so
+        # a rate-limited batch would otherwise emit 50 near-identical lines.
+        failures: List[str] = []
 
         async def _fetch_one(symbol: str) -> Optional[Dict]:
             async with sem:
@@ -2294,15 +2297,32 @@ class FMPClient:
                     )
                     if isinstance(data, list) and data:
                         return _normalize_profile(data[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Was a bare `except Exception: pass`. That is the one thing the
+                    # rulebook forbids outright, and it bites hardest exactly here: an FMP
+                    # 429 (or an expired key) fails EVERY symbol, this returns `[]`, and
+                    # the callers cannot tell "these tickers have no profiles" from "we
+                    # could not reach FMP at all". Silent, and indistinguishable from a
+                    # legitimate empty answer.
+                    failures.append(f"{symbol.upper()}:{type(e).__name__}")
                 return None
 
         results = await asyncio.gather(
             *[_fetch_one(t) for t in tickers[:50]],
             return_exceptions=True,
         )
-        return [r for r in results if isinstance(r, dict)]
+        out = [r for r in results if isinstance(r, dict)]
+        if failures:
+            asked = len(tickers[:50])
+            # WARNING when the batch mostly failed (a systemic upstream problem), INFO for
+            # the ordinary case of a few unprofiled symbols.
+            log = logger.warning if len(failures) >= max(2, asked // 2) else logger.info
+            log(
+                "get_company_profiles_batch: %d/%d profile fetches failed (%s%s)",
+                len(failures), asked, ", ".join(failures[:8]),
+                ", ..." if len(failures) > 8 else "",
+            )
+        return out
 
     # ── Stock peers ────────────────────────────────────────────────
 

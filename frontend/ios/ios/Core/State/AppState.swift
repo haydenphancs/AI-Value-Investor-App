@@ -997,11 +997,19 @@ final class AppState {
     }
 
     private func performCreditsRefresh() async {
+        // Captured BEFORE the request. `invalidateIdentity` bumps this on sign-out and on
+        // an account switch, so a refresh already in flight cannot write the ENDED
+        // session's balance back into `user.credits` after `signOut()` has reset `user`.
+        // Credits are money-adjacent — the next account (or the guest UI) would be shown
+        // the previous user's balance, and a purchase decision made against it.
+        let identity = identityGeneration
         do {
-            user.credits = try await apiClient.request(
+            let credits = try await apiClient.request(
                 endpoint: .getUserCredits,
                 responseType: CreditInfo.self
             )
+            guard identity == identityGeneration else { return }
+            user.credits = credits
         } catch {
             Analytics.shared.track(.backgroundSyncFailed, [
                 "op": .string("credits_refresh"),

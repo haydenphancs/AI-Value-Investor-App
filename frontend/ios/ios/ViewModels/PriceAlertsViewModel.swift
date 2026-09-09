@@ -47,11 +47,27 @@ final class PriceAlertsViewModel: ObservableObject {
 
     var parsedThreshold: Double? {
         // Accept a leading "$" or a trailing "%" — people type what the field means.
-        let cleaned = draftThreshold
+        //
+        // ⚠️ Separators are LOCALE-dependent, and a hardcoded `,`-is-thousands rule is
+        // wrong for most of the world. The field is a `.decimalPad`, which renders the
+        // locale's own decimal separator — so on a German/French/Spanish device the user
+        // types "1,5" meaning one-and-a-half, the old code stripped the comma to "15",
+        // and `Double("15")` parsed cleanly. The alert was then silently created at TEN
+        // TIMES the intended threshold, and simply never fired where they expected.
+        //
+        // Strip the GROUPING separator and normalise the DECIMAL one, both read from the
+        // current locale. In en_US that is byte-identical to the old behaviour
+        // (grouping ",", decimal "."), so nothing changes for existing users.
+        let decimalSep = Locale.current.decimalSeparator ?? "."
+        let groupingSep = Locale.current.groupingSeparator ?? ","
+        var cleaned = draftThreshold
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: "%", with: "")
-            .replacingOccurrences(of: ",", with: "")
             .trimmingCharacters(in: .whitespaces)
+        cleaned = cleaned.replacingOccurrences(of: groupingSep, with: "")
+        if decimalSep != "." {
+            cleaned = cleaned.replacingOccurrences(of: decimalSep, with: ".")
+        }
         guard let value = Double(cleaned), value.isFinite, value > 0 else { return nil }
         // Mirrors the backend's own ceiling so the refusal happens before a round trip.
         if draftKind.isPercent && value > 100 { return nil }

@@ -294,8 +294,12 @@ class TrackingViewModel: ObservableObject {
         case .dateAdded:
             // "Date added" now means position in the active portfolio.
             let order = activeTickerOrder
-            let positions = Dictionary(uniqueKeysWithValues:
-                order.enumerated().map { ($1, $0) })
+            // first-wins rather than `uniqueKeysWithValues:`, which TRAPS on a duplicate
+            // key. A repeated ticker in `order` would crash the sort; the earliest
+            // position is the right one to keep.
+            let positions = Dictionary(
+                order.enumerated().map { ($1, $0) },
+                uniquingKeysWith: { first, _ in first })
             assets.sort { lhs, rhs in
                 let l = positions[lhs.ticker.uppercased()] ?? Int.max
                 let r = positions[rhs.ticker.uppercased()] ?? Int.max
@@ -419,8 +423,11 @@ class TrackingViewModel: ObservableObject {
     /// calculator needs but the per-portfolio item doesn't carry.
     var portfolioDiversificationScore: DiversificationScore? {
         guard let active = portfolioStore.activePortfolio else { return nil }
-        let assetsByTicker = Dictionary(uniqueKeysWithValues:
-            trackedAssets.map { ($0.ticker.uppercased(), $0) })
+        // first-wins: `.uppercased()` COLLAPSES case-differing rows ("brk.b" and
+        // "BRK.B") onto one key, and `uniqueKeysWithValues:` traps on that.
+        let assetsByTicker = Dictionary(
+            trackedAssets.map { ($0.ticker.uppercased(), $0) },
+            uniquingKeysWith: { first, _ in first })
 
         let holdings: [PortfolioHolding] = active.items.compactMap { item in
             guard item.isHolding else { return nil }

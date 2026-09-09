@@ -326,10 +326,10 @@ class TechnicalAnalysisService:
         # — a hard 500, not a graceful degrade — and `_daily_to_weekly`'s
         # `.agg({"high":"max", ...})` would too.
         historical: List[Dict[str, Any]] = []
-        from app.services.asset_class import detect_asset_class
+        from app.services.asset_class import uses_coingecko_price
 
         _is_crypto_source = (
-            detect_asset_class(ticker) == "crypto"
+            uses_coingecko_price(ticker)
             and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
         )
         if _is_crypto_source:

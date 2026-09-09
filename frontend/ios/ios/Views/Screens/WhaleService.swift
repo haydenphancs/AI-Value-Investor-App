@@ -41,6 +41,17 @@ class WhaleService: ObservableObject {
     /// points at the most recent task (completed tasks are harmless to retain).
     private var followTasks: [String: Task<Void, Never>] = [:]
 
+    /// Bumped by `reset()`. An in-flight follow request captures the value it started
+    /// under and refuses to persist if it no longer matches.
+    ///
+    /// Cancellation alone is NOT enough: a task already past its `await` still runs its
+    /// completion branch, and that branch calls `saveFollowedWhales()`. So a Follow tapped
+    /// by account A that lands after A signs out re-wrote A's id into the device-global
+    /// `followedWhaleIds` key that `reset()` had just removed — handing it to account B on
+    /// the next sign-in. That is precisely the bleed `reset()` exists to stop
+    /// (auth.md §7), reintroduced through the back door.
+    private var identityEpoch = 0
+
     private init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
         loadFollowedWhales()
@@ -97,9 +108,12 @@ class WhaleService: ObservableObject {
         // Backend sync — chained AFTER any in-flight mutation for THIS whale so
         // the requests are strictly ordered and the last server response wins.
         let previousTask = followTasks[whaleId]
+        let epoch = identityEpoch
         followTasks[whaleId] = Task { [weak self] in
             await previousTask?.value
             guard let self else { return }
+            // The session that started this request must still be the current one.
+            guard self.identityEpoch == epoch else { return }
             do {
                 let endpoint: APIEndpoint = newFollowing
                     ? .followWhale(whaleId: whaleId)
@@ -112,6 +126,9 @@ class WhaleService: ObservableObject {
                 // Reconcile to the authoritative server state instead of
                 // trusting the optimistic guess (which a later toggle may have
                 // already superseded).
+                // Re-check AFTER the await: the sign-out may have landed while the
+                // request was in flight.
+                guard self.identityEpoch == epoch else { return }
                 if response.isFollowing {
                     self.followedWhaleIds.insert(whaleId)
                 } else {
@@ -132,6 +149,9 @@ class WhaleService: ObservableObject {
                 // Revert, and TELL THE USER. The revert was always correct; the silence was the
                 // bug — a `print` in a release build is indistinguishable from the app deciding
                 // on its own that the tap didn't happen.
+                // Same guard on the revert: it persists too, so an ex-user's revert
+                // would re-create the key just as the success branch would.
+                guard self.identityEpoch == epoch else { return }
                 if wasFollowing {
                     self.followedWhaleIds.insert(whaleId)
                 } else {
@@ -198,6 +218,11 @@ class WhaleService: ObservableObject {
     /// reconcile them. Identical in shape to the Learn-store bleed, so it is cleared from the
     /// same funnel: `AppState.discardDataForEndedSession()`.
     func reset() {
+        // Bump FIRST, so any request already in flight fails its epoch check and cannot
+        // re-persist the ended session's follows after the key below is removed.
+        identityEpoch &+= 1
+        for task in followTasks.values { task.cancel() }
+        followTasks.removeAll()
         followedWhaleIds = []
         UserDefaults.standard.removeObject(forKey: "followedWhaleIds")
     }

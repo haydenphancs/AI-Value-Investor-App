@@ -352,7 +352,14 @@ struct ResearchReport: Identifiable, Codable {
     }
 
     var formattedFairValue: String {
-        "$\(Int(fairValue))"
+        // `Int(Double)` TRAPS on NaN, ±Infinity and anything outside Int64 — and
+        // `fairValue` is decoded straight off the wire (`try c.decode(Double.self)`),
+        // so a degenerate model output would crash the Home report card rather than
+        // render badly. `finiteOrNil` is the app's existing degrade for exactly this.
+        guard let v = fairValue.finiteOrNil, v.magnitude < 9_007_199_254_740_992 else {
+            return "—"
+        }
+        return "$\(Int(v))"
     }
 
     var timeAgo: String {

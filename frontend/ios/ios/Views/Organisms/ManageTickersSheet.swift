@@ -31,9 +31,12 @@ struct ManageTickersSheet: View {
     /// the symbol when the asset feed hasn't populated this ticker yet.
     private var companyNames: [String: String] {
         Dictionary(
-            uniqueKeysWithValues: viewModel.trackedAssets.map {
+            viewModel.trackedAssets.map {
                 ($0.ticker.uppercased(), $0.companyName)
-            }
+            },
+            // first-wins: `.uppercased()` can collapse case-differing rows onto one key,
+            // and `uniqueKeysWithValues:` traps on the duplicate.
+            uniquingKeysWith: { first, _ in first }
         )
     }
 

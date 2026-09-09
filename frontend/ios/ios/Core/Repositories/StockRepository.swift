@@ -1503,7 +1503,9 @@ struct MovingAverageIndicatorDTO: Codable {
     func toDisplayModel() -> MovingAverageIndicator {
         MovingAverageIndicator(
             name: name,
-            value: value ?? 0,
+            // Pass the null THROUGH. `?? 0` turned "not computable" into the price
+            // level "0.00" — see MovingAverageIndicator.formattedValue.
+            value: value,
             signal: IndicatorSignal(rawValue: signal) ?? .neutral
         )
     }
@@ -1517,7 +1519,9 @@ struct OscillatorIndicatorDTO: Codable {
     func toDisplayModel() -> OscillatorIndicator {
         OscillatorIndicator(
             name: name,
-            value: value ?? 0,
+            // Pass the null THROUGH. `?? 0` turned "not computable" into the price
+            // level "0.00" — see MovingAverageIndicator.formattedValue.
+            value: value,
             signal: IndicatorSignal(rawValue: signal) ?? .neutral
         )
     }

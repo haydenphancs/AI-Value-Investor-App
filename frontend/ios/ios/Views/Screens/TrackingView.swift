@@ -1525,7 +1525,18 @@ private struct PortfolioConfigRow: Identifiable {
     /// Render a number without a trailing ".0" so a clean integer round-trips
     /// as "100" instead of "100.0" in the text field.
     private static func formatNumber(_ value: Double) -> String {
-        if value.truncatingRemainder(dividingBy: 1) == 0 {
+        // `Int(Double)` TRAPS — it is not a failable conversion. It crashes on NaN, on
+        // ±Infinity, and on anything outside Int64's range, and none of those are
+        // hypothetical here: the Shares field is a `.decimalPad` with no magnitude limit,
+        // so typing twenty digits (1e20) and switching to the Dollars segment ran
+        // `String(Int(1e20))` and killed the app from inside the config sheet.
+        //
+        // 2^53 is the bound rather than Int64.max because past it a Double cannot even
+        // represent consecutive integers, so `String(value)` is the more honest rendering
+        // as well as the safe one.
+        guard value.isFinite else { return "" }
+        if value.truncatingRemainder(dividingBy: 1) == 0,
+           value.magnitude < 9_007_199_254_740_992 {   // 2^53
             return String(Int(value))
         }
         return String(value)
@@ -1603,8 +1614,10 @@ struct PortfolioConfigSheet: View {
                                 .padding(.horizontal, AppSpacing.lg)
 
                             VStack(spacing: AppSpacing.sm) {
-                                let priceByTicker = Dictionary(uniqueKeysWithValues:
-                                    viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.price) })
+                                // first-wins — `.uppercased()` can collapse two rows onto one key.
+                                let priceByTicker = Dictionary(
+                                    viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.price) },
+                                    uniquingKeysWith: { first, _ in first })
                                 ForEach($rows) { $row in
                                     PortfolioConfigRowView(
                                         row: $row,
@@ -1687,9 +1700,12 @@ struct PortfolioConfigSheet: View {
             rows = []
             return
         }
-        let companyByTicker = Dictionary(uniqueKeysWithValues:
-            viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.companyName) })
-        let existingByTicker = Dictionary(uniqueKeysWithValues: rows.map { ($0.ticker, $0) })
+        // first-wins on both — see the note above; a duplicate key traps the sheet open.
+        let companyByTicker = Dictionary(
+            viewModel.trackedAssets.map { ($0.ticker.uppercased(), $0.companyName) },
+            uniquingKeysWith: { first, _ in first })
+        let existingByTicker = Dictionary(
+            rows.map { ($0.ticker, $0) }, uniquingKeysWith: { first, _ in first })
         rows = active.items.map { item in
             if let existing = existingByTicker[item.ticker] {
                 return existing

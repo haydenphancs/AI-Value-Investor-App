@@ -3,11 +3,16 @@ Shared chart data fetching — handles intraday, daily, and aggregated intervals
 for all asset types (stocks, crypto, ETFs, indices, commodities).
 """
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.integrations.fmp import FMPClient
+from app.services.asset_class import uses_coingecko_price
+
+logger = logging.getLogger(__name__)
 from app.utils.market_hours import US_MARKET_EARLY_CLOSES
 
 
@@ -366,6 +371,53 @@ async def _fetch_all_daily(fmp: FMPClient, symbol: str) -> List[Dict]:
     return deduped
 
 
+async def _fetch_crypto_chart_data(
+    symbol: str, range_code: str, resolved_interval: str
+) -> List[Dict[str, Any]]:
+    """Chart rows for a crypto pair, from CoinGecko, in the FMP row shape.
+
+    Mirrors `crypto_service`'s own branch so both surfaces draw the SAME series:
+    intraday ranges take `market_chart?days=1|7` (5-minute / hourly), everything else
+    takes the daily series windowed by `daily_range_days`.
+
+    ⚠️ Branch on the RANGE, not on `resolved_interval != "daily"`: `DEFAULT_INTERVALS`
+    maps 5Y→"weekly" and ALL→"monthly", so an interval test sends those down the
+    intraday path and serves SEVEN DAYS of hourly bars under a five-year label.
+
+    Returns [] rather than raising when CoinGecko cannot serve it — an empty chart is
+    the same degrade every other failure in this function produces.
+    """
+    from datetime import date as _date
+
+    from app.services.coingecko_adapter import crypto_base_symbol, market_chart_to_rows
+    from app.integrations.coingecko import get_coingecko_client
+
+    base = crypto_base_symbol(symbol)
+    intraday_days = {"1D": 1, "1W": 7}.get(range_code)
+    # CoinGecko Basic caps history at CRYPTO_HISTORY_YEARS; asking past it is refused
+    # locally by the client rather than spending a call.
+    cap_days = max(1, int(getattr(settings, "CRYPTO_HISTORY_YEARS", 2)) * 365)
+    days = intraday_days if intraday_days else min(daily_range_days(range_code), cap_days)
+
+    try:
+        payload = await get_coingecko_client().get_market_chart(
+            base, days, interval=None if intraday_days else "daily"
+        )
+    except Exception as e:
+        logger.warning(
+            "crypto chart unavailable for %s %s (%s: %s) — returning an empty series",
+            symbol, range_code, type(e).__name__, e,
+        )
+        return []
+
+    rows = market_chart_to_rows(payload, intraday=bool(intraday_days))
+    if intraday_days:
+        return rows
+    # Daily: trim to the requested window (the fetch is capped, not windowed).
+    cutoff = (_date.today() - timedelta(days=daily_range_days(range_code))).isoformat()
+    return [r for r in rows if (r.get("date") or "") >= cutoff]
+
+
 async def fetch_chart_data(
     fmp: FMPClient,
     symbol: str,
@@ -383,6 +435,24 @@ async def fetch_chart_data(
     outside regular market hours (09:30–16:00 ET) is filtered out.
     """
     resolved_interval = resolve_interval(range_code, interval)
+
+    # ── Crypto source gate ───────────────────────────────────────────────────
+    # FMP 402s every crypto pair, so EVERY call below raises FMPNotEntitledException
+    # for one. This is the shared chart fetcher, so that broke callers well beyond the
+    # crypto screen — most visibly `/stocks/{ticker}/chart`, which the crypto detail
+    # view model polls every 30s for its live intraday chart. Each tick failed and the
+    # only trace was a `print` in the client's catch, so the chart silently never
+    # updated.
+    #
+    # Routing HERE rather than at each call site is deliberate: it is the same
+    # choke-point argument as `price_service.get_quotes`, and it means the fix reaches
+    # every consumer without an iOS release. The FMP path below is untouched and comes
+    # back with `CRYPTO_PRICE_SOURCE=fmp`.
+    if uses_coingecko_price(symbol) and str(
+        getattr(settings, "CRYPTO_PRICE_SOURCE", "coingecko") or ""
+    ).lower() != "fmp":
+        return await _fetch_crypto_chart_data(symbol, range_code, resolved_interval)
+
     from_date, to_date = compute_date_range(range_code)
 
     # Extend from_date to include extra data for indicator warm-up

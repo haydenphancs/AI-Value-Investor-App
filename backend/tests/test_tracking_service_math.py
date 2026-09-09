@@ -773,3 +773,87 @@ async def test_feed_with_zero_resolved_quotes_is_not_cached(monkeypatch):
     svc.price = PriceFromFMPFake(svc.fmp)
     await svc.get_tracking_feed("u-healthy")
     assert tsvc._feed_cache_get("u-healthy") is not None
+
+
+# ══════════════════ NaN defeats a guard AND its try/except ═══════════════════
+#
+# FMP emits bare `NaN` tokens and Python's json parses them without raising. NaN then
+# beats BOTH usual defences at once:
+#   * `float(nan)` does not raise, so `except (TypeError, ValueError)` never fires;
+#   * every comparison with NaN is False, so `amount <= 0` does not skip the row.
+# The NaN reaches a REQUIRED response float and Starlette renders with allow_nan=False,
+# so the WHOLE Tracking feed 500s from inside the renderer — past the endpoint's own
+# error handling. Both sites below shipped this; the rest of the file already used
+# `_finite_or_none`.
+
+import json as _json
+import math as _math
+
+from fastapi.encoders import jsonable_encoder as _enc
+
+from app.services.chart_helper import _finite_or_none as _fin
+
+
+def test_a_bare_nan_token_really_does_survive_json_parsing():
+    """The premise. If this ever stops being true the guards below are still correct."""
+    parsed = _json.loads('{"price": NaN, "epsEstimated": NaN}')
+    assert _math.isnan(parsed["price"])
+
+
+def test_nan_defeats_both_the_try_except_and_the_le_zero_guard():
+    """Documents WHY `_finite_or_none` is required rather than float() + try/except."""
+    nan = float("nan")
+    # float() does not raise ...
+    assert _math.isnan(float(nan))
+    # ... `or 0` keeps it (NaN is truthy) ...
+    assert _math.isnan(nan or 0)
+    # ... and it slips past the guard.
+    assert (nan <= 0) is False
+    # `_finite_or_none` is the thing that actually stops it.
+    assert _fin(nan) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "", "abc"])
+def test_insider_amount_inputs_are_rejected_before_they_become_an_amount(bad):
+    """`raw_amount` is a REQUIRED float on `InsiderTransactionItemResponse`."""
+    shares, price = _fin(100), _fin(bad)
+    assert price is None or _math.isfinite(price)
+    if price is None:
+        return                      # row is skipped — the correct degrade
+    assert _math.isfinite(shares * price)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_earnings_estimates_degrade_to_none_not_to_a_non_finite(bad):
+    """`eps_estimate` / `revenue_estimate` are Optional — absent beats fabricated."""
+    assert _fin(bad) is None
+    _json.dumps(_enc({"eps_estimate": _fin(bad)}), allow_nan=False)
+
+
+def test_a_finite_estimate_still_survives():
+    """Anti-vacuity: the guard must not blank real consensus numbers."""
+    assert _fin(2.35) == 2.35
+    assert _fin("2.35") == 2.35
+    assert _fin(0) == 0.0
+
+
+def test_neither_tracking_site_uses_a_bare_float_coercion():
+    """Source guard: the two sites that shipped this must keep using `_finite_or_none`.
+
+    Comment-stripped, because the fix left prose next to it naming `float(` and `NaN`.
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "app" / "services" / "tracking_service.py").read_text(encoding="utf-8")
+    stripped = "\n".join(
+        "" if l.strip().startswith("#") else re.sub(r"\s#.*$", "", l)
+        for l in src.splitlines()
+    )
+    assert 'float(tx.get("price") or 0)' not in stripped
+    assert 'float(tx.get("securitiesTransacted") or 0)' not in stripped
+    assert 'float(entry["epsEstimated"])' not in stripped
+    assert 'float(entry["revenueEstimated"])' not in stripped
+    assert '_finite_or_none(tx.get("price"))' in stripped
+    assert '_finite_or_none(entry.get("epsEstimated"))' in stripped

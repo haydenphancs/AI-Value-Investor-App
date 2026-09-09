@@ -465,10 +465,38 @@ _MIXED_PULSE = [
 ]
 
 
+def _stub_crypto_chart(monkeypatch):
+    """Serve the crypto tile the SAME bars the FMP fake serves everything else.
+
+    ⚠️ Required since crypto moved to CoinGecko. `fetch_chart_data` now routes a crypto
+    PAIR away from FMP entirely (FMP 402s every one), so `_FakeFMP.get_intraday_prices`
+    is never reached for BTCUSD — the tile would otherwise degrade to an empty series and
+    these assertions would fail for a reason that has nothing to do with what they test.
+
+    The bars are returned UNCLIPPED, which is the real contract: a CoinGecko series is
+    24/7 by construction, so there is no regular-hours filter to apply to it. That keeps
+    the intent intact — crypto keeps its off-hours bars, equities are clipped — while
+    GCUSD still exercises the FMP+extended_hours path for a continuously-quoted future.
+    """
+    async def _fake_crypto_chart(symbol, range_code, resolved_interval):
+        return [
+            {"date": "2026-06-26 02:00:00", "open": 98.0, "high": 98.5, "low": 97.5, "close": 98.0, "volume": 5},
+            {"date": "2026-06-26 10:00:00", "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "volume": 10},
+            {"date": "2026-06-26 11:00:00", "open": 100.0, "high": 101.2, "low": 100.0, "close": 101.0, "volume": 12},
+            {"date": "2026-06-26 12:00:00", "open": 101.0, "high": 102.4, "low": 101.0, "close": 102.0, "volume": 14},
+            {"date": "2026-06-26 20:00:00", "open": 102.0, "high": 103.5, "low": 102.0, "close": 103.0, "volume": 8},
+        ]
+
+    monkeypatch.setattr(
+        "app.services.chart_helper._fetch_crypto_chart_data", _fake_crypto_chart
+    )
+
+
 @pytest.mark.asyncio
 async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices(monkeypatch):
     """The behavioural half of the test above: same upstream bars, different series."""
     monkeypatch.setattr(hds, "_PULSE_SYMBOLS", _MIXED_PULSE)
+    _stub_crypto_chart(monkeypatch)
     svc, _fake = _fresh_service()
     resp = await svc.get_dashboard()
     tiles = {p.symbol: p for p in resp.pulse}
@@ -493,6 +521,7 @@ async def test_pulse_span_window_follows_the_asset_class_too(monkeypatch):
     half a day left.
     """
     monkeypatch.setattr(hds, "_PULSE_SYMBOLS", _MIXED_PULSE)
+    _stub_crypto_chart(monkeypatch)
     svc, _fake = _fresh_service()
     resp = await svc.get_dashboard()
     tiles = {p.symbol: p for p in resp.pulse}

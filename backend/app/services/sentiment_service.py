@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # drift. A longer value here silently freezes the News tab (see `_persist_articles`).
 from app.services.news_cache_service import CACHE_TTL_HOURS as _NEWS_CACHE_TTL_HOURS
 from app.config import settings
-from app.services.asset_class import detect_asset_class
+from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
 
 _NEWS_CACHE_TTL = timedelta(hours=_NEWS_CACHE_TTL_HOURS)
@@ -600,7 +600,7 @@ class SentimentService:
             # The FMP branch is preserved verbatim and reachable via
             # `CRYPTO_PRICE_SOURCE=fmp`; nothing here is deleted.
             if (
-                detect_asset_class(ticker) == "crypto"
+                uses_coingecko_price(ticker)
                 and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
             ):
                 from app.integrations.coingecko import get_coingecko_client

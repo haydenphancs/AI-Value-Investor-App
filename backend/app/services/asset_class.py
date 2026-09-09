@@ -132,3 +132,47 @@ def symbol_trades_extended_hours(
 ) -> bool:
     """Convenience: resolve the class for *symbol* and answer the 24/7 question."""
     return trades_extended_hours(resolve_asset_class(symbol, stored))
+
+
+def uses_coingecko_price(symbol: Optional[str]) -> bool:
+    """True when CoinGecko is the correct PRICE source for *symbol*.
+
+    ⚠️ Crypto CLASSIFICATION alone is not this question, and using it alone shipped a
+    real production bug. `_BARE_CRYPTO_SYMBOLS` deliberately calls a bare ``BTC`` /
+    ``ETH`` / ``LTC`` "crypto" so its CHART gets a 24/7 session window — but on FMP those
+    same tickers are listed securities we are fully licensed for:
+
+        BTC  → Grayscale Bitcoin Mini Trust ETF   (AMEX)   real $34.68
+        ETH  → Grayscale Ethereum Mini Trust ETF  (AMEX)   real $23.68
+        XRP  → Bitwise XRP ETF                    (AMEX)   real $15.92
+        ATOM → Atomera Incorporated               (NASDAQ) real $4.14
+        BCH  → Banco de Chile                     (NYSE)   real $42.37
+        LTC  → LTC Properties, Inc. (a REIT)      (NYSE)   real $42.01
+
+    Routing those to CoinGecko served the COIN price for a listed security — BTC at
+    $78,984 against a real $34.68, a **2,277x** error, under the name "Bitcoin", and a
+    REIT rendered as "Litecoin". Measured against FMP on 2026-09-09.
+
+    The correct test is the CONJUNCTION: this is crypto *and* FMP genuinely cannot serve
+    it. `is_blocked_symbol` is the licence question and is the authority on the second
+    half — a symbol FMP can serve must keep going to FMP. That makes the pair form
+    (``BTCUSD``) route to CoinGecko while the bare form (``BTC``) stays on FMP, which is
+    exactly the distinction the two ticker namespaces carry.
+
+    Does NOT consult ``CRYPTO_PRICE_SOURCE``: the callers AND this with their own
+    ``_fmp_crypto_enabled()`` gate so the "hide, don't remove" kill-switch stays one
+    explicit test at each call site.
+    """
+    # Local import: `fmp_entitlements` pulls in the CoinGecko id map, and keeping this
+    # out of module scope leaves `asset_class` importable by anything without dragging
+    # the integration layer in behind it.
+    from app.integrations.fmp_entitlements import _is_fx_pair, is_blocked_symbol
+
+    if detect_asset_class(symbol) != "crypto" or not is_blocked_symbol(symbol):
+        return False
+    # `detect_asset_class` calls ANY sufficiently long USD-suffixed symbol crypto, so an
+    # FX pair lands here too — and CoinGecko happily answers for it. `EURUSD` resolved to
+    # a euro STABLECOIN quoting $1.18: close enough to the real EUR/USD rate to look
+    # correct, and wrong the moment that coin depegs. FX is blocked on FMP and has no
+    # licensed substitute, so it must stay absent rather than borrow a lookalike.
+    return not _is_fx_pair(str(symbol or "").strip().upper())

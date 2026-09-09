@@ -10,6 +10,7 @@ Design (mirrors home_service.py):
 """
 
 import asyncio
+import math
 import time as _time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
@@ -52,7 +53,7 @@ from app.services._earnings_common import (
     alert_report_time,
 )
 from app.config import settings
-from app.services.asset_class import detect_asset_class
+from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -622,7 +623,7 @@ class TrackingService:
                 # tap away agree. The adapter emits ET wall-clock timestamps,
                 # which is what the `last_day` prefix match below assumes.
                 if (
-                    detect_asset_class(ticker) == "crypto"
+                    uses_coingecko_price(ticker)
                     and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
                 ):
                     from app.services.crypto_service import get_crypto_service
@@ -738,14 +739,13 @@ class TrackingService:
                 # Consensus numbers — emitted as structured fields so the
                 # iOS detail view shows "EPS Est: $X | Rev Est: $YB" in the
                 # Consensus row without repeating the sentence.
-                try:
-                    eps_est = float(entry["epsEstimated"]) if entry.get("epsEstimated") is not None else None
-                except (TypeError, ValueError):
-                    eps_est = None
-                try:
-                    rev_est = float(entry["revenueEstimated"]) if entry.get("revenueEstimated") is not None else None
-                except (TypeError, ValueError):
-                    rev_est = None
+                # Same NaN trap as the insider bucket below: `float("nan")` does not
+                # raise, so the try/except lets it through into `AlertResponse`, and the
+                # feed 500s at serialization. `_finite_or_none` returns None for
+                # NaN/Inf/non-numeric alike, and both fields are Optional on the wire, so
+                # an unknown consensus renders as absent rather than as a fabricated 0.
+                eps_est = _finite_or_none(entry.get("epsEstimated"))
+                rev_est = _finite_or_none(entry.get("revenueEstimated"))
 
                 # One-line description for the card. iOS rebuilds its own
                 # version for the alert card, but keep a sane fallback here.
@@ -1144,13 +1144,22 @@ class TrackingService:
                 if not informative:
                     continue
 
-                try:
-                    shares = float(tx.get("securitiesTransacted") or 0)
-                    price = float(tx.get("price") or 0)
-                    amount = shares * price
-                except (TypeError, ValueError):
+                # `_finite_or_none`, NOT bare float() — the rest of this file already
+                # does this and these two lines were the gap.
+                #
+                # A bare `NaN` token in FMP's body parses cleanly (Python's json accepts
+                # it), `NaN or 0` KEEPS the NaN because NaN is truthy, `float(nan)` does
+                # not raise so `except (TypeError, ValueError)` never fires, and
+                # `nan <= 0` is False so the row is not skipped. The NaN then lands in
+                # `InsiderTransactionItemResponse.raw_amount`, which is a REQUIRED float,
+                # and Starlette renders with allow_nan=False → the WHOLE Tracking feed
+                # 500s from inside the renderer, past this function's own error handling.
+                shares = _finite_or_none(tx.get("securitiesTransacted"))
+                price = _finite_or_none(tx.get("price"))
+                if shares is None or price is None:
                     continue
-                if amount <= 0:
+                amount = shares * price
+                if not math.isfinite(amount) or amount <= 0:
                     continue
 
                 insider_name = (tx.get("reportingName") or "Insider").strip()

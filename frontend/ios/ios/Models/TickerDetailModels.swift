@@ -1659,11 +1659,20 @@ struct IndicatorSummary {
 struct MovingAverageIndicator: Identifiable {
     let id = UUID()
     let name: String
-    let value: Double
+    let value: Double?
     let signal: IndicatorSignal
 
+    /// "—" when the indicator could not be computed.
+    ///
+    /// ⚠️ This used to be a non-Optional `Double` defaulted to 0 at the DTO boundary
+    /// (`value ?? 0`), so a null arrived as the price level "0.00". That is not a rare
+    /// edge: the Weekly tab resamples ~600 calendar days to ~86 weekly bars, so
+    /// SMA(100), SMA(200), EMA(100) and EMA(200) are null for EVERY ticker and all four
+    /// rendered as "0.00" moving-average price levels. An unknown number is None, never
+    /// 0 — the same rule the backend follows by sending null in the first place.
     var formattedValue: String {
-        String(format: "%.2f", value)
+        guard let value, value.isFinite else { return "—" }
+        return String(format: "%.2f", value)
     }
 }
 
@@ -1688,11 +1697,20 @@ extension MovingAverageIndicator {
 struct OscillatorIndicator: Identifiable {
     let id = UUID()
     let name: String
-    let value: Double
+    let value: Double?
     let signal: IndicatorSignal
 
+    /// "—" when the indicator could not be computed.
+    ///
+    /// ⚠️ This used to be a non-Optional `Double` defaulted to 0 at the DTO boundary
+    /// (`value ?? 0`), so a null arrived as the price level "0.00". That is not a rare
+    /// edge: the Weekly tab resamples ~600 calendar days to ~86 weekly bars, so
+    /// SMA(100), SMA(200), EMA(100) and EMA(200) are null for EVERY ticker and all four
+    /// rendered as "0.00" moving-average price levels. An unknown number is None, never
+    /// 0 — the same rule the backend follows by sending null in the first place.
     var formattedValue: String {
-        String(format: "%.2f", value)
+        guard let value, value.isFinite else { return "—" }
+        return String(format: "%.2f", value)
     }
 }
 

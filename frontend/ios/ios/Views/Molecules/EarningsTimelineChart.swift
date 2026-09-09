@@ -142,8 +142,17 @@ struct EarningsTimelineChart: View {
     /// seconds to draw on every toggle/tap.
     private func computePriceColumns() -> [(colX: Double, price: Double)] {
         guard !dailyPrices.isEmpty, !points.isEmpty else { return [] }
+        // `uniqueKeysWithValues:` TRAPS on a duplicate key, and the backend does not
+        // dedupe the year it derives: `_build_annual_timeline` takes `int(date[:4])` of
+        // every annual income-statement record, so a company that moved its fiscal
+        // year-end has two annual period-ends inside one calendar year and ships two
+        // points with the same `year`. That crashed the chart on open.
+        //
+        // Keep the LAST occurrence — `points` is ordered oldest-first, so that is the
+        // most recent period for the year, which is what the column should plot.
         let yearToIndex = Dictionary(
-            uniqueKeysWithValues: points.enumerated().map { ($0.element.year, $0.offset) }
+            points.enumerated().map { ($0.element.year, $0.offset) },
+            uniquingKeysWith: { _, latest in latest }
         )
         let cols: [(colX: Double, price: Double)] = dailyPrices.compactMap { dp in
             guard dp.date.count >= 10,

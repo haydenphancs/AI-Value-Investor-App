@@ -57,7 +57,7 @@ from app.database import get_supabase
 from app.integrations.fmp import FMPRateLimitException, get_fmp_client
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
-from app.services.asset_class import detect_asset_class
+from app.services.asset_class import detect_asset_class, uses_coingecko_price
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +352,7 @@ class PriceService:
         sym = (symbol or "").strip().upper()
         if not sym:
             return {}
-        if self._crypto_quotes_enabled() and detect_asset_class(sym) == "crypto":
+        if self._crypto_quotes_enabled() and uses_coingecko_price(sym):
             # Crypto is blocked on FMP but licensed on CoinGecko. Route it rather than
             # returning {} — this is the path a single-symbol caller (a Tracking row, a
             # price-alert baseline at creation time) takes, and {} is what made a BTC
@@ -407,7 +407,7 @@ class PriceService:
         # 18 partial migrations that drift apart.
         crypto = {
             s for s in wanted
-            if self._crypto_quotes_enabled() and detect_asset_class(s) == "crypto"
+            if self._crypto_quotes_enabled() and uses_coingecko_price(s)
         }
         wanted = {s for s in wanted if not is_blocked_symbol(s)} - crypto
         if not wanted and not crypto:

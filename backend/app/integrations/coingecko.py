@@ -114,6 +114,13 @@ SYMBOL_TO_COINGECKO_ID: Dict[str, str] = {
     "KAS": "kaspa",
     "ATOM": "cosmos",
     "FIL": "filecoin",
+    # Served as a related coin on the Filecoin/storage screens. Its ABSENCE here was a
+    # live defect, not a cosmetic gap: `is_blocked_symbol` blocks a crypto pair by
+    # membership in THIS map, so "ARUSD" (5 chars, below the 6-char length rule) was
+    # not refused — its Technical Analysis and sentiment went to FMP and came back a
+    # raw 402, and the related-coin row rendered the label "AR" instead of "Arweave".
+    # `test_crypto_symbol_map_parity.py` now fails the build on the next such omission.
+    "AR": "arweave",
     "ARB": "arbitrum",
     "VET": "vechain",
     "FET": "fetch-ai",

@@ -321,7 +321,17 @@ final class PortfolioStore: ObservableObject {
         do {
             try await syncTickers(for: targetId)
         } catch {
-            portfolios[index].items = originalItems
+            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
+            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
+            // shrunk by `deletePortfolio` — any of which can land while this request is in
+            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
+            // other main-actor work interleaves there. Subscripting the stale index then
+            // either traps on out-of-range (a hard crash, not a catchable error) or writes
+            // the revert into a DIFFERENT portfolio. If the target is gone, there is
+            // nothing to revert.
+            if let i = portfolios.firstIndex(where: { $0.id == targetId }) {
+                portfolios[i].items = originalItems
+            }
             throw error
         }
     }
@@ -340,7 +350,17 @@ final class PortfolioStore: ObservableObject {
         do {
             try await syncTickers(for: targetId)
         } catch {
-            portfolios[index].items = originalItems
+            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
+            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
+            // shrunk by `deletePortfolio` — any of which can land while this request is in
+            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
+            // other main-actor work interleaves there. Subscripting the stale index then
+            // either traps on out-of-range (a hard crash, not a catchable error) or writes
+            // the revert into a DIFFERENT portfolio. If the target is gone, there is
+            // nothing to revert.
+            if let i = portfolios.firstIndex(where: { $0.id == targetId }) {
+                portfolios[i].items = originalItems
+            }
             throw error
         }
     }
@@ -352,7 +372,10 @@ final class PortfolioStore: ObservableObject {
         guard let index = portfolios.firstIndex(where: { $0.id == portfolioId }) else { return }
         let normalized = tickers.map { $0.uppercased() }
         let originalItems = portfolios[index].items
-        let priorByTicker = Dictionary(uniqueKeysWithValues: originalItems.map { ($0.ticker, $0) })
+        // first-wins: a portfolio carrying the same ticker twice would otherwise trap
+        // here while merely reordering its own tickers.
+        let priorByTicker = Dictionary(
+            originalItems.map { ($0.ticker, $0) }, uniquingKeysWith: { first, _ in first })
         portfolios[index].items = normalized.map { ticker in
             priorByTicker[ticker] ?? PortfolioItem(ticker: ticker, shares: nil, marketValue: nil)
         }
@@ -360,7 +383,17 @@ final class PortfolioStore: ObservableObject {
         do {
             try await syncTickers(for: portfolioId)
         } catch {
-            portfolios[index].items = originalItems
+            // Re-resolve by ID. `index` was captured BEFORE the await, and `portfolios` is
+            // replaced wholesale by `performLoad`, emptied by `reset()` (sign-out) and
+            // shrunk by `deletePortfolio` — any of which can land while this request is in
+            // flight. @MainActor does NOT prevent it: `await` is a suspension point and
+            // other main-actor work interleaves there. Subscripting the stale index then
+            // either traps on out-of-range (a hard crash, not a catchable error) or writes
+            // the revert into a DIFFERENT portfolio. If the target is gone, there is
+            // nothing to revert.
+            if let i = portfolios.firstIndex(where: { $0.id == portfolioId }) {
+                portfolios[i].items = originalItems
+            }
             throw error
         }
     }

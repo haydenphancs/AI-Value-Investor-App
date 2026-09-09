@@ -503,6 +503,10 @@ _CACHE_MAX_ENTRIES = 1024
 # never drift apart. Branch on THIS, never on `resolve_interval(...) != "daily"`:
 # DEFAULT_INTERVALS maps 5Y→"weekly" and ALL→"monthly", so an interval test sweeps
 # those in and silently serves 7 days of hourly bars under a 5-year label.
+# The window "Avg. Volume (30D)" promises. The row is OMITTED unless the history really
+# covers it — see the derivation in `get_crypto_detail`.
+_AVG_VOLUME_DAYS = 30
+
 _INTRADAY_RANGES = {"1D": 1, "1W": 7}
 
 # Ranges that ask for more history than CoinGecko Basic can serve (2 years). They are
@@ -1089,6 +1093,28 @@ class CryptoService:
             v = sub.get("usd")
             return v if v is not None else default
 
+        def _usd_opt(field: str) -> Optional[float]:
+            """`_usd` for the fields where ABSENT must stay absent.
+
+            ⚠️ `_usd`'s `default=0` is right for `current_price` (which has its own
+            last-close recovery below) and catastrophic for the statistics: when
+            `/coins/{id}` degrades, `md` is `{}` and every one of these reads 0, so the
+            Key Statistics column shipped "Market Cap $0.00 / 24h Volume $0.00 / 24h High
+            $0.00 / Circulating Supply 0 BTC" as FACTS — underneath a header showing a
+            real price recovered from the chart, which makes them look measured rather
+            than missing.
+
+            The house rule is that an unknown number is None, never 0.0
+            (`price_service.py` invariant #1), and the 52-week block a few lines below
+            already honours it: `_fmt(None)` and `_pct(None)` render "—". This is the
+            same degrade for the other columns.
+            """
+            sub = md.get(field)
+            if not isinstance(sub, dict):
+                return None
+            v = sub.get("usd")
+            return v if isinstance(v, (int, float)) else None
+
         price = _usd("current_price")
         change = md.get("price_change_24h", 0) or 0
         change_pct = md.get("price_change_percentage_24h", 0) or 0
@@ -1115,14 +1141,15 @@ class CryptoService:
                         change = round(price - _prev, 6)
                         change_pct = round(((price - _prev) / _prev) * 100, 4)
 
-        day_high = _usd("high_24h")
-        day_low = _usd("low_24h")
-        volume = _usd("total_volume")
-        market_cap = _usd("market_cap")
-        circulating_supply = md.get("circulating_supply", 0) or 0
-        total_supply = md.get("total_supply", 0) or 0
+        # Absent stays absent — see `_usd_opt`. These render "—" rather than "$0.00".
+        day_high = _usd_opt("high_24h")
+        day_low = _usd_opt("low_24h")
+        volume = _usd_opt("total_volume")
+        market_cap = _usd_opt("market_cap")
+        circulating_supply = md.get("circulating_supply")
+        total_supply = md.get("total_supply")
         max_supply_cg = md.get("max_supply")  # None if no cap
-        fdv = _usd("fully_diluted_valuation")
+        fdv = _usd_opt("fully_diluted_valuation")
 
         # 52-week band, from the ONLY source that can express a 52-week window:
         # the daily history. `None` when it cannot be derived — never a stand-in.
@@ -1153,7 +1180,19 @@ class CryptoService:
         year_high: Optional[float] = None
         year_low: Optional[float] = None
         if not self._fmp_crypto_enabled():
-            year_high, year_low = await self._cg_52_week_band(symbol)
+            # Guarded: this is an EXTRA CoinGecko call outside the main gather, and an
+            # unguarded await made one /ohlc hiccup (a 429 after 3 retries) propagate out
+            # of the whole builder — so the endpoint returned an error screen instead of a
+            # complete crypto detail merely missing 5 of its 14 statistics rows. The same
+            # failure INSIDE the gather degrades gracefully; this now matches it.
+            try:
+                year_high, year_low = await self._cg_52_week_band(symbol)
+            except Exception as e:
+                logger.warning(
+                    "crypto 52-week band unavailable for %s (%s: %s) — the five band rows "
+                    "degrade to em-dashes; the rest of the screen is unaffected",
+                    symbol, type(e).__name__, e,
+                )
         if (year_high is None or year_low is None) and historical:
             from app.services.chart_helper import _finite_or_none
             one_year_ago = (today - timedelta(days=365)).isoformat()
@@ -1185,14 +1224,38 @@ class CryptoService:
                 symbol, len(historical or []),
             )
 
-        # Avg volume from FMP (CoinGecko doesn't provide 30D avg directly)
-        # Compute 30-day average volume from historical data
-        avg_volume = volume  # fallback
-        if historical:
-            last_30 = historical[-30:] if len(historical) >= 30 else historical
-            vols = [p.get("volume", 0) or 0 for p in last_30 if (p.get("volume", 0) or 0) > 0]
+        # Avg volume over 30 DAYS, or nothing. Neither source publishes it directly, so it
+        # is derived from the daily history.
+        #
+        # ⚠️ Two substitutions used to hide behind this label, and both are the "label must
+        # describe the data shown" rule again:
+        #   * `avg_volume = volume` fell back to the TWENTY-FOUR HOUR volume whenever the
+        #     history was empty (a market_chart 429, or an id that resolves for
+        #     /coins/{id} but not for history) — a one-day figure rendered as "$34.20B"
+        #     under "Avg. Volume (30D)".
+        #   * `historical[-30:] if len >= 30 else historical` averaged whatever it had, so
+        #     a coin listed eleven days ago shipped an 11-day mean under a 30-day label.
+        # Neither was logged; the label was the only thing the user had, and it was wrong.
+        # Imported here, not relied upon from the 52-week block above — that import sits
+        # inside an `if` and is not guaranteed to have run.
+        from app.services.chart_helper import _finite_or_none as _fin
+
+        avg_volume: Optional[float] = None
+        if historical and len(historical) >= _AVG_VOLUME_DAYS:
+            last_30 = historical[-_AVG_VOLUME_DAYS:]
+            vols = [
+                v for v in (_fin(p.get("volume")) for p in last_30 if isinstance(p, dict))
+                if v is not None and v > 0
+            ]
+            # Gaps inside the window are tolerated; an absent window is not.
             if vols:
                 avg_volume = sum(vols) / len(vols)
+        if avg_volume is None:
+            logger.info(
+                "Crypto %s: fewer than %d daily rows (%d) — omitting Avg. Volume (30D) "
+                "rather than labelling a shorter mean, or the 24h volume, as 30-day",
+                symbol, _AVG_VOLUME_DAYS, len(historical or []),
+            )
 
         # ── Auto-generate profile from CoinGecko if no curated profile ──
         if not _has_curated_profile and isinstance(coin_data, dict):
@@ -1286,8 +1349,21 @@ class CryptoService:
                 bench_all = _compute_all_time_return(spy_hist)
         else:
             benchmark_label = "BTC"
-            # Fetch BTC data from CoinGecko (likely already cached)
-            btc_coin_data = await self._get_coin_fundamentals("BTC")
+            # Fetch BTC data from CoinGecko (likely already cached).
+            #
+            # Guarded for the same reason as the 52-week band above: this call exists only
+            # to populate two "vs BTC" comparison numbers, and an unguarded await let a
+            # CoinGecko failure here kill an ALTCOIN screen whose own coin data, chart,
+            # 52-week band, related coins and snapshots had all succeeded.
+            try:
+                btc_coin_data = await self._get_coin_fundamentals("BTC")
+            except Exception as e:
+                logger.warning(
+                    "BTC benchmark fundamentals unavailable for the %s screen (%s: %s) — "
+                    "the vs-BTC rows are omitted; the rest of the screen is unaffected",
+                    symbol, type(e).__name__, e,
+                )
+                btc_coin_data = {}
             btc_md = btc_coin_data.get("market_data", {}) if isinstance(btc_coin_data, dict) else {}
             bench_1m = btc_md.get("price_change_percentage_30d")
             bench_1y = btc_md.get("price_change_percentage_1y")
@@ -1564,6 +1640,12 @@ class CryptoService:
 
         out: List[Dict] = []
         for p in rows or []:
+            # One non-dict element must not crash the whole response — the same guard
+            # `_build_related_cryptos` carries, for the same reason. A malformed upstream
+            # payload (a bare string, a null, a nested list) would otherwise raise
+            # AttributeError from `.get` and 500 the entire crypto detail screen.
+            if not isinstance(p, dict):
+                continue
             close = _finite_or_none(p.get("close") or p.get("adjClose"))
             if close is None or close <= 0:
                 continue
@@ -1595,6 +1677,11 @@ class CryptoService:
 
         result = []
         for p in historical:
+            # `historical` is RAW upstream JSON on the FMP branch (`raw.get("historical")`),
+            # so a malformed payload can carry a non-dict element. Skip it rather than
+            # raising AttributeError out of `.get` and losing the whole chart.
+            if not isinstance(p, dict):
+                continue
             if (p.get("date") or "") >= cutoff:
                 # A non-finite (Inf) close slips past a bare `close > 0`, and raw
                 # open/high/low/volume can carry a NaN/Inf token — either serializes
@@ -1631,7 +1718,11 @@ class CryptoService:
         ))
 
         # Only show Total Supply if it differs from Circulating
-        if total_supply and abs(total_supply - circulating_supply) > 1:
+        # Both are Optional now (an absent CoinGecko field stays absent), so the
+        # subtraction needs BOTH present — `abs(x - None)` is a TypeError that would
+        # 500 the whole detail response.
+        if (total_supply is not None and circulating_supply is not None
+                and total_supply and abs(total_supply - circulating_supply) > 1):
             stats.append(KeyStatisticItem(
                 label="Total Supply",
                 value=_fmt_supply(total_supply, symbol),
@@ -1645,6 +1736,8 @@ class CryptoService:
 
         stats.append(KeyStatisticItem(
             label="Fully Diluted Val.",
+            # Both are Optional now; `_fmt(None)` renders "—", so an unknown FDV with an
+            # unknown market cap degrades instead of printing $0.00.
             value=_fmt(fdv) if fdv else _fmt(market_cap),
         ))
 
@@ -1660,14 +1753,26 @@ class CryptoService:
         day_high, day_low, year_high, year_low,
         circulating_supply, total_supply, max_supply, fdv, symbol,
     ) -> List[KeyStatisticsGroupResponse]:
-        vol_mkt_ratio = (volume / market_cap * 100) if market_cap > 0 else 0
+        # None-safe on BOTH operands: either being unknown makes the ratio unknown, and
+        # "0.00%" is a claim (a coin with no trading) rather than an absence. `market_cap`
+        # and `volume` are Optional now, so a bare `market_cap > 0` would also TypeError.
+        vol_mkt_ratio = (
+            (volume / market_cap * 100)
+            if (volume is not None and market_cap is not None and market_cap > 0)
+            else None
+        )
 
         return [
             # Column 1: Price & Volume
             KeyStatisticsGroupResponse(statistics=[
                 KeyStatisticItem(label="Market Cap", value=_fmt(market_cap)),
                 KeyStatisticItem(label="24h Volume", value=_fmt(volume)),
-                KeyStatisticItem(label="Volume/Mkt Cap", value=f"{vol_mkt_ratio:.2f}%"),
+                # NOT `_pct`: that prefixes a sign ("+3.45%"), which reads as a CHANGE.
+                # This is a ratio. Keep the shipped format and only handle unknown.
+                KeyStatisticItem(
+                    label="Volume/Mkt Cap",
+                    value=f"{vol_mkt_ratio:.2f}%" if vol_mkt_ratio is not None else "—",
+                ),
                 KeyStatisticItem(label="24h High", value=_fmt(day_high)),
                 KeyStatisticItem(label="24h Low", value=_fmt(day_low)),
             ]),

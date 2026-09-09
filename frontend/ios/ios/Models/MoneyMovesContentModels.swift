@@ -70,6 +70,25 @@ private extension Array where Element == CodingKey {
     }
 }
 
+/// Stringify a Double the way an author would expect, WITHOUT trapping.
+///
+/// ⚠️ `Int(Double)` is not failable — it TRAPS on NaN, on ±Infinity, and on anything
+/// outside Int64's range. These decoders exist precisely so one bad value cannot break the
+/// whole Learn payload, and a trap is strictly worse than the throw they were written to
+/// avoid: it kills the app instead of dropping a field. A content JSONB carrying `1e30`
+/// (an authoring slip, or a pipeline that wrote a raw float) reached `Int(1e30)` and
+/// crashed on decode.
+///
+/// 2^53 is the cutoff because past it a Double cannot represent consecutive integers, so
+/// the plain `String(d)` form is the more faithful rendering anyway.
+private func _stringifyDouble(_ d: Double) -> String? {
+    guard d.isFinite else { return nil }
+    if d == d.rounded(), d.magnitude < 9_007_199_254_740_992 {   // 2^53
+        return String(Int(d))
+    }
+    return String(d)
+}
+
 private extension KeyedDecodingContainer {
     /// Decode an array, dropping any element that fails to decode. Missing/non-array key => [].
     func lenientArray<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T] {
@@ -95,7 +114,7 @@ private extension KeyedDecodingContainer {
         if let s = (try? decodeIfPresent(String.self, forKey: key)) ?? nil { return s }
         if let i = (try? decodeIfPresent(Int.self, forKey: key)) ?? nil { return String(i) }
         if let d = (try? decodeIfPresent(Double.self, forKey: key)) ?? nil {
-            return d == d.rounded() ? String(Int(d)) : String(d)
+            return _stringifyDouble(d)
         }
         if let b = (try? decodeIfPresent(Bool.self, forKey: key)) ?? nil { return String(b) }
         return nil
@@ -123,8 +142,9 @@ private struct FlexibleStringElement: Decodable {
         guard let c = try? decoder.singleValueContainer() else { value = nil; return }
         if let s = try? c.decode(String.self) { value = s }
         else if let i = try? c.decode(Int.self) { value = String(i) }
-        else if let d = try? c.decode(Double.self), d.isFinite {
-            value = d == d.rounded() ? String(Int(d)) : String(d)
+        else if let d = try? c.decode(Double.self) {
+            // `stringifyDouble` also rejects non-finite, so the isFinite check moved in.
+            value = _stringifyDouble(d)
         }
         else if let b = try? c.decode(Bool.self) { value = String(b) }
         else { value = nil }   // object / array / null: nothing sensible to render

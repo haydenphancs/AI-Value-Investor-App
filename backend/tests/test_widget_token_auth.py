@@ -61,6 +61,44 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+_STUB_SCOPE_LABEL = "stubbed market universe"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_market_build(monkeypatch):
+    """This file is about the CREDENTIAL, not the payload — so build no payload.
+
+    `get_market_mover` fans out to `widget_movers_service._query`,
+    `market_movers_service._select_all_closes` and `news_insight_service._select_cards`
+    (Supabase) plus FMP. Unstubbed, the first 200-expecting test made all of them live;
+    the rest were served from the service's own cache, which is why only one test showed
+    up in the guard's report.
+
+    Worse, the endpoint wraps the call in `except Exception -> _empty("market")`, so a
+    total upstream failure is ALSO a 200 — the acceptance assertions could not tell a
+    working route from a dead one. `scope_label` below fixes that: `_empty` never sets
+    it, so a 200 carrying it proves the request reached the handler's real branch.
+
+    Patched on the CLASS, not on `get_widget_movers_service`: `widget.py` binds that
+    factory with a module-level import, and the service is a module singleton that may
+    already exist — the class attribute is the one target that covers both.
+    """
+    from app.schemas.widget import WidgetMoverPayload
+    from app.services.widget_movers_service import WidgetMoversService
+
+    async def _stub(self, *_a, **_k):
+        return WidgetMoverPayload(
+            mode="market",
+            as_of="2026-09-09T00:00:00Z",
+            market_session="closed",
+            session_date="2026-09-08",
+            session_label="Mon close",
+            scope_label=_STUB_SCOPE_LABEL,
+        )
+
+    monkeypatch.setattr(WidgetMoversService, "get_market_mover", _stub)
+
+
 def _forge(**claims) -> str:
     """A widget token with individual claims overridden — for the negative cases."""
     now = datetime.now(timezone.utc)
@@ -202,6 +240,9 @@ def test_no_credential_is_refused(client):
 def test_a_widget_token_is_accepted(client):
     r = client.get(_MARKET, headers={WIDGET_TOKEN_HEADER: create_widget_token(_UID)})
     assert r.status_code == 200
+    # Not just "a 200": the endpoint's own `except` also answers 200 with an empty
+    # payload. See `_no_live_market_build`.
+    assert r.json()["scope_label"] == _STUB_SCOPE_LABEL
 
 
 def test_a_session_bearer_is_accepted(client):
@@ -211,6 +252,7 @@ def test_a_session_bearer_is_accepted(client):
         _MARKET, headers={"Authorization": f"Bearer {create_access_token({'sub': _UID})}"}
     )
     assert r.status_code == 200
+    assert r.json()["scope_label"] == _STUB_SCOPE_LABEL
 
 
 @pytest.mark.parametrize(

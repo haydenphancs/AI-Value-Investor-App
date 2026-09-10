@@ -3051,9 +3051,18 @@ def _index_svc_stubbed(quote, history):
     async def _derived(symbol): return {}
     async def _pe(): return 0
 
+    # Step 7's AI stories are a fan-out leg too, and the only one that survived: it reads
+    # the `index_cache` tier-2 row and the macro cache from SUPABASE, then spawns a
+    # background Gemini refresh. Every test below that got past the price recovery made a
+    # live Supabase call (blocked by the hermeticity guard, swallowed by `_tier2_get`), and
+    # left `^GSPC` stuck in the module-global `_ai_refresh_inflight`. Stubbing the narrowest
+    # thing that touches the network keeps `_build_snapshots`' own logic live.
+    async def _stories(**_kw): return ("", "", "", [])
+
     svc._get_quote, svc._get_history, svc._get_chart = _quote, _hist, _chart
     svc._get_sector_performance, svc._get_constituent_count = _sector, _const
     svc._get_derived, svc._get_pe = _derived, _pe
+    svc._generate_ai_stories = _stories
     return svc
 
 

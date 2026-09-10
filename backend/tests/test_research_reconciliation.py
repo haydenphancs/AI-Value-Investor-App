@@ -138,6 +138,36 @@ def _patch_credit_service(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def pushes(monkeypatch):
+    """Capture the report-failed push instead of letting it reach the real dispatcher.
+
+    Every winning claim ends in `_notify_report_failed`, whose FUNCTION-SCOPED
+    `from app.services.push_dispatch_service import get_push_dispatch_service` resolves
+    from the SOURCE module on each call — so that is the binding to patch, not `recon`.
+
+    Unstubbed it read `notification_settings`, `device_tokens`, `notifications` and the
+    ETF lookup from the PRODUCTION Supabase project: 64 blocked calls from this file
+    alone, every one swallowed by the site's own "never raises" `except Exception`. The
+    file's docstring already claimed "no network"; now it is true.
+
+    Recorded rather than merely silenced, so the body invariant is testable: a refund
+    that did NOT happen must not tell the user their credits are back.
+    """
+    sent: list[dict] = []
+
+    class _Dispatcher:
+        async def notify_users(self, user_ids, **kw):
+            sent.append({"user_ids": list(user_ids), **kw})
+            return len(user_ids)
+
+    monkeypatch.setattr(
+        "app.services.push_dispatch_service.get_push_dispatch_service",
+        lambda: _Dispatcher(),
+    )
+    return sent
+
+
 def _row(**over):
     base = {
         "id": "r1",
@@ -628,7 +658,7 @@ async def test_a_claimed_orphan_is_invisible_to_the_sweep():
 
 
 @pytest.mark.asyncio
-async def test_a_no_op_refund_is_logged_with_the_report_id(caplog):
+async def test_a_no_op_refund_is_logged_with_the_report_id(caplog, pushes):
     """The site's `except Exception` was dead code — `refund_ledgered` never raises, it catches
     and returns None — so this, the ONLY leak log carrying `report_id` for a manual correction,
     could never fire. The claim (is_refunded=True) is already spent by the time it matters."""
@@ -646,10 +676,16 @@ async def test_a_no_op_refund_is_logged_with_the_report_id(caplog):
     assert "REFUND LEAK" in msg and "r1" in msg, (
         f"the leak line must carry the report_id a human needs to correct it: {msg!r}"
     )
+    # And the user must not be TOLD their credits are back when they are not — a false
+    # reassurance sends them to a balance that never moved. Only observable now that the
+    # push is stubbed rather than dying on a blocked socket.
+    assert pushes and "credits" not in pushes[0]["body"].lower(), (
+        f"a leaked refund still promised the credits back: {pushes!r}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog):
+async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog, pushes):
     """The success log used to fire unconditionally — including when the refund did nothing."""
     import logging
 
@@ -671,4 +707,8 @@ async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog):
     ]
     assert not recon_errors, (
         f"a refund that succeeded logged an error: {[r.getMessage() for r in recon_errors]}"
+    )
+    # Anti-vacuity for the leak assertion above: the successful branch DOES say it.
+    assert pushes and "credits have been returned" in pushes[0]["body"], (
+        f"a completed refund did not tell the user their credits are back: {pushes!r}"
     )

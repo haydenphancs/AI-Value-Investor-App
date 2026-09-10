@@ -109,6 +109,19 @@ def test_a_covered_licensed_response_IS_usable():
 
 def test_the_analyst_tool_hands_back_a_marker_not_zeros(monkeypatch):
     svc = ChatService.__new__(ChatService)
+
+    # `_fetch_analyst_data` does a FUNCTION-SCOPED `from app.services.analyst_service import
+    # get_analyst_service`, so the name resolves from the SOURCE module on every call — patch
+    # there, not on `chat_service`. Without this the test reached the real service, which calls
+    # FMP: the outbound call was blocked by the hermeticity guard, its `except Exception`
+    # swallowed the failure, and the assertions below passed off the ERROR path with the
+    # marker never actually built.
+    class _Svc:
+        get_analysis = AsyncMock(return_value=_response())
+
+    monkeypatch.setattr(
+        "app.services.analyst_service.get_analyst_service", lambda: _Svc()
+    )
     monkeypatch.setattr(
         chat_service_module,
         "analyst_is_usable",

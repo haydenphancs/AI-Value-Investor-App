@@ -23,8 +23,25 @@ import pytest
 from app.services.price_alert_service import PriceAlertService
 
 
+class _NoQuotes:
+    """The documented `price_source` seam (`price_service.price_source`): an instance
+    attribute named `price` wins over the singleton.
+
+    Without it `evaluate_once` reached the REAL price service for every non-empty
+    universe — FMP for the equities, CoinGecko for BTCUSD. The hermeticity guard blocked
+    those, `evaluate_once`'s own `except Exception` swallowed the failure and returned
+    early, and every assertion below still held because `stats["tickers"]` is set BEFORE
+    the fetch. Green either way, which is exactly the failure mode
+    `.claude/rules/testing.md` describes.
+    """
+
+    async def get_quotes_list(self, tickers):
+        return []
+
+
 def _svc(universe):
     svc = PriceAlertService()
+    svc.price = _NoQuotes()
     return svc, [
         patch.object(PriceAlertService, "_active_universe", lambda self: list(universe)),
         patch.object(PriceAlertService, "_active_rules", lambda self, tickers: []),
@@ -65,6 +82,7 @@ async def test_the_surviving_ticker_is_the_crypto_one_by_identity():
     seen: list[list[str]] = []
 
     svc = PriceAlertService()
+    svc.price = _NoQuotes()
     with patch.object(PriceAlertService, "_active_universe", lambda self: list(MIXED)), \
          patch.object(PriceAlertService, "_active_rules",
                       lambda self, tickers: seen.append(list(tickers)) or []):

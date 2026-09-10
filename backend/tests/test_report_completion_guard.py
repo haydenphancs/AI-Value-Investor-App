@@ -51,29 +51,48 @@ def _service(matched: bool, monkeypatch):
     monkeypatch.setattr(rs, "compute_quality_score", lambda persona, data: 70)
     upsert = AsyncMock()
     monkeypatch.setattr(rs, "upsert_cached_report", upsert)
-    return svc, upsert
+
+    # The delivery path ends in `_notify_report_ready`, whose FUNCTION-SCOPED
+    # `from app.services.push_dispatch_service import get_push_dispatch_service`
+    # resolves from the SOURCE module on every call — patch there, not on `rs`.
+    # Unstubbed, the real dispatcher read `notification_settings`, `device_tokens`,
+    # `notifications` and the ETF lookup straight from Supabase. Those calls were
+    # blocked and `_notify_report_ready` swallows everything by design ("a push failure
+    # must not turn a delivered report into a failed one"), so the test stayed green
+    # while the push it now asserts on never actually ran.
+    notify = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        "app.services.push_dispatch_service.get_push_dispatch_service",
+        lambda: MagicMock(notify_users=notify),
+    )
+    return svc, upsert, notify
 
 
 @pytest.mark.asyncio
 async def test_completion_dropped_when_already_reconciled(monkeypatch):
     """Reconciled (update matches 0 rows) → NO delivery: upsert_cached_report
     is never called, so the refunded report is not also delivered."""
-    svc, upsert = _service(matched=False, monkeypatch=monkeypatch)
+    svc, upsert, notify = _service(matched=False, monkeypatch=monkeypatch)
 
     await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
 
     upsert.assert_not_called()
+    # `_notify_report_ready` sits after the conditional write for exactly this reason:
+    # "a refunded report can never notify". Now that the dispatcher is stubbed rather
+    # than failing on a blocked socket, that placement is actually observable.
+    notify.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_completion_delivers_when_row_still_live(monkeypatch):
     """Normal case (row still pending/processing, not refunded) → the write
     matches and the report IS delivered (cache seeded)."""
-    svc, upsert = _service(matched=True, monkeypatch=monkeypatch)
+    svc, upsert, notify = _service(matched=True, monkeypatch=monkeypatch)
 
     await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
 
     upsert.assert_awaited_once()
+    notify.assert_awaited_once()
 
 
 # ── Terminal statuses are owned by someone else ──────────────────────────────

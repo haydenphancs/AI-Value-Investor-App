@@ -321,6 +321,18 @@ async def test_change_percent_reads_plural_key_for_non_stock(monkeypatch):
         return []
     monkeypatch.setattr(tsvc, "fetch_chart_data", fake_fetch)
 
+    # BTCUSD does NOT take the `fetch_chart_data` branch — `_get_all_sparklines` routes
+    # a coin to `crypto_service._cg_history` instead (see `_stub_both_bar_sources`), so
+    # stubbing only the FMP side let this test reach the real CoinGecko. The guard
+    # blocked it, `_fetch_one`'s `except` swallowed it into an empty sparkline, and the
+    # price/change assertions below passed either way. Same class-level target the other
+    # crypto tests here already use, so the singleton cannot hold a live client.
+    async def fake_cg_history(self, symbol, days, *, intraday=False):
+        return []
+    monkeypatch.setattr(
+        "app.services.crypto_service.CryptoService._cg_history", fake_cg_history
+    )
+
     svc = TrackingService()
     svc.fmp = _QuoteOnlyFMP(quotes)
     svc.price = PriceFromFMPFake(svc.fmp)

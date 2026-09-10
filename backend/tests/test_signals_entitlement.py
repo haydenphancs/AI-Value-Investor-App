@@ -366,6 +366,27 @@ def _no_live_supabase(monkeypatch):
     monkeypatch.setattr(mod, "fetch_ticker_metadata", _no_meta)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_coingecko(monkeypatch):
+    """The BTC pulse tile's sparkline does NOT go through `svc.fmp`.
+
+    `_fetch_sparkline` calls the shared `chart_helper.fetch_chart_data`, which gates
+    crypto to CoinGecko before it ever touches the FMP client — so `_NoQuotesFMP`
+    covers the five ETF tiles and nothing at all for BTCUSD. Every dashboard test here
+    made a live `pro-api.coingecko.com` call that `_fetch_sparkline`'s own
+    `except Exception` turned into an empty series, which is indistinguishable from the
+    stubbed answer. `fetch_chart_data` resolves `_fetch_crypto_chart_data` from
+    `chart_helper`'s own globals, so that is the binding to patch. Autouse, for the same
+    reason as `_no_live_supabase`: a test added later must not reopen it.
+    """
+    import app.services.chart_helper as chart_helper
+
+    async def _no_crypto_bars(_symbol, _range_code, _interval):
+        return []
+
+    monkeypatch.setattr(chart_helper, "_fetch_crypto_chart_data", _no_crypto_bars)
+
+
 def _service():
     from app.services.home_dashboard_service import HomeDashboardService
 

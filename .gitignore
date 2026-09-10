@@ -346,3 +346,23 @@ documents/legal/*.pdf
 # documents/legal/GIT_HISTORY_PURGE_RUNBOOK.md.
 backend/data/benchmark_universe.json
 backend/data/industry_universe.json
+
+# Learn narration audio — served from Supabase Storage (book-media / journey-media /
+# money-moves-media), NOT from the repo. ~700 MB of git history came from committing these.
+# Regenerate with scripts/clone_learn_audio.py, publish with scripts/seed_*.py.
+#
+# ⚠️ book_audio is EXTENSION-scoped, never `backend/data/book_audio/`. The directory form
+# would also exclude the 30 *.json + runpod_cost_log.jsonl that book_audio_service.py globs
+# AT IMPORT (line 31/47) to build BOOK_AUDIO_CATALOG — Railway's Dockerfile is `COPY . .`
+# from the git checkout, so untracked+ignored means absent from the image, which empties
+# GET /api/v1/learn/books/audio for every user and degrades only at logger.warning.
+# git cannot re-include a file whose PARENT DIRECTORY is excluded, so a `!*.manifest.json`
+# negation under a directory rule is silently inert. Pinned by
+# tests/test_learn_books_audio.py::test_the_book_audio_manifests_are_never_excluded_from_the_build
+# which is parametrized over this file as well as .dockerignore.
+backend/data/book_audio/*.m4a
+backend/data/book_audio/*.m4a.orig
+backend/data/journey_audio/
+backend/data/money_moves_audio/
+backend/data/journey_audio_gemini_bak/
+backend/data/money_moves_audio_gemini_bak/

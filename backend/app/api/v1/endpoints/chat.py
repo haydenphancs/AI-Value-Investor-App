@@ -39,6 +39,8 @@ from app.services.chat_budget_service import get_chat_budget_service, ChatBudget
 from app.services.credit_service import CreditService, CreditServiceUnavailable
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.services.chat_intent import is_trade_intent
+from app.schemas.chat_starters import ChatStartersResponse
+from app.services.chat_starters_service import get_chat_starters_service
 from app.schemas.chat import (
     CreateChatSessionRequest,
     SendChatMessageRequest,
@@ -783,6 +785,39 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
 
 
 # ── Endpoints ───────────────────────────────────────────────────────
+
+@router.get("/starters", response_model=ChatStartersResponse)
+async def get_chat_starters(
+    user: dict = Depends(get_chat_identity),   # strict: a real account, or 401
+):
+    """Daily-rotating starter questions for the empty chat state and the detail AI bars.
+
+    The chips above "Ask Cay AI…" were five hardcoded strings until this route existed.
+    They now change every ET day and a few of them name what actually moved today.
+
+    **Why it is authenticated.** The live slots are FMP-derived, and the signed Order
+    Form grants End-User Display Rights only "through the Licensee's authenticated
+    platform" (`.claude/rules/auth.md` §1a). `chat.py`'s router carries no blanket
+    dependency, so this must be declared here — and the corresponding iOS case must be
+    `.signInRequired`.
+
+    ⚠️ **The body is IMPERSONAL, and one cache entry serves everybody.** The dependency
+    authenticates the caller but the cache key does not include them, so any per-user
+    slot — watchlist, tier, holdings — would be handed to whoever asked next. If
+    personalisation is ever wanted here it needs a separate per-user-keyed cache, not a
+    field on this response. `test_chat_starters_endpoint.py` fails the build if the
+    service starts reading the caller.
+
+    ⚠️ Related, and the reason App-Exclusive Signals are excluded from the composition:
+    `signals_v3` tickers are Pro-gated and `redact_signals()` masks them PER REQUEST. A
+    globally cached set carrying one would show Free users the ticker the paywall hides.
+
+    Never errors. Every live source is optional and every slot degrades to an evergreen
+    question, with the bundled catalogue as the floor — so there is no `ErrorCode` for
+    this route and no iOS `AppError` branch to keep in sync.
+    """
+    return await get_chat_starters_service().get_starters()
+
 
 @router.get("/sessions", response_model=ChatSessionListResponse)
 async def list_chat_sessions(

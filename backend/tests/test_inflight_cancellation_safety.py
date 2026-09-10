@@ -73,6 +73,12 @@ _INFLIGHT_MODULES = [
     # and the arm that matters is `add_done_callback` — the in-flight entry must clear
     # from the task's own completion, which is what its `finally` does.
     "crypto_service.py",
+    # Added 2026-09-10 with the rotating chat starters. TWO shared futures, not one: the
+    # editorial POOL (hourly) and the composed RESPONSE (15 min). The response build is the
+    # one that matters — it is fronted by a 2.5 s `wait_for`, so without the shield the
+    # first caller to hit that deadline would cancel the build every other caller is joined
+    # to, and the leader's `set_result` would then raise InvalidStateError.
+    "chat_starters_service.py",
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.

@@ -22,6 +22,10 @@ import SwiftUI
 
 struct AIChatScreen: View {
     @ObservedObject var viewModel: ChatViewModel
+
+    /// Daily-rotating starter questions. Shared with the five detail AI bars, fetched
+    /// once per ET day regardless of how many screens ask for it.
+    private var startersStore: ChatStartersStore { ChatStartersStore.shared }
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appState) private var appState
 
@@ -31,12 +35,23 @@ struct AIChatScreen: View {
     /// restores `currentContextType` / `currentReferenceId` but never touched a `@State`).
     /// The default set is stock-flavoured, which is wrong on a Learn screen.
     private var suggestions: [SuggestionChip] {
+        // A book chat keeps its own chips: they are derived from that book's actual cores,
+        // which is a better-targeted set than anything a market rotation could offer.
         if viewModel.currentContextType == .book,
            let ref = viewModel.currentReferenceId,
            let order = Int(ref) {
             let forBook = SuggestionChip.forBook(curriculumOrder: order)
             if !forBook.isEmpty { return forBook }
         }
+        // Read INSIDE the view body — that is what registers the dependency on the
+        // `@Observable` store, so the row redraws when the day's fetch lands instead of
+        // showing the bundled set for the whole visit.
+        let rotating = startersStore.globalStarters
+        if !rotating.isEmpty {
+            return rotating.map { SuggestionChip(text: $0, type: SuggestionChip.inferType(from: $0)) }
+        }
+        // Last resort only. `sampleData` is frozen and names two tickers picked long ago;
+        // it exists now purely so the row is never empty.
         return SuggestionChip.sampleData
     }
     @State private var showingHistory: Bool = false
@@ -134,6 +149,10 @@ struct AIChatScreen: View {
             // Load the history list so the top-left history icon is ready. Does NOT touch the
             // active conversation — reopening resumes whatever the caller's ViewModel holds.
             viewModel.loadHistory()
+            // Today's starter questions. Cheap to call from every entry point: the store
+            // joins an in-flight fetch, returns immediately when warm, and is keyed on the
+            // ET date — so six call sites still cost one request per day.
+            Task { await ChatStartersStore.shared.prefetch() }
         }
     }
 
@@ -217,7 +236,10 @@ struct AIChatScreen: View {
                     .tint(AppColors.primaryBlue)
                 Spacer()
             } else {
-                // Empty state: Spacer pushes the chat bar to the bottom
+                // Empty state: the mark, sunk into the background. Exactly ONE unbounded
+                // Spacer may follow it, or the chat bar stops being pinned to the bottom.
+                Spacer(minLength: 0)
+                ChatBackdropLogo()
                 Spacer()
             }
 
@@ -260,6 +282,9 @@ struct AIChatScreen: View {
                 // conversation is seeded (messages non-empty) or the AI is replying, even before
                 // the session id lands. Mirrors the conversation-area gate above.
                 suggestions: (viewModel.messages.isEmpty && !viewModel.isAITyping) ? suggestions.map(\.text) : [],
+                // The global chat is the one surface that drifts; the detail bars leave
+                // `marquee` at its default and stay still.
+                marquee: true,
                 onSuggestionTap: { text in
                     if let chip = suggestions.first(where: { $0.text == text }) {
                         handleSuggestionTap(chip)

@@ -1113,6 +1113,12 @@ final class AppState {
         // phone, saw A's followed investors — and any list the server hadn't yet reconciled
         // stayed wrong. Same bug class, same fix, one funnel.
         WhaleService.shared.reset()
+        // Not the same bug class as the stores above — the starter-question payload is
+        // impersonal by contract, so nothing here leaks between accounts. It is cleared for
+        // FRESHNESS: the store refetches only when its ET day-key is stale, so a session
+        // change that carries a warm store into a new account would otherwise keep serving
+        // whatever was fetched before the switch.
+        ChatStartersStore.shared.clearForEndedSession()
         // Search history is the same bug class one more time: tickers the user opened and
         // questions they asked Cay AI, on a device-global UserDefaults key with no user id in
         // it. Left behind, the next account to sign in on this phone reads the previous user's

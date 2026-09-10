@@ -672,7 +672,14 @@ def test_every_public_table_is_curated():
 # Empty, and that is the healthy steady state — both former entries (157
 # `market_close_snapshot`, 159 `corporate_action_cache`) are APPLIED and now appear in the
 # snapshot, so the real column-drift check below covers them again.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+_PENDING_MIGRATION_TABLES: set[str] = {
+    # Migration 161. Curated in the same change as the migration, per CLAUDE.md, but the
+    # snapshot is a pg_dump of the LIVE database and migrations are applied by hand — so
+    # the table cannot appear there until it is applied. `test_pending_tables_are_really_
+    # still_pending` above forces this entry to be removed the moment it is, which is what
+    # stops this becoming a permanent hole.
+    "public.chat_starters",
+}
 
 
 def test_pending_tables_are_really_still_pending():

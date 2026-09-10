@@ -267,6 +267,18 @@ CURATION: dict[str, TableDoc] = {
         key=("user_id", "budget_day", "turn_count", "token_count"),
         note="A turn is CLAIMED before the model call and released on failure, so a crash "
              "cannot leak budget."),
+    "public.chat_starters": T("chat",
+        purpose="Editorial pool of starter questions for the empty chat state and the "
+                "five asset detail AI bars.",
+        key=("slug", "text", "scope", "is_active", "sort_order"),
+        note="Migration 161. The DAY'S selection is NOT stored: app/services/daily_rotation.py "
+             "derives it as a pure function of the pool and the ET date, so every instance "
+             "agrees with no schedule table to drift and no cron to miss. `scope` is a closed "
+             "vocabulary (global + one per detail screen); non-global rows carry a literal "
+             "{symbol} the client fills in, and iOS DROPS a template it cannot fill rather "
+             "than rendering a raw brace. SERVICE-ROLE ONLY like 157/158/159 — nothing "
+             "client-side reads it (iOS goes through GET /chat/starters), so a public grant "
+             "would widen the anon key's reach for no benefit."),
 
     # ----------------------------------------------------------- learn-content
     "public.books": T("learn-content", key=("id", "title", "author", "level", "is_most_read")),

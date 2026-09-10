@@ -32,6 +32,23 @@ struct TickerDetailView: View {
 
     let tickerSymbol: String
 
+    /// Today's rotating question set for the AI bar.
+    ///
+    /// Read HERE rather than in the ViewModel: `ChatStartersStore` is `@Observable`, and
+    /// only a read inside a `View` body registers the dependency that redraws the row when
+    /// the day's fetch lands.
+    ///
+    /// ⚠️ Only the DEFAULT tab rotates. `.financials`, `.analysis`, `.news` and `.holders`
+    /// each carry a hand-written set aimed at what that tab is showing ("Is margin
+    /// improving?" under Financials), which is better targeted than any general rotation —
+    /// so those are left alone deliberately.
+    private var rotatingAISuggestions: [TickerAISuggestion] {
+        guard viewModel.usesDefaultSuggestions else { return viewModel.aiSuggestions }
+        let rotated = ChatStartersStore.shared.detailStarters(for: .ticker, symbol: tickerSymbol)
+        guard !rotated.isEmpty else { return viewModel.aiSuggestions }
+        return rotated.map { TickerAISuggestion(text: $0) }
+    }
+
     /// The Research route is parked on AppState rather than injected as a closure — see
     /// `AppState.pendingResearchTicker`. The closure form only ever worked from Tracking.
     @Environment(AppState.self) private var appState
@@ -173,7 +190,7 @@ struct TickerDetailView: View {
             TickerDetailAIBar(
                 inputText: $viewModel.aiInputText,
                 tickerSymbol: tickerSymbol,
-                suggestions: viewModel.aiSuggestions,
+                suggestions: rotatingAISuggestions,
                 onSuggestionTap: viewModel.handleSuggestionTap,
                 onSend: viewModel.handleAISend
             )
@@ -191,6 +208,9 @@ struct TickerDetailView: View {
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
+            // Today's starter questions. One shared request per ET day across all six
+            // surfaces that show a chip row — the store joins, caches and date-gates.
+            Task { await ChatStartersStore.shared.prefetch() }
             viewModel.loadTickerData()
             // Lazy on purpose. Hooking AppState.onAuthenticated would add a request
             // to every cold launch of a signed-in user for a feature most never use;

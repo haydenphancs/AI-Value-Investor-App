@@ -12,6 +12,13 @@ struct CaydexAIChatBar: View {
     @Binding var inputText: String
     var placeholder: String = "Ask Cay AI..."
     var suggestions: [String] = []
+    /// When true the suggestion row drifts continuously (the global Ask Cay AI chat).
+    /// Default false ⇒ the five detail bars keep a still row with no edit at their call
+    /// sites, which is what the tester asked for: changing questions, no motion.
+    ///
+    /// Declared next to `suggestions` because Swift's memberwise init is positional:
+    /// the call-site order has to mirror this one.
+    var marquee: Bool = false
     var onSuggestionTap: ((String) -> Void)?
     var onSend: (() -> Void)?
     /// Reports text-field focus changes. Wiser reading screens pass this to collapse the audio player
@@ -29,18 +36,19 @@ struct CaydexAIChatBar: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.sm) {
-            // Suggestion chips row (only shown when suggestions are provided)
+            // Suggestion chips row (only shown when suggestions are provided).
+            //
+            // `MarqueeChipRow` rather than a ScrollView: it drifts when asked to, pauses on
+            // touch so a moving chip is still tappable, and collapses to a still, pannable
+            // row for Reduce Motion / VoiceOver / the detail bars — all through one
+            // `isPaused` flag, with no second layout to keep in step. See that file's header.
             if !suggestions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: AppSpacing.sm) {
-                        ForEach(suggestions, id: \.self) { suggestion in
-                            CaydexAISuggestionChip(text: suggestion) {
-                                onSuggestionTap?(suggestion)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, AppSpacing.lg)
-                }
+                MarqueeChipRow(
+                    chips: suggestions,
+                    drifts: marquee,
+                    onTap: { onSuggestionTap?($0) }
+                )
+                .padding(.horizontal, AppSpacing.lg)
             }
 
             // Input bar
@@ -108,6 +116,11 @@ struct CaydexAISuggestionChip: View {
     let text: String
     var onTap: (() -> Void)?
 
+    /// What the pill DRAWS: 11pt caption + 8pt padding top and bottom.
+    fileprivate static let visualHeight: CGFloat = 27
+    /// What it can be HIT on. Apple's HIG minimum, not a tunable.
+    fileprivate static let hitTargetHeight: CGFloat = 44
+
     var body: some View {
         Button(action: {
             onTap?()
@@ -115,6 +128,11 @@ struct CaydexAISuggestionChip: View {
             Text(text)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textSecondary)
+                // Both REQUIRED by the marquee, not cosmetic: without them a long question
+                // wraps, so the tile's width becomes a function of the width available to
+                // it, and the loop unit never settles.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.vertical, AppSpacing.sm)
                 .background(
@@ -125,6 +143,13 @@ struct CaydexAISuggestionChip: View {
                     RoundedRectangle(cornerRadius: AppCornerRadius.pill)
                         .stroke(AppColors.cardBackgroundLight, lineWidth: 1)
                 )
+                // The pill stays its designed ~27pt — this is HIT AREA only, bringing the
+                // target to Apple's 44pt minimum. Padding first, `contentShape` after:
+                // `.hitSlop()` is a documented no-op on a Button label (its negative
+                // padding hands the frame straight back), and a contentShape applied
+                // BEFORE the padding would shrink back to the glyphs.
+                .padding(.vertical, (Self.hitTargetHeight - Self.visualHeight) / 2)
+                .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
     }

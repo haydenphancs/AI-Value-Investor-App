@@ -1550,6 +1550,20 @@ class TickerDetailViewModel: ObservableObject {
         tickerData?.chartPricePoints ?? []
     }
 
+    /// Whether `aiSuggestions` is falling through to the generic default set.
+    ///
+    /// The four tab-specific sets below are hand-written for what that tab shows and are
+    /// better targeted than a general rotation, so the daily rotation applies only when
+    /// this is true. Kept beside the switch it describes so the two cannot drift.
+    var usesDefaultSuggestions: Bool {
+        switch selectedTab {
+        case .financials, .analysis, .news, .holders:
+            return false
+        default:
+            return true
+        }
+    }
+
     var aiSuggestions: [TickerAISuggestion] {
         switch selectedTab {
         case .financials:

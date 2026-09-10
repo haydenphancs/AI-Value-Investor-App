@@ -30,6 +30,17 @@ struct ETFDetailView: View {
 
     let etfSymbol: String
 
+    /// Today's rotating question set for the AI bar.
+    ///
+    /// Read HERE rather than in the ViewModel: `ChatStartersStore` is `@Observable`, and
+    /// only a read inside a `View` body registers the dependency that redraws the row when
+    /// the day's fetch lands. Falls back to the ViewModel's fixed set if the store is cold.
+    private var rotatingAISuggestions: [ETFAISuggestion] {
+        let rotated = ChatStartersStore.shared.detailStarters(for: .etf, symbol: etfSymbol)
+        guard !rotated.isEmpty else { return viewModel.aiSuggestions }
+        return rotated.map { ETFAISuggestion(text: $0) }
+    }
+
     init(etfSymbol: String) {
         self.etfSymbol = etfSymbol
         self._viewModel = StateObject(wrappedValue: ETFDetailViewModel(etfSymbol: etfSymbol))
@@ -138,7 +149,7 @@ struct ETFDetailView: View {
             ETFDetailAIBar(
                 inputText: $viewModel.aiInputText,
                 etfSymbol: etfSymbol,
-                suggestions: viewModel.aiSuggestions,
+                suggestions: rotatingAISuggestions,
                 onSuggestionTap: viewModel.handleSuggestionTap,
                 onSend: viewModel.handleAISend
             )
@@ -154,6 +165,9 @@ struct ETFDetailView: View {
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
+            // Today's starter questions. One shared request per ET day across all six
+            // surfaces that show a chip row — the store joins, caches and date-gates.
+            Task { await ChatStartersStore.shared.prefetch() }
             viewModel.loadETFData()
             // Lazy on purpose. Hooking AppState.onAuthenticated would add a request
             // to every cold launch of a signed-in user for a feature most never use;

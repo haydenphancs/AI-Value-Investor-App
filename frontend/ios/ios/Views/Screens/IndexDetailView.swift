@@ -30,6 +30,17 @@ struct IndexDetailView: View {
 
     let indexSymbol: String
 
+    /// Today's rotating question set for the AI bar.
+    ///
+    /// Read HERE rather than in the ViewModel: `ChatStartersStore` is `@Observable`, and
+    /// only a read inside a `View` body registers the dependency that redraws the row when
+    /// the day's fetch lands. Falls back to the ViewModel's fixed set if the store is cold.
+    private var rotatingAISuggestions: [IndexAISuggestion] {
+        let rotated = ChatStartersStore.shared.detailStarters(for: .index, symbol: indexSymbol)
+        guard !rotated.isEmpty else { return viewModel.aiSuggestions }
+        return rotated.map { IndexAISuggestion(text: $0) }
+    }
+
     init(indexSymbol: String) {
         self.indexSymbol = indexSymbol
         self._viewModel = StateObject(wrappedValue: IndexDetailViewModel(indexSymbol: indexSymbol))
@@ -155,7 +166,7 @@ struct IndexDetailView: View {
             IndexDetailAIBar(
                 inputText: $viewModel.aiInputText,
                 indexSymbol: indexSymbol,
-                suggestions: viewModel.aiSuggestions,
+                suggestions: rotatingAISuggestions,
                 onSuggestionTap: viewModel.handleSuggestionTap,
                 onSend: viewModel.handleAISend
             )
@@ -171,6 +182,9 @@ struct IndexDetailView: View {
         // bottom clear for "Ask Cay AI". Also keeps the player visible above this fullScreenCover.
         .globalAudioOverlay(token: compactToken, forceCompact: true)
         .task {
+            // Today's starter questions. One shared request per ET day across all six
+            // surfaces that show a chip row — the store joins, caches and date-gates.
+            Task { await ChatStartersStore.shared.prefetch() }
             viewModel.loadIndexData()
             // Lazy on purpose. Hooking AppState.onAuthenticated would add a request
             // to every cold launch of a signed-in user for a feature most never use;

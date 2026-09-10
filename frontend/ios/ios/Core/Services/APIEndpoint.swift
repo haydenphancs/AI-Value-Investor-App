@@ -346,6 +346,9 @@ enum APIEndpoint: Sendable {
     case getWidgetToken
 
     // MARK: - Chat
+    /// Daily-rotating starter questions for the empty chat state and the detail AI bars.
+    /// Fetched once per ET day by `ChatStartersStore`, not per screen.
+    case getChatStarters
     case listChatSessions(limit: Int, offset: Int)
     case createChatSession(stockId: String?, contextType: String? = nil, referenceId: String? = nil)
     case sendChatMessage(sessionId: String, message: String, context: String? = nil, contextType: String? = nil, referenceId: String? = nil)
@@ -652,6 +655,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/updates/news/enrich"
 
         // Chat
+        case .getChatStarters:
+            return "/api/v1/chat/starters"
         case .listChatSessions:
             return "/api/v1/chat/sessions"
         case .createChatSession:
@@ -1208,7 +1213,11 @@ enum APIEndpoint: Sendable {
         // Chat. The transcript is the caller's own, but the answers are built from FMP data
         // through `agents/fmp_tools.py`, so it is account-only on both counts.
         case .listChatSessions, .createChatSession, .sendChatMessage, .streamChatMessage,
-             .getChatHistory, .updateChatSession, .deleteChatSession:
+             .getChatHistory, .updateChatSession, .deleteChatSession,
+             // `getChatStarters` belongs here rather than with the catalogues: a few of its
+             // chips name tickers that moved today, which is FMP-derived data and therefore
+             // authenticated-platform-only under the Order Form (auth.md §1a).
+             .getChatStarters:
             return .signInRequired
 
         // Learn. The content is our OWN — no FMP anywhere in `learn.py` — so the licence does

@@ -96,7 +96,7 @@ struct AIMessageContent: View {
     }
 
     /// Full-width tappable follow-up questions (longer than the short empty-state chips, so they
-    /// render as rows rather than reusing the horizontal SuggestionChipsRow).
+    /// render as rows rather than reusing the horizontal chip row in `CaydexAIChatBar`).
     private func followUpChips(_ questions: [String]) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             ForEach(questions, id: \.self) { question in

@@ -522,7 +522,7 @@ class IndexDetailViewModel: ObservableObject {
             print("   📊 Chart points: \(response.chartData.count)")
             print("   🏢 Profile: \(response.indexName) (\(response.indexProfile.numberOfConstituents) constituents)")
             if let snap = indexData?.snapshotsData {
-                print("   📈 Valuation: P/E \(snap.valuation.peRatio)x | Level: \(snap.valuation.level.rawValue)")
+                print("   📈 Valuation: P/E \(snap.valuation.peDisplay) | Level: \(snap.valuation.level?.rawValue ?? "unknown")")
                 print("   🌍 Sectors: \(snap.sectorPerformance.sectors.count) sectors loaded")
                 print("   🏛️ Macro: \(snap.macroForecast.indicators.count) indicators")
             }
@@ -838,13 +838,25 @@ class IndexDetailViewModel: ObservableObject {
         parts.append("KEY STATISTICS: \(statsText)")
 
         // Valuation
+        // Broken into locals deliberately: `val.level` is Optional now (it is nil when the
+        // backend could not compute the P/E), and inlining `??` into the long `+` chain made
+        // the expression too complex for the type-checker to solve in reasonable time.
+        //
+        // The chat context must NOT say "Level=Bargain" off a 0 sentinel — this text is fed
+        // to the model as fact, so an unknown has to read as unknown here too.
         let val = snap.valuation
+        let valLevel: String = val.level?.rawValue ?? "unavailable"
+        let valPE: String = val.peKnown && val.peRatio > 0
+            ? String(format: "%.1fx", val.peRatio) : "unavailable"
+        let valFwd: String = val.peKnown && val.forwardPE > 0
+            ? String(format: "%.1fx", val.forwardPE) : "unavailable"
+        let valYield: String = val.earningsYield > 0
+            ? String(format: "%.2f%%", val.earningsYield) : "unavailable"
+        let valAvg: String = String(format: "%.0f", val.historicalAvgPE)
         parts.append(
-            "VALUATION: P/E(TTM)=\(String(format: "%.1f", val.peRatio))x, "
-            + "Forward P/E=\(String(format: "%.1f", val.forwardPE))x, "
-            + "Earnings Yield=\(String(format: "%.2f", val.earningsYield))%, "
-            + "Level=\(val.level.rawValue), "
-            + "Historical Avg P/E (\(val.historicalPeriod))=\(String(format: "%.0f", val.historicalAvgPE))x"
+            "VALUATION: P/E(TTM)=\(valPE), Forward P/E=\(valFwd), "
+            + "Earnings Yield=\(valYield), Level=\(valLevel), "
+            + "Historical Avg P/E (\(val.historicalPeriod))=\(valAvg)x"
         )
 
         // ALL sector performance (not just top 5)

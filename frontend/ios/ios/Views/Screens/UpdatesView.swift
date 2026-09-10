@@ -198,6 +198,16 @@ struct UpdatesView: View {
                     }
                 )
             }
+            // `SearchView` is the one that matters here — it presents the ticker screen in a
+            // cover of its own, so `dismiss()` there left this tab's search cover on screen.
+            .onPresentationReset {
+                showProfile = false
+                showSearch = false
+                showManageAssetsSheet = false
+                insightSources = nil
+                viewModel.showFilterSheet = false
+                viewModel.showPaywall = false
+            }
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()
                     .environment(appState)

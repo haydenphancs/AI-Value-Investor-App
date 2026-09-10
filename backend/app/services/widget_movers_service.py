@@ -233,7 +233,9 @@ class _MarketContext:
     # `industry-performance-snapshot` walks back to the last trading day, so on a Monday
     # morning it legitimately returns FRIDAY's numbers — which must not be compared
     # against a live Monday quote. None ⇒ unknown, and the comparison is refused.
-    industry_snapshot_date: Optional[str] = None
+    # Per-industry session stamps, keyed by lowercased industry name. A scalar here made
+    # one thinly-traded industry disarm attribution for every card — see `_industries()`.
+    industry_dates: Dict[str, str] = field(default_factory=dict)
     # True when the news-card read succeeded. Same reasoning as the flags above: a failed
     # Supabase read must not become "no company news today".
     news_available: bool = True
@@ -300,10 +302,11 @@ class _MarketContext:
         # green while printing a previous session's move as "today", the one sentence its
         # docstring says it exists to prevent. Same posture as `industry_available`: a
         # thing we cannot verify is not a thing we assert.
+        stamp = self.industry_dates.get(name.strip().lower())
         if (
-            not self.industry_snapshot_date
+            not stamp
             or not self.session_date
-            or self.industry_snapshot_date != self.session_date
+            or stamp != self.session_date
         ):
             return name, None
         return name, self.industry_changes.get(name.strip().lower())
@@ -970,17 +973,30 @@ class WidgetMoversService:
             # producer derives it the same way `_pick_denominator` chooses: a price that
             # has moved off the stored close belongs to the live session; a price still
             # equal to it means the change is the one that close ended.
-            snap_date: Optional[str] = None
+            # 🔴 PER-INDUSTRY dates, not one scalar for the whole batch.
+            #
+            # This used to keep only the FIRST row's date — and `rows` is sorted by
+            # `changesPercentage` DESCENDING, so the scalar was whichever session the day's
+            # TOP-GAINING industry happened to describe. `industry_for` then fails closed on
+            # `industry_snapshot_date != session_date` for **all** industries.
+            #
+            # Concretely: mid-session, the top-ranked industry is one whose members are
+            # mostly untraded so far, so their prices still equal the stored close and
+            # `_group_performance` correctly stamps them with the PREVIOUS trade date. Every
+            # widget card in that cycle then loses its industry line — including industries
+            # whose own stamp is today — for the full hourly context-cache window.
+            #
+            # The producer already computes a date per row; this just stops discarding it.
+            dates: Dict[str, str] = {}
             for r in rows or []:
-                if snap_date is None:
-                    d = str(r.get("date") or "").strip()
-                    if d:
-                        snap_date = d[:10]
                 name = str(r.get("industry") or "").strip().lower()
                 chg = _group_change(r)
                 if name and chg is not None:
                     out[name] = chg
-            return out, snap_date
+                    d = str(r.get("date") or "").strip()
+                    if d:
+                        dates[name] = d[:10]
+            return out, dates
 
         async def _earnings():
             rows = await fmp.get_earnings_calendar(
@@ -1037,7 +1053,7 @@ class WidgetMoversService:
         # successful call ("no industries moved enough to report") and an empty dict
         # from a 429 are the same value; only the flag tells them apart.
         if isinstance(industry, tuple):
-            ctx.industry_changes, ctx.industry_snapshot_date = industry
+            ctx.industry_changes, ctx.industry_dates = industry
             ctx.industry_available = True
         else:
             logger.warning(

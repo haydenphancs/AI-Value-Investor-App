@@ -157,6 +157,18 @@ struct ValuationSnapshotDTO: Decodable {
     let historicalPeriod: String
     let storyTemplate: String
 
+    /// Did the backend actually COMPUTE the P/E, or is `peRatio` the 0 sentinel?
+    ///
+    /// `Optional`, matching the `estimatesAvailable` precedent: a backend that predates the
+    /// field decodes as `nil`, and `IndexValuationSnapshot` treats `nil` as "assume known"
+    /// so nothing regresses. `peRatio` itself stays a plain `Double` — it cannot become
+    /// Optional without breaking every shipped build's decode.
+    ///
+    /// This exists because `ValuationLevel.from(pe:)` begins `case ..<18: return .bargain`,
+    /// so a 0 sentinel rendered a green **"Bargain"** badge with the gauge pinned hard-left.
+    /// The backend already knew it could not compute the figure — it just had no way to say so.
+    let peKnown: Bool?
+
     enum CodingKeys: String, CodingKey {
         case peRatio = "pe_ratio"
         case forwardPe = "forward_pe"
@@ -164,6 +176,7 @@ struct ValuationSnapshotDTO: Decodable {
         case historicalAvgPe = "historical_avg_pe"
         case historicalPeriod = "historical_period"
         case storyTemplate = "story_template"
+        case peKnown = "pe_known"
     }
 }
 
@@ -371,7 +384,9 @@ extension IndexDetailResponse {
             earningsYield: snapshotsData.valuation.earningsYield,
             historicalAvgPE: snapshotsData.valuation.historicalAvgPe,
             historicalPeriod: snapshotsData.valuation.historicalPeriod,
-            storyTemplate: snapshotsData.valuation.storyTemplate
+            storyTemplate: snapshotsData.valuation.storyTemplate,
+            // `nil` (older backend) means "assume known" — the pre-existing behaviour.
+            peKnown: snapshotsData.valuation.peKnown ?? true
         )
 
         let sectorEntries = snapshotsData.sectorPerformance.sectors.map { s in

@@ -21,6 +21,14 @@ extension Notification.Name {
     /// Posted after the backend settings blob is applied to UserDefaults, so open
     /// screens (e.g. the Profile appearance picker) can refresh from the store.
     static let caydexSettingsHydrated = Notification.Name("caydexSettingsHydrated")
+
+    /// Posted when the user changes Settings → AI & Research → "Default Analyst".
+    ///
+    /// The Research tab's ViewModel is a `@StateObject` on a view that is mounted once for the
+    /// whole app process, and `AppSettingsView` is a `fullScreenCover` above the entire tree —
+    /// so dismissing Settings rebuilds nothing and there is no view-update path that would
+    /// carry this change. This notification is that path.
+    static let caydexDefaultPersonaChanged = Notification.Name("caydexDefaultPersonaChanged")
 }
 
 @MainActor
@@ -79,7 +87,7 @@ final class SettingsSyncManager {
     // than guessing, so a malformed value costs a notification's timing, never its
     // delivery.
     static let stringKeys: [String] = [
-        "default_persona", AppearanceManager.storageKey,
+        AnalysisPersona.defaultPersonaStorageKey, AppearanceManager.storageKey,
         "notify_quiet_start", "notify_quiet_end", "notify_timezone",
     ]
 

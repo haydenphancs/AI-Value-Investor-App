@@ -202,7 +202,7 @@ def _ctx():
     sd = session_trading_date().isoformat()
     return _MarketContext(
         industry_available=True, earnings_available=True, market_available=True,
-        news_available=True, industry_snapshot_date=sd, session_date=sd,
+        news_available=True, industry_dates={}, session_date=sd,
     )
 
 
@@ -311,7 +311,10 @@ def _industry_ctx(snapshot_date, session_date):
     c.ticker_industry = {"NVDA": "Semiconductors"}
     c.industry_available = True
     c.industry_changes = {"semiconductors": -1.2}
-    c.industry_snapshot_date = snapshot_date
+    # Per-industry stamps now, not one scalar for the batch: the scalar was the FIRST row's
+    # date and rows are sorted by % change desc, so the day's top-gaining industry decided
+    # attribution for every card. `{}` models "no date at all", which must still fail closed.
+    c.industry_dates = {"semiconductors": snapshot_date} if snapshot_date else {}
     c.session_date = session_date
     return c
 
@@ -343,3 +346,31 @@ def test_an_unverifiable_session_yields_the_name_without_a_number(snapshot, sess
 
     assert name == "Semiconductors", "the industry NAME is never in doubt"
     assert change is None, why
+
+
+def test_one_stale_industry_does_not_disarm_attribution_for_the_others():
+    """🔴 The bug this replaced a scalar to fix.
+
+    `_industries()` kept only the FIRST row's date, and rows arrive sorted by
+    `changesPercentage` DESCENDING — so the stamp belonged to whichever industry led the
+    day. Mid-session that is often one whose members are mostly untraded, whose prices still
+    equal the stored close, and which `_group_performance` therefore correctly stamps with
+    the PREVIOUS trade date. `industry_for` then failed closed for EVERY industry, for the
+    whole hourly context-cache window — including ones stamped today.
+    """
+    from app.services.widget_movers_service import _MarketContext
+
+    session = "2026-09-08"
+    c = _MarketContext()
+    c.industry_available = True
+    c.ticker_industry = {"NVDA": "Semiconductors", "BA": "Aerospace & Defense"}
+    c.industry_changes = {"semiconductors": -1.2, "aerospace & defense": 4.0}
+    # The top gainer is stale (untraded members still at Friday's close); the other is live.
+    c.industry_dates = {"aerospace & defense": "2026-09-05", "semiconductors": session}
+    c.session_date = session
+
+    assert c.industry_for("NVDA") == ("Semiconductors", -1.2), (
+        "a same-session industry lost its number because ANOTHER industry was stale"
+    )
+    # ...and the genuinely stale one is still refused.
+    assert c.industry_for("BA") == ("Aerospace & Defense", None)

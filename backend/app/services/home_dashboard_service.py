@@ -94,10 +94,19 @@ logger = logging.getLogger(__name__)
 # FRED's WTI spot is not usable HERE — the tiles carry a live intraday sparkline and FRED
 # publishes ~5 business days behind.
 #
-# BITCOIN is deliberately absent until Phase 5 moves crypto to CoinGecko. Leaving a
-# permanently-unresolvable symbol in this list would pin `len(pulse) < len(_PULSE_SYMBOLS)`
-# forever, which downgrades the cache TTL and logs a degradation warning on every build —
-# masking the real degradation signal this strip depends on.
+# ⚠️ BITCOIN IS NOT IN THIS LIST, AND THAT IS DELIBERATE — see `_CRYPTO_PULSE_SYMBOL`.
+#
+# It is served as a sixth tile, but from a SEPARATE cache with its own TTL and outside this
+# list, for two independent reasons:
+#
+#  1. **Completeness.** The strip's degraded-TTL gate is `len(pulse) < len(_PULSE_SYMBOLS)`.
+#     Putting a symbol here that can fail on its own upstream (CoinGecko) would drop the
+#     whole strip to `_CACHE_DEGRADED_TTL_SECONDS` (45s) whenever that one tile failed —
+#     i.e. a CoinGecko outage would make the strip refetch MORE often, not less.
+#  2. **Budget.** CoinGecko Basic is 100,000 calls/MONTH = 2.3/min sustained. This strip
+#     rebuilds on a 60s TTL forever, so a BTC tile inside it costs ~86,400 calls/month —
+#     ~86% of the entire monthly quota, for one tile. On its own 600s TTL it is ~8,640
+#     (~8.6%). Measured against the live key on 2026-09-09: 394 calls used month-to-date.
 _PULSE_SYMBOLS: List[Dict[str, str]] = [
     {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
     {"symbol": "ONEQ", "name": "Nasdaq Composite ETF", "type": "etf"},
@@ -105,6 +114,34 @@ _PULSE_SYMBOLS: List[Dict[str, str]] = [
     {"symbol": "IWM", "name": "Russell 2000 ETF", "type": "etf"},
     {"symbol": "GLD", "name": "Gold ETF", "type": "etf"},
 ]
+
+# The sixth tile. `type: "crypto"` is what selects the 24/7 session window for its
+# sparkline; it is priced from CoinGecko via `price_service`'s `uses_coingecko_price` split.
+_CRYPTO_PULSE_SYMBOL: Dict[str, str] = {
+    "symbol": "BTCUSD", "name": "Bitcoin", "type": "crypto",
+}
+# 10 min, against the strip's 60s — see the budget note above.
+_CRYPTO_PULSE_TTL_SECONDS = 600
+_CRYPTO_PULSE_CACHE_KEY = "pulse:crypto"
+
+# What a COMPLETE strip looks like to a caller: the entitled ETFs plus the crypto tile.
+# Deliberately NOT used for the degraded-TTL gate — that stays on `len(_PULSE_SYMBOLS)`
+# so a CoinGecko failure cannot shorten the whole strip's cache life.
+_EXPECTED_PULSE_TILES = len(_PULSE_SYMBOLS) + 1
+
+
+def _equity_tile_count(tiles) -> int:
+    """How many of the ENTITLED-ETF tiles survived.
+
+    The strip's degraded-TTL gate must ignore the crypto tile: it is served from a separate
+    cache and a CoinGecko failure must not shorten the whole strip's cache life (an outage
+    would then make it refetch MORE often). Counting the full list against
+    `len(_PULSE_SYMBOLS)` also breaks the other way — a HEALTHY 6-tile strip compares
+    unequal to 5 and gets pinned at the 45s degraded TTL forever.
+    """
+    return sum(1 for t in tiles if getattr(t, "type", None) != "crypto")
+
+
 
 _SPARKLINE_POINTS = 30          # downsampled intraday closes per mini-chart
 # 1 min — live market-data freshness ceiling. Was 300s, which meant the Market
@@ -933,7 +970,7 @@ class HomeDashboardService:
             age = time.time() - cached[0]
             ttl = (
                 _CACHE_TTL_SECONDS
-                if len(cached[1]) == len(_PULSE_SYMBOLS)
+                if _equity_tile_count(cached[1]) == len(_PULSE_SYMBOLS)
                 else _CACHE_DEGRADED_TTL_SECONDS
             )
             if age < ttl:
@@ -956,10 +993,11 @@ class HomeDashboardService:
                 # so it can still be served as "last known good", but at the short
                 # TTL resolved above.
                 self._cache[_CACHE_KEY] = (time.time(), pulse)
-                if len(pulse) < len(_PULSE_SYMBOLS):
+                if _equity_tile_count(pulse) < len(_PULSE_SYMBOLS):
                     logger.warning(
-                        "Market pulse degraded (%d/%d tiles) — caching for only %ds",
-                        len(pulse), len(_PULSE_SYMBOLS), _CACHE_DEGRADED_TTL_SECONDS,
+                        "Market pulse degraded (%d/%d entitled tiles) — caching for only "
+                        "%ds", _equity_tile_count(pulse), len(_PULSE_SYMBOLS),
+                        _CACHE_DEGRADED_TTL_SECONDS,
                     )
             if not fut.done():
                 fut.set_result(pulse)
@@ -1050,11 +1088,16 @@ class HomeDashboardService:
                 type(e).__name__, e,
             )
 
-        results = await asyncio.gather(
+        # The crypto tile rides the SAME gather as the ETF tiles. Awaiting it afterwards
+        # would add its full latency to every cold build (measured: it doubled the build
+        # time under a slow upstream, which matters because `_get_pulse_guarded` ships an
+        # empty strip once the build passes `_PULSE_BUILD_TIMEOUT_SECONDS`).
+        *results, crypto_res = await asyncio.gather(
             *[
                 self._fetch_pulse_item(cfg, quote_map.get(cfg["symbol"].upper()))
                 for cfg in _PULSE_SYMBOLS
             ],
+            self._get_crypto_pulse_tile(),
             return_exceptions=True,
         )
         pulse: List[MarketPulseItemResponse] = []
@@ -1070,7 +1113,42 @@ class HomeDashboardService:
 
         if not pulse:
             logger.warning("Home dashboard: all %d pulse symbols failed", len(_PULSE_SYMBOLS))
+
+        # Appended AFTER the completeness log above, and excluded from the degraded-TTL
+        # gate by `_equity_tile_count`, so a CoinGecko failure cannot shorten the strip's
+        # cache life.
+        if isinstance(crypto_res, BaseException):
+            logger.warning(
+                "Crypto pulse tile failed: %s: %s — the rest of the strip is unaffected",
+                type(crypto_res).__name__, crypto_res,
+            )
+        elif crypto_res is not None:
+            pulse.append(crypto_res)
         return pulse
+
+    async def _get_crypto_pulse_tile(self) -> Optional[MarketPulseItemResponse]:
+        """The BTC tile, cached for `_CRYPTO_PULSE_TTL_SECONDS` independently of the strip.
+
+        Returns None (tile simply absent) on any failure — never raises, and never counts
+        against `len(_PULSE_SYMBOLS)`. See the budget note on `_PULSE_SYMBOLS`.
+        """
+        cached = self._cache.get(_CRYPTO_PULSE_CACHE_KEY)
+        if cached is not None and time.time() - cached[0] < _CRYPTO_PULSE_TTL_SECONDS:
+            return cached[1] or None
+
+        try:
+            tile = await self._fetch_pulse_item(_CRYPTO_PULSE_SYMBOL, None)
+        except Exception as e:
+            logger.warning(
+                "Crypto pulse tile failed (%s: %s) — omitting it; the rest of the strip is "
+                "unaffected", type(e).__name__, e,
+            )
+            return None
+        if tile is not None:
+            # Only a good tile is cached: pinning a miss for 10 minutes would be far worse
+            # than for 60s, which is exactly why this cache is separate.
+            self._cache[_CRYPTO_PULSE_CACHE_KEY] = (time.time(), tile)
+        return tile
 
     # ── Daily Scanners ────────────────────────────────────────────────
 
@@ -1719,6 +1797,25 @@ class HomeDashboardService:
 
         change_f = _finite_float(change)
         if change_f is None:
+            # ⚠️ KNOWN TRADE-OFF, decided deliberately — do not "fix" this to a drop
+            # without changing the wire shape first.
+            #
+            # 0.0 here renders "+0.00%" in GREEN (the strip colours off `>= 0`), i.e. a
+            # tile asserting flat-and-up when the move is actually unknown. Dropping the
+            # tile instead was tried and reverted: `test_pulse_non_finite_price_drops_tile_
+            # and_never_serializes_nan` pins that a non-finite CHANGE must degrade rather
+            # than remove a tile whose PRICE is perfectly good.
+            #
+            # The house answer is the three-state pattern — a `change_known` companion
+            # bool beside the non-Optional float (`MarketPulseItemResponse.change_percent`
+            # is a plain `Double` on iOS, so it cannot become nullable). That is a wire +
+            # iOS change and has not been made. In practice these five symbols are heavily
+            # traded ETFs read from `/stable/profile`, so an absent change is a corrupt
+            # token rather than a routine state.
+            logger.warning(
+                "Quote for %s has a price but no usable change — rendering 0.00%%; see the "
+                "note here before changing this", symbol,
+            )
             change_f = 0.0
 
         # Prior close → the dashed reference line on the iOS sparkline (drop if

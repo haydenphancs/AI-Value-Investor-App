@@ -97,14 +97,17 @@ struct ValuationSnapshotCard: View {
                 }
             }) {
                 HStack(spacing: AppSpacing.md) {
+                    // `valuation.level` is nil when the backend could not compute the P/E.
+                    // Rendering a neutral icon and NO badge is the whole point: the 0
+                    // sentinel used to resolve to a green "Bargain" here.
                     ZStack {
                         RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .fill(valuation.level.bgColor)
+                            .fill(valuation.level?.bgColor ?? AppColors.cardBackgroundNested)
                             .frame(width: 36, height: 36)
 
-                        Image(systemName: valuation.level.iconName)
+                        Image(systemName: valuation.level?.iconName ?? "questionmark.circle.fill")
                             .font(AppTypography.iconDefault).fontWeight(.semibold)
-                            .foregroundColor(valuation.level.color)
+                            .foregroundColor(valuation.level?.color ?? AppColors.textMuted)
                     }
 
                     Text("Valuation")
@@ -113,14 +116,16 @@ struct ValuationSnapshotCard: View {
 
                     Spacer()
 
-                    // Valuation level badge
-                    Text(valuation.level.rawValue)
-                        .font(AppTypography.caption)
-                        .foregroundColor(valuation.level.color)
-                        .padding(.horizontal, AppSpacing.sm)
-                        .padding(.vertical, AppSpacing.xxs)
-                        .background(valuation.level.bgColor)
-                        .cornerRadius(AppCornerRadius.small)
+                    // Valuation level badge — omitted entirely when the level is unknown.
+                    if let level = valuation.level {
+                        Text(level.rawValue)
+                            .font(AppTypography.caption)
+                            .foregroundColor(level.color)
+                            .padding(.horizontal, AppSpacing.sm)
+                            .padding(.vertical, AppSpacing.xxs)
+                            .background(level.bgColor)
+                            .cornerRadius(AppCornerRadius.small)
+                    }
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(AppTypography.iconXS).fontWeight(.semibold)
@@ -133,14 +138,17 @@ struct ValuationSnapshotCard: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                    // Tier bar
-                    ValuationTierBar(tiers: valuation.tiers, gaugePosition: valuation.gaugePosition)
+                    // Tier bar — omitted when there is no level, rather than drawn with the
+                    // marker parked at zero inside the "Bargain" quarter.
+                    if let gauge = valuation.gaugePosition {
+                        ValuationTierBar(tiers: valuation.tiers, gaugePosition: gauge)
+                    }
 
                     // Key metrics row
                     HStack(spacing: 0) {
-                        ValuationMetricPill(label: "P/E (TTM)", value: String(format: "%.1fx", valuation.peRatio))
+                        ValuationMetricPill(label: "P/E (TTM)", value: valuation.peDisplay)
                         Spacer()
-                        ValuationMetricPill(label: "Fwd P/E", value: String(format: "%.1fx", valuation.forwardPE))
+                        ValuationMetricPill(label: "Fwd P/E", value: valuation.forwardPEDisplay)
                         Spacer()
                         ValuationMetricPill(label: "10Y Avg", value: String(format: "%.0fx", valuation.historicalAvgPE))
                     }

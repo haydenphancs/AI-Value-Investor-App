@@ -456,10 +456,21 @@ struct TickerDetailView: View {
     /// Themes, Signals or a notification hit the `else` and opened a chat instead, which is what
     /// the TestFlight report described. Parking the intent on AppState works from all of them.
     ///
-    /// `dismiss()` runs AFTER the intent is parked: this screen is pushed inside another tab's
-    /// navigation stack, so leaving it on the stack would strand it behind the Research tab.
+    /// Getting to the Research tab is only half of it — the user has to be able to SEE it.
+    ///
+    /// `dismiss()` closes exactly ONE presentation level, and this screen is presented from ~14
+    /// places of which only the Tracking tab reaches it by a push. Everywhere else it sits under
+    /// one or two `fullScreenCover`s (Home has no root `NavigationStack`, so theme → ticker,
+    /// signals → ticker and search → ticker are all two covers deep). Dismissing one level
+    /// switched the tab BEHIND a cover that was still on screen, which is indistinguishable from
+    /// the button doing nothing — the second TestFlight report on this button, after the first
+    /// one fixed the route.
+    ///
+    /// So: park the intent, ask every tab root to take its own presentations down, and still
+    /// `dismiss()` — the token unwinds PRESENTATIONS, and Tracking's push is not one.
     private func handleDeepResearchTap() {
         appState.pendingResearchTicker = tickerSymbol
+        appState.dismissAllPresentations()
         dismiss()
     }
 

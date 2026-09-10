@@ -91,3 +91,28 @@ def test_the_coins_this_was_wrong_for_are_still_uncurated_and_still_slug_mismatc
         assert sym not in _CRYPTO_PROFILES
         cg_id = SYMBOL_TO_COINGECKO_ID.get(sym, "")
         assert cg_id.replace("-", " ").title() == slug_name, (sym, cg_id)
+
+
+# ── an unknown 24h move must omit the row, not render a green +0.00% ─────────
+
+def test_a_related_coin_with_no_change_is_omitted(svc):
+    """`change_percent` is a non-Optional `Double` on iOS, so a null is not available — and
+    0 is not neutral: the tile colours off `changePercent >= 0` and prints "+0.00%" in
+    GREEN, i.e. flat-and-up. CoinGecko sends `price_change_percentage_24h: null` for a coin
+    listed inside the last 24h.
+
+    Omitting matches the decision already made for an unknown PRICE in the same loop.
+    """
+    q = _quote("SNX", "Synthetix Network", price=2.5)
+    q["changePercentage"] = None
+    q["changesPercentage"] = None
+    assert svc._build_related_cryptos([q], ["SNX"]) == []
+
+
+def test_a_real_zero_change_is_still_rendered(svc):
+    """A coin that genuinely did not move is a MEASUREMENT — it must survive."""
+    q = _quote("SNX", "Synthetix Network", price=2.5)
+    q["changePercentage"] = 0.0
+    q["changesPercentage"] = 0.0
+    out = svc._build_related_cryptos([q], ["SNX"])
+    assert len(out) == 1 and out[0].change_percent == 0.0

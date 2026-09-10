@@ -61,6 +61,21 @@ class ValuationSnapshotResponse(BaseModel):
     historical_avg_pe: float
     historical_period: str
     story_template: str
+    # ⚠️ The companion bool, per the three-state rule: an unknown number is None, never 0.0
+    # — and where the wire field is a non-Optional float that shipped iOS builds decode as a
+    # plain `Double`, "unknown" has to travel beside it as a flag.
+    #
+    # `pe_ratio` CANNOT become Optional: shipped builds decode it as `Double`, so a null
+    # would crash the decode. And 0.0 is not a harmless placeholder here — iOS derives the
+    # badge with `ValuationLevel.from(pe:)`, whose first arm is `case ..<18: return .bargain`.
+    # So a P/E the backend knows it could not compute rendered as a GREEN "Bargain" badge,
+    # with the gauge marker pinned hard-left and the story reading "The market is trading at
+    # 0.0x earnings, which is considered Bargain... suggesting potential value."
+    #
+    # The backend already computed `val_label = "Unknown"` for this case — it just never put
+    # it on the wire, so iOS re-derived a different answer from the sentinel.
+    # Same pattern as `benchmark_available` / `estimates_available` / `money_flow_index_known`.
+    pe_known: bool = True
 
 
 class SectorPerformanceEntryResponse(BaseModel):

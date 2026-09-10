@@ -2523,11 +2523,26 @@ Separate each category with "===CATEGORY===" followed by the category name.
                     "than rendering $0.00", sym,
                 )
                 continue
+            # ⚠️ An unknown 24h move OMITS the row, exactly as an unknown price does a few
+            # lines above — `change_percent` is a non-Optional `Double` on iOS, so a null is
+            # not available, and `0` is not a neutral placeholder: the tile colours off
+            # `changePercent >= 0` and renders "+0.00%" in GREEN. A coin listed within the
+            # last 24h (CoinGecko sends `price_change_percentage_24h: null` for those) would
+            # show as flat-and-up rather than as unknown.
+            #
+            # Dropping the row keeps this consistent with the price decision in the same
+            # loop, and "People Also Check" already renders a shorter list correctly.
+            if rel_change is None:
+                logger.info(
+                    "Related crypto %s has a price but no 24h change — omitting the row "
+                    "rather than rendering a green +0.00%%", sym,
+                )
+                continue
             result.append(RelatedCryptoResponse(
                 symbol=sym,
                 name=name,
                 price=rel_price,
-                change_percent=rel_change if rel_change is not None else 0,
+                change_percent=rel_change,
             ))
 
         return result

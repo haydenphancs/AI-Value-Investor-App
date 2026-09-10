@@ -42,6 +42,53 @@ from app.schemas.technical_analysis import (
 )
 from app.services.asset_class import detect_asset_class
 
+
+def _analysable_symbol(ticker: str) -> str:
+    """The entitled instrument whose OHLCV actually backs this screen.
+
+    Index and commodity screens are served by proxy ETFs (Phase 4). Their own symbols are
+    blocked, so technical analysis has to be computed on the proxy — which is what the
+    chart, quote and history paths already do via `index_service._proxy_for` /
+    `commodity_service._ref_of`.
+
+    ⚠️ Raises for a commodity backed by a FRED SERIES rather than a fund. Crude Oil (`CL`)
+    and Natural Gas (`NG`) resolve to `DCOILWTICO` / `DHHNGSP`, which are single daily
+    values — no open/high/low/volume, so there is nothing to compute 18 indicators on.
+    Sending a FRED series id to FMP would return an empty list and surface as "no data",
+    inviting a retry that can never work; refusing contractually is the honest answer and
+    is the code iOS already branches on.
+
+    Imports are function-scoped: both modules are heavy and import this one's siblings.
+    """
+    from app.integrations.fmp import FMPNotEntitledException
+
+    sym = (ticker or "").upper()
+
+    from app.services.index_service import _INDEX_PROFILES, _proxy_for
+    if sym in _INDEX_PROFILES:
+        return _proxy_for(sym)
+
+    from app.services.commodity_service import (
+        _COMMODITY_PROFILES,
+        _COMMODITY_SOURCE_ETF,
+        _raise_if_withdrawn,
+        _ref_of,
+        _root,
+        _source_of,
+    )
+    _raise_if_withdrawn(sym)
+    if _root(sym) in _COMMODITY_PROFILES or sym in _COMMODITY_PROFILES:
+        if _source_of(sym) != _COMMODITY_SOURCE_ETF:
+            raise FMPNotEntitledException(
+                f"Technical analysis is unavailable for {sym}: it is priced from a FRED "
+                f"daily series ({_ref_of(sym)}), which carries a single value per day — "
+                f"there is no open/high/low/volume to compute indicators from."
+            )
+        return _ref_of(sym)
+
+    return sym
+
+
 logger = logging.getLogger(__name__)
 
 # ── In-memory cache ──────────────────────────────────────────────
@@ -347,7 +394,19 @@ class TechnicalAnalysisService:
             )
             historical = market_chart_to_rows(payload, intraday=False)
         else:
-            raw = await self.fmp.get_historical_prices(ticker, from_date, to_date)
+            # 🔴 Route index / commodity screens through their PROXY before touching FMP.
+            #
+            # Phase 4 moved those screens onto entitled ETFs, but this service never learned
+            # about it: it fetched `historical-price-eod/full` with the screen's own symbol,
+            # so `^GSPC` / `^IXIC` / `^DJI` and `GCUSD` / `SIUSD` / `PLUSD` / `PAUSD` all hit
+            # the fatal entitlement guard. The endpoint then flattened that to a generic 502
+            # and iOS showed "Couldn't load technical analysis." with a retry button that
+            # could never succeed — the Analysis tab was dead on 9 screens.
+            #
+            # SPY / ONEQ / DIA / GLD / SLV / PPLT / PALL are all entitled and carry full
+            # OHLCV, so the fix is the same symbol swap the rest of Phase 4 made.
+            analysis_symbol = _analysable_symbol(ticker)
+            raw = await self.fmp.get_historical_prices(analysis_symbol, from_date, to_date)
 
             # Parse FMP response
             if isinstance(raw, dict):

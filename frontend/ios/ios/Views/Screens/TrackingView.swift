@@ -303,6 +303,16 @@ struct TrackingContentViewWithBinding: View {
                 }
             }
             .alertDestinationCover($openedAlertDestination)
+            // Tracking reaches the ticker screen by a PUSH inside its own stack, which is the
+            // one chain that always worked — `dismiss()` pops it. These are the other doors:
+            // the alert-destination cover, and search.
+            .onPresentationReset {
+                openedAlertDestination = nil
+                pendingAlertDestination = nil
+                showProfile = false
+                showSearch = false
+                viewModel.selectedAlert = nil
+            }
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()
                     .environment(appState)

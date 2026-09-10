@@ -244,11 +244,44 @@ struct AnalysisPersona: Identifiable, Hashable {
 
     static let fallbacks: [AnalysisPersona] = allCases
 
+    /// The `UserDefaults` key behind Settings → AI & Research → "Default Analyst".
+    /// Written by `AppSettingsView`'s `@AppStorage`, synced by `SettingsSyncManager`
+    /// (`stringKeys`) and allow-listed by the backend's `_KNOWN_KEYS`. All four sites must
+    /// agree; `test_ios_default_persona_setting.py` fails the build if one drifts.
+    static let defaultPersonaStorageKey = "default_persona"
+
     /// The user's "Default Analyst" (Settings → AI & Research), stored by `.key`.
     /// Falls back to Warren Buffett when unset or unrecognized.
+    ///
+    /// ⚠️ A stored-property initializer must never be the ONLY read of this.
+    /// `ResearchViewModel.selectedPersona` still seeds itself from here for first paint, which
+    /// is fine — what shipped the TestFlight bug is that the seed was the *only* read. That
+    /// ViewModel is a `@StateObject` on a view `ContentView` opacity-mounts once and never
+    /// re-creates, so the setting was read a single time per app process and changing it did
+    /// nothing for the rest of the run. Anything that pre-selects an analyst must also re-read
+    /// it — see `ResearchViewModel.applyDefaultPersona(force:)` and its two observers.
     static var settingsDefault: AnalysisPersona {
-        let storedKey = UserDefaults.standard.string(forKey: "default_persona") ?? warrenBuffett.key
-        return allCases.first { $0.key == storedKey } ?? warrenBuffett
+        settingsDefault(in: allCases)
+    }
+
+    /// `settingsDefault` resolved against a runtime persona list.
+    ///
+    /// `GET /research/personas` can serve a persona that is not in the hardcoded `allCases`
+    /// (a backend-first addition), and resolving only against `allCases` would silently
+    /// downgrade such a stored key to Buffett. Candidates win; `allCases` is the fallback so
+    /// the setting still resolves before the fetch has landed.
+    static func settingsDefault(in candidates: [AnalysisPersona]) -> AnalysisPersona {
+        // EVERY rung must stay inside the pool. An earlier version fell back to
+        // `allCases.first { $0.key == storedKey }`, which could hand back a persona the
+        // backend no longer serves — leaving `selectedPersona` outside `personas`, so the
+        // carousel highlighted NO card and the description card described an analyst that was
+        // not on screen. That is worse than the arbitrary `mapped[0]` it replaced.
+        let pool = candidates.isEmpty ? allCases : candidates
+        let storedKey = UserDefaults.standard.string(forKey: defaultPersonaStorageKey)
+        return pool.first { $0.key == storedKey }
+            ?? pool.first { $0.key == warrenBuffett.key }
+            ?? pool.first
+            ?? warrenBuffett
     }
 
     /// Build an `AnalysisPersona` from a backend `agent_personas` row.

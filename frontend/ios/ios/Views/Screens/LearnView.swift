@@ -71,6 +71,16 @@ struct LearnContentView: View {
             BookLibraryView()
                 .environmentObject(audioManager)
         }
+        // Covers only. `showingBookLibrary` / `showingInvestorJourney` / `showingMoneyMovesDetail`
+        // are `.navigationDestination` PUSHES inside this tab's own stack — the user is leaving
+        // for another tab, not abandoning Learn, so that stack is theirs to come back to.
+        .onPresentationReset {
+            selectedMoneyMoveArticle = nil
+            selectedLibraryBook = nil
+            showProfile = false
+            showSearch = false
+            showBookChat = false
+        }
         .fullScreenCover(item: $selectedMoneyMoveArticle) { article in
             MoneyMoveArticleDetailView(article: article)
                 .environmentObject(audioManager)

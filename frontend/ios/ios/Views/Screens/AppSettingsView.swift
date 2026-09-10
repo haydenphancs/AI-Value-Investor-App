@@ -15,7 +15,7 @@ struct AppSettingsView: View {
     @Environment(\.requestReview) private var requestReview
 
     // Synced preferences (see SettingsSyncManager key lists).
-    @AppStorage("default_persona") private var defaultPersona: String = AnalysisPersona.warrenBuffett.key
+    @AppStorage(AnalysisPersona.defaultPersonaStorageKey) private var defaultPersona: String = AnalysisPersona.warrenBuffett.key
     @AppStorage("playback_speed") private var playbackSpeedRaw: Double = PlaybackSpeed.normal.rawValue
     @AppStorage("autoplay_next") private var autoplayNext: Bool = true
     @AppStorage("haptic_feedback") private var hapticFeedback: Bool = true
@@ -93,6 +93,13 @@ struct AppSettingsView: View {
         .task { await personalizationConsent.load() }
         // Sync general prefs to the backend when leaving (no-op for guests).
         .onDisappear { SettingsSyncManager.shared.push() }
+        // Tell the Research tab immediately. Its ViewModel is a `@StateObject` on a view
+        // `ContentView` mounts once for the whole app process, and this screen is a
+        // `fullScreenCover` above that tree — so nothing here rebuilds it and, without this
+        // post, the new analyst would not apply until the next cold launch.
+        .onChange(of: defaultPersona) { _, _ in
+            NotificationCenter.default.post(name: .caydexDefaultPersonaChanged, object: nil)
+        }
         .onChange(of: playbackSpeedRaw) { _, newValue in
             AudioManager.shared.playbackSpeed = PlaybackSpeed(rawValue: newValue) ?? .normal
         }

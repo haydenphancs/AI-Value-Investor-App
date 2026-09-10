@@ -339,11 +339,54 @@ def test_an_energy_screen_keeps_the_commodity_name_and_unit(root, unit):
     assert "Shares" not in meta["name"] and "Trust" not in meta["name"]
 
 
-def test_the_related_row_quotes_the_ref_not_the_blocked_code():
-    """`related` holds `*USD` futures codes — all blocked. Quoting them directly returned
-    `{}` for every one, so "People Also Check" rendered empty on every commodity screen."""
+def test_the_related_row_quotes_by_SOURCE_not_just_by_ref():
+    """`related` holds `*USD` futures codes — all blocked — so they must be resolved before
+    quoting. But resolving is not enough: the ref may be a FRED SERIES ID.
+
+    ⚠️ This test used to assert `"_ref_of(" in body` and **passed on the bug**. The code did
+    call `_ref_of`, then handed the result straight to FMP:
+
+        CL -> related ["NGUSD"] -> _ref_of -> "DHHNGSP"   (Henry Hub, a FRED id)
+
+    `is_blocked_symbol("DHHNGSP")` is False, so it went out to `/stable/profile`, returned
+    `[]`, and the row was dropped — "People Also Check" was permanently empty on Crude Oil
+    and Natural Gas, and because partial results are not cached, every request re-fired it.
+    A textbook vacuous source-scan (landmine #7), replaced with a behavioural check.
+    """
     body = _src_without_comments(COM.CommodityService._get_related)
-    assert "_ref_of(" in body, "the related row is quoting blocked futures codes again"
+    assert "self._get_quote(" in body, (
+        "related quotes must go through `_get_quote`, the one place that branches on source"
+    )
+    assert "price_source(self).get_quote(" not in body, (
+        "the related row bypasses the source branch again — a FRED id will reach FMP"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fred_backed_neighbour_is_never_quoted_from_fmp(monkeypatch):
+    """The behavioural half: Crude Oil's neighbour is Natural Gas, which is FRED-backed."""
+    svc = COM.CommodityService.__new__(COM.CommodityService)
+    asked_fmp: list = []
+
+    class _Price:
+        async def get_quote(self, sym):
+            asked_fmp.append(sym)
+            return {}
+
+    monkeypatch.setattr(COM, "price_source", lambda _self=None: _Price(), raising=True)
+    monkeypatch.setattr(COM, "_cache_get", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(COM, "_cache_set", lambda *a, **k: None, raising=True)
+
+    async def _fred(series_id):
+        return {"symbol": series_id, "price": 3.21}
+
+    svc._fred_quote = _fred
+    out = await svc._get_related("CLUSD", ["NGUSD"])
+
+    assert asked_fmp == [], f"a FRED series id was sent to FMP: {asked_fmp}"
+    assert out and out[0][0] == "NGUSD", (
+        "the row must keep the commodity code as its identity so it links to the screen"
+    )
 
 
 # ── Phase 4's exit criterion, in one place ───────────────────────────────────
@@ -405,3 +448,67 @@ def test_the_macro_tier_reads_only_licensed_sources():
     )
     # And `VIXCLS` carries a Cboe copyright whose reprint permission runs to FRED, not us.
     assert "VIXCLS" not in refs, "the Cboe-copyrighted VIX series is wired in"
+
+
+# ── Technical analysis must use the proxy too (Phase 4 missed this feed) ─────
+
+def test_technical_analysis_resolves_the_proxy_before_hitting_fmp():
+    """`test_no_symbol_list_that_feeds_FMP_contains_a_blocked_symbol` enumerates seven
+    symbol feeds and did NOT include this one — which is why the Analysis tab being dead on
+    3 index and 6 commodity screens passed green for a whole phase.
+
+    iOS calls `.getTechnicalAnalysis(ticker: indexSymbol)` with `^GSPC` and
+    `.getTechnicalAnalysis(ticker: commoditySymbol)` with `GCUSD`; the service fetched
+    `historical-price-eod/full` with that symbol verbatim and hit the fatal entitlement
+    guard.
+    """
+    from app.integrations.fmp import FMPNotEntitledException
+    from app.services.technical_analysis_service import _analysable_symbol
+
+    from app.integrations.fmp_entitlements import is_blocked_symbol
+
+    expected = {"^GSPC": "SPY", "^IXIC": "ONEQ", "^DJI": "DIA",
+                "GCUSD": "GLD", "SIUSD": "SLV", "PLUSD": "PPLT", "PAUSD": "PALL"}
+    for screen, proxy in expected.items():
+        got = _analysable_symbol(screen)
+        assert got == proxy, (screen, got, proxy)
+        assert not is_blocked_symbol(got), f"{screen} still resolves to a blocked symbol"
+
+    # An ordinary equity passes through untouched.
+    assert _analysable_symbol("AAPL") == "AAPL"
+
+    # FRED-backed commodities have no OHLCV at all — they must refuse CONTRACTUALLY
+    # (retrying can never help) rather than send a series id to FMP.
+    for fred_backed in ("CLUSD", "NGUSD"):
+        with pytest.raises(FMPNotEntitledException):
+            _analysable_symbol(fred_backed)
+
+    # And a withdrawn screen keeps its existing refusal.
+    with pytest.raises(FMPNotEntitledException):
+        _analysable_symbol("KCUSD")
+
+
+@pytest.mark.asyncio
+async def test_the_ohlcv_fetch_actually_uses_the_resolver(monkeypatch):
+    """The WIRING, not just the resolver.
+
+    ⚠️ Testing `_analysable_symbol` alone is not enough and this caught it: a mutation
+    replacing `_analysable_symbol(ticker)` with a bare `ticker` at the call site left every
+    resolver assertion above green, because nothing exercised the fetch. The leaf is only
+    meaningful if its one caller uses it.
+    """
+    from app.services import technical_analysis_service as TAS
+
+    svc = TAS.TechnicalAnalysisService.__new__(TAS.TechnicalAnalysisService)
+    asked: list = []
+
+    class _FMP:
+        async def get_historical_prices(self, symbol, frm, to):
+            asked.append(symbol)
+            return []
+
+    svc.fmp = _FMP()
+    with pytest.raises(Exception):
+        # No rows -> the method raises its own 404; we only care what it ASKED for.
+        await svc._fetch_daily_ohlcv_uncached("^GSPC")
+    assert asked == ["SPY"], f"the fetch bypassed the proxy resolver: {asked}"

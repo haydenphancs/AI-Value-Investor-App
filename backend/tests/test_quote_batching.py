@@ -123,6 +123,11 @@ async def test_market_pulse_issues_one_quote_request_for_every_tile(monkeypatch)
             calls["bulk_symbols"] += len(symbols)
             return [_quote(s) for s in symbols]
 
+    # `_cache` is CLASS-level and now also holds the separately-TTL'd Bitcoin tile, so a
+    # sibling test's warm entry would satisfy `_get_crypto_pulse_tile` and this test would
+    # count one fewer per-tile fallback. Clear it — the pollution is order-dependent and
+    # only shows up in a full run.
+    hd.HomeDashboardService._cache.clear()
     svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
     svc.fmp = _FMP()
     svc.price = PriceFromFMPFake(svc.fmp)
@@ -144,13 +149,24 @@ async def test_market_pulse_issues_one_quote_request_for_every_tile(monkeypatch)
 
     tiles = await svc._build_pulse()
 
-    assert len(tiles) == len(hd._PULSE_SYMBOLS), "a tile was dropped"
+    assert len(tiles) == hd._EXPECTED_PULSE_TILES, "a tile was dropped"
     assert calls["bulk"] == 1, f"expected ONE batch request, got {calls['bulk']}"
-    assert calls["bulk_symbols"] == len(hd._PULSE_SYMBOLS)
-    assert calls["single"] == 0, (
-        f"{calls['single']} per-symbol /quote calls survived — the pulse is still "
-        "fanning out"
+    assert calls["bulk_symbols"] == len(hd._PULSE_SYMBOLS), (
+        "the FMP batch must cover the ENTITLED ETF tiles only — the crypto tile is priced "
+        "from CoinGecko and must never be added to an FMP batch"
     )
+    # Exactly ONE single quote: the Bitcoin tile. It is deliberately outside the FMP batch
+    # (`_CRYPTO_PULSE_SYMBOL`, not `_PULSE_SYMBOLS`) because it is priced through
+    # `price_source` → `uses_coingecko_price` → CoinGecko. FMP 402s every `…USD` pair, so
+    # batching it would be a guaranteed miss.
+    #
+    # ⚠️ It shows up as a `get_stock_price_quote` here only because `PriceFromFMPFake`
+    # forwards everything to the FMP fake and does NOT apply `is_blocked_symbol`. In
+    # production this call goes to CoinGecko.
+    assert calls["single"] == 1, (
+        f'expected exactly the crypto tile to quote singly, got {calls["single"]}'
+    )
+
 
 
 @pytest.mark.asyncio
@@ -172,6 +188,11 @@ async def test_pulse_falls_back_per_tile_when_the_batch_fails(monkeypatch):
             calls["single"] += 1
             return _quote(symbol)
 
+    # `_cache` is CLASS-level and now also holds the separately-TTL'd Bitcoin tile, so a
+    # sibling test's warm entry would satisfy `_get_crypto_pulse_tile` and this test would
+    # count one fewer per-tile fallback. Clear it — the pollution is order-dependent and
+    # only shows up in a full run.
+    hd.HomeDashboardService._cache.clear()
     svc = hd.HomeDashboardService.__new__(hd.HomeDashboardService)
     svc.fmp = _FMP()
     svc.price = PriceFromFMPFake(svc.fmp)
@@ -185,8 +206,8 @@ async def test_pulse_falls_back_per_tile_when_the_batch_fails(monkeypatch):
     svc._fetch_sparkline = _no_spark
 
     tiles = await svc._build_pulse()
-    assert len(tiles) == len(hd._PULSE_SYMBOLS), "a batch failure blanked the strip"
-    assert calls["single"] == len(hd._PULSE_SYMBOLS), "the per-tile fallback did not fire"
+    assert len(tiles) == hd._EXPECTED_PULSE_TILES, "a batch failure blanked the strip"
+    assert calls["single"] == hd._EXPECTED_PULSE_TILES, "the per-tile fallback did not fire"
 
 
 @pytest.mark.asyncio

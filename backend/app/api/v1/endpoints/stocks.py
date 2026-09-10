@@ -16,7 +16,7 @@ import math
 import re
 
 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPException
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list, sanitize_non_finite
 from app.api.error_response import (
@@ -1337,6 +1337,19 @@ async def get_technical_analysis(ticker: str):
         return await service.get_analysis(ticker)
     except HTTPException:
         raise
+    except FMPException as e:
+        # Typed upstream failures keep their own code — `FMPNotEntitledException` maps to
+        # `FMP_NOT_ENTITLED` (409), which iOS already branches on to render a permanent
+        # "not covered" state.
+        #
+        # 🔴 These used to be swallowed by the bare `except Exception` below and flattened
+        # to a generic 502 "service unavailable", so a screen that can NEVER have technical
+        # analysis (Crude Oil and Natural Gas are priced from FRED daily series — one value
+        # per day, no OHLCV) rendered a retry button that could not succeed.
+        logger.info(
+            "Technical analysis refused for %s (%s): %s", ticker, type(e).__name__, e,
+        )
+        return error_response_from_exception(e, ticker=ticker, step="technical_analysis")
     except Exception as e:
         logger.error(f"Technical analysis failed for {ticker}: {e}", exc_info=True)
         raise HTTPException(

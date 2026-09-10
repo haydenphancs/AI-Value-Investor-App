@@ -1248,6 +1248,24 @@ class IndexService:
             v = _finite_or_none(quote.get(key))
             return v if v is not None else default
 
+        def _q_opt(key: str) -> Optional[float]:
+            """Like `_q` but keeps "absent" distinguishable from a measured zero.
+
+            🔴 The display-only key statistics MUST use this. `PriceService._shape` emits a
+            FIXED key set — symbol/name/price/change/changePercentage/previousClose/volume/
+            avgVolume/marketCap/exchange (+ optional 52-week band) — and it has **no
+            `open`, `dayHigh` or `dayLow`**, because `/stable/quote`, which carried them, is
+            a blocked path. So `_q("open")` was not a rare miss: it returned the `0` default
+            on EVERY index request, and `_fmt(0.0)` renders `"0.00"`, not `"—"`.
+            The card therefore shipped `Open 0.00 / Day High 0.00 / Day Low 0.00` as facts,
+            beside a real `current_price` and a live `market_status.status == "open"`.
+
+            `commodity_service._build_commodity_detail` has always had this right — its
+            local `_fmt` does `if not v: return "—"`. This is the index twin of that fix,
+            and the same defect class as the fabricated BTC 52-week low.
+            """
+            return _finite_or_none(quote.get(key))
+
         price = _q("price")
         change = _q("change")
 
@@ -1313,21 +1331,26 @@ class IndexService:
             change_pct = _finite_or_none(quote.get("changesPercentage"))
         # FMP doesn't return PE for indices — compute from sector benchmarks
         pe = _q("pe") or pe_from_sectors or 0
-        eps = _q("eps")
-        prev_close = _q("previousClose")
+        # `eps` was read here and never used. `_shape` has no `eps` key (and `/stable/quote`,
+        # which had one, is blocked), so it could only ever be 0 — a dead read of a field
+        # that cannot exist. Removed rather than left to look like a live input.
+        prev_close = _q_opt("previousClose")
+        # `None` is falsy, so the guard below behaves exactly as it did with the 0 default;
+        # the difference is only that an absent previous close now renders "—", not "0.00".
         if change_pct is None and change and prev_close:
             try:
                 change_pct = round((change / prev_close) * 100, 4)
             except (TypeError, ValueError, ZeroDivisionError):
                 change_pct = None
         change_pct = change_pct if change_pct is not None else 0
-        open_price = _q("open")
-        day_high = _q("dayHigh")
-        day_low = _q("dayLow")
-        year_high = _q("yearHigh")
-        year_low = _q("yearLow")
-        volume = _q("volume")
-        avg_volume = _q("avgVolume")
+        # Display-only rows: absent stays absent so `_fmt` renders "—".
+        open_price = _q_opt("open")
+        day_high = _q_opt("dayHigh")
+        day_low = _q_opt("dayLow")
+        year_high = _q_opt("yearHigh")
+        year_low = _q_opt("yearLow")
+        volume = _q_opt("volume")
+        avg_volume = _q_opt("avgVolume")
         market_cap = _q("marketCap")
 
         # ── Step 3: Read the history-derived stats ────────────────
@@ -1338,8 +1361,9 @@ class IndexService:
         avg_50 = derived.get("avg_50")
         avg_200 = derived.get("avg_200")
         # FMP does not return avgVolume for indices; fall back to the 30-day mean.
-        if not avg_volume:
-            avg_volume = derived.get("avg_volume_30d") or 0
+        if avg_volume is None:
+            # `or 0` here would re-fabricate the zero the line above stopped emitting.
+            avg_volume = _finite_or_none(derived.get("avg_volume_30d"))
         ytd_return = derived.get("ytd_return")
         one_month_return = derived.get("one_month_return")
         one_year_return = derived.get("one_year_return")
@@ -1603,6 +1627,10 @@ class IndexService:
 
         return IndexSnapshotsDataResponse(
             valuation=ValuationSnapshotResponse(
+                # `pe_known` is the load-bearing field — see the note on the schema. The
+                # three floats keep their 0 sentinel for wire compatibility with shipped
+                # builds; `pe_known=False` is what tells the client not to believe them.
+                pe_known=bool(pe and pe > 0),
                 pe_ratio=round(pe, 1) if pe else 0,
                 forward_pe=round(forward_pe, 1) if forward_pe else 0,
                 earnings_yield=round(earnings_yield, 2) if earnings_yield else 0,
@@ -1704,17 +1732,31 @@ class IndexService:
         """The deterministic prose. Pure, no I/O, always works — which is what makes it
         safe to answer with while Gemini runs behind the response."""
         # ── Build default templates (always work) ─────────────────
-        valuation_template = (
-            f"The market is trading at {{PE_RATIO}} earnings, "
-            f"which is considered {{VALUATION_LABEL}}. "
-            f"That's {'a premium to' if pe and pe > historical_avg_pe else 'below'} "
-            f"the {{HISTORICAL_PERIOD}} average of {{HISTORICAL_AVG_PE}} — "
-            f"{'investors are pricing in strong future growth' if pe and pe > historical_avg_pe else 'suggesting potential value'}. "
-            f"The forward P/E of {{FORWARD_PE}} tells a "
-            f"{'slightly better' if forward_pe and forward_pe < pe else 'similar'} story, "
-            f"suggesting analysts expect earnings to "
-            f"{'catch up' if forward_pe and forward_pe < pe else 'remain steady'}."
-        )
+        #
+        # 🔴 With no P/E there is nothing to say about valuation, and the template below
+        # would say it anyway: every branch is a ternary on `pe`, and the falsy arms read
+        # "below the average — suggesting potential value". Against `pe = 0` that renders
+        # "The market is trading at 0.0x earnings, which is considered Bargain. That's below
+        # the 10-year average of 21x — suggesting potential value." — investment language
+        # asserted from a number the service knows it failed to compute.
+        if not (pe and pe > 0):
+            valuation_template = (
+                "Index-level P/E isn't available right now. It's derived from the sector "
+                "benchmark medians, and not enough sectors reported this period for the "
+                "figure to be meaningful. The rest of this snapshot is unaffected."
+            )
+        else:
+            valuation_template = (
+                f"The market is trading at {{PE_RATIO}} earnings, "
+                f"which is considered {{VALUATION_LABEL}}. "
+                f"That's {'a premium to' if pe and pe > historical_avg_pe else 'below'} "
+                f"the {{HISTORICAL_PERIOD}} average of {{HISTORICAL_AVG_PE}} — "
+                f"{'investors are pricing in strong future growth' if pe and pe > historical_avg_pe else 'suggesting potential value'}. "
+                f"The forward P/E of {{FORWARD_PE}} tells a "
+                f"{'slightly better' if forward_pe and forward_pe < pe else 'similar'} story, "
+                f"suggesting analysts expect earnings to "
+                f"{'catch up' if forward_pe and forward_pe < pe else 'remain steady'}."
+            )
 
         advancing = sum(1 for s in sectors if s.change_percent >= 0)
         sector_template = (
@@ -1884,7 +1926,18 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                     ai_sector = ai_sector.replace(header, "").strip()
 
                 if ai_valuation and len(ai_valuation) > 20:
-                    if "{PE_RATIO}" in ai_valuation and "{VALUATION_LABEL}" in ai_valuation:
+                    if not (pe and pe > 0):
+                        # 🔴 No P/E, so there is nothing to narrate. The deterministic
+                        # fallback already says so honestly; accepting Gemini's prose here
+                        # would put the fabricated valuation back on screen by the other
+                        # door — it is prompted WITH the placeholders and will happily write
+                        # "trading at {PE_RATIO}, which is considered {VALUATION_LABEL}",
+                        # which resolves against the 0 sentinel client-side.
+                        logger.info(
+                            "index %s: P/E unavailable — keeping the honest valuation "
+                            "template and discarding the AI one", symbol,
+                        )
+                    elif "{PE_RATIO}" in ai_valuation and "{VALUATION_LABEL}" in ai_valuation:
                         valuation_template = ai_valuation
                     else:
                         logger.warning("Gemini valuation story missing placeholders, using default")

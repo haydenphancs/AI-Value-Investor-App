@@ -123,14 +123,31 @@ struct IndexValuationSnapshot {
     let historicalAvgPE: Double
     let historicalPeriod: String
     let storyTemplate: String
+    /// See `ValuationSnapshotDTO.peKnown`. `false` means `peRatio` is the 0 sentinel.
+    let peKnown: Bool
 
-    var level: ValuationLevel {
-        ValuationLevel.from(pe: peRatio)
+    /// `nil` when the P/E could not be computed — the caller must render no badge.
+    ///
+    /// 🔴 This was non-Optional and read `ValuationLevel.from(pe: peRatio)`. With `peRatio`
+    /// at the 0 sentinel that returns `.bargain` (its first arm is `case ..<18`), so an
+    /// index whose P/E the backend failed to derive shipped a green "Bargain" badge, a
+    /// gauge marker pinned hard-left inside the Bargain quarter, and a story reading
+    /// "trading at 0.0x earnings, which is considered Bargain — suggesting potential value".
+    var level: ValuationLevel? {
+        guard peKnown, peRatio > 0 else { return nil }
+        return ValuationLevel.from(pe: peRatio)
     }
 
-    var gaugePosition: Double {
-        ValuationLevel.gaugePosition(pe: peRatio)
+    /// `nil` when there is no level to point at, so the tier bar can be omitted entirely
+    /// rather than drawn with the marker parked at zero.
+    var gaugePosition: Double? {
+        guard peKnown, peRatio > 0 else { return nil }
+        return ValuationLevel.gaugePosition(pe: peRatio)
     }
+
+    /// Formatted P/E figures, or "—". Never `String(format: "%.1fx", 0)`.
+    var peDisplay: String { peKnown && peRatio > 0 ? String(format: "%.1fx", peRatio) : "—" }
+    var forwardPEDisplay: String { peKnown && forwardPE > 0 ? String(format: "%.1fx", forwardPE) : "—" }
 
     var tiers: [ValuationTier] {
         let current = level
@@ -144,11 +161,15 @@ struct IndexValuationSnapshot {
 
     /// Resolves the template by replacing placeholders with live data
     var resolvedStory: String {
+        // When the P/E is unknown the backend sends prose with NO placeholders in it (it
+        // says so plainly instead), so these substitutions are no-ops on that path. They
+        // still have to degrade safely: `peDisplay` renders "—" rather than "0.0x", and the
+        // label falls back rather than force-unwrapping the now-Optional `level`.
         storyTemplate
-            .replacingOccurrences(of: "{PE_RATIO}", with: String(format: "%.1fx", peRatio))
-            .replacingOccurrences(of: "{FORWARD_PE}", with: String(format: "%.1fx", forwardPE))
-            .replacingOccurrences(of: "{EARNINGS_YIELD}", with: String(format: "%.2f%%", earningsYield))
-            .replacingOccurrences(of: "{VALUATION_LABEL}", with: level.rawValue)
+            .replacingOccurrences(of: "{PE_RATIO}", with: peDisplay)
+            .replacingOccurrences(of: "{FORWARD_PE}", with: forwardPEDisplay)
+            .replacingOccurrences(of: "{EARNINGS_YIELD}", with: earningsYield > 0 ? String(format: "%.2f%%", earningsYield) : "—")
+            .replacingOccurrences(of: "{VALUATION_LABEL}", with: level?.rawValue ?? "not available")
             .replacingOccurrences(of: "{HISTORICAL_AVG_PE}", with: String(format: "%.0fx", historicalAvgPE))
             .replacingOccurrences(of: "{HISTORICAL_PERIOD}", with: historicalPeriod)
     }
@@ -378,7 +399,8 @@ extension IndexValuationSnapshot {
         earningsYield: 3.51,
         historicalAvgPE: 21,
         historicalPeriod: "10-year",
-        storyTemplate: "The S&P 500 is trading at {PE_RATIO} earnings, which is considered {VALUATION_LABEL}. That's a hefty premium to the {HISTORICAL_PERIOD} average of {HISTORICAL_AVG_PE} — investors are clearly pricing in strong future growth. The forward P/E of {FORWARD_PE} tells a slightly better story, suggesting analysts expect earnings to catch up."
+        storyTemplate: "The S&P 500 is trading at {PE_RATIO} earnings, which is considered {VALUATION_LABEL}. That's a hefty premium to the {HISTORICAL_PERIOD} average of {HISTORICAL_AVG_PE} — investors are clearly pricing in strong future growth. The forward P/E of {FORWARD_PE} tells a slightly better story, suggesting analysts expect earnings to catch up.",
+        peKnown: true
     )
 }
 

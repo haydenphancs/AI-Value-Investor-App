@@ -518,6 +518,13 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         MarketPulseItem(name: "Gold ETF", symbol: "GLD", type: .etf,
                         priceText: "399.72", changeText: "-1.73%", isPositive: false,
                         spark: spark([24, 22, 25, 19, 21, 17, 18, 13])),
+        // The sixth tile. Served from a SEPARATE, longer-lived backend cache
+        // (`_CRYPTO_PULSE_SYMBOL`, 600s) and priced from CoinGecko rather than FMP — see
+        // the budget note in `home_dashboard_service`. `.crypto` is what selects the 24/7
+        // sparkline window.
+        MarketPulseItem(name: "Bitcoin", symbol: "BTCUSD", type: .crypto,
+                        priceText: "78,045.00", changeText: "-0.47%", isPositive: false,
+                        spark: spark([19, 23, 21, 26, 22, 25, 20, 18])),
     ]
 
     // MARK: - Scanner: Today's Top Movers

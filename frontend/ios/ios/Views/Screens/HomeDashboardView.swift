@@ -132,6 +132,19 @@ struct HomeDashboardView: View {
         ) { _ in
             Task { await viewModel.load() }
         }
+        // Home is where this matters most: it has NO root NavigationStack, so every destination
+        // here is modal and the ticker screen is routinely two covers deep (theme → ticker,
+        // signals → ticker, search → ticker). Clearing these roots unwinds the whole nest —
+        // a screen presented three deep needs no code of its own, now or later.
+        .onPresentationReset {
+            selectedTicker = nil
+            signalDetailTarget = nil
+            themeDetailTarget = nil
+            pushRoute = nil
+            showSearch = false
+            showProfile = false
+            showSignalsPaywall = false
+        }
         .sheet(isPresented: $showSearch) {
             SearchView()
         }

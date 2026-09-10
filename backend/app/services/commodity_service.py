@@ -934,9 +934,23 @@ class CommodityService:
         # them directly returned `{}` for all of them and "People Also Check" rendered
         # empty on every commodity screen. The tuple keeps the original symbol so the row
         # still links to the commodity screen rather than to the fund.
-        refs = [_ref_of(s) for s in related_symbols]
+        # 🔴 Route each related symbol through `self._get_quote`, which is the ONE place
+        # that branches on the symbol's SOURCE. This used to be
+        # `price_source(self).get_quote(_ref_of(s))` — resolving the ref but skipping the
+        # branch — so a FRED-backed neighbour sent a FRED SERIES ID to FMP:
+        #
+        #     CL  -> related ["NGUSD"] -> _ref_of -> "DHHNGSP"  (Henry Hub, a FRED id)
+        #     NG  -> related ["CLUSD"] -> _ref_of -> "DCOILWTICO"
+        #
+        # `is_blocked_symbol("DCOILWTICO")` is False, so the call went out to
+        # `/stable/profile?symbol=DCOILWTICO`, came back `[]`, and the row was dropped —
+        # "People Also Check" was permanently empty on Crude Oil and Natural Gas. Worse,
+        # partial results are deliberately not cached (below), so EVERY request re-fired
+        # the useless call.
+        #
+        # Reusing `_get_quote` also picks up its per-symbol cache and its degradation gate.
         results = await asyncio.gather(
-            *[price_source(self).get_quote(r) for r in refs],
+            *[self._get_quote(s) for s in related_symbols],
             return_exceptions=True,
         )
         related_quotes = [

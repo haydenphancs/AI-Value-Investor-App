@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,20 @@ _FMP_SECTOR_MAP: Dict[str, str] = {
     "Materials": "Basic Materials",
 }
 
-# Fallback tickers if FMP sp500-constituent endpoint is unavailable
+# 🔴 NOT a ticker source any more — see `_get_sector_tickers`.
+#
+# This table's ONLY remaining job is to define the 11 canonical sector NAMES
+# (`CANONICAL_SECTORS`, below), which the whole lookup layer keys on. It must not be
+# deleted, and it must never again be used to compute a median: `sp500-constituent` is a
+# BLOCKED path under the current FMP entitlement, so "the endpoint is unavailable" went
+# from a rare degradation to the permanent state, and this fallback went from a safety net
+# to the thing that silently overwrites good data.
+#
+# 5 tickers x 11 sectors = 55, against `MIN_SAMPLE_SIZE = 5` — so every one of these
+# sectors clears the sample gate at EXACTLY the boundary and upserts a 5-company median
+# over the ~5,700-company values that `industry_benchmark_service` writes from
+# `benchmark_universe.json`. Thirteen services read that table, including moat scoring,
+# health check, valuation/growth snapshots and the AI report collector.
 _FALLBACK_SECTOR_TICKERS: Dict[str, List[str]] = {
     "Technology": ["AAPL", "MSFT", "NVDA", "AVGO", "CRM"],
     "Healthcare": ["UNH", "JNJ", "LLY", "PFE", "ABBV"],
@@ -716,12 +729,34 @@ class SectorBenchmarkService:
         return {"rows_upserted": total_upserted, "elapsed_seconds": round(elapsed, 1)}
 
     async def _get_sector_tickers(self) -> Dict[str, List[str]]:
-        """Fetch S&P 500 constituents and group by canonical sector name."""
+        """Fetch S&P 500 constituents and group by canonical sector name.
+
+        RAISES rather than falling back. `sp500-constituent` is a blocked path, and
+        `FMPClient.get_sp500_constituents` swallows the refusal into `[]` (a warning, no
+        exception) — so an empty list here is the PERMANENT state, not a blip.
+
+        Returning `_FALLBACK_SECTOR_TICKERS` at that point computed 5-company medians and
+        upserted them over the broad-universe rows, and the caller could not tell: the
+        write succeeded, the row count looked plausible, and `POST /admin/refresh-sector-
+        benchmarks` answered `200 {"status": "started"}` because it dispatches through
+        `asyncio.create_task`. One click silently degraded every sector comparison in the
+        app.
+
+        The live producer is `industry_benchmark_service.recompute_all`, which writes both
+        the industry rows and the `industry = ''` sector aggregate from
+        `benchmark_universe.json` (see `main.py`'s retirement note). Anything that wants
+        sector benchmarks should call that.
+        """
         constituents = await self.fmp.get_sp500_constituents()
 
         if not constituents:
-            logger.warning("FMP sp500-constituent returned empty, using fallback tickers")
-            return dict(_FALLBACK_SECTOR_TICKERS)
+            raise FMPUnavailableException(
+                "sector benchmarks: `sp500-constituent` returned no rows (it is a BLOCKED "
+                "path under the current entitlement). Refusing to compute medians from "
+                f"the {sum(len(v) for v in _FALLBACK_SECTOR_TICKERS.values())}-ticker "
+                "fallback — they would overwrite the broad-universe rows written by "
+                "industry_benchmark_service.recompute_all, which is the live producer."
+            )
 
         sector_map: Dict[str, List[str]] = {}
         for c in constituents:
@@ -736,8 +771,14 @@ class SectorBenchmarkService:
             sector_map.setdefault(sector, []).append(symbol)
 
         if not sector_map:
-            logger.warning("No valid sectors from constituents, using fallback")
-            return dict(_FALLBACK_SECTOR_TICKERS)
+            # Same refusal as the empty-constituents arm above, and for the same reason:
+            # a fallback here would upsert 5-company medians over the broad-universe rows.
+            # Reachable if FMP ever changes its sector vocabulary wholesale.
+            raise FMPUnavailableException(
+                "sector benchmarks: no constituent row mapped to a canonical sector "
+                f"({len(constituents)} rows in, 0 grouped). Refusing to fall back to the "
+                "hardcoded tickers — see `_get_sector_tickers`."
+            )
 
         return sector_map
 

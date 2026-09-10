@@ -138,6 +138,32 @@ final class AppState {
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
     var pendingResearchTicker: String?
 
+    /// Bumped when a screen needs everything presented ABOVE the tab bar taken down.
+    ///
+    /// `pendingResearchTicker` gets the user to the right tab; this is what lets them SEE it.
+    /// `dismiss()` closes exactly one presentation level, and the detail screens are routinely
+    /// two covers deep (Home has no root `NavigationStack`, so every Home destination is modal:
+    /// theme → ticker, signals → ticker, search → ticker). Dismissing one level switched the tab
+    /// behind a cover that was still on screen, which reads as the button doing nothing.
+    ///
+    /// A MONOTONIC TOKEN, deliberately — not a `Bool`, and not `pendingResearchTicker` itself.
+    /// Every other intent here is consumed-and-cleared by exactly one owner; an observer that
+    /// piggybacked on such a value would race that clear (the "ONE OWNER PER ROUTE KIND" hazard
+    /// documented in `ContentView`). A value that only ever increases has no clear to race, so
+    /// any number of observers can react to the same bump.
+    ///
+    /// Observers are the five tab ROOTS, via `.onPresentationReset` — clearing a root's own
+    /// presentation state unwinds every cover nested beneath it in one go, so a screen presented
+    /// three deep needs no code of its own.
+    ///
+    /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
+    private(set) var presentationResetToken: Int = 0
+
+    /// Take down everything presented above the tab bar. See `presentationResetToken`.
+    func dismissAllPresentations() {
+        presentationResetToken &+= 1
+    }
+
     /// Unread notification count, for the tab-bar badge.
     ///
     /// Device-global (no user id), so it MUST be reset in `discardDataForEndedSession()`
@@ -1134,6 +1160,9 @@ final class AppState {
         pendingPushTicker = nil
         pendingTrackingTab = nil
         pendingResearchTicker = nil
+        // Not data, but the same bug class: a bump left pending across a sign-out would fire
+        // into the next account and tear down a screen they had just opened.
+        presentationResetToken = 0
         PortfolioStore.shared.reset()
         // Same reason: the price alerts in this store are the signed-out user's own
         // data, and the detail-header bell renders straight off it.
@@ -1618,7 +1647,11 @@ struct WatchlistStock: Codable, Identifiable, Equatable, Sendable {
 final class ResearchState {
     var reports: [ResearchReportSummary] = []
     var generatingReports: Set<String> = [] // Report IDs currently generating
-    var selectedPersona: String = "buffett"
+    // NOTE: there is deliberately no `selectedPersona` here. One used to exist, defaulted to
+    // "buffett" — not even a valid persona key — and was never read or written by anything.
+    // The Research tab's selection lives on `ResearchViewModel`, which is the only thing that
+    // can honour the user's "Default Analyst" setting; a second copy here would be a
+    // ready-made way to render the wrong analyst.
 
     func isGenerating(_ reportId: String) -> Bool {
         generatingReports.contains(reportId)

@@ -127,18 +127,38 @@ async def refresh_sector_benchmarks(
     Auth: pass `X-Admin-Token: <settings.ADMIN_TOKEN>` OR sign in with an
     email on the admin allowlist.
 
+    🔴 Re-pointed at `industry_benchmark_service.recompute_all`, which is the LIVE producer
+    of these rows. It previously called `sector_benchmark_service.compute_all_benchmarks`,
+    and that path is now a data-corruption button:
+
+      * `sp500-constituent` is a BLOCKED path under the current FMP entitlement;
+      * `get_sp500_constituents` swallows the refusal into `[]` (warning, no exception);
+      * the service then fell back to 55 hardcoded tickers — 5 per sector against
+        `MIN_SAMPLE_SIZE = 5`, so each cleared the sample gate at exactly the boundary;
+      * and upserted those 5-company medians over the ~5,700-company rows.
+
+    Because the work is dispatched with `asyncio.create_task`, the caller got
+    `200 {"status": "started"}` and the damage happened silently in the background. Thirteen
+    services read `sector_benchmarks`, including moat scoring, health check, the
+    valuation/growth snapshots and the AI report collector.
+
+    `recompute_all` writes the industry rows AND the `industry = ''` sector aggregate in one
+    pass from `benchmark_universe.json` — see the retirement note in `main.py`.
+
     Args:
-        backfill: If True, forces deep historical computation (16 annual, 80 quarterly).
-                  If False (default), only refreshes recent periods.
+        backfill: If True, recompute every period regardless of freshness.
+                  If False (default), skip rows refreshed in the last 24h.
     """
     _authorize_admin(user, x_admin_token)
     try:
-        from app.services.sector_benchmark_service import get_sector_benchmark_service
+        from app.services.industry_benchmark_service import get_industry_benchmark_service
 
-        service = get_sector_benchmark_service()
-        asyncio.create_task(service.compute_all_benchmarks(force=True, backfill=backfill))
-        mode = "backfill (full history)" if backfill else "daily (recent periods)"
-        return {"status": "started", "message": f"Sector benchmark computation started in background — mode: {mode}"}
+        service = get_industry_benchmark_service()
+        # `force` has no analogue here; freshness is expressed as a window.
+        skip_hours = None if backfill else 24
+        asyncio.create_task(service.recompute_all(skip_if_fresh_hours=skip_hours))
+        mode = "backfill (ignore freshness)" if backfill else "daily (skip rows fresher than 24h)"
+        return {"status": "started", "message": f"Sector + industry benchmark computation started in background — mode: {mode}"}
     except Exception as e:
         logger.error(f"Manual benchmark refresh failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to start benchmark refresh")

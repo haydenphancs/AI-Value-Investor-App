@@ -88,6 +88,11 @@ struct ContentView: View {
             appState.isAIChatPresented = false
             chatViewModel.resetForIdentityChange()
         }
+        // The chat cover is the one presentation the SHELL owns rather than a tab, so no tab
+        // root's `.onPresentationReset` can reach it.
+        .onPresentationReset {
+            appState.isAIChatPresented = false
+        }
         .onChange(of: appState.pendingPushRoute, initial: true) { _, route in
             // `initial: true` for the same reason as HomeDashboardView: a cold launch
             // from a tap sets this before either view exists.
@@ -211,12 +216,17 @@ struct ResearchViewWithBinding: View {
         // entry point that was wired up.
         .onChange(of: prefilledTicker) { _, ticker in
             guard let ticker, !ticker.isEmpty else { return }
-            viewModel.searchText = ticker
+            // Through the ViewModel, NOT `viewModel.searchText = ticker`. The chip renders
+            // `selectedTarget` and falls back to `searchText` only when it is nil, while
+            // `generateAnalysis()` reads `searchText` — so writing one of them left the screen
+            // showing a stale target while Generate charged 20 credits for this one.
+            viewModel.applyPrefilledTicker(ticker)
         }
         // Live-poll the Reports list while anything is generating.
         //
         // This was wired ONLY in `Views/Screens/ResearchView.swift`, the preview-only
-        // copy of this screen that is never presented — so in the shipping app nothing
+        // copy of this screen that was never presented (that file has since been deleted —
+        // this view is the only Research screen) — so in the shipping app nothing
         // ever armed it. The generation stream refreshes the list at 25% boundaries,
         // which hid the gap while a stream was alive, but a report started in a
         // previous app run, or one whose stream ended on a network error, left its
@@ -242,12 +252,33 @@ struct ResearchViewWithBinding: View {
             guard isActiveTab else { return }
             await viewModel.loadIfStale()
         }
+        // Re-seed the analyst from Settings → "Default Analyst" on every entry to this tab.
+        //
+        // The notification observers in the ViewModel cover a change made while the app is
+        // running; this covers the rest — a value hydrated from the server, and the promise the
+        // setting's own subtitle makes ("Pre-selected for new research"). It also clears the
+        // manual-override flag, which is what makes a one-off pick last for the visit it was
+        // made in rather than for the whole app process.
+        .task(id: isActiveTab) {
+            guard isActiveTab else { return }
+            viewModel.researchTabDidActivate()
+        }
         // The direct case, and the one that has no other cure: signing in or out from THIS
         // tab. `SignInRequiredSheet` dismisses itself on `.authenticated`, and
         // `onAuthenticated()`'s fan-out hydrates credits, settings and the Learn stores but
         // nothing research-related — so without this the tab behind the sheet keeps rendering
         // "Sign in to see your analyses" to a user who just signed in.
         .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+        // This tab is the DESTINATION of the research handoff, so it must be clear when the user
+        // arrives — landing on Research behind a report cover is the same bug, one screen along.
+        .onPresentationReset {
+            selectedReport = nil
+            selectedTrendingAnalysis = nil
+            showProfile = false
+            viewModel.showCreditsSheet = false
+            viewModel.showPersonasSheet = false
+            viewModel.showTargetSearchSheet = false
+        }
         .fullScreenCover(item: $selectedReport) { report in
             NavigationStack {
                 TickerReportView(report: report)
@@ -275,7 +306,7 @@ struct ResearchViewWithBinding: View {
         .sheet(isPresented: $viewModel.showPersonasSheet) {
             PersonasSheet(
                 personas: viewModel.personas,
-                selectedPersona: $viewModel.selectedPersona
+                selectedPersona: personaBinding
             )
         }
         .sheet(isPresented: $viewModel.showTargetSearchSheet) {
@@ -344,7 +375,7 @@ struct ResearchViewWithBinding: View {
                 // Persona Selection Section
                 PersonaSelectionSection(
                     personas: viewModel.personas,
-                    selectedPersona: $viewModel.selectedPersona,
+                    selectedPersona: personaBinding,
                     onViewAllTapped: handleViewAllPersonas
                 )
 
@@ -448,6 +479,22 @@ struct ResearchViewWithBinding: View {
     }
 
     // MARK: - Action Handlers
+
+    /// The analyst binding handed to both picker surfaces.
+    ///
+    /// NOT `$viewModel.selectedPersona`. `PersonaSelectionSection` and `PersonasSheet` write
+    /// through a plain `@Binding`, which would set the property directly and skip
+    /// `selectPersona(_:)` — the only place that records the pick as deliberate. A default
+    /// re-applied a moment later would then silently overwrite the user's tap. Routing the
+    /// setter through the ViewModel keeps one writer; `selectedPersona` is `private(set)` so a
+    /// future direct binding fails to compile rather than reintroducing this quietly.
+    private var personaBinding: Binding<AnalysisPersona> {
+        Binding(
+            get: { viewModel.selectedPersona },
+            set: { viewModel.selectPersona($0) }
+        )
+    }
+
     private func handleProfileTapped() {
         showProfile = true
     }

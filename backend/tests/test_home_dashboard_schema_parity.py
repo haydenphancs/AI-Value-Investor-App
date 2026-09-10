@@ -31,6 +31,7 @@ from app.schemas.home_dashboard import (
 )
 from app.services.home_dashboard_service import (
     HomeDashboardService,
+    _EXPECTED_PULSE_TILES,
     _PULSE_SYMBOLS,
     _SCANNER_CACHE_KEY,
     _THEMES_CACHE_KEY,
@@ -339,17 +340,17 @@ async def test_build_returns_all_symbols_mapped_and_validated():
     resp = await svc.get_dashboard()
 
     assert isinstance(resp, HomeDashboardResponse)
-    assert len(resp.pulse) == len(_PULSE_SYMBOLS)
+    assert len(resp.pulse) == _EXPECTED_PULSE_TILES
     # Order + identity preserved from the configured universe.
-    assert [p.symbol for p in resp.pulse] == [c["symbol"] for c in _PULSE_SYMBOLS]
+    assert [p.symbol for p in resp.pulse] == [c["symbol"] for c in _PULSE_SYMBOLS] + ["BTCUSD"]
     first = resp.pulse[0]
     assert first.name == "S&P 500 ETF" and first.type == "etf"
     assert first.spark == [100.0, 101.0, 102.0]     # latest-session intraday, oldest-first
     assert first.previous_close == 100.0            # → dashed reference line on iOS
     assert first.change_percent == 1.23
     # One quote + one intraday call per symbol.
-    assert fake.quote_calls == len(_PULSE_SYMBOLS)
-    assert fake.intraday_calls == len(_PULSE_SYMBOLS)
+    assert fake.quote_calls == _EXPECTED_PULSE_TILES
+    assert fake.intraday_calls == len(_PULSE_SYMBOLS)  # crypto sparkline is not FMP
 
 
 @pytest.mark.asyncio
@@ -359,7 +360,7 @@ async def test_concurrent_loads_dedup_to_single_fanout():
     # The dedup signal is the call count (the responses are fresh objects and
     # Pydantic copies the pulse list on construction, so identity can't be used).
     a, b = await asyncio.gather(svc.get_dashboard(), svc.get_dashboard())
-    assert fake.quote_calls == len(_PULSE_SYMBOLS)   # not doubled → deduped
+    assert fake.quote_calls == _EXPECTED_PULSE_TILES   # not doubled → deduped
     assert [p.symbol for p in a.pulse] == [p.symbol for p in b.pulse]
 
 
@@ -386,7 +387,7 @@ async def test_symbol_failure_drops_only_that_tile():
 
     symbols = {p.symbol for p in resp.pulse}
     assert "GLD" not in symbols    # the one failure dropped
-    assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1    # everyone else survives
+    assert len(resp.pulse) == _EXPECTED_PULSE_TILES - 1    # everyone else survives
 
 
 @pytest.mark.asyncio
@@ -411,7 +412,7 @@ async def test_pulse_non_finite_price_drops_tile_and_never_serializes_nan():
 
     symbols = {p.symbol for p in resp.pulse}
     assert "SPY" not in symbols  # NaN-price tile dropped
-    assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1
+    assert len(resp.pulse) == _EXPECTED_PULSE_TILES - 1
     for p in resp.pulse:
         assert _m.isfinite(p.price) and p.price > 0
         assert _m.isfinite(p.change_percent)         # Inf change → 0.0
@@ -490,6 +491,22 @@ def _stub_crypto_chart(monkeypatch):
     monkeypatch.setattr(
         "app.services.chart_helper._fetch_crypto_chart_data", _fake_crypto_chart
     )
+
+
+@pytest.fixture(autouse=True)
+def _always_stub_the_crypto_chart(monkeypatch):
+    """AUTOUSE, because the shipped strip now carries a Bitcoin tile.
+
+    `_CRYPTO_PULSE_SYMBOL` (BTCUSD) is fetched on every `_build_pulse`, and its sparkline
+    routes to CoinGecko — which `conftest.py`'s hermeticity guard blocks. Left unstubbed the
+    call still *degrades* correctly (empty series, logged), but the blocked attempt makes
+    every build slower and leaves a pending task at teardown, which is what broke
+    `test_slow_pulse_build_does_not_block_the_dashboard`: it waits a fixed 0.5s for the
+    shielded build to warm the cache.
+
+    Stub the service, never exempt the host — `.claude/rules/testing.md`.
+    """
+    _stub_crypto_chart(monkeypatch)
 
 
 @pytest.mark.asyncio
@@ -623,17 +640,17 @@ async def test_partial_pulse_is_not_pinned_for_the_full_ttl():
 
     svc.fmp.get_stock_price_quote = flaky_quote  # type: ignore[assignment]
     resp = await svc.get_dashboard()
-    assert len(resp.pulse) == len(_PULSE_SYMBOLS) - 1
+    assert len(resp.pulse) == _EXPECTED_PULSE_TILES - 1
 
     ts, cached = HomeDashboardService._cache[hds._CACHE_KEY]
-    assert len(cached) < len(_PULSE_SYMBOLS)
+    assert len(cached) < _EXPECTED_PULSE_TILES
     # Age it past the DEGRADED ttl but well inside the healthy one.
     HomeDashboardService._cache[hds._CACHE_KEY] = (
         ts - (hds._CACHE_DEGRADED_TTL_SECONDS + 1), cached
     )
     svc.fmp.get_stock_price_quote = _FakeFMP().get_stock_price_quote  # type: ignore[assignment]
     again = await svc.get_dashboard()
-    assert len(again.pulse) == len(_PULSE_SYMBOLS), "degraded strip was pinned"
+    assert len(again.pulse) == _EXPECTED_PULSE_TILES, "degraded strip was pinned"
 
 
 @pytest.mark.asyncio
@@ -641,7 +658,7 @@ async def test_healthy_pulse_is_cached_for_the_full_ttl():
     svc, fake = _fresh_service()
     await svc.get_dashboard()
     ts, cached = HomeDashboardService._cache[hds._CACHE_KEY]
-    assert len(cached) == len(_PULSE_SYMBOLS)
+    assert len(cached) == _EXPECTED_PULSE_TILES
 
     # Just past the degraded TTL — a COMPLETE strip must still be served.
     HomeDashboardService._cache[hds._CACHE_KEY] = (
@@ -675,9 +692,16 @@ async def test_slow_pulse_build_does_not_block_the_dashboard(monkeypatch):
     # shared build (CancelledError is a BaseException and would poison every
     # awaiter parked on `_inflight`). It keeps running and warms the cache, so
     # the NEXT request is served instantly.
-    await asyncio.sleep(0.5)
+    # Wait for the CONDITION, not a fixed interval. A fixed `sleep(0.5)` encoded an
+    # assumption about total build time that the strip's composition can change — adding
+    # the Bitcoin tile pushed the cold build past it, and the test failed for a reason
+    # unrelated to what it asserts (that the shield keeps the build alive).
+    for _ in range(40):                       # up to ~2s
+        if hds._CACHE_KEY in HomeDashboardService._cache:
+            break
+        await asyncio.sleep(0.05)
     assert hds._CACHE_KEY in HomeDashboardService._cache
-    assert len(HomeDashboardService._cache[hds._CACHE_KEY][1]) == len(_PULSE_SYMBOLS)
+    assert len(HomeDashboardService._cache[hds._CACHE_KEY][1]) == _EXPECTED_PULSE_TILES
     assert HomeDashboardService._inflight == {}, "in-flight future leaked"
 
 
@@ -686,7 +710,7 @@ async def test_pulse_timeout_serves_the_last_good_strip(monkeypatch):
     svc, _fake = _fresh_service()
     await svc.get_dashboard()                       # warm the cache
     good = list(HomeDashboardService._cache[hds._CACHE_KEY][1])
-    assert len(good) == len(_PULSE_SYMBOLS)
+    assert len(good) == _EXPECTED_PULSE_TILES
 
     # Age it just past the normal TTL — expired, but still inside the
     # stale-serve ceiling, which is what "serve the last good strip" means.
@@ -753,3 +777,103 @@ async def test_stale_pulse_is_not_served_past_the_ceiling(monkeypatch):
     # The status header is still computed fresh and still correct.
     assert resp.market_status_text
     await asyncio.sleep(0.4)
+
+
+# ── The Bitcoin tile lives outside the strip's cache, deliberately ───────────
+
+@pytest.mark.asyncio
+async def test_a_failing_crypto_tile_does_not_shorten_the_strips_ttl(monkeypatch):
+    """🔴 The reason the tile is NOT in `_PULSE_SYMBOLS`.
+
+    The degraded-TTL gate is `equity tiles < len(_PULSE_SYMBOLS)`. Had Bitcoin been added to
+    that list, a CoinGecko failure would drop the WHOLE strip to
+    `_CACHE_DEGRADED_TTL_SECONDS` (45s) — so an upstream outage would make the strip refetch
+    MORE often, not less, spending more quota exactly when the provider is unhealthy.
+    """
+    svc, _fake = _fresh_service()
+
+    async def _no_crypto():
+        return None
+
+    monkeypatch.setattr(svc, "_get_crypto_pulse_tile", _no_crypto, raising=True)
+    resp = await svc.get_dashboard()
+
+    assert len(resp.pulse) == len(_PULSE_SYMBOLS), "the ETF tiles must be unaffected"
+    assert "BTCUSD" not in {p.symbol for p in resp.pulse}
+    # The strip is still COMPLETE as far as the TTL gate is concerned.
+    cached = HomeDashboardService._cache[hds._CACHE_KEY][1]
+    assert hds._equity_tile_count(cached) == len(_PULSE_SYMBOLS)
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_six_tile_strip_is_not_treated_as_degraded():
+    """The mirror-image bug: counting the full list against `len(_PULSE_SYMBOLS)` makes a
+    perfectly healthy 6-tile strip compare unequal to 5 and get pinned at the 45s TTL."""
+    svc, _fake = _fresh_service()
+    resp = await svc.get_dashboard()
+    assert len(resp.pulse) == _EXPECTED_PULSE_TILES
+    cached = HomeDashboardService._cache[hds._CACHE_KEY][1]
+    assert hds._equity_tile_count(cached) == len(_PULSE_SYMBOLS), (
+        "the crypto tile is being counted against the entitled-ETF completeness gate"
+    )
+
+
+def test_the_crypto_tile_is_not_in_the_fmp_symbol_list():
+    """Its presence in `_PULSE_SYMBOLS` would also put it in the FMP batch request, which
+    402s every `…USD` pair — and would trip `test_asset_proxy_integrity`'s exit criterion."""
+    from app.integrations.fmp_entitlements import is_blocked_symbol
+
+    assert hds._CRYPTO_PULSE_SYMBOL["symbol"] not in {c["symbol"] for c in _PULSE_SYMBOLS}
+    assert hds._CRYPTO_PULSE_SYMBOL["type"] == "crypto", (
+        "the type drives the 24/7 sparkline window"
+    )
+    # Every symbol that DOES reach the FMP batch must be entitled.
+    for cfg in _PULSE_SYMBOLS:
+        assert not is_blocked_symbol(cfg["symbol"]), cfg["symbol"]
+
+
+def test_the_crypto_tile_ttl_is_sized_for_the_monthly_quota():
+    """CoinGecko Basic is 100,000 calls/MONTH = 2.3/min sustained. The strip rebuilds on a
+    60s TTL forever, so the tile's own TTL is what keeps it affordable:
+      60s  -> ~86,400/mo (~86% of the entire quota, for one tile)
+      600s -> ~8,640/mo  (~8.6%)
+    """
+    assert hds._CRYPTO_PULSE_TTL_SECONDS >= 600, (
+        "a shorter crypto tile TTL puts the Home strip on track to exhaust the monthly "
+        "CoinGecko quota by itself"
+    )
+    monthly = (30 * 24 * 60 * 60) / hds._CRYPTO_PULSE_TTL_SECONDS
+    assert monthly < 0.15 * 100_000, f"{monthly:,.0f} calls/month is too much of the cap"
+
+
+@pytest.mark.asyncio
+async def test_the_degradation_warning_still_fires_when_an_equity_tile_is_missing(caplog):
+    """The operator-facing half of the completeness gate.
+
+    With a Bitcoin tile in the list, a naive `len(pulse) < len(_PULSE_SYMBOLS)` is 5 < 5 —
+    FALSE — when one ETF tile has failed and crypto has succeeded. The strip is genuinely
+    degraded and the warning that says so would never fire again. That log is the signal
+    this strip's health is judged by, so it has to count the entitled tiles specifically.
+    """
+    import logging
+
+    svc, fake = _fresh_service()
+    original = svc.fmp.get_stock_price_quote
+
+    async def one_bad(ticker: str):
+        if ticker == "GLD":
+            raise RuntimeError("upstream down")
+        return await original(ticker)
+
+    svc.fmp.get_stock_price_quote = one_bad  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="app.services.home_dashboard_service"):
+        resp = await svc.get_dashboard()
+
+    symbols = {p.symbol for p in resp.pulse}
+    assert "GLD" not in symbols
+    assert "BTCUSD" in symbols, "the crypto tile should still be there"
+    assert len(resp.pulse) == len(_PULSE_SYMBOLS)   # 4 ETFs + 1 crypto == 5 == the naive count
+    assert any("degraded" in r.message.lower() for r in caplog.records), (
+        "the strip is degraded (4 of 5 entitled tiles) but nothing said so"
+    )

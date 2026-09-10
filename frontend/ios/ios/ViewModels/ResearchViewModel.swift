@@ -16,7 +16,18 @@ class ResearchViewModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var quickTickers: [QuickTicker] = QuickTicker.defaults
     @Published var personas: [AnalysisPersona] = AnalysisPersona.allCases
-    @Published var selectedPersona: AnalysisPersona = AnalysisPersona.settingsDefault
+    /// The analyst the Research tab has pre-selected.
+    ///
+    /// `private(set)` on purpose: every user-driven change must go through `selectPersona(_:)`
+    /// so it can mark `personaManuallyChosen`. The two picker surfaces
+    /// (`PersonaSelectionSection`, `PersonasSheet`) used to write straight through
+    /// `$viewModel.selectedPersona`, which would bypass that flag silently. `ContentView` now
+    /// hands them a `Binding` whose setter calls the method, and this access level is what
+    /// turns a future direct binding into a compile error instead of a quiet regression.
+    @Published private(set) var selectedPersona: AnalysisPersona = AnalysisPersona.settingsDefault
+    /// True once the user has tapped an analyst during THIS visit to the Research tab.
+    /// Reset by `researchTabDidActivate()`, so a manual pick wins until they leave and return.
+    private var personaManuallyChosen = false
     @Published var features: [AnalysisFeature] = AnalysisFeature.allFeatures
     /// Optional on purpose: nil = "not loaded yet / couldn't load". It used to
     /// default to a hardcoded 47-credit mock and STAY there when the fetch failed,
@@ -173,6 +184,41 @@ class ResearchViewModel: ObservableObject {
             Task { @MainActor [weak self] in await self?.loadCredits() }
         }
 
+        // Adopt a changed "Default Analyst" without waiting for a relaunch.
+        //
+        // TWO notifications, answering two different failure modes:
+        //
+        //  • `.caydexDefaultPersonaChanged` — the user just changed it in Settings. Settings is
+        //    a `fullScreenCover` above the whole tree, so dismissing it rebuilds nothing and
+        //    there is no view-update path that would otherwise reach this ViewModel.
+        //
+        //  • `.caydexSettingsHydrated` — the SERVER's value has just landed in UserDefaults.
+        //    `SettingsSyncManager.hydrate()` runs from `AppState.onAuthenticated()`, i.e. AFTER
+        //    this ViewModel is constructed, so on a fresh install or a new device the stored
+        //    default arrives too late for the property initializer above and the tab would open
+        //    on Buffett even on a cold launch.
+        //
+        // They differ in ONE way, and it is load-bearing: the explicit change FORCES, the
+        // server hydrate does not.
+        //
+        // Settings is reached through `ProfileView`, a `.fullScreenCover` on this very screen —
+        // and a cover does not change `\.isActiveTab`, so `researchTabDidActivate()` does NOT
+        // fire on the way back. Without `force` the sequence "tap an analyst → open Settings →
+        // change Default Analyst → return" would leave the tapped analyst in place, which is
+        // the reported bug wearing a different hat. Deliberately changing the setting is the
+        // more recent and more explicit statement of intent, so it wins over an earlier tap.
+        //
+        // A hydrate is the opposite: it is background sync the user did not ask for, and it
+        // fires on every foreground and network-restore, so it must never yank a manual pick.
+        defaultPersonaObservers = [
+            (Notification.Name.caydexDefaultPersonaChanged, true),
+            (Notification.Name.caydexSettingsHydrated, false),
+        ].map { name, force in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.applyDefaultPersona(force: force) }
+            }
+        }
+
         // Deliberately NO load here — same rule as `UpdatesViewModel.init` and
         // `TrackingViewModel.init`.
         //
@@ -186,10 +232,15 @@ class ResearchViewModel: ObservableObject {
 
     /// Token for the `.caydexEntitlementChanged` observer, removed on deinit.
     private var entitlementObserver: NSObjectProtocol?
+    /// Tokens for the two "Default Analyst" observers, removed on deinit.
+    private var defaultPersonaObservers: [NSObjectProtocol] = []
 
     deinit {
         if let entitlementObserver {
             NotificationCenter.default.removeObserver(entitlementObserver)
+        }
+        for observer in defaultPersonaObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -267,6 +318,12 @@ class ResearchViewModel: ObservableObject {
         creditBalance = nil
         lastLoadedAt = nil
         error = nil
+        // The analyst is per-ACCOUNT, so it must not survive a sign-out or an account switch
+        // either. `SettingsSyncManager.clearLocalForEndedSession()` removes the stored key on
+        // sign-out and the next account's `hydrate()` writes its own, so re-deriving here is
+        // what keeps this ViewModel from rendering the previous user's choice. `force` because
+        // their manual pick is exactly what must not carry over.
+        applyDefaultPersona(force: true)
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -286,10 +343,21 @@ class ResearchViewModel: ObservableObject {
             let mapped = backend.map(AnalysisPersona.from)
             guard !mapped.isEmpty else { return }
             self.personas = mapped
-            // Keep current selection if still present, else default to first.
-            if !mapped.contains(where: { $0.key == self.selectedPersona.key }) {
-                self.selectedPersona = mapped[0]
-            }
+            // Re-derive against the list the backend actually serves.
+            //
+            // This deliberately does NOT assign `selectedPersona` itself — that would be a
+            // third writer and defeat the single-writer design `private(set)` exists to
+            // enforce. It also does not fall back to `mapped[0]`, as it used to: GET
+            // /research/personas has no ORDER BY, so "first" is whatever row order Postgres
+            // happened to return, and arbitrary row order must never decide a user-visible
+            // default.
+            //
+            // `force` only when the current selection is gone. Otherwise a hand-picked analyst
+            // that IS still served survives, while the non-forced call still lets a
+            // `default_persona` synced from a newer build — a key with no hardcoded case, which
+            // resolved to Buffett at launch — be adopted now that the real list is here.
+            let stillServed = mapped.contains { $0.key == self.selectedPersona.key }
+            self.applyDefaultPersona(force: !stillServed)
         } catch {
             print("⚠️ ResearchVM: Failed to load personas — \(error). Keeping fallbacks.")
         }
@@ -529,8 +597,35 @@ class ResearchViewModel: ObservableObject {
     }
 
     // MARK: - Actions
+
+    /// The single writer for a USER-driven analyst change.
+    ///
+    /// Both picker surfaces route here through the `Binding` built in `ContentView`, so this is
+    /// the one place that can mark the selection as deliberate. Anything that sets
+    /// `selectedPersona` without going through here is a default being applied, not a choice.
     func selectPersona(_ persona: AnalysisPersona) {
         selectedPersona = persona
+        personaManuallyChosen = true
+    }
+
+    /// Re-read Settings → "Default Analyst" and adopt it.
+    ///
+    /// No-op once the user has picked an analyst by hand during this visit, unless `force` —
+    /// which is for an identity change, where the previous account's choice must not carry over.
+    func applyDefaultPersona(force: Bool = false) {
+        guard force || !personaManuallyChosen else { return }
+        if force { personaManuallyChosen = false }
+        selectedPersona = AnalysisPersona.settingsDefault(in: personas)
+    }
+
+    /// The Research tab just became visible.
+    ///
+    /// Clearing the manual-override flag here is what makes the setting's own promise
+    /// ("Pre-selected for new research") true: a one-off pick applies to the visit it was made
+    /// in, and coming back to the tab starts from the user's stated default again.
+    func researchTabDidActivate() {
+        personaManuallyChosen = false
+        applyDefaultPersona()
     }
 
     func selectQuickTicker(_ ticker: QuickTicker) {
@@ -562,6 +657,34 @@ class ResearchViewModel: ObservableObject {
     func clearTarget() {
         selectedTarget = nil
         searchText = ""
+    }
+
+    /// Adopt a ticker handed over by "AI Deep Research" on a detail screen.
+    ///
+    /// ⚠️ THIS MUST SET BOTH FIELDS, and that is not tidiness — they are read by different code.
+    /// `TargetSelectionSection` renders `selectedTarget` and only falls back to `searchText` when
+    /// it is nil, while `generateAnalysis()` takes the ticker from `searchText`. The handoff used
+    /// to write `searchText` alone, so a target left over from an earlier `TargetSearchSheet`
+    /// pick kept rendering — the user saw the OLD company in the chip and Generate spent 20
+    /// credits on the NEW one. A displayed target that is not the target being charged for is a
+    /// money bug, not a display bug.
+    ///
+    /// Mirrors `selectQuickTicker` above, including using the symbol as the display name: the
+    /// route carries a ticker only, and the chip shows the ticker prominently either way.
+    func applyPrefilledTicker(_ ticker: String) {
+        let symbol = ticker.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !symbol.isEmpty else { return }
+        searchText = symbol
+        searchResults = []
+        showSearchResults = false
+        selectedTarget = StockSearchResult(
+            ticker: symbol,
+            companyName: symbol,
+            exchange: nil,
+            sector: nil,
+            logoUrl: nil,
+            type: "stock"
+        )
     }
 
     func generateAnalysis() {
@@ -939,7 +1062,10 @@ class ResearchViewModel: ObservableObject {
             // Set the target as late as possible so an await above cannot let the
             // user's own selection be overwritten by a stale one.
             self.searchText = ticker
-            self.selectedPersona = persona
+            // Through `selectPersona`, not a bare assignment: retrying a report is the user
+            // asking for THAT analyst again, so it must count as a manual pick and survive a
+            // subsequent `applyDefaultPersona()`.
+            self.selectPersona(persona)
             self.generateAnalysis()
         }
     }

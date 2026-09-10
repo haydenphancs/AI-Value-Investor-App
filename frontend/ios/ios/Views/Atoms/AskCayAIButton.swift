@@ -53,9 +53,9 @@ struct AskCayAIButton: View {
             Image(systemName: AppSymbols.ai)
                 // `iconLarge` (20pt), NOT `iconDefault` (16pt). The neighbouring logo and avatar
                 // are full-bleed art filling their whole 36pt tile; a 16pt glyph fills 0.44 of
-                // this one — the lowest ratio in the app (IconTile 0.50, CayAIAvatar 0.52) — so
-                // the tile read as SMALLER than the avatar even though both measure 36.0pt. 20pt
-                // puts it at 0.56.
+                // this one — the lowest ratio in the app (IconTile 0.50, and the since-removed
+                // CayAIAvatar 0.52) — so the tile read as SMALLER than the avatar even though
+                // both measure 36.0pt. 20pt puts it at 0.56.
                 //
                 // The 0.56 was measured against `sparkles.2`. `AppSymbols.ai` resolves to the
                 // wider classic `sparkles` below iOS 26, which fills marginally more of the tile

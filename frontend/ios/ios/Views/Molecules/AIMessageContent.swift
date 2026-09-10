@@ -47,8 +47,12 @@ struct AIMessageContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
-            // Cay AI attribution
-            CayAIMessageHeader()
+            // NO "✦ Cay AI" attribution row. It cost ~28pt at the top of EVERY assistant
+            // message to repeat something the screen never stops saying — the title bar,
+            // the input placeholder and the bubble styling all identify the speaker — and
+            // on a phone that is a meaningful slice of the conversation. Removed
+            // deliberately; the attribution survives for VoiceOver via the container label
+            // at the bottom of this view, which is the only place it was load-bearing.
 
             // Thinking card at the TOP of the answer (Copilot-style).
             if let thinking = thinking, thinking.shouldDisplay {
@@ -93,6 +97,12 @@ struct AIMessageContent: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Keeps the speaker attribution that the removed header used to carry visually.
+        // `.contain` rather than `.combine`: the answer holds its own focusable elements
+        // (follow-up chips, source pills, the expandable thinking card), and combining
+        // would flatten them into one unusable blob.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Cay AI")
     }
 
     /// Full-width tappable follow-up questions (longer than the short empty-state chips, so they

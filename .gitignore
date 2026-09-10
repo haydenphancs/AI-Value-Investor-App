@@ -311,11 +311,26 @@ xcuserdata/
 # plaintext passwords for real accounts on the production Supabase project, so the script
 # is committable and the credentials are not.
 backend/scripts/testflight_testers.local.json
+
+# ── Confidential launch + vendor-negotiation documents ───────────────────────
+# This repo is PUBLIC. Between them these carry bank-account digits, the legal entity name /
+# W-9 / EIN, the Supabase project ref, review-account credentials, and the NEGOTIATED FMP
+# pricing — all world-readable via raw.githubusercontent until 2026-09-10.
+#
+# ⚠️ `LAUNCH_CHECKLIST.md` was listed TWICE here and `LAUNCH_RUNBOOK.md` not at all, so the
+# runbook stayed tracked and served. Fixed 2026-09-10.
+#
+# Keep editing them locally — they simply stop being published. Back them up somewhere that
+# is not a public git remote; untracking means git no longer keeps their history.
 documents/legal/LAUNCH_CHECKLIST.md
-documents/legal/LAUNCH_CHECKLIST.md
+documents/legal/LAUNCH_RUNBOOK.md
 documents/legal/fmp-negotiation-reply.md
 documents/legal/fmp-quote-analysis.md
 documents/legal/HANDOFF-crypto-to-coingecko.md
+
+# Signed contracts / countersigned order forms. A signed FMP Order Form carries a signature
+# and the negotiated price; it belongs in App Store Connect, never in git.
+documents/legal/*.pdf
 
 # ── FMP-derived universe files — MUST NOT be committed (ToS §2.6.1) ──────────
 # `benchmark_universe.json` (5,704 tickers with per-ticker market-cap floats) and

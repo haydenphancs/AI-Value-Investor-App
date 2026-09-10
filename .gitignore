@@ -366,3 +366,9 @@ backend/data/journey_audio/
 backend/data/money_moves_audio/
 backend/data/journey_audio_gemini_bak/
 backend/data/money_moves_audio_gemini_bak/
+
+# Internal operational runbook for purging this repo's own history. It documents the
+# secrets and the real-investor narration strings it exists to remove, so publishing it
+# defeats the purge — its own success check (git log -S'buffett_zubenelgenubi' must be
+# empty) can never pass while it is tracked. Kept locally, never committed.
+documents/legal/GIT_HISTORY_PURGE_RUNBOOK.md

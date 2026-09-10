@@ -328,6 +328,22 @@ documents/legal/fmp-negotiation-reply.md
 documents/legal/fmp-quote-analysis.md
 documents/legal/HANDOFF-crypto-to-coingecko.md
 
+# The rest of the FMP/vendor family, untracked 2026-09-10. Surfaced by a branch audit AFTER the
+# first four were removed: same material — negotiated pricing, contract-term analysis, direct
+# vendor correspondence and the build-vs-buy work that quotes competitor quotes. There is no
+# reason for any of it to sit on a public repo.
+# ⚠️ Untracking fixes the TIP ONLY. These stay fetchable from history by commit SHA until
+# GitHub garbage-collects — see documents/legal/GIT_HISTORY_PURGE_RUNBOOK.md. If they are to be
+# purged, do it BEFORE asking GitHub Support to GC, so one pass closes everything.
+documents/legal/fmp-order-form-checklist.md
+documents/legal/data-vendor-options.md
+documents/legal/vendor-redistribution-emails.md
+documents/legal/fmp-vs-twelvedata-survival-analysis.md
+documents/legal/fmp-dataset-drop-ranking.md
+documents/legal/fmp-16-datasets-build-or-free.md
+documents/legal/fmp-gap-build-vs-buy.md
+documents/legal/HANDOFF-fmp-phases-4-6.md
+
 # Signed contracts / countersigned order forms. A signed FMP Order Form carries a signature
 # and the negotiated price; it belongs in App Store Connect, never in git.
 documents/legal/*.pdf

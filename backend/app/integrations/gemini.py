@@ -66,8 +66,8 @@ class GeminiTimeoutError(TimeoutError):
     """One Gemini SDK call exceeded settings.GEMINI_REQUEST_TIMEOUT_SECONDS.
 
     Subclasses **TimeoutError deliberately**. `_call_with_timeout` used to let the
-    bare `asyncio.TimeoutError` escape, and three outer handlers catch that type
-    today (`home_dashboard_service`, `chat_context_resolver`, `live_price`). Keeping
+    bare `asyncio.TimeoutError` escape, and two outer handlers catch that type
+    today (`home_dashboard_service`, `chat_context_resolver`). Keeping
     the inheritance guarantees this change CANNOT alter what any of them catch — it
     only adds a name and a message.
 

@@ -292,7 +292,10 @@ struct ResearchViewWithBinding: View {
         .fullScreenCover(item: $selectedTrendingAnalysis) { analysis in
             NavigationStack {
                 TrendingAnalysisDetailView(analysis: analysis) { ticker in
-                    viewModel.searchText = ticker
+                    // Same pairing rule as the deep-research handoff: writing `searchText`
+                    // alone leaves a stale `selectedTarget` rendering in the chip while
+                    // Generate charges this ticker.
+                    viewModel.applyPrefilledTicker(ticker)
                 }
             }
         }

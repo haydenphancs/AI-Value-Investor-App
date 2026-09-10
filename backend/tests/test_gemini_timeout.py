@@ -88,10 +88,10 @@ async def test_call_with_timeout_raises_the_typed_error(monkeypatch):
 async def test_it_is_still_a_timeout_error(monkeypatch):
     """THE inheritance guard.
 
-    `home_dashboard_service`, `chat_context_resolver` and `live_price` all
+    `home_dashboard_service` and `chat_context_resolver` both
     `except asyncio.TimeoutError`. Subclassing TimeoutError is what guarantees this
-    change cannot alter what any of them catch — dropping to `Exception` would
-    silently break three degradation paths.
+    change cannot alter what either of them catches — dropping to `Exception` would
+    silently break both degradation paths.
     """
     _reset(monkeypatch)
     monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 0.02)

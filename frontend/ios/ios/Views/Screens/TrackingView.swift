@@ -303,15 +303,25 @@ struct TrackingContentViewWithBinding: View {
                 }
             }
             .alertDestinationCover($openedAlertDestination)
-            // Tracking reaches the ticker screen by a PUSH inside its own stack, which is the
-            // one chain that always worked — `dismiss()` pops it. These are the other doors:
-            // the alert-destination cover, and search.
+            // Tracking is the one tab that reaches the ticker screen by a PUSH inside its own
+            // stack, so its list is the longest: the four `.navigationDestination` items as well
+            // as the covers. Nil-ing the OUTERMOST item pops the whole chain — whale → trade
+            // group → ticker is three pushes and one assignment retires all of them.
+            //
+            // `pendingAlertDestination` FIRST, and it is not cosmetic: the alert sheet's
+            // `onDismiss` does `openedAlertDestination = pendingAlertDestination`, which runs
+            // AFTER the animation. Clearing `selectedAlert` without clearing the pending value
+            // would re-present the destination cover on top of the Research tab.
             .onPresentationReset {
-                openedAlertDestination = nil
                 pendingAlertDestination = nil
+                openedAlertDestination = nil
+                viewModel.selectedAlert = nil
+                viewModel.selectedAssetNavigation = nil
+                viewModel.selectedSearchResult = nil
+                viewModel.selectedWhaleId = nil
+                viewModel.selectedTradeGroup = nil
                 showProfile = false
                 showSearch = false
-                viewModel.selectedAlert = nil
             }
             .fullScreenCover(isPresented: $showProfile) {
                 ProfileView()

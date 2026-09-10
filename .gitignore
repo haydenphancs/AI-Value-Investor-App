@@ -316,3 +316,18 @@ documents/legal/LAUNCH_CHECKLIST.md
 documents/legal/fmp-negotiation-reply.md
 documents/legal/fmp-quote-analysis.md
 documents/legal/HANDOFF-crypto-to-coingecko.md
+
+# ── FMP-derived universe files — MUST NOT be committed (ToS §2.6.1) ──────────
+# `benchmark_universe.json` (5,704 tickers with per-ticker market-cap floats) and
+# `industry_universe.json` (9,188) are built from FMP's company-screener. Market caps are
+# licensed CONTENT, so a public repo carrying them is redistribution, and §2.10 makes the
+# remedy key termination.
+#
+# They are served from the PRIVATE Supabase Storage bucket `universe-data` and resolved by
+# `backend/app/services/universe_data.py`, which downloads on a local miss. Keep your local
+# copies — they just never get committed again.
+#
+# ⚠️ Ignoring them does NOT remove the blobs already in history. That needs the rewrite in
+# documents/legal/GIT_HISTORY_PURGE_RUNBOOK.md.
+backend/data/benchmark_universe.json
+backend/data/industry_universe.json

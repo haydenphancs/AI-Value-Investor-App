@@ -6,7 +6,9 @@ because `_load_universe` is called OUTSIDE the per-sector try/except, ONE bad va
 aborted the ENTIRE recompute (every sector, zero rows). The fix coerces totally,
 dropping + warning the bad ticker.
 
-`_load_universe` reads `_UNIVERSE_PATH.read_text()` — monkeypatched here so no file
+`_load_universe` now goes through `universe_data.load_universe`, the single resolver shared
+by all four readers — so the stub patches THAT rather than a per-module `_UNIVERSE_PATH`
+constant (there used to be four such constants, with three different path idioms). No file
 is touched. The method doesn't use `self`, so a `__new__` instance is enough.
 """
 
@@ -18,20 +20,19 @@ from app.services import industry_benchmark_service as ibs
 from app.services.industry_benchmark_service import IndustryBenchmarkService
 
 
-class _FakePath:
-    def __init__(self, text):
-        self._text = text
-
-    def read_text(self):
-        return self._text
-
-
 def _svc():
     return IndustryBenchmarkService.__new__(IndustryBenchmarkService)
 
 
 def _set_universe(monkeypatch, payload):
-    monkeypatch.setattr(ibs, "_UNIVERSE_PATH", _FakePath(json.dumps(payload)))
+    """Patch the binding the CALLER uses.
+
+    `industry_benchmark_service` does `from ...universe_data import load_universe` at module
+    scope, so the name is bound at import time and patching `universe_data.load_universe`
+    would not be seen — see `.claude/rules/testing.md` on module- vs function-scoped imports.
+    """
+    industries = payload.get("industries", []) if isinstance(payload, dict) else []
+    monkeypatch.setattr(ibs, "load_universe", lambda _name: industries)
 
 
 def test_nonnumeric_market_cap_does_not_abort(monkeypatch):
@@ -90,10 +91,54 @@ def test_unknown_sector_and_empty_mcaps_skipped(monkeypatch):
     assert _svc()._load_universe() == []    # all three skipped
 
 
-def test_unreadable_universe_file_returns_empty(monkeypatch):
-    class _BadPath:
-        def read_text(self):
-            raise FileNotFoundError("missing")
+def test_a_missing_universe_returns_empty_rather_than_raising(monkeypatch):
+    """`load_universe` answers [] on any failure (and logs at ERROR itself), so the caller
+    degrades instead of 500ing a request path."""
+    monkeypatch.setattr(ibs, "load_universe", lambda _name: [])
+    assert _svc()._load_universe() == []
 
-    monkeypatch.setattr(ibs, "_UNIVERSE_PATH", _BadPath())
-    assert _svc()._load_universe() == []    # caught + logged, not raised
+
+def test_the_shared_loader_swallows_a_read_failure_and_logs_it(tmp_path, monkeypatch, caplog):
+    """The resolver's OWN contract, tested where it lives.
+
+    All four readers relied on this behaviour independently before; now there is one place
+    it can be wrong. ⚠️ It must LOG — a silently empty universe renders as "no data for this
+    industry", which is indistinguishable from a real answer.
+    """
+    import logging
+
+    from app.services import universe_data as ud
+
+    ud.reset_cache_for_tests()
+    monkeypatch.setenv("UNIVERSE_DATA_DIR", str(tmp_path))      # empty dir → local miss
+    monkeypatch.setattr(ud, "_download_from_storage", lambda _f: False)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.universe_data"):
+        assert ud.load_universe(ud.INDUSTRY_UNIVERSE) == []
+    ud.reset_cache_for_tests()
+
+
+def test_the_shared_loader_reads_a_real_file(tmp_path, monkeypatch):
+    import json as _json
+
+    from app.services import universe_data as ud
+
+    ud.reset_cache_for_tests()
+    monkeypatch.setenv("UNIVERSE_DATA_DIR", str(tmp_path))
+    (tmp_path / ud.INDUSTRY_UNIVERSE).write_text(_json.dumps(
+        {"ticker_count": 2, "industries": [{"industry": "Software", "sector": "Technology",
+                                            "tickers": ["AAPL"], "market_caps": {"AAPL": 1.0}}]}
+    ))
+    out = ud.load_universe(ud.INDUSTRY_UNIVERSE)
+    assert len(out) == 1 and out[0]["industry"] == "Software"
+    ud.reset_cache_for_tests()
+
+
+def test_every_reader_resolves_to_the_same_directory():
+    """The point of the shared resolver: four modules at three different nesting depths
+    used to compute this independently (`parents[2]` x3, `parents[3]` in the collector)."""
+    from app.services import universe_data as ud
+
+    assert ud.universe_path(ud.BENCHMARK_UNIVERSE).parent == ud.universe_path(ud.INDUSTRY_UNIVERSE).parent
+    assert ud.universe_path(ud.BENCHMARK_UNIVERSE).parent.name == "data"
+    assert ud.universe_path(ud.BENCHMARK_UNIVERSE).parent.parent.name == "backend"

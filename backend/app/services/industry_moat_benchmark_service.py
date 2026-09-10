@@ -76,9 +76,10 @@ TABLE_NAME = "industry_moat_benchmarks"
 # operator resume after a Ctrl-C / rate-limit-induced abort — any
 # industry with a benchmark row newer than this is skipped.
 DEFAULT_SKIP_IF_FRESH_HOURS = 24
-_UNIVERSE_PATH = (
-    Path(__file__).resolve().parents[2] / "data" / "industry_universe.json"
-)
+# Single resolver — see `app/services/universe_data.py`. There were FOUR different
+# path idioms for this one directory, and the file is FMP-derived so it has to be
+# able to move out of the repo (ToS §2.6.1) without a hunt.
+from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe, universe_path
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -120,16 +121,11 @@ def _load_universe_industries() -> List[Tuple[str, List[Tuple[str, float]]]]:
     """Return [(industry, [(ticker, mkt_cap), ...]), ...]. Tickers are
     sorted by market-cap descending. Empty industries are skipped.
     """
-    try:
-        data = json.loads(_UNIVERSE_PATH.read_text())
-    except Exception as exc:
-        logger.error(
-            "industry_moat_benchmark: failed to read %s: %s",
-            _UNIVERSE_PATH, exc,
-        )
-        return []
+    industries = load_universe(INDUSTRY_UNIVERSE)
+    if not industries:
+        return []          # already logged at ERROR by `load_universe`
     out: List[Tuple[str, List[Tuple[str, float]]]] = []
-    for entry in data.get("industries", []) or []:
+    for entry in industries:
         ind = entry.get("industry")
         mcaps = entry.get("market_caps") or {}
         if not ind or not mcaps:

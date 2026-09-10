@@ -53,22 +53,11 @@ router = APIRouter(dependencies=[Depends(get_current_user_id)])
 
 
 # ETF/stock proxies for commodity news queries (FMP has no commodity news)
-_COMMODITY_NEWS_TICKERS: Dict[str, str] = {
-    "GC": "GLD,IAU,GOLD,NEM,AEM",
-    "SI": "SLV,PAAS,WPM,AG",
-    "CL": "USO,XLE,CVX,XOM,OXY",
-    "NG": "UNG,LNG,AR,EQT",
-    "HG": "COPX,FCX,SCCO",
-    "PL": "PPLT,SBSW",
-    "PA": "PALL,SBSW",
-    "ZW": "WEAT,ADM,BG",
-    "ZC": "CORN,ADM,BG",
-    "ZS": "SOYB,ADM,BG",
-    "KC": "JO,SBUX",
-    "SB": "CANE,SGG",
-    "CC": "NIB,HSY",
-    "CT": "BAL",
-}
+# Single source of truth in the service layer — `news_cache_service` needs the same map
+# for the Updates scope path, and an endpoint module is the wrong thing for a service to
+# import from. The eight WITHDRAWN roots are absent by construction: their detail screens
+# refuse, so a news feed for them routes to a screen that does not exist.
+from app.services.commodity_service import COMMODITY_NEWS_TICKERS as _COMMODITY_NEWS_TICKERS
 
 
 # Futures roots are 1-4 alphanumerics (GC, CL, ZW). Note that normalization can
@@ -111,6 +100,19 @@ async def get_commodity_news(
     base = _normalize_commodity_symbol(symbol)
     if not _COMMODITY_SYMBOL_RE.match(base):
         return _invalid_news_symbol(symbol)
+    # Refuse a withdrawn screen here too. Every other commodity route runs
+    # `_raise_if_withdrawn`; this one did not, so `GET /commodities/KC/news` answered 200
+    # with real coffee-adjacent equity news (SBUX, JO) for a screen the app refuses to open.
+    # Same contractual code, so the client renders the same permanent "not covered" state
+    # rather than a retry.
+    from app.services.commodity_service import _raise_if_withdrawn
+
+    try:
+        _raise_if_withdrawn(base)
+    except Exception as e:
+        if (resp := upstream_error_response(e, ticker=base, step="commodity_news")) is not None:
+            return resp
+        raise
     news_tickers = _COMMODITY_NEWS_TICKERS.get(base, "")
     cache_key = f"COMMODITY_{base}"
 

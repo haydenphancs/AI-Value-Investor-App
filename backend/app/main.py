@@ -102,6 +102,22 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
 
+    # The two FMP-derived universe files. They are read by four services plus three
+    # scheduled jobs, and every one of those degrades to `[]` on a miss — so an absent file
+    # renders as "no data for this industry" rather than as a failure. Checked once here so
+    # a broken deploy says so in one obvious line at boot, instead of being discovered as an
+    # empty Industry Benchmark card weeks later. Deliberately NOT fatal: most of the app
+    # does not need them, and killing the container would turn a degraded feature into a
+    # total outage.
+    try:
+        from app.services.universe_data import verify_universe_files_present
+
+        await asyncio.to_thread(verify_universe_files_present)
+    except Exception as exc:
+        logger.error(
+            "STARTUP: universe file check itself failed (%s: %s)", type(exc).__name__, exc,
+        )
+
     healthy = await check_supabase_health()
     if healthy:
         logger.info("Supabase connection OK")
@@ -860,7 +876,7 @@ async def _run_volatility_precompute_job():
     """Daily σ precompute for the Updates volatility-relative move trigger.
 
     Populates ``ticker_volatility_cache`` once a day (~08:00 UTC, pre-open) for the
-    swept universe (top-200 watchlist + ^GSPC) so the 5-min sweeper can read σ
+    swept universe (top-200 watchlist + SPY) so the 5-min sweeper can read σ
     cheaply. ~201 light FMP historical calls; ``skip_if_fresh_hours`` makes a dyno
     restart RESUME rather than refetch. A ticker with no σ (new/low history) simply
     falls back to the fixed price band in the gate — never loses a signal.

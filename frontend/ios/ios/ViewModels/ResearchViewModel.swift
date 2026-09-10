@@ -586,11 +586,11 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
-    func selectSearchResult(_ result: StockSearchResult) {
-        searchText = result.ticker
-        searchResults = []
-        showSearchResults = false
-    }
+    // `selectSearchResult(_:)` used to live here. It was DEAD — the only call site,
+    // `SearchView.swift:72`, resolves to `SearchViewModel`'s method of the same name — and it
+    // wrote `searchText` WITHOUT `selectedTarget`, which is precisely the shape that made the
+    // chip and the charged ticker disagree. Deleted rather than left as a loaded gun; use
+    // `applyPrefilledTicker(_:)` or `selectTarget(_:)`, both of which write the pair.
 
     func dismissSearchResults() {
         showSearchResults = false
@@ -1061,7 +1061,11 @@ class ResearchViewModel: ObservableObject {
             }
             // Set the target as late as possible so an await above cannot let the
             // user's own selection be overwritten by a stale one.
-            self.searchText = ticker
+            //
+            // Through `applyPrefilledTicker`, not a bare `searchText` write: the chip renders
+            // `selectedTarget`, so retrying TSLA while a stale AAPL target sat there showed
+            // AAPL and charged TSLA.
+            self.applyPrefilledTicker(ticker)
             // Through `selectPersona`, not a bare assignment: retrying a report is the user
             // asking for THAT analyst again, so it must count as a manual pick and survive a
             // subsequent `applyDefaultPersona()`.

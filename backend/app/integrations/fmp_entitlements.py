@@ -255,7 +255,12 @@ SUBSTITUTION: Dict[str, str] = {
     "splits": "historical-price-eod/non-split-adjusted vs /full — the ratio is the split",
     "grades": "no entitled substitute — render an honest empty state",
     "price-target-consensus": "no entitled substitute — render an honest empty state",
-    "sp500-constituent": "backend/data/benchmark_universe.json",
+    # Named by FILENAME, not by repo path: the file is FMP-derived (ToS §2.6.1), so it
+    # moves out of the public repo and is resolved by `services/universe_data.py`,
+    # which falls back to a private Supabase Storage bucket. A hardcoded
+    # `backend/data/...` here would become a lie at the exact moment someone hits the
+    # 402 and reads this message.
+    "sp500-constituent": "the benchmark_universe.json industry roster (services/universe_data.py)",
     # The other two index rosters have no substitute at all — nothing in the repo
     # lists Dow-30 or Nasdaq-Composite membership, and the membership LIST is
     # itself the litigated subject matter (Dow Jones v. CBOT). The index screens

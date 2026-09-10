@@ -774,7 +774,7 @@ class InsightSweeper:
         market_change = market_quote.get("changePercentage")
 
         # 1b. σ (daily-return volatility) for the volatility-relative move tier —
-        #     read from the daily-precomputed cache (keyed on ^GSPC for the market
+        #     read from the daily-precomputed cache (keyed on SPY for the market
         #     scope). Best-effort: a miss yields None → the gate falls back to the
         #     fixed band for that scope. get_sigmas_bulk never raises into the sweep.
         sigmas = await self.vol.get_sigmas_bulk(symbols)

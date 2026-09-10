@@ -45,8 +45,10 @@ from app.services.sector_benchmark_service import (
 
 logger = logging.getLogger(__name__)
 
-# backend/app/services/industry_benchmark_service.py → parents[2] == backend/
-_UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "benchmark_universe.json"
+# Single resolver — see `app/services/universe_data.py`. There were FOUR different
+# path idioms for this one directory, and the file is FMP-derived so it has to be
+# able to move out of the repo (ToS §2.6.1) without a hunt.
+from app.services.universe_data import BENCHMARK_UNIVERSE, load_universe, universe_path
 
 # Cap per industry by market cap — medians stabilize well below this, and it bounds
 # FMP cost + memory. Most industries above the $500M floor have fewer than this.
@@ -153,13 +155,12 @@ class IndustryBenchmarkService:
     # ── Universe ─────────────────────────────────────────────────────
     def _load_universe(self) -> List[Tuple[str, List[Tuple[str, List[Tuple[str, float]]]]]]:
         """[(sector, [(industry, [(ticker, cap)...] top-N by cap), ...]), ...]."""
-        try:
-            data = json.loads(_UNIVERSE_PATH.read_text())
-        except Exception as exc:
-            logger.error("industry_benchmark: failed to read %s: %s", _UNIVERSE_PATH, exc)
+        industries = load_universe(BENCHMARK_UNIVERSE)
+        if not industries:
+            # `load_universe` already logged at ERROR with the reason.
             return []
         by_sector: Dict[str, List[Tuple[str, List[Tuple[str, float]]]]] = defaultdict(list)
-        for entry in data.get("industries", []) or []:
+        for entry in industries:
             ind = entry.get("industry")
             sector = entry.get("sector")
             mcaps = entry.get("market_caps") or {}

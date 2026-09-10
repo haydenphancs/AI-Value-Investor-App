@@ -1068,7 +1068,7 @@ class HomeDashboardService:
     async def _build_pulse(self) -> List[MarketPulseItemResponse]:
         # ONE `batch-quote` request for every tile, instead of one `/quote` per tile.
         # `/stable/batch-quote` takes a comma-separated list and returns the identical
-        # field set (verified live across ^GSPC / BTCUSD / GCUSD / BRK-B), and index
+        # field set (verified live across SPY / ONEQ / DIA / BRK-B), and ETF proxy
         # symbols ride along for free — so this is the same data in 1 call, not 6.
         #
         # Best-effort: on failure every tile falls back to its own `/quote`, which is

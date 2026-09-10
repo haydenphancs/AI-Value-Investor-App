@@ -295,6 +295,22 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
 #: Kept as data rather than deleted silently: these symbols still exist in
 #: `asset_class._COMMODITY_SYMBOLS` (which classifies them for market-hours and news
 #: routing) and can still arrive from a watchlist row saved before the change.
+# Equity/ETF proxies whose news is ABOUT this commodity. FMP has no commodity news feed,
+# so `news/stock` for a futures code (`GCUSD`) returns nothing at all.
+#
+# Lives here rather than in `endpoints/commodities.py` because two callers need it: the
+# `/commodities/{symbol}/news` route AND `news_cache_service`'s scope router, which serves
+# the Updates tab. Only the six covered roots appear — the withdrawn ones refuse.
+COMMODITY_NEWS_TICKERS: Dict[str, str] = {
+    "GC": "GLD,IAU,GOLD,NEM,AEM",
+    "SI": "SLV,PAAS,WPM,AG",
+    "CL": "USO,XLE,CVX,XOM,OXY",
+    "NG": "UNG,LNG,AR,EQT",
+    "PL": "PPLT,SBSW",
+    "PA": "PALL,SBSW",
+}
+
+
 _WITHDRAWN_COMMODITIES: Dict[str, str] = {
     "KC": "coffee", "CT": "cotton", "CC": "cocoa",
     "HG": "copper", "ZW": "wheat", "ZC": "corn", "ZS": "soybeans", "SB": "sugar",

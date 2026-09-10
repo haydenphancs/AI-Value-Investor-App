@@ -108,6 +108,20 @@ def is_crypto_scope(scope: str) -> bool:
     )
 
 
+def _commodity_news_proxies(scope: str) -> str:
+    """Comma-separated equity/ETF proxies for a commodity scope, or "" if not a commodity.
+
+    `GCUSD` -> "GLD,IAU,GOLD,NEM,AEM". Returns "" for anything else, so the caller falls
+    through to the ordinary stock feed.
+    """
+    from app.services.commodity_service import COMMODITY_NEWS_TICKERS, _root
+
+    s = (scope or "").strip().upper()
+    if not s:
+        return ""
+    return COMMODITY_NEWS_TICKERS.get(_root(s), "")
+
+
 def _sanitize_published_at(value: Any) -> Optional[str]:
     """Return a value Postgres ``timestamptz`` will accept, or None.
 
@@ -1377,6 +1391,18 @@ Return a JSON array with one object per article in order. Each object must have:
                 # never generated. `news/crypto` carries no from_date param; it
                 # returns the latest window, which is what the refresh needs.
                 raw = await self.fmp.get_crypto_news(scope, limit=limit)
+                fallback = scope
+            elif (_proxies := _commodity_news_proxies(scope)):
+                # A COMMODITY scope (`GCUSD`). `news/stock?symbols=GCUSD` returns nothing —
+                # FMP has no commodity news feed — so a starred commodity's Updates timeline
+                # was permanently empty and never generated an Insight card, while the same
+                # asset's own News tab (which goes through `/commodities/GC/news`) was full.
+                # The sweeper also burned one useless `news/stock` call per cycle on it.
+                #
+                # Same proxy map the detail route uses, so the two surfaces agree.
+                raw = await self.fmp.get_stock_news(
+                    _proxies, limit=limit, from_date=from_date
+                )
                 fallback = scope
             else:
                 raw = await self.fmp.get_stock_news(

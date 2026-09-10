@@ -89,7 +89,10 @@ _ALL_INDUSTRY_FRED_SERIES = "USNGSP"
 _ALL_INDUSTRY_FRED_LABEL = "BEA US total GDP (all industries, via FRED)"
 
 # Universe file written by `backend/scripts/discover_industries.py`.
-_UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "industry_universe.json"
+# Single resolver — see `app/services/universe_data.py`. There were FOUR different
+# path idioms for this one directory, and the file is FMP-derived so it has to be
+# able to move out of the repo (ToS §2.6.1) without a hunt.
+from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe, universe_path
 
 
 # ── Data class ──────────────────────────────────────────────────────────
@@ -233,19 +236,10 @@ def _load_universe() -> List[Dict[str, Any]]:
     `recompute_all` logs a warning and bails — there's nothing to do
     until discovery runs.
     """
-    if not _UNIVERSE_PATH.exists():
-        logger.warning(
-            "industry_universe.json not found at %s — run "
-            "`python backend/scripts/discover_industries.py` first",
-            _UNIVERSE_PATH,
-        )
-        return []
-    try:
-        data = json.loads(_UNIVERSE_PATH.read_text())
-        return data.get("industries", []) or []
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.error("Failed to load industry universe: %s", exc)
-        return []
+    # `load_universe` resolves the path, pulls from Supabase Storage on a local miss, and
+    # logs at ERROR with the reason when it cannot. It returns [] rather than raising: this
+    # is a request/job path where a missing universe must degrade, not 500.
+    return load_universe(INDUSTRY_UNIVERSE)
 
 
 # ── Service ─────────────────────────────────────────────────────────────

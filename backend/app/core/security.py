@@ -596,7 +596,7 @@ def trusted_client_ip(req: Any) -> str:
     Every per-IP auth limiter keyed off that value, so rotating one header per request gave a
     brand-new bucket every time and the limits never fired: unlimited password guesses against
     a known address on `/auth/login`, unlimited Supabase confirmation emails to an arbitrary
-    address on `/auth/register`, and a bypass of the anonymous WebSocket connection cap.
+    address on `/auth/register`.
 
     The RIGHTMOST entry is the one our own edge appended, so that is the only part of the
     header a caller cannot forge. `--forwarded-allow-ips='*'` stays as-is — it is there so

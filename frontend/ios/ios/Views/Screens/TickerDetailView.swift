@@ -466,12 +466,26 @@ struct TickerDetailView: View {
     /// the button doing nothing — the second TestFlight report on this button, after the first
     /// one fixed the route.
     ///
-    /// So: park the intent, ask every tab root to take its own presentations down, and still
-    /// `dismiss()` — the token unwinds PRESENTATIONS, and Tracking's push is not one.
+    /// So: park the intent, then ask every tab root to take its own presentations down.
+    ///
+    /// ⚠️ **No `dismiss()` here, deliberately.** It looks like it belongs — it was here — and it
+    /// is both redundant and actively harmful:
+    ///
+    ///  * Redundant, because the reset already covers BOTH shapes. A presented ticker screen
+    ///    goes when its root's cover binding is nil'd; a PUSHED one (Tracking, the only tab that
+    ///    pushes) goes when that tab's `.navigationDestination` item is nil'd, which its reset
+    ///    block does for all four.
+    ///  * Harmful, because it is a SECOND dismissal request, issued from inside, in the same
+    ///    runloop as the root's. UIKit refuses a dismissal on a controller whose transition is
+    ///    already in flight, and the request that loses is the outer one — stranding e.g.
+    ///    `ThemeDetailView` on screen with its binding already nil, which is unrecoverable
+    ///    (re-tapping the same card assigns an equal `item`, so it is not a change).
+    ///
+    /// Order is load-bearing: park the ticker FIRST so `ContentView` has switched to Research
+    /// before the covers animate away, leaving no frame where the user sees Home.
     private func handleDeepResearchTap() {
         appState.pendingResearchTicker = tickerSymbol
         appState.dismissAllPresentations()
-        dismiss()
     }
 
     private func handleSearchTapped() {

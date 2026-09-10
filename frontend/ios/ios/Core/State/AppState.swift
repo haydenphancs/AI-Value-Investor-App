@@ -156,7 +156,14 @@ final class AppState {
     /// presentation state unwinds every cover nested beneath it in one go, so a screen presented
     /// three deep needs no code of its own.
     ///
-    /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
+    /// ⚠️ **Deliberately NOT reset in `discardDataForEndedSession()`**, unlike every `pending*`
+    /// field above. Those are parked INSTRUCTIONS that fire later, so one left behind executes
+    /// against the next account. A bump here is consumed synchronously by every mounted observer
+    /// in the same runloop — there is no residue to inherit, so a reset buys nothing. It also
+    /// costs something: `= 0` would be the only DECREMENT in the system, and a decrement is a
+    /// change, so it would be the one thing capable of tearing down a presentation at sign-out —
+    /// including the Account cover the user is signing out from. `PresentationReset` guards
+    /// `newValue > oldValue` as insurance in case someone re-adds one.
     private(set) var presentationResetToken: Int = 0
 
     /// Take down everything presented above the tab bar. See `presentationResetToken`.
@@ -1160,9 +1167,7 @@ final class AppState {
         pendingPushTicker = nil
         pendingTrackingTab = nil
         pendingResearchTicker = nil
-        // Not data, but the same bug class: a bump left pending across a sign-out would fire
-        // into the next account and tear down a screen they had just opened.
-        presentationResetToken = 0
+        // `presentationResetToken` is deliberately NOT reset here — see its declaration.
         PortfolioStore.shared.reset()
         // Same reason: the price alerts in this store are the signed-out user's own
         // data, and the detail-header bell renders straight off it.

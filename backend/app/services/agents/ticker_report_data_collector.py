@@ -7188,10 +7188,10 @@ _COMPETITOR_MAX_N = 5
 # existing `_build_competitors()` floor + scoring, so the "don't
 # fabricate" guarantee is preserved.
 
-_INDUSTRY_UNIVERSE_PATH = (
-    Path(__file__).resolve().parents[3]  # backend/
-    / "data" / "industry_universe.json"
-)
+# Single resolver — see `app/services/universe_data.py`. There were FOUR different
+# path idioms for this one directory, and the file is FMP-derived so it has to be
+# able to move out of the repo (ToS §2.6.1) without a hunt.
+from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe, universe_path
 _INDUSTRY_PEERS_CACHE: Dict[str, List[str]] = {}
 
 
@@ -7200,15 +7200,10 @@ def _load_industry_peers_from_universe(industry: str) -> List[str]:
     `industry` sorted by market cap descending. Called once per
     industry per process (cached by `_industry_universe_peers`).
     """
-    try:
-        data = json.loads(_INDUSTRY_UNIVERSE_PATH.read_text())
-    except Exception as exc:
-        logger.warning(
-            "industry_universe peers: failed to read %s: %s",
-            _INDUSTRY_UNIVERSE_PATH, exc,
-        )
-        return []
-    for entry in data.get("industries", []) or []:
+    industries = load_universe(INDUSTRY_UNIVERSE)
+    if not industries:
+        return []          # already logged at ERROR by `load_universe`
+    for entry in industries:
         if entry.get("industry") == industry:
             mcaps = entry.get("market_caps") or {}
             return [

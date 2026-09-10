@@ -39,7 +39,7 @@ ENV PYTHONUNBUFFERED=1
 # Railway injects $PORT; default 8000 for local docker run.
 # --proxy-headers + --forwarded-allow-ips='*' makes uvicorn honor Railway's
 # X-Forwarded-For so request/websocket .client.host is the REAL client IP (not the
-# proxy's). Needed so the live-price WebSocket per-IP guest connection limit is
-# counted per guest, and so client-IP logging is accurate. Safe here: Railway's
+# proxy's). Needed for accurate client-IP logging and for the per-IP auth rate
+# limiters (`core/security.py`). Safe here: Railway's
 # edge is the only ingress and always sets the header.
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

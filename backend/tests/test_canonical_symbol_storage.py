@@ -223,3 +223,47 @@ def test_the_canonicaliser_the_tracking_paths_now_use(bare, declared, expected):
     from app.services.asset_class import canonical_stored_symbol
 
     assert canonical_stored_symbol(bare, declared) == expected
+
+
+# ── DELETE /watchlist: a deliberately-bare security must be removable ────────
+#
+# 🔴 Live bug, and migration 160's header invites the exact state that triggers it: a user
+# who really tracks LTC Properties / Banco de Chile / Atomera re-adds the BARE form (correct
+# — `canonical_stored_symbol('LTC','stock')` leaves it alone), and could then never remove
+# it. `RemoveFromWatchlistRequest` carries no `asset_type`, so the handler canonicalised to
+# 'LTCUSD', deleted ZERO rows, logged a warning, and returned
+# 200 {"message": "LTCUSD removed from watchlist"}. The row stayed forever while the UI
+# reported success every time.
+
+def _watchlist_source():
+    """Comment-stripped: the note beside the fix names the retired pattern."""
+    import inspect
+    from app.api.v1.endpoints import watchlist
+
+    raw = inspect.getsource(watchlist.remove_from_watchlist)
+    return "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+
+
+def test_remove_tries_the_raw_ticker_before_the_canonical_one():
+    src = _watchlist_source()
+    assert "raw_ticker" in src, "remove still canonicalises unconditionally"
+    assert src.index('.eq("ticker", raw_ticker)') < src.index('.eq("ticker", canonical)')
+
+
+def test_remove_does_not_delete_both_spellings_at_once():
+    """A user can legitimately hold the coin AND the security — 'BTCUSD' and 'BTC' are two
+    different assets after migration 160. A single `.in_([raw, canonical])` would remove
+    both when the user asked for one."""
+    src = _watchlist_source()
+    assert ".in_(" not in src, "remove deletes both spellings — that is a second bug"
+
+
+def test_the_canonicaliser_leaves_a_declared_equity_bare():
+    """This is what makes the bare form usable for the listed security at all."""
+    from app.services.asset_class import canonical_stored_symbol
+
+    for sym in ("LTC", "BCH", "ATOM", "BTC", "SOL", "XRP", "ETH"):
+        assert canonical_stored_symbol(sym, "stock") == sym
+        assert canonical_stored_symbol(sym, "Stock") == sym
+        # ...but with no declaration at all, the bare-list guess still applies.
+        assert canonical_stored_symbol(sym, None) == sym + "USD"

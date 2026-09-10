@@ -67,9 +67,22 @@
 --    deactivating them. It is cleared with the rename, so the next sweep re-baselines.
 --    (Zero crypto alerts exist in production today; this keeps the file correct anyway.)
 --
--- Idempotent: re-running is a no-op because every WHERE clause joins on the BARE form and
--- nothing bare remains afterwards, and the DELETE arms drop only rows that would collide
--- with a pair-form row the same user/portfolio already has.
+-- Idempotent, and SAFE TO RE-RUN FOREVER — which is a stronger claim and needed a real
+-- mechanism, not just "nothing bare remains".
+--
+-- ⚠️ The naive version is NOT re-runnable. Nothing bare remains immediately after the first
+-- apply, but the header above explicitly invites a user who really tracks LTC Properties or
+-- Atomera to RE-ADD the bare form — and `canonical_stored_symbol('LTC', 'stock')` correctly
+-- stores it bare. A second apply would then convert that REIT into Litecoin: the very bug
+-- this file exists to remove, in mirror image, on a row the file told the user to create.
+--
+-- So the guessing half is bounded to rows that existed BEFORE the canonicalising write path
+-- shipped (commit 0a1e671c, 2026-09-09T20:48:19Z). After that instant a bare coin row is
+-- impossible by construction, so anything bare is a deliberate security and must be left
+-- alone. That makes this a true one-shot backfill: provably a no-op on every later run,
+-- whatever the user does in between.
+--
+-- The price_alerts half needs no cutoff — it filters on a trustworthy `asset_type`.
 
 BEGIN;
 
@@ -79,28 +92,135 @@ BEGIN;
 -- joined by every arm below instead. `coin_name` is the curated name from
 -- `crypto_service._CRYPTO_PROFILES` where one exists.
 CREATE TEMP TABLE _coin_canon (
-    bare      text PRIMARY KEY,
-    pair      text NOT NULL,
-    coin_name text NOT NULL
+    bare           text PRIMARY KEY,
+    pair           text NOT NULL,
+    coin_name      text,          -- curated display name, where one exists
+    bare_guessable boolean NOT NULL
 ) ON COMMIT DROP;
 
-INSERT INTO _coin_canon (bare, pair, coin_name) VALUES
-    ('BTC',   'BTCUSD',   'Bitcoin'),
-    ('ETH',   'ETHUSD',   'Ethereum'),
-    ('SOL',   'SOLUSD',   'Solana'),
-    ('ADA',   'ADAUSD',   'Cardano'),
-    ('DOT',   'DOTUSD',   'Polkadot'),
-    ('AVAX',  'AVAXUSD',  'Avalanche'),
-    ('MATIC', 'MATICUSD', 'Polygon'),
-    ('LINK',  'LINKUSD',  'Chainlink'),
-    ('XRP',   'XRPUSD',   'XRP'),
-    ('DOGE',  'DOGEUSD',  'Dogecoin'),
-    ('SHIB',  'SHIBUSD',  'Shiba Inu'),
-    ('UNI',   'UNIUSD',   'Uniswap'),
-    ('AAVE',  'AAVEUSD',  'Aave'),
-    ('LTC',   'LTCUSD',   'Litecoin'),
-    ('BCH',   'BCHUSD',   'Bitcoin Cash'),
-    ('ATOM',  'ATOMUSD',  'Cosmos Hub');
+-- Every key of `coingecko.SYMBOL_TO_COINGECKO_ID` (111), because that is the exact set
+-- `asset_class.canonical_stored_symbol` will convert for a caller that DECLARES crypto.
+-- `bare_guessable` marks the 16 in `asset_class._BARE_CRYPTO_SYMBOLS` — the only ones where
+-- a bare ticker may be *guessed* to mean the coin with no declared asset type.
+--
+-- The distinction is the whole point: `price_alerts` carries a trustworthy `asset_type`, so
+-- it needs no guess and converts across all 111. An earlier draft enumerated 16 everywhere,
+-- which left a pre-existing `('SUI', asset_type='crypto')` alert bare — and `SUI` is Sun
+-- Communities on FMP, so the rule would evaluate a REIT's share price against a threshold
+-- the user set for the Sui coin. That is the migration's own headline bug, left in place for
+-- 95 symbols.
+INSERT INTO _coin_canon (bare, pair, coin_name, bare_guessable) VALUES
+    ('1INCH','1INCHUSD',NULL,false),
+    ('AAVE','AAVEUSD','Aave',true),
+    ('ADA','ADAUSD','Cardano',true),
+    ('ALGO','ALGOUSD',NULL,false),
+    ('APT','APTUSD','Aptos',false),
+    ('AR','ARUSD',NULL,false),
+    ('ARB','ARBUSD','Arbitrum',false),
+    ('ATOM','ATOMUSD','Cosmos Hub',true),
+    ('AVAX','AVAXUSD','Avalanche',true),
+    ('AXS','AXSUSD',NULL,false),
+    ('BAL','BALUSD',NULL,false),
+    ('BCH','BCHUSD','Bitcoin Cash',true),
+    ('BEAM','BEAMUSD',NULL,false),
+    ('BGB','BGBUSD',NULL,false),
+    ('BLUR','BLURUSD',NULL,false),
+    ('BNB','BNBUSD','BNB',false),
+    ('BONK','BONKUSD',NULL,false),
+    ('BTC','BTCUSD','Bitcoin',true),
+    ('CAKE','CAKEUSD',NULL,false),
+    ('CELO','CELOUSD',NULL,false),
+    ('CFX','CFXUSD',NULL,false),
+    ('CHZ','CHZUSD',NULL,false),
+    ('COMP','COMPUSD',NULL,false),
+    ('CRO','CROUSD',NULL,false),
+    ('CRV','CRVUSD',NULL,false),
+    ('DASH','DASHUSD',NULL,false),
+    ('DCR','DCRUSD',NULL,false),
+    ('DOGE','DOGEUSD','Dogecoin',true),
+    ('DOT','DOTUSD','Polkadot',true),
+    ('DYDX','DYDXUSD',NULL,false),
+    ('EIGEN','EIGENUSD',NULL,false),
+    ('ENA','ENAUSD',NULL,false),
+    ('ENS','ENSUSD',NULL,false),
+    ('EOS','EOSUSD',NULL,false),
+    ('ETC','ETCUSD',NULL,false),
+    ('ETH','ETHUSD','Ethereum',true),
+    ('ETHFI','ETHFIUSD',NULL,false),
+    ('FET','FETUSD',NULL,false),
+    ('FIL','FILUSD',NULL,false),
+    ('FLOKI','FLOKIUSD',NULL,false),
+    ('FLOW','FLOWUSD',NULL,false),
+    ('FLR','FLRUSD',NULL,false),
+    ('FTM','FTMUSD',NULL,false),
+    ('GALA','GALAUSD',NULL,false),
+    ('GMX','GMXUSD',NULL,false),
+    ('GRT','GRTUSD',NULL,false),
+    ('HBAR','HBARUSD',NULL,false),
+    ('HYPE','HYPEUSD',NULL,false),
+    ('ICP','ICPUSD',NULL,false),
+    ('IMX','IMXUSD',NULL,false),
+    ('INJ','INJUSD',NULL,false),
+    ('IOTA','IOTAUSD',NULL,false),
+    ('JASMY','JASMYUSD',NULL,false),
+    ('JUP','JUPUSD',NULL,false),
+    ('KAS','KASUSD',NULL,false),
+    ('KAVA','KAVAUSD',NULL,false),
+    ('LDO','LDOUSD',NULL,false),
+    ('LEO','LEOUSD',NULL,false),
+    ('LINK','LINKUSD','Chainlink',true),
+    ('LTC','LTCUSD','Litecoin',true),
+    ('MANA','MANAUSD',NULL,false),
+    ('MASK','MASKUSD',NULL,false),
+    ('MATIC','MATICUSD','Polygon',true),
+    ('MNT','MNTUSD',NULL,false),
+    ('MORPHO','MORPHOUSD',NULL,false),
+    ('NEAR','NEARUSD','NEAR Protocol',false),
+    ('NEO','NEOUSD',NULL,false),
+    ('NEXO','NEXOUSD',NULL,false),
+    ('OKB','OKBUSD',NULL,false),
+    ('ONDO','ONDOUSD',NULL,false),
+    ('ONE','ONEUSD',NULL,false),
+    ('OP','OPUSD','Optimism',false),
+    ('PENDLE','PENDLEUSD',NULL,false),
+    ('PENGU','PENGUUSD',NULL,false),
+    ('PEPE','PEPEUSD',NULL,false),
+    ('PI','PIUSD',NULL,false),
+    ('POL','POLUSD',NULL,false),
+    ('PYTH','PYTHUSD',NULL,false),
+    ('QNT','QNTUSD',NULL,false),
+    ('RENDER','RENDERUSD',NULL,false),
+    ('ROSE','ROSEUSD',NULL,false),
+    ('RUNE','RUNEUSD',NULL,false),
+    ('SAND','SANDUSD',NULL,false),
+    ('SEI','SEIUSD',NULL,false),
+    ('SHIB','SHIBUSD','Shiba Inu',true),
+    ('SKY','SKYUSD',NULL,false),
+    ('SNX','SNXUSD',NULL,false),
+    ('SOL','SOLUSD','Solana',true),
+    ('STRK','STRKUSD',NULL,false),
+    ('STX','STXUSD',NULL,false),
+    ('SUI','SUIUSD','Sui',false),
+    ('SUSHI','SUSHIUSD',NULL,false),
+    ('TAO','TAOUSD',NULL,false),
+    ('THETA','THETAUSD',NULL,false),
+    ('TIA','TIAUSD',NULL,false),
+    ('TON','TONUSD','Toncoin',false),
+    ('TRUMP','TRUMPUSD',NULL,false),
+    ('TRX','TRXUSD','TRON',false),
+    ('UNI','UNIUSD','Uniswap',true),
+    ('VET','VETUSD',NULL,false),
+    ('VIRTUAL','VIRTUALUSD',NULL,false),
+    ('WIF','WIFUSD',NULL,false),
+    ('WLD','WLDUSD',NULL,false),
+    ('XDC','XDCUSD',NULL,false),
+    ('XLM','XLMUSD',NULL,false),
+    ('XMR','XMRUSD',NULL,false),
+    ('XRP','XRPUSD','XRP',true),
+    ('XTZ','XTZUSD',NULL,false),
+    ('ZEC','ZECUSD',NULL,false),
+    ('ZIL','ZILUSD',NULL,false),
+    ('ZK','ZKUSD',NULL,false);
 
 -- ── 1. price_alerts — asset_type is reliable here, so no guess ──────────────
 -- DESTRUCTIVE (bounded): drops a bare-form rule only where renaming it would collide with
@@ -166,6 +286,8 @@ WHERE  a.ticker = c.bare
 DELETE FROM watchlist_items b
 USING watchlist_items a, _coin_canon c
 WHERE  a.ticker = c.bare
+  AND  c.bare_guessable
+  AND  a.added_at < '2026-09-09 20:48:19+00'::timestamptz
   AND  b.ticker = c.pair
   AND  a.user_id = b.user_id
   AND  a.id <> b.id
@@ -175,6 +297,8 @@ WHERE  a.ticker = c.bare
 DELETE FROM watchlist_items a
 USING watchlist_items b, _coin_canon c
 WHERE  a.ticker = c.bare
+  AND  c.bare_guessable
+  AND  a.added_at < '2026-09-09 20:48:19+00'::timestamptz
   AND  b.ticker = c.pair
   AND  a.user_id = b.user_id
   AND  a.id <> b.id;
@@ -201,7 +325,9 @@ SET    ticker       = c.pair,
        market_cap   = NULL,
        beta         = NULL
 FROM   _coin_canon c
-WHERE  w.ticker = c.bare;
+WHERE  w.ticker = c.bare
+  AND  c.bare_guessable
+  AND  w.added_at < '2026-09-09 20:48:19+00'::timestamptz;
 
 -- ── 3. portfolio_items — must track watchlist_items exactly (see note 1) ────
 -- A portfolio is a named SUBSET of the watchlist, seeded from it by copying the ticker
@@ -214,25 +340,47 @@ WHERE  w.ticker = c.bare;
 -- DESTRUCTIVE (bounded): the unique key is `portfolio_items_portfolio_id_ticker_key
 -- UNIQUE (portfolio_id, ticker)` (verified live). Scoped by portfolio_id, not user_id —
 -- holdings are deliberately independent across a user's portfolios.
+-- ⚠️ These arms FOLLOW THE WATCHLIST rather than re-deriving the rule.
+--
+-- portfolio_items has its own `added_at`, and a position can be added to a group long
+-- after the watchlist row was created — so bounding it by its OWN timestamp would let the
+-- two tables diverge, which is precisely the orphan-then-purge failure this section exists
+-- to prevent. The predicate is therefore "the matching watchlist row is now canonical and
+-- the bare form is gone", which is true exactly when the arm above converted it.
 DELETE FROM portfolio_items b
-USING portfolio_items a, _coin_canon c
+USING portfolio_items a, _coin_canon c, portfolios po
 WHERE  a.ticker = c.bare
   AND  b.ticker = c.pair
   AND  a.portfolio_id = b.portfolio_id
+  AND  po.id = a.portfolio_id
   AND  a.id <> b.id
+  AND  EXISTS (SELECT 1 FROM watchlist_items w
+               WHERE w.user_id = po.user_id AND w.ticker = c.pair)
+  AND  NOT EXISTS (SELECT 1 FROM watchlist_items w2
+                   WHERE w2.user_id = po.user_id AND w2.ticker = c.bare)
   AND (a.shares IS NOT NULL OR a.market_value IS NOT NULL)
         > (b.shares IS NOT NULL OR b.market_value IS NOT NULL);
 
 DELETE FROM portfolio_items a
-USING portfolio_items b, _coin_canon c
+USING portfolio_items b, _coin_canon c, portfolios po
 WHERE  a.ticker = c.bare
   AND  b.ticker = c.pair
   AND  a.portfolio_id = b.portfolio_id
-  AND  a.id <> b.id;
+  AND  po.id = a.portfolio_id
+  AND  a.id <> b.id
+  AND  EXISTS (SELECT 1 FROM watchlist_items w
+               WHERE w.user_id = po.user_id AND w.ticker = c.pair)
+  AND  NOT EXISTS (SELECT 1 FROM watchlist_items w2
+                   WHERE w2.user_id = po.user_id AND w2.ticker = c.bare);
 
 UPDATE portfolio_items p
 SET    ticker = c.pair
-FROM   _coin_canon c
-WHERE  p.ticker = c.bare;
+FROM   _coin_canon c, portfolios po
+WHERE  p.ticker = c.bare
+  AND  po.id = p.portfolio_id
+  AND  EXISTS (SELECT 1 FROM watchlist_items w
+               WHERE w.user_id = po.user_id AND w.ticker = c.pair)
+  AND  NOT EXISTS (SELECT 1 FROM watchlist_items w2
+                   WHERE w2.user_id = po.user_id AND w2.ticker = c.bare);
 
 COMMIT;

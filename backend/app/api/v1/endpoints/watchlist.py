@@ -276,22 +276,56 @@ async def remove_from_watchlist(
     supabase: Client = Depends(get_supabase),
 ):
     """Remove a stock from user's watchlist."""
-    # Same normalisation as the add path — otherwise a row stored as BTCUSD
-    # could never be removed by a client still sending BTC.
-    ticker = canonical_stored_symbol(request.stock_id, getattr(request, 'asset_type', None))
+    # RAW first, then the canonical form — never canonical-only.
+    #
+    # 🔴 Canonicalising unconditionally made a deliberately-BARE row undeletable, and said
+    # it had succeeded. `RemoveFromWatchlistRequest` carries no `asset_type` (the shipped
+    # client does not send one), so `canonical_stored_symbol('LTC', None)` returns
+    # 'LTCUSD' — bare-list membership is decisive with no declaration. The DELETE then
+    # matched ZERO rows, logged a warning, and still returned
+    # 200 {"message": "LTCUSD removed from watchlist"}. The row stayed on the watchlist
+    # and in the group forever while the UI reported success every time.
+    #
+    # That is exactly the state migration 160's header invites: a user who genuinely
+    # tracks LTC Properties (the REIT), Banco de Chile or Atomera re-adds the bare form,
+    # and could then never remove it.
+    #
+    # Trying raw and then canonical is correct in BOTH directions and needs no client
+    # change: a user holding the ETF ('BTC') deletes that row, while a stale client that
+    # still says 'BTC' for the coin falls through to 'BTCUSD'. Deleting both spellings at
+    # once would be wrong — a user can legitimately hold the coin AND the security.
     user_id = user["id"]
-    logger.info("[Watchlist] DELETE ticker=%s for user=%s", ticker, user_id)
+    raw_ticker = (request.stock_id or "").strip().upper()
+    canonical = canonical_stored_symbol(request.stock_id, getattr(request, 'asset_type', None))
+    logger.info("[Watchlist] DELETE ticker=%s (canonical=%s) for user=%s",
+                raw_ticker, canonical, user_id)
 
     try:
         result = (
             supabase.table("watchlist_items")
             .delete()
             .eq("user_id", user_id)
-            .eq("ticker", ticker)
+            .eq("ticker", raw_ticker)
             .execute()
         )
+        ticker = raw_ticker
+        if not result.data and canonical != raw_ticker:
+            logger.info("[Watchlist] no %s row for user=%s — retrying as %s",
+                        raw_ticker, user_id, canonical)
+            result = (
+                supabase.table("watchlist_items")
+                .delete()
+                .eq("user_id", user_id)
+                .eq("ticker", canonical)
+                .execute()
+            )
+            if result.data:
+                ticker = canonical
         if not result.data:
-            logger.warning("[Watchlist] Ticker %s not found in watchlist for user=%s", ticker, user_id)
+            logger.warning(
+                "[Watchlist] Ticker %s (nor %s) found in watchlist for user=%s",
+                raw_ticker, canonical, user_id,
+            )
         else:
             logger.info("[Watchlist] Removed %s from watchlist", ticker)
 

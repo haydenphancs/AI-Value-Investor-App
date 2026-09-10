@@ -679,6 +679,8 @@ _PENDING_MIGRATION_TABLES: set[str] = {
     # still_pending` above forces this entry to be removed the moment it is, which is what
     # stops this becoming a permanent hole.
     "public.chat_starters",
+    # Migration 162, same situation.
+    "public.chat_starter_answers",
 }
 
 

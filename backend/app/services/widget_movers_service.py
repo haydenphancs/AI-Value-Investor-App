@@ -84,6 +84,7 @@ from app.schemas.widget import (
     WidgetMoverResponse,
 )
 from app.services.daily_move_attribution import (
+    Attribution,
     attribute,
     # Shared so the market band and the cause sentence can never disagree about how a
     # percentage reads. Duplicating the formatting is how two surfaces on the same tile
@@ -328,6 +329,29 @@ class RankedMover:
     # reads `open` — so the overnight/intraday split is free arithmetic.
     open_price: Optional[float] = None
     previous_close: Optional[float] = None
+
+
+@dataclass
+class MoveExplanation:
+    """One ticker's same-day story: the deterministic cause plus the facts that gate it.
+
+    `tier` carries `classify_move`'s vocabulary (Typical/Notable/Unusual/Extreme on the
+    σ path, flat/notable/extreme on the fixed-band fallback), which is the SAME set the
+    Updates sweeper gates its paid catalyst on. Callers deciding whether a move earns a
+    web search must read this rather than re-deriving a threshold — two surfaces with
+    two thresholds is how one of them starts explaining moves the other calls ordinary.
+    """
+
+    ticker: str
+    company_name: Optional[str]
+    change_percent: Optional[float]
+    price: Optional[float]
+    tier: Optional[str]
+    z: Optional[float]
+    industry_name: Optional[str]
+    industry_change_percent: Optional[float]
+    market_change_percent: Optional[float]
+    attribution: Attribution
 
 
 def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
@@ -762,6 +786,76 @@ class WidgetMoversService:
             sorted({t.upper() for t in tickers if t})
         )
         return await self._cached(key, lambda: self._build_portfolio(user_id, tickers))
+
+    async def attribute_ticker_move(self, ticker: str) -> Optional["MoveExplanation"]:
+        """Same-day attribution for ONE arbitrary ticker — the widget's engine, made callable.
+
+        Exists so that "why did this move today" has exactly ONE implementation. Ask Cay AI
+        needs the same answer the Home Screen widget shows, and re-deriving it in the chat
+        layer would give the two surfaces different explanations for the same market day —
+        the precise inconsistency `_sectors` documents and rejects a few hundred lines below.
+
+        The composition is `_build_mover`'s, minus the ranking: `_rank_and_read` for the
+        quote + σ + news card, `_market_context` for the industry / earnings / market legs
+        (1h cached, shared with the widget), then the pure `attribute()`.
+
+        Returns None when the move is unreadable — an unusable quote is not a flat day, and
+        the caller must be able to tell those apart. `CauseKind.NONE` is a real answer and
+        is returned normally.
+        """
+        sym = (ticker or "").upper().strip()
+        if not sym:
+            return None
+        try:
+            ranked, cards, news_available, index_rows = await self._rank_and_read([sym])
+        except Exception as e:
+            logger.warning(
+                "attribution: rank/read failed for %s (%s: %s)", sym, type(e).__name__, e
+            )
+            return None
+        if not ranked:
+            # `rank_movers` drops a row whose change is missing or non-finite.
+            return None
+        m = ranked[0]
+
+        today = session_trading_date()
+        ctx = await self._market_context([sym], index_rows)
+        classified, had_news, card_checked = _classified_today_news(
+            cards.get(sym), today.isoformat()
+        )
+        industry = ctx.industry_for(sym)
+        a = attribute(
+            ticker=sym,
+            change_percent=m.change_percent,
+            today=today,
+            z=m.z,
+            open_price=m.open_price,
+            previous_close=m.previous_close,
+            industry_name=industry[0],
+            industry_change_percent=industry[1],
+            market_change_percent=ctx.market_change,
+            earnings_row=ctx.earnings_for(sym),
+            # `grades` is 402 under the Order Form, so the analyst detector is inert.
+            # Passing None is honest; `_head_grades` would spend a guaranteed failure.
+            grade_rows=None,
+            classified_news=classified,
+            had_news=had_news,
+            news_checked=ctx.news_available and news_available and card_checked,
+        )
+        if a is None:
+            return None
+        return MoveExplanation(
+            ticker=sym,
+            company_name=m.company_name,
+            change_percent=m.change_percent,
+            price=m.price,
+            tier=m.tier,
+            z=m.z,
+            industry_name=industry[0],
+            industry_change_percent=industry[1],
+            market_change_percent=ctx.market_change,
+            attribution=a,
+        )
 
     # ── cache plumbing ───────────────────────────────────────────────
 

@@ -254,6 +254,13 @@ struct StockChartWidgetData: Codable, Identifiable {
     let peRatio: Double?
     let yearHigh: Double?
     let yearLow: Double?
+    /// `false` ⇒ `dayHigh`/`dayLow` are placeholders the card must not render.
+    ///
+    /// Optional because it is decoded with the synthesised initialiser, so an older server
+    /// that does not send the key must not fail the whole message. nil is NOT "known": the
+    /// `> 0` test in `hasDayRange` is what actually decides, and this flag makes the server's
+    /// intent explicit alongside it.
+    let dayRangeKnown: Bool?
     /// nil = unknown; true = US session open → the card shows a green "Live" dot, else "Closed".
     let isMarketOpen: Bool?
     let historicalData: [HistoricalDataPointDTO]
@@ -273,6 +280,7 @@ struct StockChartWidgetData: Codable, Identifiable {
         case peRatio = "pe_ratio"
         case yearHigh = "year_high"
         case yearLow = "year_low"
+        case dayRangeKnown = "day_range_known"
         case isMarketOpen = "is_market_open"
         case historicalData = "historical_data"
     }
@@ -294,8 +302,23 @@ struct StockChartWidgetData: Codable, Identifiable {
         return "\(sign)\(String(format: "%.2f", change))"
     }
 
-    var formattedDayHigh: String { String(format: "$%.2f", dayHigh) }
-    var formattedDayLow: String { String(format: "$%.2f", dayLow) }
+    /// Whether today's high/low are real numbers.
+    ///
+    /// ⚠️ THE CARD SHIPPED "Day High $0.00 / Day Low $0.00" AS FACT, beside a live price.
+    /// `dayHigh`/`dayLow` came from FMP's `/stable/quote`, which is in a package the signed
+    /// Order Form does not include and answers 402 — so the backend's `or 0` rendered a
+    /// fabricated zero. Same class as the index screen's `Open 0.00` and the 0-P/E "Bargain"
+    /// badge; this call site was missed in that sweep.
+    ///
+    /// The `> 0` test is the load-bearing half and works against any server, including one
+    /// too old to send `day_range_known`: no traded instrument has a zero or negative daily
+    /// high. The flag is the server saying so explicitly.
+    var hasDayRange: Bool {
+        dayRangeKnown != false && dayHigh > 0 && dayLow > 0
+    }
+
+    var formattedDayHigh: String { hasDayRange ? String(format: "$%.2f", dayHigh) : "—" }
+    var formattedDayLow: String { hasDayRange ? String(format: "$%.2f", dayLow) : "—" }
 
     var formattedVolume: String { Self.abbreviate(Double(volume)) }
     var formattedAvgVolume: String { Self.abbreviate(Double(avgVolume)) }
@@ -941,6 +964,7 @@ extension StockChartWidgetData {
         peRatio: 62.3,
         yearHigh: 299.29,
         yearLow: 138.80,
+        dayRangeKnown: true,
         isMarketOpen: true,
         historicalData: [
             HistoricalDataPointDTO(date: "2026-01-30", open: 220, high: 223, low: 218, close: 220, volume: 80_000_000),

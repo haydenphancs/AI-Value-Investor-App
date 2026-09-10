@@ -106,6 +106,17 @@ class StockChartWidget(BaseModel):
     change_percent: float
     day_high: float
     day_low: float
+    # False ⇒ `day_high`/`day_low` are PLACEHOLDERS and must not be rendered.
+    #
+    # A companion boolean rather than making the two floats Optional: iOS declares them as
+    # non-Optional `Double` in two shipped models, so a null on the wire is a decode failure
+    # for every build already in the field. Same constraint and same shape as `pe_known`.
+    #
+    # They are 0.0 rather than absent because the card used to emit exactly that — from
+    # `quote.get("dayHigh") or 0` against a `/stable/quote` key that is 402 under the FMP
+    # Order Form — and render it as "$0.00" beside a live price. Defaults False so an
+    # unmigrated writer cannot re-assert a fabricated range by omission.
+    day_range_known: bool = False
     volume: int
     avg_volume: int
     market_cap: Optional[float] = None

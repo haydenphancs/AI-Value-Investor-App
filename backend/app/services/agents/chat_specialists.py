@@ -49,7 +49,16 @@ _SPECIALISTS: Dict[str, ChatSpecialist] = {
     "macro": ChatSpecialist(
         "macro", "Macro",
         "LENS: Answer through a MACRO / market lens — overall conditions, valuations, sector "
-        "rotation, rates, and macro drivers. Use the market-overview tool for market/index "
+        # `get_market_snapshot` named FIRST and unconditionally, because this lens is the one
+        # routinely selected for "why is <sector> lagging" — and until that tool existed the
+        # instruction below pointed at `get_market_overview`, which `_TOOLS_BY_ASSET_TYPE`
+        # granted to INDEX chats ONLY. On every other screen this lens was being told to call
+        # a tool that was not in its declaration list, which is how it ended up explaining
+        # that it could not do sectors at all.
+        "rotation, rates, and macro drivers. Use get_market_snapshot for sector performance, "
+        "market breadth and what is moving today — it names every sector, so answer sector "
+        "questions from it rather than declining them. Use the market-overview tool for "
+        "market/index "
         # Was "Do NOT name specific indices — say 'the market'", a second copy of the gag that
         # `_ASSET_PERSONAS["INDEX"]` carried. This lens is selected on index detail screens too,
         # so leaving it here would have re-imposed the evasion the persona fix removes.

@@ -36,6 +36,7 @@ from app.services.chat_security import normalize_text, cap_prompt, neutralize_fe
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
 from app.services.chart_helper import _finite_or_none
 from app.services.price_service import price_source
+from app.utils.market_hours import session_trading_date
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,74 @@ _MARKET_OVERVIEW_TOOL = types.Tool(
 )
 
 
+_TICKER_NEWS_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="get_ticker_news",
+            description=(
+                "Fetch the most recent news headlines for a ticker, with key points and "
+                "publisher. Call whenever the user asks what is happening with a company, "
+                "what the news is, or what is behind a story — and before saying you do "
+                "not know why something happened."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
+                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    ]
+)
+
+_PRICE_MOVE_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="explain_price_move",
+            description=(
+                "Explain why a ticker moved TODAY. Returns the identified cause (earnings, "
+                "analyst action, company news, a sector-wide move, or an overnight gap), how "
+                "unusual the move is for THIS ticker specifically, how its industry and the "
+                "wider market did, recent headlines, and — for a large unexplained move — a "
+                "web-researched catalyst with sources. ALWAYS call this for any 'why is X "
+                "up/down' question rather than answering from the price alone."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "ticker": types.Schema(
+                        type=types.Type.STRING,
+                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
+                    ),
+                },
+                required=["ticker"],
+            ),
+        )
+    ]
+)
+
+_MARKET_SNAPSHOT_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="get_market_snapshot",
+            description=(
+                "Fetch how the market is doing TODAY: every sector's daily move, the leading "
+                "and lagging industries, the biggest gaining and losing stocks, and today's "
+                "market news summary with its cited catalyst. Takes no arguments. Call for "
+                "any question about sectors, market breadth, what is hot or trending today, "
+                "sector rotation, or why the market moved — including when the user names "
+                "one sector, such as Basic Materials or Technology."
+            ),
+            parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+        )
+    ]
+)
+
+
 # Asset classes that carry a single live quote, so the `stock_chart` card is meaningful for
 # them. INDEX is deliberately absent — it has no single quote and gets `market_overview`.
 _QUOTED_WIDGET_ASSET_TYPES = frozenset({"STOCK", "ETF", "CRYPTO", "COMMODITY"})
@@ -159,6 +228,53 @@ def _chat_output_cap(is_deep_dive: bool) -> int:
         if is_deep_dive
         else settings.CHAT_MAX_OUTPUT_TOKENS
     )
+
+
+def _day_range(
+    quote: Dict[str, Any], historical_data: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Today's high/low for the chat card — or an explicit "unknown".
+
+    ⚠️ THIS SHIPPED `Day High $0.00 / Day Low $0.00` AS FACT. The card read
+    `quote.get("dayHigh") or 0`, but `PriceService._shape` emits no such key: `dayHigh` and
+    `dayLow` came from `/stable/quote`, which is in the "Real-time Market Data" package the
+    Order Form does not include, so it answers 402. The `or 0` then rendered `$0.00` beside a
+    live price. Same class as the index screen's fabricated `Open 0.00` and the 0-P/E
+    "Bargain" badge — this call site was simply missed in that sweep.
+
+    The range is recoverable for free: the EOD bars fetched for the chart carry high/low, and
+    `_normalize_historical` already keeps them. The guard that makes it honest is the DATE —
+    FMP publishes the EOD row after the close, so intraday the newest bar is usually the
+    PREVIOUS session, and printing that as "today's range" would trade one wrong number for
+    a subtler one.
+
+    `day_range_known` is a companion BOOLEAN rather than making the floats Optional: iOS
+    declares `let dayHigh: Double` (non-Optional) in two shipped models, so a null on the
+    wire is a decode failure for every build already in the field. Same pattern as `pe_known`.
+    """
+    hi = _finite_or_none(quote.get("dayHigh"))
+    lo = _finite_or_none(quote.get("dayLow"))
+    if hi and lo and hi > 0 and lo > 0:
+        # Kept live: if a future entitled quote source restores these keys, they win.
+        return {"day_high": hi, "day_low": lo, "day_range_known": True}
+
+    if historical_data:
+        last = historical_data[-1]          # `_normalize_historical` sorts date ASCENDING
+        try:
+            same_session = last.get("date") == session_trading_date().isoformat()
+        except Exception as e:  # noqa: BLE001 — a clock/tz failure must not drop the card
+            logger.warning("chat widget: session date unavailable (%s: %s)",
+                           type(e).__name__, e)
+            same_session = False
+        if same_session:
+            hi = _finite_or_none(last.get("high"))
+            lo = _finite_or_none(last.get("low"))
+            if hi and lo and hi > 0 and lo > 0:
+                return {"day_high": hi, "day_low": lo, "day_range_known": True}
+
+    # 0.0 is a PLACEHOLDER the client must not render, flagged as such. The floats stay
+    # non-null because the wire type cannot become Optional without breaking shipped builds.
+    return {"day_high": 0.0, "day_low": 0.0, "day_range_known": False}
 
 
 class ChatService:
@@ -268,6 +384,15 @@ class ChatService:
             symbol = args.get("symbol", "^GSPC").upper()
             return await self._fetch_market_overview_data(symbol)
 
+        async def _handle_ticker_news_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            return await self._fetch_ticker_news_data(args.get("ticker", "").upper())
+
+        async def _handle_price_move_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            return await self._fetch_price_move_data(args.get("ticker", "").upper())
+
+        async def _handle_market_snapshot_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            return await self._fetch_market_snapshot_data()
+
         # Return cached deep dive if available (zero Gemini cost)
         if cached_report:
             logger.info(f"Deep dive cache HIT for {stock_id}")
@@ -291,6 +416,9 @@ class ChatService:
             "get_analyst_analysis": (_ANALYST_ANALYSIS_TOOL, _handle_analyst_tool),
             "get_sentiment_analysis": (_SENTIMENT_ANALYSIS_TOOL, _handle_sentiment_tool),
             "get_market_overview": (_MARKET_OVERVIEW_TOOL, _handle_market_overview_tool),
+            "get_ticker_news": (_TICKER_NEWS_TOOL, _handle_ticker_news_tool),
+            "explain_price_move": (_PRICE_MOVE_TOOL, _handle_price_move_tool),
+            "get_market_snapshot": (_MARKET_SNAPSHOT_TOOL, _handle_market_snapshot_tool),
         }
         tools = [tool for name, (tool, _) in _ALL_TOOLS.items() if name in allowed]
         handlers = {
@@ -985,8 +1113,7 @@ class ChatService:
                 if quote.get("changePercentage") is not None
                 else quote.get("changesPercentage")
             ) or 0,
-            day_high=quote.get("dayHigh") or 0,
-            day_low=quote.get("dayLow") or 0,
+            **_day_range(quote, historical_data),
             # NOT `int(quote.get("volume") or 0)`: a NaN survives `or 0` (NaN is truthy) and
             # `int(nan)` raises ValueError inside the caller's try → the entire card disappears.
             volume=int(_finite_or_none(quote.get("volume")) or 0),
@@ -1127,6 +1254,38 @@ class ChatService:
         except Exception as e:
             logger.error(f"Market overview fetch failed for {symbol}: {e}")
             return {"error": str(e)}
+
+    # ── Market awareness (see `services/chat_market_tools.py` for the why) ────────
+    #
+    # Thin delegations on purpose. The logic lives in one module so the streaming and
+    # non-streaming registries — which build their `types.Tool` objects separately and
+    # have drifted before — cannot end up with two different implementations of the same
+    # tool name.
+
+    async def _fetch_ticker_news_data(self, ticker: str) -> Dict[str, Any]:
+        """Recent headlines for a ticker. The tool chat has never had."""
+        from app.services.chat_market_tools import fetch_ticker_news
+
+        # Derived here rather than defaulted downstream, exactly as `_fetch_sentiment_data`
+        # does: a coin routed through the equity news feed comes back empty, and the model
+        # then reports "no news" for the most-discussed asset on the screen.
+        return await fetch_ticker_news(
+            ticker, is_crypto=detect_asset_class(ticker) == "crypto"
+        )
+
+    async def _fetch_price_move_data(self, ticker: str) -> Dict[str, Any]:
+        """Why this ticker moved today — deterministic first, web search only if needed."""
+        from app.services.chat_market_tools import explain_price_move
+
+        return await explain_price_move(
+            ticker, is_crypto=detect_asset_class(ticker) == "crypto"
+        )
+
+    async def _fetch_market_snapshot_data(self) -> Dict[str, Any]:
+        """Sector/industry breadth, today's movers, and the Updates AI market card."""
+        from app.services.chat_market_tools import fetch_market_snapshot
+
+        return await fetch_market_snapshot()
 
     @staticmethod
     def _get_valuation_level(pe: Optional[float]) -> str:
@@ -1663,6 +1822,37 @@ class ChatService:
             + "When you have access to sentiment data from the get_sentiment_analysis tool, "
             "incorporate the mood score, social mentions, and news sentiment into your analysis. "
             "Explain what the sentiment means in plain language. "
+            # ── WHAT YOU CAN DO ──
+            #
+            # This block exists because its absence shipped a user-visible refusal. Asked why
+            # a sector was lagging, the model answered "My tools are designed to analyze
+            # individual company stocks rather than entire sectors" — a sentence written by no
+            # prompt in this repo. It was a reasonable inference: the only capability named
+            # positively above was a ticker-keyed price tool, and the analyst clause right
+            # before it is a REFUSAL TEMPLATE. With two ticker tools in view and an example of
+            # declining, declining generalised.
+            #
+            # So the fix is not a "be more helpful" exhortation, which would only push the
+            # model to answer from memory. It is naming the tools that now exist, and saying
+            # which question each one answers.
+            + "WHAT YOU CAN ANSWER. You are not limited to a single company's price. You also "
+            "have: get_ticker_news for recent headlines about a company or coin; "
+            "explain_price_move for why a specific ticker moved TODAY — it returns the actual "
+            "cause, how unusual the move is for that ticker, how its industry and the market "
+            "did, and for a big unexplained move a web-researched catalyst with sources; and "
+            "get_market_snapshot for how the market itself is doing today — every sector's "
+            "move, leading and lagging industries, the day's biggest gainers and losers, and "
+            "today's market news summary. "
+            "WHEN THE USER ASKS 'WHY', CALL A TOOL BEFORE ANSWERING. 'Why is X down today?' "
+            "means call explain_price_move — never restate the price, the change and the "
+            "volume back to the user and stop, because that answers a different question than "
+            "the one asked. 'Why is <sector> lagging?', 'what's hot today?' and 'what topics "
+            "are hot?' mean call get_market_snapshot; it covers every sector by name, so you "
+            "can answer sector questions and must not say you only handle individual stocks. "
+            "If a tool comes back with no cause found, say what DID happen — how big the move "
+            "was relative to normal for that ticker, and how its sector and the market did — "
+            "and say plainly that no single catalyst is visible. That is a real answer. Never "
+            "supply a reason a tool did not give you. "
             "Write your response in clean markdown. "
             # Brevity for an ordinary question, a structured brief for the AI Analyst button.
             # These two CONTRADICT each other, which is why only one may ever be present: the

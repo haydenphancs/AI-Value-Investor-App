@@ -142,6 +142,7 @@ class PriceCatalystService:
         window_label: str,
         *,
         force_refresh: bool = False,
+        cache_only: bool = False,
         run_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Return {tag, reason, sources} for a big move, or None on hard
@@ -150,6 +151,13 @@ class PriceCatalystService:
         A "no clear catalyst" outcome is NOT a failure — it returns
         {tag: None, reason: <broad-market explanation>, sources: []} so the
         section trusts the web-search over an FMP keyword guess.
+
+        ``cache_only=True`` reads the two cache tiers and returns None on a miss
+        WITHOUT spending a grounded search. It exists so a caller that meters paid
+        searches can answer from cache for free: charging a budget unit for a row
+        that was already paid for would let one popular ticker exhaust a daily cap
+        while costing nothing. Mutually exclusive with ``force_refresh`` by
+        construction — that skips the same cache this only reads.
         """
         focal = (ticker or "").strip().upper()
         if not focal:
@@ -168,6 +176,10 @@ class PriceCatalystService:
             if db_cached is not None:
                 _mem_set(ctx_key, db_cached)
                 return db_cached
+
+        if cache_only:
+            # A miss, not a failure. The caller degrades to its own cheaper answer.
+            return None
 
         if ctx_key in _inflight:
             try:

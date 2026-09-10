@@ -279,6 +279,17 @@ CURATION: dict[str, TableDoc] = {
              "than rendering a raw brace. SERVICE-ROLE ONLY like 157/158/159 — nothing "
              "client-side reads it (iOS goes through GET /chat/starters), so a public grant "
              "would widen the anon key's reach for no benefit."),
+    "public.chat_starter_answers": T("chat",
+        purpose="Pre-computed answers to the day's suggestion chips, so tapping one replays "
+                "a stored answer instead of paying a Gemini turn.",
+        key=("question_hash", "answer_date", "question", "answer", "widget"),
+        note="Migration 162. Keyed on the QUESTION, never the chip slot: the chip set is "
+             "rebuilt every 15 minutes and its hot-ticker/hot-sector slots follow the tape, "
+             "so slot-keying would eventually serve one question's answer under another's "
+             "text. Retention is ONE ET day - yesterday's answer to a 'today' question is "
+             "wrong, not merely stale. Rows are GLOBALLY shared, so the warm job runs with "
+             "no user id, no personalisation and no memory facts. SERVICE-ROLE ONLY: the "
+             "rows hold FMP-derived market data and the anon key ships in the iOS binary."),
 
     # ----------------------------------------------------------- learn-content
     "public.books": T("learn-content", key=("id", "title", "author", "level", "is_most_read")),

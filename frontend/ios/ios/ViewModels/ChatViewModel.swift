@@ -1089,6 +1089,20 @@ class ChatViewModel: ObservableObject {
         case "get_financials", "get_income_statement": return "Pulling the financials"
         case "get_ticker_report":                 return "Reading the research report"
         case "search_news":                       return "Scanning recent news"
+        // The four tools the backend has ACTUALLY been sending all along. Without these
+        // the `default:` arm rendered them as "Get stock chart data" — a de-snake-cased
+        // function name, shown to the user as a progress step.
+        case "get_stock_chart_data":              return "Checking the latest price"
+        case "get_sentiment_analysis":            return "Reading the market mood"
+        case "get_analyst_analysis":              return "Checking analyst coverage"
+        case "get_market_overview":               return "Sizing up the market"
+        case "get_ticker_news":                   return "Scanning recent news"
+        case "get_market_snapshot":               return "Checking today's market"
+        // Deliberately NOT "Searching the web". That phrasing reads as a generic chatbot,
+        // and it would also be wrong most of the time: this tool answers from deterministic
+        // attribution and cached news first and escalates to a web search only for a large
+        // move it cannot otherwise explain. "Digging deeper" is true on every path.
+        case "explain_price_move":                return "Digging deeper"
         default:
             let words = name.replacingOccurrences(of: "_", with: " ")
             return words.prefix(1).uppercased() + words.dropFirst()

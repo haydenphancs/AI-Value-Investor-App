@@ -291,6 +291,14 @@ async def lifespan(app: FastAPI):
         from app.services.updates_insight_sweeper import run_insight_sweeper_loop
         insight_sweeper_task = _spawn(run_insight_sweeper_loop(), "insight_sweeper")
 
+        # Pre-computes the day's Ask Cay AI suggestion-chip answers, so tapping a chip
+        # replays a stored answer instead of paying a Gemini turn (migration 162).
+        #
+        # Its own loop rather than a step in the 2-hourly maintenance pass: the chip set is
+        # rebuilt every 15 minutes and its hot-ticker slots follow the tape, so a two-hour
+        # cadence would leave a freshly promoted chip cold for most of its life.
+        _spawn(_run_starter_warm_loop(), "starter_warm")
+
     # Outside the else: this family is opt-in-able locally (see `run_notification_jobs`).
     if run_notification_jobs:
         # Quiet-hours flush. Runs 24/7 — NOT gated on market hours, because a quiet
@@ -409,6 +417,17 @@ async def _run_news_pre_warmer():
             await asyncio.to_thread(get_chat_budget_service().cleanup_old_budget_rows)
 
         await _step("chat_usage_budget sweep", _chat_budget)
+
+        # Retention sweep for chat_starter_answers (migration 162). ONE ET day: a
+        # pre-computed answer to "Why is X down 22% today?" is not merely stale the next
+        # morning, it is wrong. Piggy-backed here for the same reason as the sweep above —
+        # a cheap single DELETE that needs no cadence of its own.
+        async def _starter_answers():
+            from app.services.chat_starter_warm_service import sweep_expired
+
+            await asyncio.to_thread(sweep_expired)
+
+        await _step("chat_starter_answers sweep", _starter_answers)
 
         # Same for guest_report_budget (migration 106) — one row per INSTALL per
         # month, and installs are never cleaned up otherwise, so without this the
@@ -905,6 +924,44 @@ def _next_daily_run(now: "datetime", hour_utc: int = 8) -> "datetime":
     if candidate <= now:
         candidate = candidate + timedelta(days=1)
     return candidate
+
+
+async def _run_starter_warm_loop():
+    """Pre-compute the day's Ask Cay AI suggestion-chip answers (migration 162).
+
+    The chips are the questions people are most likely to tap and the only ones known before
+    they are asked, so answering them ahead of time turns the slowest, most expensive turns
+    in the product into instant ones.
+
+    COMPUTE FIRST, THEN SLEEP. `_run_volatility_precompute_job` above slept first and was
+    therefore inert for up to ~24h after every deploy — a shipped feature dark for a day with
+    nothing in the logs to say so. Cheap to run at the head of every iteration because the
+    pass is self-limiting: a chip already warmed today makes no Gemini call at all.
+
+    GATED ON MARKET HOURS, like the insight sweeper. The hot-ticker and hot-sector chips are
+    derived from the live tape; overnight the set is stable and re-checking it would only
+    burn a Supabase read every 15 minutes for a day's worth of nothing.
+    """
+    from app.services.chat_starter_warm_service import warm_todays_starters
+    from app.utils.market_hours import is_market_active
+
+    # Behind the sweeper's own 150s stagger AND the volatility job's 200s, so a cold boot
+    # does not have three jobs contending for the same universe cache at once.
+    await asyncio.sleep(240)
+
+    while True:
+        try:
+            if is_market_active():
+                await warm_todays_starters()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Never fatal: a failed pass just means the chips answer live, which is what the
+            # app did before this existed.
+            logger.warning(
+                "Starter warm pass failed (%s: %s)", type(e).__name__, e, exc_info=True
+            )
+        await asyncio.sleep(max(60, settings.CHAT_STARTER_WARM_INTERVAL_SECONDS))
 
 
 async def _run_volatility_precompute_job():

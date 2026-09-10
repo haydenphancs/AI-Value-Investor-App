@@ -209,7 +209,13 @@ def test_declarations_default_to_the_full_equity_set(monkeypatch):
     from app.services.agents import chat_tools as _ct
 
     monkeypatch.setattr(_ct, "analyst_section_available", lambda: True)
-    equity = {"get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis"}
+    # The market-awareness tools ride along on the equity default. They were added because the
+    # three-tool set below left the model with no news, no sector data and no way to answer a
+    # "why did it move" question — which it then said out loud to a user.
+    equity = {
+        "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
+        "get_ticker_news", "explain_price_move", "get_market_snapshot",
+    }
     assert _tool_names() == equity
     assert _tool_names("STOCK") == equity
     assert _tool_names("NORMAL") == equity

@@ -637,6 +637,36 @@ class Settings(BaseSettings):
     CHAT_DAILY_TURN_LIMIT_PER_IP: int = 300
     CHAT_DAILY_TOKEN_LIMIT: int = 200000
 
+    # ── Chat web search (the one paid step in `chat_market_tools`) ────────────────
+    #
+    # Ask Cay AI may escalate an unexplained MATERIAL move to a grounded Google Search
+    # via `price_catalyst_service`. Google bills $35 per 1,000 grounded prompts on the
+    # 2.5 family, with the first 1,500/day free — and the Updates sweeper's own
+    # `_CATALYST_DAILY_CAP` spends at most 30 of those, so this cap sits inside the free
+    # allowance by design rather than by luck. It is a DENIAL-OF-WALLET ceiling, not a
+    # fair-use limit: the ladder's free tiers still answer when it binds.
+    #
+    # Enforced GLOBALLY (one shared bucket in `chat_usage_budget`), not per user, because
+    # the cost is ours whoever spends it. The kill switch matches the five existing
+    # `*_AI_ENABLED` flags on the other grounded-search services.
+    CHAT_WEB_SEARCH_ENABLED: bool = True
+    CHAT_WEB_SEARCH_DAILY_CAP: int = 200
+
+    # ── Pre-warmed suggestion-chip answers (`chat_starter_warm_service`) ──────────
+    #
+    # The day's global chips are answered by a background pass and stored for one ET day,
+    # so tapping one replays a stored answer instead of paying a Gemini turn. The cap
+    # bounds DISTINCT questions per day: the chip set drifts intraday as the hot-ticker and
+    # hot-sector slots track the tape, so it is not simply "eight". A cap that binds every
+    # day is logged as a warning — it means the chips are churning faster than the warmer
+    # can follow and the feature has quietly stopped helping.
+    CHAT_STARTER_WARM_ENABLED: bool = True
+    CHAT_STARTER_WARM_DAILY_CAP: int = 60
+    # How often the warm pass runs while the market is active. Matched to
+    # `ChatStartersService._RESPONSE_TTL_SECONDS` (900) so a newly promoted chip is warmed
+    # about as fast as it can appear; a shorter interval would just re-read the same set.
+    CHAT_STARTER_WARM_INTERVAL_SECONDS: int = 900
+
     # A charged chat turn earns the session ONE free follow-up, valid for this many seconds.
     #
     # Chat is a flat 1 credit per turn and stays that way, so the cost of the decision is

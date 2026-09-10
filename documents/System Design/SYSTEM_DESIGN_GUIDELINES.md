@@ -1472,6 +1472,61 @@ replaying it on a three-day-old message would show a number that was true once.
 > sheet rendered *behind* it. Fixing any one alone is invisible. All three are pinned in
 > `tests/test_ios_paid_path_guards.py`.
 
+### 9b.9 Chat market awareness, and the one metered path inside a flat-priced turn
+
+*(Added 2026-09-10.)* Ask Cay AI could not answer "why". Asked why a stock was down 22% it
+restated the price and the volume; asked why a sector was lagging — a question the app's own
+suggestion chips generate — it replied that its tools only cover individual companies.
+
+**That was an accurate description of its tool surface, not a prompt failure.** After FMP's
+package enforcement took `grades` (so `analyst_section_available()` withholds
+`get_analyst_analysis`), a stock or global chat held exactly two tools:
+`get_stock_chart_data` and `get_sentiment_analysis`. Sentiment returns counts and scores and
+never a headline, and `sector_performance` rode on `get_market_overview`, which
+`_TOOLS_BY_ASSET_TYPE` granted to `INDEX` alone. Meanwhile the *research* agent already had
+`fetch_more_news` and `fetch_sector_performance`. The asymmetry was the whole defect.
+
+Three tools closed it, all backed by services that already existed and were wired to other
+surfaces — `get_ticker_news`, `get_market_snapshot` (sector + industry breadth, the day's
+movers, and the Updates screen's own `__MARKET__` AI card), and `explain_price_move`.
+
+**`explain_price_move` is an escalation ladder, and the ladder is the cost design.** Tier 1 is
+`daily_move_attribution` — a pure module, no network and no model, whose answer set is
+earnings / analyst / company news / group move / gap. Tier 2 is the ticker's 6h-cached news
+corpus; FMP's "Market News" package IS on the Order Form. Tier 3 is a grounded Google Search
+via `price_catalyst_service`, and it is **the only metered thing inside a flat-priced turn**:
+
+- Reached only when the move is volatility-relative material (`classify_move` returning
+  `Unusual` / `Extreme` / the fixed-band `extreme`, byte-identical to the Updates sweeper's
+  `_CATALYST_TIERS`) **and** tiers 1-2 found no company-specific cause.
+- The cache is probed BEFORE the budget (`get_catalyst(..., cache_only=True)`), so a row the
+  sweeper already paid for is free to reuse. Reversing those two would let one popular ticker
+  exhaust the ceiling while costing nothing.
+- Bounded by `CHAT_WEB_SEARCH_DAILY_CAP` through the existing `chat_usage_budget` RPC under a
+  fixed uuid5 bucket — durable and cross-instance, unlike the sweeper's in-process counter.
+  It **fails CLOSED**, the opposite of `_claim_chat_turn_or_error`: that one fails open so a
+  DB blip cannot wall a user out of chat, whereas refusing here only drops the turn back to
+  the free tiers.
+
+⚠️ **The window label is `"today"` and must stay so.** It is a cache-identity component
+(migration 095) shared with the sweeper, and it is the guard against the failure
+`daily_move_attribution`'s own header records: a cached `"Last 15 Days"` +42.7% narrative
+printed under a red daily move is *a correct answer to a different question*.
+
+**Pricing is unchanged, and §9b.8 still holds.** Google bills $35/1,000 grounded prompts on the
+2.5 family with the first 1,500/day free, against a sweeper that spends ≤30 — so the cap sits
+inside the free allowance by design rather than by luck.
+
+**Pre-warmed suggestion answers (migration 162).** The day's chips are the only questions known
+before they are asked, so a lifespan loop answers each one once and stores it in
+`chat_starter_answers`; tapping a chip then replays a stored answer through the same
+`_replay_cached_answer` path a cached deep dive uses. Still charged 1 credit — one credit buys
+one answer regardless of how fast it arrived, and a free tier of shared questions would be
+farmable. Two properties are load-bearing: rows are keyed on the **question**, never the chip
+slot, because `chat_starters_service` rebuilds its set every 15 minutes and its hot-ticker slots
+track the tape; and the warm job runs with **no user identity**, because one row serves every
+caller and `redact_signals()` is per-request.
+
 ---
 
 ## 9c. Personalized explanations — pedagogy, never analysis

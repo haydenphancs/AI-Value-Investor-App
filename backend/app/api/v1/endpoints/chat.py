@@ -1294,12 +1294,31 @@ async def stream_chat_message(
                 reader_lens=reader_lens,
                 user_id=user["id"],
             )
+            # A pre-computed answer to one of today's suggestion chips, if this is one.
+            #
+            # Looked up ALONGSIDE prep so it costs no wall-clock, and consulted BEFORE the
+            # router so a hit skips `route_question` too — that is a real (if small) Gemini
+            # call, and paying a classifier to route an answer we already hold would be
+            # spending money to decide nothing. Never raises; a miss means "answer live".
+            from app.services.chat_starter_warm_service import lookup as _warm_lookup
+
             if settings.CHAT_MULTI_AGENT_ENABLED:
-                prep, route = await asyncio.gather(
-                    prep_coro, route_question(chat_service.gemini, user_message),
+                # All three in ONE gather. Awaiting the warm lookup first to decide whether
+                # to route would serialise the router's ~400ms behind prep on every MISS —
+                # i.e. slow down the common case to save a cheap flash-lite call in the rare
+                # one. The wasted classification on a hit is the right side of that trade.
+                prep, route, warmed = await asyncio.gather(
+                    prep_coro,
+                    route_question(chat_service.gemini, user_message),
+                    _warm_lookup(user_message),
                 )
+                if warmed is not None:
+                    # The stored answer was written by the general path, so labelling the
+                    # turn with a specialist the replay never consulted would put a false
+                    # "Consulting Macro" stage on the thinking card.
+                    route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
             else:
-                prep = await prep_coro
+                prep, warmed = await asyncio.gather(prep_coro, _warm_lookup(user_message))
                 route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
 
             # Capture sources up-front so they survive even if streaming later fails and we
@@ -1357,6 +1376,23 @@ async def stream_chat_message(
                     stock_id, len(deep_dive_cached),
                 )
                 answer_stream = _replay_cached_answer(deep_dive_cached)
+            elif warmed is not None:
+                # A suggestion chip whose answer was pre-computed this morning. Replayed
+                # through the SAME path as a cached deep dive, so it persists, streams and
+                # renders identically to a generated turn — it just arrives immediately.
+                #
+                # Still CHARGED, deliberately: one credit buys one answer regardless of how
+                # fast it arrived. Making a set of shared questions free would create a
+                # second, farmable price for the same product.
+                logger.info(
+                    "Starter warm HIT — replaying %d chars, no Gemini call",
+                    len(warmed["answer"]),
+                )
+                w = warmed.get("widget")
+                if w and widget_key(w) not in seen_widgets:
+                    seen_widgets.add(widget_key(w))
+                    widgets.append(w)
+                answer_stream = _replay_cached_answer(warmed["answer"])
             elif route["mode"] == "synthesize":
                 answer_stream = chat_service.stream_synthesis(
                     prep, user_message, route, tools, handlers, signals=stream_signals,

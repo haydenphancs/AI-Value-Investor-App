@@ -48,24 +48,46 @@ def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
 # `get_stock_chart_data` is kept for ETF / CRYPTO / COMMODITY on purpose — all three are quoted
 # by FMP's `/stable/quote` and the resulting card is honest for them (`pe_ratio` and
 # `market_cap` are Optional on `StockChartWidget`, and iOS renders P/E only when present).
+# Granted to EVERY asset class, including `NORMAL` (the global chat with no screen behind
+# it). It is the answer to "what's hot today", "why is <sector> lagging" and "how is the
+# market doing" — and until it existed there was no sector path outside an index screen, so
+# Cay AI told a user its tools only cover individual companies. That was true.
+#
+# It is NOT `get_market_overview`, which stays index-only: that one runs through
+# `index_service.get_index_detail` and recomputes with FMP *and Gemini* on a cold cache —
+# the exact stall that forced a 4s timeout on `ChatContextResolver`. This one is a screener
+# sweep plus two cache reads.
+_MARKET_TOOL = "get_market_snapshot"
+
+# The two per-ticker tools that closed the "why did it move" hole. Both are free at the
+# point of call; `explain_price_move` escalates to a metered web search only for a material
+# move it cannot otherwise explain (see `chat_market_tools`).
+_NEWS_TOOLS = frozenset({"get_ticker_news", "explain_price_move"})
+
 _STOCK_TOOLSET = frozenset({
     "get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
-})
+}) | _NEWS_TOOLS | {_MARKET_TOOL}
 
 _TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
     "STOCK": _STOCK_TOOLSET,
     # No screen context: the user may ask about any stock, so keep the full equity set.
     "NORMAL": _STOCK_TOOLSET,
     # A fund has no analyst coverage, but it does have news sentiment and a real quote.
-    "ETF": frozenset({"get_stock_chart_data", "get_sentiment_analysis"}),
+    "ETF": frozenset({"get_stock_chart_data", "get_sentiment_analysis"})
+           | _NEWS_TOOLS | {_MARKET_TOOL},
     # Sentiment IS meaningful for a coin — `sentiment_service` has a crypto news branch — but
     # only if the caller passes `is_crypto`; see `ChatService._fetch_sentiment_data`.
-    "CRYPTO": frozenset({"get_stock_chart_data", "get_sentiment_analysis"}),
+    # News is routed on the same flag, so a coin gets `news/crypto` rather than an equity
+    # query for "BTCUSD" that returns nothing.
+    "CRYPTO": frozenset({"get_stock_chart_data", "get_sentiment_analysis"})
+              | _NEWS_TOOLS | {_MARKET_TOOL},
     # An index has no analyst ratings and no per-symbol social sentiment; it has the
-    # market-overview aggregate, which is the tool built for exactly this case.
-    "INDEX": frozenset({"get_market_overview"}),
-    # A futures contract has neither analyst coverage nor ticker sentiment.
-    "COMMODITY": frozenset({"get_stock_chart_data"}),
+    # market-overview aggregate, which is the tool built for exactly this case — plus the
+    # breadth snapshot, which is what "why is the market down" actually needs.
+    "INDEX": frozenset({"get_market_overview", _MARKET_TOOL}),
+    # A futures contract has neither analyst coverage nor ticker sentiment. It does have
+    # news, and the macro backdrop is most of any commodity answer.
+    "COMMODITY": frozenset({"get_stock_chart_data", "get_ticker_news", _MARKET_TOOL}),
 }
 
 
@@ -118,7 +140,38 @@ def build_chat_tool_declarations(asset_type: Optional[str] = None) -> List[types
             "gauge. Call when the user asks about sentiment, mood, buzz, or why a stock feels "
             "bullish/bearish.",
         ),
+        _ticker_tool(
+            "get_ticker_news",
+            "Fetch the most recent news headlines for a ticker, with key points and publisher. "
+            "Call whenever the user asks what is happening with a company, what the news is, or "
+            "what is behind a story — and before saying you do not know why something happened.",
+        ),
+        _ticker_tool(
+            "explain_price_move",
+            "Explain why a ticker moved TODAY. Returns the identified cause (earnings, analyst "
+            "action, company news, a sector-wide move, or an overnight gap), how unusual the move "
+            "is for THIS ticker specifically, how its industry and the wider market did, recent "
+            "headlines, and — for a large unexplained move — a web-researched catalyst with "
+            "sources. ALWAYS call this for any 'why is X up/down' question rather than answering "
+            "from the price alone.",
+        ),
     ]
+    if _MARKET_TOOL in allowed:
+        decls.append(
+            types.FunctionDeclaration(
+                name=_MARKET_TOOL,
+                description=(
+                    "Fetch how the market is doing TODAY: every sector's daily move, the "
+                    "leading and lagging industries, the biggest gaining and losing stocks, "
+                    "and today's market news summary with its cited catalyst. Takes no "
+                    "arguments. Call for any question about sectors, market breadth, what is "
+                    "hot or trending today, sector rotation, or why the market moved — "
+                    "including when the user names one sector, such as Basic Materials or "
+                    "Technology."
+                ),
+                parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+            )
+        )
     if "get_market_overview" in allowed:
         decls.append(
             types.FunctionDeclaration(
@@ -162,11 +215,23 @@ def build_chat_tool_handlers(
     async def _market(args: Dict[str, Any]) -> Dict[str, Any]:
         return await svc._fetch_market_overview_data((args.get("symbol") or "^GSPC").upper())
 
+    async def _news(args: Dict[str, Any]) -> Dict[str, Any]:
+        return await svc._fetch_ticker_news_data((args.get("ticker") or "").upper())
+
+    async def _why(args: Dict[str, Any]) -> Dict[str, Any]:
+        return await svc._fetch_price_move_data((args.get("ticker") or "").upper())
+
+    async def _snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
+        return await svc._fetch_market_snapshot_data()
+
     return {
         "get_stock_chart_data": _stock,
         "get_analyst_analysis": _analyst,
         "get_sentiment_analysis": _sentiment,
         "get_market_overview": _market,
+        "get_ticker_news": _news,
+        "explain_price_move": _why,
+        _MARKET_TOOL: _snapshot,
     }
 
 

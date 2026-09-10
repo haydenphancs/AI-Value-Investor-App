@@ -513,7 +513,11 @@ def _feed_for(monkeypatch, tier):
     monkeypatch.setattr(ws, "get_supabase", lambda: _StrictSupabase(_activity_tables()))
     ws._free_whale_id = None                       # force a fresh name→id resolution
     try:
-        return asyncio.get_event_loop().run_until_complete(
+        # `asyncio.run`, not `get_event_loop()` — see test_whale_activity_feed.py. This
+        # site did not fail in the reversed-order run that exposed the other two, which is
+        # exactly why it is worth fixing: it is the same latent defect waiting on an ordering
+        # nobody has tried yet.
+        return asyncio.run(
             ws.WhaleService().get_whale_activity_feed("u1", tier=tier)
         )
     finally:

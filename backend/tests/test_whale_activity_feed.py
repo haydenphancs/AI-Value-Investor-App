@@ -69,7 +69,12 @@ def _feed(monkeypatch, tables, user_id="u1", tier="premium"):
     _whale_activity_cache.clear()
     monkeypatch.setattr(wsvc, "get_supabase", lambda: _FakeSupabase(tables))
     import asyncio
-    return asyncio.get_event_loop().run_until_complete(
+    # `asyncio.run`, NOT `get_event_loop().run_until_complete`. The latter reads the
+    # process-wide loop policy, so it only works while some earlier test happens to have
+    # left a live loop installed — under any other ordering it raises "There is no current
+    # event loop in thread 'MainThread'" and every test in this file fails at the helper,
+    # never reaching its assertion. Found by running the suite in reversed file order.
+    return asyncio.run(
         WhaleService().get_whale_activity_feed(user_id, tier=tier)
     )
 

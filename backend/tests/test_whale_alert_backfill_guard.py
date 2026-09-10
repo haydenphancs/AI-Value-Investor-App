@@ -48,7 +48,10 @@ class _FakeSupabase:
 
 def _alerts(monkeypatch, rows):
     monkeypatch.setattr(tsvc, "get_supabase", lambda: _FakeSupabase(rows))
-    return asyncio.get_event_loop().run_until_complete(
+    # `asyncio.run`, not `get_event_loop()` — see the note in test_whale_activity_feed.py.
+    # This helper is the single choke point for the file, so the stale-loop failure takes
+    # every test in it down at once and none of them reach an assertion.
+    return asyncio.run(
         TrackingService()._get_whale_trade_alerts(["ORCL"])
     )
 

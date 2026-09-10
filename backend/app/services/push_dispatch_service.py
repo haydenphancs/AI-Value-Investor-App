@@ -124,7 +124,26 @@ class _Recipient:
     preferences: Dict[str, Any] = field(default_factory=dict)
     devices: List[dict] = field(default_factory=list)
     category_sent_today: int = 0
+    #: Rows with `read_at IS NULL` at the moment this recipient was resolved.
     unread: int = 0
+    #: The number to put in `aps.badge` — i.e. what the icon should read AFTER this
+    #: notification lands, INCLUDING it.
+    #:
+    #: ⚠️ Separate from `unread` because the two delivery paths resolve at different points
+    #: in the row's life, and `_deliver` cannot tell them apart:
+    #:
+    #:   * claim path — `resolve_recipients` runs BEFORE `claim_send` inserts, so the new
+    #:     row is not in `unread` yet and the badge is `unread + 1`;
+    #:   * flush path — the deferred row was inserted (unread) hours ago at defer time, so
+    #:     it is ALREADY in `unread` and the badge is `unread`.
+    #:
+    #: `_deliver` used to add 1 unconditionally, which over-counted every quiet-hours flush
+    #: by exactly one. Each caller now states its own arithmetic.
+    #:
+    #: `None` means "claim-path semantics" — `unread + 1` — because that is the overwhelmingly
+    #: common construction and the one every direct caller wants. The flush path is the single
+    #: exception and sets it explicitly.
+    badge: Optional[int] = None
     # False when the bulk read failed for this user, so per-user code can fail OPEN in
     # the same direction the single-user reads always did.
     preferences_known: bool = True
@@ -177,6 +196,13 @@ class PushDispatchService:
                 self.supabase.table("watchlist_items")
                 .select("user_id")
                 .eq("ticker", ticker.upper())
+                # ORDER BY, so truncation is DETERMINISTIC AND FAIR-BY-KEY rather than
+                # heap order. PostgREST returns physical row order otherwise — arbitrary
+                # but STABLE — so once this scope crosses the cap the SAME tail of rows is
+                # excluded on every single alert, forever, with nothing to indicate it.
+                # `profile_match_sender` already does this and says why; the dispatcher
+                # selectors never got the same treatment.
+                .order("user_id")
                 .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
                 .execute()
                 .data
@@ -351,6 +377,13 @@ class PushDispatchService:
                 self.supabase.table("whale_follows")
                 .select("user_id")
                 .eq("whale_id", whale_id)
+                # ORDER BY, so truncation is DETERMINISTIC AND FAIR-BY-KEY rather than
+                # heap order. PostgREST returns physical row order otherwise — arbitrary
+                # but STABLE — so once this scope crosses the cap the SAME tail of rows is
+                # excluded on every single alert, forever, with nothing to indicate it.
+                # `profile_match_sender` already does this and says why; the dispatcher
+                # selectors never got the same treatment.
+                .order("user_id")
                 .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
                 .execute()
                 .data
@@ -582,25 +615,47 @@ class PushDispatchService:
         return counts
 
     def unread_counts_bulk(self, user_ids: Sequence[str]) -> Dict[str, int]:
-        """user_id → unread inbox count, for the APNs badge.
+        """user_id → unread DELIVERED inbox count, for the APNs badge.
 
         Server-computed on purpose. Incrementing client-side drifts the moment a
         notification is delivered and never opened, and the badge is the one piece of
         notification state a user sees without launching the app.
+
+        ⚠️ **`sent` only.** The inbox row is written BEFORE delivery is attempted, so this
+        table also holds rows in `deferred` / `no_device` / `dry_run` / `failed` / `pending`
+        — notifications the user was never shown. Counting those put a number on the app
+        icon for something that does not exist anywhere on the phone, which is exactly the
+        "there is no notification but it still shows 1" report. The in-app inbox still LISTS
+        every row regardless of state; only the badge is restricted, because a badge is a
+        promise that something is there to look at.
+
+        ⚠️ The row limit is PER USER, not per chunk. It used to be `len(chunk) * 50` across
+        the whole `IN` list with no ordering, so one user sitting on hundreds of unread rows
+        could consume the budget and zero every other user's badge in that fan-out — silently,
+        unlike its sibling `_category_counts_bulk`, which at least logs when it truncates.
         """
         counts: Dict[str, int] = {uid: 0 for uid in user_ids}
         for chunk in _chunks(list(user_ids)):
+            limit = len(chunk) * _DAILY_COUNT_PROBE
             try:
                 rows = (
                     self.supabase.table(TABLE)
                     .select("user_id")
                     .in_("user_id", list(chunk))
                     .is_("read_at", "null")
-                    .limit(len(chunk) * _DAILY_COUNT_PROBE)
+                    .eq("push_state", STATE_SENT)
+                    .order("user_id")
+                    .limit(limit)
                     .execute()
                     .data
                     or []
                 )
+                if len(rows) >= limit:
+                    logger.warning(
+                        "push: unread probe hit its %d-row limit for %d user(s) — some "
+                        "badges may read low this cycle",
+                        limit, len(chunk),
+                    )
             except Exception as e:
                 logger.warning(
                     "push: bulk unread count failed for %d user(s) (%s: %s) — badge omitted",
@@ -646,6 +701,8 @@ class PushDispatchService:
         for uid, unread in self.unread_counts_bulk(ids).items():
             if uid in recipients:
                 recipients[uid].unread = unread
+                # +1 for the row `claim_send` is about to insert — this runs BEFORE it.
+                recipients[uid].badge = unread + 1
 
         return recipients
 
@@ -906,7 +963,7 @@ class PushDispatchService:
             thread_id=kind.thread_id,
             collapse_id=collapse_id,
             category=kind.thread_id,
-            badge=recipient.unread + 1,
+            badge=recipient.badge if recipient.badge is not None else recipient.unread + 1,
             # How long APNs may keep retrying if the device is unreachable. `None` for
             # the two kinds the user paid for; a few hours for anything describing a
             # price. See NotificationKind.expiration_hours.
@@ -1264,17 +1321,42 @@ class PushDispatchService:
             # REMAINING row in the batch flipped to `pending` with nothing to put them
             # back. One bad row now costs one row.
             try:
-                try:
-                    claimed_raw = str(row.get("claimed_at") or "").replace("Z", "+00:00")
-                    claimed_at = (
-                        datetime.fromisoformat(claimed_raw) if claimed_raw else now
-                    )
-                    if claimed_at.tzinfo is None:
-                        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    claimed_at = now
+                # STALENESS IS MEASURED FROM WHEN THE ROW WAS DUE, NOT WHEN IT WAS PARKED.
+                #
+                # ⚠️ This used to read `claimed_at < now - NOTIFICATION_MAX_DEFER_HOURS`,
+                # which silently turned §11.5's "DEFER, never drop" into "drop" for any
+                # quiet window longer than 12 hours. Nothing bounds that window — neither
+                # `resolve_window` (it only rejects start == end), nor `sanitize_preferences`,
+                # nor the iOS pickers — so a perfectly legal 20:00 → 10:00 (14h) meant every
+                # quiet-hours-respecting notification claimed at 20:01 was marked `failed`
+                # at flush. The user set an ordinary preference and silently stopped
+                # receiving alerts.
+                #
+                # `deliver_after` is the instant the row was SUPPOSED to fire — the end of
+                # the user's own window, computed by `quiet_hours.next_end_utc`. Measuring
+                # from there keeps a real staleness bound (a row we failed to flush for 12h
+                # AFTER it came due is genuinely stuck, and a 14-hour-late "AAPL moved 8%"
+                # is misinformation) while making every window the user can set work.
+                #
+                # Falls back to `claimed_at` when `deliver_after` is absent, which is only
+                # possible for a row written before this column was populated.
+                def _ts(value: Any) -> Optional[datetime]:
+                    try:
+                        raw = str(value or "").replace("Z", "+00:00")
+                        if not raw:
+                            return None
+                        parsed = datetime.fromisoformat(raw)
+                        return (
+                            parsed.replace(tzinfo=timezone.utc)
+                            if parsed.tzinfo is None
+                            else parsed
+                        )
+                    except ValueError:
+                        return None
 
-                if claimed_at < cutoff:
+                due_at = _ts(row.get("deliver_after")) or _ts(row.get("claimed_at")) or now
+
+                if due_at < cutoff:
                     stats["stale"] += 1
                     await asyncio.to_thread(
                         self.mark_state, uid, key, STATE_FAILED,
@@ -1312,6 +1394,10 @@ class PushDispatchService:
                     preferences=prefs,
                     devices=devices.get(uid, []),
                     unread=unread.get(uid, 0),
+                    # NO +1 here: this row was inserted unread when it was DEFERRED, so
+                    # `unread_counts_bulk` above already includes it. Adding one made every
+                    # flushed notification badge one higher than the truth.
+                    badge=unread.get(uid, 0),
                     category_sent_today=charged[budget_key],
                 )
 

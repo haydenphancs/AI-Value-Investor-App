@@ -1650,10 +1650,11 @@ already failed in production:
 | every VISIBLE toggle has a registered kind | 12 of the original 13 toggles wrote a preference nothing read, so their UI had to be hidden |
 | every REGISTERED kind has a visible toggle | push shipped 2026-08-01 with the screen hidden — users got alerts with no in-app opt-out, only iOS Settings, which kills every type at once and never re-prompts |
 
-Shipped kinds: `ticker_move`, `research_complete`, `earnings_upcoming`,
-`earnings_result`, `insider_trade`, `whale_13f` (ships **off**), `congress_trade`,
-`price_alert`, `profile_match` (ships **off** — derived from stated preferences, so it
-must be opt-in, and the sender additionally refuses any profile without `consented_at`).
+Shipped kinds — **ten**: `ticker_move`, `research_complete`, `research_failed`,
+`earnings_upcoming`, `earnings_result`, `insider_trade`, `whale_13f` (ships **off**),
+`congress_trade`, `price_alert`, `profile_match` (ships **off** — derived from stated
+preferences, so it must be opt-in, and the sender additionally refuses any profile without
+`consented_at`).
 
 ### 11.2 Decision ladder (order is load-bearing)
 
@@ -1667,7 +1668,7 @@ must be opt-in, and the sender additionally refuses any profile without `consent
   claim round-trip means DO NOT SEND: if we cannot prove an alert is unsent, we don't
   send it.
 * Caps are **per category** (`watchlist` 3, `earnings` 4, `smart_money` 3,
-  `price_alert` 10, `app` uncapped) and roll at the **user's** midnight, not ET.
+  `price_alert` 10, `match` 1, `app` uncapped) and roll at the **user's** midnight, not ET.
 
 ### 11.3 Three clocks, never interchanged
 
@@ -1703,13 +1704,32 @@ Cross-instance safety via `claim_due_notifications` + `FOR UPDATE SKIP LOCKED`. 
 parked past `NOTIFICATION_MAX_DEFER_HOURS` are failed, not sent: a 14-hour-late
 "AAPL moved 8%" is misinformation.
 
-`research_complete` and `price_alert` bypass quiet hours — both answer something the
-user explicitly asked for minutes earlier.
+`research_complete`, `research_failed` and `price_alert` bypass quiet hours — all three
+answer something the user explicitly asked for minutes earlier.
+
+⚠️ **Staleness is measured from `deliver_after`, not from `claimed_at`.** Nothing bounds how
+long a quiet window may be — `resolve_window` only rejects `start == end` — so measuring from
+when the row was *parked* against `NOTIFICATION_MAX_DEFER_HOURS` (12) silently turned "defer,
+never drop" into "drop" for any window longer than that. A perfectly ordinary 20:00 → 10:00
+binned every quiet-hours-respecting alert. The bound now applies to how late a row is against
+its own due time, which is the thing that actually makes a notification misinformation.
 
 ### 11.6 Verification without a device
 
-`notification_events` records one row per notification DECIDED, not merely delivered,
-so "did it fire, for whom, and why not" is a SQL query. Layered:
+`notification_events` records one row per notification the dispatcher tried to DELIVER —
+including ones deferred by quiet hours, or that found no registered device — so "did it fire,
+and what happened to it" is a SQL query. Layered:
+
+⚠️ **Two verdicts deliberately write NO row**: `preference_off:*` and `cap_reached:*`. That is
+required by §11.2 — a suppressed alert must not burn its dedup slot and cost the user
+tomorrow's alert too — but it means the two most likely answers to "why didn't I get it?" are
+*not* in the table. They survive only in the dispatcher's aggregate log line. Use
+`POST /admin/notifications/preview`, which reports a per-user verdict and writes nothing.
+
+⚠️ **The app-icon badge counts `sent` rows only**, while the in-app inbox lists every row
+whatever its `push_state`. A badge is a promise that something is on the phone; the inbox is
+a record of what the system decided. Counting an undelivered row on the icon is what produced
+the "there is no notification but it still shows 1" report.
 
 1. `PUSH_DRY_RUN` — full pipeline, no APNs POST. Also the global kill switch.
 2. `RUN_NOTIFICATION_JOBS_LOCALLY` — the blanket local-dev skip excluded every sender.

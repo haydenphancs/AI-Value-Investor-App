@@ -178,7 +178,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         let route = NotificationRoute(payload: info)
         await MainActor.run {
-            syncBadge(from: info)
             Analytics.shared.track(.pushOpened, [
                 "kind": .string(kindDimension(info)),
                 "route": .string(route.analyticsName),
@@ -188,14 +187,32 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // banner was tappable, the tap did nothing, and nothing was logged.
             PushNotificationManager.shared.handleTap(route: route)
         }
+
+        // RECONCILE, never adopt — this is the phantom-badge fix.
+        //
+        // `aps.badge` is the server's count AT SEND TIME, computed as `unread + 1` where the
+        // `+1` is *this* notification. Opening it is the one moment the count provably just
+        // went down, so adopting that number re-asserts a stale, too-high value at exactly the
+        // wrong instant. Measured in production: a report-ready push carried `badge: 1`, the
+        // user opened it, the row was marked read 90 seconds later, server unread went to 0 —
+        // and the icon still read 1 seven minutes later, which is what they reported.
+        //
+        // Asking the server instead costs one request on a path the user just interrupted
+        // anyway, and it is the same call every foreground already makes.
+        await NotificationInboxViewModel.shared.refreshUnreadCount()
     }
 
-    /// Adopt the badge the server computed, so the app icon agrees with the backend even
-    /// if the user never opens the notification.
+    /// Adopt the badge the server computed for a notification ARRIVING while the app is open.
     ///
     /// Server-computed on purpose: incrementing client-side drifts the moment a
     /// notification is delivered and not opened, and the badge is the one piece of
     /// notification state visible without launching the app.
+    ///
+    /// ⚠️ **Arrival only — never on the TAP.** `aps.badge` is `unread + 1` at SEND time, and
+    /// that `+1` is the notification itself. On arrival that is exactly right: the row is now
+    /// unread and the count really did go up. On a tap it is a stale over-count re-asserted at
+    /// the one moment the true count went DOWN, which is the phantom badge users reported.
+    /// `didReceive` calls `refreshUnreadCount()` instead. Do not "tidy" the two paths together.
     ///
     /// ⚠️ Writes the app-icon badge INDIRECTLY, through
     /// `AppState.notificationUnreadDidChange`. This method used to call `setBadgeCount`

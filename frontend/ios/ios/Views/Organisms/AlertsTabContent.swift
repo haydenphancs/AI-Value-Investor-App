@@ -69,6 +69,7 @@
 //
 
 import SwiftUI
+import UIKit   // didBecomeActiveNotification — see the foreground trigger below
 
 struct AlertsTabContent: View {
     @Environment(AppState.self) private var appState
@@ -202,6 +203,25 @@ struct AlertsTabContent: View {
         // covered by `.reloadOnIdentityChange`) does not double-fetch.
         .onChange(of: appState.auth.status) { _, status in
             guard status == .authenticated, isAuthBlocked else { return }
+            Task { await loadAll() }
+        }
+        // FOREGROUND, while this screen is already on top.
+        //
+        // `iosApp` fires `refreshUnreadCount()` on every `didBecomeActive`, which writes the
+        // icon badge straight from the server — but none of the three triggers above re-run
+        // here: the tab did not change, the identity did not change, and auth was never
+        // blocked. So the badge could be re-raised from the server while THIS list, the one
+        // the user is looking at, was never reloaded and never re-marked read. That is a badge
+        // the user cannot clear by doing the one thing that is supposed to clear it.
+        //
+        // `loadAll()` ends in `markAllReadOnView()`, so arriving here re-reads and re-marks in
+        // one step. It costs one request per foreground, and only while Alerts is on screen.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UIApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            guard isActiveTab else { return }
             Task { await loadAll() }
         }
     }

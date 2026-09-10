@@ -546,6 +546,64 @@ async def test_a_row_deferred_past_the_max_window_is_failed_not_sent(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_long_quiet_window_defers_rather_than_dropping():
+    """§11.5 promises "DEFER, never drop" — and a legal quiet window used to break it.
+
+    Nothing bounds how long a quiet window may be: `resolve_window` only rejects
+    `start == end`, `sanitize_preferences` keeps any scalar, and the iOS pickers are free
+    form. So 20:00 → 10:00 is 14 hours, and staleness was measured from `claimed_at` against
+    a 12-hour cap — every quiet-hours-respecting notification parked at 20:01 was marked
+    `failed` at flush. The user set an ordinary preference and silently stopped getting
+    alerts.
+
+    This row was parked 14 hours ago and came due 1 minute ago. It must SEND.
+    """
+    push = _FakePush()
+    svc = _svc(push)
+    parked = datetime.now(timezone.utc) - timedelta(hours=14)
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": KIND_TICKER_MOVE,
+        "title": "NVDA", "body": "moved 8%", "route": {"ticker": "NVDA"},
+        "claimed_at": parked.isoformat(),
+        "deliver_after": due.isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 1}
+    svc.mark_state = lambda *a, **k: None
+
+    stats = await svc.flush_deferred()
+    assert stats["stale"] == 0, "a row that came due one minute ago is not stale"
+    assert stats["sent"] == 1
+    assert push.calls[0]["title"] == "NVDA"
+
+
+@pytest.mark.asyncio
+async def test_a_row_stuck_long_past_its_due_time_still_fails():
+    """The staleness bound has to survive the fix above, or a genuinely stuck row buzzes
+    someone at breakfast about yesterday afternoon."""
+    push = _FakePush()
+    svc = _svc(push)
+    parked = datetime.now(timezone.utc) - timedelta(hours=40)
+    due = datetime.now(timezone.utc) - timedelta(hours=20)   # 20h LATE, not 20h old
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": KIND_TICKER_MOVE,
+        "title": "T", "body": "B", "route": {},
+        "claimed_at": parked.isoformat(),
+        "deliver_after": due.isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    states = []
+    svc.mark_state = lambda uid, key, state, **kw: states.append((state, kw.get("error")))
+
+    stats = await svc.flush_deferred()
+    assert stats["stale"] == 1 and stats["sent"] == 0
+    assert push.calls == []
+    assert states[0][0] == "failed" and "stale" in states[0][1]
+
+
+@pytest.mark.asyncio
 async def test_a_fresh_deferred_row_is_delivered_with_its_stored_payload():
     push = _FakePush()
     svc = _svc(push)
@@ -562,7 +620,18 @@ async def test_a_fresh_deferred_row_is_delivered_with_its_stored_payload():
     assert stats["sent"] == 1
     assert push.calls[0]["title"] == "NVDA"
     assert push.calls[0]["data"]["ticker"] == "NVDA"
-    assert push.calls[0]["badge"] == 3
+    # The badge is the unread count AS-IS — no `+1`.
+    #
+    # ⚠️ This assertion used to read `== 3`, which pinned a real bug rather than catching it.
+    # A deferred row is INSERTED unread at defer time, hours before this flush, so the count
+    # read here ALREADY includes it. Adding one made every quiet-hours delivery badge one
+    # higher than the user's true unread count, permanently — and for a batch of N rows for
+    # one user, all N sent the same inflated number.
+    #
+    # The stub's `{"u1": 2}` therefore means "2 unread, and this flushed row is one of them".
+    # The claim path is the one that adds 1, because there `resolve_recipients` runs before
+    # the INSERT — pinned separately by `test_the_claim_path_badge_includes_the_new_row`.
+    assert push.calls[0]["badge"] == 2
 
 
 @pytest.mark.asyncio

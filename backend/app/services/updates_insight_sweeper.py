@@ -459,7 +459,7 @@ class InsightSweeper:
         if cp is None or round(cp, 2) == 0.0:
             return
         try:
-            from app.services.notification_kinds import KIND_TICKER_MOVE
+            from app.services.notification_kinds import KIND_TICKER_MOVE, ticker_route
             from app.services.push_dispatch_service import (
                 get_push_dispatch_service,
                 trading_date_et,
@@ -518,10 +518,16 @@ class InsightSweeper:
                 dedup_key=f"move:{scope}:{trading_date_et()}",
                 preference_key="notify_watchlist_changes",
                 # Routes the tap straight to this ticker (AppDelegate → deep link).
-                # `asset_type` is backfilled from `watchlist_items` by
-                # `notify_watchers` — without it every BTC/ETH alert opened the
-                # equity screen via the client's `.stock` fallback.
-                data={"kind": KIND_TICKER_MOVE, "ticker": scope},
+                #
+                # Through `ticker_route`, like every other sender. This used to be a
+                # hand-written `{"kind", "ticker"}` dict with NO `route` key at all, so the
+                # tap only landed correctly because `NotificationRouter` defaults the family
+                # to "ticker" — the app's most common notification working by client
+                # accident. The old comment here also claimed `asset_type` was backfilled
+                # from `watchlist_items`; that backfill was DELETED (the column is
+                # client-writable and cross-tenant), so it was describing a rescue that no
+                # longer existed.
+                data=ticker_route(KIND_TICKER_MOVE, scope),
             )
         except Exception as e:
             logger.warning(

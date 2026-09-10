@@ -193,6 +193,16 @@ async def lifespan(app: FastAPI):
     if is_local_dev:
         logger.info("Local dev mode — skipping background tasks (Railway handles them)")
         if run_notification_jobs:
+            # ⚠️ FORCE DRY RUN ON A LAPTOP unless it was deliberately turned off.
+            #
+            # The senders read PRODUCTION Supabase (that is what `backend/.env` points at),
+            # so with `APNS_*` present in a local env this flag alone was enough to buzz
+            # real users' phones from a developer machine. The docstring above said "pair
+            # with PUSH_DRY_RUN=true" — advisory, and nothing enforced it. Opting back IN
+            # now takes an explicit `PUSH_DRY_RUN=false`, which is a thing you can only do
+            # on purpose.
+            if settings.PUSH_DRY_RUN is not False:
+                settings.PUSH_DRY_RUN = True
             logger.info(
                 "RUN_NOTIFICATION_JOBS_LOCALLY is set — starting the notification "
                 "loops locally (PUSH_DRY_RUN=%s)", settings.PUSH_DRY_RUN,
@@ -358,53 +368,78 @@ async def _warm_social_cache():
 
 
 async def _run_news_pre_warmer():
-    """Background task: pre-warm news cache for popular watchlist tickers."""
+    """Background task: pre-warm news cache, then run the retention sweeps.
+
+    ⚠️ EVERY STEP GETS ITS OWN `try`, and that is the whole point of the shape.
+    All five retention sweeps used to sit inside ONE try, AFTER two FMP-backed calls.
+    So an FMP outage — the single most likely failure in this loop — aborted the cycle
+    before any DELETE ran, and the only evidence was a log line reading "News pre-warmer
+    failed". `notification_events`, `analytics_events`, `chat_usage_budget`,
+    `guest_report_budget` and `push_send_log` then grow unbounded with no
+    retention-shaped symptom anywhere. A cache pre-warm and a retention DELETE have
+    nothing to do with each other and must not share a failure.
+    """
     # Delay initial run to let the app fully start
     await asyncio.sleep(30)
 
-    while True:
+    async def _step(label: str, run) -> None:
         try:
+            await run()
+        except Exception as e:
+            logger.error("%s failed: %s", label, e, exc_info=True)
+
+    while True:
+        async def _news():
             from app.services.news_cache_service import get_news_cache_service
 
             service = get_news_cache_service()
             await service.pre_warm_popular_tickers(top_n=20)
             await service.cleanup_expired_cache()
 
-            # Retention sweep for chat_usage_budget. Migration 096 documented this
-            # sweep and indexed for it, but it was never implemented, so the table
-            # accumulated one row per user per active day indefinitely. Piggy-backed
-            # on this 2-hourly loop rather than adding another task: it is a cheap
-            # single DELETE and does not need its own cadence.
+        await _step("News pre-warmer", _news)
+
+        # Retention sweep for chat_usage_budget. Migration 096 documented this
+        # sweep and indexed for it, but it was never implemented, so the table
+        # accumulated one row per user per active day indefinitely. Piggy-backed
+        # on this 2-hourly loop rather than adding another task: it is a cheap
+        # single DELETE and does not need its own cadence.
+        async def _chat_budget():
             from app.services.chat_budget_service import get_chat_budget_service
 
-            await asyncio.to_thread(
-                get_chat_budget_service().cleanup_old_budget_rows
-            )
+            await asyncio.to_thread(get_chat_budget_service().cleanup_old_budget_rows)
 
-            # Same for guest_report_budget (migration 106) — one row per INSTALL per
-            # month, and installs are never cleaned up otherwise, so without this the
-            # table grows without bound as installs churn.
+        await _step("chat_usage_budget sweep", _chat_budget)
+
+        # Same for guest_report_budget (migration 106) — one row per INSTALL per
+        # month, and installs are never cleaned up otherwise, so without this the
+        # table grows without bound as installs churn.
+        async def _guest_budget():
             from app.services.guest_report_budget_service import (
                 get_guest_report_budget_service,
             )
 
-            await asyncio.to_thread(
-                get_guest_report_budget_service().sweep_expired
-            )
+            await asyncio.to_thread(get_guest_report_budget_service().sweep_expired)
 
-            # And analytics_events (migration 107) — the highest-volume of the three.
-            # These are aggregate inputs, not a system of record, so they age out.
+        await _step("guest_report_budget sweep", _guest_budget)
+
+        # And analytics_events (migration 107) — the highest-volume of the three.
+        # These are aggregate inputs, not a system of record, so they age out.
+        async def _analytics():
             from app.services.analytics_service import get_analytics_service
 
             await asyncio.to_thread(get_analytics_service().sweep_expired)
 
-            # And push_send_log (migration 109) — one row per delivered push; the
-            # dedup horizon is a single trading day, so anything old is pure history.
+        await _step("analytics_events sweep", _analytics)
+
+        # And notification_events + push_send_log (migrations 119 / 109) — the inbox,
+        # dedup ledger and cap ledger. This is the one whose growth is invisible until
+        # the inbox query slows down.
+        async def _push():
             from app.services.push_dispatch_service import get_push_dispatch_service
 
             await asyncio.to_thread(get_push_dispatch_service().sweep_expired)
-        except Exception as e:
-            logger.error(f"News pre-warmer failed: {e}", exc_info=True)
+
+        await _step("notification retention sweep", _push)
 
         # Re-run every 2 hours
         await asyncio.sleep(7200)
@@ -1592,9 +1627,17 @@ async def health():
     would otherwise make the platform kill a perfectly healthy container.
     """
     db_ok = await check_supabase_health()
-    return {
+    body = {
         "status": "healthy" if db_ok else "degraded",
     }
+    # PUSH_DRY_RUN is documented as the global notification kill switch. Its only other
+    # signal is a log line inside the local-dev branch, which never fires in production —
+    # so an operator flipping it during an incident and forgetting leaves every push
+    # silently undelivered, with `notification_events.push_state='dry_run'` as the sole
+    # evidence and nobody looking. Report it where a human already looks.
+    if settings.PUSH_DRY_RUN:
+        body["push_dry_run"] = True
+    return body
 
 
 @app.get("/health/live", tags=["Root"])

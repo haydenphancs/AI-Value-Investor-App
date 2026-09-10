@@ -856,6 +856,14 @@ def test_a_report_notification_opens_the_report():
     assert 'item.kind == "research_complete"' in dest, (
         "The detail screen no longer offers the report for a research_complete notification."
     )
+    # BOTH paths must derive "is this a report?" the same way. The push tap reads
+    # `route["route"]` (`NotificationRoute.init(payload:)`); this screen used to read only
+    # `kind`, so the same notification could route one way from a banner and another from the
+    # inbox — how a route ends up working "by accident" on one surface.
+    assert 'route["route"] == "report"' in dest, (
+        "The in-app path infers report-ness from `kind` alone again and ignores the route the "
+        "backend declared — the push path reads `route[\"route\"]`, so the two disagree."
+    )
 
 
 def test_the_whale_id_rides_along_only_when_there_is_one():

@@ -428,3 +428,79 @@ def test_a_session_ending_clears_the_app_icon_badge_too():
         "the app-icon badge survives sign-out — the tab clears, the icon keeps the "
         "previous account's number"
     )
+
+
+# ── The phantom badge ────────────────────────────────────────────────────────
+#
+# TestFlight, build 7: *"There is no notification but it's still shows '1' on the app?"*
+#
+# Confirmed against production rather than inferred. That account's `research_complete`
+# push went out at 19:37:45 carrying `aps.badge = unread + 1 = 1` — correct at that
+# instant. The row was marked READ at 20:11:42, taking server-side unread to 0. The report
+# was filed at 20:18:09 with the icon still reading 1, and every one of their then-existing
+# rows carried an earlier `read_at`. The read landed; the badge was never reconciled.
+
+_ALERTS_TAB = _IOS / "Views" / "Organisms" / "AlertsTabContent.swift"
+
+
+def test_a_push_tap_does_not_adopt_the_send_time_badge():
+    """`aps.badge` is `unread + 1` AT SEND TIME, and that `+1` is the notification being
+    opened. Adopting it on the tap re-asserts a stale, too-high number at the one moment
+    the true count provably went DOWN — which is the reported bug, exactly."""
+    body = _balanced(_read(_APP_DELEGATE), "didReceive response: UNNotificationResponse\n    ) async {")
+    assert "syncBadge" not in body, (
+        "the tap adopts the payload badge again; it must reconcile from the server"
+    )
+    assert "refreshUnreadCount()" in body, (
+        "the tap no longer reconciles the badge at all"
+    )
+
+
+def test_the_foreground_arrival_path_still_adopts_it():
+    """The other direction. On ARRIVAL the row really is newly unread, so the payload
+    number is right and dropping it would leave the icon stale until the next foreground."""
+    body = _balanced(_read(_APP_DELEGATE), "willPresent notification: UNNotification\n    ) async -> UNNotificationPresentationOptions {")
+    assert "syncBadge" in body
+
+
+def test_reading_the_list_reconciles_even_with_nothing_to_mark():
+    """`markAllReadOnView` used to `guard unreadCount > 0 else { return }`, which made the
+    screen whose whole job is to clear the badge a no-op in the one case that needs it: the
+    badge stale-HIGH while this view model's in-memory count is already 0. Reachable from a
+    push tap, from `reset()`, and from any failed load."""
+    body = _balanced(_read(_INBOX_VM), "func markAllReadOnView() async {")
+    guard = body[: body.index("unreadOnOpen")] if "unreadOnOpen" in body else body
+    assert "notificationUnreadDidChange" in guard, (
+        "the zero-unread path returns without publishing, so a stale-high badge is never "
+        "corrected by the screen that exists to correct it"
+    )
+
+
+def test_the_alerts_screen_reloads_on_foreground():
+    """`iosApp` refreshes the badge from the server on every `didBecomeActive`, but none of
+    this screen's other triggers re-run then — the tab did not change, the identity did not
+    change, auth was never blocked. So the badge could be re-raised while THIS list, the one
+    being looked at, was never reloaded and never re-marked read."""
+    src = _read(_ALERTS_TAB)
+    assert "didBecomeActiveNotification" in src, (
+        "no foreground trigger on Alerts — the badge and the list can diverge while the "
+        "user is staring at them"
+    )
+
+
+def test_reading_everything_clears_notification_center():
+    """The mirror of the phantom badge: the user clears the app and still finds a stack of
+    banners for alerts they have already read."""
+    body = _balanced(_read(_INBOX_VM), "func markAllRead() async {")
+    assert "removeAllDeliveredNotifications" in body
+
+
+def test_the_icon_badge_still_has_exactly_one_writer():
+    """Anti-regression for the whole design: every count must leave through
+    `AppState.notificationUnreadDidChange`. A second `setBadgeCount` anywhere reintroduces
+    the two-sources-of-truth bug this file already documents."""
+    hits = []
+    for path in _IOS.rglob("*.swift"):
+        if "setBadgeCount" in _read(path):
+            hits.append(path.name)
+    assert hits == ["AppState.swift"], f"setBadgeCount written outside AppState: {hits}"

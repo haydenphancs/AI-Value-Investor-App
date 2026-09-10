@@ -55,12 +55,29 @@ _OLD_DESC_BODY = (
     "Max raise it, and credit packs are there if you want more. Credits are spent only inside "
     "the app, are not a currency, and cannot be transferred or cashed out."
 )
-_NEW_DESC_HEADING = "FREE TO START"
+# ⚠️ These two MUST stay byte-identical to the "HOW IT'S PAID FOR" block in
+# `documents/legal/app-store-listing.md`. That document is the source of truth for the
+# listing: it carries the reasoning ("the word doing the work is *free*, because the
+# objection being pre-empted is cost, not friction") and a MEASURED 3,894 / 4000 character
+# count with only ~106 characters of headroom. This script is just the delivery mechanism.
+#
+# They diverged once, silently: the doc was rewritten on 2026-09-07 and this script was
+# drafted separately, so running it would have published a heading and a paragraph that
+# exist nowhere in the doc. Realigned to the doc 2026-09-10. If you change one, change both —
+# `tests/test_asc_description_parity.py` fails the build otherwise.
+#
+# The doc hard-wraps at ~95 columns for readability; the live ASC description does not, so
+# the body is unwrapped here. Paragraph breaks are real and must survive.
+_NEW_DESC_HEADING = "HOW IT'S PAID FOR"
 _NEW_DESC_BODY = (
-    "Caydex needs a free account — it is how your watchlists, portfolios and reports stay "
-    "yours across devices. Every account includes a monthly credit allowance for AI reports "
-    "and chat. Pro and Max raise it, and credit packs are there if you want more. Credits are "
-    "spent only inside the app, are not a currency, and cannot be transferred or cashed out."
+    "Caydex needs a free account. Signing up takes a moment and includes a monthly "
+    "allowance of credits for AI research."
+    "\n\n"
+    "AI-generated research reports and report chat cost credits, because each run has a "
+    "real per-use cost. A free account includes a monthly credit allowance. Pro and Max "
+    "subscriptions raise that allowance, and credit packs are available if you want more "
+    "without subscribing. Credits are only spent inside the app on AI generation; they are "
+    "not a currency, cannot be transferred, and cannot be cashed out."
 )
 
 _OLD_NOTES_PARA_START = "Demo account — please use this to review."

@@ -8,6 +8,7 @@
 
 import Combine
 import Foundation
+import UserNotifications   // removeAllDeliveredNotifications — see markAllRead
 import os
 
 @MainActor
@@ -297,6 +298,12 @@ final class NotificationInboxViewModel: ObservableObject {
             let result = try await repository.markAllRead()
             unreadCount = result.unreadCount
             AppState.notificationUnreadDidChange(unreadCount)
+            // Everything is read, so nothing should still be sitting in Notification Center.
+            // Leaving them there is the mirror of the phantom badge: the user clears the app
+            // and still finds a stack of banners describing alerts they have already seen.
+            if unreadCount == 0 {
+                UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+            }
         } catch {
             AppActions.shared.reportMutationFailure(
                 AppError.from(error), action: "mark your notifications read"
@@ -343,10 +350,20 @@ final class NotificationInboxViewModel: ObservableObject {
     /// Mark everything read because the user is LOOKING at the list.
     ///
     /// Separate from `markAllRead()` — that one is the explicit toolbar action and carries no
-    /// snapshot. Safe to call on every appearance: `markAllRead` no-ops at `unreadCount == 0`,
-    /// and the snapshot only ever grows within a viewing session.
+    /// snapshot. Safe to call on every appearance; the snapshot only ever grows within a
+    /// viewing session.
+    ///
+    /// ⚠️ **Reconciles the icon badge even when there is nothing to mark.** It used to
+    /// `guard unreadCount > 0` and return, which made the screen whose entire job is to clear
+    /// the badge a no-op in precisely the case that needs it: the badge stale-HIGH while this
+    /// view model's in-memory count is already 0. That is reachable from a push tap, from
+    /// `reset()`, and from any load that failed — and it is what the phantom "1" report was.
+    /// Publishing a 0 we already believe costs one local write and is idempotent.
     func markAllReadOnView() async {
-        guard unreadCount > 0 else { return }
+        guard unreadCount > 0 else {
+            AppState.notificationUnreadDidChange(unreadCount)
+            return
+        }
         unreadOnOpen.formUnion(items.filter { !isRead($0) }.map(\.id))
         await markAllRead()
     }

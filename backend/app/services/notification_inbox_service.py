@@ -136,7 +136,25 @@ class NotificationInboxService:
                 .limit(size + 1)          # +1 probes for a next page without a count
             )
             if before:
-                query = query.lt("claimed_at", before)
+                # COMPOSITE keyset, matching the composite ORDER BY above.
+                #
+                # ⚠️ This used to be `.lt("claimed_at", before)` alone. The sort is
+                # `(claimed_at DESC, id DESC)` precisely because `claimed_at` is NOT unique —
+                # a fan-out writes many rows in the same millisecond — but the cursor only
+                # carried half of it. Every row sharing the boundary timestamp with the last
+                # row of a page was therefore skipped on the next page: permanently
+                # unreachable through the list, while still counted as unread. A page
+                # boundary landing inside a fan-out is the common case, not a corner one.
+                stamp, _, last_id = str(before).partition("|")
+                if last_id:
+                    query = query.or_(
+                        f"claimed_at.lt.{stamp},"
+                        f"and(claimed_at.eq.{stamp},id.lt.{last_id})"
+                    )
+                else:
+                    # A cursor minted by an older build, mid-session. Degrade to the old
+                    # behaviour rather than 500 on it.
+                    query = query.lt("claimed_at", stamp)
             rows = query.execute().data or []
         except Exception as e:
             logger.error(
@@ -154,7 +172,13 @@ class NotificationInboxService:
             unread_count=self.unread_count(user_id),
             # Derived from the raw row, not from `items` — a skipped malformed row would
             # otherwise stall the cursor and make the client re-request forever.
-            next_cursor=(_iso(rows[-1].get("claimed_at")) if has_more and rows else None),
+            # `claimed_at|id` — both halves of the sort key. Opaque to the client, which
+            # only ever echoes it back as `before`, so the format is ours to choose.
+            next_cursor=(
+                f"{_iso(rows[-1].get('claimed_at'))}|{rows[-1].get('id')}"
+                if has_more and rows and rows[-1].get("id")
+                else None
+            ),
         )
 
     def unread_count(self, user_id: str) -> int:
@@ -169,12 +193,24 @@ class NotificationInboxService:
                 .select("id")
                 .eq("user_id", user_id)
                 .is_("read_at", "null")
+                # DELIVERED only — this number goes on the app icon.
+                #
+                # The row is written BEFORE delivery is attempted, so this table also holds
+                # `deferred` / `no_device` / `dry_run` / `failed` / `pending` rows the user
+                # was never shown. Counting them badges the icon for something that exists
+                # nowhere on the phone — "there is no notification but it still shows 1".
+                # The LIST deliberately still returns every row: the inbox is a record of
+                # what the system decided, the badge is a promise that something is there.
+                .in_("push_state", sorted(_DELIVERED))
                 .limit(UNREAD_PROBE_CAP)
                 .execute()
                 .data
                 or []
             )
-            return len(rows)
+            # A row with no id cannot be rendered (`_to_response` skips it) and cannot be
+            # marked read (both selectors key on id or dedup_key), so counting it creates a
+            # badge the user has no way to clear.
+            return sum(1 for r in rows if r.get("id"))
         except Exception as e:
             logger.warning(
                 "notification inbox: unread count failed for user=%s (%s: %s)",

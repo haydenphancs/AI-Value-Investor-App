@@ -148,6 +148,47 @@ def test_no_sender_hand_writes_a_ticker_route_any_more():
     )
 
 
+def test_a_sender_cannot_pass_a_route_dict_that_omits_route():
+    """The assertion above is only half the guard, and it passed VACUOUSLY for months.
+
+    It looks for a hand-written `"route": "ticker"`. But `updates_insight_sweeper` — the
+    sender behind `ticker_move`, the app's most common notification — passed
+    `data={"kind": ..., "ticker": ...}`, which OMITS the key entirely. No literal to match,
+    so no offender, while the tap landed correctly only because `NotificationRouter` happens
+    to default the family to "ticker". A guard that catches the wrong spelling but not the
+    missing key is not guarding the property it claims.
+
+    So: any `data=`/`route=` dict literal handed to a notify call must either come from
+    `ticker_route(...)` or carry a `route` key itself.
+    """
+    offenders = []
+    for path in list((_SENDERS / "notification_senders").glob("*.py")) + [
+        _SENDERS / "updates_insight_sweeper.py",
+        _SENDERS / "price_alert_service.py",
+        _SENDERS / "research_service.py",
+        _SENDERS / "research_reconciliation_service.py",
+    ]:
+        if not path.exists():
+            continue
+        code = "\n".join(
+            "" if line.strip().startswith("#") else line
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+        for match in re.finditer(r"\b(?:data|route)\s*=\s*\{([^{}]*)\}", code, re.S):
+            body = match.group(1)
+            # `{**ticker_route(...), ...}` is the CORRECT form and is what most senders
+            # use — the key comes from the builder, so it is not spelled out here.
+            if "ticker_route(" in body:
+                continue
+            if '"route"' not in body and "'route'" not in body:
+                offenders.append(f"{path.name}: {{{body.strip()[:60]}...}}")
+
+    assert not offenders, (
+        "notify payload dict with no `route` key — the tap then relies on the iOS "
+        f"client's default family instead of saying where it goes: {offenders}"
+    )
+
+
 # ── the asset type when the sender does not know ─────────────────────────────
 #
 # `asset_type` defaulted to the literal "stock" and FIVE of the six callers took that

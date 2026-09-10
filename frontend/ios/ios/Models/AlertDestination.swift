@@ -60,7 +60,20 @@ extension AlertDestination {
 
         // The report leads for `research_complete`, because the body literally says "tap to read
         // the full report" — and until this change it opened the ticker screen instead.
-        if item.kind == "research_complete", !symbol.isEmpty {
+        //
+        // ⚠️ HONOUR THE ROUTE THE BACKEND DECLARED, not just the kind.
+        //
+        // `route["route"]` is the family the dispatcher wrote, and it is what the PUSH path
+        // reads (`NotificationRoute.init(payload:)`). This screen read only `kind`, so the two
+        // taps on the same notification derived "is this a report?" by different rules — the
+        // shape that lets a route work on one path and silently open the wrong screen on the
+        // other. A new report-family kind would have routed correctly from a banner and landed
+        // on the ticker from the inbox, which is exactly the bug this block was added to fix.
+        //
+        // The kind check stays as a fallback: rows written before the dispatcher emitted
+        // `route` are still in the 30-day retention window.
+        let isReport = route["route"] == "report" || item.kind == "research_complete"
+        if isReport, !symbol.isEmpty {
             out.append(AlertDestination(
                 label: "Read the full report",
                 systemImage: "doc.text",

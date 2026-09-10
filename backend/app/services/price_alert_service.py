@@ -280,6 +280,9 @@ class PriceAlertService:
                 self.supabase.table(TABLE)
                 .select("ticker")
                 .eq("is_active", True)
+                # Deterministic truncation — see the note in push_dispatch_service.watchers_of.
+                # Unordered, the same users' rules fall off the end of every cycle forever.
+                .order("id")
                 .limit(MAX_RULES)
                 .execute()
                 .data
@@ -309,6 +312,7 @@ class PriceAlertService:
                         "armed, last_price, trigger_count")
                 .eq("is_active", True)
                 .in_("ticker", tickers)
+                .order("id")
                 .limit(MAX_RULES)
                 .execute()
                 .data

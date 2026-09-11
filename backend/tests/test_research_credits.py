@@ -185,6 +185,51 @@ def test_refund_ledgered_never_raises_on_rpc_error(service):
 # flag. The only signal was a Postgres RAISE WARNING that PostgREST never surfaces.
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "ok",                                  # a string where the envelope should be
+        ["refunded"],                          # a list
+        {"refunded": 20, "spendable": 60},     # the envelope minus its verdict
+        {"outcome": None},                     # the key present, the value absent
+        {"outcome": "brand_new_outcome", "refunded": 20},
+    ],
+)
+def test_an_unrecognised_rpc_body_is_a_leak_not_a_success(service, caplog, body):
+    """🔴 Until 2026-09-10 every one of these fell through to the final `else` and logged
+    "Refunded None credits" at INFO — a success message for a refund nothing proved happened,
+    on a path where the one-shot `is_refunded` CAS is already spent. The three report call
+    sites then asked `refund_did_not_happen`, whose deny-list said "it happened", so the user
+    silently lost the credits and no alert fired. Both halves are closed: this pins the log."""
+    _stub_rpc(service, body)
+    with caplog.at_level(logging.INFO):
+        out = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "an unrecognised refund outcome logged no ERROR — it cannot reach Sentry"
+    msg = errors[0].getMessage()
+    assert "REFUND LEAK" in msg, f"missing the greppable marker: {msg!r}"
+    assert "unrecognised" in msg and "AAPL" in msg and "20" in msg, msg
+    # And NOT the success line — the two must be mutually exclusive.
+    assert not any("Refunded" in r.getMessage() and r.levelno == logging.INFO for r in caplog.records), (
+        "the success INFO line still fires for an unproven refund"
+    )
+    # The return value is what the call sites hand to the predicate; the two must agree.
+    from app.services.credit_service import refund_did_not_happen
+    assert refund_did_not_happen(out) is True, (
+        f"refund_ledgered returned {out!r} and the predicate called it settled"
+    )
+
+
+def test_a_refund_that_worked_still_logs_the_success_line_not_a_leak(service, caplog):
+    """Anti-vacuity for the test above: the new arm must not swallow the real success path."""
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 20, "spendable": 60})
+    with caplog.at_level(logging.INFO):
+        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("Refunded 20 credits" in r.getMessage() for r in caplog.records)
+
+
 def test_a_refund_that_moved_nothing_is_reported_as_an_error(service, caplog):
     """THE regression guard. `no_matching_debit` means the user is owed credits and the
     one-shot guard is spent — it must reach Sentry, which means logger.ERROR."""

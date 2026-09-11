@@ -45,7 +45,11 @@ import app.services.research_reconciliation_service as recon
 from app.api.v1.endpoints import research as research_endpoint
 from app.config import settings
 from app.services import credit_service
-from app.services.credit_service import REFUND_FAILURE_OUTCOMES, refund_did_not_happen
+from app.services.credit_service import (
+    REFUND_FAILURE_OUTCOMES,
+    REFUND_SETTLED_OUTCOMES,
+    refund_did_not_happen,
+)
 
 # The full outcome vocabulary of `refund_credits` as of migration 142, split the way the
 # predicate must split it. Spelled out as LITERALS on purpose: parametrising over
@@ -257,6 +261,20 @@ def test_the_owed_set_is_exactly_these_three():
     assert set(REFUND_FAILURE_OUTCOMES) == set(_OWED_OUTCOMES)
 
 
+def test_the_settled_set_is_exactly_these_four():
+    """The ALLOW-list the predicate actually reads (2026-09-10). Parametrised over literals for
+    the same reason as the owed set: widening it to a new name would let that name fall open
+    again, and this is the line that stops it."""
+    assert set(REFUND_SETTLED_OUTCOMES) == set(_BENIGN_OUTCOMES)
+
+
+def test_owed_and_settled_partition_the_vocabulary():
+    """No outcome may be both, and none may be neither — the second half is what the deny-list
+    could not promise."""
+    assert not set(REFUND_SETTLED_OUTCOMES) & set(REFUND_FAILURE_OUTCOMES)
+    assert set(REFUND_SETTLED_OUTCOMES) | set(REFUND_FAILURE_OUTCOMES) == set(_RPC_OUTCOMES)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -293,9 +311,8 @@ def test_the_predicate_never_raises_on_a_shape_it_was_not_promised(garbage):
     """Both endpoint call sites evaluate this INSIDE an error path that has already burned the
     CAS. A predicate that raises there (an `.get` on a list, a `KeyError` on a string) would
     escape past the REFUND LEAK line entirely — the alert would not fire AND the request
-    would 500. Whatever the answer, it must be a bool. (The direction for these shapes is the
-    documented "anything else -> pre-142 integer" clause; see the xfail below for the one
-    shape where that clause is known to fall open.)"""
+    would 500. Whatever the answer, it must be a bool. (Non-dict, non-None shapes take the
+    documented "pre-142 integer" clause; dict shapes are pinned individually below.)"""
     assert refund_did_not_happen(garbage) in (True, False)
 
 
@@ -318,9 +335,10 @@ def _rpc_outcome_vocabulary() -> set[str]:
 
 
 def test_the_rpc_vocabulary_is_fully_classified():
-    """The predicate is a DENY-list, so an outcome the RPC learns to emit tomorrow falls OPEN
-    — logged as "Refunded" with the CAS spent. This is what makes that closed at build time:
-    a new name in the SQL must be filed as owed or benign before it can ship."""
+    """The predicate is an ALLOW-list now, so an outcome the RPC learns to emit tomorrow falls
+    CLOSED (alerts) rather than open — but it should still be filed deliberately, not left to
+    page on every occurrence. This makes that a build-time decision: a new name in the SQL must
+    be classified as owed or settled before it can ship."""
     vocab = _rpc_outcome_vocabulary()
     assert {"refunded", "no_matching_debit", "capped_to_zero"} <= vocab, (
         "the parser is not reading the function body — the guard below would pass vacuously"
@@ -334,17 +352,24 @@ def test_the_rpc_vocabulary_is_fully_classified():
     assert set(REFUND_FAILURE_OUTCOMES) <= vocab, "an owed outcome the RPC can never emit is dead code"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN GAP, recorded not pinned: refund_did_not_happen is a deny-list, so a dict with "
-        "no `outcome` key — which refund_ledgered returns when the RPC answers with a non-dict, "
-        "non-integer body — reads as 'it happened' and never alerts. Inverting the predicate to "
-        "an allow-list of the benign outcomes closes it; this marker then fails so it gets removed."
-    ),
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},                                        # a non-dict RPC body, after `payload = {}`
+        {"outcome": None},                         # the key present, the value absent
+        {"refunded": 0, "spendable": 140},         # the envelope minus its verdict
+        {"outcome": "brand_new_outcome"},          # a name the RPC learns to emit tomorrow
+        {"outcome": ""},
+        {"outcome": "REFUNDED"},                   # case matters — the RPC emits lowercase
+    ],
 )
-def test_a_payload_with_no_outcome_falls_open_today():
-    assert refund_did_not_happen({}) is True
+def test_an_unproven_envelope_is_a_leak(payload):
+    """🔴 Was a strict xfail. The predicate was a DENY-list, so every one of these read as
+    "it happened": `refund_ledgered` returns exactly `{}` when the RPC answers with a non-dict
+    body, and by then the one-shot CAS is burned — the user silently lost 20 credits and the
+    REFUND LEAK alert never fired. Fail toward alerting: a false page costs a human one look,
+    a missed one is permanent."""
+    assert refund_did_not_happen(payload) is True
 
 
 # ── 3. `_outcome_name` — what the REFUND LEAK line says happened ─────────────────────────

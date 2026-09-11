@@ -40,11 +40,27 @@ class CreditServiceUnavailable(Exception):
 # Outcomes of `refund_credits` (migration 142) that mean the user is STILL OWED credits.
 # `refunded` with a zero amount is NOT here: that is a success whose caps resolved to zero,
 # the same way `revoke_purchased_credits` reports `reclaimed: 0`.
+#
+# Since 2026-09-10 this tuple is DOCUMENTATION and log classification only. The predicate
+# below no longer reads it — see REFUND_SETTLED_OUTCOMES for why.
 REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero")
+
+# Outcomes after which the user is NOT owed anything: the refund moved (whatever the caps let
+# it move), it had already moved, or there was never a charge to reverse. THIS is the set the
+# predicate consults, as an ALLOW-list.
+#
+# ⚠️ It used to be a DENY-list over REFUND_FAILURE_OUTCOMES, and that fell OPEN on every shape
+# it had not been told about: a dict with no `outcome` key, `outcome: None`, or a name the RPC
+# learns to emit tomorrow all read as "it happened". `refund_ledgered` returns exactly that
+# empty dict when the RPC answers with a non-dict body, and by the time any of the three
+# report call sites ask, the one-shot `is_refunded` CAS is already burned — so a malformed
+# reply meant the user silently lost 20 credits AND the REFUND LEAK alert never fired. A
+# false alert costs a human one look; a missed one is permanent. Fail toward alerting.
+REFUND_SETTLED_OUTCOMES = ("refunded", "already_refunded", "guest", "invalid")
 
 
 def refund_did_not_happen(outcome) -> bool:
-    """True when a `refund_ledgered` result means the credits were not returned.
+    """True when a `refund_ledgered` result does NOT prove the credits were returned.
 
     One predicate for all three report call sites, because each of them burns the one-shot
     `research_reports.is_refunded` CAS BEFORE refunding — so "did it actually happen" is the
@@ -52,16 +68,19 @@ def refund_did_not_happen(outcome) -> bool:
     way everywhere.
 
     Handles three shapes on purpose:
-      * `None`   -> transport fault (the round trip failed).
-      * `dict`   -> the migration-142 outcome envelope.
-      * anything else -> the PRE-142 bare integer. Treated as "it happened", which is exactly
-        the assumption the old contract forced; this keeps the deploy window (code first, then
-        migration) from reporting false leaks on every refund.
+      * `None`   -> transport fault (the round trip failed). Owed.
+      * `dict`   -> the migration-142 outcome envelope. Settled ONLY when `outcome` is one of
+        REFUND_SETTLED_OUTCOMES; a missing key, `None`, or an unrecognised name is owed.
+      * anything else -> the PRE-142 bare integer, treated as "it happened" because that is
+        the assumption the old contract forced. Unreachable through `refund_ledgered`, which
+        normalises that integer into a `refunded` envelope before returning; kept so a caller
+        handing the raw RPC answer straight through gets the documented legacy reading rather
+        than a false leak.
     """
     if outcome is None:
         return True
     if isinstance(outcome, dict):
-        return outcome.get("outcome") in REFUND_FAILURE_OUTCOMES
+        return outcome.get("outcome") not in REFUND_SETTLED_OUTCOMES
     return False
 
 
@@ -542,6 +561,20 @@ class CreditService:
             logger.info(
                 "refund_credits no-op (outcome=%s) for user=%s amount=%s reason=%s",
                 outcome, user_id, amount, reason,
+            )
+        elif outcome != "refunded":
+            # Every outcome the RPC is known to emit is handled above, so reaching here means
+            # the body was not the 142 envelope at all — a non-dict `.data` became `{}` on the
+            # `payload =` line, or the RPC now emits a name this code has never seen. Either
+            # way nothing is PROVEN to have moved, and this used to fall through to the
+            # "Refunded %s credits" INFO line below with `refunded=None` — a success message
+            # for a refund that may not exist, on a path where the CAS is already spent.
+            # Same marker as the other leaks so the existing Sentry rule pages on it.
+            logger.error(
+                "REFUND LEAK: refund_credits answered with an unrecognised outcome=%r "
+                "(payload keys=%s) for user=%s ref_id=%s amount=%s reason=%s — cannot confirm "
+                "the refund moved; the one-shot guard is already burned; manual check needed",
+                outcome, sorted(payload.keys()), user_id, ref_id, amount, reason,
             )
         elif isinstance(refunded, int) and refunded < amount:
             # The LEAST() caps can move less than requested. Previously this logged the full

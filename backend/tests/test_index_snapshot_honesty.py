@@ -80,10 +80,51 @@ def test_pe_known_defaults_true_so_an_older_payload_is_unchanged():
 
 @pytest.mark.parametrize("pe,expected", [(0, False), (0.0, False), (None, False),
                                          (22.0, True), (0.4, True)])
-def test_pe_known_tracks_whether_the_value_was_computed(pe, expected):
-    """The production expression, pinned. Note 0.4 is `True`: a small P/E is still a
-    measurement, and only 0/None mean "not computed"."""
-    assert bool(pe and pe > 0) is expected
+@pytest.mark.asyncio
+async def test_pe_known_tracks_whether_the_value_was_computed(pe, expected, monkeypatch):
+    """Pinned at the BUILDER, not on a literal the test evaluates itself — the earlier
+    form (`assert bool(pe and pe > 0) is expected`) never touched production code and
+    stayed green with `pe_known=True` hard-coded. Note 0.4 is `True`: a small P/E is
+    still a measurement, and only 0/None mean "not computed"."""
+    from app.services.index_service import IndexService
+
+    svc = IndexService.__new__(IndexService)
+
+    async def _no_ai(*a, **k):
+        return "valuation story", "sector story", "macro story", []
+
+    monkeypatch.setattr(svc, "_generate_ai_stories", _no_ai, raising=False)
+    out = await svc._build_snapshots(
+        symbol="^GSPC", pe=pe, forward_pe=0.0, earnings_yield=0.0,
+        historical_avg_pe=21.0, historical_period="10-yr", sector_raw=[],
+        index_name="SPDR S&P 500 ETF Trust",
+    )
+    assert out.valuation.pe_known is expected
+
+
+def test_an_unreadable_sector_row_is_dropped_not_zeroed(monkeypatch):
+    """A sector row whose change is None / a non-numeric string must not become a
+    0.00% entry the story template narrates as flat."""
+    import asyncio
+    from app.services.index_service import IndexService
+
+    svc = IndexService.__new__(IndexService)
+
+    async def _no_ai(*a, **k):
+        return "valuation story", "sector story", "macro story", []
+
+    monkeypatch.setattr(svc, "_generate_ai_stories", _no_ai, raising=False)
+    out = asyncio.run(svc._build_snapshots(
+        symbol="^GSPC", pe=20.0, forward_pe=0.0, earnings_yield=0.0,
+        historical_avg_pe=21.0, historical_period="10-yr",
+        sector_raw=[{"sector": "Energy", "changesPercentage": None},
+                    {"sector": "Utilities", "changesPercentage": "n/a"},
+                    {"sector": "Tech", "changesPercentage": "1.5%"},
+                    {"sector": "Health", "changesPercentage": -0.4}],
+        index_name="SPDR S&P 500 ETF Trust",
+    ))
+    got = {s.sector: s.change_percent for s in out.sector_performance.sectors}
+    assert got == {"Tech": 1.5, "Health": -0.4}
 
 
 # ── 3. the story must not characterise an unknown P/E ────────────────────────

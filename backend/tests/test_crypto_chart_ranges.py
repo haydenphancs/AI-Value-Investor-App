@@ -95,4 +95,4 @@ def test_every_offered_crypto_range_has_a_real_window(code):
     """Anti-vacuity: each pill the crypto screen shows maps to a genuine window."""
     assert daily_range_days(code) > 0
     assert compute_date_range(code)[0] is not None
-    assert resolve_interval(code, None) in ALLOWED_INTERVALS.get(code, {"daily"}) or True
+    assert resolve_interval(code, None) in ALLOWED_INTERVALS.get(code, {"daily"})

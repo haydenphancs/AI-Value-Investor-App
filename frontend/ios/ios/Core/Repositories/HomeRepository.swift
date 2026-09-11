@@ -117,8 +117,17 @@ final class HomeRepository: HomeRepositoryProtocol {
         )
     }
 
+    /// A wire Double rendered as a whole count. `Int(Double)` TRAPS on NaN/±inf and on
+    /// anything past 2^53 — a fatalError, not a throw — so a decoded value is bounded
+    /// before conversion. Counts are small; anything else is clamped, never crashed on.
+    static func wholeCount(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        let bounded = min(max(value, 0), 1_000_000_000)
+        return Int(bounded.rounded())
+    }
+
     private static func mapPulse(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
-        let type = MarketTickerType(rawValue: dto.type) ?? .stock
+        let type = MarketTickerType.resolve(dto.type, symbol: dto.symbol)
         // Collapse signed zero before BOTH the colour test and the format: `-0.0`
         // satisfies `>= 0` (so the tile paints green) while "%+.2f" preserves the
         // sign bit and prints "-0.00%". The backend now normalises too; this keeps
@@ -352,8 +361,8 @@ final class HomeRepository: HomeRepositoryProtocol {
                 subtitle: "Most-bought on Capitol Hill this month",
                 iconSystemName: "building.columns.fill",
                 accent: AppColors.primaryBlue,
-                headline: { "\(Int($0.value)) members buying" },
-                leaderStat: { "\(Int($0.value)) buys" }
+                headline: { "\(Self.wholeCount($0.value)) members buying" },
+                leaderStat: { "\(Self.wholeCount($0.value)) buys" }
             ))
         }
 
@@ -368,8 +377,8 @@ final class HomeRepository: HomeRepositoryProtocol {
                 // Honest fund COUNT (not a $ figure): 13F trade dollars are
                 // implied-price estimates, so a precise "+$2.1B" would overstate
                 // precision. See the plan's whale-source decision.
-                headline: { "\(Int($0.value)) funds adding" },
-                leaderStat: { "\(Int($0.value)) funds" }
+                headline: { "\(Self.wholeCount($0.value)) funds adding" },
+                leaderStat: { "\(Self.wholeCount($0.value)) funds" }
             ))
         }
 

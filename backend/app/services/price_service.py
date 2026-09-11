@@ -58,6 +58,7 @@ from app.integrations.fmp import FMPRateLimitException, get_fmp_client
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import detect_asset_class, uses_coingecko_price
+from app.utils.market_hours import previous_trading_day, session_trading_date
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,18 @@ def _finite(value: Any) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
+def _positive_price(value: Any) -> Optional[float]:
+    """A finite price strictly above zero, else None.
+
+    FMP reports `price: 0` for a halted or delisted listing, and `_finite(0)` is a real
+    0.0 — so `_from_screener` computed a -100.0% "day change" against the stored close,
+    and `_from_profile` shipped `$0.00 +0.00%`, while `market_movers_service` dropped the
+    same rows. An unknown price is None (invariant 1); consumers already skip None.
+    """
+    f = _finite(value)
+    return f if f is not None and f > 0 else None
+
+
 def parse_range_band(raw: Any) -> tuple[Optional[float], Optional[float]]:
     """Split FMP /stable's ``"low-high"`` 52-week band into ``(low, high)`` floats.
 
@@ -251,8 +264,12 @@ class PriceService:
         symbol = (row.get("symbol") or "").upper()
         if not symbol:
             return None
-        price = _finite(row.get("price"))
-        change = _finite(row.get("change"))
+        price = _positive_price(row.get("price"))
+        # A change without a price describes nothing: FMP reports `price: 0, change: 0`
+        # for a halted/delisted listing, and shipping `change 0.0` beside `price None`
+        # rendered "$0.00 +0.00%" on the profile path. Both stay None together.
+        change = _finite(row.get("change")) if price is not None else None
+        change_pct = _finite(row.get("changePercentage")) if price is not None else None
         # profile has no previousClose; it is exactly price - change when both are real.
         prev = price - change if (price is not None and change is not None) else None
         # `/stable/profile` carries the 52-week band as a "low-high" string, which is the only
@@ -265,7 +282,7 @@ class PriceService:
             price=price,
             previous_close=prev,
             change=change,
-            change_pct=_finite(row.get("changePercentage")),
+            change_pct=change_pct,
             volume=_finite(row.get("volume")),
             avg_volume=_finite(row.get("averageVolume")),
             market_cap=_finite(row.get("marketCap")),
@@ -273,6 +290,100 @@ class PriceService:
             year_low=year_low,
             year_high=year_high,
         )
+
+    @staticmethod
+    def _snapshot_is_current(snap: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:
+        """Is this stored close recent enough to be the day change's denominator?
+
+        ⚠️ The row is written by an HOURLY job that returns 0 on every abort path (rate
+        limit after retries, a truncated prior session, the coverage guard, a Supabase
+        failure) and leaves the previous row in place — which is correct for a holiday
+        and wrong for a real session that was never ingested. Nothing on the read path
+        checked, so after two missed sessions every batch day-change (Home tiles, Top
+        Movers, the widget's "Down X% today", price alerts) was a multi-session move
+        presented as today's. Migration 158 stored `trade_date` precisely "so a stale or
+        skipped ingest is visible in the data"; this is the reader that looks.
+
+        The rule: the stored close must be at least the session BEFORE the one the current
+        numbers describe. `previous_trading_day` is holiday-aware, so the Tuesday after
+        Labor Day still accepts Friday's close; one genuinely missed session does not.
+        A row without a `trade_date` (a pre-158 shape) is trusted, as before.
+        """
+        if not snap:
+            return False
+        raw = snap.get("trade_date")
+        if not raw:
+            return True
+        try:
+            stored = date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            return True
+        return stored >= previous_trading_day(session_trading_date(now))
+
+    @classmethod
+    def _change_session(
+        cls, prev: Optional[float], snap: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """WHICH SESSION a change computed against `prev` describes (ISO date), or None.
+
+        `_pick_denominator` already decides it: a price that has moved off the stored
+        close belongs to a LATER session (so the change is the current one), while a
+        price still equal to the stored close means the change is the one that close
+        ENDED — `trade_date`. It matters premarket: at 07:00 ET on a Monday the screener
+        still reports Friday's close, so the change is FRIDAY's move, and without the
+        stamp the widget printed it as "Down 4.8% today" under a Monday date.
+        """
+        if prev is None or not snap:
+            return None
+        close = _finite(snap.get("close"))
+        if close is not None and abs(prev - close) < 1e-12:
+            return session_trading_date().isoformat()
+        return str(snap.get("trade_date") or "")[:10] or None
+
+    _stale_snapshot_dates: set = set()
+    # Above this share of a batch, stale rows are a MISSED INGEST, not a few illiquid
+    # names whose last print was days ago (CCZ / FEMD-class rows are always a little
+    # stale and are the normal case).
+    _STALE_BATCH_WARN_SHARE = 0.5
+
+    @classmethod
+    def _report_stale_snapshots(cls, stale: Dict[str, str], total: int) -> None:
+        """The read-side trace of a stale close map, per BATCH.
+
+        `stale` maps symbol → its stale `trade_date`. A handful of stale rows in a batch
+        is an INFO line (illiquid listings whose last close is old); a majority is the
+        signature of an ingest that missed a session, and that is a WARNING — once per
+        distinct newest stale date, so a missed session cannot page on every 30 s poll.
+        """
+        if not stale or total <= 0:
+            return
+        dates = sorted({d for d in stale.values() if d})
+        sample = ", ".join(sorted(stale)[:5])
+        share = len(stale) / total
+        if share < cls._STALE_BATCH_WARN_SHARE:
+            logger.info(
+                "price: %d of %d symbols carry a stale close snapshot (trade_date %s; e.g. %s) "
+                "— their day change reads as unknown",
+                len(stale), total, "/".join(dates[-3:]), sample,
+            )
+            return
+        newest = dates[-1] if dates else "?"
+        if newest in cls._stale_snapshot_dates:
+            return
+        cls._stale_snapshot_dates.add(newest)
+        logger.warning(
+            "price: market_close_snapshot is STALE for %d of %d symbols (newest trade_date=%s; "
+            "e.g. %s) — every batch day change reads as unknown until the close-snapshot "
+            "ingest catches up",
+            len(stale), total, newest, sample,
+        )
+
+    @staticmethod
+    def _stale_trade_date(snap: Optional[Dict[str, Any]]) -> Optional[str]:
+        """The row's `trade_date` when it is too old to be a denominator, else None."""
+        if not snap or PriceService._snapshot_is_current(snap):
+            return None
+        return str(snap.get("trade_date") or "")[:10] or "?"
 
     @staticmethod
     def _pick_denominator(
@@ -294,6 +405,13 @@ class PriceService:
         """
         if snap is None or price is None:
             return None
+        if not PriceService._snapshot_is_current(snap):
+            # A stale row cannot be "yesterday's close". Unknown beats a multi-session
+            # move labelled as today's (invariant 1). The batch callers count these and
+            # report them (`_report_stale_snapshots`) — a majority of a batch being stale
+            # is the read-side trace of a missed ingest, whose only other signal is the
+            # job's own ERROR hours earlier.
+            return None
         close = _finite(snap.get("close"))
         prev = _finite(snap.get("previous_close"))
         if close is None:
@@ -312,7 +430,7 @@ class PriceService:
         symbol = (row.get("symbol") or "").upper()
         if not symbol:
             return None
-        price = _finite(row.get("price"))
+        price = _positive_price(row.get("price"))
         prev = cls._pick_denominator(price, snap)
 
         change = change_pct = None
@@ -322,7 +440,7 @@ class PriceService:
         # else: left as None on purpose. No previous close means the day change is
         # genuinely unknown, and 0.00% would be a fabricated fact (invariant 1).
 
-        return cls._shape(
+        out = cls._shape(
             symbol=symbol,
             name=row.get("companyName"),
             price=price,
@@ -334,6 +452,13 @@ class PriceService:
             market_cap=_finite(row.get("marketCap")),
             exchange=row.get("exchangeShortName") or row.get("exchange"),
         )
+        if change_pct is not None:
+            # Present only when there IS a change to describe, so the fixed key set
+            # every consumer reads is unchanged (`yearLow`/`yearHigh` follow the same rule).
+            session = cls._change_session(prev, snap)
+            if session:
+                out["changeSession"] = session
+        return out
 
     # ── single symbol ─────────────────────────────────────────────────────────────
 
@@ -435,13 +560,21 @@ class PriceService:
             crypto_rows = {}
 
         out: Dict[str, Dict[str, Any]] = dict(crypto_rows or {})
+        stale: Dict[str, str] = {}
+        seen = 0
         for sym in wanted:
             row = universe.get(sym)
             if row is None:
                 continue
-            quote = self._from_screener(row, closes.get(sym))
+            seen += 1
+            snap = closes.get(sym)
+            stale_date = self._stale_trade_date(snap)
+            if stale_date:
+                stale[sym] = stale_date
+            quote = self._from_screener(row, snap)
             if quote is not None and quote.get("price") is not None:
                 out[sym] = quote
+        self._report_stale_snapshots(stale, seen)
 
         missing = wanted - set(out)   # `wanted` already excludes crypto
         if missing:
@@ -719,7 +852,8 @@ class PriceService:
             if not sym:
                 continue
             snap = {"close": _finite(row.get("close")),
-                    "previous_close": _finite(row.get("previous_close"))}
+                    "previous_close": _finite(row.get("previous_close")),
+                    "trade_date": str(row.get("trade_date") or "")[:10] or None}
             if snap["close"] is None and snap["previous_close"] is None:
                 continue
             out[sym] = snap
@@ -740,7 +874,7 @@ class PriceService:
             chunk = symbols[i:i + CHUNK]
             resp = (
                 supabase.table("market_close_snapshot")
-                .select("symbol,close,previous_close")
+                .select("symbol,close,previous_close,trade_date")
                 .in_("symbol", chunk)
                 .execute()
             )
@@ -785,7 +919,21 @@ class PriceService:
         # same destructive partial write, just quieter. `batch-eod` is one call for the
         # whole market, so a healthy prior session covers most of the latest one; anything
         # far below that is a truncated response, not a real session.
-        coverage = (len(prev_by_symbol) / len(latest)) if latest else 0.0
+        #
+        # Measured over the ENTITLED UNIVERSE (NASDAQ/NYSE/AMEX, the screener's rows) when
+        # it is known, not over the global row count. `batch-eod` is worldwide, and the
+        # prior session can be a day most non-US exchanges were shut while the US traded
+        # (1 May, Whit Monday, Boxing Day observed…): a prior payload that is US-only
+        # would then be a fraction of a full global latest and trip the floor — aborting
+        # a perfectly good US ingest for the whole day. The global ratio is the fallback
+        # when the universe is unavailable, so a truncated prior session is still caught.
+        universe = await self._universe_symbols_for_coverage()
+        if universe:
+            latest_us = [r for r in latest if (r.get("symbol") or "").upper() in universe]
+            prev_us = [sym for sym in prev_by_symbol if sym in universe]
+            coverage = (len(prev_us) / len(latest_us)) if latest_us else 0.0
+        else:
+            coverage = (len(prev_by_symbol) / len(latest)) if latest else 0.0
         if prev_by_symbol and coverage < _MIN_PREV_SESSION_COVERAGE:
             logger.error(
                 "price_service: prior session %s covers only %.1f%% of the %d symbols in "
@@ -883,6 +1031,22 @@ class PriceService:
         for key in [k for k in _cache if k.startswith("price:close:")]:
             _cache.pop(key, None)
         return written
+
+    async def _universe_symbols_for_coverage(self) -> Optional[set]:
+        """The screener universe's symbols for the coverage ratio, or None if unavailable.
+
+        Best effort: the ingest must never fail because the screener did. One cached
+        call (60 s TTL) inside an hourly job.
+        """
+        try:
+            rows = await self._get_universe()
+        except Exception as e:                      # noqa: BLE001 — degrade to the global ratio
+            logger.warning("price_service: universe unavailable for the coverage ratio "
+                           "(%s: %s) — falling back to the global row count",
+                           type(e).__name__, e)
+            return None
+        syms = {str(k).upper() for k in (rows or {}).keys()}
+        return syms or None
 
     async def _fetch_latest_session(
         self, start_date: Optional[str] = None

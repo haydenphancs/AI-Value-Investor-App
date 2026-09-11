@@ -123,7 +123,7 @@ rather than an unfinished feature.
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────┬───────────────────────────────────────┘
                                       │ HTTPS/JSON · SSE (chat)
-                                      │ WSS /api/v1/ws/price/{ticker}
+                                      │ REST price polling 15–30 s (no WS)
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           FASTAPI BACKEND                                    │
@@ -735,7 +735,7 @@ auto-retried.
 │  │                                                                       │    │
 │  │  Tier 2: Supabase `*_cache` tables (PostgreSQL, `expires_at`)        │    │
 │  │      ├── TTL: 24h / close-aligned; survives restarts                 │    │
-│  │      └── news_articles, profit_power_cache, signals_cache, …         │    │
+│  │      └── ticker_news_cache, profit_power_cache, signals_cache, …    │    │
 │  │                                                                       │    │
 │  │  Pre-warmers in main.py lifespan warm popular tickers/scanners.     │    │
 │  │  No Redis — the in-process dict + Supabase tiers suffice today.     │    │
@@ -765,6 +765,19 @@ Note the invariant is narrower than "no price-derived value": market cap (price 
 shares) legitimately feeds the P/FCF, EV/EBITDA and earnings-yield fallbacks. It is a
 slow, daily-cadence upstream field on the same clock as FMP's TTM ratios, inside the
 24-hour staleness budget by construction. A live quote is not.
+
+Three tables added by the 2026-09 FMP-entitlement rebuild follow the same rule.
+`market_close_snapshot` holds two SETTLED sessions per symbol — the official
+`batch-eod` close and the one before it, keyed by `symbol` with their `trade_date`s —
+never the live tick; it is the denominator every batch day-change is computed against,
+and a reader that finds a `trade_date` older than the previous session treats the
+change as unknown rather than serve a multi-session move. `corporate_action_cache`
+holds split / dividend events DERIVED from two entitled price series for a closed
+window; a derivation that could not be performed is stored in NEITHER tier, because a
+stored `[]` is byte-identical to "no split". `crypto_fundamentals_cache` persists only
+the DURABLE half of a coin's CoinGecko coin payload — supply, description, genesis —
+and the price half (and the rolling returns derived from it) is re-hydrated from one
+live CoinGecko markets row on every hit.
 
 ### 7.2 Client-side TTLs
 

@@ -36,7 +36,8 @@ from app.services.active_group_service import (
 )
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.integrations.finra_short_interest import get_short_interest
-from app.services.asset_class import trades_extended_hours
+from app.services.asset_class import trades_extended_hours, resolve_asset_class
+from app.services.crypto_names import display_name_for_row
 from app.services.chart_helper import (
     FULL_SPAN,
     fetch_chart_data,
@@ -698,8 +699,10 @@ def _short_rows(
             rank=i + 1,
             symbol=(it.get("symbol") or "").upper(),
             name=it.get("name") or it.get("symbol") or "",
-            price=round(_finite_float(it.get("price")) or 0.0, 2),
-            change_percent=round(_finite_float(it.get("change_percent")) or 0.0, 2),
+            # Both are guarded upstream (a row without a finite positive price / change
+            # never reaches here); the `or 0.0` is signed-zero collapse, not a default.
+            price=round((_finite_float(it.get("price")) or 0.0) + 0.0, 2),
+            change_percent=round((_finite_float(it.get("change_percent")) or 0.0) + 0.0, 2),
             market_cap=_finite_float(it.get("market_cap")),
             short_percent_of_float=round(float(it["short_percent_of_float"]), 2),
         ))
@@ -929,8 +932,14 @@ class HomeDashboardService:
             row = by_ticker.get(sym, {})
             tiles.append(MarketPulseItemResponse(
                 symbol=sym,
-                name=row.get("company_name") or sym,
-                type=(row.get("asset_type") or "stock"),
+                name=display_name_for_row(sym, row.get("company_name")),
+                # RESOLVED, not the raw column. `watchlist_items.asset_type` defaults to
+                # 'Stock' (capital S — not even in iOS's lowercase vocabulary, so it fell
+                # to `.stock`) and the add path only started writing it in 2026-09; every
+                # older BTCUSD/SPY row still carries the default, and publishing it sent
+                # a starred coin to the EQUITY screen. `resolve_asset_class` trusts a
+                # meaningful stored value and otherwise decides from the symbol.
+                type=resolve_asset_class(sym, row.get("asset_type")),
                 price=price,
                 change_percent=change,
                 previous_close=_finite_float(q.get("previousClose")),
@@ -1371,7 +1380,14 @@ class HomeDashboardService:
             # market cap can't prove it clears the floor → drop.
             if market_cap is None or market_cap < _SCANNER_MIN_MARKET_CAP:
                 continue
-            price_f = _finite_float(q.get("price")) or 0.0
+            price_f = _finite_float(q.get("price"))
+            if price_f is None or price_f <= 0:
+                # Dropped, not published as `$0.00`: `ScannerRowResponse.price` is a
+                # non-Optional float, and the profile fallback in `get_quotes` can hand
+                # back a row with `price: None` (NaN/null) or `0` (halted/delisted) that
+                # still clears the market-cap floor above. `_movers_from_universe` and
+                # `_volume_rows` already skip `price <= 0`; this arm was the outlier.
+                continue
             change = _parse_pct(q.get("changesPercentage"))
             if change is None:
                 change = _parse_pct(q.get("changePercentage"))

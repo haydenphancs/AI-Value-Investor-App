@@ -284,7 +284,13 @@ class ETFDetailViewModel: ObservableObject {
     ///
     /// The socket WINS over the REST snapshot: a tick is now, a snapshot is up to 45s old.
     private func refreshLiveSlice(includeChart: Bool) async {
-        chartRequestToken += 1
+        // OBSERVE the token, never advance it. This runs from the 30-second timer only;
+        // advancing it here discarded an in-flight USER range fetch (cold range = 0.5–5 s
+        // of FMP history) whenever a tick landed mid-flight — and since the tick passes
+        // `includeChart: false` on a daily range it fetched no bars either, so the chart
+        // stayed on the OLD range under the NEW pill with nothing left to retry. Same
+        // discipline as `CryptoDetailViewModel.refreshChartOnly`. A tick that lands after
+        // a newer user fetch still drops itself (the token moved).
         let token = chartRequestToken
         let range = selectedChartRange
         do {

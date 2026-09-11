@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +55,15 @@ UNIVERSE_BUCKET = "universe-data"
 _ENV_DIR = "UNIVERSE_DATA_DIR"
 
 _cache: Dict[str, List[Dict[str, Any]]] = {}
+#: When a load FAILED, keyed like `_cache`, as `time.monotonic()`. Kept SEPARATE from the
+#: success memo on purpose: `_cache` has no TTL (the files change quarterly), and writing
+#: `[]` into it on a failure made one Storage blip at boot empty industry benchmarks / moat /
+#: dossier / competitor peers for the life of the process — a `[]` there is byte-identical
+#: to "this file has no industries". A failure is remembered only for
+#: `_FAILURE_RETRY_SECONDS` (a herd guard: four services read this on request paths), and
+#: the next attempt after that re-fetches.
+_failed_at: Dict[str, float] = {}
+_FAILURE_RETRY_SECONDS = 300
 _lock = threading.Lock()
 
 
@@ -131,13 +141,22 @@ def load_universe(filename: str) -> List[Dict[str, Any]]:
         cached = _cache.get(filename)
         if cached is not None:
             return cached
+        failed = _failed_at.get(filename)
+        if failed is not None and time.monotonic() - failed < _FAILURE_RETRY_SECONDS:
+            # Inside the retry window: degrade without another Storage round-trip. NOT
+            # written to `_cache` — see `_failed_at`.
+            return []
 
         path = universe_path(filename)
         raw: Optional[bytes] = None
         if not path.exists():
             raw = _download_from_storage(filename)
             if raw is None:
-                _cache[filename] = []
+                _failed_at[filename] = time.monotonic()
+                logger.error(
+                    "universe_data: %s unavailable — will retry in %ds; the surfaces that "
+                    "depend on it are EMPTY until then", filename, _FAILURE_RETRY_SECONDS,
+                )
                 return []
 
         try:
@@ -154,15 +173,17 @@ def load_universe(filename: str) -> List[Dict[str, Any]]:
         except Exception as exc:
             logger.error(
                 "universe_data: %s is present but unreadable (%s: %s) — the surfaces that "
-                "depend on it will be EMPTY", path, type(exc).__name__, exc,
+                "depend on it will be EMPTY; retrying in %ds",
+                path, type(exc).__name__, exc, _FAILURE_RETRY_SECONDS,
             )
-            _cache[filename] = []
+            _failed_at[filename] = time.monotonic()
             return []
 
         logger.info(
             "universe_data: loaded %s (%d industries, %s tickers)",
             filename, len(industries), payload.get("ticker_count", "?"),
         )
+        _failed_at.pop(filename, None)
         _cache[filename] = industries
         return industries
 
@@ -193,3 +214,4 @@ def verify_universe_files_present() -> Dict[str, bool]:
 def reset_cache_for_tests() -> None:
     with _lock:
         _cache.clear()
+        _failed_at.clear()

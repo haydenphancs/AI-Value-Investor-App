@@ -355,7 +355,9 @@ class WhaleHydrator:
                 .execute()
             )
             if existing.data:
-                if existing.data[0].get("raw_hash") == raw_hash:
+                # A NULL hash on either side is never "unchanged": it marks a degraded
+                # derivation (a failed split lookup, or a failed denorm write below).
+                if raw_hash is not None and existing.data[0].get("raw_hash") == raw_hash:
                     logger.info("  Skipping %s — data unchanged", name)
                     self.stats["skipped"] += 1
                     return
@@ -510,6 +512,10 @@ class WhaleHydrator:
         # empty, i.e. exactly the previous behaviour.
         split_ratios: Dict[str, float] = {}
         unclassified_tickers: Set[str] = set()
+        # Armed by a lookup that FAILED (not by an adjustment the classifier saw and
+        # could not name). A snapshot built on it gets NO `raw_hash` — see the bottom of
+        # this method — so the next run re-derives instead of skipping "data unchanged".
+        lookup_failed_tickers: Set[str] = set()
         # Bound BEFORE the try: the fail-closed handler reads it, and the very first
         # statement inside can raise — which would turn a recoverable lookup failure into
         # a NameError that aborts 13F processing entirely.
@@ -564,15 +570,26 @@ class WhaleHydrator:
                     if flagged is True or isinstance(flagged, BaseException):
                         if isinstance(flagged, BaseException):
                             logger.warning(
-                                "  Unclassified-adjustment probe failed for %s (%s: %s)"
-                                " — arming the magnitude backstop (fail-closed)",
-                                t, type(flagged).__name__, flagged,
+                                "  Unclassified-adjustment probe failed for %s "
+                                "(whale_id=%s cik=%s) (%s: %s) — arming the magnitude "
+                                "backstop (fail-closed)",
+                                t, whale_id, cik, type(flagged).__name__, flagged,
                             )
+                            lookup_failed_tickers.add(t)
                         unclassified_tickers.add(t)
 
                 for t, sl in zip(suspects, split_lists):
-                    if isinstance(sl, BaseException):
-                        logger.warning("  Split lookup failed for %s: %s", t, sl)
+                    if sl is None or isinstance(sl, BaseException):
+                        # FAIL CLOSED — mirrors `whale_service`: a degraded derivation
+                        # (`None`) means no restatement, so the backstop must be armed.
+                        logger.warning(
+                            "  Split lookup failed for %s (whale_id=%s cik=%s) (%s) — "
+                            "arming the magnitude backstop (fail-closed)",
+                            t, whale_id, cik,
+                            sl if sl is None else f"{type(sl).__name__}: {sl}",
+                        )
+                        unclassified_tickers.add(t)
+                        lookup_failed_tickers.add(t)
                         continue
                     r = _split_ratio_in_window(sl, prev_end, curr_end)
                     if r and abs(r - 1.0) > 1e-9:
@@ -589,6 +606,7 @@ class WhaleHydrator:
             )
             split_ratios = {}
             unclassified_tickers = set(suspects or [])
+            lookup_failed_tickers = set(suspects or [])
 
         # Diff quarters for trade group
         trade_group = self._diff_quarters(
@@ -596,9 +614,21 @@ class WhaleHydrator:
             unclassified_tickers,
         )
 
-        raw_hash = hashlib.sha256(
+        raw_hash: Optional[str] = hashlib.sha256(
             json.dumps(current_raw, sort_keys=True, default=str).encode()
         ).hexdigest()
+        if lookup_failed_tickers:
+            # DEGRADED, not final: rows were withheld because a lookup FAILED. Hashing
+            # this as the answer for the raw filing would make `_hydrate_one` skip it as
+            # "data unchanged" on every later run — a one-off 429 became a permanent hole
+            # in the whale's trades that only `--force` healed. NULL means "re-derive".
+            logger.warning(
+                "  Snapshot for whale_id=%s cik=%s period=%s is DEGRADED — split lookups "
+                "failed for %d ticker(s) (%s); NO raw_hash so the next run re-derives",
+                whale_id, cik, period, len(lookup_failed_tickers),
+                ", ".join(sorted(lookup_failed_tickers)[:10]),
+            )
+            raw_hash = None
 
         return {
             "holdings": holdings,

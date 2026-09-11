@@ -121,6 +121,23 @@ def test_duplicate_dates_collapse_when_bucketing_intraday_into_days():
                 for h in range(8, 20)]
     rows = market_chart_to_rows({"prices": same_day, "total_volumes": []}, intraday=False)
     assert len(rows) == 1
+    # ...and the survivor is the NEWEST point (19:00 UTC → 10.0 + 19), not the first.
+    assert rows[0]["close"] == 10.0 + 19
+
+
+def test_the_trailing_live_point_supersedes_the_midnight_print_on_the_same_et_date():
+    """CoinGecko's daily series ends with the CURRENT price. Between 00:00 UTC and
+    midnight ET it shares an ET date with the day's 00:00 UTC print; the live point
+    must win or the chart's last close is hours stale beside a live header."""
+    midnight_utc = int(dt.datetime(2026, 6, 2, 0, 0, tzinfo=dt.timezone.utc).timestamp() * 1000)
+    live = int(dt.datetime(2026, 6, 2, 3, 30, tzinfo=dt.timezone.utc).timestamp() * 1000)  # 23:30 ET Jun 1
+    rows = market_chart_to_rows(
+        {"prices": [[midnight_utc, 100.0], [live, 103.0]],
+         "total_volumes": [[midnight_utc, 1.0], [live, 2.0]]},
+        intraday=False,
+    )
+    assert [r["date"] for r in rows] == ["2026-06-01"]
+    assert rows[0]["close"] == 103.0 and rows[0]["volume"] == 2.0
 
 
 # ── /ohlc, for the 52-week band ──────────────────────────────────────────────

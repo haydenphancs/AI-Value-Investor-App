@@ -189,11 +189,16 @@ struct SectorIndustryDTO: Decodable {
     let industry: String
     let sectorPerformance: Double
     let industryRank: String
+    /// `pe_known` pattern: `sectorPerformance` is a plain Double on the wire (a shipped
+    /// build cannot decode null), so this says whether it is a measurement or the 0.0
+    /// placeholder. `nil` (older backend) reads as known, matching prior behaviour.
+    let sectorPerformanceKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case sector, industry
         case sectorPerformance = "sector_performance"
         case industryRank = "industry_rank"
+        case sectorPerformanceKnown = "sector_performance_known"
     }
 }
 
@@ -209,11 +214,13 @@ struct CompanyProfileDTO: Decodable {
     let sector: String
     let industry: String
     let sectorPerformance: Double
+    let sectorPerformanceKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case description, ceo, founded, employees, headquarters, website
         case sector, industry
         case sectorPerformance = "sector_performance"
+        case sectorPerformanceKnown = "sector_performance_known"
     }
 }
 
@@ -287,7 +294,8 @@ extension StockOverviewResponseDTO {
             sector: sectorIndustry.sector,
             industry: sectorIndustry.industry,
             sectorPerformance: sectorIndustry.sectorPerformance,
-            industryRank: sectorIndustry.industryRank
+            industryRank: sectorIndustry.industryRank,
+            sectorPerformanceKnown: sectorIndustry.sectorPerformanceKnown ?? true
         )
 
         // Company Profile (includes sector & industry)
@@ -300,7 +308,9 @@ extension StockOverviewResponseDTO {
             website: companyProfile.website,
             sector: companyProfile.sector,
             industry: companyProfile.industry,
-            sectorPerformance: companyProfile.sectorPerformance
+            sectorPerformance: companyProfile.sectorPerformance,
+            sectorPerformanceKnown: companyProfile.sectorPerformanceKnown
+                ?? sectorIndustry.sectorPerformanceKnown ?? true
         )
 
         // Related Tickers

@@ -111,10 +111,20 @@ class _QuotaCircuitBreaker:
     report, across every concurrent report) would each burn its full backoff
     ladder against an API that is already returning 429 — adding load and
     latency for nothing. After `GEMINI_QUOTA_CIRCUIT_THRESHOLD` *consecutive*
-    quota errors the breaker opens and `is_open()` returns True for
+    quota errors the breaker OPENS and `is_open()` returns True for
     `GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS`; calls then fail fast (the caller's
-    sentinel fallback applies). Any success resets it. A single half-open trial
-    is allowed once the cooldown elapses.
+    sentinel fallback applies).
+
+    HALF-OPEN, for real (2026-09-11). Once the cooldown elapses the breaker admits
+    exactly ONE trial call — `is_open()` returns False once and stamps
+    `_trial_started_at`; every other caller keeps failing fast until that trial
+    reports. A `record_success()` closes the breaker fully; a `record_quota_error()`
+    during the trial re-opens it immediately with the deadline measured from NOW.
+    The previous shape cleared all state at the cooldown boundary, which readmitted
+    every parallel caller at once — under a sustained 429 that cycled 30 s off /
+    ~20 errors on, and the docstring's "half-open" was a promise the code did not
+    keep. A trial that never reports (a non-quota failure, a disconnect) expires
+    after another cooldown, so a lost trial cannot wedge the breaker open.
 
     Single-event-loop process → no lock needed (all access is on one thread).
     """
@@ -122,18 +132,48 @@ class _QuotaCircuitBreaker:
     def __init__(self) -> None:
         self._consecutive = 0
         self._opened_at = 0.0
+        self._trial_started_at = 0.0  # > 0 while the single half-open trial is in flight
+
+    def reset(self) -> None:
+        """Pristine closed state (tests, and the one legitimate operator use)."""
+        self._consecutive = 0
+        self._opened_at = 0.0
+        self._trial_started_at = 0.0
+
+    @property
+    def half_open(self) -> bool:
+        return self._opened_at > 0.0 and self._trial_started_at > 0.0
 
     def is_open(self) -> bool:
         if self._opened_at <= 0.0:
             return False
-        if time.time() - self._opened_at >= settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS:
-            # Cooldown elapsed → half-open: clear state and allow one trial.
-            self._opened_at = 0.0
-            self._consecutive = 0
-            return False
-        return True
+        now = time.time()
+        cooldown = settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS
+        if now - self._opened_at < cooldown:
+            return True
+        # Cooldown elapsed → HALF-OPEN. One trial at a time; a trial older than a
+        # cooldown is presumed lost and a fresh one is admitted.
+        if self._trial_started_at > 0.0 and now - self._trial_started_at < cooldown:
+            return True
+        self._trial_started_at = now
+        logger.warning(
+            "Gemini quota circuit HALF-OPEN — admitting one trial call after %.0fs", cooldown,
+        )
+        return False
 
     def record_quota_error(self) -> None:
+        if self.half_open:
+            # The trial failed on quota → re-open at once, deadline from now. The
+            # consecutive count stays at the threshold so the breaker is still "open
+            # for cause", not counting up from zero again.
+            self._trial_started_at = 0.0
+            self._opened_at = time.time()
+            self._consecutive = max(self._consecutive, settings.GEMINI_QUOTA_CIRCUIT_THRESHOLD)
+            logger.error(
+                "Gemini quota circuit trial FAILED — re-opened, failing fast for %.0fs",
+                settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS,
+            )
+            return
         self._consecutive += 1
         if self._consecutive >= settings.GEMINI_QUOTA_CIRCUIT_THRESHOLD:
             # Stamp the open time ONLY on the closed→open transition. Setting it
@@ -150,8 +190,11 @@ class _QuotaCircuitBreaker:
                 self._opened_at = time.time()
 
     def record_success(self) -> None:
+        if self._opened_at > 0.0:
+            logger.info("Gemini quota circuit CLOSED after a successful call")
         self._consecutive = 0
         self._opened_at = 0.0
+        self._trial_started_at = 0.0
 
 
 # Module-level breaker shared by every decorated Gemini call.
@@ -580,6 +623,59 @@ def _thinking_config(budget: Optional[int]) -> Optional[Any]:
     return None if budget is None else types.ThinkingConfig(thinking_budget=budget)
 
 
+def truncate_tool_result(result: Any, budget: Optional[int] = None) -> Any:
+    """Shrink a tool result to fit `budget` characters of JSON, STRUCTURALLY.
+
+    Three call sites used to slice `json.dumps(result)[:N]` at three different N
+    (8000 / 5000 / none), so an oversized result reached the model as syntactically
+    broken JSON with no hint that anything was missing. This prunes instead — list
+    tails first, then long strings — and stamps `{"_truncated": true, "_dropped":
+    <n>}` so the model can say "I only saw part of this" rather than reading a cut.
+
+    Never raises; a value that cannot be serialised is stringified. One budget
+    (`GEMINI_TOOL_RESULT_MAX_CHARS`) for every caller.
+    """
+    limit = int(budget or getattr(settings, "GEMINI_TOOL_RESULT_MAX_CHARS", 8000) or 8000)
+
+    def _size(v: Any) -> int:
+        try:
+            return len(json.dumps(v, default=str))
+        except Exception:
+            return len(str(v))
+
+    if _size(result) <= limit:
+        return result
+
+    dropped = 0
+
+    def _prune(v: Any, list_cap: int, str_cap: int) -> Any:
+        nonlocal dropped
+        if isinstance(v, dict):
+            return {k: _prune(x, list_cap, str_cap) for k, x in v.items()}
+        if isinstance(v, list):
+            if len(v) > list_cap:
+                dropped += len(v) - list_cap
+                v = v[:list_cap]
+            return [_prune(x, list_cap, str_cap) for x in v]
+        if isinstance(v, str) and len(v) > str_cap:
+            dropped += 1
+            return v[: max(str_cap - 1, 1)] + "…"
+        return v
+
+    pruned: Any = result
+    for list_cap, str_cap in ((25, 1200), (12, 600), (6, 300), (3, 160), (1, 80)):
+        dropped = 0
+        pruned = _prune(result, list_cap, str_cap)
+        if isinstance(pruned, dict):
+            pruned = {**pruned, "_truncated": True, "_dropped": dropped}
+        if _size(pruned) <= limit:
+            return pruned
+    # A single enormous scalar (or a non-dict shape that will not prune): keep a valid
+    # JSON envelope around a hard cut rather than cutting the JSON itself.
+    text = json.dumps(result, default=str)
+    return {"_truncated": True, "_dropped": dropped, "partial": text[: max(limit - 64, 1)]}
+
+
 def _response_finish(response: Any) -> Optional[str]:
     try:
         cand = (response.candidates or [None])[0]
@@ -587,6 +683,35 @@ def _response_finish(response: Any) -> Optional[str]:
         return getattr(fr, "name", fr) if fr is not None else None
     except Exception:
         return None
+
+
+async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[str, Any]) -> Any:
+    """Run one function-calling handler with the guards every caller needs.
+
+    * Unknown tool → an error result (never an exception): the model gets one
+      function_response per call it made, so the counts still match.
+    * Exception inside the handler → `{"error": ...}` + a WARNING. In
+      `generate_with_tools` the handler used to run inside the `@async_retry` body,
+      so an FMP `FMPRateLimitException` ("rate limit" in its message) was classified
+      as a Gemini QUOTA error, retried with the quota ladder, and counted toward
+      the process-wide circuit breaker. A tool failure is data for the model, not
+      a Gemini failure.
+    * Per-call timeout (`CHAT_TOOL_TIMEOUT_SECONDS`) → `{"error": "timed_out"}`.
+      An index tool that recomputes a cold detail cache used to hold the whole
+      stream — the same stall the context resolver caps at 4 s — with no bound.
+    """
+    if handler is None:
+        logger.warning("Gemini requested unknown tool: %s", name)
+        return {"error": f"unknown tool: {name}"}
+    timeout = float(getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
+    try:
+        return await asyncio.wait_for(handler(args), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("Gemini tool %s timed out after %.1fs (args=%s)", name, timeout, args)
+        return {"error": "timed_out", "tool": name, "timeout_seconds": timeout}
+    except Exception as e:  # noqa: BLE001 — a tool failure must not become a Gemini failure
+        logger.warning("Gemini tool %s failed: %s: %s", name, type(e).__name__, e)
+        return {"error": str(e), "tool": name}
 
 
 class GeminiClient:
@@ -994,6 +1119,7 @@ class GeminiClient:
             )
             embedding = list(result.embeddings[0].values)
             self._embedding_cache.set(key, embedding)
+            _log_gemini_usage(_response_usage(result), call_site="generate_embedding", model=model_name)
             return embedding
         except Exception as e:
             if not is_transient_gemini_error(e):
@@ -1038,6 +1164,8 @@ class GeminiClient:
                 logger.error("Gemini grounded research failed: %s", exc, exc_info=True)
             raise
 
+        # The only $35/1k-prompt path in the product, and the one that logged nothing.
+        _log_gemini_usage(_response_usage(response), call_site="generate_grounded_research", model=model)
         candidates = getattr(response, "candidates", None) or []
         if not candidates:
             return {"text": "", "tokens_used": None, "grounding_sources": [], "search_queries": []}
@@ -1145,16 +1273,16 @@ class GeminiClient:
                 for fc in fn_calls:
                     args = dict(fc.args) if fc.args else {}
                     handler = tool_handlers.get(fc.name)
-                    if handler is None:
-                        logger.warning(f"Gemini called unknown tool: {fc.name}")
-                        handler_result = {"error": f"unknown tool: {fc.name}"}
-                    else:
+                    if handler is not None:
                         logger.info(f"Gemini invoked tool '{fc.name}' with args: {args}")
-                        handler_result = await handler(args)
+                    handler_result = await _run_tool_handler(fc.name, handler, args)
+                    if handler is not None and not (
+                        isinstance(handler_result, dict) and handler_result.get("error")
+                    ):
                         tool_results.append(handler_result)
                     response_parts.append(types.Part.from_function_response(
                         name=fc.name,
-                        response={"result": handler_result},
+                        response={"result": truncate_tool_result(handler_result)},
                     ))
 
                 # Feed the results back. Append the model's turn VERBATIM (candidate.content) so any
@@ -1171,6 +1299,10 @@ class GeminiClient:
                     ),
                     what="generate_with_tools tool follow-up",
                 )
+                _log_gemini_usage(_response_usage(response), call_site="generate_with_tools", model=model)
+                _log_gemini_usage(
+                    _response_usage(follow_up), call_site="generate_with_tools:follow_up", model=model,
+                )
                 return {
                     "text": _response_text(follow_up),
                     "model": self.model_name,
@@ -1180,6 +1312,7 @@ class GeminiClient:
                 }
 
             # No function call — return normal text response.
+            _log_gemini_usage(_response_usage(response), call_site="generate_with_tools", model=model)
             return {
                 "text": _response_text(response),
                 "model": self.model_name,
@@ -1193,8 +1326,9 @@ class GeminiClient:
             # file that never consulted the classifier, so a plain 429 / "high
             # demand" / per-call timeout paged Sentry as if it were a code bug.
             # Mirrors generate_text / generate_json / generate_embedding /
-            # generate_grounded_research now. The try still spans the tool handlers,
-            # so a genuine bug inside an FMP tool keeps its ERROR + stack.
+            # generate_grounded_research now. Tool handlers run inside
+            # `_run_tool_handler`, which converts their failures to an error RESULT —
+            # so nothing an FMP tool raises can reach this classifier any more.
             if not is_transient_gemini_error(e):
                 logger.error(f"Gemini tool-calling generation failed: {e}", exc_info=True)
             raise
@@ -1205,20 +1339,32 @@ class GeminiClient:
         tools: List[Any],
         temperature: float = 0.7,
         max_output_tokens: int = 8192,
+        thinking_budget: Optional[int] = None,
     ):
         """Create a stateful async chat session bound to function-calling tools
         (for the agentic research loop). Returns a google-genai AsyncChat; drive
         it with ``await _call_with_timeout(chat.send_message(...))``. The chats
         module auto-preserves the model's turns (incl. thought_signature) across
-        rounds, so the caller only feeds tool responses back."""
+        rounds, so the caller only feeds tool responses back.
+
+        `thinking_budget` goes through the same `_thinking_config` encoder as the
+        three generation helpers: None attaches nothing (byte-identical to the
+        pre-cap request), 0 disables thinking, a positive value is a ceiling. This
+        path had NO budget knob at all, so the deep-research loop — up to five
+        calls per report — thought at the model default while the rest of the
+        report path was capped (SYSTEM_DESIGN_GUIDELINES 9b.7)."""
+        kwargs: Dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": max_output_tokens,
+            "system_instruction": system_instruction or None,
+            "tools": list(tools),
+        }
+        thinking = _thinking_config(thinking_budget)
+        if thinking is not None:
+            kwargs["thinking_config"] = thinking
         return self._client.aio.chats.create(
             model=self.model_name,
-            config=types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                system_instruction=system_instruction or None,
-                tools=list(tools),
-            ),
+            config=types.GenerateContentConfig(**kwargs),
         )
 
     async def stream_agentic(
@@ -1286,20 +1432,11 @@ class GeminiClient:
                 response_parts: List[Any] = []
                 for fc in fcalls:
                     args = dict(fc.args) if fc.args else {}
-                    handler = tool_handlers.get(fc.name)
-                    if handler is None:
-                        logger.warning("Agentic chat requested unknown tool: %s", fc.name)
-                        result = {"error": f"unknown tool: {fc.name}"}
-                    else:
-                        try:
-                            result = await handler(args)
-                        except Exception as e:
-                            logger.warning("Agentic tool %s failed: %s: %s", fc.name, type(e).__name__, e)
-                            result = {"error": str(e)}
+                    result = await _run_tool_handler(fc.name, tool_handlers.get(fc.name), args)
                     yield "tool", {"name": fc.name, "args": args, "result": result}
                     response_parts.append(types.Part.from_function_response(
                         name=fc.name,
-                        response={"result": json.dumps(result, default=str)[:8000]},
+                        response={"result": json.dumps(truncate_tool_result(result), default=str)},
                     ))
                 message = response_parts
 

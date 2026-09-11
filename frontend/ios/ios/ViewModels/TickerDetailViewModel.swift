@@ -1081,8 +1081,9 @@ class TickerDetailViewModel: ObservableObject {
         let sectorIndustry = SectorIndustryInfo(
             sector: stockDetail?.sector ?? "N/A",
             industry: stockDetail?.industry ?? "N/A",
-            sectorPerformance: 0.0,   // Not available from current API
-            industryRank: "--"        // Not available from current API
+            sectorPerformance: 0.0,   // Not available on this path — and SAID so below
+            industryRank: "--",       // Not available from current API
+            sectorPerformanceKnown: false
         )
 
         // Build company profile from API data
@@ -1101,7 +1102,8 @@ class TickerDetailViewModel: ObservableObject {
             website: stockDetail?.website ?? "N/A",
             sector: stockDetail?.sector ?? "N/A",
             industry: stockDetail?.industry ?? "N/A",
-            sectorPerformance: 0.0
+            sectorPerformance: 0.0,
+            sectorPerformanceKnown: false
         )
 
         // Determine market status based on current time

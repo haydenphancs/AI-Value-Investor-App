@@ -86,6 +86,7 @@ async def get_crypto_fear_greed():
     Returns current value, 7D/30D averages, and 30-day history.
     """
     from app.integrations.alternative_me import (
+        FearGreedUnavailableException,
         get_fear_greed_index,
         compute_fear_greed_summary,
     )
@@ -93,6 +94,10 @@ async def get_crypto_fear_greed():
     try:
         entries = await get_fear_greed_index(limit=30)
         return compute_fear_greed_summary(entries)
+    except FearGreedUnavailableException as e:
+        # No reading — 502 so iOS hides the gauge. Never a fabricated 50 / "Neutral".
+        logger.warning("Fear & Greed Index unavailable: %s", e)
+        raise HTTPException(status_code=502, detail="Fear & Greed Index unavailable")
     except Exception as e:
         logger.error(f"Fear & Greed Index failed: {e}", exc_info=True)
         raise HTTPException(

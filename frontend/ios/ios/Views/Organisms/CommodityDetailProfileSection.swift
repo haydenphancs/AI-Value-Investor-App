@@ -82,10 +82,16 @@ struct CommodityDetailProfileSection: View {
                 // Info rows
                 CompanyProfileRow(label: "Exchange", value: profile.exchange)
                 CompanyProfileRow(label: "Trading Hours", value: profile.tradingHours)
-                CompanyProfileRow(label: "Contract Size", value: profile.contractSize)
+                // A fund share (GLD) and a spot print (WTI) have no contract or tick; the
+                // backend sends those EMPTY rather than inventing an oz-per-share figure.
+                if !profile.contractSize.isEmpty {
+                    CompanyProfileRow(label: "Contract Size", value: profile.contractSize)
+                }
                 CompanyProfileRow(label: "Unit", value: profile.formattedUnit)
                 CompanyProfileRow(label: "Currency", value: profile.currency)
-                CompanyProfileRow(label: "Tick Size", value: profile.tickSize)
+                if !profile.tickSize.isEmpty {
+                    CompanyProfileRow(label: "Tick Size", value: profile.tickSize)
+                }
 
                 // Additional info shown when expanded
                 if isExpanded {

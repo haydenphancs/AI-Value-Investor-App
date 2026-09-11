@@ -16,6 +16,7 @@ import math
 import re
 
 from app.integrations.coingecko import SYMBOL_TO_COINGECKO_ID
+from app.services.crypto_names import CRYPTO_NAMES
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPException
 from app.integrations.finra_short_interest import get_short_interest
 from app.schemas.common import normalize_fmp_response, normalize_fmp_list, sanitize_non_finite
@@ -166,47 +167,9 @@ _US_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 # Crypto exchanges returned by FMP
 _CRYPTO_EXCHANGES = {"CRYPTO", "CCC", "CC", "CRYPTOCURRENCY"}
 
-# Crypto display names derived from CoinGecko ID map (zero API cost)
-_CRYPTO_NAMES: Dict[str, str] = {
-    sym: cg_id.replace("-", " ").title()
-    for sym, cg_id in SYMBOL_TO_COINGECKO_ID.items()
-}
-# Override common names that don't title-case well from IDs
-_CRYPTO_NAMES.update({
-    "BTC": "Bitcoin", "ETH": "Ethereum", "BNB": "BNB",
-    "XRP": "XRP", "SOL": "Solana", "DOGE": "Dogecoin",
-    "ADA": "Cardano", "TRX": "TRON", "AVAX": "Avalanche",
-    "DOT": "Polkadot", "SHIB": "Shiba Inu", "TON": "Toncoin",
-    "LINK": "Chainlink", "XLM": "Stellar", "HBAR": "Hedera",
-    "BCH": "Bitcoin Cash", "LTC": "Litecoin", "UNI": "Uniswap",
-    "NEAR": "NEAR Protocol", "AAVE": "Aave", "PEPE": "Pepe",
-    "TAO": "Bittensor", "ICP": "Internet Computer",
-    "ETC": "Ethereum Classic", "RENDER": "Render",
-    "POL": "Polygon", "MATIC": "Polygon", "APT": "Aptos",
-    "MNT": "Mantle", "KAS": "Kaspa", "ATOM": "Cosmos",
-    "FIL": "Filecoin", "ARB": "Arbitrum", "VET": "VeChain",
-    "FET": "Artificial Superintelligence Alliance",
-    "ONDO": "Ondo", "WLD": "Worldcoin", "ALGO": "Algorand",
-    "OP": "Optimism", "CRO": "Cronos", "JUP": "Jupiter",
-    "BONK": "Bonk", "STX": "Stacks", "INJ": "Injective",
-    "SEI": "Sei", "IMX": "Immutable X", "GRT": "The Graph",
-    "SUI": "Sui", "THETA": "Theta", "RUNE": "THORChain",
-    "FTM": "Fantom", "FLOKI": "Floki", "TIA": "Celestia",
-    "PYTH": "Pyth Network", "QNT": "Quant", "ENA": "Ethena",
-    "SAND": "The Sandbox", "MANA": "Decentraland",
-    "AXS": "Axie Infinity", "GALA": "Gala", "FLOW": "Flow",
-    "ENS": "Ethereum Name Service", "CHZ": "Chiliz",
-    "PENDLE": "Pendle", "CAKE": "PancakeSwap",
-    "EOS": "EOS", "NEO": "Neo", "XTZ": "Tezos",
-    "IOTA": "IOTA", "COMP": "Compound", "SNX": "Synthetix",
-    "CRV": "Curve DAO", "DYDX": "dYdX", "GMX": "GMX",
-    "1INCH": "1inch", "SUSHI": "SushiSwap",
-    "WIF": "dogwifhat", "JASMY": "JasmyCoin",
-    "TRUMP": "Official Trump", "PI": "Pi Network",
-    "HYPE": "Hyperliquid", "VIRTUAL": "Virtuals Protocol",
-    "PENGU": "Pudgy Penguins", "XMR": "Monero",
-    "DASH": "Dash", "ZEC": "Zcash",
-})
+# Crypto display names: one explicit table, no slug fallback (see services/crypto_names.py).
+_CRYPTO_NAMES: Dict[str, str] = dict(CRYPTO_NAMES)
+
 
 
 def _get_exchange_short_name(item: Dict[str, Any]) -> Optional[str]:
@@ -1403,6 +1366,16 @@ async def get_technical_analysis_detail(ticker: str):
         return await service.get_analysis_detail(ticker)
     except HTTPException:
         raise
+    except FMPException as e:
+        # Same contract as the gauge route above: a typed refusal keeps its own code
+        # (`FMP_NOT_ENTITLED` → 409, permanent, no retry) instead of flattening to a 502
+        # that invites a retry loop. This route was the "fixed 1 of 2 copies" sibling.
+        logger.info(
+            "Technical analysis detail refused for %s (%s): %s", ticker, type(e).__name__, e,
+        )
+        return error_response_from_exception(
+            e, ticker=ticker, step="technical_analysis_detail",
+        )
     except Exception as e:
         logger.error(
             f"Technical analysis detail failed for {ticker}: {e}", exc_info=True

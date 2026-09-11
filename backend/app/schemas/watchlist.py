@@ -26,3 +26,6 @@ class AddToWatchlistRequest(BaseModel):
 
 class RemoveFromWatchlistRequest(BaseModel):
     stock_id: str  # ticker symbol
+    # Same disambiguation as the add: "crypto" means the PAIR row (BTCUSD), anything else
+    # or absent means raw-then-canonical. Optional so the shipped build keeps working.
+    asset_type: Optional[str] = None

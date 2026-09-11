@@ -114,10 +114,17 @@ def _commodity_news_proxies(scope: str) -> str:
     `GCUSD` -> "GLD,IAU,GOLD,NEM,AEM". Returns "" for anything else, so the caller falls
     through to the ordinary stock feed.
     """
+    from app.services.asset_class import detect_asset_class
     from app.services.commodity_service import COMMODITY_NEWS_TICKERS, _root
 
     s = (scope or "").strip().upper()
     if not s:
+        return ""
+    # ⚠️ Pair form only. `_root` is a bare `.replace("USD", "")`, and the sweeper hands
+    # this function every WATCHLIST scope — plain equities. Matching the bare root sent
+    # Colgate-Palmolive (CL) through the crude-oil proxies (USO,XLE,CVX,…) and cached oil
+    # headlines under `ticker=CL`, so its News tab and Insight card carried OPEC coverage.
+    if detect_asset_class(s) != "commodity":
         return ""
     return COMMODITY_NEWS_TICKERS.get(_root(s), "")
 

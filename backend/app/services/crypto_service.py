@@ -14,6 +14,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,6 +39,7 @@ from app.schemas.crypto import (
 )
 from app.utils.market_hours import to_utc_instant
 from app.services.price_service import price_source
+from app.services.chart_helper import AGGREGATED_INTERVALS, _aggregate_prices
 
 logger = logging.getLogger(__name__)
 
@@ -517,6 +519,7 @@ _OVER_CAP_RANGES = frozenset({"5Y", "ALL"})
 _CG_DAILY_TTL = 3600        # settled daily bars; only the trailing point moves
 _CG_INTRADAY_TTL = 120      # the live 1D/1W chart
 _CG_OHLC_TTL = 21600        # 6h — 4-day candles, nothing changes faster
+_CG_EMPTY_TTL = 300         # a legitimately empty series: re-ask in 5 min, not every poll
 _CG_MARKETS_TTL = 120       # related coins / tracking rows, shared across users
 _CG_LIVE_MD_TTL = 60        # the re-hydrated header/statistics row on a DB-cache hit
 
@@ -553,6 +556,42 @@ _VOLATILE_MARKET_DATA_FIELDS = (
 _VOLATILE_CURRENCY_KEYED = frozenset({
     "current_price", "market_cap", "total_volume", "high_24h", "low_24h",
 })
+# Rolling price returns: derived from the live price, so exactly as stale as it. Stripped
+# from the persisted row like the fields above — but kept OUT of that tuple, because they
+# are NOT re-obtainable from a `/coins/markets` row (the correspondence that tuple pins).
+# On a DB hit their absence sends the builder to `_compute_return(historical, …)`, which
+# reads the coin's own live history. Before this, "1 Month" / "1 Year" and every altcoin's
+# "vs BTC" 1M/1Y row were served from a row up to 12 h old beside a live header, and the
+# fallback never ran because the stale value was not None.
+_STALE_DERIVED_MARKET_FIELDS = (
+    "price_change_percentage_7d",
+    "price_change_percentage_14d",
+    "price_change_percentage_30d",
+    "price_change_percentage_60d",
+    "price_change_percentage_200d",
+    "price_change_percentage_1y",
+    "price_change_percentage_7d_in_currency",
+    "price_change_percentage_14d_in_currency",
+    "price_change_percentage_30d_in_currency",
+    "price_change_percentage_60d_in_currency",
+    "price_change_percentage_200d_in_currency",
+    "price_change_percentage_1y_in_currency",
+)
+
+
+def _carries_live_price(payload: Any) -> bool:
+    """True when `market_data.current_price` is a `{usd: <finite>}` dict — the shape a
+    successful re-hydration (and a fresh `/coins/{id}`) produces."""
+    if not isinstance(payload, dict):
+        return False
+    md = payload.get("market_data")
+    if not isinstance(md, dict):
+        return False
+    cp = md.get("current_price")
+    if not isinstance(cp, dict):
+        return False
+    usd = cp.get("usd")
+    return isinstance(usd, (int, float)) and not isinstance(usd, bool) and math.isfinite(usd)
 
 
 def strip_volatile_market_data(data: Any) -> Any:
@@ -566,7 +605,7 @@ def strip_volatile_market_data(data: Any) -> Any:
     out = copy.deepcopy(data)
     md = out.get("market_data")
     if isinstance(md, dict):
-        for field in _VOLATILE_MARKET_DATA_FIELDS:
+        for field in _VOLATILE_MARKET_DATA_FIELDS + _STALE_DERIVED_MARKET_FIELDS:
             md.pop(field, None)
     out["_volatile_stripped"] = True
     return out
@@ -817,12 +856,35 @@ class CryptoService:
         cached = _cache_get(key, _CG_INTRADAY_TTL if intraday else _CG_DAILY_TTL)
         if cached is not None:
             return cached
+        empty = _cache_get(f"{key}:empty", _CG_EMPTY_TTL)
+        if empty is not None:
+            return empty
         payload = await self.coingecko.get_market_chart(
             symbol, days, interval=None if intraday else "daily"
         )
         rows = market_chart_to_rows(payload, intraday=intraday)
         if rows:
             _cache_set(key, rows)
+        elif payload is None:
+            # NOT "looked, found nothing": `get_market_chart` answers None when the
+            # coin id could not be RESOLVED — `resolve_coin_id` swallows a `/search`
+            # 429/5xx into None for any symbol outside the hardcoded map and the id
+            # cache. That is a failed lookup, and memoising it would serve a long-tail
+            # coin an empty chart for `_CG_EMPTY_TTL` after a one-second hiccup while
+            # the header's own `resolve_coin_id` call recovers. Serve once, never store.
+            logger.warning(
+                "[crypto] %s: coin id unresolved for %dd %s history — served empty, NOT cached",
+                symbol.upper(), days, "intraday" if intraday else "daily",
+            )
+        else:
+            # Memoise an EMPTY series too, briefly. A transport failure raises out of
+            # `get_market_chart`, and an unresolved id is caught above, so a payload
+            # with no usable rows is "looked, found nothing" — a real answer — and
+            # refusing to memoise it meant a coin with no chart data (a preview or
+            # inactive listing) was re-fetched on every 30-second chart poll and every
+            # Tracking sparkline: the 86k-calls/month path this cache exists to close.
+            # Short TTL so a listing that starts trading shows up.
+            _cache_set(f"{key}:empty", rows)
         return rows
 
     async def _cg_52_week_band(
@@ -939,6 +1001,11 @@ class CryptoService:
         if cached is not None:
             logger.debug(f"CoinGecko mem cache hit for {symbol}")
             return cached
+        # A DEGRADED payload (durable half, no live price) is memoised under its own key
+        # for the live row's TTL only — see below.
+        degraded = _cache_get(f"{mem_key}:degraded", _CG_LIVE_MD_TTL)
+        if degraded is not None:
+            return degraded
 
         # Tier 2: Supabase — DURABLE fields only. The row can be 12h old, so the
         # price-derived half is re-hydrated live before anything reads it. See
@@ -947,6 +1014,22 @@ class CryptoService:
         if db_data is not None:
             logger.debug(f"CoinGecko DB cache hit for {symbol}")
             db_data = await self._rehydrate_volatile(symbol, db_data)
+            if not _carries_live_price(db_data):
+                # The re-hydration FAILED (or the row arrived with no price). This used to
+                # be memoised under `mem_key` for `_CACHE_TTL_SECONDS` (300 s), so one
+                # `/coins/markets` hiccup made `get_crypto_core` raise for five minutes —
+                # `_live_markets_row` itself never memoises a failure, so this memo was
+                # the only thing preventing recovery. Judged from the INPUT (is
+                # `current_price` a `{usd: …}` dict?), not from `_volatile_stripped`: a
+                # row that arrives with `current_price: null` is also no price. Kept for
+                # 60 s as a herd guard, then re-tried.
+                logger.warning(
+                    "crypto_service: %s durable row served WITHOUT a live price — memoised "
+                    "for %ds, not %ds", symbol, _CG_LIVE_MD_TTL, _CACHE_TTL_SECONDS,
+                )
+                _cache_set(f"{mem_key}:degraded", db_data)
+                return db_data
+            _cache.pop(f"{mem_key}:degraded", None)
             _cache_set(mem_key, db_data)
             return db_data
 
@@ -1615,6 +1698,12 @@ class CryptoService:
                     )
                     btc_hist = []
             if btc_hist:
+                # A DB-hit BTC row has its rolling returns stripped (see
+                # `_STALE_DERIVED_MARKET_FIELDS`); compute them from the live series.
+                if bench_1m is None:
+                    bench_1m = _compute_return(btc_hist, 30)
+                if bench_1y is None:
+                    bench_1y = _compute_return(btc_hist, 365)
                 bench_ytd = _compute_ytd_return(btc_hist)
                 bench_3y = _compute_return(btc_hist, 365 * 3) if len(btc_hist) > 365 * 3 else None
                 bench_5y = _compute_return(btc_hist, 365 * 5) if len(btc_hist) > 365 * 5 else None
@@ -1655,9 +1744,21 @@ class CryptoService:
             # down here too and serves SEVEN DAYS of hourly bars under a "5Y" label —
             # plausible, confidently wrong, and worse than the exception it replaced.
             _days = _INTRADAY_RANGES[chart_range]
-            chart_data = self._chart_rows_from(
-                await self._cg_history(symbol, _days, intraday=True)
-            )
+            try:
+                intraday_rows = await self._cg_history(symbol, _days, intraday=True)
+            except Exception as e:
+                # The ONLY unguarded await in this builder used to be this one: the
+                # 52-week band, the BTC benchmark and the SPY leg all degrade their own
+                # section, but a 429 here (after `_make_request`'s retries) failed the
+                # whole detail — header, statistics, performance — on 1D/1W only, while
+                # 3M+ degraded politely. Empty chart, everything else stands.
+                logger.warning(
+                    "crypto intraday chart unavailable for %s %s (%s: %s) — chart_data "
+                    "is empty; header/statistics/performance unaffected",
+                    symbol, chart_range, type(e).__name__, e,
+                )
+                intraday_rows = []
+            chart_data = self._chart_rows_from(intraday_rows)
         else:
             # DAILY and long-horizon. `historical` is the CoinGecko series, already
             # capped at CRYPTO_HISTORY_YEARS, and `_extract_chart_data` windows it.
@@ -1674,6 +1775,14 @@ class CryptoService:
                     settings.CRYPTO_HISTORY_YEARS,
                 )
             chart_data = self._extract_chart_data(historical, chart_range)
+            if resolved in AGGREGATED_INTERVALS:
+                # The FMP branch honoured `interval` via `fetch_chart_data`; this branch
+                # ignored it, so a user picking "Weekly" or "Monthly" on a crypto 1Y/2Y
+                # chart got daily bars under a weekly label (and MA(20) over 20 days
+                # while the label implied 20 months). Resample the daily series the same
+                # way every other asset class does. Close-only rows aggregate to a
+                # close-only bar (open/high/low stay None — nothing is invented).
+                chart_data = _aggregate_prices(chart_data, resolved)
 
         # ── Step 5: Build key statistics ──────────────────────────
         key_stats = self._build_key_statistics(

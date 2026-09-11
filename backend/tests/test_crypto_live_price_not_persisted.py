@@ -85,7 +85,10 @@ def test_the_strip_keeps_everything_durable():
     assert md["circulating_supply"] == 19_800_000.0
     assert md["total_supply"] == 21_000_000.0
     assert md["max_supply"] == 21_000_000.0
-    assert md["price_change_percentage_30d"] == 8.1
+    # A rolling 30-day return moves every minute — it is NOT durable. Stripped, so a DB
+    # hit recomputes it from live history instead of serving a 12-hour-old figure.
+    assert "price_change_percentage_30d" not in md
+    assert "price_change_percentage_1y" not in md
     assert out["description"]["en"] == "durable prose"
     assert out["genesis_date"] == "2009-01-03"
 

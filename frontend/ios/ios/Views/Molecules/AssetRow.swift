@@ -121,7 +121,8 @@ struct AssetRow: View {
                     PriceChangeLabel(
                         changePercent: asset.changePercent,
                         changeAmount: asset.changeAmount,
-                        mode: changeDisplayMode
+                        mode: changeDisplayMode,
+                        isKnown: asset.changeKnown
                     )
                 }
                 // `maxHeight: .infinity` + contentShape makes the tap area span the row's
@@ -148,7 +149,7 @@ struct AssetRow: View {
     /// composed into one unlabelled Button; splitting the row makes two elements, so both
     /// need saying explicitly.
     private var changeAccessibilityValue: String {
-        guard asset.changePercent.isFinite else { return "change unavailable" }
+        guard asset.changeKnown, asset.changePercent.isFinite else { return "change unavailable" }
         if changeDisplayMode == .amount {
             guard let formatted = asset.formattedChangeAmount else { return "change unavailable" }
             return formatted

@@ -522,8 +522,9 @@ async def test_off_hours_bars_survive_for_crypto_and_are_clipped_for_indices(mon
     assert tiles["SPY"].spark == [100.0, 101.0, 102.0]
     # BTCUSD (crypto) → the 02:00 and 20:00 ET bars survive too.
     assert tiles["BTCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
-    # A continuously-quoted future gets the same treatment as crypto.
-    assert tiles["GCUSD"].spark == [98.0, 100.0, 101.0, 102.0, 103.0]
+    # A commodity tile is an equity-hours ETF (GLD) since Phase 4: clipped like SPY.
+    # (It used to share crypto's window when GCUSD was a continuously-quoted future.)
+    assert tiles["GCUSD"].spark == [100.0, 101.0, 102.0]
 
 
 @pytest.mark.asyncio

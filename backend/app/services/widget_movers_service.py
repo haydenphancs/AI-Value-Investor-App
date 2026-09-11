@@ -220,6 +220,11 @@ class _MarketContext:
 
     # (sector name, today's % change), in the snapshot's own order.
     sector_changes: List[Tuple[str, float]] = field(default_factory=list)
+    # lowercase sector name -> ISO date of the session its change describes. The
+    # context is cached for an hour, so a band filled in the last minutes before the
+    # open carries FRIDAY's sector averages until ~10:30; `for_tickers` drops rows whose
+    # stamp is not the request's session, mirroring `industry_for`'s fail-closed gate.
+    sector_dates: Dict[str, str] = field(default_factory=dict)
 
     # Which legs actually answered. False ⇒ we know nothing, NOT "nothing happened".
     industry_available: bool = False
@@ -268,6 +273,13 @@ class _MarketContext:
         rows = index_rows or {}
         head = rows.get(MARKET_INDEX_SYMBOL) or {}
         market_change = finite(head.get("changePercentage"))
+        # Sector breadth is served from the hourly context cache with no date on the
+        # payload; only rows stamped with THIS session may feed "3 of 11 sectors up".
+        # A row with no stamp fails closed, exactly like `industry_for`.
+        sectors = [
+            (name, chg) for name, chg in self.sector_changes
+            if self.sector_dates.get(name.strip().lower()) == session_date
+        ]
         return replace(
             self,
             ticker_industry=ticker_industry,
@@ -275,6 +287,8 @@ class _MarketContext:
             index_rows=rows,
             market_change=market_change,
             market_available=market_change is not None,
+            sector_changes=sectors,
+            sector_available=self.sector_available and bool(sectors),
         )
 
     def industry_for(self, ticker: str) -> tuple[Optional[str], Optional[float]]:
@@ -325,10 +339,14 @@ class RankedMover:
     sigma_daily: Optional[float]
     z: Optional[float]
     tier: Optional[str]
-    # Both ride on the batch-quote row already fetched, and nothing else in the repo
-    # reads `open` — so the overnight/intraday split is free arithmetic.
+    # `open` is NOT on the licensed batch quote (`price_service._shape` emits no `open`
+    # since the `quote` family went 402), so `open_price` is None and the gap split is
+    # dormant; `previous_close` is real. Kept so a licensed `open` re-enables it.
     open_price: Optional[float] = None
     previous_close: Optional[float] = None
+    # ISO date of the session `change_percent` describes (`price_service` stamps it as
+    # `changeSession`). None on a row without a change or from an older shape.
+    change_session: Optional[str] = None
 
 
 @dataclass
@@ -388,6 +406,8 @@ def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
                 tier=classify_move(change, sigma, row.get("market_cap")),
                 open_price=finite(row.get("open")),
                 previous_close=finite(row.get("previous_close")),
+                change_session=(str(row.get("change_session"))[:10] or None)
+                if row.get("change_session") else None,
             )
         )
 
@@ -402,24 +422,70 @@ def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
     return ranked
 
 
-def deterministic_reason(change_percent: Optional[float], z: Optional[float]) -> str:
+def _parsed_session(stamp: Optional[str]) -> Optional[date]:
+    if not stamp:
+        return None
+    try:
+        return date.fromisoformat(str(stamp)[:10])
+    except ValueError:
+        return None
+
+
+def newest_session(ranked: Sequence[RankedMover]) -> Optional[date]:
+    """The most recent `changeSession` stamp in the batch, or None if none is stamped."""
+    stamps = [d for d in (_parsed_session(m.change_session) for m in ranked) if d]
+    return max(stamps) if stamps else None
+
+
+def drop_prior_session_movers(
+    ranked: Sequence[RankedMover],
+) -> Tuple[List[RankedMover], List[RankedMover]]:
+    """Split `ranked` into (current-session rows, rows stamped with an OLDER session).
+
+    One batch of quotes can legitimately carry two sessions: `price_service` stamps a
+    row with the stored close's date whenever the quote still equals that close — a
+    halted ticker, or one that has not printed yet — and with the live session
+    otherwise. Ranking is by z alone, so a Friday −10% halted name could head Monday's
+    tile above Monday's real movers, and the ONE `session_label` / `session_word` the
+    payload carries would then mislabel every runner. A row whose stamp is older than
+    the newest stamp in the batch is not this session's mover; it is dropped here and
+    named in the log. Rows without a stamp (older wire shape) are kept.
+    """
+    newest = newest_session(ranked)
+    if newest is None:
+        return list(ranked), []
+    current: List[RankedMover] = []
+    stale: List[RankedMover] = []
+    for m in ranked:
+        stamped = _parsed_session(m.change_session)
+        (stale if stamped is not None and stamped < newest else current).append(m)
+    return current, stale
+
+
+def deterministic_reason(
+    change_percent: Optional[float], z: Optional[float], session_word: str = "today",
+) -> str:
     """The always-available line. Never wrong, because it only restates arithmetic.
 
     This is what a mover with no catalyst and no news gets, and it is the reason the
     widget can never be blank. Phrased as a comparison rather than a bare number
     because "−4.8%" alone tells a reader nothing about whether that is remarkable
     for this particular stock.
+
+    `session_word` names the session the change belongs to — "today", or "on Fri" when
+    the payload is describing a prior session's move (pre-market, weekend). Saying
+    "today" for Friday's move was the cross-session claim the industry gate exists to
+    suppress, printed by the headline itself.
     """
     pct = finite(change_percent)
     if pct is None:
         return "Price change unavailable right now."
-    direction = "up" if pct > 0 else "down" if pct < 0 else "flat"
     if pct == 0:
-        return "Flat on the day."
+        return "Flat on the day." if session_word == "today" else f"Flat {session_word}."
     if z is None:
-        return f"{'Up' if pct > 0 else 'Down'} {abs(pct):.1f}% today."
+        return f"{'Up' if pct > 0 else 'Down'} {abs(pct):.1f}% {session_word}."
     return (
-        f"{'Up' if pct > 0 else 'Down'} {abs(pct):.1f}% today — "
+        f"{'Up' if pct > 0 else 'Down'} {abs(pct):.1f}% {session_word} — "
         f"about {z:.1f}× its normal daily range."
     )
 
@@ -917,7 +983,8 @@ class WidgetMoversService:
     async def _build_market(self) -> WidgetMoverPayload:
         tickers = await self._swept_universe()
         ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
-        ctx = await self._market_context([m.ticker for m in ranked], index_rows)
+        _, session_iso, _ = self._session_of(ranked, session_trading_date())
+        ctx = await self._market_context([m.ticker for m in ranked], index_rows, session_iso)
         ctx = replace(ctx, news_available=news_ok)
         grades = await self._head_grades(ranked)
         return self._payload(
@@ -951,8 +1018,9 @@ class WidgetMoversService:
     ) -> WidgetMoverPayload:
         ranked, cards, news_ok, index_rows = await self._rank_and_read(tickers)
         symbols = [m.ticker for m in ranked]
+        _, session_iso, _ = self._session_of(ranked, session_trading_date())
         ctx, sectors, grades = await asyncio.gather(
-            self._market_context(symbols, index_rows),
+            self._market_context(symbols, index_rows, session_iso),
             self._sectors(user_id, symbols),
             self._head_grades(ranked),
             return_exceptions=True,
@@ -980,6 +1048,7 @@ class WidgetMoversService:
         self,
         tickers: Sequence[str],
         index_rows: Optional[Dict[str, Dict[str, Any]]] = None,
+        session_date: Optional[str] = None,
     ) -> "_MarketContext":
         """Two universe-wide FMP calls plus one batched Supabase read.
 
@@ -1026,8 +1095,11 @@ class WidgetMoversService:
         # `ctx.ticker_industry` in place with further awaits afterwards — so the two
         # builds erased each other's map and the market tile reported "no catalyst" for
         # a plainly sector-driven move.
+        # The session the PAYLOAD describes (the head's `changeSession`, see
+        # `_session_of`) — not the wall clock — so the industry and sector gates compare
+        # like with like: pre-market Monday, Friday's industry move for Friday's change.
         return shared.for_tickers(
-            industry_map, session_trading_date().isoformat(), index_rows
+            industry_map, session_date or session_trading_date().isoformat(), index_rows
         )
 
     async def _industry_for_one(self, ticker: str) -> Optional[str]:
@@ -1128,12 +1200,16 @@ class WidgetMoversService:
             # 60-second payload path.
             rows = await get_market_movers_service().get_sector_performance()
             out: List[Tuple[str, float]] = []
+            dates: Dict[str, str] = {}
             for r in rows or []:
                 name = str(r.get("sector") or "").strip()
                 chg = _group_change(r)
                 if name and chg is not None:
                     out.append((name, chg))
-            return out
+                    stamp = str(r.get("date") or "")[:10]
+                    if stamp:
+                        dates[name.strip().lower()] = stamp
+            return out, dates
 
         industry, earnings, sectors = await asyncio.gather(
             _industry_perf(), _earnings(), _sector_perf(), return_exceptions=True
@@ -1163,8 +1239,8 @@ class WidgetMoversService:
                 "widget: earnings calendar failed (%s: %s)",
                 type(earnings).__name__, earnings,
             )
-        if isinstance(sectors, list):
-            ctx.sector_changes = sectors
+        if isinstance(sectors, tuple):
+            ctx.sector_changes, ctx.sector_dates = sectors
             ctx.sector_available = True
         else:
             logger.warning(
@@ -1241,6 +1317,7 @@ class WidgetMoversService:
         today: date,
         today_iso: str,
         grade_rows: Optional[Sequence[Dict[str, Any]]] = None,
+        session_word: str = "today",
     ) -> WidgetMoverResponse:
         classified, had_news, card_checked = _classified_today_news(
             cards.get(m.ticker), today_iso
@@ -1264,6 +1341,7 @@ class WidgetMoversService:
             # Both must hold: the batched read has to have succeeded AND this particular
             # ticker has to have an insight row behind it.
             news_checked=ctx.news_available and card_checked,
+            session_word=session_word,
         )
         # `attribute` returns None only for an unreadable move, which `rank_movers`
         # has already filtered out — but degrade rather than crash if that changes.
@@ -1278,7 +1356,10 @@ class WidgetMoversService:
             cause=WidgetCauseResponse(
                 kind=(a.kind.value if a else "none"),
                 tag=(a.tag if a else None),
-                detail=(a.detail if a else deterministic_reason(m.change_percent, m.z)),
+                detail=(
+                    a.detail if a
+                    else deterministic_reason(m.change_percent, m.z, session_word)
+                ),
             ),
             context=WidgetMoveContextResponse(
                 change_percent=m.change_percent or 0.0,
@@ -1299,6 +1380,27 @@ class WidgetMoversService:
             ),
         )
 
+    @staticmethod
+    def _session_of(
+        ranked: Sequence[RankedMover], live_session: date
+    ) -> Tuple[date, str, str]:
+        """The session the ranked changes describe: (date, iso, wording).
+
+        Batch quotes carry `changeSession` (stamped by `price_service` with the same
+        derivation the movers universe uses). At 07:30 ET Monday the screener still
+        reports Friday's close, so every change is FRIDAY's move — and this used to be
+        labelled with `session_trading_date()` (Monday), so the tile said "Down 4.8%
+        today" under "Pre-market 7:30 AM ET", gated earnings/news on Monday's rows, and
+        attached a Monday BMO print as the cause of Friday's move. The NEWEST stamp in
+        the batch is authoritative — `drop_prior_session_movers` has already removed
+        rows stamped older than it, so every stamped row agrees; a batch with no stamp
+        at all (older shape) keeps the live session.
+        """
+        stamped = newest_session(ranked) or live_session
+        if stamped >= live_session:
+            return live_session, live_session.isoformat(), "today"
+        return stamped, stamped.isoformat(), f"on {stamped.strftime('%a')}"
+
     def _payload(
         self,
         *,
@@ -1317,15 +1419,15 @@ class WidgetMoversService:
         # being described are Friday's close — nothing could match, so every detector
         # went dark AND the tile still asserted "No company news today." A confident
         # negative produced by asking about the wrong day.
-        today = session_trading_date()
-        today_iso = today.isoformat()
+        live_session = session_trading_date()
+        today, today_iso, session_word = self._session_of(ranked, live_session)
 
         head: Optional[WidgetMoverResponse] = None
         runners: List[WidgetMoverResponse] = []
         if ranked:
             head = self._build_mover(
                 ranked[0], cards=cards, ctx=ctx, today=today,
-                today_iso=today_iso, grade_rows=head_grades,
+                today_iso=today_iso, grade_rows=head_grades, session_word=session_word,
             )
             # ONE ROW PER TICKER, and the headline never repeats below itself.
             #
@@ -1348,7 +1450,8 @@ class WidgetMoversService:
             # the only paid call in the chain and is spent on the headline alone.
             runners = [
                 self._build_mover(
-                    m, cards=cards, ctx=ctx, today=today, today_iso=today_iso
+                    m, cards=cards, ctx=ctx, today=today, today_iso=today_iso,
+                    session_word=session_word,
                 )
                 for m in deduped
             ]
@@ -1362,7 +1465,10 @@ class WidgetMoversService:
             # is how a Friday snapshot read on Sunday says "Fri close" instead of
             # silently presenting Friday's −5% as today's.
             session_date=today_iso,
-            session_label=session_label(),
+            session_label=(
+                session_label() if today == live_session
+                else f"{today.strftime('%a')} close"
+            ),
             scope_label=scope_label,
             # Gated on the SAME session date every other detector uses, so an
             # off-session roll-up is dropped rather than labelled.
@@ -1436,10 +1542,18 @@ class WidgetMoversService:
                     "sigma_daily": sigmas.get(sym),
                     "open": q.get("open"),
                     "previous_close": q.get("previousClose"),
+                    "change_session": q.get("changeSession"),
                 }
             )
 
-        ranked = rank_movers(rows)
+        ranked, stale = drop_prior_session_movers(rank_movers(rows))
+        if stale:
+            logger.warning(
+                "widget: %d row(s) stamped with a PRIOR session dropped from the ranking "
+                "(halted / not yet printed): %s",
+                len(stale),
+                ", ".join(f"{m.ticker}@{m.change_session}" for m in stale[:10]),
+            )
         # Only the head needs a card today, but reading the top few keeps the door
         # open for a large-family widget listing runners-up without a second round
         # trip — and `get_cards` is one batched select regardless.

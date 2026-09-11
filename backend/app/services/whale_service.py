@@ -61,6 +61,16 @@ from app.services._whale_common import (
     dedupe_congress_trades,
     congressional_raw_hash,
 )
+
+# Smallest per-share price move (either direction) that reads like a split: 3:2 is
+# 1.5, 4:3 is 1.33, a 1:10 reverse is 0.1. See `_suspicious_split_tickers`.
+_SPLIT_PRICE_FACTOR = 1.3
+
+# A snapshot persisted WITHOUT `raw_hash` was built while a split lookup was failing
+# (see `_process_13f_path`). The in-app path serves it as-is for this long, then
+# re-derives; the daily hydrator re-derives regardless (its hash compare never matches
+# NULL). Bounds the FMP spend of a prolonged outage to one attempt per hour per whale.
+_DEGRADED_SNAPSHOT_RETRY_SECONDS = 3600
 from app.services.entitlements import (
     FREE_TIER_WHALE_NAME,
     TIER_FREE,
@@ -1779,6 +1789,20 @@ class WhaleService:
 
     # ── 13F Processing Path ──────────────────────────────────────────
 
+    @staticmethod
+    def _degraded_snapshot_is_due(row: Dict[str, Any]) -> bool:
+        """True when a hash-less (degraded) snapshot is old enough to retry."""
+        raw = row.get("processed_at")
+        if not raw:
+            return True
+        try:
+            processed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        if processed.tzinfo is None:
+            processed = processed.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - processed).total_seconds() >= _DEGRADED_SNAPSHOT_RETRY_SECONDS
+
     async def _process_13f_path(
         self, whale_id: str, cik: str, whale: Optional[Dict] = None
     ) -> Optional[Dict[str, Any]]:
@@ -1814,7 +1838,14 @@ class WhaleService:
             .execute()
         )
         if existing.data:
-            return existing.data[0]
+            row = existing.data[0]
+            if row.get("raw_hash") is not None or not self._degraded_snapshot_is_due(row):
+                return row
+            logger.warning(
+                "whale: existing snapshot for whale_id=%s period=%s is DEGRADED (no "
+                "raw_hash) and older than %ds — re-deriving",
+                whale_id, period, _DEGRADED_SNAPSHOT_RETRY_SECONDS,
+            )
 
         # Step 3: Fetch current + previous quarter concurrently
         prev = _find_previous_quarter(filing_dates, year, quarter)
@@ -1905,6 +1936,12 @@ class WhaleService:
         # empty → the raw diff, same as before.
         split_ratios: Dict[str, float] = {}
         unclassified_tickers: Set[str] = set()
+        # True when the backstop was armed by a lookup that FAILED (429, outage, a
+        # degraded `None` derivation) rather than by an adjustment the classifier saw and
+        # could not name. The two arm the same backstop, but only the first is
+        # transient — and a snapshot built on it must not be stamped with a `raw_hash`,
+        # or the hydrator's "data unchanged" skip makes the withheld rows permanent.
+        lookup_failed_tickers: Set[str] = set()
         # Bound BEFORE the try: the fail-closed handler reads it, and the very first
         # statement inside can raise — which would turn a recoverable lookup failure into
         # a NameError that aborts 13F processing entirely.
@@ -1975,14 +2012,30 @@ class WhaleService:
                         if isinstance(flagged, BaseException):
                             logger.warning(
                                 "whale: unclassified-adjustment probe failed for %s "
-                                "(%s: %s) — arming the magnitude backstop (fail-closed)",
-                                t, type(flagged).__name__, flagged,
+                                "(whale_id=%s cik=%s period=%s-Q%s) (%s: %s) — arming the "
+                                "magnitude backstop (fail-closed)",
+                                t, whale_id, cik, year, quarter,
+                                type(flagged).__name__, flagged,
                             )
+                            lookup_failed_tickers.add(t)
                         unclassified_tickers.add(t)
 
                 for t, sl in zip(suspects, split_lists):
-                    if isinstance(sl, BaseException):
-                        logger.warning("Split lookup failed for %s: %s", t, sl)
+                    if sl is None or isinstance(sl, BaseException):
+                        # FAIL CLOSED. `None` is a degraded derivation (see
+                        # `get_split_rows`); with no ratio there is no restatement, and
+                        # the gate above may have SUCCEEDED on a fresh re-derive and
+                        # cleared this ticker — the exact state that fabricates a split
+                        # as a purchase. Arm the backstop for it.
+                        logger.warning(
+                            "whale: split lookup failed for %s (whale_id=%s cik=%s "
+                            "period=%s-Q%s) (%s) — no restatement; arming the magnitude "
+                            "backstop (fail-closed)",
+                            t, whale_id, cik, year, quarter,
+                            sl if sl is None else f"{type(sl).__name__}: {sl}",
+                        )
+                        unclassified_tickers.add(t)
+                        lookup_failed_tickers.add(t)
                         continue
                     r = _split_ratio_in_window(sl, prev_end, curr_end)
                     # Tolerance, not `!= 1.0`. The derived ratio is an exact rational so
@@ -2000,12 +2053,13 @@ class WhaleService:
             # blast radius is bounded to them, and a withheld row is recoverable where a
             # fabricated BOUGHT that feeds an alert is not.
             logger.warning(
-                "whale: split adjustment failed for CIK %s (%s: %s) — arming the "
-                "magnitude backstop for all %d suspects (fail-closed)",
-                cik, type(e).__name__, e, len(suspects or []),
+                "whale: split adjustment failed for CIK %s (whale_id=%s) (%s: %s) — "
+                "arming the magnitude backstop for all %d suspects (fail-closed)",
+                cik, whale_id, type(e).__name__, e, len(suspects or []),
             )
             split_ratios = {}
             unclassified_tickers = set(suspects or [])
+            lookup_failed_tickers = set(suspects or [])
 
         trade_group = self._diff_quarters(
             current_raw, prev_raw, filing_date, total_value, split_ratios,
@@ -2016,9 +2070,23 @@ class WhaleService:
             holdings_data, trade_group, sector_data
         )
 
-        raw_hash = hashlib.sha256(
+        raw_hash: Optional[str] = hashlib.sha256(
             json.dumps(current_raw, sort_keys=True, default=str).encode()
         ).hexdigest()
+        if lookup_failed_tickers:
+            # DEGRADED, not final. The backstop withheld rows because a lookup FAILED,
+            # so this snapshot must not be hashed as "the answer for this raw filing":
+            # the hydrator skips on an equal hash and `_process_13f_path` serves an
+            # existing row as-is, which made a one-off 429 a permanent hole in the
+            # whale's trades (only `--force` healed it). A NULL hash is "re-derive me".
+            logger.warning(
+                "whale: snapshot for whale_id=%s cik=%s period=%s is DEGRADED — split "
+                "lookups failed for %d ticker(s) (%s); persisting WITHOUT raw_hash so the "
+                "next sweep re-derives",
+                whale_id, cik, period, len(lookup_failed_tickers),
+                ", ".join(sorted(lookup_failed_tickers)[:10]),
+            )
+            raw_hash = None
 
         # Step 5: Persist
         snapshot = {
@@ -2032,6 +2100,7 @@ class WhaleService:
             "behavior_summary": behavior,
             "sentiment_text": sentiment,
             "raw_hash": raw_hash,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
         }
 
         try:
@@ -2213,25 +2282,37 @@ class WhaleService:
 
         cur = _map(current_raw)
         prev = _map(previous_raw)
-        suspects: List[str] = []
-        for sym in set(cur) & set(prev):
+        # ⚠️ Flag on the implied PRICE ratio, not on "shares ≈ price". The holder's
+        # share ratio is split × real trade, while the per-share price (value ÷ shares)
+        # moves by the split alone — so requiring the two to agree within 35% only ever
+        # caught a holder who did NOTHING through the split. One who sold >26% (or
+        # bought >54%) across a 10:1 was never a suspect, never looked up, never
+        # restated: half a position sold rendered as a $4.0M BOUGHT. A quarter in which
+        # the per-share price moved by ≥30% either way is worth the (bounded, cached)
+        # lookup; the derived data then confirms or clears it.
+        #
+        # Ordered strongest-first so `_MAX_SPLIT_LOOKUPS` trims the price-only tail, not
+        # the rows where shares and price moved inversely together.
+        strong: List[str] = []
+        weak: List[str] = []
+        for sym in sorted(set(cur) & set(prev)):
             cv, cs = cur[sym]
             pv, ps = prev[sym]
             if cs <= 0 or ps <= 0 or cv <= 0 or pv <= 0:
                 continue
-            share_ratio = cs / ps
-            if 0.7 < share_ratio < 1.4:
-                continue  # share count barely moved → not a split
             cur_price = cv / cs
             prev_price = pv / ps
             if cur_price <= 0 or prev_price <= 0:
                 continue
             price_ratio = prev_price / cur_price
-            # shares & price moved inversely by ~the same factor → value
-            # ~preserved → smells like a split; confirm against real /splits.
-            if abs(share_ratio - price_ratio) <= 0.35 * share_ratio:
-                suspects.append(sym)
-        return suspects
+            if not (price_ratio >= _SPLIT_PRICE_FACTOR or price_ratio <= 1.0 / _SPLIT_PRICE_FACTOR):
+                continue  # the per-share price did not move like a split
+            share_ratio = cs / ps
+            if not (0.7 < share_ratio < 1.4) and abs(share_ratio - price_ratio) <= 0.35 * share_ratio:
+                strong.append(sym)      # shares and price moved inversely together
+            else:
+                weak.append(sym)        # price moved like a split; shares also traded
+        return strong + weak
 
     def _diff_quarters(
         self,

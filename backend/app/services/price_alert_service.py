@@ -48,7 +48,7 @@ from app.services.price_alert_engine import (
 )
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
-from app.services.asset_class import detect_asset_class
+from app.services.asset_class import detect_asset_class, uses_coingecko_price
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -392,7 +392,9 @@ class PriceAlertService:
 
         tickers = await asyncio.to_thread(self._active_universe)
         if only_round_the_clock:
-            tickers = [t for t in tickers if detect_asset_class(t) == "crypto"]
+            # SOURCE, not classification: a bare BTC/LTC row is the ETF/REIT and closes
+            # with the equity session; only a CoinGecko-priced pair moves overnight.
+            tickers = [t for t in tickers if uses_coingecko_price(t)]
         if not tickers:
             # Short-circuit BEFORE the quote call. Outside market hours with no crypto
             # alert on file this is the common case, and CoinGecko's budget is

@@ -120,6 +120,10 @@ _ABSENT_IOS = {
     "class CacheManager": ("§3.2", "no such type — the cache lives inside StockRepository"),
     "class PersistenceManager": ("§9.2", "persistence is Keychain + UserDefaults only"),
     "struct RetryPolicy": ("§6.4", "retry is a fixed 1s delay, not a policy object"),
+    # App B, 2026-09-08: the live-price WebSocket was REMOVED (streaming is outside the
+    # FMP Order Form); prices poll over REST. A socket client reappearing is a licence
+    # problem, not a feature.
+    "URLSessionWebSocketTask": ("App B 2026-09-08", "the live-price WebSocket is removed; prices poll over REST"),
 }
 _ABSENT_BACKEND = {
     "BackgroundTasks":  ("§5.3", "work is dispatched via asyncio.create_task through _spawn"),
@@ -131,6 +135,7 @@ _ABSENT_BACKEND = {
     "Accept-Version":   ("§8.2", "URL-path versioning only"),
     "X-API-Version":    ("§8.2", "URL-path versioning only"),
     "deep_research_reports": ("§5.3", "the table is `research_reports`"),
+    "@router.websocket": ("App B 2026-09-08", "the live-price WebSocket is removed; prices poll over REST"),
 }
 # X-RateLimit-* is READ from FMP upstream; §8.3 says we never EMIT it. Only that one file may
 # mention it, and it must not appear on a response we build.
@@ -384,7 +389,17 @@ _CURATED_TABLES = {
     "sector_benchmarks", "chat_sessions", "chat_messages", "chat_usage_budget",
     "notification_events", "trending_themes", "user_investor_profile", "user_memory_facts",
     "watchlist_items", "whale_trades", "snapshot_cache", "etf_snapshot_cache",
-    "news_articles", "signals_cache", "guest_report_budget",
+    "signals_cache", "guest_report_budget",
+    # 2026-09-11: `news_articles` was removed from the §7.1 cache tree — it is a DEAD table
+    # (no read or write anywhere in app/ or scripts/) that migration 168 drops. The exemplar
+    # is the live per-ticker cache. Curated so the doc line and the table stay coupled.
+    "ticker_news_cache",
+    # §7.1 names the three Phase 0–6 tables that follow the "no live price in Tier 2"
+    # rule: two settled sessions, derived corporate actions, and the durable half of a
+    # coin's fundamentals.
+    "market_close_snapshot", "corporate_action_cache", "crypto_fundamentals_cache",
+    # §9b.9 (chat starters, migrations 161/162) names this table; the snapshot now holds it.
+    "chat_starter_answers",
     # Named by §9c.0b as the corpus that is EMPTY — the reason the book source pill
     # had to be earned rather than asserted. Curated so dropping it fails here
     # instead of quietly orphaning that paragraph.

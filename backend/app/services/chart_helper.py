@@ -423,7 +423,12 @@ async def _fetch_crypto_chart_data(
         return rows
     # Daily: trim to the requested window (the fetch is capped, not windowed).
     cutoff = (_date.today() - timedelta(days=daily_range_days(range_code))).isoformat()
-    return [r for r in rows if (r.get("date") or "") >= cutoff]
+    rows = [r for r in rows if (r.get("date") or "") >= cutoff]
+    if resolved_interval in AGGREGATED_INTERVALS:
+        # Honour a weekly/monthly request the way the FMP branch always did. Close-only
+        # rows aggregate to close-only bars — open/high/low stay None.
+        rows = _aggregate_prices(rows, resolved_interval)
+    return rows
 
 
 async def fetch_chart_data(

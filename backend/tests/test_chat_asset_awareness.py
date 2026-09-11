@@ -259,10 +259,14 @@ async def test_missing_symbol_yields_no_widget():
 # ── 4. "Live"/"Closed" must follow the asset's OWN session ──────────────────
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("symbol", ["BTCUSD", "ETHUSD", "GCUSD", "CLUSD"])
+@pytest.mark.parametrize("symbol", ["BTCUSD", "ETHUSD"])
 async def test_round_the_clock_assets_are_live_while_wall_street_sleeps(monkeypatch, symbol):
     """The card stamped the US EQUITY session on everything, so a Bitcoin card read "Closed"
-    at 2am on a Sunday while BTC was very much trading — a confidently wrong claim."""
+    at 2am on a Sunday while BTC was very much trading — a confidently wrong claim.
+
+    Crypto only since Phase 4: a commodity card is a NYSE Arca ETF (GLD) or an EIA daily
+    print, and "Open" at 2am Sunday for GLD would be the same confidently wrong claim in
+    the other direction — see `test_a_commodity_card_follows_the_equity_session`."""
     monkeypatch.setattr(
         "app.services.home_dashboard_service._market_status", lambda: ("closed", False)
     )
@@ -276,6 +280,28 @@ async def test_round_the_clock_assets_are_live_while_wall_street_sleeps(monkeypa
     svc.price = PriceFromFMPFake(svc.fmp)
     widget = await svc._fetch_stock_widget_data(symbol)
     assert widget["is_market_open"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["GCUSD", "CLUSD"])
+async def test_a_commodity_card_follows_the_commodity_screens_verdict(monkeypatch, symbol):
+    """GCUSD is served by GLD (NYSE Arca) and CLUSD by a FRED daily settlement — neither
+    trades while Wall Street sleeps, so the card must say so. The verdict comes from
+    `commodity_service._commodity_market_status`, the same function the detail screen's
+    badge reads, so the two can never disagree."""
+    monkeypatch.setattr(
+        "app.services.commodity_service._commodity_market_status", lambda sym="": "Market Closed"
+    )
+    svc = _svc()
+    svc.fmp = SimpleNamespace(
+        get_stock_price_quote=AsyncMock(return_value={"name": "Gold", "price": 300.0,
+                                                     "avgVolume": 1234}),
+        get_historical_prices=AsyncMock(return_value=[]),
+        get_company_profile=AsyncMock(return_value=None),
+    )
+    svc.price = PriceFromFMPFake(svc.fmp)
+    widget = await svc._fetch_stock_widget_data(symbol)
+    assert widget["is_market_open"] is False
 
 
 @pytest.mark.asyncio
@@ -399,3 +425,69 @@ def test_a_non_symbol_shaped_subject_is_still_dropped():
     )
     assert "ignore all prior instructions" not in instruction
     assert "currently helping analyze" not in instruction
+
+
+@pytest.mark.asyncio
+async def test_a_fred_backed_commodity_card_is_never_open_during_the_equity_session(monkeypatch):
+    """11:00 ET on a weekday: the equity session is OPEN, but crude is an EIA settlement
+    published days behind — the detail badge says "Market Closed" and so must the card.
+    Before this the card asked the EQUITY clock and said "Open" for the same minute."""
+    monkeypatch.setattr(
+        "app.services.home_dashboard_service._market_status", lambda: ("open", True)
+    )
+    from app.services import commodity_service as cs
+    assert cs._commodity_market_status("CLUSD") == "Market Closed", "precondition: FRED screen"
+    svc = _svc()
+    svc.fmp = SimpleNamespace(
+        get_stock_price_quote=AsyncMock(return_value={"name": "Crude", "price": 65.0,
+                                                     "avgVolume": 1234}),
+        get_historical_prices=AsyncMock(return_value=[]),
+        get_company_profile=AsyncMock(return_value=None),
+    )
+    svc.price = PriceFromFMPFake(svc.fmp)
+    widget = await svc._fetch_stock_widget_data("CLUSD")
+    assert widget["is_market_open"] is False
+
+
+# ── the symbol chat FETCHES agrees with the class it ASSIGNS ─────────────────
+#
+# Chat classifies a bare "BTC" as the coin (`include_bare_coins=True`), but
+# `price_source.get_quote("BTC")` routes on `uses_coingecko_price`, which is False for the
+# bare form — so the card carried the Grayscale ETF's quote under a 24/7 "Live" dot and
+# crypto news. The tool handlers now resolve a coin to its pair before any fetch.
+
+@pytest.mark.parametrize("raw, expected", [
+    ("BTC", "BTCUSD"), ("btc", "BTCUSD"), ("BTCUSD", "BTCUSD"), ("LTC", "LTCUSD"),
+    ("AAPL", "AAPL"), ("GCUSD", "GCUSD"), ("^GSPC", "^GSPC"), ("", ""), (None, ""),
+])
+def test_chat_symbol_resolves_a_bare_coin_to_the_pair(raw, expected):
+    assert ChatService._chat_symbol(raw) == expected
+
+
+def test_every_ticker_tool_handler_resolves_through_chat_symbol():
+    """Brace-bound to the handler closures: each `args.get("ticker"...)` read inside a
+    `_handle_*_tool` must pass through `_chat_symbol`, not a bare `.upper()`."""
+    import inspect
+    import re
+    src = inspect.getsource(ChatService)
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    handlers = re.findall(
+        r"async def (_handle_\w+_tool)\(args[^\n]*\n(.*?)(?=\n        async def |\n        [a-zA-Z_]+ = )",
+        code, re.S,
+    )
+    names = [h for h, _ in handlers]
+    assert {"_handle_stock_tool", "_handle_sentiment_tool", "_handle_ticker_news_tool",
+            "_handle_price_move_tool"} <= set(names), names
+    for name, body in handlers:
+        if 'args.get("ticker"' not in body:
+            continue
+        assert "_chat_symbol(" in body, f"{name} fetches on the raw ticker"
+        assert 'args.get("ticker", "").upper()' not in body, f"{name} bypasses _chat_symbol"
+
+
+def test_the_deterministic_crypto_widget_fetches_the_pair():
+    import inspect
+    src = inspect.getsource(ChatService._deterministic_widget)
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    i = code.index('if asset_type == "CRYPTO":')
+    assert 'canonical_stored_symbol(symbol, "crypto")' in code[i:i + 300]

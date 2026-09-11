@@ -386,8 +386,12 @@ class CryptoDetailViewModel: ObservableObject {
         Task { @MainActor in
             do {
                 if wasInWatchlist {
+                    // The COIN is stored as the pair (`BTCUSD`, migration 160); say so, or
+                    // the backend's raw-first lookup removes a same-ticker ETF/REIT row.
                     try await apiClient.request(
-                        endpoint: .removeFromWatchlist(stockId: cryptoSymbol)
+                        endpoint: .removeFromWatchlist(
+                            stockId: CryptoSymbol.pair(cryptoSymbol), assetType: "crypto"
+                        )
                     )
                     print("✅ [CryptoDetailVM] Removed \(cryptoSymbol) from watchlist")
                 } else {
@@ -425,7 +429,12 @@ class CryptoDetailViewModel: ObservableObject {
                 print("⏭️ [CryptoDetailVM] Watchlist snapshot discarded — user toggled during the fetch")
                 return
             }
-            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == cryptoSymbol.uppercased() }
+            // The coin's row is the PAIR form (`BTCUSD`) since migration 160; `cryptoSymbol`
+            // is always bare here. Comparing bare-to-stored never matched, so a saved coin
+            // rendered an empty star and every tap re-added it (409). Match the pair
+            // EXACTLY — a bare `BTC` row is the Grayscale ETF, not this screen's asset.
+            let stored = CryptoSymbol.pair(cryptoSymbol)
+            self.isFavorite = watchlist.contains { $0.ticker.uppercased() == stored }
         } catch {
             print("⚠️ [CryptoDetailVM] Watchlist check failed: \(error)")
         }

@@ -196,7 +196,10 @@ struct TickerChartView: View {
                 MainChartCanvas(
                     pricePoints: visiblePoints,
                     isPositive: isPositive,
-                    chartType: chartSettings.chartType,
+                    // A persisted Candle/Bar preference is coerced on a source that has no
+                    // OHLC (crypto) — see `ChartAssetContext.allowedChartTypes`.
+                    chartType: assetContext.allowedChartTypes.contains(chartSettings.chartType)
+                        ? chartSettings.chartType : .line,
                     overlays: chartSettings.activeOverlays,
                     showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
@@ -260,7 +263,7 @@ struct TickerChartView: View {
                 }
 
                 // Interval selector — only show when multiple intervals are available
-                if selectedRange.allowedIntervals.count > 1 {
+                if assetContext.allowedIntervals(for: selectedRange).count > 1 {
                     // Custom Liquid Glass dropdown (see intervalMenuOverlay) —
                     // matches the Assets-tab Sort popup. Not a native Menu (can't
                     // shrink/restyle it) and not a popover (has a beak).
@@ -361,7 +364,7 @@ struct TickerChartView: View {
     private func intervalMenuOverlay(anchor: Anchor<CGRect>?, geo: GeometryProxy) -> some View {
         if showIntervalMenu, let anchor {
             let rect = geo[anchor]
-            let intervals = selectedRange.allowedIntervals
+            let intervals = assetContext.allowedIntervals(for: selectedRange)
             let width = Self.intervalMenuWidth
             let panelHeight = CGFloat(intervals.count) * Self.intervalRowHeight + AppSpacing.sm
             // Right-align to the chip, clamped to the chart bounds.

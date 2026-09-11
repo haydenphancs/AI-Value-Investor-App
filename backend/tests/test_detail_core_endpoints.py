@@ -44,6 +44,8 @@ from _price_fakes import PriceFromFMPFake
 _INDEX_KEYS = {
     "symbol", "index_name", "current_price", "price_change",
     "price_change_percent", "market_status", "chart_data",
+    # `pe_known` pattern on the header change (2026-09-11): iOS decodes `Bool?`.
+    "change_known",
 }
 _ETF_KEYS = {
     "symbol", "name", "current_price", "price_change",

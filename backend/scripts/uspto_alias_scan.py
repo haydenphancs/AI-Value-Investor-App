@@ -93,10 +93,10 @@ def candidate_alternates(name: str, ticker: str) -> List[str]:
 
 
 def load_universe_top_n(top_n: int) -> List[Tuple[str, float]]:
-    path = REPO / "backend" / "data" / "industry_universe.json"
-    data = json.loads(path.read_text())
+    from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe
+
     rows: List[Tuple[str, float]] = []
-    for ind in data.get("industries", []) or []:
+    for ind in load_universe(INDUSTRY_UNIVERSE):
         for tkr, cap in (ind.get("market_caps") or {}).items():
             if cap and tkr:
                 rows.append((tkr.upper(), float(cap)))

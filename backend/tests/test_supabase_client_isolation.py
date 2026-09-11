@@ -125,14 +125,40 @@ def test_no_auth_call_on_the_service_role_client():
     )
 
 
+def _handlers(src: str) -> list[tuple[str, str]]:
+    """(name, full text) for every top-level def/async def, comments stripped."""
+    body = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    parts = re.split(r"(?m)^(?=(?:async )?def )", body)
+    out = []
+    for part in parts:
+        m = re.match(r"(?:async )?def (\w+)", part)
+        if m:
+            out.append((m.group(1), part))
+    return out
+
+
 def test_every_handler_that_runs_auth_has_the_isolated_dependency():
+    """PER HANDLER, not a count. `_auth_of()` falls back to the service-role singleton when
+    `auth_client` was not injected, so ONE forgotten dependency on a new sign-in route is a
+    sign-in on the shared client. Before migration 163 that was a silent wrong-row read for
+    every later request; after it, `authenticated` holds no table privilege at all, so it is
+    a process-wide 42501 until restart. The old `count(...) >= 8` heuristic passed on that."""
     src = (_APP / "api" / "v1" / "endpoints" / "auth.py").read_text(encoding="utf-8")
     assert "get_auth_client" in src
     # Every auth.* call goes through the resolver, which prefers the injected isolated client.
     assert "_auth_of(auth_client, supabase).auth." in src
-    assert src.count("auth_client: Client = Depends(get_auth_client)") >= 8, (
-        "a handler that performs auth.* is missing the isolated-client dependency"
+    missing = [
+        name for name, text in _handlers(src)
+        if "_auth_of(" in text and name != "_auth_of"
+        and "auth_client: Client = Depends(get_auth_client)" not in text
+    ]
+    assert not missing, (
+        "handler(s) that run auth.* without the isolated-client dependency — each one is a "
+        f"sign-in on the service-role singleton: {missing}"
     )
+    # Anti-vacuity: the scan must actually see the handlers it is protecting.
+    covered = [n for n, t in _handlers(src) if "_auth_of(" in t and n != "_auth_of"]
+    assert len(covered) >= 8, f"the handler scan found only {covered}"
 
 
 def test_the_auth_client_never_reads_tables():

@@ -97,8 +97,18 @@ def market_chart_to_rows(
                 if v is not None:
                     vol_by_ts[pair[0]] = v
 
-    rows: List[Dict[str, Any]] = []
-    seen: set = set()
+    # One row per (ET) date; on a repeat the NEWEST timestamp wins.
+    #
+    # ⚠️ "Keep the first" was wrong for the daily series. CoinGecko's daily `market_chart`
+    # is one 00:00 UTC print per day PLUS the current price as the last element. The
+    # midnight print maps to 20:00/19:00 ET of the PREVIOUS calendar day, so from 00:00
+    # UTC until midnight ET (20:00–24:00 EDT) the midnight bar and the live point share
+    # an ET date — and keeping the first DROPPED the live point. The chart's last close,
+    # `_compute_return`'s `prices[-1]`, the sentiment 7d arm and the tracking daily path
+    # were then 4–5 hours stale beside a live header every evening. For an intraday
+    # series bucketed into days the newest point is equally the right survivor (the
+    # day's last observed price, not its first).
+    by_date: Dict[str, tuple] = {}
     for pair in prices:
         if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
@@ -107,12 +117,16 @@ def market_chart_to_rows(
         if close is None or close <= 0:
             continue
         date = epoch_ms_to_et(ts, intraday=intraday)
-        if date is None or date in seen:
-            # A daily series built from an intraday feed can repeat a date; last wins is
-            # wrong for a chart, so keep the FIRST and skip the rest.
+        if date is None:
             continue
-        seen.add(date)
-        rows.append({"date": date, "close": close, "volume": vol_by_ts.get(ts)})
+        try:
+            order = float(ts)
+        except (TypeError, ValueError):
+            continue
+        prev = by_date.get(date)
+        if prev is None or order > prev[0]:
+            by_date[date] = (order, {"date": date, "close": close, "volume": vol_by_ts.get(ts)})
+    rows = [row for _, row in by_date.values()]
     rows.sort(key=lambda r: r["date"])
     return rows
 

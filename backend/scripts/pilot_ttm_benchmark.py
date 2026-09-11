@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from app.integrations.fmp import get_fmp_client
 
-_UNIVERSE = Path(__file__).resolve().parent.parent / "data" / "benchmark_universe.json"
+# The universe is resolved through `app.services.universe_data` (disk, then Storage).
 MIN_SAMPLE_SIZE = 5
 _CONCURRENCY = 12
 
@@ -124,8 +124,9 @@ async def run_industry(fmp, sem, name: str, tickers: List[str]) -> None:
 
 
 async def main(industries: List[str]) -> None:
-    uni = json.loads(_UNIVERSE.read_text())
-    by_name = {e["industry"]: e for e in uni["industries"]}
+    from app.services.universe_data import BENCHMARK_UNIVERSE, load_universe
+
+    by_name = {e["industry"]: e for e in load_universe(BENCHMARK_UNIVERSE)}
     fmp = get_fmp_client()
     sem = asyncio.Semaphore(_CONCURRENCY)
     try:

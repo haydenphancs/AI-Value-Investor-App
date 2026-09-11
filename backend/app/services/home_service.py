@@ -176,12 +176,19 @@ class HomeService:
                 )
                 if not quote:
                     return None
+                price = _finite_or_none(quote.get("price"))
+                change_pct = _finite_or_none(quote.get("changesPercentage"))
+                if price is None or price <= 0 or change_pct is None:
+                    # `price_service` hands back PRESENT keys holding None when the day
+                    # change is genuinely unknown (no prior close) — a `$0.00 / 0.00%`
+                    # card would be a fabricated fact. Drop the card instead.
+                    return None
                 return MarketTickerResponse(
                     name=cfg["name"],
                     symbol=cfg["symbol"],
                     type=cfg["type"],
-                    price=round(float(quote.get("price") or 0), 2),
-                    change_percent=round(float(quote.get("changesPercentage") or 0), 2),
+                    price=round(price, 2),
+                    change_percent=round(change_pct + 0.0, 2),
                     sparkline_data=sparkline,
                 )
             except Exception as exc:
@@ -275,28 +282,34 @@ class HomeService:
             if not quote:
                 return None
 
-            change = float(quote.get("changesPercentage") or 0)
-            price = float(quote.get("price") or 0)
+            change = _finite_or_none(quote.get("changesPercentage"))
+            price = _finite_or_none(quote.get("price"))
+            if change is None or price is None or price <= 0:
+                # Unknown move → no headline, never "Markets Trade Sideways Near 0".
+                return None
 
+            # The number is SPY's — name the fund, not the index (a fund share near $650
+            # under the heading "S&P 500" beside an index near 6,600 is the Phase 4
+            # labelling rule broken).
             if change > 0.5:
                 sentiment = "Bullish"
-                headline = f"Markets Rally as S&P 500 Gains {abs(change):.1f}%"
+                headline = f"Markets Rally as S&P 500 ETF Gains {abs(change):.1f}%"
                 bullets = [
-                    f"The S&P 500 is trading at {price:,.0f}, up {change:.2f}% in today's session.",
+                    f"SPY (S&P 500 ETF) is trading at {price:,.2f}, up {change:.2f}% in today's session.",
                     "Broad market strength suggests positive investor sentiment across sectors.",
                 ]
             elif change < -0.5:
                 sentiment = "Bearish"
-                headline = f"Markets Pull Back as S&P 500 Drops {abs(change):.1f}%"
+                headline = f"Markets Pull Back as S&P 500 ETF Drops {abs(change):.1f}%"
                 bullets = [
-                    f"The S&P 500 has declined to {price:,.0f}, down {abs(change):.2f}% today.",
+                    f"SPY (S&P 500 ETF) has declined to {price:,.2f}, down {abs(change):.2f}% today.",
                     "Investors appear cautious amid market volatility.",
                 ]
             else:
                 sentiment = "Neutral"
-                headline = f"Markets Trade Sideways Near {price:,.0f}"
+                headline = f"Markets Trade Sideways, S&P 500 ETF Near {price:,.2f}"
                 bullets = [
-                    f"The S&P 500 is holding steady at {price:,.0f} with a {change:+.2f}% move.",
+                    f"SPY (S&P 500 ETF) is holding steady at {price:,.2f} with a {change:+.2f}% move.",
                     "Mixed signals from economic data keep markets range-bound.",
                 ]
 

@@ -91,9 +91,8 @@ DEFAULT_REFRESH_RECENT = _REFRESH_RECENT_QUARTERS   # 2
 RETRY_AFTER_DEFAULT = 60    # seconds to back off on FMPRateLimitException
 TARGET_QUARTERS = 8
 
-# industry_universe.json lives at backend/data/ — from backend/scripts/ that is
-# parents[1] / "data" (parents[0] == scripts, parents[1] == backend).
-_UNIVERSE_PATH = Path(__file__).resolve().parents[1] / "data" / "industry_universe.json"
+# industry_universe.json is resolved through `app.services.universe_data` (disk first,
+# then the private Supabase Storage bucket) — the file left the public repo.
 
 
 class _RateLimiter:
@@ -164,12 +163,12 @@ def _json_stock_caps() -> Dict[str, float]:
     5-letter fund tickers may remain. The screener path is strongly preferred.
     """
     caps: Dict[str, float] = {}
-    try:
-        data = json.loads(_UNIVERSE_PATH.read_text())
-    except Exception as exc:
-        logger.error("Failed to read %s: %s", _UNIVERSE_PATH, exc)
+    from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe
+
+    entries = load_universe(INDUSTRY_UNIVERSE)   # [] and an ERROR log when unavailable
+    if not entries:
         return caps
-    for entry in data.get("industries", []) or []:
+    for entry in entries:
         for t, c in (entry.get("market_caps") or {}).items():
             t = (t or "").upper().strip()
             if t and _TICKER_RE.match(t):
@@ -352,6 +351,17 @@ class HedgeFundFlowHydrator:
                 if _win else []
             )
         self.stats["fmp_calls"] += 2
+        if splits is None:
+            # FAIL CLOSED — mirrors `HoldersService._get_hedge_fund_quarters`: a failed
+            # derivation is not "no split", and a quarter computed on ratio 1.0 through a
+            # real split would be written to `hedge_fund_quarters` and served forever.
+            logger.warning(
+                "  %s: split lookup FAILED over %s — %d quarter(s) NOT computed or "
+                "persisted (%s); re-run to hydrate",
+                ticker, _win, len(to_fetch), ", ".join(f"{y}Q{q}" for y, q in to_fetch),
+            )
+            self.stats["errors"] += 1
+            return
         split_ratios = HoldersService._quarter_split_ratios(splits, to_fetch)
 
         results = await asyncio.gather(

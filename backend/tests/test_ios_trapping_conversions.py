@@ -71,7 +71,10 @@ def test_no_unguarded_int_conversion_of_a_double():
     fine, so this only flags conversions whose argument is a known Double-valued name.
     """
     offenders = []
-    pattern = re.compile(r"\bInt\((?!try|Int|UInt)([A-Za-z_][A-Za-z0-9_.]*)\)")
+    # `\$?` — closure shorthand: `Int($0.value)` was invisible to the old pattern (the
+    # argument had to start with a letter), and two decoded signal counts in
+    # HomeRepository shipped unguarded through exactly that form.
+    pattern = re.compile(r"\bInt\((?!try|Int|UInt)(\$?[A-Za-z_0-9][A-Za-z0-9_.]*)\)")
     for p in _swift_files():
         lines = _stripped(p).splitlines()
         for i, line in enumerate(lines):

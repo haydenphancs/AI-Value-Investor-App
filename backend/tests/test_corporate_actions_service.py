@@ -234,8 +234,11 @@ async def test_the_inflight_entry_is_always_released(svc):
 
 
 def test_window_closure_drives_the_ttl():
+    """A window is 'closed' only after `_SETTLE_DAYS`: a row persisted the evening a
+    quarter ends can freeze a not-yet-restated split as 'no split' for a whole quarter."""
     today = date.today()
-    assert mod._window_is_closed((today - timedelta(days=1)).isoformat()) is True
+    assert mod._window_is_closed((today - timedelta(days=mod._SETTLE_DAYS + 1)).isoformat()) is True
+    assert mod._window_is_closed((today - timedelta(days=1)).isoformat()) is False
     assert mod._window_is_closed(today.isoformat()) is False
     assert mod._window_is_closed(None) is False
     assert mod._window_is_closed("not-a-date") is False

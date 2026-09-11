@@ -295,9 +295,37 @@ async def delete_holding(
     To remove the ticker from the watchlist entirely, call
     ``DELETE /api/v1/watchlist`` instead.
     """
-    supabase.table("watchlist_items").update(
-        {"shares": None, "market_value": None}
-    ).eq("user_id", user["id"]).eq("ticker", ticker.upper()).execute()
+    # Raw first, then the canonical spelling — same rule as the PUT above. This used to
+    # match one spelling and answer "Holding cleared" on zero rows: a coin's row is
+    # "BTCUSD", so clearing "BTC" was a silent no-op.
+    raw_ticker = ticker.upper()
+    canonical = canonical_stored_symbol(raw_ticker, None)
+    result = (
+        supabase.table("watchlist_items")
+        .update({"shares": None, "market_value": None})
+        .eq("user_id", user["id"])
+        .eq("ticker", raw_ticker)
+        .execute()
+    )
+    if not result.data and canonical != raw_ticker:
+        result = (
+            supabase.table("watchlist_items")
+            .update({"shares": None, "market_value": None})
+            .eq("user_id", user["id"])
+            .eq("ticker", canonical)
+            .execute()
+        )
+    if not result.data:
+        logger.warning(
+            "[Tracking] delete_holding matched no row for %s (nor %s) user=%s",
+            raw_ticker, canonical, user["id"],
+        )
+        return make_error_response(
+            ErrorCode.TICKER_NOT_FOUND,
+            status_code=404,
+            message=f"Holding not found for {raw_ticker}",
+            user_message="That holding is no longer in your portfolio.",
+        )
 
     return {"message": "Holding cleared"}
 
@@ -339,13 +367,24 @@ async def bulk_update_holdings(
             "shares": item.shares,
             "market_value": item.market_value,
         }
+        # Raw first, then the canonical spelling (a coin's row is "BTCUSD").
+        raw_ticker = ticker
+        canonical = canonical_stored_symbol(raw_ticker, None)
         result = (
             supabase.table("watchlist_items")
             .update(updates)
             .eq("user_id", user["id"])
-            .eq("ticker", ticker)
+            .eq("ticker", raw_ticker)
             .execute()
         )
+        if not result.data and canonical != raw_ticker:
+            result = (
+                supabase.table("watchlist_items")
+                .update(updates)
+                .eq("user_id", user["id"])
+                .eq("ticker", canonical)
+                .execute()
+            )
         if result.data:
             updated += 1
 

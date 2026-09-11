@@ -15,11 +15,17 @@ struct TickerPriceHeader: View {
     let priceChangePercent: String
     let isPositive: Bool
     let marketStatus: MarketStatus
+    /// `false` when the backend said the day change is UNKNOWN (`change_known`): the
+    /// caller's `isPositive` is then a placeholder, so the header must not assert a
+    /// direction — neutral colour, no arrow, no flash. Defaults `true` for the callers
+    /// whose models carry no such flag yet.
+    var changeKnown: Bool = true
 
     @State private var priceFlashColor: Color?
 
     private var changeColor: Color {
-        isPositive ? AppColors.bullish : AppColors.bearish
+        guard changeKnown else { return AppColors.textSecondary }
+        return isPositive ? AppColors.bullish : AppColors.bearish
     }
 
     private var arrowIcon: String {
@@ -49,9 +55,12 @@ struct TickerPriceHeader: View {
 
                 // Price change
                 HStack(spacing: 4) {
-                    Image(systemName: arrowIcon)
-                        .font(AppTypography.iconTiny).fontWeight(.semibold)
-                        .foregroundColor(changeColor)
+                    // An arrow asserts a direction; an unknown change has none.
+                    if changeKnown {
+                        Image(systemName: arrowIcon)
+                            .font(AppTypography.iconTiny).fontWeight(.semibold)
+                            .foregroundColor(changeColor)
+                    }
 
                     Text("\(priceChange) \(priceChangePercent)")
                         .font(AppTypography.labelSmall)
@@ -65,6 +74,7 @@ struct TickerPriceHeader: View {
         .padding(.horizontal, AppSpacing.lg)
         .onChange(of: price) { _, _ in
             // Brief color flash on price update (green for positive, red for negative)
+            guard changeKnown else { return }
             priceFlashColor = isPositive ? AppColors.bullish : AppColors.bearish
             withAnimation(.easeOut(duration: 0.6)) {
                 priceFlashColor = nil
@@ -93,6 +103,18 @@ struct TickerPriceHeader: View {
             priceChangePercent: "(-1.35%)",
             isPositive: false,
             marketStatus: .open
+        )
+
+        // Unknown change: em dash, no arrow, neutral — never a red decline.
+        TickerPriceHeader(
+            companyName: "S&P 500",
+            symbol: "^GSPC",
+            price: "6,012.34",
+            priceChange: "—",
+            priceChangePercent: "",
+            isPositive: false,
+            marketStatus: .open,
+            changeKnown: false
         )
     }
     .padding(.vertical)

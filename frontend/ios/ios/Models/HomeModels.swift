@@ -54,6 +54,27 @@ enum MarketTickerType: String, Codable, Hashable {
     case crypto     // Bitcoin, Ethereum → CryptoDetailView
     case commodity  // Gold, Oil, Silver → CommodityDetailView
     case etf        // ETFs → ETFDetailView
+
+    /// Resolve a wire `type` string the way the backend's `resolve_asset_class` does: a
+    /// SPECIFIC class ("crypto", "commodity", "index", "etf" — and the search route's
+    /// "fund", which is the ETF screen) is trusted; anything else, including "Stock" (the
+    /// DB column default the backend used to publish verbatim for every row) falls back
+    /// to the SYMBOL — never to `.stock` blindly. A starred coin arrived as `type: "Stock"`
+    /// for `BTCUSD`, decoded as `.stock`, and its tap opened the FMP-blocked equity screen.
+    /// The symbol still says what it is: `^GSPC` is an index, `BTCUSD` a coin, `GCUSD` a
+    /// commodity code.
+    static func resolve(_ raw: String?, symbol: String) -> MarketTickerType {
+        let normalized = (raw ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if normalized == "fund" { return .etf }
+        if normalized != "stock", let known = MarketTickerType(rawValue: normalized) {
+            return known
+        }
+        let sym = symbol.trimmingCharacters(in: .whitespaces).uppercased()
+        if sym.hasPrefix("^") { return .index }
+        if MarketHoursUtil.commoditySymbols.contains(sym) { return .commodity }
+        if sym.count > 3, sym.hasSuffix("USD") || sym.hasSuffix("USDT") { return .crypto }
+        return .stock
+    }
 }
 
 // MARK: - Market Ticker

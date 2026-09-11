@@ -831,7 +831,11 @@ async def list_chat_sessions(
         supabase.table("chat_sessions")
         .select(_SESSION_LIST_COLUMNS)
         .eq("user_id", user["id"])
-        .order("last_message_at", desc=True, nullsfirst=False)
+        # No NULLS clause: `last_message_at` is NOT NULL DEFAULT now() (chat_sessions DDL),
+        # so `nullsfirst=False` bought nothing semantically and cost the planner the
+        # (user_id, last_message_at DESC) index — DESC defaults to NULLS FIRST, and a
+        # mismatched NULLS flag forces an explicit sort of the user's whole list per page.
+        .order("last_message_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()
     )

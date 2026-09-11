@@ -482,12 +482,22 @@ def recent_quarters(count: int = 4, *, today: Optional[date] = None) -> List[Tup
     return list(reversed(out))
 
 
+#: Calendar days a window must have been closed for before its derivation is persisted.
+#: The Tier-2 row has NO expiry (a closed window's ratios are invariant under FMP's later
+#: rescaling), so it must not be written from series that may not yet carry the window's
+#: final bar restated: at 00:30 UTC on the day after a quarter end — 20:30 ET, minutes
+#: after the close — a split effective on that last session can still be absent from
+#: `/full`, and a `[]` derived then would be frozen as "no split" for the quarter every
+#: Holders build keys on. Two days covers the vendor's restatement lag with a weekend.
+_SETTLE_DAYS = 2
+
+
 def _window_is_closed(to_date: Optional[str]) -> bool:
-    """True when the window ends strictly in the past, so no new action can land in it."""
+    """True when the window ended at least `_SETTLE_DAYS` ago, so its bars are final."""
     if not to_date:
         return False
     try:
-        return date.fromisoformat(str(to_date)[:10]) < date.today()
+        return date.fromisoformat(str(to_date)[:10]) < date.today() - timedelta(days=_SETTLE_DAYS)
     except (TypeError, ValueError):
         return False
 
@@ -820,11 +830,23 @@ class CorporateActionsService:
 
     async def get_split_rows(
         self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Splits in FMP's own ``/splits`` row shape.
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Splits in FMP's own ``/splits`` row shape — or **None** when it could not look.
 
         ``[{"date": "2024-06-10", "numerator": 10, "denominator": 1}, ...]``, newest first
         to match what the retired endpoint returned.
+
+        ⚠️ ``None`` (a failed derivation: a price leg raised, a symbol mismatch, <2 bars)
+        is NOT ``[]`` (looked, no split). This used to collapse the two via
+        :meth:`get_adjustment_events`'s ``or []``, and the collapse was load-bearing in
+        the worst way: `whale_service` and `holders_service` run TWO derivations per
+        ticker — this one for the ratio, `has_unclassified_adjustment` for the backstop
+        gate — and a failure is deliberately cached in neither tier, so the first could
+        degrade (one 429 in a 25-ticker burst) while the second, a fresh re-derive,
+        succeeded. Ratio 1.0 (no restatement) AND gate False (a cleanly classified 10:1
+        is not "unclassified") is the one combination that writes the raw 10x share diff
+        to `whale_trades` as a BOUGHT. Callers treat ``None`` as "could not check" and arm
+        the magnitude backstop, exactly as they do for a raised exception.
 
         Emitting FMP's shape rather than a new one is deliberate: it lets
         ``holders_service._quarter_split_ratios`` and
@@ -835,7 +857,9 @@ class CorporateActionsService:
         parsing this shape must never see a row it cannot interpret. Use
         :meth:`get_adjustment_events` for the full picture.
         """
-        events = await self.get_adjustment_events(symbol, from_date, to_date, kind="split")
+        events = await self._events_or_none(symbol, from_date, to_date, kind="split")
+        if events is None:
+            return None
         return [
             {"symbol": (symbol or "").strip().upper(),
              "date": ev.date,

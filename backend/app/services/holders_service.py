@@ -501,7 +501,7 @@ class HoldersService:
         historical_prices = _unwrap(
             historical_prices, "Historical prices", [], critical=True
         )
-        stock_splits = _unwrap(stock_splits, "Stock splits", [])
+        stock_splits = _unwrap(stock_splits, "Stock splits", None)
         # critical=True on all four: these now raise FMPPartialPageException when
         # the paginated feed loses a page, and a truncated congressional set must
         # NOT be pinned into the 24h Supabase cache — that would freeze a
@@ -539,8 +539,12 @@ class HoldersService:
         # mechanically, so `changeInSharesNumber` / `numberOf13FsharesChange` report the
         # multiplication as if institutions had bought. `_quarter_split_ratios` is the
         # same helper the quarterly chart uses — this is the missing half.
+        # `None` = the derivation could not be performed (see `get_split_rows`): no ratio,
+        # so no restatement — the backstop below MUST be armed regardless of what the
+        # separate `has_unclassified_adjustment` re-derive says.
+        split_lookup_failed = stock_splits is None
         inst_split_ratio = self._quarter_split_ratios(
-            stock_splits, [(data_year, data_quarter)]
+            stock_splits or [], [(data_year, data_quarter)]
         ).get((data_year, data_quarter), 1.0)
         # Did anything happen IN THE DATA QUARTER that the classifier declined to name?
         # Only then does the per-holder magnitude backstop apply — see the comment at its
@@ -580,6 +584,8 @@ class HoldersService:
                 "holders: unclassified-adjustment probe failed for %s (%s: %s) — arming "
                 "the magnitude backstop (fail-closed)", ticker, type(e).__name__, e,
             )
+            inst_unclassified = True
+        if split_lookup_failed:
             inst_unclassified = True
 
         recent = self._build_recent_activities(
@@ -2138,11 +2144,25 @@ class HoldersService:
             # the quarter boundary so a split on a quarter's first trading day is not
             # missed when that boundary falls on a weekend.
             _win = window_for_quarters(missing)
-            split_ratios = HoldersService._quarter_split_ratios(
+            split_rows = (
                 await corporate_actions_source(self).get_split_rows(ticker, *_win)
-                if _win else [],
-                missing,
+                if _win else []
             )
+            if split_rows is None:
+                # FAIL CLOSED. `None` is "could not look" (see `get_split_rows`), and
+                # `or []` turned it into ratio 1.0 for every quarter — so a 10:1 split
+                # quarter booked institutions as buyers of ~9x their position, and the
+                # row was PERSISTED and reused as `existing` on every later call. The
+                # quarters are withheld from this response instead (they render as
+                # no-activity), nothing is written, and the next call re-derives.
+                logger.warning(
+                    "hedge_fund_quarters: split lookup FAILED for %s over %s — %d missing "
+                    "quarter(s) withheld (%s), not computed and not persisted",
+                    ticker, _win, len(missing),
+                    ", ".join(f"{y}Q{q}" for y, q in missing),
+                )
+                missing = []
+            split_ratios = HoldersService._quarter_split_ratios(split_rows or [], missing)
             fmp_results = await asyncio.gather(
                 *[
                     self.fmp.get_institutional_ownership_for_quarter(

@@ -24,7 +24,8 @@ from app.services.chart_helper import (
     sparkline_precision,
     _finite_or_none,
 )
-from app.services.asset_class import symbol_trades_extended_hours
+from app.services.asset_class import resolve_asset_class, symbol_trades_extended_hours
+from app.services.crypto_names import display_name_for_row
 from app.database import get_supabase
 from app.utils.supabase_errors import retry_idempotent_async
 from app.schemas.tracking import (
@@ -399,6 +400,8 @@ class TrackingService:
                         ticker, quote.get("price"), quote.get("changePercentage"),
                     )
 
+                price_known = price_f is not None
+                change_known = change_pct is not None
                 price = price_f if price_f is not None else 0
                 # `+ 0.0` collapses signed zero: round(-0.001, 2) is -0.0, and on
                 # iOS `-0.0 >= 0` is true, so the row would show a green up-arrow
@@ -416,9 +419,13 @@ class TrackingService:
                 assets.append(
                     TrackedAssetResponse(
                         ticker=ticker,
-                        company_name=item.get("company_name") or quote.get("name") or ticker,
+                        company_name=display_name_for_row(
+                            ticker, item.get("company_name") or quote.get("name"),
+                        ),
                         price=round(float(price), 2),
                         change_percent=round(float(change_pct), 2) + 0.0,
+                        price_known=price_known,
+                        change_known=change_known,
                         previous_close=round(prev_close_f, 2) if prev_close_f else None,
                         sparkline_data=sparkline,
                         spark_from=spark_from,
@@ -433,7 +440,9 @@ class TrackingService:
                         market_cap=market_cap_f if market_cap_f else None,
                         shares=_finite_or_none(shares),
                         market_value=_finite_or_none(stored_value),
-                        asset_type=item.get("asset_type"),
+                        # RESOLVED, not the raw column: the 'Stock' default was published
+                        # verbatim for every coin/ETF row (see home_dashboard_service).
+                        asset_type=resolve_asset_class(ticker, item.get("asset_type")),
                     )
                 )
             except Exception as exc:
@@ -443,6 +452,8 @@ class TrackingService:
                     TrackedAssetResponse(
                         ticker=ticker,
                         company_name=item.get("company_name") or ticker,
+                        price_known=False,
+                        change_known=False,
                     )
                 )
 

@@ -15,7 +15,12 @@ from app.dependencies import get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.services.tracking_service import invalidate_feed_cache
 from app.services._classification_common import classification_from_profile
-from app.services.asset_class import canonical_stored_symbol
+from app.services.asset_class import (
+    canonical_stored_symbol,
+    resolve_asset_class,
+    uses_coingecko_price,
+)
+from app.services.crypto_names import crypto_display_name
 from app.schemas.watchlist import (
     AddToWatchlistRequest,
     RemoveFromWatchlistRequest,
@@ -23,6 +28,9 @@ from app.schemas.watchlist import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The wire vocabulary iOS switches on (`MarketTickerType`, `AssetDetailRouter`).
+_WIRE_CLASSES = frozenset({"stock", "etf", "index", "commodity", "crypto"})
 
 router = APIRouter()
 
@@ -124,9 +132,33 @@ async def add_to_watchlist(
     company_name = ticker
     logo_url = None
     classification: dict = {}
+    # What this row IS, lowercase, in the wire vocabulary iOS's `MarketTickerType` and
+    # `AssetDetailRouter` switch on ("stock" | "etf" | "index" | "commodity" | "crypto").
+    #
+    # 🔴 This column was NEVER written by this endpoint. It kept its 'Stock' default for
+    # every row — including every coin/ETF starred from its own screen — and both Home's
+    # watchlist strip and the Tracking feed published that default verbatim, so tapping a
+    # starred Bitcoin opened the EQUITY screen for "BTCUSD" (an FMP-blocked symbol → error).
+    # Migration 160 backfilled `asset_type='crypto'` for rows added BEFORE it shipped; this
+    # is the write path it corrected around. `resolve_asset_class` honours the client's
+    # declaration and otherwise decides from the symbol.
+    declared = (request.asset_type or "").strip().lower()
+    # The CLIENT's declaration is authoritative on the write path — it is the one place
+    # that knows which of two same-ticker assets the user tapped. `resolve_asset_class`
+    # deliberately distrusts a stored "stock" (the column default), which is right on the
+    # READ side but would override an explicit "stock" here.
+    asset_type = declared if declared in _WIRE_CLASSES else resolve_asset_class(ticker, None)
+    is_coin = uses_coingecko_price(ticker)
+    if is_coin:
+        # A coin has no FMP company profile — `profile?symbol=BTCUSD` is crypto data we do
+        # not licence (and answers 402 at the symbol level on some endpoints). The name is
+        # the coin's, from the app's own table; sector/industry/market cap stay NULL, which
+        # is the honest answer for an asset that has none.
+        company_name = crypto_display_name(ticker) or ticker
+        asset_type = "crypto"
     try:
         fmp = get_fmp_client()
-        profile = await fmp.get_company_profile(ticker)
+        profile = None if is_coin else await fmp.get_company_profile(ticker)
         if profile:
             company_name = profile.get("companyName", ticker)
             logo_url = profile.get("image")
@@ -136,7 +168,8 @@ async def add_to_watchlist(
                 ticker, company_name,
                 ", ".join(f"{k}={v}" for k, v in classification.items()) or "unclassified",
             )
-        else:
+        elif not is_coin:
+            # A coin's profile is deliberately skipped (CoinGecko names it), not missing.
             logger.warning("[Watchlist] FMP returned no profile for %s", ticker)
     except Exception as exc:
         logger.warning("[Watchlist] FMP profile fetch failed for %s: %s", ticker, exc)
@@ -147,6 +180,7 @@ async def add_to_watchlist(
         "ticker": ticker,
         "company_name": company_name,
         "logo_url": logo_url,
+        "asset_type": asset_type,
     }
     # Only keys that actually resolved — `classification_from_profile` never yields a
     # key mapped to None, so this cannot blank a column on a partial FMP response.
@@ -296,31 +330,41 @@ async def remove_from_watchlist(
     # once would be wrong — a user can legitimately hold the coin AND the security.
     user_id = user["id"]
     raw_ticker = (request.stock_id or "").strip().upper()
-    canonical = canonical_stored_symbol(request.stock_id, getattr(request, 'asset_type', None))
-    logger.info("[Watchlist] DELETE ticker=%s (canonical=%s) for user=%s",
-                raw_ticker, canonical, user_id)
+    declared = (request.asset_type or "").strip().lower()
+    canonical = canonical_stored_symbol(request.stock_id, request.asset_type)
+    # Which spelling to try FIRST. Undeclared: raw, then canonical (the shipped client
+    # sends the bare symbol whichever asset it means, and a bare row can only be the
+    # security). Declared "crypto": the PAIR first — the crypto screen's star sends the
+    # bare symbol for the COIN, and with both rows present the raw-first order deleted
+    # the user's ETF/REIT instead, silently, and left the star filled.
+    first, second = (canonical, raw_ticker) if declared == "crypto" else (raw_ticker, canonical)
+    logger.info("[Watchlist] DELETE ticker=%s (canonical=%s, declared=%s) for user=%s",
+                raw_ticker, canonical, declared or "-", user_id)
 
+    # Bound BEFORE the try: the except arm below names it, and binding it inside the try
+    # (after the first .execute()) made a Supabase failure raise UnboundLocalError out of
+    # the handler itself — the ERROR log was lost and the client got a bare 500.
+    ticker = first
     try:
         result = (
             supabase.table("watchlist_items")
             .delete()
             .eq("user_id", user_id)
-            .eq("ticker", raw_ticker)
+            .eq("ticker", first)
             .execute()
         )
-        ticker = raw_ticker
-        if not result.data and canonical != raw_ticker:
+        if not result.data and second != first:
             logger.info("[Watchlist] no %s row for user=%s — retrying as %s",
-                        raw_ticker, user_id, canonical)
+                        first, user_id, second)
             result = (
                 supabase.table("watchlist_items")
                 .delete()
                 .eq("user_id", user_id)
-                .eq("ticker", canonical)
+                .eq("ticker", second)
                 .execute()
             )
             if result.data:
-                ticker = canonical
+                ticker = second
         if not result.data:
             logger.warning(
                 "[Watchlist] Ticker %s (nor %s) found in watchlist for user=%s",
@@ -335,8 +379,11 @@ async def remove_from_watchlist(
         _delete_through_from_groups(supabase, user_id, ticker)
         return {"message": f"{ticker} removed from watchlist"}
     except Exception as exc:
-        logger.error("[Watchlist] DB error deleting %s: %s", ticker, exc)
-        raise HTTPException(status_code=500, detail=f"Failed to remove {ticker}: {exc}")
+        logger.error(
+            "[Watchlist] %s deleting %s (canonical=%s) for user=%s: %s",
+            type(exc).__name__, raw_ticker, canonical, user_id, exc, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to remove {raw_ticker}: {exc}")
 
 
 def _ticker_in_active_group(supabase: Client, user_id: str, ticker: str) -> bool:

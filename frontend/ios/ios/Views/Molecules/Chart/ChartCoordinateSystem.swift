@@ -127,7 +127,8 @@ enum TradingDayHelper {
 
         /// US equities / ETFs / indices: 09:30 – 16:00 ET.
         static let regular = SessionWindow(openMinute: 9 * 60 + 30, closeMinute: 16 * 60)
-        /// Crypto + commodity futures: the whole calendar day.
+        /// Crypto: the whole calendar day. (Commodity futures used to share it; since
+        /// Phase 4 a commodity screen is an equity-hours ETF or a once-a-day FRED print.)
         static let roundTheClock = SessionWindow(openMinute: 0, closeMinute: 24 * 60)
     }
 
@@ -137,9 +138,12 @@ enum TradingDayHelper {
     /// card and chart stop at different places.
     static func window(for context: ChartAssetContext) -> SessionWindow {
         switch context {
-        case .crypto, .commodity:
+        case .crypto:
             return .roundTheClock
-        case .stock, .etf, .index:
+        case .stock, .etf, .index, .commodity:
+            // `.commodity` moved here in Phase 4: GLD's 1D bars are 09:30–16:00 ET
+            // (fetched on the regular session), and drawing them on a 24-hour axis
+            // filled two-thirds of the width with the "now" cursor in the wrong place.
             return .regular
         }
     }

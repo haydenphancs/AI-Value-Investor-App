@@ -77,7 +77,14 @@ def get_supabase() -> Client:
             supabase_key=settings.SUPABASE_SERVICE_ROLE_KEY
         )
         _force_http1_on_postgrest(_supabase_client)
-    return _supabase_client
+    # Self-heal on every resolution, like get_auth_client / get_admin_client. Nothing is
+    # supposed to sign in on this client (tests/test_supabase_client_isolation.py pins it),
+    # but `_auth_of()` in auth.py falls back to THIS client when a handler forgets the
+    # isolated dependency, and one such sign-in used to demote every later `.table()` call
+    # in the process to that user's JWT. Since migration 163 the tables this client serves
+    # grant NOTHING to `authenticated`, so that demotion is no longer a wrong-row read but a
+    # process-wide 42501 until restart. A header write per call is the cheap insurance.
+    return _reset_to_service_role(_supabase_client)
 
 
 _auth_client: Optional[Client] = None

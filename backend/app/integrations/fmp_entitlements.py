@@ -311,9 +311,19 @@ BLOCKED_SYMBOL_PREFIXES: FrozenSet[str] = frozenset({"^"})
 
 # FMP commodity codes. All end in "USD", which is also the crypto-pair shape, so the
 # commodity set is enumerated explicitly and crypto is caught by the suffix rule below.
+#
+# ⚠️ Must be a SUPERSET of `asset_class._COMMODITY_SYMBOLS`. The two sets are the two
+# "commodity" authorities in the app (this one answers the LICENCE question, that one the
+# SESSION question), and they drifted: LBUSD / OJUSD / ZUSD were commodities to the
+# classifier but not blocked here. Five characters long, so the `len >= 6` suffix rule
+# below could not see them, their 2-char base is not a coin, and they are not ISO FX — so
+# `price_service.get_quote` let them out to FMP's `profile` instead of short-circuiting
+# to `{}` like GCUSD. Pinned by `tests/test_fmp_runtime_402_backstop.py`
+# (`test_every_commodity_the_classifier_knows_is_blocked_by_the_licence_guard`).
 BLOCKED_COMMODITY_SYMBOLS: FrozenSet[str] = frozenset({
     "GCUSD", "SIUSD", "CLUSD", "NGUSD", "HGUSD", "PLUSD", "PAUSD",
     "ZWUSD", "ZCUSD", "ZSUSD", "KCUSD", "SBUSD", "CCUSD", "CTUSD",
+    "LBUSD", "OJUSD", "ZUSD",
 })
 
 # Crypto pairs (BTCUSD, ETHUSD, ...) and FX pairs (EURUSD, USDJPY, ...) are both blocked.

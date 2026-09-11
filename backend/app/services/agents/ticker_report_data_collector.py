@@ -7226,7 +7226,13 @@ def _industry_universe_peers(industry: str, exclude: Set[str]) -> List[str]:
     sorted_tickers = _INDUSTRY_PEERS_CACHE.get(industry)
     if sorted_tickers is None:
         sorted_tickers = _load_industry_peers_from_universe(industry)
-        _INDUSTRY_PEERS_CACHE[industry] = sorted_tickers
+        # Memoise only a NON-EMPTY answer. `load_universe` returns `[]` while Storage is
+        # down (and retries after its own failure window), but this memo has no TTL —
+        # so an industry first asked for during a boot-time blip stayed peerless for the
+        # life of the process even after the universe recovered. An empty answer is a
+        # cheap in-memory filter to recompute; a wrong one is permanent.
+        if sorted_tickers:
+            _INDUSTRY_PEERS_CACHE[industry] = sorted_tickers
     return [t for t in sorted_tickers if t not in exclude][:20]
 
 
@@ -7718,7 +7724,7 @@ def _fallback_macro_headline(
     threat_level: str,
     risk_factors: List[Dict[str, Any]],
     *,
-    measured: bool = True,
+    measured: bool,
 ) -> str:
     """Deterministic macro headline for when the AI narrative is absent.
 
@@ -7754,7 +7760,7 @@ def _fallback_macro_brief(
     threat_level: str,
     risk_factors: List[Dict[str, Any]],
     *,
-    measured: bool = True,
+    measured: bool,
 ) -> str:
     """Deterministic intelligence brief when the AI narrative is absent — a
     one-liner grounded in the computed tier + the top factors, so the brief

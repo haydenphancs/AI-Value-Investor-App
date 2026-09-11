@@ -788,11 +788,17 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         )
 
     # ── FMP typed exceptions (from app.integrations.fmp) ──────────────
+    # `"fmpexception" in cls` is a SUBSTRING test on the class name, and it misses any
+    # subclass whose name does not literally contain it: "fmppartialpageexception" is
+    # "fmp" + "partialpageexception". That one subclasses FMPUnavailableException (a lost
+    # page of a paginated fetch) and used to fall through to REPORT_GENERATION_FAILED, a
+    # 500-class code, for a transient upstream page drop. Test the CLASS name prefix too.
     if (
         "fmpauthexception" in cls
         or "fmpratelimitexception" in cls
         or "fmpunavailableexception" in cls
         or "fmpexception" in cls
+        or "fmppartialpage" in cls
     ):
         if "ratelimit" in cls:
             return ErrorCode.FMP_RATE_LIMITED, _DEFAULT_STATUS[ErrorCode.FMP_RATE_LIMITED]

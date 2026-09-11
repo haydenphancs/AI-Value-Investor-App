@@ -40,6 +40,9 @@ struct IndexQuoteResponse: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `pe_known` pattern: False when the proxy quote carried no change, so the two
+    /// floats above are 0.0 placeholders. `nil` (older backend) reads as known.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
     let keyStatisticsGroups: [IndexKeyStatisticsGroupDTO]
@@ -49,6 +52,7 @@ struct IndexQuoteResponse: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatisticsGroups = "key_statistics_groups"
@@ -63,6 +67,9 @@ struct IndexDetailResponse: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `pe_known` pattern: False when the proxy quote carried no change, so the two
+    /// floats above are 0.0 placeholders. `nil` (older backend) reads as known.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
     let keyStatisticsGroups: [IndexKeyStatisticsGroupDTO]
@@ -78,6 +85,7 @@ struct IndexDetailResponse: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatisticsGroups = "key_statistics_groups"
@@ -322,6 +330,7 @@ extension IndexQuoteResponse {
         out.currentPrice = currentPrice
         out.priceChange = priceChange
         out.priceChangePercent = priceChangePercent
+        out.changeKnown = changeKnown ?? true
         out.marketStatus = marketStatus.resolvedMarketStatus
         out.keyStatisticsGroups = keyStatisticsGroups.map { group in
             KeyStatisticsGroup(statistics: group.statistics.map {
@@ -451,6 +460,7 @@ extension IndexDetailResponse {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: mktStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close, open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
@@ -518,6 +528,9 @@ struct IndexCoreResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `pe_known` pattern: False when the proxy quote carried no change, so the two
+    /// floats above are 0.0 placeholders. `nil` (older backend) reads as known.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     /// Empty when the server could only have produced bars by pulling the multi-thousand
     /// row daily history. The full response fills them in a moment later.
@@ -529,6 +542,7 @@ struct IndexCoreResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
     }
@@ -540,6 +554,7 @@ struct IndexCoreResponseDTO: Decodable {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: marketStatus.resolvedMarketStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close,
@@ -560,21 +575,25 @@ struct IndexCoreData {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—".
+    var changeKnown: Bool = true
     var marketStatus: MarketStatus
     /// `var`: the range pill is interactive before the full response lands, and the live
     /// socket merges ticks into the core header the same way it merges into the full one.
     var chartPricePoints: [StockPricePoint]
 
     var chartData: [Double] { chartPricePoints.map { $0.close } }
-    var isPositive: Bool { priceChange >= 0 }
+    var isPositive: Bool { changeKnown && priceChange >= 0 }
     /// Prior close, for the chart's dashed baseline — derived exactly as the full display
     /// model derives it, not shipped by the server, so there is one source for it.
     var previousClose: Double { currentPrice - priceChange }
 
     var formattedPrice: String { IndexHeaderFormat.price(currentPrice) }
-    var formattedChange: String { IndexHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? IndexHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        IndexHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? IndexHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 
@@ -595,9 +614,28 @@ protocol IndexHeaderRenderable {
     var formattedChange: String { get }
     var formattedChangePercent: String { get }
     var isPositive: Bool { get }
+    /// False → `isPositive` and `previousClose` are derived from placeholder floats.
+    var changeKnown: Bool { get }
     var marketStatus: MarketStatus { get }
     var chartPricePoints: [StockPricePoint] { get }
     var previousClose: Double { get }
+}
+
+extension IndexHeaderRenderable {
+    /// Line colour for the chart. Follows the day change when it is known; otherwise the
+    /// series' own direction, so an unknown change is never painted as a decline.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
+    }
+
+    /// The dashed baseline: nil when the change is unknown — `previousClose` would then be
+    /// `currentPrice - 0`, a baseline sitting exactly on the live price.
+    var chartPreviousClose: Double? {
+        changeKnown ? previousClose : nil
+    }
 }
 
 extension IndexDetailData: IndexHeaderRenderable {}

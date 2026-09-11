@@ -122,20 +122,21 @@ struct IndexDetailView: View {
                             priceChange: indexData.formattedChange,
                             priceChangePercent: indexData.formattedChangePercent,
                             isPositive: indexData.isPositive,
-                            marketStatus: indexData.marketStatus
+                            marketStatus: indexData.marketStatus,
+                            changeKnown: indexData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         // Chart
                         TickerChartView(
                             pricePoints: indexData.chartPricePoints,
-                            isPositive: indexData.isPositive,
+                            isPositive: indexData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .index,
                             chartDataVersion: viewModel.chartDataVersion,
                             chartEventDates: viewModel.chartEventDates,
-                            previousClose: indexData.previousClose
+                            previousClose: indexData.chartPreviousClose
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {

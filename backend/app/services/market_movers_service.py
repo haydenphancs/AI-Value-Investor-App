@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 _CLOSES_TTL = 3600.0
 # The derived universe rides the screener's own 60 s freshness.
 _UNIVERSE_TTL = 60.0
+# A universe built while the close map was DOWN (every day change unknown) is memoised
+# under its own key for this long — a herd guard, not an answer. Without it every
+# request during a Supabase outage re-ran the paged full-table read to its timeout;
+# with the normal TTL the outage was frozen as "no day changes" for a minute past its
+# end. `get_universe` has no `_inflight` of its own (only `_all_closes` does).
+_DEGRADED_UNIVERSE_TTL = 15.0
 
 # An "average move" computed from two members is noise presented as a statistic. Sectors
 # always clear this easily (11 groups over ~11k symbols); the long tail of ~150 industries
@@ -130,6 +136,11 @@ class MarketMoversService:
             rows = (
                 supabase.table("market_close_snapshot")
                 .select("symbol,close,previous_close,trade_date")
+                # ORDER BY is what makes `.range()` pages stable: without it Postgres may
+                # return rows in a different physical order between statements, and the
+                # hourly upsert rewrites every tuple while this sweep is in flight — so a
+                # page could skip or repeat symbols and the gap would be cached for 1h.
+                .order("symbol")
                 .range(start, start + PAGE - 1)
                 .execute()
             ).data or []
@@ -164,6 +175,9 @@ class MarketMoversService:
         hit = _cache_get(key, _UNIVERSE_TTL)
         if hit is not None:
             return hit
+        degraded = _cache_get(f"{key}:degraded", _DEGRADED_UNIVERSE_TTL)
+        if degraded is not None:
+            return degraded
 
         ps = price_source()
         rows, closes = await asyncio.gather(
@@ -173,17 +187,24 @@ class MarketMoversService:
             logger.warning("movers: screener universe unavailable: %s: %s",
                            type(rows).__name__, rows)
             return {}
-        if isinstance(closes, Exception):
-            logger.warning("movers: close map unavailable: %s: %s",
+        closes_failed = isinstance(closes, Exception)
+        if closes_failed:
+            logger.warning("movers: close map unavailable: %s: %s — universe served "
+                           "with unknown day changes and NOT cached, so the next call "
+                           "retries the close map",
                            type(closes).__name__, closes)
             closes = {}
 
         out: Dict[str, Dict[str, Any]] = {}
+        stale: Dict[str, str] = {}
         for symbol, r in rows.items():
             price = _finite(r.get("price"))
             if price is None or price <= 0:
                 continue
             snap = closes.get(symbol)
+            stale_date = PriceService._stale_trade_date(snap)
+            if stale_date:
+                stale[symbol] = stale_date
             prev = PriceService._pick_denominator(price, snap)
             change_pct = None
             if prev is not None and prev > 0:
@@ -198,14 +219,12 @@ class MarketMoversService:
             # printed it as "Aerospace & Defense fell 1.2% today", the exact cross-session
             # claim `widget_movers_service.industry_for`'s age gate exists to suppress —
             # and that gate was inert because these rows carried no date at all.
+            # ONE derivation, shared with `price_service._from_screener` (which stamps the
+            # same key on batch quotes for the widget), so the two can never disagree
+            # about which session a change belongs to.
             change_session: Optional[str] = None
             if change_pct is not None:
-                close = _finite((snap or {}).get("close"))
-                if close is not None and prev is not None and abs(prev - close) < 1e-12:
-                    # Denominator IS the latest stored close -> a later, live session.
-                    change_session = session_trading_date().isoformat()
-                else:
-                    change_session = str((snap or {}).get("trade_date") or "")[:10] or None
+                change_session = PriceService._change_session(prev, snap)
             # change_pct stays None when there is no usable previous close. Callers must
             # skip those rather than treat them as 0.0% — a fabricated flat day on a real
             # company is worse than an absent row.
@@ -225,7 +244,16 @@ class MarketMoversService:
                 "isEtf": bool(r.get("isEtf")),
                 "isFund": bool(r.get("isFund")),
             }
-        _cache_set(key, out)
+        if not closes_failed:
+            PriceService._report_stale_snapshots(stale, len(out))
+            _cache_set(key, out)
+        else:
+            # A Supabase blip produces a universe whose every `changePercentage` is None —
+            # byte-identical to "the snapshot table is empty". Caching it under the normal
+            # key would freeze Home movers, the sector cards and Overview's sector rank on
+            # a transient for the whole TTL. It is memoised under its OWN short key
+            # instead: a herd guard for the outage, retried within seconds of its end.
+            _cache_set(f"{key}:degraded", out)
         return out
 
     async def get_scanner_inputs(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:

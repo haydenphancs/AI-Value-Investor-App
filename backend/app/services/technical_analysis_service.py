@@ -58,6 +58,18 @@ def _analysable_symbol(ticker: str) -> str:
     inviting a retry that can never work; refusing contractually is the honest answer and
     is the code iOS already branches on.
 
+    ⚠️ Only the COMMODITY CLASS (the `GCUSD` pair form `detect_asset_class` recognises)
+    is treated as a commodity here. This helper runs on EVERY non-crypto ticker the stock
+    TA route receives, and `commodity_service._root` is a bare `.replace("USD", "")`, so
+    matching the bare root re-classified real two-letter equities: CL (Colgate-Palmolive)
+    and NG (NovaGold) were refused as "priced from a FRED series", CC (Chemours) and KC
+    (Kingsoft Cloud) as "no longer covered", and PL (Planet Labs) silently got 18
+    indicators computed on PPLT — the platinum ETF — under its own name. The commodity
+    screen always sends the pair form (the detail response's `symbol` IS `fmp_symbol`),
+    so nothing legitimate is lost by requiring it. Same rule as the shared-helper trap
+    recorded in `.claude/rules`: a helper applied to a caller whose ambiguity it does
+    not have.
+
     Imports are function-scoped: both modules are heavy and import this one's siblings.
     """
     from app.integrations.fmp import FMPNotEntitledException
@@ -68,6 +80,9 @@ def _analysable_symbol(ticker: str) -> str:
     if sym in _INDEX_PROFILES:
         return _proxy_for(sym)
 
+    if detect_asset_class(sym) != "commodity":
+        return sym
+
     from app.services.commodity_service import (
         _COMMODITY_PROFILES,
         _COMMODITY_SOURCE_ETF,
@@ -77,7 +92,7 @@ def _analysable_symbol(ticker: str) -> str:
         _source_of,
     )
     _raise_if_withdrawn(sym)
-    if _root(sym) in _COMMODITY_PROFILES or sym in _COMMODITY_PROFILES:
+    if _root(sym) in _COMMODITY_PROFILES:
         if _source_of(sym) != _COMMODITY_SOURCE_ETF:
             raise FMPNotEntitledException(
                 f"Technical analysis is unavailable for {sym}: it is priced from a FRED "

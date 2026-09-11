@@ -148,6 +148,39 @@ enum ChartAssetContext {
             return ChartTimeRange.allCases.filter { $0 != .twoYears }
         }
     }
+
+    /// The intervals the SOURCE can actually serve for a range on this asset class.
+    ///
+    /// Crypto is priced from CoinGecko, whose intraday feed has one granularity per
+    /// window (5-minute at 1D, hourly at 1W) — the picker used to offer 1min/15min/30min
+    /// and the chart drew the same bars under every label. Daily ranges keep the full
+    /// list: the backend resamples the daily series to weekly/monthly.
+    func allowedIntervals(for range: ChartTimeRange) -> [ChartInterval] {
+        switch self {
+        case .crypto:
+            switch range {
+            case .oneDay:  return [.fiveMin]
+            case .oneWeek: return [.oneHour]
+            default:       return range.allowedIntervals
+            }
+        case .stock, .etf, .index, .commodity:
+            return range.allowedIntervals
+        }
+    }
+
+    /// The chart TYPES this asset class can draw honestly.
+    ///
+    /// CoinGecko rows carry close + volume only — no open/high/low — and the candle /
+    /// bar renderers fill a missing range from the close, so every crypto candle was a
+    /// zero-height, zero-wick, always-green doji. Line and area need only the close.
+    var allowedChartTypes: [ChartType] {
+        switch self {
+        case .crypto:
+            return [.line, .area]
+        case .stock, .etf, .index, .commodity:
+            return ChartType.allCases
+        }
+    }
 }
 
 // MARK: - Chart Settings

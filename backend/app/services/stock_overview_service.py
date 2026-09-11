@@ -1632,6 +1632,7 @@ class StockOverviewService:
         # The UI label is period-agnostic ("Sector Performance"), so nothing on screen
         # claims a window this figure does not cover.
         sector_perf_value = 0.0
+        sector_perf_known = False
         if isinstance(sector_perf, list) and sector_perf:
             logger.debug("[SectorIndustry] sector_perf sample: %s", sector_perf[0])
             for sp in sector_perf:
@@ -1645,6 +1646,9 @@ class StockOverviewService:
                     )
                     if val != 0.0:
                         sector_perf_value = val
+                    # A matched sector row IS a measurement (a flat 0.0 included). An
+                    # unmatched one is not — see `sector_performance_known`.
+                    sector_perf_known = True
                     # Break on the SECTOR match, not on a non-zero value: a sector that
                     # genuinely closed flat is 0.0, and continuing past it used to leave
                     # the loop scanning rows that can never match.
@@ -1684,6 +1688,7 @@ class StockOverviewService:
             industry=industry,
             sector_performance=round(sector_perf_value, 2),
             industry_rank=industry_rank,
+            sector_performance_known=sector_perf_known,
         )
 
     # ── Company Profile ───────────────────────────────────────────
@@ -1718,6 +1723,9 @@ class StockOverviewService:
             sector=sector_industry.sector if sector_industry else profile.get("sector") or "N/A",
             industry=sector_industry.industry if sector_industry else profile.get("industry") or "N/A",
             sector_performance=sector_industry.sector_performance if sector_industry else 0.0,
+            sector_performance_known=(
+                sector_industry.sector_performance_known if sector_industry else False
+            ),
         )
 
     # ── Related Tickers ───────────────────────────────────────────

@@ -44,7 +44,9 @@ from app.services.asset_class import (
         ("NATGAS", "stock"),
         # Crypto.
         ("BTCUSD", "crypto"), ("ETHUSD", "crypto"), ("SOLUSDT", "crypto"),
-        ("BTC", "crypto"), ("DOGE", "crypto"),
+        # A BARE coin ticker is the listed SECURITY by default since migration 160 (BTC
+        # is the Grayscale ETF, LTC a REIT); the pair form is the coin. Chat opts in.
+        ("BTC", "stock"), ("DOGE", "stock"), ("LTC", "stock"),
         # Equities.
         ("AAPL", "stock"), ("ORCL", "stock"), ("CRM", "stock"), ("PLUG", "stock"),
         ("BRK-B", "stock"), ("BRK.B", "stock"),
@@ -66,7 +68,8 @@ def test_friendly_commodity_names_are_equities_unless_opted_in():
         assert detect_asset_class(alias, include_aliases=True) == "commodity", alias
     # The unambiguous futures codes are unaffected either way.
     assert detect_asset_class("GCUSD") == "commodity"
-    assert symbol_trades_extended_hours("GCUSD", "Stock") is True
+    # …and since Phase 4 a commodity screen is an equity-hours ETF or a FRED print.
+    assert symbol_trades_extended_hours("GCUSD", "Stock") is False
 
 
 def test_bare_usd_ticker_is_not_a_coin():
@@ -107,9 +110,20 @@ def test_stored_asset_type_is_a_hint_not_the_authority():
     assert resolve_asset_class("SPY", "ETF") == "etf"
 
 
-def test_only_crypto_and_commodity_trade_around_the_clock():
+def test_bare_coins_are_crypto_only_on_opt_in():
+    for sym in ("BTC", "ETH", "LTC", "DOGE"):
+        assert detect_asset_class(sym) == "stock"
+        assert detect_asset_class(sym, include_bare_coins=True) == "crypto"
+    # The opt-in never widens beyond the bare-coin set or changes the pair form.
+    assert detect_asset_class("AAPL", include_bare_coins=True) == "stock"
+    assert detect_asset_class("BTCUSD", include_bare_coins=True) == "crypto"
+
+
+def test_only_crypto_trades_around_the_clock():
+    """`commodity` left this set in Phase 4: every surviving commodity screen is an
+    equity-hours ETF or a once-a-day FRED settlement."""
     assert trades_extended_hours("crypto") is True
-    assert trades_extended_hours("commodity") is True
+    assert trades_extended_hours("commodity") is False
     assert trades_extended_hours("stock") is False
     assert trades_extended_hours("index") is False   # tracks the equity session
     assert trades_extended_hours("etf") is False
@@ -120,9 +134,10 @@ def test_only_crypto_and_commodity_trade_around_the_clock():
 def test_symbol_trades_extended_hours_end_to_end():
     # The realistic call: symbol + the useless stored default.
     assert symbol_trades_extended_hours("BTCUSD", "Stock") is True
-    assert symbol_trades_extended_hours("GCUSD", "Stock") is True
-    assert symbol_trades_extended_hours("CLUSD", None) is True
+    assert symbol_trades_extended_hours("GCUSD", "Stock") is False   # GLD, equity hours
+    assert symbol_trades_extended_hours("CLUSD", None) is False      # FRED daily print
     assert symbol_trades_extended_hours("AAPL", "Stock") is False
+    assert symbol_trades_extended_hours("BTC", "Stock") is False     # the Grayscale ETF
     assert symbol_trades_extended_hours("^GSPC", "Stock") is False
 
 

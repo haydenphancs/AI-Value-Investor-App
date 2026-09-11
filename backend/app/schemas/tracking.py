@@ -29,6 +29,13 @@ class TrackedAssetResponse(BaseModel):
     company_name: str
     price: float = 0.0
     change_percent: float = 0.0
+    # `price_service` hands back a PRESENT `None` when the day change is genuinely
+    # unknown (no usable prior close) or the price is not a price; the floats above are
+    # then 0.0 wire placeholders, NOT a flat day / a $0 stock. Shipped builds decode
+    # plain Doubles, so the floats stay; these say whether they mean anything. iOS
+    # renders "—" when False. Default True so cached rows keep their meaning.
+    price_known: bool = True
+    change_known: bool = True
     # Previous trading day's close (authoritative, from the FMP quote). The
     # sparkline's dotted baseline anchors to this; nullable for degraded rows.
     previous_close: Optional[float] = None

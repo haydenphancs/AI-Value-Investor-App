@@ -428,14 +428,20 @@ struct SectorIndustryInfo {
     let industry: String
     let sectorPerformance: Double
     let industryRank: String
+    /// False when the backend had no matching sector row: `sectorPerformance` is then
+    /// the 0.0 wire placeholder, and rendering it as "+0.00%" in green was a fabricated
+    /// flat day. Defaults true for the callers that build it from measured data.
+    var sectorPerformanceKnown: Bool = true
 
     var formattedPerformance: String {
+        guard sectorPerformanceKnown else { return "—" }
         let sign = sectorPerformance >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", sectorPerformance))%"
     }
 
     var performanceColor: Color {
-        sectorPerformance >= 0 ? AppColors.bullish : AppColors.bearish
+        guard sectorPerformanceKnown else { return AppColors.textSecondary }
+        return sectorPerformance >= 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 
@@ -450,18 +456,21 @@ struct CompanyProfile {
     let sector: String
     let industry: String
     let sectorPerformance: Double
+    var sectorPerformanceKnown: Bool = true
 
     var formattedEmployees: String {
         TickerDetailFormatters.decimalFormatter.string(from: NSNumber(value: employees)) ?? "\(employees)"
     }
 
     var formattedSectorPerformance: String {
+        guard sectorPerformanceKnown else { return "—" }
         let sign = sectorPerformance >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", sectorPerformance))%"
     }
 
     var sectorPerformanceColor: Color {
-        sectorPerformance >= 0 ? AppColors.bullish : AppColors.bearish
+        guard sectorPerformanceKnown else { return AppColors.textSecondary }
+        return sectorPerformance >= 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 

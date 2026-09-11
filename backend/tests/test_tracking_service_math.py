@@ -569,8 +569,8 @@ async def test_extended_hours_resolved_from_symbol_when_asset_type_is_useless(mo
         {"BTCUSD": "stock", "GCUSD": "", "CLUSD": "stock", "AAPL": "stock", "^GSPC": "stock"},
     )
     assert seen["BTCUSD"] is True     # 24/7
-    assert seen["GCUSD"] is True      # gold future, ~23h
-    assert seen["CLUSD"] is True      # crude future, ~23h
+    assert seen["GCUSD"] is False     # GLD since Phase 4 — equity hours, not a ~23h future
+    assert seen["CLUSD"] is False     # FRED daily settlement — no intraday session at all
     assert seen["AAPL"] is False      # equity stays clipped
     assert seen["^GSPC"] is False     # index tracks the equity session
 

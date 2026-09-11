@@ -36,6 +36,9 @@ ASSET_KEYS = {
     "spark_from", "spark_to",
     "logo_url", "sector", "country", "market_cap",
     "shares", "market_value", "asset_type",
+    # Companion bools for the two non-Optional floats above (the `pe_known` pattern):
+    # iOS decodes them as `Bool?` and renders "—" when False. Added 2026-09-11.
+    "price_known", "change_known",
 }
 ALERT_KEYS = {
     "type", "title", "description", "ticker", "company_name", "day", "month",

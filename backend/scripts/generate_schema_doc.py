@@ -86,11 +86,18 @@ EXPECTED: dict[str, int] = {
     #   +1 function                               -> account_auth_methods (156)
     # `secdef` did not move: 156's function is the one addition and it is not SECURITY
     # DEFINER-counted here.
-    "tables": 134,
-    "public": 99,
+    # Refreshed 2026-09-11 after re-dumping for 161/162. Every delta is accounted for:
+    #   +1 table / +1 policy / +1 rls / +1 public -> chat_starters (161)
+    #   +1 table / +1 policy / +1 rls / +1 public -> chat_starter_answers (162)
+    # No new function, FK, enum or view. Migrations 163-168 are written but NOT yet applied;
+    # when they are, expect: policies -3 (163) -43 (164) -20 (165), tables -8 / public -8 /
+    # rls -8 / policies -(their remaining service policies) (168), functions -1 (168 drops
+    # cleanup_expired_news_articles). Move these numbers in the same change as the re-dump.
+    "tables": 136,
+    "public": 101,
     "fk": 28,
-    "policies": 197,
-    "rls": 99,
+    "policies": 199,
+    "rls": 101,
     "functions": 43,
     "enums": 14,
     "views": 1,

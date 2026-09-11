@@ -70,8 +70,10 @@ struct TickerDetailCompanyProfileSection: View {
                 CompanyProfileRow(label: "Employees", value: profile.formattedEmployees)
                 CompanyProfileRow(label: "Headquarters", value: profile.headquarters)
                 CompanyProfileRow(label: "Sector", value: profile.sector)
+                // Same-SESSION figure (the screener-derived sector mean) — the old
+                // "(1Y)" suffix claimed a window the number never covered.
                 CompanyProfileRow(
-                    label: "Sector Performance (1Y)",
+                    label: "Sector Performance",
                     value: profile.formattedSectorPerformance,
                     valueColor: profile.sectorPerformanceColor
                 )

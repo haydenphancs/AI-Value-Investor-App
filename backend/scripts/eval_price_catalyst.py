@@ -55,7 +55,7 @@ from app.services.agents.ticker_report_data_collector import (
     _hist_list,
 )
 
-_UNIVERSE = REPO / "backend" / "data" / "industry_universe.json"
+# The universe is resolved through `app.services.universe_data` (disk, then Storage).
 _OUT_DIR = REPO / "backend" / "scripts" / "out"
 
 # Rough per-grounded-request fee (Google Search grounding). Only for the cost
@@ -93,9 +93,10 @@ _ETF_DENYLIST = {
 def _sample_tickers(n: int, seed: int) -> List[str]:
     """Liquid-name candidate pool (top market caps), shuffled. We over-sample
     because many tickers won't have a big move in the window."""
-    data = json.loads(_UNIVERSE.read_text())
+    from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe
+
     caps: Dict[str, float] = {}
-    for ind in data.get("industries", []):
+    for ind in load_universe(INDUSTRY_UNIVERSE):
         for t, c in (ind.get("market_caps") or {}).items():
             try:
                 caps[t] = max(caps.get(t, 0.0), float(c or 0))

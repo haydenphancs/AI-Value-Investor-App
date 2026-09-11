@@ -39,13 +39,26 @@ from app.schemas.etf import (
     RelatedTickerResponse,
 )
 from app.utils.market_hours import market_status_fields, to_utc_instant
-from app.services.corporate_actions_service import (
-    corporate_actions_source,
-    window_for_range,
-)
+from app.services.corporate_actions_service import corporate_actions_source
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
+
+# The ex-dividend derivation window used ONLY for the pay-frequency label. The default
+# open window (`corporate_actions_service.window_for_range(None, today)`) is 400 days,
+# and `_infer_pay_frequency` refuses to name a cadence from fewer than three agreeing
+# gaps — so inside 400 days a semi-annual payer (≤3 dates, ≤2 gaps) and an annual payer
+# (≤2 dates) could never be labelled at all. Four years gives an annual payer 4 dates /
+# 3 gaps; the 8-date cap in `_infer_pay_frequency` keeps a monthly payer from dragging
+# in 48.
+_PAY_FREQUENCY_LOOKBACK_DAYS = 4 * 365 + 30
+
+
+def _pay_frequency_window(today: Optional[str] = None) -> Tuple[str, str]:
+    """`(from, to)` ISO dates for the frequency derivation — see the constant above."""
+    end = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    begin = datetime.strptime(end, "%Y-%m-%d") - timedelta(days=_PAY_FREQUENCY_LOOKBACK_DAYS)
+    return begin.strftime("%Y-%m-%d"), end
 
 # ── Per-section in-memory cache ──────────────────────────────────
 #
@@ -1259,7 +1272,7 @@ class ETFService:
         if pay_frequency == "—":
             try:
                 ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
-                    symbol, *window_for_range(None, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+                    symbol, *_pay_frequency_window()
                 )
                 if ex_dates:
                     pay_frequency = self._infer_pay_frequency(
@@ -1461,10 +1474,7 @@ class ETFService:
             derived_frequency = "—"
             try:
                 ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
-                    symbol,
-                    *window_for_range(
-                        None, datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                    ),
+                    symbol, *_pay_frequency_window()
                 )
                 if ex_dates:
                     derived_frequency = self._infer_pay_frequency(
@@ -2095,7 +2105,17 @@ class ETFService:
         for i in range(1, len(dates)):
             gaps.append(abs((dates[i - 1] - dates[i]).days))
 
-        avg_gap = sum(gaps) / len(gaps) if gaps else 365
+        # ⚠️ Consistency before cadence. The dates now come from a derivation with a
+        # detection floor (`_DIVIDEND_FACTOR_EPS`): a low-yield quarterly payer can
+        # surface only 2 of its 4 ex-dates, which average to ~182 days and read as a
+        # confident "Semi-Annually"; Q1+Q4 alone read "Annually". Two gaps that agree
+        # cannot tell a partial detection from a real cadence, so a label needs at least
+        # three gaps of the same size. Thin evidence degrades to "—" — the honest answer,
+        # and what the card already showed before the derivation existed.
+        if len(gaps) < 3 or not gaps or max(gaps) > 1.5 * min(gaps) or min(gaps) <= 0:
+            return "—"
+
+        avg_gap = sum(gaps) / len(gaps)
 
         if avg_gap < 45:
             return "Monthly"

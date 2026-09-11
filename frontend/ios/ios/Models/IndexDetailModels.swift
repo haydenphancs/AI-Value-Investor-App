@@ -345,6 +345,8 @@ struct IndexDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → `priceChange` / `priceChangePercent` are placeholders; render "—".
+    var changeKnown: Bool = true
     // `var` on everything the 30-second light slice merges in place — see ETFDetailData.
     var marketStatus: MarketStatus
     var chartPricePoints: [StockPricePoint]
@@ -359,7 +361,7 @@ struct IndexDetailData: Identifiable {
     }
 
     var isPositive: Bool {
-        priceChange >= 0
+        changeKnown && priceChange >= 0
     }
 
     /// Previous close (current price − today's change). Anchors the chart's
@@ -369,9 +371,11 @@ struct IndexDetailData: Identifiable {
     }
 
     var formattedPrice: String { IndexHeaderFormat.price(currentPrice) }
-    var formattedChange: String { IndexHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? IndexHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        IndexHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? IndexHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 

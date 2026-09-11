@@ -46,6 +46,12 @@ class SectorIndustryResponse(BaseModel):
     industry: str
     sector_performance: float
     industry_rank: str
+    # False when no sector row matched (the group had < 5 members, or the profile's
+    # sector name does not normalise to the screener's). `sector_performance` is then
+    # the 0.0 wire placeholder, NOT a flat day — shipped builds decode a plain Double,
+    # so the float cannot become Optional; this is the `pe_known` pattern. iOS renders
+    # "—" when False. Defaults True so older cached snapshots keep their meaning.
+    sector_performance_known: bool = True
 
 
 class CompanyProfileResponse(BaseModel):
@@ -58,6 +64,8 @@ class CompanyProfileResponse(BaseModel):
     sector: str = "N/A"
     industry: str = "N/A"
     sector_performance: float = 0.0
+    # Twin of `SectorIndustryResponse.sector_performance_known` (same value, same flag).
+    sector_performance_known: bool = True
 
 
 class StockOverviewCoreResponse(BaseModel):

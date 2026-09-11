@@ -158,9 +158,11 @@ class WidgetMoveContextResponse(BaseModel):
     # |move| / σ_daily. None when σ is unknown — NOT 0.0, which would read as
     # "judged, perfectly normal" for a ticker we cannot judge.
     z: Optional[float] = None
-    # The overnight half of the move. Both `open` and `previousClose` ride on the
-    # batch-quote row already fetched, so this costs nothing — and a gap means the
-    # stock moved before anyone could trade, which is itself an explanation.
+    # The overnight half of the move. Needs the session `open`, which the licensed batch
+    # quote (`price_service._shape`, built from the screener) does NOT carry since the
+    # `quote` family went 402 — so these are `None` / `False` on every mover today and
+    # the client treats them as absent. Kept on the wire so the shape is unchanged and a
+    # licensed `open` re-enables them with no client change.
     gap_percent: Optional[float] = None
     intraday_percent: Optional[float] = None
     gap_dominant: bool = False

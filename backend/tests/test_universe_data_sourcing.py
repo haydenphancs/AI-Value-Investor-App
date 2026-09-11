@@ -50,10 +50,17 @@ def test_every_reader_uses_the_shared_resolver():
     services and `parents[3]` in the report collector (it sits a level deeper). Nothing
     shared a constant, so relocating the files meant finding each by hand.
     """
-    roots = Path(__file__).resolve().parents[1] / "app"
+    backend = Path(__file__).resolve().parents[1]
+    # `scripts/` too: two of them (`hydrate_hedge_fund_flow.py`, `verify_industry_dossier.py`)
+    # kept a hand-built `parents[1] / "data" / …` path after the files left the repo, so the
+    # hydrator silently lost its screener fallback and the verifier crashed. The two
+    # BUILDERS that write the files are the only legitimate hardcoded paths.
+    writers = {"build_benchmark_universe.py", "discover_industries.py"}
     offenders = []
-    for path in roots.rglob("*.py"):
-        if path.name == "universe_data.py":
+    candidates = list((backend / "app").rglob("*.py")) + list((backend / "scripts").glob("*.py"))
+    for path in candidates:
+        roots = backend / "app" if "app" in path.parts[len(backend.parts):][:1] else backend / "scripts"
+        if path.name == "universe_data.py" or path.name in writers:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

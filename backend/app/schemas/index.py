@@ -159,6 +159,7 @@ class IndexQuoteResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    change_known: bool = True
     market_status: MarketStatusResponse
     # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
     chart_data: List[ChartDataPointResponse] = []
@@ -186,6 +187,10 @@ class IndexCoreResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the proxy quote carried no change (a halted / holiday profile row):
+    # `price_change` / `price_change_percent` are then 0.0 placeholders, not a flat
+    # day. Same pattern as `pe_known`; iOS renders "—". Defaults True.
+    change_known: bool = True
     market_status: MarketStatusResponse
     # Empty when the bars would have cost a multi-thousand-row history pull — see
     # `IndexService._get_chart(fast_only=True)`. The full response fills them in.
@@ -198,6 +203,10 @@ class IndexDetailResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the proxy quote carried no change (a halted / holiday profile row):
+    # `price_change` / `price_change_percent` are then 0.0 placeholders, not a flat
+    # day. Same pattern as `pe_known`; iOS renders "—". Defaults True.
+    change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[ChartDataPointResponse]
     key_statistics_groups: List[KeyStatisticsGroupResponse]

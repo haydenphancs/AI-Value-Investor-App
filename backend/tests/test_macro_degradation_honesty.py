@@ -69,10 +69,16 @@ def test_factors_present_always_summarize_them(measured):
     assert "unavailable" not in out.lower()
 
 
-def test_the_default_stays_benign_for_existing_callers():
-    """`measured` defaults True so no other call site changes behaviour silently."""
-    sig = inspect.signature(_fallback_macro_headline)
-    assert sig.parameters["measured"].default is True
+def test_measured_is_required_so_a_dropped_thread_is_a_typeerror():
+    """`measured=True` as a DEFAULT is fail-open: a caller that forgets the kwarg gets
+    "Benign macro backdrop" for an unmeasured tier. Both real callers pass it; making it
+    required turns a dropped thread into a TypeError at the call site."""
+    from app.services.agents.ticker_report_data_collector import _fallback_macro_brief
+    for fn in (_fallback_macro_headline, _fallback_macro_brief):
+        sig = inspect.signature(fn)
+        assert sig.parameters["measured"].default is inspect.Parameter.empty, fn.__name__
+    with pytest.raises(TypeError):
+        _fallback_macro_headline("low", [])          # type: ignore[call-arg]
 
 
 # ── The degradation is now loud ──────────────────────────────────────────────
@@ -83,10 +89,14 @@ def test_the_default_stays_benign_for_existing_callers():
      ("integrations/census.py", "_warn_unconfigured_once")],
 )
 def test_an_unconfigured_upstream_warns(module, symbol):
-    src = (_SRC / module).read_text()
-    assert symbol in src, f"{module} degrades silently when unconfigured"
-    # And it must be CALLED, not merely defined.
-    assert src.count(symbol) >= 2, f"{module} defines {symbol} but never calls it"
+    """Asserts an `ast.Call`, not a raw text count: the FRED module's docstring names
+    `_warn_unconfigured_once`, so `count >= 2` was already satisfied by prose + `def`
+    and stayed green with the call deleted."""
+    import ast as _ast
+    tree = _ast.parse((_SRC / module).read_text())
+    calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+             and getattr(n.func, "id", None) == symbol]
+    assert calls, f"{module} defines {symbol} but never calls it"
 
 
 def test_fred_docstring_no_longer_promises_something_it_does_not_do():

@@ -174,6 +174,30 @@ class FMPClient:
     _MAX_RETRIES = 2            # 3 attempts total
     _RETRY_BASE_DELAY = 0.5     # seconds; exponential backoff (0.5s, 1.0s)
 
+    _unpredicted_402: set = set()
+
+    @classmethod
+    def _note_unpredicted_402(cls, endpoint: str, params: Optional[Dict[str, Any]]) -> None:
+        """WARNING once per (endpoint, symbol) for a 402 the manifest did not predict.
+
+        Keyed on the SYMBOL too, because blocking is per-symbol on the endpoints we own
+        (`SYMBOL_SENSITIVE_PREFIXES`): keyed on the path alone, only the first refused
+        symbol was ever named and every later one 402'd silently for the life of the
+        process — the manifest could not be corrected from the logs. The set is bounded
+        by the number of distinct refused (path, symbol) pairs, which is small.
+        """
+        symbol = str((params or {}).get("symbol") or "").upper()
+        key = (normalize_path(endpoint), symbol)
+        if key in cls._unpredicted_402:
+            return
+        cls._unpredicted_402.add(key)
+        logger.warning(
+            "FMP 402 Restricted Endpoint on %s (symbol=%s) — NOT predicted by "
+            "fmp_entitlements; classify it in the manifest (path or symbol rule). "
+            "Further 402s for this path+symbol are not logged.",
+            endpoint, symbol or None,
+        )
+
     @staticmethod
     def _raise_if_not_entitled(
         endpoint: str,
@@ -330,6 +354,23 @@ class FMPClient:
                     raise FMPUnavailableException(
                         f"FMP returned {response.status_code} for {endpoint} "
                         f"after {self._MAX_RETRIES + 1} attempts"
+                    )
+
+                if response.status_code == 402:
+                    # A live "Restricted Endpoint" the manifest did NOT predict. The
+                    # pre-flight guard (`_raise_if_not_entitled`) is a prediction from
+                    # `fmp_entitlements`; FMP's own answer is the oracle. Without this
+                    # arm a 402 fell to `raise_for_status()`, was logged at ERROR on EVERY
+                    # call (Sentry noise for a permanent condition) and classified
+                    # FMP_UNAVAILABLE — 503, "try again shortly", iOS Retry button — for
+                    # a refusal that can never succeed. Same class of failure the PIUSD
+                    # note in `fmp_entitlements.is_blocked_symbol` records. Raise the
+                    # CONTRACTUAL exception so the client renders its permanent state,
+                    # and log ONCE per endpoint so the manifest can be corrected.
+                    self._note_unpredicted_402(endpoint, params)
+                    raise FMPNotEntitledException(
+                        f"FMP refused {endpoint} with 402 Restricted Endpoint (not "
+                        f"predicted by fmp_entitlements — add it to the manifest)"
                     )
 
                 response.raise_for_status()

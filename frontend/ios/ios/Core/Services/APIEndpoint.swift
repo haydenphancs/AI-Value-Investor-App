@@ -280,7 +280,7 @@ enum APIEndpoint: Sendable {
     /// mean the listed security. Deliberately NOT optional-with-a-default: every call
     /// site should have to state what it is adding.
     case addToWatchlist(stockId: String, assetType: String?)
-    case removeFromWatchlist(stockId: String)
+    case removeFromWatchlist(stockId: String, assetType: String? = nil)
 
     // MARK: - Tracking
     case getTrackingAssets
@@ -995,8 +995,8 @@ enum APIEndpoint: Sendable {
         case .setMoneyMoveBookmark(let slug), .removeMoneyMoveBookmark(let slug):
             return MoneyMoveBookmarkRequest(slug: slug)
 
-        case .removeFromWatchlist(let stockId):
-            return RemoveFromWatchlistRequest(stockId: stockId)
+        case .removeFromWatchlist(let stockId, let assetType):
+            return RemoveFromWatchlistRequest(stockId: stockId, assetType: assetType)
 
         case .generateResearch(let stockId, let persona):
             return GenerateResearchRequest(stockId: stockId, investorPersona: persona)
@@ -1515,6 +1515,11 @@ nonisolated struct AddToWatchlistRequest: Encodable, Sendable {
 
 nonisolated struct RemoveFromWatchlistRequest: Encodable, Sendable {
     let stockId: String
+    /// "crypto" makes the backend delete the PAIR row (`BTCUSD`) first. Without it the
+    /// backend tries the raw spelling first — right for the equity screens, and wrong for
+    /// the crypto screen, whose star sends the bare symbol for the COIN: with both rows
+    /// present it deleted the user's same-ticker ETF/REIT instead. Omitted when nil.
+    let assetType: String?
 }
 
 nonisolated struct GenerateResearchRequest: Encodable, Sendable {

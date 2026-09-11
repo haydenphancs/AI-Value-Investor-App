@@ -313,14 +313,14 @@ CURATION: dict[str, TableDoc] = {
     "public.user_lesson_progress": T("learn-progress",
         purpose="Legacy per-lesson progress, superseded by user_learn_progress.",
         key=("user_id", "lesson_id", "status", "completed_at"),
-        note="No reference remains in backend/app — it is FK-bound and still carries RLS, but "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). No reference remains in backend/app — it is FK-bound and still carries RLS, but "
              "the live read path is user_learn_progress."),
     "public.user_study_schedules": T("learn-progress",
         key=("user_id", "daily_reminder_enabled", "morning_session_time", "review_time"),
-        note="UNIQUE(user_id) — one schedule per account."),
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). UNIQUE(user_id) — one schedule per account."),
     "public.user_bookmarks": T("learn-progress",
         key=("user_id", "bookmarkable_type", "bookmarkable_id"),
-        note="Polymorphic: bookmarkable_type picks which table bookmarkable_id points into, so "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). Polymorphic: bookmarkable_type picks which table bookmarkable_id points into, so "
              "no FK can enforce it. No reference remains in backend/app."),
 
     # ------------------------------------------------------------------ whales
@@ -383,7 +383,7 @@ CURATION: dict[str, TableDoc] = {
     "public.portfolio_holdings": T("portfolio",
         purpose="Legacy flat holdings table, keyed directly on the user rather than a portfolio.",
         key=("user_id", "ticker", "shares", "market_value", "sector"),
-        note="Still FK-bound to users and still carries six RLS policies, some of them "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). Still FK-bound to users and still carries six RLS policies, some of them "
              "overlapping legacy duplicates. The live path is portfolios + portfolio_items."),
     "public.watchlist_items": T("portfolio",
         key=("user_id", "ticker", "shares", "market_value", "sector", "asset_type", "market_cap"),
@@ -453,7 +453,7 @@ CURATION: dict[str, TableDoc] = {
     "public.etf_detail_cache": T("market-cache",
         purpose="Full ETF detail response — holdings, sectors, expense ratio.",
         key=("cache_key", "symbol", "chart_range", "interval", "response_json"),
-        note="RETIRED and no longer read or written. etf_service was decomposed into "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). RETIRED and no longer read or written. etf_service was decomposed into "
              "per-section caches (etf_snapshot_cache categories fundamentals / derived / "
              "chart:*), because a 24h row of the WHOLE payload froze current_price — which "
              "is the only reason `_refresh_volatile` ever existed. Left in place for one "
@@ -464,7 +464,7 @@ CURATION: dict[str, TableDoc] = {
     "public.index_detail_cache": T("market-cache",
         purpose="Index detail response, keyed by symbol AND chart range.",
         key=("cache_key", "symbol", "chart_range", "response_json"),
-        note="RETIRED and no longer read or written — superseded by index_cache. Migration "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). RETIRED and no longer read or written — superseded by index_cache. Migration "
              "150 also REVOKEd the GRANT ALL to `authenticated` that 032 shipped, which had "
              "let any signed-in user read and write this cache through PostgREST. Left in "
              "place for one release so a rollback is a code revert."),
@@ -523,7 +523,7 @@ CURATION: dict[str, TableDoc] = {
         key=("symbol", "category", "paragraphs")),
     "public.asset_snapshots": T("market-cache",
         key=("symbol", "asset_type", "snapshot_type", "content", "expires_at"),
-        note="No reference remains in backend/app; crypto_snapshots and etf_snapshot_cache "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). No reference remains in backend/app; crypto_snapshots and etf_snapshot_cache "
              "carry the live paths."),
     "public.social_mentions_history": T("market-cache",
         purpose="Daily ApeWisdom mention and upvote counts per ticker, kept as history so the "
@@ -601,7 +601,7 @@ CURATION: dict[str, TableDoc] = {
     "public.news_articles": T("news",
         key=("external_id", "source_name", "headline", "sentiment", "related_tickers",
              "insight_key_points", "expires_at"),
-        note="UNIQUE(external_id, source_name) — the same wire story from two sources is two "
+        note="DROPPED BY MIGRATION 168 (written 2026-09-11, apply + re-dump, then delete this entry). UNIQUE(external_id, source_name) — the same wire story from two sources is two "
              "rows. Swept by cleanup_expired_news_articles()."),
     "public.ticker_news_cache": T("news",
         purpose="Per-ticker news with AI summary bullets and sentiment, cached separately from "

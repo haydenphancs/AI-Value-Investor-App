@@ -38,6 +38,7 @@ from supabase import Client
 from app.database import get_supabase
 from app.dependencies import get_watchlist_identity
 from app.schemas.tracking import PortfolioInsightsResponse
+from app.services.asset_class import canonical_stored_symbol
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
 from app.utils.supabase_errors import is_unique_violation
@@ -671,21 +672,48 @@ async def set_portfolio_tickers(
         seen.add(symbol)
         requested.append(symbol)
 
-    # Restrict to tickers already on the master watchlist.
+    # Restrict to tickers already on the master watchlist — matching RAW first, then the
+    # CANONICAL spelling, never both at once.
+    #
+    # 🔴 This used to match the raw spelling only, and the delete+reinsert below is
+    # DESTRUCTIVE. After migration 160 a coin lives on the watchlist as "BTCUSD"; a
+    # client still saying "BTC" for it (stale local state, the shipped build) matched
+    # nothing, so the position was dropped — with its hand-entered `shares` — and the
+    # response said success. Raw wins when it exists (a bare row is the listed security,
+    # e.g. the Grayscale ETF); the pair is the fallback for the coin. `DELETE /watchlist`
+    # and `PUT /tracking/holdings/{ticker}` follow the same rule.
+    accepted: List[str] = []
     if requested:
+        lookup: List[str] = []
+        for sym in requested:
+            for cand in (sym, canonical_stored_symbol(sym, None)):
+                if cand not in lookup:
+                    lookup.append(cand)
         watchlist = (
             supabase.table("watchlist_items")
             .select("ticker")
             .eq("user_id", user["id"])
-            .in_("ticker", requested)
+            .in_("ticker", lookup)
             .execute()
             .data
             or []
         )
         valid = {row["ticker"].upper() for row in watchlist if row.get("ticker")}
-        accepted = [t for t in requested if t in valid]
-    else:
-        accepted = []
+        dropped: List[str] = []
+        for sym in requested:
+            canon = canonical_stored_symbol(sym, None)
+            chosen = sym if sym in valid else (canon if canon != sym and canon in valid else None)
+            if chosen is None:
+                dropped.append(sym)
+            elif chosen not in accepted:
+                # `["BTC", "BTCUSD"]` with only the pair stored must not insert it twice
+                # (unique (portfolio_id, ticker)).
+                accepted.append(chosen)
+        if dropped:
+            logger.warning(
+                "[Portfolios] PUT tickers dropped %s (on neither spelling of the watchlist) "
+                "user=%s portfolio=%s", dropped, user["id"], portfolio_id,
+            )
 
     # Capture existing holdings so kept tickers don't lose shares /
     # market_value when we delete + reinsert below.
@@ -770,9 +798,17 @@ async def set_portfolio_holdings(
             errors.append(f"{ticker}: market_value cannot be negative")
             continue
 
-        supabase.table("portfolio_items").update(
+        # Raw first, then the canonical spelling — the row for a coin is "BTCUSD", and a
+        # client sending "BTC" for it used to update 0 rows and report success.
+        raw_ticker = ticker
+        canonical = canonical_stored_symbol(raw_ticker, None)
+        result = supabase.table("portfolio_items").update(
             {"shares": item.shares, "market_value": item.market_value}
-        ).eq("portfolio_id", portfolio_id).eq("ticker", ticker).execute()
+        ).eq("portfolio_id", portfolio_id).eq("ticker", raw_ticker).execute()
+        if not result.data and canonical != raw_ticker:
+            supabase.table("portfolio_items").update(
+                {"shares": item.shares, "market_value": item.market_value}
+            ).eq("portfolio_id", portfolio_id).eq("ticker", canonical).execute()
 
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))

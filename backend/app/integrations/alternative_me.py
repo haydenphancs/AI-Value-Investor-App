@@ -15,6 +15,26 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+class FearGreedUnavailableException(Exception):
+    """No reading is available (upstream failed with a cold cache, or answered nothing).
+
+    Distinct from a bad reading on purpose: the endpoint maps it to 502 and iOS hides the
+    gauge, which is the honest render. A fabricated 50 / "Neutral" is byte-identical to a
+    real reading and used to ship for 15 minutes after any upstream blip.
+    """
+
+
+def _readable(entry: Any) -> bool:
+    """An entry whose `value` parses as an int in 0..100."""
+    if not isinstance(entry, dict):
+        return False
+    try:
+        v = int(str(entry.get("value", "")).strip())
+    except (TypeError, ValueError):
+        return False
+    return 0 <= v <= 100
+
 _BASE_URL = "https://api.alternative.me/fng/"
 _CACHE_TTL = 900  # 15 minutes
 
@@ -41,18 +61,31 @@ async def get_fear_greed_index(limit: int = 30) -> List[Dict[str, Any]]:
             resp.raise_for_status()
             data = resp.json()
 
-        entries = data.get("data", [])
+        entries = [e for e in (data.get("data") or []) if _readable(e)]
+        if not entries:
+            # An empty answer is NOT a reading. Caching it pinned "no data" for
+            # `_CACHE_TTL` and the summary below turned it into a confident Neutral 50.
+            logger.warning("Fear & Greed Index: upstream returned no readable entries")
+            if _cache is not None:
+                return _cache[:limit]
+            raise FearGreedUnavailableException("Fear & Greed Index returned no entries")
         _cache = entries
         _cache_ts = time.time()
 
         logger.info(f"Fear & Greed Index: fetched {len(entries)} entries")
         return entries[:limit]
 
+    except FearGreedUnavailableException:
+        raise
     except Exception as e:
-        logger.error(f"Fear & Greed Index fetch failed: {e}")
+        logger.warning(f"Fear & Greed Index fetch failed: {type(e).__name__}: {e}")
         if _cache is not None:
             return _cache[:limit]
-        return []
+        # Cold cache and a failed fetch: there is no reading to give. Raising lets the
+        # endpoint answer 502 and iOS hide the gauge — not paint a fabricated "Neutral".
+        raise FearGreedUnavailableException(
+            f"Fear & Greed Index unavailable: {type(e).__name__}: {e}"
+        ) from e
 
 
 def compute_fear_greed_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -67,13 +100,11 @@ def compute_fear_greed_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
             "history": [{"value": 40, "classification": "Fear", "timestamp": "..."}, ...]
         }
     """
+    entries = [e for e in (entries or []) if _readable(e)]
     if not entries:
-        return {
-            "value": 50, "classification": "Neutral",
-            "value_7d": 50, "classification_7d": "Neutral",
-            "value_30d": 50, "classification_30d": "Neutral",
-            "history": [],
-        }
+        # 50 is a CLAIM ("Neutral"), not an absence. Byte-identical to a real reading,
+        # so it can never be a fallback: refuse, and let the caller degrade.
+        raise FearGreedUnavailableException("no Fear & Greed entries to summarise")
 
     def _classify(score: int) -> str:
         if score <= 20:
@@ -88,12 +119,10 @@ def compute_fear_greed_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
             return "Extreme Greed"
 
     def _avg(items: List[Dict]) -> int:
-        if not items:
-            return 50
-        total = sum(int(e.get("value", 50)) for e in items)
+        total = sum(int(e["value"]) for e in items)
         return round(total / len(items))
 
-    current_val = int(entries[0].get("value", 50))
+    current_val = int(entries[0]["value"])
     current_class = entries[0].get("value_classification", _classify(current_val))
 
     avg_7d = _avg(entries[:7])
@@ -101,7 +130,7 @@ def compute_fear_greed_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     history = [
         {
-            "value": int(e.get("value", 50)),
+            "value": int(e["value"]),
             "classification": e.get("value_classification", "Neutral"),
             "timestamp": e.get("timestamp", ""),
         }

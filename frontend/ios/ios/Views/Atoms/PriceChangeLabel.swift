@@ -15,6 +15,10 @@ struct PriceChangeLabel: View {
     var mode: ChangeDisplayMode = .percent
     var showArrow: Bool = true
     var fontSize: CGFloat = 13
+    /// `false` when the caller's backend row said the move is UNKNOWN (`change_known`),
+    /// in which case `changePercent` is the wire's non-Optional placeholder `0` and must
+    /// not be read as "+0.00%". Renders exactly like a NaN: em dash, no arrow, neutral.
+    var isKnown: Bool = true
 
     /// Signed zero collapsed to +0. `-0.0` is the value any barely-negative move
     /// rounds to server-side, and it breaks BOTH readers below in opposite
@@ -29,7 +33,7 @@ struct PriceChangeLabel: View {
     /// The signed-zero normalisation above cannot help a NaN (`nan == 0` is false), and
     /// `nan >= 0` is false, so an unguarded NaN rendered a red DOWN arrow next to the
     /// literal text "nan%" — indistinguishable from a real decline.
-    private var isFinite: Bool { changePercent.isFinite }
+    private var isFinite: Bool { isKnown && changePercent.isFinite }
 
     private var isPositive: Bool {
         normalizedChange >= 0
@@ -92,6 +96,7 @@ struct PriceChangeLabel: View {
         PriceChangeLabel(changePercent: .nan)
         PriceChangeLabel(changePercent: .infinity)
         PriceChangeLabel(changePercent: -.infinity)
+        PriceChangeLabel(changePercent: 0, isKnown: false)
 
         // Amount mode. Last one has no computable dollar value -> "—", NOT the percent.
         PriceChangeLabel(changePercent: 2.34, changeAmount: 3.41, mode: .amount)

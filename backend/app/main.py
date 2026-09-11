@@ -841,9 +841,12 @@ async def _run_research_reconciliation_job():
 # S&P 500) was RETIRED in the industry-benchmark migration. Sector + industry
 # medians are now produced in one pass by the industry-benchmark recompute
 # chained into `_run_industry_dossier_job` (base+120 min). The old
-# `sector_benchmark_service.compute_all_benchmarks` still backs the manual
-# admin endpoint but is no longer scheduled — two schedulers writing the
-# industry='' rows would race and re-introduce stale data.
+# `sector_benchmark_service.compute_all_benchmarks` is now called by NOTHING:
+# `POST /admin/refresh-sector-benchmarks` was re-pointed at
+# `industry_benchmark_service.recompute_all` (2026-09), because the old path
+# reads the BLOCKED `sp500-constituent`, falls back to 55 hardcoded tickers and
+# upserts 5-company medians over the ~5,700-company rows — a data-corruption
+# button. It must stay unscheduled; see `admin.py`'s docstring.
 
 
 # TTM weekly refresh fires at 06:00 UTC Sunday — deliberately AFTER the quarterly

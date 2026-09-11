@@ -7,6 +7,7 @@ Serves the IndexDetailView screen on iOS.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,8 +50,12 @@ logger = logging.getLogger(__name__)
 # ⚠️ THE RELABELLING IS THE FEATURE, NOT A SIDE EFFECT. SPY trades near $770 while the
 # S&P 500 index sits near 6,600 — an order of magnitude apart. Showing SPY's price under
 # an "S&P 500" heading would be the same class of fabrication as the BTC 52-week low this
-# phase removed, so every user-visible field below describes the FUND: its name, its
-# inception, its provider, its holding count. `documents/legal/fmp-16-datasets-build-or-free.md`
+# phase removed, so every user-visible PRICE field below describes the FUND: its name,
+# its inception, its provider. The one deliberate exception is `number_of_constituents`,
+# which is the INDEX's count (3,000 for the Nasdaq Composite) and is labelled "Index
+# Constituents" on both the profile row and the key-stat tile — a fund that samples the
+# index holds fewer names, and asserting its holding count from memory would be the same
+# fabrication in the other direction. `documents/legal/fmp-16-datasets-build-or-free.md`
 # accepts the cost explicitly ("users see ~600 not ~6,000").
 #
 # Proxy choice is measured, not assumed (all vs FRED daily series, 1Y to 2026-09-05,
@@ -745,8 +750,8 @@ class IndexService:
             rows = await self.fmp.get_index_constituents(symbol)
         except Exception as e:
             logger.warning(
-                "Index constituents fetch failed for %s: %s: %s — using the fund's "
-                "published holding count (%s)",
+                "Index constituents fetch failed for %s: %s: %s — using the index's "
+                "profile constituent count (%s)",
                 symbol, type(e).__name__, e, fallback,
             )
             return fallback
@@ -1078,6 +1083,7 @@ class IndexService:
             current_price=full.current_price,
             price_change=full.price_change,
             price_change_percent=full.price_change_percent,
+            change_known=full.change_known,
             market_status=full.market_status,
             # Bars only when the caller asked for a range — the 30s loop skips them on a
             # daily chart, where nothing below the last candle can have moved.
@@ -1169,6 +1175,7 @@ class IndexService:
                     change_pct = round((change / prev_close) * 100, 4)
                 except (TypeError, ValueError, ZeroDivisionError):
                     change_pct = None
+        change_known = change_pct is not None
         if change_pct is None:
             change_pct = 0.0
 
@@ -1178,6 +1185,7 @@ class IndexService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
         )
@@ -1342,6 +1350,7 @@ class IndexService:
                 change_pct = round((change / prev_close) * 100, 4)
             except (TypeError, ValueError, ZeroDivisionError):
                 change_pct = None
+        change_known = change_pct is not None
         change_pct = change_pct if change_pct is not None else 0
         # Display-only rows: absent stays absent so `_fmt` renders "—".
         open_price = _q_opt("open")
@@ -1452,6 +1461,7 @@ class IndexService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
             key_statistics_groups=key_stats,
@@ -1522,7 +1532,9 @@ class IndexService:
         return [
             # Column 1: Price & Breadth
             KeyStatisticsGroupResponse(statistics=[
-                KeyStatisticItem(label="Constituents", value=str(constituents)),
+                # "Index" on purpose: the fund tracks the index but may sample it (ONEQ
+                # holds fewer names than the Composite's ~3,000). Matches the profile row.
+                KeyStatisticItem(label="Index Constituents", value=str(constituents)),
                 KeyStatisticItem(label="Open", value=_fmt(open_price)),
                 KeyStatisticItem(label="Previous Close", value=_fmt(prev_close)),
                 KeyStatisticItem(label="Day High", value=_fmt(day_high)),
@@ -1580,12 +1592,16 @@ class IndexService:
             sector_name = item.get("sector", "")
             change = item.get("changesPercentage")
             if change is None:
-                # Try string format
-                change_str = str(item.get("changesPercentage", "0"))
+                change = item.get("changePercentage")
+            if isinstance(change, str):
                 try:
-                    change = float(change_str.replace("%", ""))
+                    change = float(change.replace("%", ""))
                 except (ValueError, TypeError):
-                    change = 0
+                    change = None
+            if change is None or not isinstance(change, (int, float)) or not math.isfinite(change):
+                # An unreadable move is DROPPED, not published as 0.00% — a fabricated flat
+                # sector in a snapshot the story template then narrates.
+                continue
             if sector_name:
                 sectors.append(SectorPerformanceEntryResponse(
                     sector=sector_name,

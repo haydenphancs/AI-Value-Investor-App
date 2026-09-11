@@ -62,6 +62,34 @@ struct MarqueeChipRow: View {
     @State private var isTouching = false
     @State private var isOnScreen = false
     @State private var resumeTask: Task<Void, Never>?
+    /// True once this touch has travelled far enough to be a SWIPE rather than a tap.
+    ///
+    /// ⚠️ REPORTED FROM TESTFLIGHT 1.0 (8): *"when i try to sweep right, it suddenly
+    /// 'touch' then ask the question. But i intent to sweep right only."* — and it sent
+    /// the question, which costs a credit.
+    ///
+    /// The cause is specific to a marquee and is why the usual reasoning ("a Button
+    /// cancels when the finger leaves it") does not save us: the row translates 1:1 with
+    /// the finger, so the chip travels UNDER the touch. The touch therefore never leaves
+    /// that Button's bounds, its tap is never cancelled, and it fires on release at the
+    /// end of every swipe.
+    ///
+    /// Reset on touch-DOWN and never in `onEnded`, because `onEnded` and the Button's
+    /// action both fire on release with no defined order — clearing it there would race
+    /// the very read it exists for.
+    @State private var didDrag = false
+
+    /// Movement past which a touch is a swipe, matching UIKit's own pan slop. Below it a
+    /// finger that wobbled a point or two on a small target still counts as a tap.
+    private static let dragSlop: CGFloat = 10
+
+    /// How long after letting go before the row drifts again — long enough to read the
+    /// chip you stopped on.
+    private static let resumeDelay: Duration = .seconds(1.2)
+    /// Backstop for a gesture that is cancelled rather than ended (see `onChanged`). Longer
+    /// than `resumeDelay` so it never pre-empts a real drag still in progress, short enough
+    /// that a stuck row visibly heals itself.
+    private static let cancelledGestureTimeout: Duration = .seconds(3)
 
     /// Apple's minimum comfortable target. The pill itself stays its designed height; this
     /// is the row's, so the extra is hit area rather than a bigger chip.
@@ -152,6 +180,11 @@ struct MarqueeChipRow: View {
         .onDisappear {
             isOnScreen = false
             resumeTask?.cancel()
+            // Cancelling the pending release without clearing the latch is the same freeze
+            // by another door: the row would come back on-screen still believing a finger
+            // is down, and never drift again.
+            isTouching = false
+            didDrag = false
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Suggested questions")
@@ -190,7 +223,12 @@ struct MarqueeChipRow: View {
             // ids inside one ForEach collapse to a single element — which is exactly why
             // the row this replaced could not simply be wrapped.
             ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
-                CaydexAISuggestionChip(text: chip) { onTap(chip) }
+                CaydexAISuggestionChip(text: chip) {
+                    // The swipe/tap split. See `didDrag` — a marquee chip cannot rely on
+                    // the Button cancelling itself, because the chip moves with the finger.
+                    guard !didDrag else { return }
+                    onTap(chip)
+                }
             }
         }
     }
@@ -235,26 +273,61 @@ struct MarqueeChipRow: View {
                     base = offset(at: .now)
                     anchor = .now
                     lastTranslation = 0
+                    didDrag = false
                     isTouching = true
-                    resumeTask?.cancel()
+                    // ⚠️ ARMED HERE, NOT ONLY IN `onEnded` — this is the other half of the
+                    // TestFlight report, *"It doesn't move."*
+                    //
+                    // `isTouching` is a latch and `onEnded` was its only release. But a
+                    // DragGesture running `.simultaneousGesture` alongside a child Button
+                    // is CANCELLED when that Button claims the touch, and SwiftUI's
+                    // DragGesture has no `onCancelled` — so on a tap, `onEnded` may never
+                    // arrive. `isTouching` then stays true forever and the row is paused
+                    // for the rest of the session, having drifted only until the user's
+                    // first touch. That is exactly the reported symptom.
+                    //
+                    // So the release is armed at touch-DOWN with a generous timeout, and
+                    // `onEnded` merely replaces it with the shorter, nicer one. A dropped
+                    // `onEnded` now costs a couple of still seconds instead of the feature.
+                    scheduleResume(after: Self.cancelledGestureTimeout)
                 }
                 let delta = value.translation.width - lastTranslation
                 lastTranslation = value.translation.width
                 base = wrapped(base + delta)
+                // `predictedEndTranslation` as well as the live one. A FLICK delivers few
+                // `onChanged` events and can release while the instantaneous translation is
+                // still under the slop — and a flick is exactly what "sweep right" is. The
+                // predicted value carries the velocity, so a fast gesture is recognised as a
+                // drag on the first event rather than the last one that never arrives.
+                //
+                // Checked here and never in `onEnded`: that fires on release alongside the
+                // Button's own action, with no defined order between them.
+                if abs(value.translation.width) > Self.dragSlop
+                    || abs(value.predictedEndTranslation.width) > Self.dragSlop {
+                    didDrag = true
+                }
             }
             .onEnded { _ in
                 anchor = .now
                 lastTranslation = 0
-                resumeTask?.cancel()
                 // A beat before drifting again, so letting go to read something does not
                 // immediately pull it away.
-                resumeTask = Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(1.2))
-                    guard !Task.isCancelled else { return }
-                    anchor = .now
-                    isTouching = false
-                }
+                scheduleResume(after: Self.resumeDelay)
             }
+    }
+
+    /// Release the `isTouching` latch after `delay`, replacing any pending release.
+    ///
+    /// One place, so the watchdog armed on touch-down and the polite delay armed on
+    /// touch-up cannot drift apart — and so neither can leave the row stuck.
+    private func scheduleResume(after delay: Duration) {
+        resumeTask?.cancel()
+        resumeTask = Task { @MainActor in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            anchor = .now
+            isTouching = false
+        }
     }
 }
 

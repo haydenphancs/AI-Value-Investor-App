@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # dump_schema.sh — regenerate backend/database/schema_snapshot.sql from the
-# live Supabase database. Schema only — no data, no secrets.
+# live Supabase database. Schema only — no data, no secrets. INCLUDES table and
+# function GRANT/REVOKE statements (since 2026-09-11): they are the layer PostgREST
+# checks before RLS, and the snapshot is the only committed record of them.
 #
 # When to run:
 #   - After every batch of 3-5 new migrations applied to Supabase.
@@ -96,12 +98,21 @@ PGPASSWORD="$SUPABASE_DB_PASSWORD" "$PG_DUMP" \
   -d "$PG_DB" \
   --schema-only \
   --no-owner \
-  --no-privileges \
   > "$OUTPUT_FILE"
+# NOT --no-privileges. Postgres checks table/function GRANTs BEFORE row-level security
+# (migration 086's header), so a dump without them omits the half of every access
+# decision that is evaluated first. That is how `users` stayed UPDATE-able by any
+# signed-in account and 25 cache tables stayed anon-readable while the snapshot showed
+# only their policies (see migrations 163-165). --no-owner alone already suppresses the
+# ownership noise; the GRANT/REVOKE lines that remain are the point.
 
 line_count=$(wc -l < "$OUTPUT_FILE")
 table_count=$(grep -c "^CREATE TABLE" "$OUTPUT_FILE")
 policy_count=$(grep -c "^CREATE POLICY" "$OUTPUT_FILE")
+grant_count=$(grep -cE "^(GRANT|REVOKE) " "$OUTPUT_FILE")
 
-echo "Done. $line_count lines, $table_count tables, $policy_count RLS policies."
+echo "Done. $line_count lines, $table_count tables, $policy_count RLS policies, $grant_count GRANT/REVOKE statements."
+if [ "$grant_count" -eq 0 ]; then
+  echo "WARNING: no GRANT/REVOKE statements in the dump — was --no-privileges re-added? Migration VERIFY steps and reviewers read grants from this file." >&2
+fi
 echo "Review with: git diff $OUTPUT_FILE"

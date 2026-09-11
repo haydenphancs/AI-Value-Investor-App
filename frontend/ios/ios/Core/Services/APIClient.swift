@@ -130,8 +130,9 @@ actor APIClient {
     }
 
     /// The current access token, for the one consumer that genuinely cannot go through
-    /// `request`: the live-price WebSocket, which passes it as a `?token=` query parameter
-    /// because `URLSessionWebSocketTask` can't set headers from iOS.
+    /// `request` — historically the live-price socket, which passed it as a `?token=`
+    /// query parameter. That socket is gone (2026-09-08; streaming is outside the FMP
+    /// Order Form) and prices poll over REST, but the accessor stays the ONE token source.
     ///
     /// Exists so those call sites stop reading the Keychain directly. Four ViewModels did, and
     /// the Keychain copy is deliberately NOT the same value — `restoreAuthState` disarms the

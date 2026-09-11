@@ -48,7 +48,12 @@ enum CommodityCategory: String, CaseIterable {
 // MARK: - Commodity Market Status
 enum CommodityMarketStatus {
     case open
-    case closed(date: Date, time: String, timezone: String)
+    /// `date` is nil when the backend sent only "Market Closed" — the FRED-sourced screens
+    /// (Crude, NatGas) show an EIA settlement published ~5 business days behind, and the
+    /// wire carries no as-of date. The old mapping stamped `Date()`, so the badge read
+    /// "Market Closed  Sep 11" above a print from Sep 1: the day the user looked, not the
+    /// day the value is from. No date is rendered unless one was actually received.
+    case closed(date: Date?, time: String, timezone: String)
     case preMarket
     case afterHours
 
@@ -57,9 +62,13 @@ enum CommodityMarketStatus {
         case .open:
             return "Market Open"
         case .closed(let date, let time, let timezone):
+            guard let date else { return "Market Closed" }
             let formatter = DateFormatter()
             formatter.dateFormat = "MMM d"
-            return "Market Closed  \(formatter.string(from: date)), \(time) \(timezone)"
+            let when = [time, timezone].filter { !$0.isEmpty }.joined(separator: " ")
+            return when.isEmpty
+                ? "Market Closed  \(formatter.string(from: date))"
+                : "Market Closed  \(formatter.string(from: date)), \(when)"
         case .preMarket:
             return "Pre-Market"
         case .afterHours:
@@ -78,6 +87,8 @@ enum CommodityUnit: String {
     case bushel = "per bu"
     case ton = "per ton"
     case contract = "per contract"
+    /// An ETF-backed screen (GLD/SLV/PPLT/PALL): the number is a fund SHARE price.
+    case share = "per share"
 
     var shortName: String { rawValue }
 }

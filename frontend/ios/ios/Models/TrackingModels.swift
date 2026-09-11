@@ -68,6 +68,9 @@ struct TrackedAsset: Identifiable {
     let companyName: String
     let price: Double
     let changePercent: Double
+    /// False → the matching float is a placeholder; render "—", never a number.
+    var priceKnown: Bool = true
+    var changeKnown: Bool = true
     let sparklineData: [Double]
     /// Where `sparklineData` sits inside this asset's own trading session, as
     /// fractions of the row's width. The series is a bare `[Double]` with no
@@ -101,7 +104,7 @@ struct TrackedAsset: Identifiable {
     }
 
     var isPositive: Bool {
-        normalizedChange >= 0
+        changeKnown && normalizedChange >= 0
     }
 
     /// Previous trading day's close — the sparkline's dotted baseline. Uses the
@@ -109,8 +112,9 @@ struct TrackedAsset: Identifiable {
     /// else derives it from price and day-change % as a fallback.
     var previousClose: Double? {
         if let pc = backendPreviousClose { return pc }
+        guard changeKnown, priceKnown else { return nil }
         let factor = 1 + changePercent / 100
-        guard factor != 0 else { return nil }
+        guard factor.isFinite, factor != 0 else { return nil }
         return price / factor
     }
 
@@ -126,6 +130,7 @@ struct TrackedAsset: Identifiable {
     /// non-finite. The label renders "—" in that case rather than quietly falling back to the
     /// percentage, which would put a wrong number in a column of dollars.
     var changeAmount: Double? {
+        guard changeKnown, priceKnown else { return nil }
         guard let prev = previousClose, prev.isFinite, price.isFinite else { return nil }
         let delta = price - prev
         return delta.isFinite ? delta : nil
@@ -187,6 +192,7 @@ struct TrackedAsset: Identifiable {
     }
 
     var formattedPrice: String {
+        guard priceKnown, price.isFinite else { return "—" }
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
         formatter.currencySymbol = "$"
@@ -196,6 +202,7 @@ struct TrackedAsset: Identifiable {
     }
 
     var formattedChange: String {
+        guard changeKnown else { return "—" }
         let sign = isPositive ? "+" : ""
         return "\(sign)\(String(format: "%.2f", normalizedChange))%"
     }
@@ -642,12 +649,20 @@ struct TrackedAssetDTO: Codable, Identifiable {
     let assetType: String?
     let shares: Double?
     let marketValue: Double?
+    /// `pe_known` pattern: `price` / `changePercent` are plain Doubles on the wire, so
+    /// these say whether they are measurements or 0.0 placeholders (the backend's own
+    /// `price_service` reports an unknown day change as None, and the feed used to fold
+    /// it into "+0.00%" in green). `nil` (older backend) reads as known.
+    let priceKnown: Bool?
+    let changeKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ticker
         case companyName = "company_name"
         case price
         case changePercent = "change_percent"
+        case priceKnown = "price_known"
+        case changeKnown = "change_known"
         case previousClose = "previous_close"
         case sparklineData = "sparkline_data"
         case sparkFrom = "spark_from"
@@ -702,6 +717,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
         assetType = lenient(String.self, .assetType)
         shares = lenient(Double.self, .shares).finiteOrNil
         marketValue = lenient(Double.self, .marketValue).finiteOrNil
+        priceKnown = lenient(Bool.self, .priceKnown)
+        changeKnown = lenient(Bool.self, .changeKnown)
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -715,6 +732,8 @@ struct TrackedAssetDTO: Codable, Identifiable {
             companyName: CompanyNameFormatter.clean(companyName),
             price: price,
             changePercent: changePercent,
+            priceKnown: priceKnown ?? true,
+            changeKnown: changeKnown ?? true,
             sparklineData: sparklineData,
             // A missing, non-finite or inverted pair falls back to the full
             // width — the pre-span behaviour. Never narrow a row we cannot place.

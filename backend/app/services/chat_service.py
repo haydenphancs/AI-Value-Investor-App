@@ -25,7 +25,12 @@ from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
 from app.services.agents.book_voice_prompt import book_display_title, render_book_voice
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
-from app.services.asset_class import detect_asset_class, trades_extended_hours
+from app.services.asset_class import (
+    canonical_stored_symbol,
+    detect_asset_class,
+    trades_extended_hours,
+    uses_coingecko_price,
+)
 from app.services._analyst_common import (
     analyst_is_usable,
     analyst_section_available,
@@ -34,7 +39,7 @@ from app.services.agents.chat_tools import tools_for_asset_type
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
-from app.services.chart_helper import _finite_or_none
+from app.services.chart_helper import _finite_or_none, fetch_chart_data
 from app.services.price_service import price_source
 from app.utils.market_hours import session_trading_date
 
@@ -366,17 +371,17 @@ class ChatService:
 
         async def _handle_stock_tool(args: Dict[str, Any]) -> Dict[str, Any]:
             """Called when Gemini decides it needs stock data."""
-            ticker = args.get("ticker", "").upper()
+            ticker = self._chat_symbol(args.get("ticker", ""))
             return await self._fetch_stock_widget_data(ticker)
 
         async def _handle_analyst_tool(args: Dict[str, Any]) -> Dict[str, Any]:
             """Called when Gemini decides it needs analyst data."""
-            ticker = args.get("ticker", "").upper()
+            ticker = self._chat_symbol(args.get("ticker", ""))
             return await self._fetch_analyst_data(ticker)
 
         async def _handle_sentiment_tool(args: Dict[str, Any]) -> Dict[str, Any]:
             """Called when Gemini decides it needs sentiment data."""
-            ticker = args.get("ticker", "").upper()
+            ticker = self._chat_symbol(args.get("ticker", ""))
             return await self._fetch_sentiment_data(ticker)
 
         async def _handle_market_overview_tool(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -385,10 +390,10 @@ class ChatService:
             return await self._fetch_market_overview_data(symbol)
 
         async def _handle_ticker_news_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._fetch_ticker_news_data(args.get("ticker", "").upper())
+            return await self._fetch_ticker_news_data(self._chat_symbol(args.get("ticker", "")))
 
         async def _handle_price_move_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._fetch_price_move_data(args.get("ticker", "").upper())
+            return await self._fetch_price_move_data(self._chat_symbol(args.get("ticker", "")))
 
         async def _handle_market_snapshot_tool(args: Dict[str, Any]) -> Dict[str, Any]:
             return await self._fetch_market_snapshot_data()
@@ -864,6 +869,9 @@ class ChatService:
             symbol = (stock_id or reference_id or "").split("|")[0].strip().upper()
             if not symbol:
                 return None
+            if asset_type == "CRYPTO":
+                # The crypto screen may hand us the bare form; the coin is priced as the pair.
+                symbol = canonical_stored_symbol(symbol, "crypto")
             if asset_type == "INDEX":
                 raw = await self._fetch_market_overview_data(symbol)
                 if raw and raw.get("widget_type") == "market_overview":
@@ -946,6 +954,22 @@ class ChatService:
 
     # ── FMP data fetching for the stock widget ──────────────────────
 
+    @staticmethod
+    def _chat_symbol(raw: Any) -> str:
+        """The symbol chat should FETCH for what the model or the screen named.
+
+        Chat classifies a bare coin ticker as the COIN (`include_bare_coins=True` — a
+        typed "BTC" means Bitcoin here, unlike the watchlist where the bare form is the
+        listed security). The data path has to agree: `price_source.get_quote("BTC")`
+        routes on `uses_coingecko_price`, which is False for the bare form, so the card
+        served the Grayscale ETF's $34 quote under a 24/7 "Live" dot and crypto news.
+        Resolving to the pair (`BTCUSD`) sends every leg to CoinGecko.
+        """
+        ticker = str(raw or "").strip().upper()
+        if ticker and detect_asset_class(ticker, include_bare_coins=True) == "crypto":
+            return canonical_stored_symbol(ticker, "crypto")
+        return ticker
+
     async def _fetch_stock_widget_data(self, ticker: str) -> Dict[str, Any]:
         """
         Fetch real-time quote + 30-day historical prices from FMP and
@@ -965,9 +989,19 @@ class ChatService:
             from_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
             historical_data: List[Dict[str, Any]] = []
             try:
-                hist_raw = await self.fmp.get_historical_prices(
-                    ticker, from_date=from_date, to_date=to_date
-                )
+                if uses_coingecko_price(ticker):
+                    # FMP 402s every crypto pair; the shared fetcher routes a coin to
+                    # CoinGecko and returns the same row shape the normaliser expects.
+                    # "3M" is the smallest daily range it knows (and shares the crypto
+                    # screen's cached series); trim it to the card's 30-day window.
+                    hist_raw = [
+                        r for r in await fetch_chart_data(self.fmp, ticker, "3M")
+                        if isinstance(r, dict) and str(r.get("date") or "")[:10] >= from_date
+                    ]
+                else:
+                    hist_raw = await self.fmp.get_historical_prices(
+                        ticker, from_date=from_date, to_date=to_date
+                    )
                 historical_data = self._normalize_historical(hist_raw)
             except Exception as e:
                 logger.warning(
@@ -1008,8 +1042,15 @@ class ChatService:
             # session on them made a Bitcoin card read "Closed" at 2am on a Sunday while BTC was
             # very much trading — a confidently wrong claim on an AI-authored card. Same
             # classifier the charts use, so the card and the detail screen agree.
-            if trades_extended_hours(detect_asset_class(ticker)):
+            asset_class = detect_asset_class(ticker, include_bare_coins=True)
+            if trades_extended_hours(asset_class):
                 is_market_open = True
+            elif asset_class == "commodity":
+                # The commodity screen's own verdict, so the card and the screen agree:
+                # a metal is an ETF (equity hours); WTI / Henry Hub are a FRED daily
+                # settlement published days behind, which is never "live".
+                from app.services.commodity_service import _commodity_market_status
+                is_market_open = _commodity_market_status(ticker) == "Market Open"
             else:
                 from app.services.home_dashboard_service import _market_status
                 is_market_open = _market_status()[1]
@@ -1192,7 +1233,7 @@ class ChatService:
             from app.services.sentiment_service import get_sentiment_service
 
             service = get_sentiment_service()
-            is_crypto = detect_asset_class(ticker) == "crypto"
+            is_crypto = detect_asset_class(ticker, include_bare_coins=True) == "crypto"
             # FMP wants the pair ("BTCUSD"); ApeWisdom wants the bare base ("BTC"). The crypto
             # endpoint already splits them this way — mirror it, or social mentions come back
             # empty for every coin. Trailing-only strip: a global replace turns USDT into T.
@@ -1270,7 +1311,7 @@ class ChatService:
         # does: a coin routed through the equity news feed comes back empty, and the model
         # then reports "no news" for the most-discussed asset on the screen.
         return await fetch_ticker_news(
-            ticker, is_crypto=detect_asset_class(ticker) == "crypto"
+            ticker, is_crypto=detect_asset_class(ticker, include_bare_coins=True) == "crypto"
         )
 
     async def _fetch_price_move_data(self, ticker: str) -> Dict[str, Any]:
@@ -1278,7 +1319,7 @@ class ChatService:
         from app.services.chat_market_tools import explain_price_move
 
         return await explain_price_move(
-            ticker, is_crypto=detect_asset_class(ticker) == "crypto"
+            ticker, is_crypto=detect_asset_class(ticker, include_bare_coins=True) == "crypto"
         )
 
     async def _fetch_market_snapshot_data(self) -> Dict[str, Any]:
@@ -1620,7 +1661,7 @@ class ChatService:
         declared = (context_type or "").strip().upper()
         if declared in ("ETF", "CRYPTO", "INDEX", "COMMODITY", "STOCK"):
             return declared
-        return detect_asset_class(stock_id, include_aliases=True).upper()
+        return detect_asset_class(stock_id, include_aliases=True, include_bare_coins=True).upper()
 
     # ── Deep dive cache ───────────────────────────────────────────
 

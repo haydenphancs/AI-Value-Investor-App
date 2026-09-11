@@ -245,9 +245,14 @@ def _watchlist_source():
 
 
 def test_remove_tries_the_raw_ticker_before_the_canonical_one():
+    """Undeclared (the shipped build): RAW first, canonical second. A request that
+    declares "crypto" flips the order, because the crypto screen's star sends the bare
+    symbol for the COIN and raw-first would delete the same-ticker ETF/REIT instead.
+    Behavioural coverage for both orders: `test_watchlist_asset_type_persistence.py`."""
     src = _watchlist_source()
     assert "raw_ticker" in src, "remove still canonicalises unconditionally"
-    assert src.index('.eq("ticker", raw_ticker)') < src.index('.eq("ticker", canonical)')
+    assert 'first, second = (canonical, raw_ticker) if declared == "crypto" else (raw_ticker, canonical)' in src
+    assert src.index('.eq("ticker", first)') < src.index('.eq("ticker", second)')
 
 
 def test_remove_does_not_delete_both_spellings_at_once():

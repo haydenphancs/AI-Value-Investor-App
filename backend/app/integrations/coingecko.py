@@ -288,6 +288,9 @@ class CoinGeckoClient:
 
     _MAX_RETRIES = 3
     _BACKOFF_BASE_SECONDS = 1.0
+    # Longest we will honour a 429 Retry-After for before giving the caller its
+    # degrade path. A monthly-quota 429 can carry hours; nobody is waiting for that.
+    _MAX_RETRY_AFTER_SECONDS = 60.0
 
     @staticmethod
     def _error_code(response: "httpx.Response") -> Optional[int]:
@@ -404,7 +407,14 @@ class CoinGeckoClient:
                         break
                     wait = self._BACKOFF_BASE_SECONDS * (2 ** attempt)
                     if isinstance(e, CoinGeckoRateLimitException) and e.retry_after:
-                        wait = max(wait, e.retry_after)
+                        # Honour Retry-After, but BOUNDED. CoinGecko sends 429 for a burst
+                        # AND for monthly-quota exhaustion, and the header is parsed as any
+                        # float; an unbounded sleep here parked the in-flight leader — and
+                        # every joiner shielded on its future — for the full value, hours
+                        # in the quota case, while each HTTP handler timed out client-side
+                        # and the server task lived on. Past the cap the caller degrades
+                        # (its own except arm) instead of waiting.
+                        wait = max(wait, min(float(e.retry_after), self._MAX_RETRY_AFTER_SECONDS))
                     logger.warning(
                         "CoinGecko %s attempt %d/%d failed (%s) — retrying in %.1fs",
                         endpoint, attempt + 1, self._MAX_RETRIES, e, wait,

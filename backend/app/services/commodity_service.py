@@ -186,6 +186,12 @@ def _commodity_market_status(symbol: str = "") -> str:
 _COMMODITY_SOURCE_FRED = "fred"
 _COMMODITY_SOURCE_ETF = "etf"
 
+# ⚠️ Every field on these profiles describes the INSTRUMENT WHOSE NUMBER IS SHOWN — the
+# same rule as the header label. GC/SI/PL/PA are NYSE Arca funds (GLD/SLV/PPLT/PALL):
+# equity hours, a $0.01 tick, and no contract — `contract_size`/`tick_size` are sent
+# EMPTY rather than invented (iOS hides an empty row). CL/NG are EIA daily spot
+# settlements via FRED: no exchange session, no contract. The COMEX/NYMEX futures
+# metadata that used to sit here described GCUSD/CLUSD, which no screen shows.
 _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
     "GC": {
         "name": "SPDR Gold Shares",
@@ -194,11 +200,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "GLD",
         "ref_name": "SPDR Gold Shares",
         "category": "metals",
-        "exchange": "COMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "100 troy ounces",
+        "exchange": "NYSE Arca",
+        "trading_hours": "Mon–Fri 9:30 AM – 4:00 PM ET",
+        "contract_size": "",
         "unit": "share",
-        "tick_size": "$0.10",
+        "tick_size": "$0.01",
         "major_producers": "China, Australia, Russia, USA, Canada",
         "major_consumers": "China, India, USA, Germany, Turkey",
         "description": "SPDR Gold Shares (GLD) is an exchange-traded fund that holds physical gold. Prices shown here are the FUND'S SHARE PRICE, not the gold spot price — a share represents a fraction of an ounce. Gold is a precious metal widely regarded as a store of value and safe-haven asset. Prices are driven by inflation expectations, interest rates, geopolitical risk, and US dollar strength. Central banks hold gold as reserve assets, and demand spans jewelry, electronics, and investment products.",
@@ -211,11 +217,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "SLV",
         "ref_name": "iShares Silver Trust",
         "category": "metals",
-        "exchange": "COMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "5,000 troy ounces",
+        "exchange": "NYSE Arca",
+        "trading_hours": "Mon–Fri 9:30 AM – 4:00 PM ET",
+        "contract_size": "",
         "unit": "share",
-        "tick_size": "$0.005",
+        "tick_size": "$0.01",
         "major_producers": "Mexico, Peru, China, Poland, Chile",
         "major_consumers": "USA, India, Japan, China, Germany",
         "description": "iShares Silver Trust (SLV) is an exchange-traded fund that holds physical silver. Prices shown here are the FUND'S SHARE PRICE, not the silver spot price — a share represents a fraction of an ounce. Silver is both a precious and industrial metal. It is used in electronics, solar panels, medical devices, and jewelry. Silver prices correlate with gold but are more volatile due to its dual nature as a store of value and industrial commodity.",
@@ -228,11 +234,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "PPLT",
         "ref_name": "abrdn Physical Platinum Shares ETF",
         "category": "metals",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "50 troy ounces",
+        "exchange": "NYSE Arca",
+        "trading_hours": "Mon–Fri 9:30 AM – 4:00 PM ET",
+        "contract_size": "",
         "unit": "share",
-        "tick_size": "$0.10",
+        "tick_size": "$0.01",
         "major_producers": "South Africa, Russia, Zimbabwe, Canada, USA",
         "major_consumers": "China, Europe, Japan, USA",
         "description": "abrdn Physical Platinum Shares (PPLT) is an exchange-traded fund that holds physical platinum. Prices shown here are the FUND'S SHARE PRICE, not the platinum spot price — a share represents a fraction of an ounce. Platinum is a rare precious metal used heavily in automotive catalytic converters, jewelry, and industrial applications. Supply is concentrated in South Africa, making prices sensitive to mining disruptions and energy costs there.",
@@ -245,11 +251,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "PALL",
         "ref_name": "abrdn Physical Palladium Shares ETF",
         "category": "metals",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "100 troy ounces",
+        "exchange": "NYSE Arca",
+        "trading_hours": "Mon–Fri 9:30 AM – 4:00 PM ET",
+        "contract_size": "",
         "unit": "share",
-        "tick_size": "$0.50",
+        "tick_size": "$0.01",
         "major_producers": "Russia, South Africa, Canada, USA, Zimbabwe",
         "major_consumers": "China, Europe, USA, Japan",
         "description": "abrdn Physical Palladium Shares (PALL) is an exchange-traded fund that holds physical palladium. Prices shown here are the FUND'S SHARE PRICE, not the palladium spot price — a share represents a fraction of an ounce. Palladium is a precious metal used primarily in gasoline-engine catalytic converters. Supply is highly concentrated in Russia and South Africa, and prices are sensitive to auto production cycles and substitution with platinum.",
@@ -262,11 +268,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "DCOILWTICO",
         "ref_name": "WTI spot, Cushing OK (EIA via FRED)",
         "category": "energy",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "1,000 barrels",
+        "exchange": "Spot — Cushing, OK (EIA via FRED)",
+        "trading_hours": "Daily settlement, published ~5 business days behind",
+        "contract_size": "",
         "unit": "barrel",
-        "tick_size": "$0.01",
+        "tick_size": "",
         "major_producers": "USA, Saudi Arabia, Russia, Canada, Iraq",
         "major_consumers": "USA, China, India, Japan, Russia",
         "description": "West Texas Intermediate (WTI) is the US benchmark crude oil grade, priced at Cushing, Oklahoma. Prices respond to OPEC+ supply decisions, US shale output, inventory data, and global demand expectations.",
@@ -279,11 +285,11 @@ _COMMODITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "ref": "DHHNGSP",
         "ref_name": "Henry Hub spot (EIA via FRED)",
         "category": "energy",
-        "exchange": "NYMEX",
-        "trading_hours": "Sun–Fri 6:00 PM – 5:00 PM ET",
-        "contract_size": "10,000 MMBtu",
+        "exchange": "Spot — Henry Hub (EIA via FRED)",
+        "trading_hours": "Daily settlement, published ~5 business days behind",
+        "contract_size": "",
         "unit": "mmbtu",
-        "tick_size": "$0.001",
+        "tick_size": "",
         "major_producers": "USA, Russia, Iran, Qatar, Canada",
         "major_consumers": "USA, Russia, China, Iran, Japan",
         "description": "Henry Hub natural gas is the North American benchmark. Prices are driven by weather-linked heating and cooling demand, storage levels, LNG export volumes, and associated production from oil drilling.",
@@ -507,7 +513,14 @@ class CommodityService:
         if price <= 0:
             # A zero-price core would paint "$0.00" as the FIRST thing on screen. Refuse:
             # the client fetches core with `try?`, so the skeleton simply stays up.
-            raise ValueError(f"commodity core has no usable price for {symbol}")
+            #
+            # TYPED, not a bare ValueError — the index twin (`index_service.get_index_core`)
+            # was fixed the same way: `classify_exception` has no rule for ValueError, so
+            # it fell through to REPORT_GENERATION_FAILED (502, "we broke", Sentry) for what
+            # is an upstream-has-nothing condition (503 FMP_UNAVAILABLE, retryable).
+            raise FMPUnavailableException(
+                f"commodity core has no usable price for {symbol}"
+            )
 
         change = _finite_or_none(quote.get("change")) or 0
         change_pct = (_finite_or_none(quote.get("changePercentage"))
@@ -1082,10 +1095,14 @@ class CommodityService:
             )
             return []
         try:
-            # Commodities trade nearly 24h — do NOT apply the equity 09:30-16:00 ET
-            # regular-hours filter (it would gut a ~23h market to a 6.5h slice).
+            # Only ETF-backed refs reach this call (FRED returned [] above), and those
+            # funds trade the REGULAR equity session. `extended_hours=True` dated from
+            # the futures era (GCUSD, ~23h/day): it fetched GLD's 04:00–20:00 bars, and
+            # iOS drew them on a 24-hour axis, so the 1D chart filled two-thirds of the
+            # width. Matches `_commodity_market_status`'s ETF branch and the fund's own
+            # ETF detail chart, which `etf_service` fetches on the regular session.
             bars = await fetch_chart_data(
-                self.fmp, _ref_of(fmp_symbol), chart_range, interval, extended_hours=True
+                self.fmp, _ref_of(fmp_symbol), chart_range, interval, extended_hours=False
             )
         except Exception as e:
             logger.warning(

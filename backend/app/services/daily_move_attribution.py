@@ -224,6 +224,25 @@ def _moved_with_group(change: float, group_change: Optional[float]) -> bool:
 # ── Individual detectors (each returns an Attribution or None) ────────
 
 
+_DAY_NAMES = {"Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
+              "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"}
+
+
+def session_words(session_word: str = "today") -> tuple[str, str, str]:
+    """(adverb, possessive, capitalised possessive) for the session a move belongs to.
+
+    "today" -> ("today", "today's", "Today's"); "on Fri" -> ("on Fri", "Friday's",
+    "Friday's"). Every sentence this module writes says WHEN, and pre-market Monday the
+    numbers are Friday's — calling them "today's" was the cross-session claim the
+    industry gate exists to suppress, printed by the headline itself.
+    """
+    if session_word == "today":
+        return "today", "today's", "Today's"
+    day = session_word.replace("on ", "").strip()
+    full = _DAY_NAMES.get(day, day)
+    return session_word, f"{full}'s", f"{full}'s"
+
+
 def detect_earnings(
     ticker: str, change: float, earnings_row: Optional[Dict[str, Any]], today: date
 ) -> Optional[Attribution]:
@@ -305,7 +324,8 @@ def detect_earnings(
 
 
 def detect_analyst_action(
-    ticker: str, grade_rows: Optional[Sequence[Dict[str, Any]]], today: date
+    ticker: str, grade_rows: Optional[Sequence[Dict[str, Any]]], today: date,
+    session_word: str = "today",
 ) -> Optional[Attribution]:
     """An upgrade / downgrade dated today.
 
@@ -354,7 +374,7 @@ def detect_analyst_action(
             detail += f" to {new_grade}"
             if prev and prev.lower() != new_grade.lower():
                 detail += f" from {prev}"
-        detail += " today."
+        detail += f" {session_words(session_word)[0]}."
         return Attribution(kind=CauseKind.ANALYST, tag=tag, detail=detail)
     return None
 
@@ -390,8 +410,10 @@ def detect_group_move(
     industry_name: Optional[str],
     industry_change: Optional[float],
     market_change: Optional[float],
+    session_word: str = "today",
 ) -> Optional[Attribution]:
     """It went where its industry, or the whole tape, went."""
+    when = session_words(session_word)[0]
     if _moved_with_group(change, industry_change):
         name = (industry_name or "its industry").strip()
         return Attribution(
@@ -399,7 +421,7 @@ def detect_group_move(
             tag="Sector Move",
             detail=(
                 f"{name} {_dir_word(industry_change or 0)} "
-                f"{_pct(industry_change or 0)} today; {ticker} moved with it."
+                f"{_pct(industry_change or 0)} {when}; {ticker} moved with it."
             ),
         )
     if _moved_with_group(change, market_change):
@@ -408,14 +430,15 @@ def detect_group_move(
             tag="Market Move",
             detail=(
                 f"The market {_dir_word(market_change or 0)} "
-                f"{_pct(market_change or 0)} today; {ticker} moved with it."
+                f"{_pct(market_change or 0)} {when}; {ticker} moved with it."
             ),
         )
     return None
 
 
 def describe_no_cause(
-    ticker: str, ctx: MoveContext, had_news: bool, news_checked: bool = True
+    ticker: str, ctx: MoveContext, had_news: bool, news_checked: bool = True,
+    session_word: str = "today",
 ) -> str:
     """The honest answer, and the most common one.
 
@@ -450,16 +473,17 @@ def describe_no_cause(
     if ctx.gap_dominant and ctx.gap_percent is not None:
         parts.append("Most of it was an overnight gap at the open.")
 
+    when, poss, poss_cap = session_words(session_word)
     if not news_checked:
         # Do NOT assert a negative we never established. If the arithmetic above already
         # said something true and useful, let that stand alone rather than appending a
         # hedge nobody can act on.
         if not parts:
-            parts.append("Today's news could not be checked.")
+            parts.append(f"{poss_cap} news could not be checked.")
     else:
         parts.append(
-            "No company news today." if not had_news
-            else "No clear catalyst in today's news."
+            f"No company news {when}." if not had_news
+            else f"No clear catalyst in {poss} news."
         )
     return " ".join(parts)
 
@@ -486,6 +510,8 @@ def attribute(
     # False when the news lookup FAILED, as opposed to succeeding and finding nothing.
     # Defaults True so every existing caller and test keeps its current meaning.
     news_checked: bool = True,
+    # "today", or "on Fri" when `today` is a prior session (see `session_words`).
+    session_word: str = "today",
 ) -> Optional[Attribution]:
     """Best available same-day explanation, plus always-true context.
 
@@ -519,7 +545,7 @@ def attribute(
     considered: List[str] = []
     for name, detector in (
         ("earnings", lambda: detect_earnings(ticker, change, earnings_row, today)),
-        ("analyst", lambda: detect_analyst_action(ticker, grade_rows, today)),
+        ("analyst", lambda: detect_analyst_action(ticker, grade_rows, today, session_word)),
         ("company_news", lambda: detect_company_news(ticker, classified_news)),
         (
             "group",
@@ -529,6 +555,7 @@ def attribute(
                 ctx.industry_name,
                 ctx.industry_change_percent,
                 ctx.market_change_percent,
+                session_word,
             ),
         ),
     ):
@@ -553,7 +580,7 @@ def attribute(
     return Attribution(
         kind=CauseKind.NONE,
         tag=None,
-        detail=describe_no_cause(ticker, ctx, had_news, news_checked),
+        detail=describe_no_cause(ticker, ctx, had_news, news_checked, session_word),
         context=ctx,
         considered=considered,
     )

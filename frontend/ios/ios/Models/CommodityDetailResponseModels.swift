@@ -25,7 +25,8 @@ extension CommodityMarketStatus {
         case "after-hours", "afterhours":
             self = .afterHours
         default:
-            self = .closed(date: Date(), time: "", timezone: "ET")
+            // No date on the wire → no date invented. See `CommodityMarketStatus.closed`.
+            self = .closed(date: nil, time: "", timezone: "")
         }
     }
 }
@@ -141,6 +142,7 @@ struct CommodityProfileDTO: Decodable {
             case "gallon": return .gallon
             case "bushel": return .bushel
             case "ton": return .ton
+            case "share": return .share
             default: return .contract
             }
         }()

@@ -973,7 +973,14 @@ class TrackingViewModel: ObservableObject {
     /// pushed into the active portfolio — that's the whole point of tapping
     /// the star while looking at this portfolio.
     func addTickerFromSearch(_ result: StockSearchResult) {
-        let symbol = result.ticker.uppercased()
+        // The spelling the PORTFOLIO must carry is the one the watchlist stores: a coin is
+        // persisted as the pair (`BTCUSD`, migration 160) while search hands us the bare
+        // `BTC`. `PUT /portfolios/{id}/tickers` resolves a bare spelling raw-first, so a
+        // user who also holds the same-ticker security (the BTC ETF) would have had the
+        // security chosen and the coin they just starred DROPPED from the portfolio.
+        let symbol = (result.type ?? "").lowercased() == "crypto"
+            ? CryptoSymbol.pair(result.ticker)
+            : result.ticker.uppercased()
 
         Task { @MainActor in
             // Self-heal: if the user taps the star before portfolios have

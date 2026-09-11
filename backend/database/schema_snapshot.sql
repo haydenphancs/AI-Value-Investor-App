@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict evYnIooTr3DMDemHvaU13tyQgyN7xBTczilmMR73mYO1KAFFrjLWCtgw9ACU7Fm
+\restrict jtpC1SSs4bXXOM0asrIb9U508pGUbXxhO0wlmeJZuBu9i3RVOYdjRwSZli0Agy6
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -5681,6 +5681,83 @@ COMMENT ON COLUMN public.chat_sessions.free_followup_until IS 'When the session'
 
 
 --
+-- Name: chat_starter_answers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_starter_answers (
+    question_hash text NOT NULL,
+    answer_date date NOT NULL,
+    question text NOT NULL,
+    answer text NOT NULL,
+    widget jsonb,
+    suggestions jsonb DEFAULT '[]'::jsonb NOT NULL,
+    tokens_used integer,
+    model text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE chat_starter_answers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.chat_starter_answers IS 'Pre-computed answers to the day''s Ask Cay AI suggestion chips, so tapping one replays a stored answer instead of paying a Gemini turn (and possibly a grounded web search). Keyed on the QUESTION, not the chip slot, because the chip set drifts intraday as the hot-ticker and hot-sector slots track the tape. One ET day of retention: yesterday''s answer to a "today" question is wrong, not merely stale. Written by app/services/chat_starter_warm_service.py; read by the chat streaming endpoint.';
+
+
+--
+-- Name: COLUMN chat_starter_answers.question_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_starter_answers.question_hash IS 'SHA-256 of the NFKC-normalised, case-folded question text. Fixed-width key; the raw question is kept alongside so a collision would be visible rather than silent.';
+
+
+--
+-- Name: COLUMN chat_starter_answers.answer_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_starter_answers.answer_date IS 'ET trading day, matching the rotation''s own boundary. UTC here would roll the answers and the questions over at different moments.';
+
+
+--
+-- Name: chat_starters; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.chat_starters (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug text NOT NULL,
+    text text NOT NULL,
+    scope text DEFAULT 'global'::text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chat_starters_scope_check CHECK ((scope = ANY (ARRAY['global'::text, 'ticker'::text, 'etf'::text, 'crypto'::text, 'commodity'::text, 'index'::text]))),
+    CONSTRAINT chat_starters_text_length CHECK (((char_length(text) >= 4) AND (char_length(text) <= 140)))
+);
+
+
+--
+-- Name: TABLE chat_starters; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.chat_starters IS 'Editorial pool of starter questions for the Ask Cay AI chat. One row per question; scope says which surface it belongs to (global chat, or an asset detail bar, whose rows carry a literal {symbol} placeholder the client fills in). The DAY''S selection is not stored - app/services/daily_rotation.py derives it as a pure function of the pool and the ET date, so every instance agrees without coordination. Read only by app/services/chat_starters_service.py and served via GET /api/v1/chat/starters; seeded from backend/data/chat_starters.json by scripts/seed_chat_starters.py.';
+
+
+--
+-- Name: COLUMN chat_starters.scope; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_starters.scope IS 'global | ticker | etf | crypto | commodity | index. Non-global rows MUST contain exactly one {symbol} placeholder; iOS drops any template it cannot fill rather than rendering a raw brace.';
+
+
+--
+-- Name: COLUMN chat_starters.sort_order; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.chat_starters.sort_order IS 'Editorial grouping only. It does NOT drive what the user sees: normalize_pool() sorts the pool canonically because PostgREST does not guarantee row order without an ORDER BY, and a position-dependent schedule would let two instances disagree on the same day.';
+
+
+--
 -- Name: chat_usage_budget; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8934,6 +9011,30 @@ ALTER TABLE ONLY public.chat_sessions
 
 
 --
+-- Name: chat_starter_answers chat_starter_answers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_starter_answers
+    ADD CONSTRAINT chat_starter_answers_pkey PRIMARY KEY (question_hash, answer_date);
+
+
+--
+-- Name: chat_starters chat_starters_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_starters
+    ADD CONSTRAINT chat_starters_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: chat_starters chat_starters_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_starters
+    ADD CONSTRAINT chat_starters_slug_key UNIQUE (slug);
+
+
+--
 -- Name: chat_usage_budget chat_usage_budget_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10598,6 +10699,20 @@ CREATE INDEX idx_chat_sessions_type ON public.chat_sessions USING btree (session
 --
 
 CREATE INDEX idx_chat_sessions_user ON public.chat_sessions USING btree (user_id, last_message_at DESC);
+
+
+--
+-- Name: idx_chat_starter_answers_day; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_starter_answers_day ON public.chat_starter_answers USING btree (answer_date);
+
+
+--
+-- Name: idx_chat_starters_active_scope; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_starters_active_scope ON public.chat_starters USING btree (is_active, scope);
 
 
 --
@@ -12719,6 +12834,32 @@ CREATE POLICY chat_sessions_update_own ON public.chat_sessions FOR UPDATE USING 
 
 
 --
+-- Name: chat_starter_answers; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.chat_starter_answers ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: chat_starter_answers chat_starter_answers_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_starter_answers_service_all ON public.chat_starter_answers TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: chat_starters; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.chat_starters ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: chat_starters chat_starters_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_starters_service_all ON public.chat_starters TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: chat_usage_budget; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14562,5 +14703,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict evYnIooTr3DMDemHvaU13tyQgyN7xBTczilmMR73mYO1KAFFrjLWCtgw9ACU7Fm
+\unrestrict jtpC1SSs4bXXOM0asrIb9U508pGUbXxhO0wlmeJZuBu9i3RVOYdjRwSZli0Agy6
 

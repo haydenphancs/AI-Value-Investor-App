@@ -83,12 +83,15 @@ def test_the_predicate_is_strictly_narrower_than_the_classifier():
     If someone 'simplifies' `uses_coingecko_price` back to `detect_asset_class == crypto`,
     these bare symbols come back and the wrong prices ship again.
     """
-    classified = {s for s in _BARE_CRYPTO_SYMBOLS if detect_asset_class(s) == "crypto"}
+    classified = {s for s in _BARE_CRYPTO_SYMBOLS
+                  if detect_asset_class(s, include_bare_coins=True) == "crypto"}
     routed = {s for s in _BARE_CRYPTO_SYMBOLS if uses_coingecko_price(s)}
-    assert classified, "guard is stale — bare symbols are no longer classified crypto"
+    assert classified, "guard is stale — bare symbols are no longer classifiable as crypto"
     assert routed < classified, (
         "uses_coingecko_price must be STRICTLY narrower than the crypto classifier"
     )
+    # And by DEFAULT the classifier agrees with the router: a bare ticker is the security.
+    assert all(detect_asset_class(s) == "stock" for s in _BARE_CRYPTO_SYMBOLS)
 
 
 @pytest.mark.parametrize("fx", ["EURUSD", "GBPUSD", "USDCAD", "USDJPY", "AUDUSD"])

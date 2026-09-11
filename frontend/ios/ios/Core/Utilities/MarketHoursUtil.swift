@@ -83,7 +83,10 @@ enum MarketHoursUtil {
     /// `asset_class.trades_extended_hours`.
     static func shouldRefreshPrices(assetTypes: [String], symbols: [String] = []) -> Bool {
         if isMarketActive() { return true }
-        let roundTheClock: Set<String> = ["crypto", "commodity"]
+        // Crypto only since Phase 4: a commodity row is an equity-hours ETF (GLD) or a
+        // once-a-day EIA print, and polling it all weekend refreshed a number that
+        // cannot move. Mirrors backend `asset_class._ROUND_THE_CLOCK`.
+        let roundTheClock: Set<String> = ["crypto"]
         if assetTypes.contains(where: { roundTheClock.contains($0.lowercased()) }) { return true }
         // `asset_type` is unreliable (the column defaults to "Stock" and the
         // watchlist-add path never writes it), so fall back to the symbol shape —
@@ -103,16 +106,10 @@ enum MarketHoursUtil {
     /// Mirrors `asset_class._COMMODITY_SYMBOLS` on the backend — pinned by
     /// `tests/test_asset_class.py`. PAUSD (palladium) and ZWUSD (wheat) were missing
     /// from BOTH copies, so both fell through to the generic USD-suffix crypto rule.
-    nonisolated private static let commoditySymbols: Set<String> = [
+    nonisolated static let commoditySymbols: Set<String> = [
         "GCUSD", "SIUSD", "CLUSD", "NGUSD", "PLUSD", "PAUSD", "HGUSD",
         "ZSUSD", "ZCUSD", "ZWUSD", "ZUSD", "LBUSD", "OJUSD", "KCUSD",
         "SBUSD", "CTUSD", "CCUSD",
-    ]
-
-    /// `nonisolated` for the same reason as `commoditySymbols` above.
-    nonisolated private static let bareCryptoSymbols: Set<String> = [
-        "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK",
-        "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
     ]
 
     /// `nonisolated`: passed as a function value to `symbols.contains(where:)`, which calls
@@ -122,12 +119,17 @@ enum MarketHoursUtil {
     nonisolated static func symbolTradesAroundTheClock(_ symbol: String) -> Bool {
         let sid = symbol.trimmingCharacters(in: .whitespaces).uppercased()
         guard !sid.isEmpty, !sid.hasPrefix("^") else { return false }
-        if commoditySymbols.contains(sid) { return true }
+        // A commodity CODE is checked first so it never matches the crypto suffix rule —
+        // and answers false since Phase 4: GCUSD is served by GLD (NYSE Arca, equity
+        // hours) and CLUSD by a FRED daily print. Nothing on that screen moves overnight.
+        if commoditySymbols.contains(sid) { return false }
         // The USD/USDT suffix rule needs a base symbol in front of it — "USD" on
         // its own is a real listed ETF, not a coin. Mirrors the backend's
         // asset_class.detect_asset_class.
         if sid.count > 3 && (sid.hasSuffix("USD") || sid.hasSuffix("USDT")) { return true }
-        return bareCryptoSymbols.contains(sid)
+        // A BARE coin ticker is the listed security of that name since migration 160
+        // (BTC = Grayscale's ETF, LTC = a REIT); the coin is always the pair form.
+        return false
     }
 
     /// Determine if a given `MarketStatus` represents an active session where refreshing

@@ -57,10 +57,16 @@ _BARE_CRYPTO_SYMBOLS = frozenset({
     "XRP", "DOGE", "SHIB", "UNI", "AAVE", "LTC", "BCH", "ATOM",
 })
 
-# Asset classes whose sessions are NOT the US equity 09:30–16:00 ET window:
-# crypto trades 24/7, and the FMP commodity codes are continuously-quoted
-# futures (~23h/day). Both must be fetched with extended_hours=True.
-_ROUND_THE_CLOCK = frozenset({"crypto", "commodity"})
+# Asset classes whose sessions are NOT the US equity 09:30–16:00 ET window.
+#
+# Crypto only, since Phase 4. `commodity` used to be here because the FMP futures codes
+# (GCUSD, CLUSD, …) were continuously quoted (~23h/day) — but those symbols are blocked
+# now, and every surviving commodity screen is served by either a NYSE Arca ETF
+# (GLD/SLV/PPLT/PALL — the equity session) or a FRED daily settlement (no intraday bars
+# at all). Keeping `commodity` here drew GLD's 04:00–20:00 bars on a 24-hour axis and
+# ran the 24/7 refresh gate for a number that moves on equity hours or once a day.
+# iOS `ChartCoordinateSystem.window(for:)` mirrors this set; the two must agree.
+_ROUND_THE_CLOCK = frozenset({"crypto"})
 
 # Stored `asset_type` values that are specific enough to trust. Anything else
 # (None, "", the "Stock" column default, "equity", …) falls through to symbol
@@ -69,7 +75,7 @@ _TRUSTED_STORED_CLASSES = frozenset({"crypto", "commodity", "index", "etf"})
 
 
 def detect_asset_class(
-    symbol: Optional[str], *, include_aliases: bool = False
+    symbol: Optional[str], *, include_aliases: bool = False, include_bare_coins: bool = False
 ) -> str:
     """Classify a symbol as ``index`` | ``commodity`` | ``crypto`` | ``stock``.
 
@@ -82,6 +88,16 @@ def detect_asset_class(
     (``GOLD``, ``OIL``, …). Off by default because those collide with real
     listed equities; only callers that merely *describe* an asset (chat) should
     turn it on, never a caller choosing a chart's session window.
+
+    ``include_bare_coins`` opts in to calling a BARE coin ticker (``BTC``, ``LTC``)
+    crypto. Off by default since migration 160: a coin is stored and routed in the
+    PAIR form (``BTCUSD``), so a bare ticker means the listed SECURITY of that name —
+    BTC is the Grayscale Bitcoin Mini Trust ETF, LTC is LTC Properties (a REIT), BCH is
+    Banco de Chile, ATOM is Atomera, LINK is Interlink Electronics. With the arm on by
+    default, a push about LTC Properties' earnings routed to the Litecoin screen, the
+    overnight price-alert cycle quoted the REIT every minute as if it were a coin, and
+    the ETF's sparkline got a 24/7 window. Chat opts in: a user who types "BTC" into a
+    conversation means Bitcoin, and chat only describes, never routes or persists.
     """
     if not symbol:
         return "stock"
@@ -98,7 +114,7 @@ def detect_asset_class(
     # hours, disagreeing with its own ETF detail chart.
     if len(sid) > 3 and (sid.endswith("USD") or sid.endswith("USDT")):
         return "crypto"
-    if sid in _BARE_CRYPTO_SYMBOLS:
+    if include_bare_coins and sid in _BARE_CRYPTO_SYMBOLS:
         return "crypto"
     return "stock"
 
@@ -138,9 +154,9 @@ def uses_coingecko_price(symbol: Optional[str]) -> bool:
     """True when CoinGecko is the correct PRICE source for *symbol*.
 
     ⚠️ Crypto CLASSIFICATION alone is not this question, and using it alone shipped a
-    real production bug. `_BARE_CRYPTO_SYMBOLS` deliberately calls a bare ``BTC`` /
-    ``ETH`` / ``LTC`` "crypto" so its CHART gets a 24/7 session window — but on FMP those
-    same tickers are listed securities we are fully licensed for:
+    real production bug. `_BARE_CRYPTO_SYMBOLS` used to call a bare ``BTC`` / ``ETH`` /
+    ``LTC`` "crypto" by default (now opt-in via ``include_bare_coins``) — but on FMP
+    those same tickers are listed securities we are fully licensed for:
 
         BTC  → Grayscale Bitcoin Mini Trust ETF   (AMEX)   real $34.68
         ETH  → Grayscale Ethereum Mini Trust ETF  (AMEX)   real $23.68

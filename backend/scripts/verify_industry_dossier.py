@@ -39,7 +39,8 @@ from app.services.industry_dossier_service import (  # noqa: E402
 )
 
 
-_UNIVERSE_PATH = _REPO_ROOT / "data" / "industry_universe.json"
+# Resolved through the shared loader: the file left the public repo (FMP-derived, ToS
+# §2.6.1) and is fetched from Supabase Storage when absent locally.
 
 
 def _fmt_tam(b: Optional[float]) -> str:
@@ -79,8 +80,9 @@ async def main() -> None:
                         help="Print only rows with warnings")
     args = parser.parse_args()
 
-    universe = json.loads(_UNIVERSE_PATH.read_text())
-    entries = universe.get("industries", [])
+    from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe
+
+    entries = load_universe(INDUSTRY_UNIVERSE)
     if not entries:
         print("Universe file is empty — run discover_industries.py first.")
         return

@@ -24,7 +24,7 @@ struct ChartSettingsSheet: View {
                             .foregroundColor(AppColors.textPrimary)
 
                         HStack(spacing: AppSpacing.sm) {
-                            ForEach(ChartType.allCases) { type in
+                            ForEach(assetContext.allowedChartTypes) { type in
                                 Button {
                                     var transaction = Transaction()
                                     transaction.disablesAnimations = true

@@ -123,7 +123,7 @@ class CommodityDetailViewModel: ObservableObject {
                 self.suppressIntervalReload = true
                 self.chartSettings.selectedInterval = range.defaultInterval
                 self.suppressIntervalReload = false
-                Task { await self.refreshLiveSlice(includeChart: true) }
+                Task { await self.refreshLiveSlice(includeChart: true, userInitiated: true) }
             }
             .store(in: &cancellables)
 
@@ -133,7 +133,7 @@ class CommodityDetailViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 guard !self.suppressIntervalReload else { return }
-                Task { await self.refreshLiveSlice(includeChart: true) }
+                Task { await self.refreshLiveSlice(includeChart: true, userInitiated: true) }
             }
             .store(in: &cancellables)
     }
@@ -297,10 +297,12 @@ class CommodityDetailViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
 
-                // NOT `MarketHoursUtil.isMarketActive()`, which the index copy uses:
-                // that is the US EQUITY session, and these are continuously-quoted
-                // futures (~23h/day). Gating on equity hours would leave the commodity
-                // screen frozen for most of the day — the very bug being fixed.
+                // `symbolTradesAroundTheClock` answers false for a commodity CODE since
+                // Phase 4 (GLD trades the equity session; a FRED print moves once a day),
+                // so this reduces to the equity-hours gate the index copy uses — the
+                // ~23h futures wording that used to sit here described GCUSD, which no
+                // screen shows any more. Kept as the shared predicate so crypto-shaped
+                // symbols reaching this screen would still refresh overnight.
                 // NO `isIntraday` gate any more. It used to skip the whole refresh on a
                 // daily chart, which froze the PRICE HEADER for the life of the screen —
                 // the light slice costs ~1.2 KB, so there is no reason to skip it. Bars
@@ -310,7 +312,8 @@ class CommodityDetailViewModel: ObservableObject {
                         || MarketHoursUtil.isMarketActive() else { continue }
 
                 await self.refreshLiveSlice(
-                    includeChart: self.chartSettings.selectedInterval.isIntraday
+                    includeChart: self.chartSettings.selectedInterval.isIntraday,
+                    userInitiated: false
                 )
             }
         }
@@ -337,8 +340,24 @@ class CommodityDetailViewModel: ObservableObject {
     /// The socket WINS over the REST snapshot: a tick is now, a snapshot is up to 45s old.
     /// Falling back to the REST values keeps the screen alive for symbols whose upstream
     /// feed never ticks, which is the reason this loop exists at all.
-    private func refreshLiveSlice(includeChart: Bool) async {
-        detailRequestGen += 1
+    private func refreshLiveSlice(includeChart: Bool, userInitiated: Bool) async {
+        // A range/interval tap while the FULL detail is still in flight (the fast-core
+        // chart is interactive before it lands): re-request the full payload for the new
+        // range instead. Bumping the gen here while `commodityData` is nil discarded the
+        // in-flight full response, this slice then found no model to merge into, and
+        // nothing ever set `commodityData` — the Overview tab shimmered forever and the
+        // chart stayed on the old range under the new pill until pull-to-refresh.
+        if userInitiated, commodityData == nil {
+            await fetchCommodityDetail()
+            return
+        }
+        // A user-initiated refresh supersedes anything in flight; the 30-second timer
+        // only OBSERVES the gen (see the index/ETF twins), so it can never discard an
+        // in-flight user range fetch — and a tick that lands after a newer user fetch
+        // still drops itself below.
+        if userInitiated {
+            detailRequestGen += 1
+        }
         let gen = detailRequestGen
         let range = selectedChartRange
         do {
@@ -532,11 +551,16 @@ class CommodityDetailViewModel: ObservableObject {
             // 404 for a ticker with no OHLCV) from "the fetch failed" (retryable). The
             // tab previously rendered nothing at all for BOTH, so a transient blip
             // looked identical to an unsupported asset and neither offered a way back.
-            if case APIError.notFound = error {
+            // Routed through `AppError.from` (ios-swiftui.md). The backend answers
+            // `FMP_NOT_ENTITLED` (409) for Crude/NatGas — a FRED daily print has no OHLCV
+            // — and that maps to `.featureUnavailable`, which is PERMANENT: the old
+            // `.notFound`-only test showed a Retry button that could never succeed.
+            switch AppError.from(error) {
+            case .featureUnavailable, .notFound:
                 self.technicalUnavailableMessage =
                     "Technical analysis isn\u{2019}t available for this asset."
                 self.technicalIsRetryable = false
-            } else {
+            default:
                 self.technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
                 self.technicalIsRetryable = true
             }

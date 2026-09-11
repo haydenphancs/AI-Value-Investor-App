@@ -95,6 +95,11 @@ _SUMMARY_CAP = 280
 # Industries are a long tail; sectors are all 11. Sending the whole industry list would
 # blow the tool-result cap and bury the sectors that answer the question.
 _INDUSTRY_EDGE = 5
+# Beyond the two ends, how many more moving industries to name, and how small a move still
+# counts as "moved". 30 rows of `{industry, change_percent}` is ~1.1KB against an 8000-char
+# tool-result cap the payload currently uses under half of.
+_INDUSTRY_REST_CAP = 30
+_INDUSTRY_MIN_MOVE_PCT = 0.5
 _HOT_TICKER_ROWS = 5
 
 
@@ -289,6 +294,27 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
         if lagging:
             out["lagging_industries"] = lagging
 
+        # Everything else that MOVED, name and percentage only.
+        #
+        # The top and bottom five tell the day's story, but they are five of ~150 — so a user
+        # naming any other industry ("what caused copper to drop?") hit a tool that knew the
+        # answer existed and could not see it, and Cay AI said it had no information. Ranked
+        # by ABSOLUTE change so the ones worth asking about survive the cap in both
+        # directions; an industry that did not move is one whose honest answer is "it moved
+        # normally", which needs no row here.
+        shown = {r["industry"] for r in leading + lagging}
+        rest = []
+        for r in sorted(industries, key=lambda x: -abs(_num(x.get("changesPercentage")) or 0.0)):
+            name = r.get("industry")
+            pct = _num(r.get("changesPercentage"))
+            if not name or name in shown or pct is None or abs(pct) < _INDUSTRY_MIN_MOVE_PCT:
+                continue
+            rest.append({"industry": name, "change_percent": pct})
+            if len(rest) >= _INDUSTRY_REST_CAP:
+                break
+        if rest:
+            out["other_industries_that_moved"] = rest
+
     if isinstance(scanner, BaseException):
         logger.warning("chat tool: universe unavailable: %s: %s",
                        type(scanner).__name__, scanner)
@@ -451,7 +477,40 @@ async def explain_price_move(ticker: str, is_crypto: bool = False) -> Dict[str, 
     catalyst = await _maybe_web_catalyst(sym, exp, a.kind.value)
     if catalyst is not None:
         out["web_research"] = catalyst
+
+    # ── The answer of last resort, so there is never a dead end ──────────────
+    #
+    # Requested directly after a follow-up chip Cay AI had PROPOSED came back "I don't have
+    # specific information on what caused copper to drop today." A question the product puts
+    # in the user's mouth must never be answered with a shrug: either a reason, or the honest
+    # shape of the day — "it moved the way it normally moves", "no clear catalyst in the
+    # news". Both of those ARE answers; "I don't know" is not.
+    #
+    # Only emitted when nothing upstream found a cause, so it can never talk over a real one.
+    if a.kind.value == "none" and not out.get("web_research"):
+        out["no_single_catalyst"] = True
+        out["bottom_line"] = _bottom_line(exp, news)
     return out
+
+
+def _bottom_line(exp: Any, news: Dict[str, Any]) -> str:
+    """Arithmetic plus the news status — never wrong, and never empty.
+
+    Reuses `deterministic_reason`, the widget's never-blank line, so the two surfaces phrase
+    "how big was this, really" identically. It is a comparison rather than a bare number
+    because "-4.8%" alone tells a reader nothing about whether that is remarkable for this
+    particular stock.
+    """
+    from app.services.widget_movers_service import deterministic_reason
+
+    move = deterministic_reason(exp.change_percent, exp.z)
+    if not news.get("news_available"):
+        # A failed read is NOT "no news". Asserting a negative nobody checked is the lie the
+        # `*_available` flags exist to prevent.
+        return f"{move} Today's news could not be checked, so do not say there was none."
+    if not (news.get("articles") or []):
+        return f"{move} No company news was published today."
+    return f"{move} No single catalyst stands out in today's news."
 
 
 # The two `daily_move_attribution` tags whose direction can CONTRADICT the price move.
@@ -497,13 +556,13 @@ def _direction_conflict(tag: Optional[str], change: Optional[float]) -> Optional
 # otherwise, and "extreme" alone does not convey that it is measured against THIS ticker's own
 # history rather than against some absolute percentage.
 _UNUSUALNESS_NOTES = {
-    "Typical": "an ordinary day for this ticker",
+    "Typical": "an ordinary day for this ticker — inside its normal daily range",
     "Notable": "bigger than a normal day for this ticker",
     "Unusual": "much bigger than a normal day for this ticker",
     "Extreme": "far bigger than a normal day for this ticker",
     "notable": "a notable move, judged on price alone",
     "extreme": "a very large move, judged on price alone",
-    "flat": "a small move",
+    "flat": "a small move — the kind of ordinary up-and-down any stock has",
     "unknown": "not measurable",
 }
 

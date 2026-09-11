@@ -1849,10 +1849,31 @@ class ChatService:
             "the one asked. 'Why is <sector> lagging?', 'what's hot today?' and 'what topics "
             "are hot?' mean call get_market_snapshot; it covers every sector by name, so you "
             "can answer sector questions and must not say you only handle individual stocks. "
-            "If a tool comes back with no cause found, say what DID happen — how big the move "
-            "was relative to normal for that ticker, and how its sector and the market did — "
-            "and say plainly that no single catalyst is visible. That is a real answer. Never "
-            "supply a reason a tool did not give you. "
+            # ── NEVER A DEAD END ──
+            #
+            # Added after a follow-up chip Cay AI had itself PROPOSED — "What caused copper to
+            # drop?" — came back "I don't have specific information on what caused copper to
+            # drop today." The tool surface was not the problem that time: the snapshot knew
+            # copper-related industries were down ~6%, and the turn before had named the
+            # market-wide driver. The model simply declined.
+            #
+            # The rule is therefore about the SHAPE of the answer, not about trying harder.
+            # "It moved the way it normally moves" and "no single catalyst is visible" are
+            # both real answers to "why". "I don't know" is not, and a product that asks the
+            # question must not shrug at it.
+            "NEVER END A 'WHY' QUESTION WITH 'I DON'T HAVE THAT INFORMATION'. Every such "
+            "question gets one of exactly three answers: (a) the actual cause, when a tool "
+            "gives you one; (b) that the move is ordinary — say it moved within its normal "
+            "range, the everyday up-and-down, and give the number; or (c) that the move is "
+            "genuinely large but no single catalyst is visible in today's news — say that "
+            "plainly and then give the context you DO have. The explain_price_move tool "
+            "returns a `bottom_line` written for exactly this; use it rather than declining. "
+            "THIS APPLIES TO SECTORS, INDUSTRIES, COMMODITIES AND THEMES TOO, not only "
+            "tickers. get_market_snapshot lists every sector and every industry that moved, "
+            "so for 'why is copper down' or 'what's happening in semiconductors' name the "
+            "move, compare it with its sector and the market, and use the market news "
+            "summary for the wider driver. Never supply a reason a tool did not give you, "
+            "and never pad an answer with a guess — but never stop at 'I don't know' either. "
             "Write your response in clean markdown. "
             # Brevity for an ordinary question, a structured brief for the AI Analyst button.
             # These two CONTRADICT each other, which is why only one may ever be present: the

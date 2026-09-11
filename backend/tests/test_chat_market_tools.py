@@ -469,3 +469,165 @@ async def test_the_move_payload_is_json_safe(monkeypatch, no_news):
     assert "market_change_percent" not in out
     assert out["industry"] == "Software", "the industry NAME is still useful without its %"
     json.dumps(out, allow_nan=False)
+
+
+# ── Never a dead end ─────────────────────────────────────────────────────────
+#
+# From the user, after a follow-up chip Cay AI had PROPOSED came back "I don't have specific
+# information on what caused copper to drop today": *"i need all answer should be a reason for
+# it. or at least, if there is no reason, then say #ticker move normally in a range like a
+# normal up and down. or no clear catalyst news."*
+
+@pytest.mark.asyncio
+async def test_an_ordinary_move_still_gets_an_answer(monkeypatch):
+    """A calm day is not an absence of an answer — it IS the answer, and it must be stated."""
+    from app.services.daily_move_attribution import CauseKind
+
+    exp = _explanation(tier="Typical", kind=CauseKind.NONE, change=0.32)
+    monkeypatch.setattr(
+        "app.services.widget_movers_service.get_widget_movers_service",
+        lambda: SimpleNamespace(attribute_ticker_move=AsyncMock(return_value=exp)),
+    )
+    monkeypatch.setattr(
+        cmt, "fetch_ticker_news",
+        AsyncMock(return_value={"news_available": True, "articles": [{"headline": "x"}]}),
+    )
+    out = await cmt.explain_price_move("KO")
+    assert out["no_single_catalyst"] is True
+    line = out["bottom_line"]
+    assert line and "0.3% today" in line
+    assert "No single catalyst" in line
+    assert "inside its normal daily range" in out["how_unusual"]
+
+
+@pytest.mark.asyncio
+async def test_no_news_at_all_is_said_differently_from_a_failed_read(monkeypatch):
+    """Three distinct states, three distinct sentences. Collapsing "we checked and there was
+    nothing" into "we could not check" (or the reverse) is how a confident negative gets
+    asserted out of an outage."""
+    from app.services.daily_move_attribution import CauseKind
+
+    exp = _explanation(tier="Typical", kind=CauseKind.NONE, change=0.32)
+    monkeypatch.setattr(
+        "app.services.widget_movers_service.get_widget_movers_service",
+        lambda: SimpleNamespace(attribute_ticker_move=AsyncMock(return_value=exp)),
+    )
+
+    monkeypatch.setattr(
+        cmt, "fetch_ticker_news",
+        AsyncMock(return_value={"news_available": True, "articles": []}),
+    )
+    assert "No company news was published today" in (await cmt.explain_price_move("KO"))["bottom_line"]
+
+    monkeypatch.setattr(
+        cmt, "fetch_ticker_news", AsyncMock(return_value={"news_available": False}),
+    )
+    line = (await cmt.explain_price_move("KO"))["bottom_line"]
+    assert "could not be checked" in line
+    assert "do not say there was none" in line
+
+
+@pytest.mark.asyncio
+async def test_a_real_cause_is_never_talked_over_by_the_fallback(monkeypatch, no_news):
+    """The bottom line is the answer of LAST resort. Emitting it beside a found cause would
+    let the model close a correct earnings explanation with "no catalyst is visible"."""
+    from app.services.daily_move_attribution import CauseKind
+
+    for kind in (CauseKind.EARNINGS, CauseKind.COMPANY_NEWS, CauseKind.SECTOR, CauseKind.MARKET):
+        exp = _explanation(tier="Extreme", kind=kind, tag="Q3 Earnings")
+        monkeypatch.setattr(
+            "app.services.widget_movers_service.get_widget_movers_service",
+            lambda exp=exp: SimpleNamespace(attribute_ticker_move=AsyncMock(return_value=exp)),
+        )
+        monkeypatch.setattr(cmt, "_maybe_web_catalyst", AsyncMock(return_value=None))
+        out = await cmt.explain_price_move("NAVN")
+        assert "bottom_line" not in out, kind
+        assert "no_single_catalyst" not in out, kind
+
+
+@pytest.mark.asyncio
+async def test_a_web_catalyst_also_suppresses_the_fallback(monkeypatch, no_news):
+    from app.services.daily_move_attribution import CauseKind
+
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    monkeypatch.setattr(
+        "app.services.widget_movers_service.get_widget_movers_service",
+        lambda: SimpleNamespace(attribute_ticker_move=AsyncMock(return_value=exp)),
+    )
+    monkeypatch.setattr(
+        cmt, "_maybe_web_catalyst",
+        AsyncMock(return_value={"reason": "Guidance cut", "from_web_search": True}),
+    )
+    out = await cmt.explain_price_move("NAVN")
+    assert "bottom_line" not in out
+    assert out["web_research"]["reason"] == "Guidance cut"
+
+
+@pytest.mark.asyncio
+async def test_an_industry_outside_the_top_and_bottom_five_is_still_visible(monkeypatch):
+    """The copper case, pinned. Five of ~150 industries told the day's story but left every
+    other named industry unanswerable — the tool knew the number and could not show it."""
+    # Copper MID-PACK, deliberately: with it at either extreme this test passes through
+    # `lagging_industries` and proves nothing about the extra list. (The first version of
+    # this fixture did exactly that and survived a mutation deleting the feature.)
+    rows = [{"industry": f"Up{i}", "sector": "S", "changesPercentage": 10.0 - i * 0.4}
+            for i in range(20)]
+    rows.append({"industry": "Copper", "sector": "Basic Materials", "changesPercentage": -6.4})
+    rows += [{"industry": f"Down{i}", "sector": "S", "changesPercentage": -7.0 - i * 0.4}
+             for i in range(20)]
+    rows.sort(key=lambda r: -r["changesPercentage"])
+
+    class _Movers:
+        async def get_sector_performance(self):
+            return [{"sector": "Basic Materials", "changesPercentage": -2.5, "constituents": 280}]
+
+        async def get_industry_performance(self):
+            return rows
+
+        async def get_scanner_inputs(self):
+            return ({}, {})
+
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service", lambda: _Movers()
+    )
+    monkeypatch.setattr(
+        "app.services.news_insight_service.get_news_insight_service",
+        lambda: SimpleNamespace(get_cards=AsyncMock(return_value={})),
+    )
+    out = await cmt.fetch_market_snapshot()
+    edges = {r["industry"] for r in
+             out.get("leading_industries", []) + out.get("lagging_industries", [])}
+    assert "Copper" not in edges, "fixture is wrong — Copper must be mid-pack to test anything"
+    extra = {r["industry"] for r in out.get("other_industries_that_moved", [])}
+    assert "Copper" in extra
+
+
+@pytest.mark.asyncio
+async def test_a_flat_industry_is_not_padded_into_the_list(monkeypatch):
+    """Anti-vacuity, and a cap guard: an industry that did not move needs no row — its honest
+    answer is "it moved normally" — and 150 of them would blow the tool-result cap."""
+    rows = [{"industry": f"Flat{i}", "sector": "S", "changesPercentage": 0.01} for i in range(60)]
+    rows.append({"industry": "Copper", "sector": "Basic Materials", "changesPercentage": -6.4})
+
+    class _Movers:
+        async def get_sector_performance(self):
+            return []
+
+        async def get_industry_performance(self):
+            return rows
+
+        async def get_scanner_inputs(self):
+            return ({}, {})
+
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service", lambda: _Movers()
+    )
+    monkeypatch.setattr(
+        "app.services.news_insight_service.get_news_insight_service",
+        lambda: SimpleNamespace(get_cards=AsyncMock(return_value={})),
+    )
+    out = await cmt.fetch_market_snapshot()
+    assert not any(r["industry"].startswith("Flat")
+                   for r in out.get("other_industries_that_moved", []))
+    import json
+    assert len(json.dumps(out)) < 8000, "the tool result must fit inside stream_agentic's cap"

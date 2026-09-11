@@ -1517,6 +1517,19 @@ printed under a red daily move is *a correct answer to a different question*.
 2.5 family with the first 1,500/day free, against a sweeper that spends ≤30 — so the cap sits
 inside the free allowance by design rather than by luck.
 
+**A 'why' question never ends in "I don't know".** Added 2026-09-10 after a follow-up chip
+Cay AI had itself PROPOSED — *"What caused copper to drop?"* — came back *"I don't have
+specific information."* The tool surface was not at fault that time; the snapshot knew
+copper-related industries were down ~6% and the previous turn had named the market-wide
+driver. So the rule is about the SHAPE of the answer: every "why" resolves to one of exactly
+three outcomes — the actual cause; the move is ordinary (*"within its normal range"*); or the
+move is large but no single catalyst is visible. The last two are real answers, and
+`explain_price_move` returns a `bottom_line` written for them, built from
+`deterministic_reason` so chat and the Home Screen widget phrase "how big was this really"
+identically. It is emitted ONLY when nothing upstream found a cause, so it can never talk over
+one. `get_market_snapshot` also names every industry that moved, not just the top and bottom
+five, because five of ~150 left every other named industry unanswerable.
+
 **Pre-warmed suggestion answers (migration 162).** The day's chips are the only questions known
 before they are asked, so a lifespan loop answers each one once and stores it in
 `chat_starter_answers`; tapping a chip then replays a stored answer through the same

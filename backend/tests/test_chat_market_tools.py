@@ -374,6 +374,17 @@ async def test_the_unusualness_note_never_claims_a_sigma_it_did_not_compute(monk
         "app.services.widget_movers_service.get_widget_movers_service",
         lambda: SimpleNamespace(attribute_ticker_move=AsyncMock(return_value=exp)),
     )
+    # ⚠️ These fixture values — an extreme tier with NO company-specific cause — are exactly
+    # the condition that unlocks TIER 3, the paid web catalyst. Unstubbed, `explain_price_move`
+    # reached the real catalyst cache and the real daily budget (both Supabase) on every call
+    # here; the hermeticity guard blocked them, the tool's own `except` swallowed the failure,
+    # and this test stayed green on the degraded path. Stub both seams exactly as the tier-3
+    # tests above do, so the assertions below are about `_unusualness_note` and nothing else.
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        "app.services.price_catalyst_service.get_price_catalyst_service",
+        lambda: SimpleNamespace(get_catalyst=AsyncMock(return_value=None)),
+    )
     out = await cmt.explain_price_move("NAVN")
     assert "judged on price alone" in out["how_unusual"]
     assert "x its typical" not in out["how_unusual"]

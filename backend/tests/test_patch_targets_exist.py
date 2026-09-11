@@ -49,8 +49,26 @@ _ALLOWED: set[tuple[str, str]] = set()
 
 
 def _module_alias_map(tree: ast.Module) -> dict[str, str]:
-    """`import app.x.y as z` / `import app.x` → {alias: dotted module}, module scope and
-    function scope alike (test helpers import inside the function constantly)."""
+    """Every name in the file that is bound to a MODULE under `app`, → its dotted path.
+
+    Two forms, module scope and function scope alike (test helpers import inside the
+    function constantly):
+
+      * `import app.x.y as z` / `import app.x`            → {"z": "app.x.y"} / {"app": "app.x"}
+      * `from app.x import y as z` / `from app.x import y` → {"z": "app.x.y"} / {"y": "app.x.y"}
+
+    ⚠️ The second form was MISSING until 2026-09-10, and it is the form most of the suite
+    uses — 63 files bind a service module with `from app.services import x as alias`. For
+    every one of them this map came back EMPTY, so `monkeypatch.setattr(alias, "name", ...,
+    raising=False)` was never resolved and never checked. That is how
+    `test_chat_starter_warm.py` shipped a `raising=False` on an attribute that does not exist
+    (`_write_row_for_test`) with this guard green: a guard that only reads one of two spellings
+    is vacuous for the other, which is the failure class this file exists to catch.
+
+    `from app.x import y` binds `y` to a module ONLY when `app.x.y` is one — it may equally
+    be a function or a constant. Import-time resolution settles it: `_resolve` returns None
+    for a non-module, and the caller already skips those, so a false name here costs nothing.
+    """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -58,6 +76,16 @@ def _module_alias_map(tree: ast.Module) -> dict[str, str]:
                 if not a.name.startswith("app"):
                     continue
                 aliases[a.asname or a.name.split(".")[0]] = a.name
+        elif isinstance(node, ast.ImportFrom):
+            # `node.module` is None for a bare relative `from . import x`; level>0 means a
+            # relative import, which no test in this tree uses for `app` and which cannot be
+            # resolved without knowing the importing package.
+            if node.level or not node.module or not node.module.startswith("app"):
+                continue
+            for a in node.names:
+                if a.name == "*":
+                    continue
+                aliases[a.asname or a.name] = f"{node.module}.{a.name}"
     return aliases
 
 

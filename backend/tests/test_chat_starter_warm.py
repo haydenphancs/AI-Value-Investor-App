@@ -88,7 +88,6 @@ async def test_the_warm_job_generates_with_no_user_identity(monkeypatch):
             return {"content": "x" * 200, "tokens_used": 10}
 
     monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
-    monkeypatch.setattr(warm, "_write_row_for_test", None, raising=False)
     written = {}
     monkeypatch.setattr(
         warm, "get_supabase",

@@ -160,13 +160,17 @@ async def test_an_hs256_token_is_never_checked_against_a_jwks_key():
 
 
 @pytest.mark.asyncio
-async def test_an_es256_token_signed_by_an_unknown_key_is_refused():
+async def test_an_es256_token_signed_by_an_unknown_key_is_refused(monkeypatch):
     """A revoked/foreign key must not verify just because the token names a kid."""
     _seed_jwks(dict(_PUBLIC_JWK, kid="some-other-kid"))
     # Only one refetch is attempted, and the network call is stubbed to return nothing.
     async def _no_keys():
         return {}
-    security._fetch_jwks = _no_keys  # type: ignore[assignment]
+    # `monkeypatch`, not a bare assignment: this used to be `security._fetch_jwks = _no_keys`
+    # with no restore, so the stub outlived the test and every later test in the session saw
+    # an empty JWKS. It went unnoticed because tests/test_patch_targets_exist.py could not
+    # see `from app.core import security` bindings until 2026-09-10.
+    monkeypatch.setattr(security, "_fetch_jwks", _no_keys)
     assert await security.verify_supabase_token(_es256()) is None
 
 

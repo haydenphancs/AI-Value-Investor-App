@@ -266,13 +266,58 @@ def test_a_mirror_failure_never_breaks_the_add():
     wl._write_through_to_active_portfolio(_Boom(), _USER, "ORCL")  # must not raise
 
 
-def test_the_add_endpoint_actually_calls_the_mirror():
-    """A helper nobody calls is the original bug in a new place."""
+
+
+def _invokes(module_rel: str, caller: str, callee: str) -> int:
+    """HOW MANY times does `caller` invoke `callee`, directly OR via asyncio.to_thread?
+
+    A COUNT, not a bool. `add_to_watchlist` mirrors into the active group on TWO branches —
+    the duplicate-converge path and the success path — so an `any(...)` test stayed green
+    when one of them was deleted, which is half the feature gone.
+
+    ⚠️ AST, not a string literal. These three assertions were exact source strings
+    (`"_write_through_to_active_portfolio(supabase, user_id, ticker)" in src`), and the
+    2026-09-12 pass that moved blocking helpers off the event loop rewrote every one of
+    them to `(await asyncio.to_thread(_write_through_to_active_portfolio, supabase,
+    user_id, ticker))`. The wiring was intact and the guards went red — which is the
+    better failure, but the same brittleness would have gone GREEN on a rename that kept
+    the spelling. Resolving the wrapper is what makes this durable.
+    """
+    import ast
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1]
-           / "app" / "api" / "v1" / "endpoints" / "watchlist.py").read_text(encoding="utf-8")
-    assert "_write_through_to_active_portfolio(supabase, user_id, ticker)" in src
+    src = (Path(__file__).resolve().parents[1] / "app" / module_rel).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == caller),
+        None,
+    )
+    assert fn is not None, f"{caller} not found in app/{module_rel} — re-point this guard"
+
+    def _target(call):
+        f = call.func
+        is_thread = (isinstance(f, ast.Attribute) and f.attr == "to_thread") or (
+            isinstance(f, ast.Name) and f.id == "to_thread"
+        )
+        if is_thread and call.args:
+            a = call.args[0]
+            return getattr(a, "id", None) or getattr(a, "attr", None)
+        return getattr(f, "id", None) or getattr(f, "attr", None)
+
+    return sum(
+        1 for n in ast.walk(fn) if isinstance(n, ast.Call) and _target(n) == callee
+    )
+
+
+def test_the_add_endpoint_actually_calls_the_mirror():
+    """A helper nobody calls is the original bug in a new place."""
+    # BOTH branches: the duplicate-converge path and the success path.
+    assert _invokes("api/v1/endpoints/watchlist.py", "add_to_watchlist",
+                    "_write_through_to_active_portfolio") == 2, (
+        "the watchlist add lost one of its two mirror call sites — either a new ticker or "
+        "a re-added one stops reaching the user's active group"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +387,10 @@ def test_the_delete_endpoint_actually_calls_the_delete_through():
     """A helper nobody calls is the original bug in a new place."""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1]
-           / "app" / "api" / "v1" / "endpoints" / "watchlist.py").read_text(encoding="utf-8")
-    assert "_delete_through_from_groups(supabase, user_id, ticker)" in src
+    assert _invokes("api/v1/endpoints/watchlist.py", "remove_from_watchlist",
+                    "_delete_through_from_groups") >= 1, (
+        "removing from the watchlist no longer clears the ticker from the user's groups"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +401,8 @@ def test_the_delete_endpoint_actually_calls_the_delete_through():
 def test_backfill_is_wired_into_the_portfolio_list():
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1]
-           / "app" / "api" / "v1" / "endpoints" / "portfolios.py").read_text(encoding="utf-8")
-    assert "_backfill_lone_empty_portfolio(supabase, user[\"id\"], portfolios)" in src, (
+    assert _invokes("api/v1/endpoints/portfolios.py", "list_portfolios",
+                    "_backfill_lone_empty_portfolio") >= 1, (
         "installs already stuck with an empty portfolio never heal"
     )
 

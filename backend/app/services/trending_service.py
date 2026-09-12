@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +124,8 @@ class TrendingService:
         current_start = now - timedelta(days=WINDOW_DAYS)
         prior_start = now - timedelta(days=WINDOW_DAYS * 2)
 
-        current_rows = self._fetch_completed_reports(since=current_start)
-        prior_rows = self._fetch_completed_reports(
-            since=prior_start, until=current_start
-        )
+        current_rows = (await asyncio.to_thread(self._fetch_completed_reports, since=current_start))
+        prior_rows = (await asyncio.to_thread(self._fetch_completed_reports, since=prior_start, until=current_start))
 
         if not current_rows:
             return []

@@ -1689,14 +1689,31 @@ async def _security_headers(request: Request, call_next):
     `--proxy-headers` turns into `request.url.scheme`.
     """
     response = await call_next(request)
+    _apply_security_headers(response, https=request.url.scheme == "https")
+    return response
+
+
+def _apply_security_headers(response, *, https: bool) -> None:
+    """The baseline headers, in ONE place so every writer shares them.
+
+    ⚠️ Two response paths never reach the middleware and therefore have to call this
+    directly (found 2026-09-12, after the middleware shipped):
+      * `cap_json_body` returns its 413 WITHOUT calling `call_next`, so nothing downstream
+        of it runs;
+      * Starlette hoists `@app.exception_handler(Exception)` into `ServerErrorMiddleware`,
+        which sits OUTSIDE every user middleware — so an unhandled 500 had no security
+        headers, no CORS header and no `X-Request-ID`, and produced no request-log line at
+        all. That is precisely where a future HTML error page would live, which is the case
+        the middleware's own docstring says it exists to cover.
+    """
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    if request.url.scheme == "https":
+    if https:
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
         )
-    return response
+
 
 # GZip
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -1751,7 +1768,7 @@ async def cap_json_body(request: Request, call_next):
                 "rejected oversized body on %s: %s bytes (cap %s)",
                 request.url.path, declared, _MAX_JSON_BODY_BYTES,
             )
-            return JSONResponse(
+            capped = JSONResponse(
                 status_code=413,
                 content=make_error_body(
                     ErrorCode.INVALID_INPUT,
@@ -1763,6 +1780,12 @@ async def cap_json_body(request: Request, call_next):
                     user_message="That was too large to send. Please try again.",
                 ),
             )
+            # This middleware sits ABOVE `_security_headers` and returns without calling
+            # `call_next`, so nothing downstream ever sees this response.
+            _apply_security_headers(
+                capped, https=request.url.scheme == "https"
+            )
+            return capped
     return await call_next(request)
 
 
@@ -1865,11 +1888,30 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(Exception)
 async def general_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled: {exc}", exc_info=True)
-    return JSONResponse(
+    """Last resort. Starlette hoists this into `ServerErrorMiddleware`, OUTSIDE every
+    user middleware — so this response gets neither the security headers nor the request
+    log unless this function supplies them itself.
+
+    The log line carries the method, path and request id because this is the one place a
+    500 is recorded at all: `add_process_time`'s `logger.info` never runs for it, so
+    without these fields an unhandled crash left no way to tell WHICH request died
+    (CLAUDE.md: errors carry context + identifiers).
+    """
+    logger.error(
+        "Unhandled exception on %s %s (request_id=%s): %s: %s",
+        request.method,
+        request.url.path,
+        getattr(request.state, "request_id", "-"),
+        type(exc).__name__,
+        exc,
+        exc_info=True,
+    )
+    response = JSONResponse(
         status_code=500,
         content={"detail": "An internal server error occurred"},
     )
+    _apply_security_headers(response, https=request.url.scheme == "https")
+    return response
 
 
 # Routes

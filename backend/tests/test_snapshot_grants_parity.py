@@ -66,21 +66,12 @@ _CLIENT_ROLES = ("anon", "authenticated")
 
 # Tables whose service_role grant is written in a migration the live database has not been
 # re-dumped with yet. (table → migration number). Delete the entry once the snapshot shows it.
-_PENDING_SERVICE_ROLE_GRANTS: dict[str, str] = {
-    "social_mentions_history": "169",
-    "daily_briefings": "169",
-    "market_insights": "169",
-    # partial (SELECT,INSERT,UPDATE) → ALL
-    "health_check_cache": "169",
-    "profit_power_cache": "169",
-    "revenue_breakdown_cache": "169",
-}
+# 169 (social_mentions_history / daily_briefings / market_insights / three partial caches)
+# was applied and the snapshot re-dumped on 2026-09-12 — the entries did their job.
+_PENDING_SERVICE_ROLE_GRANTS: dict[str, str] = {}
 # Tables whose anon/authenticated grant a not-yet-dumped migration REVOKEs.
-_PENDING_CLIENT_REVOKES: dict[str, str] = {
-    "ticker_news_cache": "169",
-    "user_settings": "169",
-    "device_tokens": "169",
-}
+# (169: ticker_news_cache / user_settings / device_tokens — landed, see above.)
+_PENDING_CLIENT_REVOKES: dict[str, str] = {}
 
 _RE_TABLE = re.compile(r"^CREATE TABLE (?:IF NOT EXISTS )?public\.([a-z0-9_]+)\s*\(", re.M)
 _RE_VIEW = re.compile(r"^CREATE (?:OR REPLACE )?VIEW public\.([a-z0-9_]+)\b", re.M)

@@ -111,33 +111,106 @@ def test_the_ceiling_still_bites_after_the_keyspace_is_pruned(monkeypatch):
         "the caller's own bucket must survive the prune, or its hits are never counted"
 
 
-def test_the_global_ceiling_cannot_be_evaded_by_varying_the_client_ip():
-    """`--forwarded-allow-ips='*'` means `request.client.host` IS the `X-Forwarded-For`
-    header — attacker-chosen. A per-IP ceiling alone therefore bounds nothing: a fresh
-    header is a fresh allowance. The global ceiling takes no key at all.
+def test_a_saturated_route_still_accepts_a_QUIET_caller_like_apple():
+    """THE PROPERTY THAT PROTECTS SUBSCRIPTION STATE.
+
+    The global ceiling used to be keyless, so Apple shared one bucket with everyone: five
+    noisy sources at the per-IP limit saturated it and every genuine notification was then
+    429'd. Apple retries a non-2xx about five times over ~3 days and nothing here monitors
+    that budget — `expire_stale_subscriptions` self-heals a lost EXPIRED, but NOTHING
+    recovers a lost REFUND, and a lost REFUND is purchased credits never clawed back.
     """
-    allowed = sum(
-        0 if billing._webhook_rate_limited(_req(f"198.51.100.{i % 256}")) else 1
-        for i in range(billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL * 2)
+    # Saturate the route with noisy callers (each at its own per-IP ceiling).
+    noisy = billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL // billing._WEBHOOK_MAX_PER_MINUTE + 1
+    for n in range(noisy):
+        for _ in range(billing._WEBHOOK_MAX_PER_MINUTE):
+            billing._webhook_rate_limited(_req(f"10.9.0.{n}"))
+    assert len(billing._webhook_global) >= billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL, \
+        "the fixture did not actually saturate the global bucket"
+
+    # Apple now arrives, at its real rate.
+    apple = "17.0.0.1"
+    blocked = sum(
+        1 for _ in range(billing._WEBHOOK_QUIET_CALLER_PER_MINUTE)
+        if billing._webhook_rate_limited(_req(apple))
     )
-    assert allowed <= billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL, (
-        f"{allowed} requests got through by rotating the client IP"
+    assert blocked == 0, (
+        f"{blocked} of Apple's notifications were 429'd because OTHER callers had filled "
+        "a shared bucket — a dropped REFUND is money that is never clawed back"
+    )
+
+
+def test_a_saturated_route_still_rejects_a_NOISY_caller():
+    """Control. The exemption must not disarm the ceiling for the traffic it exists to
+    shed — otherwise the quiet-caller carve-out is just 'no global ceiling'."""
+    noisy = billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL // billing._WEBHOOK_MAX_PER_MINUTE + 1
+    for n in range(noisy):
+        for _ in range(billing._WEBHOOK_MAX_PER_MINUTE):
+            billing._webhook_rate_limited(_req(f"10.9.0.{n}"))
+
+    attacker = "203.0.113.50"
+    for _ in range(billing._WEBHOOK_QUIET_CALLER_PER_MINUTE):
+        billing._webhook_rate_limited(_req(attacker))
+    assert billing._webhook_rate_limited(_req(attacker)) is True, (
+        "a caller above the quiet threshold is exempt from the global ceiling too — the "
+        "ceiling now sheds nothing"
+    )
+
+
+def test_a_DISTRIBUTED_flood_of_quiet_callers_is_still_bounded():
+    """The hard backstop. A thousand sources at nine a minute are all individually
+    'quiet', so the exemption alone would leave the route unbounded."""
+    allowed = 0
+    for i in range(billing._WEBHOOK_HARD_GLOBAL_PER_MINUTE * 2):
+        # A fresh source every few requests, each staying under the quiet threshold.
+        ip = f"10.{i // 65536}.{(i // 250) % 256}.{i % 250}"
+        if not billing._webhook_rate_limited(_req(ip)):
+            allowed += 1
+    assert allowed <= billing._WEBHOOK_HARD_GLOBAL_PER_MINUTE, (
+        f"{allowed} requests got through a distributed flood of individually-quiet "
+        "callers — the hard backstop is not bounding anything"
     )
 
 
 def test_the_global_window_rolls(monkeypatch):
-    for i in range(billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL):
-        billing._webhook_rate_limited(_req(f"198.51.100.{i % 256}"))
-    assert billing._webhook_rate_limited(_req("198.51.100.250")) is True
+    """A saturated minute must not become a permanently closed route."""
+    noisy = billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL // billing._WEBHOOK_MAX_PER_MINUTE + 1
+    for n in range(noisy):
+        for _ in range(billing._WEBHOOK_MAX_PER_MINUTE):
+            billing._webhook_rate_limited(_req(f"10.9.0.{n}"))
+    attacker = "203.0.113.50"
+    for _ in range(billing._WEBHOOK_QUIET_CALLER_PER_MINUTE + 1):
+        billing._webhook_rate_limited(_req(attacker))
+    assert billing._webhook_rate_limited(_req(attacker)) is True
+
     base = time.monotonic()
     monkeypatch.setattr(billing.time, "monotonic", lambda: base + 61)
-    assert billing._webhook_rate_limited(_req("198.51.100.250")) is False, \
-        "a minute later the route must accept Apple again"
+    assert billing._webhook_rate_limited(_req(attacker)) is False, \
+        "a minute later the route must accept everyone again"
 
 
-def test_the_global_ceiling_leaves_real_apple_traffic_untouched():
-    """Apple sends single-digit notifications a minute even for a busy product."""
-    assert billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL >= 10 * billing._WEBHOOK_MAX_PER_MINUTE / 2
+def test_the_ceilings_are_ordered_so_the_quiet_exemption_is_reachable():
+    """Replaces two constant-vs-constant assertions that observed nothing about Apple.
+
+    The old pair read `600 >= 10 * 120 / 2` (i.e. `600 >= 600`, true only by exact
+    equality) and `120 >= 60` — neither encoded any fact about Apple's notification rate
+    while both were NAMED as if they did. `.claude/rules/testing.md` §3: a vacuous guard is
+    worse than no guard. What actually has to hold is the ORDERING that makes the
+    quiet-caller carve-out meaningful.
+    """
+    assert (
+        billing._WEBHOOK_QUIET_CALLER_PER_MINUTE
+        < billing._WEBHOOK_MAX_PER_MINUTE
+        <= billing._WEBHOOK_MAX_PER_MINUTE_GLOBAL
+        < billing._WEBHOOK_HARD_GLOBAL_PER_MINUTE
+    ), (
+        "the four ceilings are out of order — the quiet exemption is either unreachable "
+        "or swallows the per-IP ceiling"
+    )
+    # A caller at Apple's real rate must be BELOW the quiet threshold with room to spare.
+    assert billing._WEBHOOK_QUIET_CALLER_PER_MINUTE >= 5, (
+        "the quiet threshold is so low that an ordinary Apple burst counts as noisy"
+    )
 
 
 def test_the_ceiling_is_checked_before_the_body_is_parsed():

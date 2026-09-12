@@ -679,7 +679,7 @@ class SectorBenchmarkService:
                       backfill, sectors with history get daily limits.
             sectors: Optional list of canonical sector names to process (default: all).
         """
-        if not force and self._benchmarks_are_fresh():
+        if not force and (await asyncio.to_thread(self._benchmarks_are_fresh)):
             return {"rows_upserted": 0, "skipped": True, "reason": "benchmarks are fresh"}
 
         start = time.time()
@@ -701,7 +701,7 @@ class SectorBenchmarkService:
         total_upserted = 0
         for sector, tickers in sector_tickers.items():
             try:
-                existing = self._get_existing_periods(sector)
+                existing = (await asyncio.to_thread(self._get_existing_periods, sector))
 
                 # Determine limits for this sector
                 if backfill:

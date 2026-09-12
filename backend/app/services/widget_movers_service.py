@@ -913,7 +913,11 @@ class WidgetMoversService:
         # ET Monday that is MONDAY, while the screener is still reporting Friday's close,
         # so the news and earnings detectors were queried for a day the move did not happen
         # on and returned the confident negative "no company news today".
-        today, today_iso, _word = self._session_of([m], session_trading_date())
+        today, today_iso, session_word = self._session_of([m], session_trading_date())
+        # A 24/7 asset's move is always its own rolling 24 hours — the same per-row
+        # override `_build_mover` applies on the widget path.
+        if _is_round_the_clock(sym):
+            session_word = "today"
         ctx = await self._market_context([sym], index_rows, today_iso)
         classified, had_news, card_checked = _classified_today_news(
             cards.get(sym), today_iso
@@ -922,6 +926,13 @@ class WidgetMoversService:
         a = attribute(
             ticker=sym,
             change_percent=m.change_percent,
+            # ⚠️ PASS THE WORD. `attribute`'s default is `session_word="today"`, and that
+            # word is what `detect_group_move` and `describe_no_cause` print. Deriving the
+            # session here and then dropping it left Ask Cay AI narrating a Friday move as
+            # "today" while the widget — which passes it explicitly — said "on Fri", i.e.
+            # the two surfaces disagreed about the same market day, which is the exact
+            # divergence this function's docstring says it exists to prevent.
+            session_word=session_word,
             today=today,
             z=m.z,
             open_price=m.open_price,
@@ -1580,7 +1591,22 @@ class WidgetMoversService:
 
         rows = []
         funds: List[str] = []
+        # ONLY when something else can carry the tile. Excluding the band unconditionally
+        # emptied the widget for a holdings group that is entirely SPY/ONEQ/DIA: `rows`
+        # came back empty, `ranked` was empty, and `_payload` produced
+        # `headline_mover=None` — which every iOS family renders as `EmptyStateView`. The
+        # endpoint's market-mode fallback does NOT catch it either, because that fires on
+        # an empty TICKER LIST and this list is not empty. A self-referential headline is
+        # a smaller wrong than a blank tile, so the exclusion yields when it is the only
+        # thing left.
         index_set = {s.upper() for s in index_syms}
+        if not any(s.upper() not in index_set for s in symbols):
+            logger.info(
+                "widget: every requested symbol is a market-band index (%s) — ranking "
+                "them rather than serving an empty tile",
+                ", ".join(sorted(symbols))[:120],
+            )
+            index_set = set()
         for sym in symbols:
             if sym.upper() in index_set:
                 # THE MARKET BAND CANNOT ALSO BE THE MOVER. The comment on the batch above

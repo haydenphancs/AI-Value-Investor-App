@@ -338,14 +338,20 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                         )
                     admitted = True
                     is_trial = _quota_circuit.half_open
-                elif not is_trial and _quota_circuit.tripped:
+                elif not is_trial:
                     # Admitted while CLOSED, then slept through a backoff while other
                     # callers tripped the breaker: don't wake up and add one more request
                     # to an exhausted quota (whose 429 would be booked as a trial failure).
-                    # The trial itself is exempt — it is the one call allowed to probe.
-                    raise GeminiQuotaError(
-                        "Gemini quota circuit opened during backoff — failing fast"
-                    )
+                    # Through the ADMITTING gate, not the read-only one: if the cooldown
+                    # has since elapsed with no trial in flight, this straggler becomes the
+                    # trial rather than firing un-admitted with its 429 landing as a plain
+                    # increment on a stale deadline. The trial itself never re-checks — it
+                    # is the one call allowed to probe.
+                    if _quota_circuit.is_open():
+                        raise GeminiQuotaError(
+                            "Gemini quota circuit opened during backoff — failing fast"
+                        )
+                    is_trial = _quota_circuit.half_open
                 try:
                     result = await func(*args, **kwargs)
                     _quota_circuit.record_success()
@@ -1172,6 +1178,10 @@ class GeminiClient:
             # per input character, so log the input length, which IS the billed quantity.
             try:
                 billable = getattr(getattr(result, "metadata", None), "billable_character_count", None)
+                # `chars` is a PROXY: the Developer API bills embeddings per input token,
+                # and the SDK exposes no usage on this response, so input length is the
+                # closest observable. `billable_chars` stays only so a Vertex deployment
+                # would show it; expect None here.
                 logger.info(
                     "GEMINI_EMBED call_site=generate_embedding model=%s chars=%d billable_chars=%s dim=%s",
                     model_name, len(str(text)), billable, len(embedding),

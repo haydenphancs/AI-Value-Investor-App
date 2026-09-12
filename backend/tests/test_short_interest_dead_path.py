@@ -31,7 +31,8 @@ import app.integrations.finra_short_interest as fsi
 def _isolate(monkeypatch):
     fsi._cache.clear()
     monkeypatch.setattr(fsi, "_nasdaq_kill_switch", False, raising=False)
-    monkeypatch.setattr(fsi, "_nasdaq_consecutive_failures", 0, raising=False)
+    monkeypatch.setattr(fsi, "_nasdaq_auth_failures", 0, raising=False)
+    monkeypatch.setattr(fsi, "_nasdaq_transient_failures", 0, raising=False)
     monkeypatch.setattr(fsi, "_nasdaq_rate_limited_until", 0, raising=False)
     monkeypatch.setattr(fsi, "_nasdaq_disabled_until", 0, raising=False)
     monkeypatch.setattr(fsi, "_supabase_cache_get", lambda t: None)
@@ -367,3 +368,116 @@ async def test_the_supabase_write_also_runs_off_the_loop(monkeypatch):
 
 async def _some():
     return {"shares_short": 7}
+
+
+# ── the two failure families must not share a counter ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_transient_failures_cannot_trip_the_PERMANENT_latch(monkeypatch):
+    """9 timeouts + 1 403 used to latch Nasdaq off for the life of the process.
+
+    One counter fed two arms with opposite remedies, so the run landed in whichever branch
+    happened to see the tenth event — and it logged the false line "Nasdaq 403 x10".
+    Strictly easier to hit than before the time-bounded window was added, because the
+    exception arm did not increment anything then. `_build_shorts` fans out under
+    `asyncio.Semaphore(10)`, so nine concurrent timeouts is ONE network blip.
+    """
+    calls = {"n": 0}
+
+    class _Client:
+        async def get(self, *a, **k):
+            calls["n"] += 1
+            if calls["n"] <= 9:
+                raise httpx.ReadTimeout("")
+            return httpx.Response(403, request=httpx.Request("GET", "https://x"))
+
+    monkeypatch.setattr(fsi, "_get_client", lambda: _client(_Client()))
+    for _ in range(10):
+        # The transient window may engage on the 10th timeout; clear it so the 403 is
+        # actually issued — the point is the COUNTER, not the window.
+        fsi._nasdaq_disabled_until = 0
+        await fsi._fetch_from_nasdaq("AAPL")
+
+    assert fsi._nasdaq_kill_switch is False, (
+        "nine transient timeouts plus one 403 permanently disabled the Nasdaq fallback — "
+        "the counters are shared again"
+    )
+    assert fsi._nasdaq_auth_failures == 1, fsi._nasdaq_auth_failures
+
+
+@pytest.mark.asyncio
+async def test_a_transient_blip_does_not_wipe_accumulated_auth_failures(monkeypatch):
+    """The mirror case. 9x403 + 1 timeout fired the transient arm, which zeroes the
+    counter — so a genuinely persistent credential failure could never reach the permanent
+    latch as long as one timeout interleaved."""
+    calls = {"n": 0}
+
+    class _Client:
+        async def get(self, *a, **k):
+            calls["n"] += 1
+            if calls["n"] <= 9:
+                return httpx.Response(403, request=httpx.Request("GET", "https://x"))
+            raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(fsi, "_get_client", lambda: _client(_Client()))
+    for _ in range(10):
+        fsi._nasdaq_disabled_until = 0
+        await fsi._fetch_from_nasdaq("AAPL")
+
+    assert fsi._nasdaq_auth_failures == 9, (
+        f"a single timeout wiped the accumulated 403 count ({fsi._nasdaq_auth_failures}) — "
+        "a persistent credential failure can now never latch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_transient_window_FIRING_still_leaves_the_auth_count_alone(monkeypatch):
+    """The stronger mirror: the transient arm must not wipe the auth count when it ACTUALLY
+    ENGAGES.
+
+    The test above only reaches one timeout, so the `>= _MAX_CONSECUTIVE_FAILURES` branch
+    never runs and a stray `_nasdaq_auth_failures = 0` inside it would go unnoticed. Here
+    the window really fires with 403s already banked.
+    """
+    fsi._nasdaq_auth_failures = 7
+
+    class _Client:
+        async def get(self, *a, **k):
+            raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(fsi, "_get_client", lambda: _client(_Client()))
+    for _ in range(fsi._MAX_CONSECUTIVE_FAILURES):
+        fsi._nasdaq_disabled_until = 0
+        await fsi._fetch_from_nasdaq("AAPL")
+
+    assert fsi._nasdaq_disabled_until > time.time(), "the transient window never engaged"
+    assert fsi._nasdaq_auth_failures == 7, (
+        f"engaging the transient window reset the 403 count to "
+        f"{fsi._nasdaq_auth_failures} — a persistent credential failure can never latch"
+    )
+    assert fsi._nasdaq_kill_switch is False
+
+
+@pytest.mark.asyncio
+async def test_a_200_clears_both_families(monkeypatch):
+    """Control: the source being reachable AND authorised must reset everything, or the
+    counters accumulate across unrelated incidents for the process lifetime."""
+    fsi._nasdaq_auth_failures = 5
+    fsi._nasdaq_transient_failures = 5
+
+    class _Client:
+        async def get(self, *a, **k):
+            return httpx.Response(
+                200,
+                json={"data": {"shortInterestTable": {"rows": [
+                    {"interest": "1,000", "settlementDate": "09/15/2026", "daysToCover": "1.5"},
+                ]}}},
+                request=httpx.Request("GET", "https://x"),
+            )
+
+    monkeypatch.setattr(fsi, "_get_client", lambda: _client(_Client()))
+    out = await fsi._fetch_from_nasdaq("AAPL")
+    assert out and out["shares_short"] == 1000
+    assert fsi._nasdaq_auth_failures == 0 and fsi._nasdaq_transient_failures == 0
+

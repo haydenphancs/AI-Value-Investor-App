@@ -35,6 +35,19 @@ from app.config import settings
 from app.schemas.subscription import CreditPackCatalogResponse, PlanCatalogResponse
 from app.services import subscription_service as svc
 
+
+@pytest.fixture(autouse=True)
+def _clear_catalog_cache():
+    """The storefront catalogues are memoised process-wide for 120 s (they are public,
+    unauthenticated routes that used to run a blocking SELECT per request). Tests install
+    different fake tables, so the cache must not carry one test's rows into the next."""
+    from app.services.subscription_service import reset_catalog_cache
+
+    reset_catalog_cache()
+    yield
+    reset_catalog_cache()
+
+
 _MIGRATIONS = Path(__file__).resolve().parents[1] / "database" / "migrations"
 
 # Deliberately NOT the seeded ladder: every number — credits, price AND sort_order —

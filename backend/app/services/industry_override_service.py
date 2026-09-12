@@ -55,6 +55,7 @@ from app.services.industry_dossier_service import (
     classify_lifecycle,
     get_industry_dossier_service,
 )
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -254,14 +255,12 @@ class IndustryOverrideService:
                     model_version=None,
                 ))
             if not dry_run:
-                self._write_audit_log(run_id, results)
+                (await asyncio.to_thread(self._write_audit_log, run_id, results))
             return self._summarize(run_id, results, started, dry_run=dry_run)
 
         # Load all Phase A TAMs upfront so each override has its
         # sanity-baseline without N round-trips.
-        phase_a_tams = self._load_phase_a_tams(
-            [ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES]
-        )
+        phase_a_tams = (await asyncio.to_thread(self._load_phase_a_tams, [ind for ind, _ in CURATED_OVERRIDE_INDUSTRIES]))
 
         for industry, sector in CURATED_OVERRIDE_INDUSTRIES:
             pa = phase_a_tams.get(industry) or {}
@@ -290,7 +289,7 @@ class IndustryOverrideService:
 
             if not dry_run and result.status in ("applied", "applied_with_warning"):
                 try:
-                    self._apply_to_dossier(industry, sector, result)
+                    (await asyncio.to_thread(self._apply_to_dossier, industry, sector, result))
                 except Exception as exc:
                     logger.error(
                         "industry_override: apply_to_dossier failed for %r: %s",
@@ -302,13 +301,13 @@ class IndustryOverrideService:
             # holds a global figure (research-sourced) must be tam_scope='global'
             # even when a re-run KEPT an existing better value (rejected) or the
             # row predates the tam_scope column. Idempotent.
-            backfilled = self._backfill_global_scope()
+            backfilled = (await asyncio.to_thread(self._backfill_global_scope))
             if backfilled:
                 logger.info(
                     "industry_override: backfilled tam_scope='global' on %d row(s)",
                     backfilled,
                 )
-            self._write_audit_log(run_id, results)
+            (await asyncio.to_thread(self._write_audit_log, run_id, results))
 
         return self._summarize(run_id, results, started, dry_run=dry_run)
 

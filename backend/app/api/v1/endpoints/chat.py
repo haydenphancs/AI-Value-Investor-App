@@ -1879,9 +1879,12 @@ async def stream_chat_message(
 
         # Follow-up suggestions — best-effort, AFTER the durable write. Being slow or cancelled here
         # can no longer drop the saved turn (worst case: no chips, which degrade gracefully).
+        # Only when the warm answer was actually SERVED: a hit whose turn then fell back to
+        # a live `generate_response` has a different answer, and chips stored for the
+        # replay would be attached to it.
         warm_suggestions = [
             str(x).strip() for x in ((warmed or {}).get("suggestions") or []) if str(x).strip()
-        ]
+        ] if (replayed_warm and not used_fallback) else []
         try:
             if warm_suggestions:
                 # The warm job generates and stores the chips with the answer; paying a

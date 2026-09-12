@@ -592,6 +592,8 @@ extension BackendReportListItem: Decodable {
         self.progress = try container.decodeIfPresent(Int.self, forKey: .progress)
         self.currentStep = try container.decodeIfPresent(String.self, forKey: .currentStep)
         self.createdAt = try container.decode(String.self, forKey: .createdAt)
+        // Absent on old backend builds and on queued rows: never a decode failure.
+        self.processingStartedAt = try container.decodeIfPresent(String.self, forKey: .processingStartedAt)
         self.completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
         self.userRating = try container.decodeIfPresent(Int.self, forKey: .userRating)
         self.isRefunded = try container.decodeIfPresent(Bool.self, forKey: .isRefunded)

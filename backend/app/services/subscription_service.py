@@ -10,7 +10,8 @@ invariant #4).
 """
 
 import logging
-from typing import List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.database import get_supabase
@@ -128,13 +129,56 @@ def normalize_pack_catalog(rows: List[dict]) -> List[dict]:
     return out
 
 
+#: The two storefront catalogues, memoised process-wide.
+#:
+#: `GET /billing/plans` and `GET /billing/credit-packs` are TWO OF THE TEN `.public` routes
+#: (auth.md §1a) — reachable with no credential at all, no rate limiter — and each one used
+#: to run its Supabase SELECT per request, synchronously, on the single Railway uvicorn
+#: worker. Measured 2026-09-12: 12 requests → 12 `plan_credits` SELECTs, 92-281 ms each,
+#: every one of them suspending the whole process. Anyone who knows the path could hold the
+#: event loop down with plain GETs.
+#:
+#: The content changes on a deploy or a DB edit, not per request, so a short TTL removes
+#: essentially all of that at no freshness cost. ⚠️ A FALLBACK RESULT IS NEVER CACHED: the
+#: seeded catalogue is what we serve when the read FAILED or came back empty, and pinning
+#: that for a TTL is the "a cached failure is byte-identical to a real answer" trap this
+#: codebase keeps re-learning. Only a successful, non-empty read is memoised.
+_CATALOG_TTL_SECONDS = 120
+_catalog_cache: Dict[str, Tuple[float, List[dict]]] = {}
+
+
+def _catalog_cached(key: str) -> Optional[List[dict]]:
+    hit = _catalog_cache.get(key)
+    if hit and time.time() - hit[0] < _CATALOG_TTL_SECONDS:
+        # Copy out: callers build Pydantic models from these dicts and a future caller
+        # mutating one would poison every later request.
+        return [dict(r) for r in hit[1]]
+    return None
+
+
+def _catalog_store(key: str, rows: List[dict]) -> None:
+    _catalog_cache[key] = (time.time(), [dict(r) for r in rows])
+
+
+def reset_catalog_cache() -> None:
+    """Test seam, and a manual escape hatch after a pricing edit."""
+    _catalog_cache.clear()
+
+
 class SubscriptionService:
     def __init__(self):
         self.supabase = get_supabase()
 
     def get_plan_catalog(self) -> List[dict]:
         """Tier catalog ordered cheapest → most expensive, each row carrying a
-        precomputed `price_label`. Falls back to the seeded values on any error."""
+        precomputed `price_label`. Falls back to the seeded values on any error.
+
+        Memoised for `_CATALOG_TTL_SECONDS` on SUCCESS only — see the note above the cache.
+        """
+        cached = _catalog_cached("plans")
+        if cached is not None:
+            return cached
+        served_fallback = False
         try:
             result = (
                 self.supabase.table("plan_credits")
@@ -145,14 +189,19 @@ class SubscriptionService:
             if not rows:
                 logger.warning("plan_credits empty — serving fallback catalog")
                 rows = [dict(r) for r in _FALLBACK_PLANS]
+                served_fallback = True
         except Exception as e:
             logger.error(
                 "plan_credits read failed (%s: %s) — serving fallback catalog",
                 type(e).__name__, e,
             )
             rows = [dict(r) for r in _FALLBACK_PLANS]
+            served_fallback = True
 
-        return normalize_catalog(rows)
+        out = normalize_catalog(rows)
+        if not served_fallback:
+            _catalog_store("plans", out)
+        return out
 
     def get_credit_pack_catalog(self) -> List[dict]:
         """Active consumable credit packs, cheapest → dearest, each carrying a
@@ -162,7 +211,14 @@ class SubscriptionService:
         DB flag rather than a deploy — but a retired pack must ALSO be removed from App
         Store Connect, or a client that still has it cached can buy something this
         catalog no longer lists (the purchase path resolves credits independently, so it
-        would still be honoured — see `credit_pack_for_product`)."""
+        would still be honoured — see `credit_pack_for_product`).
+
+        Memoised for `_CATALOG_TTL_SECONDS` on SUCCESS only — see the note above the cache.
+        """
+        cached = _catalog_cached("packs")
+        if cached is not None:
+            return cached
+        served_fallback = False
         try:
             result = (
                 self.supabase.table("credit_packs")
@@ -174,14 +230,19 @@ class SubscriptionService:
             if not rows:
                 logger.warning("credit_packs empty — serving fallback catalog")
                 rows = [dict(r) for r in _FALLBACK_PACKS]
+                served_fallback = True
         except Exception as e:
             logger.error(
                 "credit_packs read failed (%s: %s) — serving fallback catalog",
                 type(e).__name__, e,
             )
             rows = [dict(r) for r in _FALLBACK_PACKS]
+            served_fallback = True
 
-        return normalize_pack_catalog(rows)
+        out = normalize_pack_catalog(rows)
+        if not served_fallback:
+            _catalog_store("packs", out)
+        return out
 
     def get_user_subscription(self, user_id: str) -> Optional[dict]:
         """The user's subscription row, or None (caller falls back to Free).

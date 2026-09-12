@@ -511,7 +511,7 @@ class IndustryBenchmarkService:
             universe = [(s, inds) for s, inds in universe if s in sectors]
         total_rows = done = skipped_fresh = 0
         for sector, inds in universe:
-            if not dry_run and self._ttm_sector_is_fresh(sector, skip_if_fresh_hours):
+            if not dry_run and (await asyncio.to_thread(self._ttm_sector_is_fresh, sector, skip_if_fresh_hours)):
                 skipped_fresh += 1
                 logger.info("ttm: %s fresh — skipped", sector)
                 continue
@@ -562,7 +562,7 @@ class IndustryBenchmarkService:
             universe = [(s, inds) for s, inds in universe if s in sectors]
         total_rows = done = skipped_fresh = 0
         for sector, inds in universe:
-            if not dry_run and self._sector_is_fresh(sector, skip_if_fresh_hours):
+            if not dry_run and (await asyncio.to_thread(self._sector_is_fresh, sector, skip_if_fresh_hours)):
                 skipped_fresh += 1
                 logger.info("industry_benchmark: %s fresh — skipped", sector)
                 continue

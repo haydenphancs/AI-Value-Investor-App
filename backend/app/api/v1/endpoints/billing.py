@@ -49,7 +49,12 @@ router = APIRouter()
 async def get_plans():
     """Public tier catalog (Free / Pro / Max) with live pricing + per-action
     credit costs. No auth — the paywall must render for guests."""
-    plans = SubscriptionService().get_plan_catalog()
+    # OFF THE LOOP. This is one of the ten `.public` routes — no credential, no rate
+    # limiter — and the catalogue read is a synchronous Supabase round trip. On the single
+    # Railway worker each request suspended the whole process for 92-281 ms, so plain
+    # anonymous GETs were an event-loop denial primitive. The service memoises a
+    # SUCCESSFUL read for two minutes, so the thread hop is also rare.
+    plans = await asyncio.to_thread(SubscriptionService().get_plan_catalog)
     return PlanCatalogResponse(
         plans=[PlanResponse(**p) for p in plans],
         report_cost=settings.REPORT_CREDIT_COST,
@@ -66,7 +71,7 @@ async def get_credit_packs():
     Only the CATALOG is public. Buying is `POST /verify`, which is sign-in-required —
     consumables are not restorable by Apple, so credits have to attach to a real account
     or a reinstall loses money the user actually spent."""
-    packs = SubscriptionService().get_credit_pack_catalog()
+    packs = await asyncio.to_thread(SubscriptionService().get_credit_pack_catalog)
     return CreditPackCatalogResponse(
         packs=[CreditPackResponse(**p) for p in packs],
         report_cost=settings.REPORT_CREDIT_COST,
@@ -238,14 +243,36 @@ async def verify_purchase(
 #: process — on the single uvicorn worker, with no credential at all.
 _WEBHOOK_MAX_PER_MINUTE = 120
 
-#: Ceiling on the whole route, across every key. The per-IP bucket alone is NOT a bound:
-#: both `Procfile` and `Dockerfile` start uvicorn with `--forwarded-allow-ips='*'`, so
-#: `request.client.host` is whatever `X-Forwarded-For` says — i.e. attacker-chosen. One
-#: caller varying that header gets a fresh allowance every request. This second ceiling
-#: needs no key at all and therefore cannot be evaded by minting them. Apple's real
-#: traffic is single-digit notifications a minute, and a 429 is retried for days, so a
-#: genuine notification cannot be lost here.
+#: Ceiling on the whole route, across every key — a bound on WORK, not on a caller.
+#:
+#: ⚠️ It must never be able to reject Apple. A keyless ceiling shares one bucket between
+#: Apple and everyone else, so five noisy sources at the per-IP limit would saturate it and
+#: every genuine notification would then 429. Apple retries a non-2xx about five times over
+#: ~3 days and nothing here monitors that budget; `expire_stale_subscriptions` self-heals a
+#: lost EXPIRED, but NOTHING recovers a lost REFUND, and a lost REFUND means purchased
+#: credits are never clawed back. So the global ceiling applies only to callers who are
+#: themselves noisy (`_WEBHOOK_QUIET_CALLER_PER_MINUTE`); a caller sending a handful a
+#: minute — which is Apple, even for a busy product — is never turned away by it.
+#:
+#: (An earlier comment here claimed `request.client.host` is attacker-chosen because uvicorn
+#: runs with `--forwarded-allow-ips='*'`. That is FALSE on this deployment: Railway's edge
+#: overwrites `X-Forwarded-For`, so the per-IP key is a real per-caller control. The global
+#: ceiling is therefore a CPU backstop, not an anti-evasion measure.)
 _WEBHOOK_MAX_PER_MINUTE_GLOBAL = 600
+
+#: A caller at or below this rate is exempt from the global ceiling. Apple's real traffic is
+#: single-digit notifications a minute.
+_WEBHOOK_QUIET_CALLER_PER_MINUTE = 10
+
+#: The HARD backstop, above which nobody is exempt.
+#:
+#: The quiet-caller exemption alone would be evaded by a DISTRIBUTED flood — a thousand
+#: sources at nine a minute each are all "quiet" and would together be unbounded. This
+#: ceiling closes that at a level no plausible Apple burst can reach: 25x Apple's per-minute
+#: traffic even on a busy day, and far past what one uvicorn worker can JWS-verify anyway.
+#: Reaching it means a genuine large-scale attack, where shedding load is the right answer
+#: and Apple's multi-day retry is the safety net.
+_WEBHOOK_HARD_GLOBAL_PER_MINUTE = 3000
 
 #: How many distinct keys the per-IP map may hold before it is pruned.
 _WEBHOOK_MAX_KEYS = 10_000
@@ -259,10 +286,10 @@ def _webhook_rate_limited(request: Request) -> bool:
     """True when this caller — or the route as a whole — has exceeded its ceiling.
 
     Keyed on the proxy-aware client IP for the per-caller ceiling, and on nothing at all
-    for the global one. ⚠️ The IP is NOT trustworthy: uvicorn runs with
-    `--forwarded-allow-ips='*'`, so it is the `X-Forwarded-For` value verbatim. The per-IP
-    bucket is a courtesy that separates honest callers; `_WEBHOOK_MAX_PER_MINUTE_GLOBAL`
-    is what actually bounds the work.
+    for the global one. Railway's edge overwrites `X-Forwarded-For`, so despite uvicorn's
+    `--forwarded-allow-ips='*'` the IP reaching us is the real peer and the per-IP bucket
+    is a genuine per-caller control. The global ceiling is a bound on total WORK, and it
+    deliberately exempts quiet callers so it can never be the thing that rejects Apple.
     """
     now = time.monotonic()
     cutoff = now - 60.0
@@ -298,14 +325,27 @@ def _webhook_rate_limited(request: Request) -> bool:
             for key in oldest:
                 _webhook_hits.pop(key, None)
 
-    # Global ceiling first: it is the one an attacker cannot sidestep by varying a header.
     _webhook_global[:] = [t for t in _webhook_global if t > cutoff]
-    if len(_webhook_global) >= _WEBHOOK_MAX_PER_MINUTE_GLOBAL:
-        return True
-
     hits = _webhook_hits[ip]
     hits[:] = [t for t in hits if t > cutoff]
+
+    # Per-caller ceiling first — this is the real control, and it is the only one that can
+    # reject a caller who is on their own.
     if len(hits) >= _WEBHOOK_MAX_PER_MINUTE:
+        return True
+
+    # Global ceiling second, and ONLY against a caller who is themselves noisy. A keyless
+    # ceiling would otherwise let a handful of flooding sources starve Apple out of its own
+    # webhook — and a dropped REFUND is money that is never clawed back.
+    if (
+        len(_webhook_global) >= _WEBHOOK_MAX_PER_MINUTE_GLOBAL
+        and len(hits) >= _WEBHOOK_QUIET_CALLER_PER_MINUTE
+    ):
+        return True
+
+    # The hard backstop: past this, the exemption stops applying to anyone, because a
+    # distributed flood is made entirely of individually-quiet callers.
+    if len(_webhook_global) >= _WEBHOOK_HARD_GLOBAL_PER_MINUTE:
         return True
 
     hits.append(now)

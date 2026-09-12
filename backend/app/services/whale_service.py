@@ -764,7 +764,7 @@ class WhaleService:
             cached = _cache_get(_whale_profile_cache, mem_key, WHALE_PROFILE_CACHE_TTL)
             if cached is not None:
                 # Overlay fresh follow state
-                return self._overlay_follow_state(cached, user_id, sb)
+                return (await asyncio.to_thread(self._overlay_follow_state, cached, user_id, sb))
 
             # ── Tier 2: Supabase profile cache (24h TTL) ───────────────
             try:
@@ -800,7 +800,7 @@ class WhaleService:
                             "Whale profile %s served from Supabase cache (%.1fh old)",
                             whale_id, age_hours,
                         )
-                        return self._overlay_follow_state(profile, user_id, sb)
+                        return (await asyncio.to_thread(self._overlay_follow_state, profile, user_id, sb))
                     else:
                         logger.info(
                             "Whale profile cache expired for %s (%.1fh old)",
@@ -826,7 +826,7 @@ class WhaleService:
                 shared = await asyncio.shield(inflight)
                 if shared is None:
                     return None
-                return self._overlay_follow_state(shared, user_id, sb)
+                return (await asyncio.to_thread(self._overlay_follow_state, shared, user_id, sb))
 
         fut: "asyncio.Future" = asyncio.get_running_loop().create_future()
         if not force_refresh:
@@ -892,7 +892,7 @@ class WhaleService:
 
         if profile_no_follow is None:
             return None
-        return self._overlay_follow_state(profile_no_follow, user_id, sb)
+        return (await asyncio.to_thread(self._overlay_follow_state, profile_no_follow, user_id, sb))
 
     def _overlay_follow_state(
         self,
@@ -1097,7 +1097,7 @@ class WhaleService:
             # ONE trades query for every remaining group. This was a per-group query
             # inside the loop — up to 12 more sequential blocking round-trips on the
             # single hottest path in the feature.
-            for group in self._assemble_groups_with_trades(sb, fresh_rows):
+            for group in (await asyncio.to_thread(self._assemble_groups_with_trades, sb, fresh_rows)):
                 trade_groups.append(group)
                 all_trades.extend(group.trades)
         except Exception as e:
@@ -1249,7 +1249,7 @@ class WhaleService:
         # Same rule Updates applies to watchlist tickers.
         limit = whale_follow_limit(tier)
         if limit is not None and len(whale_ids) > limit:
-            free_id = free_tier_whale_id(sb)
+            free_id = (await asyncio.to_thread(free_tier_whale_id, sb))
             if normalize_tier(tier) == TIER_FREE:
                 whale_ids = [w for w in whale_ids if str(w) == str(free_id)]
             else:
@@ -1356,7 +1356,7 @@ class WhaleService:
             rows = result.data or []
             if not rows:
                 return []
-            return self._assemble_groups_with_trades(sb, rows)
+            return (await asyncio.to_thread(self._assemble_groups_with_trades, sb, rows))
         except Exception as e:
             logger.error(
                 "[whale_trade_groups] Failed for whale_id=%s: %s: %s",
@@ -1477,7 +1477,7 @@ class WhaleService:
 
         try:
             if follow:
-                already_followed = self._assert_may_follow(sb, user_id, whale_id, tier)
+                already_followed = (await asyncio.to_thread(self._assert_may_follow, sb, user_id, whale_id, tier))
                 (await sb_exec(
                     sb.table("whale_follows").upsert(
                     {"user_id": user_id, "whale_id": whale_id},
@@ -1491,7 +1491,7 @@ class WhaleService:
                     # constraint to lean on, so the write is confirmed AFTER the fact and
                     # compensated: whoever loses the race has their own row removed and
                     # gets the same paywall they would have got serially.
-                    self._compensate_if_over_limit(sb, user_id, whale_id, tier)
+                    (await asyncio.to_thread(self._compensate_if_over_limit, sb, user_id, whale_id, tier))
             else:
                 (await sb_exec(
                     sb.table("whale_follows").delete().eq(
@@ -3794,7 +3794,7 @@ class WhaleService:
                     for trade in trade_group.get("trades", [])[:50]
                 ]
                 if trade_rows:
-                    _bulk_write_trades(sb, trade_rows)
+                    (await asyncio.to_thread(_bulk_write_trades, sb, trade_rows))
             except Exception as tg_err:
                 logger.warning(
                     "whale_trade_group sync skipped (likely concurrent "

@@ -72,7 +72,20 @@ _NO_DATA: Dict[str, Any] = {}
 # ── Nasdaq safeguards ───────────────────────────────────────────
 
 _nasdaq_kill_switch: bool = False
-_nasdaq_consecutive_failures: int = 0
+#: TWO counters, because the two failure families have OPPOSITE remedies and sharing one
+#: routes a run into the wrong arm.
+#:
+#: With a single counter, nine transient ReadTimeouts followed by ONE 403 reached the
+#: threshold inside the 403 branch and latched the kill switch for the life of the process
+#: — logging the false line "Nasdaq 403 x10" — which is exactly the outcome the
+#: time-bounded window was added to prevent, and strictly easier to hit than before (the
+#: exception arm used to increment nothing, so ten real 403s were required). The mirror
+#: case was just as wrong: nine 403s plus one timeout fired the transient arm, which zeroes
+#: the counter, so a genuinely persistent credential failure could never accumulate to the
+#: permanent latch as long as one timeout interleaved. `_build_shorts` fans out under
+#: `asyncio.Semaphore(10)`, so ten of either in one moment is one blip, not ten events.
+_nasdaq_auth_failures: int = 0          # 403 only → PERMANENT latch (credential-shaped)
+_nasdaq_transient_failures: int = 0     # timeouts/connect errors → time-bounded window
 _MAX_CONSECUTIVE_FAILURES = 10
 _nasdaq_rate_limited_until: float = 0
 
@@ -514,8 +527,8 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
     Call Nasdaq's public API for short interest data.
     No authentication required. Only covers NASDAQ-listed stocks.
     """
-    global _nasdaq_kill_switch, _nasdaq_consecutive_failures, _nasdaq_rate_limited_until
-    global _nasdaq_disabled_until
+    global _nasdaq_kill_switch, _nasdaq_auth_failures, _nasdaq_transient_failures
+    global _nasdaq_rate_limited_until, _nasdaq_disabled_until
 
     if _nasdaq_kill_switch:
         return None
@@ -542,8 +555,8 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
             return None
 
         if resp.status_code == 403:
-            _nasdaq_consecutive_failures += 1
-            if _nasdaq_consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            _nasdaq_auth_failures += 1
+            if _nasdaq_auth_failures >= _MAX_CONSECUTIVE_FAILURES:
                 _nasdaq_kill_switch = True
                 logger.critical(f"Nasdaq 403 x{_MAX_CONSECUTIVE_FAILURES} — Nasdaq DISABLED")
             return None
@@ -552,7 +565,9 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Nasdaq API failed for {ticker}: {resp.status_code}")
             return None
 
-        _nasdaq_consecutive_failures = 0
+        # A 200 clears BOTH families — the source is demonstrably reachable AND authorised.
+        _nasdaq_auth_failures = 0
+        _nasdaq_transient_failures = 0
 
         body = resp.json()
         data = body.get("data")
@@ -600,15 +615,15 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
         # Count it. The kill switch only ever incremented on a 403, so the failure mode
         # Nasdaq actually exhibits — a silent black-hole that ends in a timeout whose
         # `str()` is empty — could never trip it, and every call kept paying the timeout.
-        _nasdaq_consecutive_failures += 1
-        if _nasdaq_consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        _nasdaq_transient_failures += 1
+        if _nasdaq_transient_failures >= _MAX_CONSECUTIVE_FAILURES:
             # A WINDOW, not the permanent latch. These are timeouts and connect errors —
             # transient by nature — and ten of them land together from one blip because
             # `_build_shorts` fans out under a semaphore of 10. Zeroing the counter is part
             # of the fix: without it the switch re-trips on the very next failure after the
             # window and the disable is permanent by another route.
             _nasdaq_disabled_until = time.time() + _NASDAQ_TRANSIENT_DISABLE_SECONDS
-            _nasdaq_consecutive_failures = 0
+            _nasdaq_transient_failures = 0
             logger.warning(
                 "Nasdaq short-interest disabled for %ds after %d consecutive failures "
                 "(last: %s) — FINRA remains the primary source",

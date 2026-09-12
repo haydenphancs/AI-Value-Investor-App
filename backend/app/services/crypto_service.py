@@ -2488,12 +2488,20 @@ Separate each category with "===CATEGORY===" followed by the category name.
                 # Gemini again, per viewed coin, forever. The only signal was the bill.
                 # CLAUDE.md: a failure that is intentionally non-fatal still gets a
                 # WARNING. The index and ETF siblings already log their equivalent branch.
+                # ⚠️ `.category`, not the models themselves. `_parse_ai_snapshots` returns
+                # `List[CryptoSnapshotResponse]`, so `", ".join(sorted(snapshots))` raises
+                # TypeError — `'<' not supported` for 2+, `expected str instance` for 1 —
+                # and the enclosing `except Exception` swallowed it, relabelling a parse
+                # SHORTFALL as an upstream crash. The one case this branch exists for is
+                # exactly the one it could not report.
+                parsed = ", ".join(
+                    sorted(str(getattr(s, "category", "?")) for s in snapshots)
+                ) or "none"
                 logger.warning(
                     "Crypto AI snapshots for %s parsed %d/4 sections from %d chars — "
                     "keeping the template defaults and NOT caching, so this will retry "
                     "(sections: %s)",
-                    symbol, len(snapshots), len(text or ""),
-                    ", ".join(sorted(snapshots)) or "none",
+                    symbol, len(snapshots), len(text or ""), parsed,
                 )
 
         except Exception as e:

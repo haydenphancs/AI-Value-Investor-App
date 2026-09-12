@@ -28,6 +28,7 @@ from app.schemas.auth import (
     OAuthSignInRequest, SessionExchangeRequest,
 )
 from app.utils.supabase_async import sb_exec
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +378,7 @@ async def refresh_token(
         # missing refreshes successfully forever while every real route 401s — see
         # `_app_user_row_exists`. AUTH_ACCOUNT_NOT_FOUND is one of the three codes iOS is
         # allowed to clear a credential on, so this ENDS the loop instead of feeding it.
-        if user_id and not _app_user_row_exists(supabase, user_id):
+        if user_id and not (await asyncio.to_thread(_app_user_row_exists, supabase, user_id)):
             logger.warning("Refresh rejected: no public.users row for user=%s", user_id)
             raise auth_error(
                 ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
@@ -388,7 +389,7 @@ async def refresh_token(
         # tokens — otherwise a reset doesn't evict a thief and they keep access for the
         # full 7-day refresh lifetime. This is the check that actually caps the window;
         # see migration 105.
-        if is_token_stale_after_password_change(payload, user_id, supabase):
+        if (await asyncio.to_thread(is_token_stale_after_password_change, payload, user_id, supabase)):
             logger.info(
                 "Refresh rejected for user=%s: token predates last password change",
                 user_id,
@@ -723,7 +724,7 @@ async def oauth_sign_in(
     # tokens for an id with no `public.users` row, iOS wrote them to the Keychain, and the
     # immediate profile fetch 401'd — leaving a stored credential the client could never
     # validate and never clear.
-    if not _app_user_row_exists(supabase, user_id):
+    if not (await asyncio.to_thread(_app_user_row_exists, supabase, user_id)):
         logger.error(
             "OAuth: no public.users row for verified provider=%s user=%s — refusing to mint "
             "tokens (check the handle_new_auth_user trigger for this account)",
@@ -734,7 +735,7 @@ async def oauth_sign_in(
             message=f"no public.users row for {user_id}",
         )
 
-    _ensure_display_name(supabase, user_id, request.display_name)
+    (await asyncio.to_thread(_ensure_display_name, supabase, user_id, request.display_name))
     logger.info("OAuth sign-in succeeded provider=%s user=%s", request.provider, user_id)
     return _issue_app_tokens_for(user_id, getattr(user, "email", None))
 
@@ -941,7 +942,7 @@ async def reset_password(
         )
 
     # 3. Evict sessions issued before this moment.
-    _mark_password_changed(supabase, user_id)
+    (await asyncio.to_thread(_mark_password_changed, supabase, user_id))
     logger.info("Password reset completed for user=%s", user_id)
     # `has_password` just flipped to true. Drop the cached probe or `GET /users/me` keeps
     # reporting the old answer for up to its TTL, and the settings row keeps offering
@@ -1124,7 +1125,7 @@ async def change_password(
             user_message="We couldn't change your password. Please try again.",
         )
 
-    _mark_password_changed(supabase, user_id)
+    (await asyncio.to_thread(_mark_password_changed, supabase, user_id))
     logger.info("Password changed for user=%s", user_id)
     # `has_password` just flipped to true. Drop the cached probe or `GET /users/me` keeps
     # reporting the old answer for up to its TTL, and the settings row keeps offering
@@ -1287,7 +1288,7 @@ async def set_password(
             user_message="We couldn't set your password. Please try again.",
         )
 
-    _mark_password_changed(supabase, user_id)
+    (await asyncio.to_thread(_mark_password_changed, supabase, user_id))
     logger.info("Password set for user=%s (providers=%s)", user_id, methods.get("providers"))
     # The probe's whole answer just changed. Without this, `GET /users/me` keeps reporting
     # `has_password: false` for up to the TTL and the settings row keeps saying "Set a Password".

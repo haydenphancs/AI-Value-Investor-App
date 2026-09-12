@@ -90,8 +90,17 @@ class AnalyticsService:
     # highest-volume table in the schema risks a statement/PostgREST timeout on the
     # FIRST post-retention sweep — and then it retries the same too-large delete every
     # 2 hours forever, never making progress. Chunking guarantees forward progress.
-    _SWEEP_CHUNK = 5000
-    _SWEEP_MAX_CHUNKS = 20   # ≤100k rows per pass; the next pass picks up the rest.
+    #
+    # ⚠️ THE CHUNK MUST MATCH THE SERVER CAP, NOT EXCEED IT. This was 5000, and PostgREST
+    # clamps every response on this project to ~1,000 rows whatever the client asks for
+    # (the fact `app/utils/postgrest_paging.py` exists for). So `ids` was never longer
+    # than 1000, the `len(ids) < _SWEEP_CHUNK` exit below fired on the FIRST iteration,
+    # `_SWEEP_MAX_CHUNKS` was dead code, and retention deleted ~1,000 rows per two-hour
+    # pass instead of the 100,000 the comment promised — on the highest-volume table in
+    # the schema, which means retention can fall permanently behind ingest while the log
+    # reports success. Matching the cap makes the short-page test mean "no rows left".
+    _SWEEP_CHUNK = 1000
+    _SWEEP_MAX_CHUNKS = 100  # ≤100k rows per pass; the next pass picks up the rest.
 
     def sweep_expired(self) -> int:
         """Delete rows older than `RETENTION_DAYS`, in bounded chunks.

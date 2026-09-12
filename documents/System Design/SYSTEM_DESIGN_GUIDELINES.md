@@ -779,8 +779,8 @@ auto-retried.
 │  │      └── Reference: services/profit_power_service.py                 │    │
 │  │                                                                       │    │
 │  │  Tier 2: Supabase `*_cache` tables (PostgreSQL)                      │    │
-│  │      ├── 24h / close-aligned; `cached_at` + app TTL in 22 of 31,     │    │
-│  │      │   an expiry column in 9; survives restarts                    │    │
+│  │      ├── 24h / close-aligned … 180 d per table; `cached_at` + app    │    │
+│  │      │   TTL in 22 of 31, an expiry column in 9; survives restarts   │    │
 │  │      └── ticker_news_cache, profit_power_cache, signals_cache, …    │    │
 │  │                                                                       │    │
 │  │  Pre-warmers in main.py lifespan warm popular tickers/scanners.     │    │

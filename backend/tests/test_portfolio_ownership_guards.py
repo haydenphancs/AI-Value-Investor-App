@@ -412,11 +412,46 @@ def _portfolio_id_routes():
     return out
 
 
+def _is_to_thread(call):
+    """`asyncio.to_thread(...)` / `to_thread(...)`."""
+    f = call.func
+    return (isinstance(f, ast.Attribute) and f.attr == "to_thread") or (
+        isinstance(f, ast.Name) and f.id == "to_thread"
+    )
+
+
+def _invocation_name(call):
+    """The function this Call actually INVOKES, seeing through `asyncio.to_thread`.
+
+    ⚠️ A blocking Supabase helper reached from an `async def` is now written
+    `(await asyncio.to_thread(_helper, a, b))` — the helper moved from the callee position
+    into the FIRST ARGUMENT. A detector that only reads `call.func` therefore stopped
+    seeing it, and on 2026-09-12 that briefly made every ownership guard in this file
+    report `rename_portfolio does not call _get_portfolio_or_404` — i.e. the guards went
+    blind to a cross-account mutation check that was in fact still there. Resolve the
+    wrapper instead of loosening the assertion.
+    """
+    if _is_to_thread(call) and call.args:
+        target = call.args[0]
+        if isinstance(target, ast.Name):
+            return target.id
+        if isinstance(target, ast.Attribute):
+            return target.attr
+        return None
+    return call.func.id if isinstance(call.func, ast.Name) else None
+
+
+def _effective_args(call):
+    """The arguments the INVOKED function receives — `to_thread`'s first arg is the
+    callable, not an argument to it."""
+    return call.args[1:] if _is_to_thread(call) else call.args
+
+
 def _called_names(node):
     return {
-        n.func.id
+        name
         for n in ast.walk(node)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        if isinstance(n, ast.Call) and (name := _invocation_name(n)) is not None
     }
 
 
@@ -424,14 +459,19 @@ def _calls_to(node, fn_name):
     return [
         n
         for n in ast.walk(node)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == fn_name
+        if isinstance(n, ast.Call) and _invocation_name(n) == fn_name
     ]
 
 
 def _arg(call, position, keyword):
-    """The AST node passed at `position` (or as `keyword=`) — None if neither is present."""
-    if len(call.args) > position:
-        return call.args[position]
+    """The AST node passed at `position` (or as `keyword=`) — None if neither is present.
+
+    Positions are counted on the INVOKED function's own signature, so a
+    `asyncio.to_thread(fn, a, b)` wrapper is transparent here too.
+    """
+    args = _effective_args(call)
+    if len(args) > position:
+        return args[position]
     for kw in call.keywords:
         if kw.arg == keyword:
             return kw.value

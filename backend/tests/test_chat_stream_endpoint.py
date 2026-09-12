@@ -512,3 +512,39 @@ def test_a_quiet_stream_carries_keepalive_comments(harness, monkeypatch):
     names = [f[0] for f in _parse_sse(r.text)]
     assert names[0] == "meta" and names[-1] == "done" and "token" in names
     assert quota.settled == [] and quota.delivered == 1
+
+
+def test_the_non_streaming_door_settles_a_degraded_answer_no_cost(harness):
+    """POST /messages — the client's stream-failure retry — must settle the same
+    `no_tools` result the same way, or the two doors price one answer differently."""
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Plain answer from memory. " * 3,
+                                        "tokens_used": 30, "degraded": "no_tools"}
+    r = client.post(
+        f"/api/v1/chat/sessions/{_SESSION}/messages",
+        json={"message": "How is Apple doing?"},
+        headers={"Authorization": "Bearer test"},
+    )
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_degraded_no_tools"] and quota.refunds == []
+    assert r.json()["content"].startswith("Plain answer")
+
+
+def test_a_warm_hit_whose_turn_fell_back_does_not_reuse_the_stored_chips(harness, monkeypatch):
+    """The stored chips belong to the stored answer; a fallback answered differently."""
+    import app.services.chat_starter_warm_service as warm
+    client, db, quota, _ = harness
+
+    async def _hit(q):
+        return {"answer": "Warm answer " * 20, "suggestions": ["Warm chip one?", "Warm chip two?"],
+                "widget": None}
+    monkeypatch.setattr(warm, "lookup", _hit)
+    _FakeChatService.fallback_result = {"content": "Live fallback answer. " * 3, "tokens_used": 80}
+    # Make the replay itself blow up before it streams, so the fallback runs.
+    monkeypatch.setattr(chat_mod, "_replay_cached_answer",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("replay died")))
+    r = _post(client, message="What's hot today?")
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"].startswith("Live fallback")
+    assert done["suggestions"] != ["Warm chip one?", "Warm chip two?"]

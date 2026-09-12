@@ -106,7 +106,7 @@ EXPECTED: dict[str, int] = {
     "tables": 128,
     "public": 93,
     "fk": 23,
-    "policies": 109,
+    "policies": 102,   # 169 dropped the user_settings/device_tokens `*_own` policies (2026-09-12)
     "rls": 93,
     "functions": 42,
     "enums": 14,

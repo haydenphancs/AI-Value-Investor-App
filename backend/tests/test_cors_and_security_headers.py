@@ -19,6 +19,19 @@ import app.main as main_mod
 from app.config import settings
 
 
+@pytest.fixture(autouse=True)
+def _clear_catalog_cache():
+    """The storefront catalogues are memoised process-wide for 120 s (they are public,
+    unauthenticated routes that used to run a blocking SELECT per request). Tests install
+    different fake tables, so the cache must not carry one test's rows into the next."""
+    from app.services.subscription_service import reset_catalog_cache
+
+    reset_catalog_cache()
+    yield
+    reset_catalog_cache()
+
+
+
 @pytest.fixture()
 def client():
     # `lifespan` spawns the background jobs; TestClient without a context manager never
@@ -85,3 +98,82 @@ def test_hsts_is_sent_only_over_https(client):
     secure = secure_client.get("/health/live")
     assert "max-age=31536000" in secure.headers.get("strict-transport-security", "")
     assert "includeSubDomains" in secure.headers["strict-transport-security"]
+
+
+# ── the two paths that never reach the middleware ───────────────────────────────────
+
+
+def test_the_headers_are_defined_in_one_shared_helper():
+    """`_security_headers` is a middleware, and TWO response paths never reach it:
+
+      * `cap_json_body` returns its 413 WITHOUT calling `call_next`, so nothing downstream
+        of it runs;
+      * Starlette hoists `@app.exception_handler(Exception)` into `ServerErrorMiddleware`,
+        which sits OUTSIDE every user middleware — so an unhandled 500 had no security
+        headers, no CORS header and no `X-Request-ID`.
+
+    That second one is exactly where a future HTML error page would live, i.e. the case the
+    middleware's own docstring says it exists to cover. Both now call the shared helper, and
+    this pins that they keep doing so.
+    """
+    import ast
+    import inspect
+    import re
+
+    import app.main as main_mod
+
+    src = inspect.getsource(main_mod)
+    tree = ast.parse(src)
+
+    def _code(name):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+        body = ast.get_source_segment(src, fn)
+        return "\n".join(re.sub(r"#.*$", "", line) for line in body.splitlines())
+
+    assert callable(getattr(main_mod, "_apply_security_headers", None))
+    for fn_name in ("_security_headers", "cap_json_body", "general_handler"):
+        assert "_apply_security_headers(" in _code(fn_name), (
+            f"{fn_name} builds a response without the baseline security headers"
+        )
+
+
+def test_the_helper_sets_all_four_and_honours_the_scheme():
+    import app.main as main_mod
+
+    class _R:
+        def __init__(self): self.headers = {}
+
+    over_https = _R()
+    main_mod._apply_security_headers(over_https, https=True)
+    assert over_https.headers["X-Content-Type-Options"] == "nosniff"
+    assert over_https.headers["X-Frame-Options"] == "DENY"
+    assert over_https.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert "max-age=" in over_https.headers["Strict-Transport-Security"]
+
+    over_http = _R()
+    main_mod._apply_security_headers(over_http, https=False)
+    assert "Strict-Transport-Security" not in over_http.headers, (
+        "HSTS over plain http is meaningless and can strand a local dev client"
+    )
+
+
+def test_an_unhandled_500_is_logged_with_the_method_path_and_request_id():
+    """`add_process_time`'s request log never runs for a hoisted 500, so this handler is
+    the ONLY record that the request happened. `Unhandled: {exc}` alone left no way to tell
+    which request died (CLAUDE.md: errors carry context + identifiers)."""
+    import ast
+    import inspect
+    import re
+
+    import app.main as main_mod
+
+    src = inspect.getsource(main_mod)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "general_handler")
+    code = "\n".join(re.sub(r"#.*$", "", l) for l in ast.get_source_segment(src, fn).splitlines())
+    for token in ("request.method", "request.url.path", "request_id", "exc_info=True"):
+        assert token in code, f"the unhandled-500 log does not carry {token}"
+

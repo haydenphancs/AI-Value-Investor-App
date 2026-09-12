@@ -31,6 +31,19 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
+
+@pytest.fixture(autouse=True)
+def _clear_catalog_cache():
+    """The storefront catalogues are memoised process-wide for 120 s (they are public,
+    unauthenticated routes that used to run a blocking SELECT per request). Tests install
+    different fake tables, so the cache must not carry one test's rows into the next."""
+    from app.services.subscription_service import reset_catalog_cache
+
+    reset_catalog_cache()
+    yield
+    reset_catalog_cache()
+
+
 # Path params substituted so a route can actually be reached. The values are irrelevant —
 # the credential check runs before any handler, so nothing here touches an upstream.
 _PATH_SAMPLE = {

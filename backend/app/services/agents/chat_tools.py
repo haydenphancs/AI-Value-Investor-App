@@ -326,11 +326,15 @@ def build_chat_tool_handlers(
     over the ticker's spelling — see `_resolve` below.
     """
     screen = (screen_symbol or "").strip().upper()
-    # Only an EQUITY screen earns the exemption. A CRYPTO session may store the bare coin
-    # ("BTC" — iOS sent that form before 2026-08-20 and `sanitize_symbol` only checks shape),
-    # and there the bare form must still canonicalise to the pair, or the chart leg would
-    # serve the Grayscale trust's quote beside a Bitcoin base card.
-    screen_is_equity = bool(screen) and (screen_asset_type or "").strip().upper() == "STOCK"
+    # Every NON-crypto screen earns the exemption — STOCK, and also ETF / INDEX / COMMODITY,
+    # whose detail views open the session with their own symbol: the Grayscale Bitcoin and
+    # Ethereum Mini Trusts are listed ETFs whose tickers are "BTC" and "ETH", and on THEIR
+    # screen the model naming "ETH" means the trust on screen, not Ether. A CRYPTO session
+    # is the one class that must NOT be exempt: it may store the bare coin ("BTC" — iOS sent
+    # that form before 2026-08-20 and `sanitize_symbol` only checks shape), and there the
+    # bare form must still canonicalise to the pair, or the chart leg would serve the
+    # Grayscale trust's quote beside a Bitcoin base card.
+    screen_is_equity = bool(screen) and (screen_asset_type or "").strip().upper() != "CRYPTO"
 
     # `ChatService._chat_symbol` resolves a bare coin ticker ("BTC") to the pair the data
     # path prices ("BTCUSD"); without it the card served the Grayscale ETF's quote under a

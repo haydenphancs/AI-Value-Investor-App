@@ -318,3 +318,78 @@ async def test_an_ordinary_etf_is_still_rankable(monkeypatch):
     ranked, *_ = await svc._rank_and_read(["GLD", "NVDA"])
     assert "GLD" in [m.ticker for m in ranked], "an ordinary ETF must still be rankable"
 
+
+@pytest.mark.asyncio
+async def test_a_band_only_holdings_group_still_gets_a_tile(monkeypatch):
+    """Excluding the market band must not EMPTY the widget.
+
+    A holdings group that is entirely SPY/ONEQ/DIA produced `rows=[]` → `ranked=[]` →
+    `headline_mover=None`, and every iOS widget family renders `EmptyStateView` for that.
+    The endpoint's market-mode fallback does not catch it: that fires on an empty TICKER
+    LIST, and this list is not empty. A self-referential headline is a smaller wrong than
+    a blank Home Screen tile, so the exclusion yields when it is the only thing left.
+    """
+    quotes = {
+        "SPY": {"symbol": "SPY", "name": "S&P 500 ETF", "price": 651.0,
+                "changePercentage": -1.6, "previousClose": 661.6, "marketCap": 6.0e11,
+                "isFund": False, "isEtf": True},
+        "DIA": {"symbol": "DIA", "name": "Dow ETF", "price": 430.0,
+                "changePercentage": -0.9, "previousClose": 433.9, "marketCap": 3.0e10,
+                "isFund": False, "isEtf": True},
+    }
+    svc = wm.WidgetMoversService.__new__(wm.WidgetMoversService)
+
+    async def _quotes(symbols):
+        return {s: quotes[s] for s in symbols if s in quotes}
+
+    class _Vol:
+        async def get_sigmas_bulk(self, symbols):
+            return {s: 0.01 for s in symbols}
+
+    class _News:
+        async def get_cards(self, tickers):
+            return {}
+
+    monkeypatch.setattr(svc, "_quotes", _quotes, raising=False)
+    monkeypatch.setattr(wm, "get_volatility_cache_service", lambda: _Vol())
+    monkeypatch.setattr(wm, "get_news_insight_service", lambda: _News())
+
+    ranked, _cards, _ok, _idx = await svc._rank_and_read(["SPY", "DIA"])
+    assert ranked, (
+        "a holdings group of only market-band symbols produced no mover at all — the "
+        "widget renders its empty state on the user's Home Screen"
+    )
+    assert {m.ticker for m in ranked} <= {"SPY", "DIA"}
+
+    # CONTROL: with ONE ordinary holding present, the band is excluded again.
+    quotes["NVDA"] = {"symbol": "NVDA", "name": "NVIDIA", "price": 130.0,
+                      "changePercentage": -0.4, "previousClose": 130.5,
+                      "marketCap": 3.1e12, "isFund": False, "isEtf": False}
+    ranked2, *_ = await svc._rank_and_read(["SPY", "DIA", "NVDA"])
+    assert [m.ticker for m in ranked2] == ["NVDA"], [m.ticker for m in ranked2]
+
+
+def test_the_attribution_path_spends_the_session_word_it_derived():
+    """`attribute()` defaults `session_word="today"`, and that word is what
+    `detect_group_move` and `describe_no_cause` print. Deriving the session and dropping
+    the word left Ask Cay AI narrating a Friday move as "today" while the widget said
+    "on Fri" — the two surfaces disagreeing about one market day, which is exactly what
+    `attribute_ticker_move`'s docstring says it exists to prevent."""
+    import ast
+    import inspect
+    import re
+
+    src = inspect.getsource(wm)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "attribute_ticker_move")
+    body = ast.get_source_segment(src, fn)
+    code = "\n".join(re.sub(r"#.*$", "", line) for line in body.splitlines())
+    assert "session_word=session_word" in code, (
+        "the derived session word is discarded, so every sentence says 'today'"
+    )
+    assert "_word" not in code.replace("session_word", ""), (
+        "the word is still being thrown away into a throwaway name"
+    )
+

@@ -533,6 +533,13 @@ async def test_the_screens_own_symbol_is_not_canonicalised_as_a_coin():
     handlers = build_chat_tool_handlers(svc, screen_symbol="BTC", screen_asset_type="CRYPTO")
     await handlers["get_stock_chart_data"]({"ticker": "btc"})
     assert seen["ticker"] == "BTCUSD"
+    # An ETF screen IS exempt: the Grayscale Ethereum Mini Trust is a listed ETF whose
+    # ticker is "ETH" — on its screen the model naming ETH means the trust, not Ether.
+    handlers = build_chat_tool_handlers(svc, screen_symbol="ETH", screen_asset_type="ETF")
+    await handlers["get_stock_chart_data"]({"ticker": "eth"})
+    assert seen["ticker"] == "ETH"
+    await handlers["get_stock_chart_data"]({"ticker": "btc"})   # a different, typed coin
+    assert seen["ticker"] == "BTCUSD"
 
 
 @pytest.mark.asyncio

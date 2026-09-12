@@ -1463,7 +1463,7 @@ async def delete_account(
         failures[f"storage:{_AVATAR_BUCKET}"] = avatar_error
 
     # 2. Tables the cascade cannot reach.
-    failures.update(_purge_unlinked_rows(supabase, user_id))
+    failures.update((await asyncio.to_thread(_purge_unlinked_rows, supabase, user_id)))
 
     if failures:
         logger.error(

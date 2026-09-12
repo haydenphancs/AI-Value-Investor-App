@@ -44,6 +44,7 @@ from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
 from app.utils.supabase_errors import is_unique_violation
 from app.utils.supabase_async import sb_exec
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -476,20 +477,20 @@ async def list_portfolios(
     Lazy-seeds a default "Holdings" portfolio on first call so the iOS client
     never has to special-case the empty state.
     """
-    portfolios = _fetch_user_portfolios(supabase, user["id"])
+    portfolios = (await asyncio.to_thread(_fetch_user_portfolios, supabase, user["id"]))
     if not portfolios:
-        _seed_default_portfolio(supabase, user["id"])
-        portfolios = _fetch_user_portfolios(supabase, user["id"])
+        (await asyncio.to_thread(_seed_default_portfolio, supabase, user["id"]))
+        portfolios = (await asyncio.to_thread(_fetch_user_portfolios, supabase, user["id"]))
     else:
-        portfolios = _backfill_lone_empty_portfolio(supabase, user["id"], portfolios)
+        portfolios = (await asyncio.to_thread(_backfill_lone_empty_portfolio, supabase, user["id"], portfolios))
 
     # Heal a user with groups but none active: every row predating migration 126's backfill,
     # anything the backfill missed, and the window after a delete whose heal failed. This is
     # the one endpoint every client calls on launch, so it is the natural repair point — and
     # the check is local (no round-trip) on the overwhelmingly common healthy path.
     if portfolios and not any(p.is_active for p in portfolios):
-        if _ensure_active_portfolio(supabase, user["id"]):
-            portfolios = _fetch_user_portfolios(supabase, user["id"])
+        if (await asyncio.to_thread(_ensure_active_portfolio, supabase, user["id"])):
+            portfolios = (await asyncio.to_thread(_fetch_user_portfolios, supabase, user["id"]))
 
     return PortfolioListResponse(portfolios=portfolios)
 
@@ -503,7 +504,7 @@ async def create_portfolio(
     name = _normalize_name(request.name)
     if not name:
         raise HTTPException(status_code=400, detail="Name cannot be empty.")
-    if _name_taken(supabase, user["id"], name):
+    if (await asyncio.to_thread(_name_taken, supabase, user["id"], name)):
         raise HTTPException(
             status_code=409, detail=f'A portfolio named "{name}" already exists.'
         )
@@ -548,7 +549,7 @@ async def create_portfolio(
     # the seed path, distinct names mean the unique-name constraint does not serialise
     # them. The RPC is idempotent and no-ops when another caller already claimed it.
     if not existing:
-        if _ensure_active_portfolio(supabase, user["id"]) == str(row["id"]):
+        if (await asyncio.to_thread(_ensure_active_portfolio, supabase, user["id"])) == str(row["id"]):
             row["is_active"] = True
 
     return _row_to_portfolio(row, [])
@@ -598,8 +599,8 @@ async def rename_portfolio(
     name = _normalize_name(request.name)
     if not name:
         raise HTTPException(status_code=400, detail="Name cannot be empty.")
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
-    if _name_taken(supabase, user["id"], name, exclude_id=portfolio_id):
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
+    if (await asyncio.to_thread(_name_taken, supabase, user["id"], name, exclude_id=portfolio_id)):
         raise HTTPException(
             status_code=409, detail=f'A portfolio named "{name}" already exists.'
         )
@@ -614,7 +615,7 @@ async def rename_portfolio(
         .data[0]
     )
 
-    items = _fetch_portfolio_items(supabase, portfolio_id)
+    items = (await asyncio.to_thread(_fetch_portfolio_items, supabase, portfolio_id))
     return _row_to_portfolio(row, items)
 
 
@@ -624,7 +625,7 @@ async def delete_portfolio(
     user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
 ):
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
 
     # Don't let the user delete their last portfolio — leaves them with no
     # active context. The iOS UI hides the destructive button in that state,
@@ -654,7 +655,7 @@ async def delete_portfolio(
     # Updates would silently fall back to the whole master watchlist under a stale label.
     # Promote a survivor immediately. Unconditional because it is a cheap no-op when the
     # deleted group was not the active one.
-    _ensure_active_portfolio(supabase, user["id"])
+    (await asyncio.to_thread(_ensure_active_portfolio, supabase, user["id"]))
     invalidate_feed_cache(user["id"])
     return {"message": "Portfolio deleted"}
 
@@ -671,7 +672,7 @@ async def activate_portfolio(
     `UserDefaults` string, so the backend could not make the other two screens follow it,
     and switching groups on one device did not follow the user to another.
     """
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
 
     try:
         switched = (await sb_exec(
@@ -699,8 +700,8 @@ async def activate_portfolio(
     # Assets tab keeps showing the previous one until the TTL lapses.
     invalidate_feed_cache(user["id"])
 
-    row = _get_portfolio_or_404(supabase, user["id"], portfolio_id)
-    return _row_to_portfolio(row, _fetch_portfolio_items(supabase, portfolio_id))
+    row = (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
+    return _row_to_portfolio(row, (await asyncio.to_thread(_fetch_portfolio_items, supabase, portfolio_id)))
 
 
 @router.put("/{portfolio_id}/tickers", response_model=PortfolioResponse)
@@ -721,7 +722,7 @@ async def set_portfolio_tickers(
     PRESERVED for tickers that remain in the portfolio after the swap; new
     tickers come in with no holdings; removed tickers lose theirs.
     """
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
 
     # Dedupe + uppercase while preserving order.
     seen: set[str] = set()
@@ -875,7 +876,7 @@ async def set_portfolio_tickers(
         ))
         .data[0]
     )
-    items = _fetch_portfolio_items(supabase, portfolio_id)
+    items = (await asyncio.to_thread(_fetch_portfolio_items, supabase, portfolio_id))
     return _row_to_portfolio(refreshed, items)
 
 
@@ -895,7 +896,7 @@ async def set_portfolio_holdings(
     ``null`` clears that ticker's holding values: it stays in the portfolio
     but stops counting toward the diversification score.
     """
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
 
     # VALIDATE EVERYTHING BEFORE WRITING ANYTHING.
     #
@@ -949,7 +950,7 @@ async def set_portfolio_holdings(
         ))
         .data[0]
     )
-    items = _fetch_portfolio_items(supabase, portfolio_id)
+    items = (await asyncio.to_thread(_fetch_portfolio_items, supabase, portfolio_id))
     return _row_to_portfolio(refreshed, items)
 
 
@@ -968,6 +969,6 @@ async def get_portfolio_insights(
     the metadata on the user's watchlist rows. Returns ``null`` when the
     portfolio has fewer than the minimum holdings for a meaningful score.
     """
-    _get_portfolio_or_404(supabase, user["id"], portfolio_id)
+    (await asyncio.to_thread(_get_portfolio_or_404, supabase, user["id"], portfolio_id))
     service = PortfolioInsightsService()
     return await service.compute_insights_for_portfolio(user["id"], portfolio_id)

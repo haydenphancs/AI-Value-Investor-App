@@ -27,6 +27,7 @@ from app.schemas.watchlist import (
     WatchlistItemResponse,
 )
 from app.utils.supabase_async import sb_exec
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,8 @@ async def add_to_watchlist(
             # Converge instead: mirror it into the active group and report success. Only a
             # ticker that is ALREADY in the active group is a true no-op duplicate, and it
             # keeps its 409 so the Tracking search still says "you have this one".
-            if not _ticker_in_active_group(supabase, user_id, ticker):
-                _write_through_to_active_portfolio(supabase, user_id, ticker)
+            if not (await asyncio.to_thread(_ticker_in_active_group, supabase, user_id, ticker)):
+                (await asyncio.to_thread(_write_through_to_active_portfolio, supabase, user_id, ticker))
                 invalidate_feed_cache(user_id)
                 logger.info(
                     "[Watchlist] %s was on the watchlist but outside the active group for "
@@ -197,7 +198,7 @@ async def add_to_watchlist(
         # missing from the feed. A stale cached feed here means the just-added
         # ticker reads as an orphan and gets deleted again — the add undoes itself.
         invalidate_feed_cache(user_id)
-        _write_through_to_active_portfolio(supabase, user_id, ticker)
+        (await asyncio.to_thread(_write_through_to_active_portfolio, supabase, user_id, ticker))
         return item
     except Exception as exc:
         logger.error("[Watchlist] DB error inserting %s: %s", ticker, exc)
@@ -381,7 +382,7 @@ async def remove_from_watchlist(
         # Keep the feed honest immediately — a stale cache would keep serving the
         # removed ticker for up to FEED_CACHE_TTL after the row is gone.
         invalidate_feed_cache(user_id)
-        _delete_through_from_groups(supabase, user_id, ticker)
+        (await asyncio.to_thread(_delete_through_from_groups, supabase, user_id, ticker))
         return {"message": f"{ticker} removed from watchlist"}
     except Exception as exc:
         logger.error(

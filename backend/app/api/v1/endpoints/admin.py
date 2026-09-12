@@ -236,15 +236,11 @@ async def industry_benchmarks_status(
                 )
                 return None
 
-        total = _count("total", sb.table("sector_benchmarks").select("id", count="exact").limit(1))
-        industry_rows = _count(
-            "industry",
-            sb.table("sector_benchmarks").select("id", count="exact").neq("industry", "").limit(1),
-        )
-        sector_rows = _count(
-            "sector",
-            sb.table("sector_benchmarks").select("id", count="exact").eq("industry", "").limit(1),
-        )
+        total = (await asyncio.to_thread(_count, "total", sb.table("sector_benchmarks").select("id", count="exact").limit(1)))
+        industry_rows = (await asyncio.to_thread(_count, "industry",
+            sb.table("sector_benchmarks").select("id", count="exact").neq("industry", "").limit(1),))
+        sector_rows = (await asyncio.to_thread(_count, "sector",
+            sb.table("sector_benchmarks").select("id", count="exact").eq("industry", "").limit(1),))
         latest = None
         try:
             r = (

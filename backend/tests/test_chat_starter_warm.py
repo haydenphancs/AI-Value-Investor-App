@@ -87,6 +87,9 @@ async def test_the_warm_job_generates_with_no_user_identity(monkeypatch):
             seen.update(kwargs)
             return {"content": "x" * 200, "tokens_used": 10}
 
+        async def generate_followup_suggestions(self, question, answer):
+            return ["Chip one?", "Chip two?", "Chip three?"]
+
     monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
     written = {}
     monkeypatch.setattr(
@@ -155,6 +158,91 @@ async def test_a_runaway_answer_is_never_stored(monkeypatch):
         lambda: (_ for _ in ()).throw(AssertionError("a write was attempted")),
     )
     assert await warm._warm_one("What topics are hot today?", "2026-09-10") is False
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_answer_is_never_stored(monkeypatch):
+    """The tool-less fallback answered with none of its live data. The live endpoint
+    REFUNDS such a turn; a warmed copy would be replayed — and charged — all day."""
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            return {"content": "z" * 200, "tokens_used": 1, "degraded": "no_tools"}
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    # An OBSERVABLE tripwire: a raising `get_supabase` would be swallowed by `_warm_one`'s
+    # store `except` and converted into the very `False` this asserts — a vacuous guard.
+    writes: list = []
+    monkeypatch.setattr(
+        warm, "get_supabase",
+        lambda: SimpleNamespace(table=lambda t: SimpleNamespace(
+            upsert=lambda row, on_conflict=None: SimpleNamespace(
+                execute=lambda: writes.append(row) or SimpleNamespace(data=[])
+            )
+        )),
+    )
+    assert await warm._warm_one("What topics are hot today?", "2026-09-10") is False
+    assert writes == [], "a degraded answer must never reach the table"
+
+
+@pytest.mark.asyncio
+async def test_a_chip_that_keeps_refusing_is_parked_after_three_strikes(monkeypatch):
+    """A refused chip stores no row, so the daily cap (stored rows) cannot bound its
+    retries: 64 passes/day would each pay a Gemini call for the same failing question."""
+    calls = {"n": 0}
+
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            calls["n"] += 1
+            return {"content": "z" * 200, "tokens_used": 1, "degraded": "no_tools"}
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    monkeypatch.setattr(warm, "_warmed_hashes", lambda day: set())
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-10")
+    import app.services.chat_starters_service as starters_mod
+    monkeypatch.setattr(
+        starters_mod, "get_chat_starters_service",
+        lambda: SimpleNamespace(get_starters=_async(SimpleNamespace(
+            global_starters=[SimpleNamespace(text="What topics are hot today?")]
+        ))),
+    )
+    warm._refusals.clear()
+    for _ in range(5):
+        assert await warm.warm_todays_starters() == 0
+    assert calls["n"] == warm._MAX_WARM_REFUSALS, calls
+    # A new day forgets the strikes.
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-11")
+    await warm.warm_todays_starters()
+    assert calls["n"] == warm._MAX_WARM_REFUSALS + 1
+
+
+def _async(value):
+    async def _f(*a, **k):
+        return value
+    return _f
+
+
+@pytest.mark.asyncio
+async def test_the_warm_row_stores_two_follow_up_chips(monkeypatch):
+    """The replay path reuses these; a row with `[]` paid a live suggestions call per tap."""
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            return {"content": "x" * 200, "tokens_used": 10}
+
+        async def generate_followup_suggestions(self, question, answer):
+            return ["Chip one?", "  ", "Chip two?", "Chip three?"]
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    written = {}
+    monkeypatch.setattr(
+        warm, "get_supabase",
+        lambda: SimpleNamespace(table=lambda t: SimpleNamespace(
+            upsert=lambda row, on_conflict=None: SimpleNamespace(
+                execute=lambda: written.update(row) or SimpleNamespace(data=[])
+            )
+        )),
+    )
+    assert await warm._warm_one("What topics are hot today?", "2026-09-10") is True
+    assert written["suggestions"] == ["Chip one?", "Chip two?"]
 
 
 @pytest.mark.asyncio

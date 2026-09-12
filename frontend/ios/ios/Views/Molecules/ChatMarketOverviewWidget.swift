@@ -76,7 +76,16 @@ struct ChatMarketOverviewWidget: View {
         HStack(spacing: 0) {
             metricPill(label: "P/E (TTM)", value: String(format: "%.1fx", data.peRatio))
             Spacer()
-            metricPill(label: "Fwd P/E", value: String(format: "%.1fx", data.forwardPe))
+            // `0` IS THE UNKNOWN SENTINEL on this wire, not a real multiple. The index
+            // service emits 0 when no forward-estimate source is licensed, and
+            // `IndexDetailModels.forwardPEDisplay` already renders "—" for `<= 0`; this
+            // pill formatted it unconditionally and printed "Fwd P/E 0.0x" beside a real
+            // "P/E (TTM) 24.3x" — a stated market forward multiple of zero.
+            metricPill(
+                label: "Fwd P/E",
+                value: data.forwardPe > 0
+                    ? String(format: "%.1fx", data.forwardPe) : "—"
+            )
             Spacer()
             metricPill(label: "Yield", value: String(format: "%.1f%%", data.earningsYield))
             Spacer()

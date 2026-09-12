@@ -23,7 +23,7 @@ from app.config import settings
 from app.database import get_supabase
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.coingecko import get_coingecko_client, CoinGeckoClient
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
 from app.integrations.gemini import get_gemini_client
 from app.services.benchmark_math import format_since, overlapping_cagrs
 from app.schemas.crypto import (
@@ -1217,7 +1217,13 @@ class CryptoService:
             # The full build can fall back to the last finite FMP close here; core has no
             # history to fall back to, and a "$0.00" header is worse than a skeleton. The
             # client fetches core with `try?`, so this just leaves the shimmer up.
-            raise ValueError(f"crypto core has no usable price for {symbol}")
+            # TYPED, not a bare ValueError. `classify_exception` only maps a
+            # ValueError whose message contains "profile" (→ TICKER_NOT_FOUND);
+            # everything else falls through to a bare 500, which on this path the
+            # client renders as "Something went wrong" for what is actually a
+            # retryable upstream gap. `index_service` and `commodity_service`
+            # already raise the typed exception for the identical condition.
+            raise FMPUnavailableException(f"crypto core has no usable price for {symbol}")
 
         change = _finite_or_none(md.get("price_change_24h")) or 0
         change_pct = _finite_or_none(md.get("price_change_percentage_24h")) or 0
@@ -2474,6 +2480,21 @@ Separate each category with "===CATEGORY===" followed by the category name.
                 # Save to Supabase permanently
                 await asyncio.to_thread(self._save_snapshots_db, symbol, snapshots)
                 logger.info(f"Background: AI snapshots generated and saved for {symbol}")
+            else:
+                # NEVER SILENT. This branch had no `else` at all: a malformed answer was
+                # dropped without a word, `finally` re-armed the spawn, and the template
+                # defaults cached in `_build_snapshots` expire after `_CACHE_TTL_SECONDS`
+                # (300 s) — so the next view five minutes later re-spawned this and spent
+                # Gemini again, per viewed coin, forever. The only signal was the bill.
+                # CLAUDE.md: a failure that is intentionally non-fatal still gets a
+                # WARNING. The index and ETF siblings already log their equivalent branch.
+                logger.warning(
+                    "Crypto AI snapshots for %s parsed %d/4 sections from %d chars — "
+                    "keeping the template defaults and NOT caching, so this will retry "
+                    "(sections: %s)",
+                    symbol, len(snapshots), len(text or ""),
+                    ", ".join(sorted(snapshots)) or "none",
+                )
 
         except Exception as e:
             logger.warning(

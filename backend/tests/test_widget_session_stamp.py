@@ -247,3 +247,114 @@ async def test_rank_and_read_drops_the_halted_prior_session_row(monkeypatch):
     monkeypatch.setattr(wm, "get_news_insight_service", lambda: _News())
     ranked, *_ = await WidgetMoversService()._rank_and_read(["HALT", "NVDA"])
     assert [m.ticker for m in ranked] == ["NVDA"]
+
+
+# ── the PRODUCTION JOIN, which every test above stops one step short of ─────────────
+
+
+def test_the_session_gate_cannot_fail_open_to_the_wall_clock():
+    """`_market_context(session_date=...)` must be REQUIRED.
+
+    Every session assertion in this file is a leaf: they hand `for_tickers` the session
+    themselves. The one line that joins `_session_of` to the gate in production was
+    untested, and the parameter was declared `Optional[str] = None`, resolved as
+    `session_date or session_trading_date().isoformat()` — i.e. it failed OPEN to the wall
+    clock. One of the three call sites relied on that default, so a pre-market Monday
+    attribution compared Friday's change against Monday's sector rows. A required parameter
+    turns that into a signature error.
+    """
+    import inspect
+    import re
+
+    from app.services.widget_movers_service import WidgetMoversService
+
+    sig = inspect.signature(WidgetMoversService._market_context)
+    param = sig.parameters["session_date"]
+    assert param.default is inspect.Parameter.empty, (
+        "session_date has a default again — the sector/industry gate silently falls back "
+        "to the wall clock whenever a caller forgets it"
+    )
+
+    src = inspect.getsource(WidgetMoversService._market_context)
+    code = "\n".join(re.sub(r"#.*$", "", line) for line in src.splitlines())
+    assert "session_date or session_trading_date" not in code, (
+        "the fail-open fallback is back inside the function"
+    )
+
+
+def test_every_market_context_call_site_passes_a_session():
+    """A required parameter is only worth as much as the values handed to it: each caller
+    must pass a session it DERIVED, not one it invented."""
+    import ast
+    import inspect
+    import re
+
+    from app.services import widget_movers_service as wms
+
+    src = inspect.getsource(wms)
+    tree = ast.parse(src)
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "_market_context"
+    ]
+    assert len(calls) >= 3, f"only {len(calls)} call sites found — the scan has rotted"
+    for call in calls:
+        positional = len(call.args)
+        named = {k.arg for k in call.keywords}
+        assert positional >= 3 or "session_date" in named, (
+            f"widget_movers_service.py:{call.lineno} calls _market_context without a "
+            "session — the sector and industry gates then compare against the wrong day"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_attribution_path_gates_on_the_rows_session_not_the_clock(monkeypatch):
+    """End-to-end over the production join, for the ONE path that used the wall clock.
+
+    `attribute_ticker_move` is what Ask Cay AI calls, and it must give the same answer the
+    Home Screen widget gives for the same market day.
+    """
+    from datetime import date
+
+    from app.services import widget_movers_service as wms
+
+    svc = wms.WidgetMoversService.__new__(wms.WidgetMoversService)
+    friday = date(2026, 9, 11)
+    monday = date(2026, 9, 14)
+    seen = {}
+
+    ranked = [wms.RankedMover(
+        ticker="NVDA", change_percent=-4.8, price=130.0, company_name="NVIDIA",
+        sigma_daily=0.015, z=3.1, tier="high", open_price=136.0, previous_close=136.5,
+        change_session=friday.isoformat(),
+    )]
+
+    async def _rank_and_read(_syms):
+        return ranked, {"NVDA": None}, True, {}
+
+    async def _ctx(_tickers, _index_rows, session_date):
+        seen["ctx_session"] = session_date
+        return wms._MarketContext()
+
+    def _news(card, today_iso):
+        seen["news_session"] = today_iso
+        return None, False, False
+
+    monkeypatch.setattr(svc, "_rank_and_read", _rank_and_read, raising=False)
+    monkeypatch.setattr(svc, "_market_context", _ctx, raising=False)
+    monkeypatch.setattr(wms, "_classified_today_news", _news)
+    monkeypatch.setattr(wms, "session_trading_date", lambda: monday)
+
+    await svc.attribute_ticker_move("NVDA")
+
+    assert seen["ctx_session"] == friday.isoformat(), (
+        "the market context was gated on MONDAY while the change being explained is "
+        f"FRIDAY's — got {seen['ctx_session']}"
+    )
+    assert seen["news_session"] == friday.isoformat(), (
+        "the news detector was asked about the wrong day, which is how the tile prints "
+        "the confident negative 'no company news today'"
+    )
+

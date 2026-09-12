@@ -75,6 +75,14 @@ struct ETFNetYield {
     /// price we failed to fetch (0.00% is then a fabricated measurement). The backend
     /// tells us which; defaults true so an older backend behaves exactly as before.
     var dividendYieldKnown: Bool = true
+    /// True when the backend actually KNOWS the fee.
+    ///
+    /// `expenseRatio` is a non-Optional `Double` and 0.0 means UNAVAILABLE, never "this
+    /// fund is free" — the service says so at its own `expense_ratio <= 0` branch, where
+    /// it already writes "Expense ratio unavailable for this fund." into `feeContext`.
+    /// Without this the tile printed "Fee: 0%" directly above that sentence. Defaults
+    /// true so an older backend behaves exactly as before.
+    var expenseRatioKnown: Bool = true
     let payFrequency: String
     let yieldContext: String
     let verdict: String
@@ -82,7 +90,8 @@ struct ETFNetYield {
     let dividendHistory: [ETFDividendPayment]
 
     var formattedExpenseRatio: String {
-        "\(String(format: "%g", expenseRatio))%"
+        guard expenseRatioKnown else { return "—" }
+        return "\(String(format: "%g", expenseRatio))%"
     }
 
     var formattedDividendYield: String {

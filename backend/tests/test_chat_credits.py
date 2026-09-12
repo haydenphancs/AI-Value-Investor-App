@@ -447,3 +447,58 @@ def test_a_claim_failure_charges_normally(monkeypatch):
     assert err is None
     assert quota.outcome == "charged"
     credit.precharge.assert_called_once()
+
+
+# ── _ChatQuota.settle_no_cost: a DELIVERED turn that cost nothing ────────────
+
+def test_a_charged_no_cost_turn_is_refunded_and_earns_no_followup(monkeypatch):
+    """Cache replay / degraded shape on a CHARGED turn: the credit comes back, and — same
+    as any refunded turn — it earns no free follow-up."""
+    credit = _patch_credit(monkeypatch)
+    svc = _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_cache_hit")
+    credit.refund_ledgered.assert_called_once()
+    quota.on_delivered()
+    svc.grant_free_followup.assert_not_called()
+
+
+def test_a_free_no_cost_turn_does_not_regrant_the_followup(monkeypatch):
+    """⚠️ The chain bound. `refund_once` restores a free ALLOWANCE because the turn never
+    arrived. A degraded free turn DID arrive — re-granting would let it earn another free
+    turn, and under a function-calling outage that chain is unbounded off one credit."""
+    credit = _patch_credit(monkeypatch)
+    svc = _patch_followup(monkeypatch, claim_returns=True)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    assert quota.outcome == "free_followup"
+    quota.settle_no_cost("chat_degraded_no_tools")
+    svc.grant_free_followup.assert_not_called()
+    credit.refund_ledgered.assert_not_called()       # a free turn wrote no debit
+    quota.on_delivered()
+    svc.grant_free_followup.assert_not_called()
+    assert quota.outcome == "free_followup"
+
+
+def test_settle_no_cost_is_idempotent_with_refund_once(monkeypatch):
+    """The finally backstop still calls `refund_once`; a settled turn must not refund twice."""
+    credit = _patch_credit(monkeypatch)
+    _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_cache_hit")
+    quota.settle_no_cost("chat_cache_hit")
+    quota.refund_once("chat_undelivered")
+    assert credit.refund_ledgered.call_count == 1
+
+
+def test_guest_settle_no_cost_touches_no_rpc(monkeypatch):
+    """A guest's delivered no-cost turn keeps its daily turn (the turn WAS delivered; the
+    daily budget meters answers, not Gemini cost) and touches neither credit RPC."""
+    credit = _patch_credit(monkeypatch)
+    rec = _patch_budget(monkeypatch)
+    svc = _patch_followup(monkeypatch, claim_returns=False)
+    quota, err = chat._claim_chat_quota(GUEST, "install-1", session_id="sess-1")
+    assert err is None
+    quota.settle_no_cost("chat_cache_hit")
+    credit.refund_ledgered.assert_not_called()
+    svc.grant_free_followup.assert_not_called()
+    assert rec["claimed"] == 1 and rec["refunded"] == 0, rec

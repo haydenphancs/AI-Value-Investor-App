@@ -176,7 +176,11 @@ _FUTURES_BACKED_FUNDS = {"USO", "USL", "DBO", "BNO", "OILK", "UNG", "UNL", "BOIL
 
 def test_the_served_commodity_set_is_exactly_the_six_with_an_honest_source():
     assert set(_COMMODITY_PROFILES) == {"GC", "SI", "PL", "PA", "CL", "NG"}
-    assert set(_WITHDRAWN_COMMODITIES) == {"KC", "CT", "CC", "HG", "ZW", "ZC", "ZS", "SB"}
+    # LB / OJ / Z joined 2026-09-11: `asset_class._COMMODITY_SYMBOLS` classified them as
+    # commodities but nothing named them, so they fell through to a retry-forever generic
+    # error instead of FMP_NOT_ENTITLED (tests/test_leftover_leads_2026_09_11.py).
+    assert set(_WITHDRAWN_COMMODITIES) == {"KC", "CT", "CC", "HG", "ZW", "ZC", "ZS", "SB",
+                                          "LB", "OJ", "Z"}
     assert not (set(_COMMODITY_PROFILES) & set(_WITHDRAWN_COMMODITIES))
 
 

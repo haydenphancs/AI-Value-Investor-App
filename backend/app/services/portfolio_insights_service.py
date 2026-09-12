@@ -44,6 +44,7 @@ from app.schemas.tracking import (
 )
 from app.services.sector_benchmark_service import _normalize_sector
 from app.services.price_service import price_source
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -284,10 +285,11 @@ class PortfolioInsightsService:
         """
         sb = get_supabase()
         result = (
-            sb.table("watchlist_items")
-            .select("*")
-            .eq("user_id", user_id)
-            .execute()
+            (await sb_exec(
+                sb.table("watchlist_items")
+                .select("*")
+                .eq("user_id", user_id)
+            ))
         )
         rows = result.data or []
         if not rows:
@@ -355,10 +357,11 @@ class PortfolioInsightsService:
         lazy-enriched from the FMP profile when missing."""
         sb = get_supabase()
         item_rows = (
-            sb.table("portfolio_items")
-            .select("ticker,shares,market_value")
-            .eq("portfolio_id", portfolio_id)
-            .execute()
+            (await sb_exec(
+                sb.table("portfolio_items")
+                .select("ticker,shares,market_value")
+                .eq("portfolio_id", portfolio_id)
+            ))
             .data
             or []
         )
@@ -372,11 +375,12 @@ class PortfolioInsightsService:
 
         tickers = [r["ticker"].upper() for r in holdings_rows]
         meta_rows = (
-            sb.table("watchlist_items")
-            .select("*")
-            .eq("user_id", user_id)
-            .in_("ticker", tickers)
-            .execute()
+            (await sb_exec(
+                sb.table("watchlist_items")
+                .select("*")
+                .eq("user_id", user_id)
+                .in_("ticker", tickers)
+            ))
             .data
             or []
         )
@@ -495,9 +499,11 @@ class PortfolioInsightsService:
             if not update:
                 continue
             try:
-                sb.table("watchlist_items").update(update).eq(
+                (await sb_exec(
+                    sb.table("watchlist_items").update(update).eq(
                     "user_id", user_id
-                ).eq("ticker", row["ticker"]).execute()
+                    ).eq("ticker", row["ticker"])
+                ))
             except Exception as e:
                 logger.warning(
                     "[portfolio_insights] Enrichment write-back failed for %s: %s: %s",

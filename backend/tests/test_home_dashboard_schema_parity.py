@@ -54,6 +54,11 @@ from _price_fakes import PriceFromFMPFake
 # The exact snake_case keys the iOS `MarketPulseItemDTO.CodingKeys` expects.
 _ITEM_KEYS = {
     "symbol", "name", "type", "price", "change_percent", "previous_close", "spark",
+    # Was `change_percent` MEASURED? It is a shipped non-Optional float, so an unknown
+    # move still travels as 0.0 — which the strip painted as a green "+0.00%". This is
+    # the companion that tells the client to render "—" in the neutral colour instead
+    # (2026-09-12; `MarketPulseItemDTO.changeKnown` is `Bool?` and defaults to true).
+    "change_known",
     # The sparkline's time axis — where `spark` sits inside this asset's own
     # session, as fractions of the tile width. Without these iOS spread N points
     # edge-to-edge and a 10:15 tile was pixel-identical to a closed day.

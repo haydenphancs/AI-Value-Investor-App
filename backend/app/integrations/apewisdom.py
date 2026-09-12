@@ -227,6 +227,16 @@ async def refresh_cache() -> Dict[str, Dict[str, Any]]:
         return _cache
 
 
+def is_cache_populated() -> bool:
+    """True once at least one ApeWisdom page has landed in the process cache.
+
+    `get_ticker_mentions` answers None both for "not tracked on Reddit" and for "the cache
+    is still cold" — the caller needs to tell those apart before it may claim a ticker has
+    zero mentions.
+    """
+    return bool(_cache)
+
+
 async def get_ticker_mentions(
     ticker: str,
 ) -> Optional[Dict[str, Any]]:

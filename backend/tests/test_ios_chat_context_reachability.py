@@ -35,12 +35,27 @@ def _swift_enum_cases() -> dict[str, str]:
     return dict(re.findall(r'case\s+(\w+)\s*=\s*"([^"]+)"', block.group(1)))
 
 
+def _strip_swift_comments(src: str) -> str:
+    """Drop `//` line comments and `/* */` blocks. Load-bearing: a commented-out
+    `contextType: .journeyLesson` used to count as a call site, which is the exact
+    vacuity .claude/rules/testing.md §3 warns about."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return "\n".join(re.sub(r"//.*$", "", line) for line in src.splitlines())
+
+
 def _sent_case_names() -> set[str]:
-    """Every `contextType: .x` actually passed at a call site."""
+    """Every `contextType: .x` actually passed at a call site (comments excluded)."""
     sent: set[str] = set()
     for swift in _IOS.rglob("*.swift"):
-        sent.update(re.findall(r"contextType:\s*\.(\w+)", swift.read_text()))
+        sent.update(re.findall(r"contextType:\s*\.(\w+)", _strip_swift_comments(swift.read_text())))
     return sent
+
+
+def test_a_commented_out_call_site_does_not_count():
+    """Anti-vacuity for the stripper itself."""
+    sample = "// contextType: .ghost\n/* contextType: .phantom */\nlet x = f(contextType: .real)"
+    found = set(re.findall(r"contextType:\s*\.(\w+)", _strip_swift_comments(sample)))
+    assert found == {"real"}, found
 
 
 def test_the_scan_finds_both_sides():

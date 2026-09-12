@@ -32,6 +32,7 @@ from typing import Set
 import pytest
 
 from app.integrations.fmp_entitlements import (
+    INDEX_CONSTITUENT_PATHS,
     BLOCKED_PATHS,
     ENTITLED_PATHS,
     RETIRED_PATHS,
@@ -171,6 +172,13 @@ def _extract_request_paths(source: str) -> Set[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if owner.get(node) in dynamic_fns and node.value in known:
                 found.add(node.value)
+
+    # Pattern 3c: `get_index_constituents` reads its path from the manifest's
+    # INDEX_CONSTITUENT_PATHS (moved there on 2026-09-11 so index_service can consult
+    # `is_entitled` BEFORE calling). The product still depends on those paths — they are
+    # debt in KNOWN_BLOCKED_IN_USE until the package is bought — so they count as called.
+    if "get_index_constituents" in dynamic_fns:
+        found |= set(INDEX_CONSTITUENT_PATHS.values())
 
     return found
 

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
 from app.dependencies import GUEST_USER_ID, get_current_user_or_guest
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -211,33 +212,62 @@ async def industry_benchmarks_status(
 
         sb = get_supabase()
 
-        def _count(query) -> int:
+        degraded = False
+
+        def _count(label: str, query) -> Optional[int]:
+            """The count, or None when we could not read it — NEVER 0.
+
+            `0` here was indistinguishable from a wiped `sector_benchmarks` table, with
+            nothing logged anywhere: a transient PostgREST failure (the h2 stale-connection
+            reuse and Cloudflare 520 shapes `app/database.py` documents) rendered as
+            "the benchmarks are gone", inviting an operator to re-trigger a 1-3 hour
+            throttled FMP recompute against a table that was fine. The partial case was
+            worse still — one failed read gave `total_rows: 5704, industry_rows: 0`, a
+            state the table cannot be in.
+            """
+            nonlocal degraded
             try:
                 return query.execute().count or 0
-            except Exception:
-                return 0
+            except Exception as e:
+                degraded = True
+                logger.warning(
+                    "industry-benchmarks-status: %s count failed (%s: %s)",
+                    label, type(e).__name__, e,
+                )
+                return None
 
-        total = _count(sb.table("sector_benchmarks").select("id", count="exact").limit(1))
+        total = _count("total", sb.table("sector_benchmarks").select("id", count="exact").limit(1))
         industry_rows = _count(
-            sb.table("sector_benchmarks").select("id", count="exact").neq("industry", "").limit(1)
+            "industry",
+            sb.table("sector_benchmarks").select("id", count="exact").neq("industry", "").limit(1),
         )
         sector_rows = _count(
-            sb.table("sector_benchmarks").select("id", count="exact").eq("industry", "").limit(1)
+            "sector",
+            sb.table("sector_benchmarks").select("id", count="exact").eq("industry", "").limit(1),
         )
         latest = None
         try:
             r = (
-                sb.table("sector_benchmarks")
-                .select("computed_at").order("computed_at", desc=True).limit(1).execute()
+                (await sb_exec(
+                    sb.table("sector_benchmarks")
+                    .select("computed_at").order("computed_at", desc=True).limit(1)
+                ))
             )
             latest = r.data[0]["computed_at"] if r.data else None
-        except Exception:
-            pass
+        except Exception as e:
+            degraded = True
+            logger.warning(
+                "industry-benchmarks-status: latest computed_at read failed (%s: %s)",
+                type(e).__name__, e, exc_info=True,
+            )
         return {
             "total_rows": total,
             "industry_rows": industry_rows,
             "sector_rows": sector_rows,
             "latest_computed_at": latest,
+            # True when ANY read above failed, so the operator reads "unknown" rather than
+            # inferring "empty" from the zeros this used to fabricate.
+            "degraded": degraded,
         }
     except Exception as e:
         logger.error(f"industry-benchmarks-status failed: {e}")
@@ -304,11 +334,12 @@ async def list_industry_dossier(
 
         sb = get_supabase()
         res = (
-            sb.table("industry_dossier")
-            .select("*")
-            .order("sector", desc=False)
-            .order("industry", desc=False)
-            .execute()
+            (await sb_exec(
+                sb.table("industry_dossier")
+                .select("*")
+                .order("sector", desc=False)
+                .order("industry", desc=False)
+            ))
         )
         rows = res.data or []
         summary = dict(Counter(r.get("source_grain") for r in rows))
@@ -321,11 +352,12 @@ async def list_industry_dossier(
         last_override_run = None
         try:
             audit_res = (
-                sb.table("industry_override_audit")
-                .select("*")
-                .order("computed_at", desc=True)
-                .limit(50)  # ≥ 9 curated industries; 50 leaves room for growth
-                .execute()
+                (await sb_exec(
+                    sb.table("industry_override_audit")
+                    .select("*")
+                    .order("computed_at", desc=True)
+                    .limit(50)
+                ))
             )
             audit_rows = audit_res.data or []
             if audit_rows:
@@ -424,13 +456,17 @@ async def industry_moat_benchmarks_status(
 
         sb = get_supabase()
         # Total rows
-        total = sb.table("industry_moat_benchmarks").select(
-            "id", count="exact",
-        ).execute()
+        total = (await sb_exec(
+                    sb.table("industry_moat_benchmarks").select(
+                    "id", count="exact",
+                    )
+                ))
         # Per-pillar counts
-        rows = sb.table("industry_moat_benchmarks").select(
-            "industry,pillar_name,sample_size,computed_at",
-        ).execute()
+        rows = (await sb_exec(
+                   sb.table("industry_moat_benchmarks").select(
+                   "industry,pillar_name,sample_size,computed_at",
+                   )
+               ))
         pillar_counts: dict[str, int] = {}
         industries: set[str] = set()
         latest_computed: Optional[str] = None

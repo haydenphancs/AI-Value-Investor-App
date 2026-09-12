@@ -177,7 +177,14 @@ async def warm_todays_starters() -> int:
         )
         return 0
 
-    pending = [q for q in questions if question_hash(q) not in already]
+    # Forget yesterday's strikes; keep today's.
+    for k in [k for k in _refusals if not k.startswith(day + ":")]:
+        _refusals.pop(k, None)
+    pending = [
+        q for q in questions
+        if question_hash(q) not in already
+        and _refusals.get(_refusal_key(day, q), 0) < _MAX_WARM_REFUSALS
+    ]
     if not pending:
         return 0
 
@@ -213,10 +220,30 @@ async def warm_todays_starters() -> int:
             )
         elif r:
             written += 1
+        if not (r is True):
+            key = _refusal_key(day, q)
+            _refusals[key] = _refusals.get(key, 0) + 1
+            if _refusals[key] == _MAX_WARM_REFUSALS:
+                logger.warning(
+                    "starter warm: %r refused %d times today — parked until tomorrow, it "
+                    "will answer live", q[:60], _MAX_WARM_REFUSALS,
+                )
     if written:
         logger.info("starter warm: stored %d/%d answer(s) for %s",
                     written, len(pending), day)
     return written
+
+
+# Per-(day, question) refusal counter. A chip whose answer is refused (degraded, too short,
+# runaway) stores NO row, so `_warmed_hashes` never sees it, `pending` re-selects it and the
+# daily cap — which counts STORED rows — cannot bound the retries: up to 64 passes/day would
+# each pay a Gemini call for the same failing question. Three strikes parks it for the day.
+_refusals: Dict[str, int] = {}
+_MAX_WARM_REFUSALS = 3
+
+
+def _refusal_key(day: str, question: str) -> str:
+    return f"{day}:{question_hash(question)}"
 
 
 def _warmed_hashes(day: str) -> set:
@@ -234,8 +261,9 @@ async def _warm_one(question: str, day: str) -> bool:
     """Generate and store one answer. Returns True when a row was written."""
     from app.services.chat_service import ChatService
 
+    svc = ChatService()
     try:
-        result = await ChatService().generate_response(
+        result = await svc.generate_response(
             # A synthetic, non-existent session id. `_get_recent_messages` returns [] for it,
             # which is what we want: a warmed answer must not depend on any conversation.
             session_id=str(uuid.uuid4()),
@@ -258,6 +286,15 @@ async def _warm_one(question: str, day: str) -> bool:
         )
         return False
 
+    if result.get("degraded"):
+        # A tool-less fallback answer (the function-calling round failed) has none of its
+        # live market data. The live endpoint REFUNDS such a turn; a warmed copy would be
+        # replayed — and charged — all day. Answer live instead.
+        logger.warning(
+            "starter warm: refusing to store a degraded (%s) answer for %r — it will answer live",
+            result.get("degraded"), question[:60],
+        )
+        return False
     answer = (result.get("content") or "").strip()
     if not (_MIN_ANSWER_CHARS <= len(answer) <= _MAX_ANSWER_CHARS):
         logger.warning(
@@ -266,13 +303,29 @@ async def _warm_one(question: str, day: str) -> bool:
         )
         return False
 
+    # The follow-up chips too — generated once here, replayed with the answer. The row
+    # used to store `[]` and the replay then paid a live suggestions call on every tap:
+    # the one Gemini call the warm path could have saved for free was the one it did not.
+    suggestions: list = []
+    try:
+        suggestions = [
+            str(x).strip() for x in
+            (await svc.generate_followup_suggestions(question, answer) or [])
+            if str(x).strip()
+        ][:2]
+    except Exception as e:  # noqa: BLE001 — chips are best-effort, the answer is the row
+        logger.warning(
+            "starter warm: suggestions failed for %r (%s: %s) — storing none",
+            question[:60], type(e).__name__, e,
+        )
+
     row = {
         "question_hash": question_hash(question),
         "answer_date": day,
         "question": question,
         "answer": answer,
         "widget": result.get("widget"),
-        "suggestions": [],
+        "suggestions": suggestions,
         "tokens_used": result.get("tokens_used"),
         "model": settings.GEMINI_MODEL,
     }

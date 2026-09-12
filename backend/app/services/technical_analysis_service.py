@@ -395,8 +395,7 @@ class TechnicalAnalysisService:
             and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
         )
         if _is_crypto_source:
-            from app.integrations.coingecko import get_coingecko_client
-            from app.services.coingecko_adapter import market_chart_to_rows
+            from app.services.crypto_service import get_crypto_service
 
             base = ticker.upper()
             for suffix in ("USDT", "USD"):
@@ -404,10 +403,11 @@ class TechnicalAnalysisService:
                     base = base[: -len(suffix)]
                     break
             days = min(600, max(1, int(settings.CRYPTO_HISTORY_YEARS) * 365))
-            payload = await get_coingecko_client().get_market_chart(
-                base, days, interval="daily"
-            )
-            historical = market_chart_to_rows(payload, intraday=False)
+            # Through `crypto_service._cg_history`, not the client directly: that is the
+            # 1 h daily memo + `_inflight` dedup + "unresolved id → serve once, never
+            # cache" rule the detail screen already relies on. Going around it cost a
+            # second `/market_chart` per TA request on a 100k-calls/month budget.
+            historical = await get_crypto_service()._cg_history(base, days)
         else:
             # 🔴 Route index / commodity screens through their PROXY before touching FMP.
             #

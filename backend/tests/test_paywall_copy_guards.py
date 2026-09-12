@@ -291,7 +291,9 @@ def test_no_paid_fallback_row_claims_narration_in_general():
         assert "Journey" not in row, f"paid row {key.group(1)!r} mentions the Journey"
         if "narration" in row.lower():
             assert key.group(1) == "learn_audio"
-            title = re.search(r'title: "([^"]+)"', row).group(1)
+            title_m = re.search(r'title: "([^"]+)"', row)
+            assert title_m, f"paid row {key.group(1)!r} has no title: literal"
+            title = title_m.group(1)
             assert "Money Moves" in title and "book" in title.lower(), (
                 f"the paid narration row must name what it covers, got {title!r}"
             )

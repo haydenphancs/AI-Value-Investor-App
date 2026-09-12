@@ -3,7 +3,8 @@
 Backend, cleanly testable slice:
   * #6 research /generate: an insert that RAISES (not just empty .data) still refunds
     the precharge and returns a structured error (guest → no charge, no refund).
-  * #7 ticker /report/chat: a generation failure refunds the charge (success does not).
+  * (#7 ticker /report/chat was deleted 2026-09-11 — no client called it and it bypassed
+    every chat guardrail; its tests went with it.)
   * #1 GET /me/credits: rolls the monthly allocation (ensure_period) for an authed user
     and SKIPS the guest sentinel.
 
@@ -18,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import app.api.v1.endpoints.research as research
-import app.api.v1.endpoints.ticker_report as ticker_report
 import app.api.v1.endpoints.users as users
 from app.api.error_response import ErrorCode
 from app.dependencies import GUEST_USER_ID
@@ -92,59 +92,6 @@ async def test_research_insert_raise_refunds_the_charge(monkeypatch):
         supabase=_generate_supabase_insert_raises(), _rate_limit=None,
     )
     assert json.loads(resp.body)["error_code"] == ErrorCode.REPORT_GENERATION_FAILED.value
-    credit.precharge.assert_called_once()
-    credit.refund_ledgered.assert_called_once()
-
-
-# ── #7 ticker /report/chat: refund on generation failure ─────────────
-
-def _report_chat_body():
-    return ticker_report.TickerReportChatRequest(
-        ticker="AAPL", message="is it cheap?", persona="warren_buffett"
-    )
-
-
-@pytest.mark.asyncio
-async def test_report_chat_refunds_on_failure(monkeypatch):
-    credit = _credit_mock(monkeypatch, ticker_report, precharge_return=100)
-    svc = MagicMock()
-    svc.chat_about_ticker = AsyncMock(side_effect=RuntimeError("gemini down"))
-    monkeypatch.setattr(ticker_report, "TickerReportService", lambda: svc)
-    await ticker_report.chat_with_ticker_report(
-        "AAPL", _report_chat_body(), user={"id": "authed-1"}, _rate=None,
-    )
-    credit.precharge.assert_called_once()
-    credit.refund_ledgered.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_report_chat_success_no_refund(monkeypatch):
-    credit = _credit_mock(monkeypatch, ticker_report, precharge_return=100)
-    svc = MagicMock()
-    svc.chat_about_ticker = AsyncMock(return_value="Cheap on normalized FCF.")
-    monkeypatch.setattr(ticker_report, "TickerReportService", lambda: svc)
-    await ticker_report.chat_with_ticker_report(
-        "AAPL", _report_chat_body(), user={"id": "authed-1"}, _rate=None,
-    )
-    credit.precharge.assert_called_once()
-    credit.refund_ledgered.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_report_chat_refunds_on_generation_failure(monkeypatch):
-    """A charged turn that never produced an answer is refunded.
-
-    Was `test_report_chat_guest_not_charged`. Report chat is account-only now (it is a full
-    Gemini answer, and the guest no-op made it a free denial-of-wallet bypass), so the
-    interesting invariant moved from "guests aren't charged" to "a failed turn is refunded".
-    """
-    credit = _credit_mock(monkeypatch, ticker_report)
-    svc = MagicMock()
-    svc.chat_about_ticker = AsyncMock(side_effect=RuntimeError("gemini down"))
-    monkeypatch.setattr(ticker_report, "TickerReportService", lambda: svc)
-    await ticker_report.chat_with_ticker_report(
-        "AAPL", _report_chat_body(), user={"id": "user-1"}, _rate=None,
-    )
     credit.precharge.assert_called_once()
     credit.refund_ledgered.assert_called_once()
 

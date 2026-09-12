@@ -126,13 +126,15 @@ class IndexDetailViewModel: ObservableObject {
                 self.chartSettings.selectedInterval = newRange.defaultInterval
                 self.suppressIntervalReload = false
 
-                // Interval alone: the `isConnected` conjunct this used to carry would be
-                // permanently false now the FMP stream is gone, freezing the intraday chart.
-                if newRange.defaultInterval.isIntraday {
-                    self.startChartRefreshTimer()
-                } else {
-                    self.stopChartRefreshTimer()
-                }
+                // The timer runs on EVERY range. It used to be stopped here whenever the
+                // new range was not intraday — which permanently killed the 30-second
+                // LEVEL refresh the moment the user tapped 3M, with nothing to restart it
+                // short of going back to 1D. That directly contradicts the timer's own
+                // body, which already decides per tick whether to include chart bars and
+                // carries the note "The level header refreshes either way — the old
+                // `isIntraday` guard froze it entirely on a daily chart". Half of that fix
+                // landed; this is the other half.
+                self.startChartRefreshTimer()
 
                 Task {
                     await self.loadChartData(range: newRange)

@@ -1439,8 +1439,17 @@ struct SentimentAnalysisData {
     let newsNeutral7d: Int
     // Social data availability
     let socialDataAvailable: Bool
+    // Per-window: was the count LOOKED UP? `socialMentions*` travel as plain Doubles, so a
+    // failed lookup still arrives as 0.0 — these say whether that 0.0 was measured. Every
+    // reader below (value, change, colour) has a neutral state for false.
+    let socialMentionsKnown: Bool
+    let socialMentions7dKnown: Bool
 
     // MARK: - Timeframe-aware accessors
+
+    func socialKnown(for timeframe: SentimentTimeframe) -> Bool {
+        timeframe == .last24h ? socialMentionsKnown : socialMentions7dKnown
+    }
 
     func score(for timeframe: SentimentTimeframe) -> Int {
         timeframe == .last24h ? moodScore : moodScore7d
@@ -1451,6 +1460,7 @@ struct SentimentAnalysisData {
     }
 
     func formattedSocialMentions(for timeframe: SentimentTimeframe) -> String {
+        guard socialKnown(for: timeframe) else { return "—" }
         let value = timeframe == .last24h ? socialMentions : socialMentions7d
         if value >= 1000 {
             return String(format: "%.1fK", value / 1000)
@@ -1459,6 +1469,7 @@ struct SentimentAnalysisData {
     }
 
     func formattedSocialChange(for timeframe: SentimentTimeframe) -> String {
+        guard socialKnown(for: timeframe) else { return "Reddit data unavailable" }
         let change = timeframe == .last24h ? socialMentionsChange : socialMentionsChange7d
         let sign = change >= 0 ? "+" : ""
         let period = timeframe == .last24h ? "today" : "this week"
@@ -1494,6 +1505,7 @@ struct SentimentAnalysisData {
     }
 
     func socialChangeColor(for timeframe: SentimentTimeframe) -> Color {
+        guard socialKnown(for: timeframe) else { return AppColors.textMuted }
         let change = timeframe == .last24h ? socialMentionsChange : socialMentionsChange7d
         return change >= 0 ? AppColors.bullish : AppColors.bearish
     }
@@ -1523,7 +1535,9 @@ extension SentimentAnalysisData {
         newsBullish7d: 420,
         newsBearish7d: 180,
         newsNeutral7d: 247,
-        socialDataAvailable: true
+        socialDataAvailable: true,
+        socialMentionsKnown: true,
+        socialMentions7dKnown: true
     )
 }
 

@@ -44,7 +44,7 @@ def _functions(tree: ast.Module):
 # ── 1. names the failure paths read must be bound before the try ─────────────
 
 # name → the function that must bind it before its first `try`.
-_MUST_BE_PREBOUND = {"route", "reader_lens"}
+_MUST_BE_PREBOUND = {"route", "reader_lens", "warmed"}
 
 
 def _stream_generator(tree: ast.Module):

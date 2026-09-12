@@ -226,6 +226,8 @@ class PriceService:
         exchange: Optional[str],
         year_low: Optional[float] = None,
         year_high: Optional[float] = None,
+        is_etf: bool = False,
+        is_fund: bool = False,
     ) -> Dict[str, Any]:
         """Build one quote-shaped row.
 
@@ -245,6 +247,11 @@ class PriceService:
             "avgVolume": avg_volume,
             "marketCap": market_cap,
             "exchange": exchange,
+            # Always present, so a ranking can refuse an open-end fund (one NAV print a
+            # day — never an intraday mover) or a leveraged ETF without a second lookup.
+            # Both the screener and `/stable/profile` carry the flags.
+            "isEtf": bool(is_etf),
+            "isFund": bool(is_fund),
         }
         # 52-week band: OMITTED when unknown, never emitted as None.
         #
@@ -289,6 +296,8 @@ class PriceService:
             exchange=row.get("exchange"),
             year_low=year_low,
             year_high=year_high,
+            is_etf=bool(row.get("isEtf")),
+            is_fund=bool(row.get("isFund")),
         )
 
     @staticmethod
@@ -451,6 +460,8 @@ class PriceService:
             avg_volume=_finite(row.get("avgVolume")),
             market_cap=_finite(row.get("marketCap")),
             exchange=row.get("exchangeShortName") or row.get("exchange"),
+            is_etf=bool(row.get("isEtf")),
+            is_fund=bool(row.get("isFund")),
         )
         if change_pct is not None:
             # Present only when there IS a change to describe, so the fixed key set
@@ -577,6 +588,22 @@ class PriceService:
         self._report_stale_snapshots(stale, seen)
 
         missing = wanted - set(out)   # `wanted` already excludes crypto
+        if missing and not universe:
+            # THE UNIVERSE ITSELF FAILED — every symbol is "missing", so the per-symbol
+            # fallback below would issue one `/stable/profile` call PER REQUESTED SYMBOL,
+            # per caller, for as long as the outage lasts. A cold Home is ~30 symbols and
+            # the Tracking feed polls every 30 s, so a single screener 429 turns into
+            # hundreds of profile calls a minute against the same rate-limited upstream —
+            # the amplification that makes an outage self-sustaining. `get_universe`
+            # already memoises its degraded state for 15 s so the next call retries; the
+            # honest answer here is to serve what we have (nothing) and let the caller
+            # degrade, exactly as it does for a symbol the screener genuinely omits.
+            logger.warning(
+                "price: universe unavailable and %d symbol(s) requested — skipping the "
+                "per-symbol profile fallback rather than fanning out",
+                len(missing),
+            )
+            missing = set()
         if missing:
             # The screener covers actively-traded US listings above the cap. Anything else
             # — a foreign listing, a sub-$50M microcap, a brand-new ticker — falls through
@@ -803,6 +830,12 @@ class PriceService:
                 market_cap_more_than=_UNIVERSE_MIN_MARKET_CAP,
                 exchange=_UNIVERSE_EXCHANGES,
                 actively_trading=True,
+                # Open-end mutual funds are not a market universe: one NAV print a day,
+                # `volume: 0`, an AUM masquerading as `marketCap`. Without this filter the
+                # sweep carried 3,719 of them (GOLDX headed the widget's prior-session
+                # drop every cycle) across TWO pages; with it the whole >$50M universe is
+                # one 7,116-row page — one screener call per refresh instead of two.
+                is_fund=False,
                 limit=_SCREENER_PAGE_SIZE,
                 page=page,
             )

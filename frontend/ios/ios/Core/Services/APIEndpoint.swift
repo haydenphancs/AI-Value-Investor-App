@@ -357,9 +357,6 @@ enum APIEndpoint: Sendable {
     case updateChatSession(sessionId: String, title: String?, isSaved: Bool?)
     case deleteChatSession(sessionId: String)
 
-    // MARK: - Ticker Report Chat
-    case chatWithTickerReport(ticker: String, message: String, persona: String)
-
     // MARK: - Whales
     case getWhaleList(category: String?)
     case getWhaleActivity
@@ -672,10 +669,6 @@ enum APIEndpoint: Sendable {
         case .deleteChatSession(let sessionId):
             return "/api/v1/chat/sessions/\(sessionId)"
 
-        // Ticker Report Chat
-        case .chatWithTickerReport(let ticker, _, _):
-            return "/api/v1/stocks/\(ticker)/report/chat"
-
         // Whales
         case .getWhaleList:
             return "/api/v1/whales"
@@ -750,7 +743,7 @@ enum APIEndpoint: Sendable {
              .resendConfirmation, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
-             .chatWithTickerReport, .completeLearnItem, .addBookBookmark,
+             .completeLearnItem, .addBookBookmark,
              .followWhale, .enrichStockNews, .enrichCryptoNews, .enrichIndexNews, .enrichCommodityNews,
              .enrichETFNews,
              .enrichUpdatesNews,
@@ -1016,9 +1009,6 @@ enum APIEndpoint: Sendable {
         case .updateChatSession(_, let title, let isSaved):
             return UpdateChatSessionRequestBody(title: title, isSaved: isSaved)
 
-        case .chatWithTickerReport(let ticker, let message, let persona):
-            return TickerReportChatRequestBody(ticker: ticker, message: message, persona: persona)
-
         case .bulkUpdateHoldings(let items):
             // FastAPI accepts a JSON array as the body when the route handler
             // declares its parameter as `List[BulkHoldingUpdateItem]`.
@@ -1268,7 +1258,7 @@ enum APIEndpoint: Sendable {
 
         // `prewarmReportCollection` fires ~20 FMP calls on detail view to warm the collection
         // cache — pure waste for a caller who can no longer generate.
-        case .getTickerReport, .chatWithTickerReport, .prewarmReportCollection:
+        case .getTickerReport, .prewarmReportCollection:
             return .signInRequired
 
         case .getCurrentUser, .updateProfile, .deleteAccount, .claimGuestData,
@@ -1332,7 +1322,7 @@ enum APIEndpoint: Sendable {
             return 120 // 2 minutes for AI generation / inline PDF render
         case .getResearchReportPDF:
             return 60 // binary PDF download
-        case .sendChatMessage, .chatWithTickerReport:
+        case .sendChatMessage:
             return 60 // 1 minute for chat
         case .streamChatMessage:
             return 120 // SSE stream stays open while tokens arrive
@@ -1550,11 +1540,6 @@ nonisolated struct UpdateChatSessionRequestBody: Encodable, Sendable {
     let isSaved: Bool?
 }
 
-nonisolated struct TickerReportChatRequestBody: Encodable, Sendable {
-    let ticker: String
-    let message: String
-    let persona: String
-}
 
 /// One row of the bulk-update payload sent to ``PUT /tracking/assets/holdings``.
 /// Setting both ``shares`` and ``marketValue`` to nil clears the holding values

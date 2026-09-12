@@ -1,78 +1,36 @@
 #!/usr/bin/env python3
 """
-Backfill Sector Benchmarks
-===========================
-Populates the Supabase `sector_benchmarks` table for all 11 GICS sectors.
+Backfill Sector Benchmarks — RETIRED. This script refuses to run.
 
-Per-sector smart mode:
-  - Sectors without historical data (year 2015) → full backfill (16 annual, 80 quarterly)
-  - Sectors with history → daily refresh (3 annual, 12 quarterly)
-  - Already-stored periods are skipped (historical benchmarks never change)
+It used to drive `SectorBenchmarkService.compute_all_benchmarks`, the path `app/main.py`
+documents as "a data-corruption button": it reads the BLOCKED `sp500-constituent`
+endpoint, falls back to 55 hardcoded tickers and upserts 5-company medians over the
+~5,700-company rows the quarterly industry job produces — on the same
+`uq_sector_industry_metric_period` key, so the good rows are silently overwritten.
+`POST /admin/refresh-sector-benchmarks` was re-pointed away from it for exactly that
+reason; this file was the last live handle on it (2026-09-11).
 
-Usage:
-    cd backend
-    python -m scripts.backfill_sector_benchmarks                      # Smart mode (all sectors)
-    python -m scripts.backfill_sector_benchmarks --sector Healthcare  # Single sector
-    python -m scripts.backfill_sector_benchmarks --backfill           # Force full backfill for all
+What to run instead:
+  * the quarterly job in `app/main.py` (`_run_industry_dossier_job`), or
+  * `POST /admin/refresh-sector-benchmarks`, which calls
+    `industry_benchmark_service.recompute_all` over the full universe.
+
+Kept as a tombstone so the old command fails LOUDLY instead of "command not found".
 """
 
-import argparse
-import asyncio
-import logging
-import os
 import sys
 
-# Ensure backend app package is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from app.services.sector_benchmark_service import (  # noqa: E402
-    get_sector_benchmark_service,
-    CANONICAL_SECTORS,
+_MESSAGE = (
+    "backfill_sector_benchmarks is retired: it recomputed sector medians from 55 hardcoded "
+    "tickers and overwrote the ~5,700-company rows (see app/main.py, 'data-corruption "
+    "button'). Use POST /admin/refresh-sector-benchmarks or the quarterly industry job."
 )
 
-logger = logging.getLogger("backfill_sector_benchmarks")
 
-
-async def main(args: argparse.Namespace) -> None:
-    service = get_sector_benchmark_service()
-
-    sectors_filter = None
-    if args.sector:
-        if args.sector not in CANONICAL_SECTORS:
-            logger.error(
-                f"Unknown sector '{args.sector}'. "
-                f"Valid sectors: {sorted(CANONICAL_SECTORS)}"
-            )
-            sys.exit(1)
-        sectors_filter = [args.sector]
-
-    result = await service.compute_all_benchmarks(
-        force=True,
-        backfill=args.backfill,
-        sectors=sectors_filter,
-    )
-
-    logger.info(f"Result: {result}")
+def main() -> "NoReturn":  # noqa: F821 — annotation only
+    print(_MESSAGE, file=sys.stderr)
+    sys.exit(2)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Backfill sector benchmarks for all 11 GICS sectors"
-    )
-    parser.add_argument(
-        "--sector",
-        type=str,
-        help="Process a single sector (e.g. 'Healthcare')",
-    )
-    parser.add_argument(
-        "--backfill",
-        action="store_true",
-        help="Force full historical backfill for all sectors",
-    )
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-
-    asyncio.run(main(parser.parse_args()))
+    main()

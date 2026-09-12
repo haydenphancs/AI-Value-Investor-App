@@ -72,8 +72,9 @@ _ACTIVE_STATUSES = ["pending", "processing"]
 #     earnings" Gemini herd to a single pipeline in the window BEFORE the shared
 #     cross-user cache is populated. (The persona-neutral FMP collection was
 #     already deduped by ticker via ticker_data_cache._INFLIGHT; this adds the
-#     missing dedup for the per-persona Gemini agent run — Stage A + 15 Stage-B
-#     narratives + synthesis.)
+#     missing dedup for the per-persona Gemini agent run — the agentic loop + Stage A
+#     + 12-22 Stage-B narratives (12 fixed + 2 per critical factor, factors capped at 5)
+#     + 2 syntheses.)
 _AGENT_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _AGENT_INFLIGHT: Dict[str, "asyncio.Future"] = {}
 

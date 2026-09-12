@@ -67,6 +67,11 @@ _IP_BUDGET_NAMESPACE = uuid.UUID("2b7f4e91-0c3d-4a86-9f52-8d1e6a04b7c3")
 def _ip_budget_bucket(req) -> str:
     """The anti-rotation budget key: a uuid5 of the address OUR edge observed.
 
+    ⚠️ UNREACHABLE since the account-only wall (2026-09-07): `get_chat_identity` is strict
+    and returns `is_guest=False` for every caller, so no chat route resolves a guest. Kept
+    because the money-path tests pin the semantics and a signed-out surface may return;
+    do NOT model chat cost on the limits this enforces — they cannot fire today.
+
     `chat_usage_budget.user_id` is a bare uuid column with no FK, so this needs no migration.
 
     A one-way hash rather than the raw address, because this row outlives the request: it is
@@ -77,6 +82,11 @@ def _ip_budget_bucket(req) -> str:
 
 def _claim_chat_turn_or_error(user: dict, x_guest_id, req=None):
     """Claim one daily chat turn for this caller's abuse/cost bucket.
+
+    ⚠️ UNREACHABLE since the account-only wall (2026-09-07): `get_chat_identity` is strict
+    and returns `is_guest=False` for every caller, so no chat route resolves a guest. Kept
+    because the money-path tests pin the semantics and a signed-out surface may return;
+    do NOT model chat cost on the limits this enforces — they cannot fire today.
 
     Returns a `JSONResponse` (409 CHAT_DAILY_LIMIT_REACHED) when the daily cap is
     reached, else None (proceed). FAILS OPEN on a budget-service transport error —
@@ -144,6 +154,11 @@ def _record_chat_tokens(user: dict, x_guest_id, tokens) -> None:
 def _refund_chat_turn(user: dict, x_guest_id) -> None:
     """Best-effort: release the daily turn claimed for this caller when generation FAILED to
     produce a persisted answer, so a Gemini outage doesn't drain the daily cap (migration 097).
+
+    ⚠️ UNREACHABLE since the account-only wall (2026-09-07): `get_chat_identity` is strict
+    and returns `is_guest=False` for every caller, so no chat route resolves a guest. Kept
+    because the money-path tests pin the semantics and a signed-out surface may return;
+    do NOT model chat cost on the limits this enforces — they cannot fire today.
 
     Refunds the per-install bucket only, not the IP ceiling: the ceiling is an abuse bound
     (300/day) rather than a fair-use budget, and threading the request this far to release it
@@ -252,6 +267,34 @@ class _ChatQuota:
             # balance as-is so the client refreshes rather than being shown a wrong number.
             if isinstance(payload, dict) and isinstance(payload.get("spendable"), int):
                 self._balance_after = payload["spendable"]
+
+    def settle_no_cost(self, reason: str) -> None:
+        """Refund a turn that WAS delivered but cost nothing (cache replay) or delivered
+        materially less than promised (a degraded shape).
+
+        Distinct from `refund_once`, which is for a turn that never arrived: that one
+        restores a claimed free-follow-up ALLOWANCE, because the claim was spent on nothing.
+        Here the user received an answer, so a free turn simply stays free — re-granting
+        would let a degraded free turn earn another free turn, and under a function-calling
+        outage that chain is unbounded off one credit. A charged turn is refunded exactly as
+        `refund_once` does. Idempotent through `_settled`, and `on_delivered` is a no-op
+        afterwards, so a no-cost turn never earns a follow-up either.
+        """
+        if self._settled:
+            return
+        self._settled = True
+        self._refund_reason = reason
+        if self._free or self._is_guest:
+            return
+        self._refunded = True
+        payload = CreditService().refund_ledgered(
+            self._user["id"],
+            settings.CHAT_CREDIT_COST,
+            reason=reason,
+            ref_id=self._ref_id,
+        )
+        if isinstance(payload, dict) and isinstance(payload.get("spendable"), int):
+            self._balance_after = payload["spendable"]
 
     def _label(self) -> Optional[str]:
         """The server-authored string iOS renders, or None when there is nothing to say.
@@ -690,6 +733,45 @@ async def _replay_cached_answer(text: str, chunk_size: int = 240):
         yield "answer", text[i:i + chunk_size]
 
 
+def _keepalive_seconds() -> float:
+    return float(getattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 15.0) or 15.0)
+
+
+async def _with_keepalive(agen):
+    """Re-yield `agen`'s events, interleaving ``("keepalive", None)`` whenever
+    `CHAT_STREAM_KEEPALIVE_SECONDS` pass with nothing to send.
+
+    Why: the synthesis path buffers its specialists and yields NOTHING until the gather
+    completes, and a single tool may legitimately run for `_TOOL_TIMEOUTS` (75 s for a
+    grounded web search). iOS's stream request times out after 120 s of silence; two
+    quiet rounds could cross it and the client would fall back — re-POSTing a turn the
+    server was still answering. A comment frame costs nothing and resets that clock.
+    """
+    it = agen.__aiter__()
+    pending = asyncio.ensure_future(it.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=_keepalive_seconds())
+            if not done:
+                yield "keepalive", None
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            pending = asyncio.ensure_future(it.__anext__())
+    finally:
+        if not pending.done():
+            pending.cancel()
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except BaseException:  # noqa: BLE001 — closing a dead generator must not mask the cause
+                pass
+
+
 def _sse(event: str, data: dict) -> str:
     """Format a single Server-Sent Events frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -1075,7 +1157,12 @@ async def send_chat_message(
         # answer, but we don't bill a turn that incurred no AI cost. `== 0` (not falsy) so a
         # real generation reporting None/unknown usage is never wrongly refunded.
         if ai_result.get("tokens_used") == 0:
-            quota.refund_once("chat_cache_hit")
+            quota.settle_no_cost("chat_cache_hit")
+        elif ai_result.get("degraded"):
+            # `generate_response` fell back to a tool-less plain-text call (or every tool the
+            # model called failed): the answer to a stock question with none of its live data.
+            # The stream path already refunds its degraded shapes; this one only logged.
+            quota.settle_no_cost(f"chat_degraded_{ai_result['degraded']}")
         # A charged turn earns this session one free follow-up (no-op after a refund).
         quota.on_delivered()
         # Settlement is final now → record it on the row so the response (and a later
@@ -1276,6 +1363,16 @@ async def stream_chat_message(
         # `degraded: True` is the honest default: nothing was classified, so `select_model`
         # must keep the flagship model rather than downgrade an unclassified turn.
         reader_lens: Optional[str] = None
+        # `warmed` is read AFTER the try (the suggestions step reuses the warmed chips), so it
+        # must be bound before it: when prep or the router raises, the gather that binds it
+        # never runs, the fallback still delivers and charges the turn, and an unbound name
+        # here would kill the stream after persistence with no `done` frame.
+        warmed: Optional[dict] = None
+        # Settlement inputs that the fallback / replay branches set; read after the try.
+        fallback_degraded: Optional[str] = None   # generate_response's own degraded marker
+        replayed_warm = False                     # the starter-warm answer was actually SERVED
+        tool_calls_seen = 0                       # single-mode agentic tool calls this turn
+        tool_calls_failed = 0                     # ...of which came back as {error: …}
         route: dict = {
             "specialists": ["general"], "mode": "single", "labels": ["General"], "degraded": True,
         }
@@ -1300,11 +1397,26 @@ async def stream_chat_message(
             )
             # A pre-computed answer to one of today's suggestion chips, if this is one.
             #
-            # Looked up ALONGSIDE prep so it costs no wall-clock, and consulted BEFORE the
-            # router so a hit skips `route_question` too — that is a real (if small) Gemini
-            # call, and paying a classifier to route an answer we already hold would be
-            # spending money to decide nothing. Never raises; a miss means "answer live".
+            # Looked up ALONGSIDE prep and the router (one gather, below) so it costs no
+            # wall-clock; on a hit the router's result is simply discarded. Never raises; a
+            # miss means "answer live".
+            #
+            # ONLY for an UNGROUNDED turn. The warmed rows are written by the global chat
+            # with no screen behind them, and the lookup keys on the question text alone —
+            # so the same words typed inside a STOCK / BOOK / report session used to replay
+            # the global, ungrounded answer and throw away the grounding block, the live
+            # quote line and the enrichment prep had just built.
+            from app.services.chat_context_resolver import _NO_CONTEXT
             from app.services.chat_starter_warm_service import lookup as _warm_lookup
+
+            ungrounded_turn = (
+                not stock_id
+                and not (effective_context or "").strip()
+                and (ctx_type or "").strip().upper() in _NO_CONTEXT
+            )
+
+            async def _warm_if_ungrounded():
+                return await _warm_lookup(user_message) if ungrounded_turn else None
 
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 # All three in ONE gather. Awaiting the warm lookup first to decide whether
@@ -1314,7 +1426,7 @@ async def stream_chat_message(
                 prep, route, warmed = await asyncio.gather(
                     prep_coro,
                     route_question(chat_service.gemini, user_message),
-                    _warm_lookup(user_message),
+                    _warm_if_ungrounded(),
                 )
                 if warmed is not None:
                     # The stored answer was written by the general path, so labelling the
@@ -1322,7 +1434,7 @@ async def stream_chat_message(
                     # "Consulting Macro" stage on the thinking card.
                     route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
             else:
-                prep, warmed = await asyncio.gather(prep_coro, _warm_lookup(user_message))
+                prep, warmed = await asyncio.gather(prep_coro, _warm_if_ungrounded())
                 route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
 
             # Capture sources up-front so they survive even if streaming later fails and we
@@ -1348,7 +1460,9 @@ async def stream_chat_message(
             # Filtered to the tools that MEAN something for this asset class — not just
             # "equity three, plus the index one for INDEX". See `chat_tools._TOOLS_BY_ASSET_TYPE`.
             tools = build_chat_tool_declarations(asset_type)
-            handlers = build_chat_tool_handlers(chat_service)
+            handlers = build_chat_tool_handlers(
+                chat_service, screen_symbol=stock_id, screen_asset_type=asset_type,
+            )
 
             # Start with the deterministic base widget (so an asset-detail chat always shows its
             # chart); agentic tool calls add more, deduped by (widget_type, ticker).
@@ -1380,6 +1494,12 @@ async def stream_chat_message(
                     stock_id, len(deep_dive_cached),
                 )
                 answer_stream = _replay_cached_answer(deep_dive_cached)
+                # Zero Gemini cost. `tokens_used` was only ever assigned on the
+                # stream→non-stream FALLBACK, so on the default streaming path this replay
+                # stayed `None`, the `== 0` refund gate below never fired, and a user tapping
+                # "AI Analyst" twice paid a second credit for a cached answer — while the
+                # non-streaming endpoint refunded the very same hit.
+                tokens_used = 0
             elif warmed is not None:
                 # A suggestion chip whose answer was pre-computed this morning. Replayed
                 # through the SAME path as a cached deep dive, so it persists, streams and
@@ -1392,6 +1512,7 @@ async def stream_chat_message(
                     "Starter warm HIT — replaying %d chars, no Gemini call",
                     len(warmed["answer"]),
                 )
+                replayed_warm = True
                 w = warmed.get("widget")
                 if w and widget_key(w) not in seen_widgets:
                     seen_widgets.add(widget_key(w))
@@ -1427,7 +1548,13 @@ async def stream_chat_message(
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
                 )
 
-            async for kind, payload in answer_stream:
+            async for kind, payload in _with_keepalive(answer_stream):
+                if kind == "keepalive":
+                    # An SSE comment line: every client ignores it, and it keeps the
+                    # connection off iOS's 120 s idle timeout while a synthesis round
+                    # buffers its specialists or a long tool (a grounded web search) runs.
+                    yield ": keepalive\n\n"
+                    continue
                 streamed_any = True
                 if kind == "thought":
                     reasoning_parts.append(payload)
@@ -1437,8 +1564,20 @@ async def stream_chat_message(
                     yield _sse("token", {"delta": payload})
                 elif kind == "tool":
                     # Real progress into the thinking card + collect any renderable widget.
-                    yield _sse("tool_step", {"name": payload.get("name"), "args": payload.get("args")})
-                    w = widget_from_tool_result(payload.get("result"))
+                    # `_run_tool_handler` never raises: a failed / timed-out tool arrives as
+                    # `{"error": …}` — surfaced on the frame (iOS ignores unknown keys) and
+                    # counted, so a turn whose EVERY tool failed settles as degraded below,
+                    # exactly like the non-streaming door.
+                    _res = payload.get("result")
+                    _err = _res.get("error") if isinstance(_res, dict) else None
+                    tool_calls_seen += 1
+                    if _err:
+                        tool_calls_failed += 1
+                    yield _sse("tool_step", {
+                        "name": payload.get("name"), "args": payload.get("args"),
+                        "error": str(_err)[:200] if _err else None,
+                    })
+                    w = widget_from_tool_result(_res)
                     if w is not None and widget_key(w) not in seen_widgets:
                         seen_widgets.add(widget_key(w))
                         widgets.append(w)
@@ -1452,6 +1591,19 @@ async def stream_chat_message(
             reasoning_text = "".join(reasoning_parts)
             if not content.strip():
                 raise RuntimeError("empty stream result")
+            if (
+                tool_calls_seen
+                and tool_calls_failed == tool_calls_seen
+                and not stream_signals.get("degraded")
+            ):
+                # Every tool the model called failed (FMP rate limit, timeouts): the answer
+                # has none of its live data. The non-streaming door already settles this
+                # shape as `no_tools`; without this the default door charged it in full.
+                logger.warning(
+                    "Chat stream: all %d tool call(s) failed for session %s — settling as degraded",
+                    tool_calls_seen, session_id,
+                )
+                stream_signals["degraded"] = "no_tools"
             citations = prep.get("citations")
 
             # Persist a freshly-generated brief so the next tap replays it for free. Best-effort
@@ -1479,7 +1631,7 @@ async def stream_chat_message(
             )
             used_fallback = True
             try:
-                ai_result = await chat_service.generate_response(
+                _fallback_task = asyncio.ensure_future(chat_service.generate_response(
                     session_id=session_id,
                     user_message=user_message,
                     session_type=session_type,
@@ -1492,7 +1644,19 @@ async def stream_chat_message(
                     # differently would be visible to the user as a personality change.
                     reader_lens=reader_lens,
                     user_id=user["id"],
-                )
+                ))
+                # The fallback is one awaited call with tools inside it — nothing reaches
+                # the client until it returns, so heartbeat it the same way as the pump.
+                try:
+                    while True:
+                        _done, _ = await asyncio.wait({_fallback_task}, timeout=_keepalive_seconds())
+                        if _done:
+                            break
+                        yield ": keepalive\n\n"
+                except BaseException:
+                    _fallback_task.cancel()
+                    raise
+                ai_result = _fallback_task.result()
                 content = ai_result.get("content")
                 citations = ai_result.get("citations")
                 fb_widget = ai_result.get("widget")
@@ -1501,6 +1665,13 @@ async def stream_chat_message(
                 # The aborted stream's thoughts don't correspond to this fallback answer — drop them
                 # so the persisted thinking card matches (the `reset` frame clears the live display).
                 reasoning_text = ""
+                # Likewise its degraded SIGNAL: `stream_synthesis` sets `no_specialists` BEFORE
+                # its rescue run, so a rescue that then raises would leave a stale marker that
+                # refunded a perfectly healthy fallback answer. The fallback's OWN marker
+                # (`generate_response` fell to plain text, or every tool it called failed) is
+                # what settlement must see — the identical result the non-streaming door refunds.
+                stream_signals.pop("degraded", None)
+                fallback_degraded = ai_result.get("degraded")
                 if streamed_any:
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})
@@ -1623,22 +1794,24 @@ async def stream_chat_message(
             # Durably persisted → delivered. The finally backstop must not refund past this
             # point (a disconnect during the best-effort steps below is not a failed turn).
             delivered = True
-            # Zero Gemini cost (deep-dive cache HIT via the fallback) → refund the charge.
-            # `== 0` (not falsy) so a normal stream (tokens_used=None) is never refunded.
+            # Zero Gemini cost (deep-dive cache HIT — replayed here, or via the fallback) →
+            # refund the charge. `== 0` (not falsy) so a normal stream (tokens_used=None) is
+            # never refunded. The starter-warm replay deliberately stays charged (see above).
+            degraded_reason = stream_signals.get("degraded") or fallback_degraded
             if tokens_used == 0:
-                quota.refund_once("chat_cache_hit")
-            elif stream_signals.get("degraded"):
-                # Delivered, but materially less than we said on screen we would deliver
-                # (the `routing` frame already named the lenses). Both shapes require a
-                # mid-turn Gemini failure, so this is rare — and it is exactly the turn a
-                # user would be right to feel shortchanged by.
+                quota.settle_no_cost("chat_cache_hit")
+            elif degraded_reason:
+                # Delivered, but materially less than promised: a synthesis that lost its
+                # lenses (`no_specialists` / `unmerged` — the `routing` frame already named
+                # them), a single-mode turn whose every tool failed (`no_tools`), or a
+                # fallback answer that `generate_response` itself marked degraded.
                 #
-                # NOT applied to the stream→non-stream fallback at `used_fallback`: that
-                # path answers from the SAME prompt via `generate_response` and costs us
-                # MORE, not less. The user lost latency and the thinking card, not the
-                # answer — refunding it would hand back a credit on a large share of turns
-                # every time the network is flaky.
-                quota.refund_once(f"chat_degraded_{stream_signals['degraded']}")
+                # A HEALTHY stream→non-stream fallback is deliberately NOT here: it answers
+                # from the SAME prompt and costs us MORE, not less — the user lost latency
+                # and the thinking card, not the answer, and refunding it would hand back a
+                # credit on a large share of turns every time the network is flaky. Only the
+                # fallback's OWN degraded marker (none of its live data) settles no-cost.
+                quota.settle_no_cost(f"chat_degraded_{degraded_reason}")
             # A charged turn earns this session one free follow-up (no-op after a refund).
             quota.on_delivered()
             # Settlement is final → fold it into the SAME local `rich_content` the
@@ -1692,17 +1865,36 @@ async def stream_chat_message(
             )
 
         # Best-effort daily token accounting (streaming rarely reports usage → char estimate).
-        _record_chat_tokens(user, x_guest_id, tokens_used or (len(content) // 4))
+        # `is not None`, not `or`: 0 is a FACT (a replay cost nothing) and must not be
+        # replaced by a character estimate; only an unknown (None) is estimated.
+        _record_chat_tokens(
+            user, x_guest_id,
+            tokens_used if tokens_used is not None
+            # A starter-warm replay is CHARGED (see the replay branch) but cost no Gemini:
+            # record 0, not a character estimate of a call that never happened. Keyed on
+            # the replay having been SERVED, not on the lookup having hit — a warm hit whose
+            # turn then fell back to a live `generate_response` cost real tokens.
+            else (0 if (replayed_warm and not used_fallback) else (len(content) // 4)),
+        )
 
         # Follow-up suggestions — best-effort, AFTER the durable write. Being slow or cancelled here
         # can no longer drop the saved turn (worst case: no chips, which degrade gracefully).
+        warm_suggestions = [
+            str(x).strip() for x in ((warmed or {}).get("suggestions") or []) if str(x).strip()
+        ]
         try:
-            suggestions = await chat_service.generate_followup_suggestions(
-                user_message=user_message,
-                answer=content,
-                context_type=ctx_type,
-                reference_id=ref_id,
-            )
+            if warm_suggestions:
+                # The warm job generates and stores the chips with the answer; paying a
+                # live suggestions call on a replay was the one Gemini call the warm path
+                # could have saved for free and did not.
+                suggestions = warm_suggestions[:2]
+            else:
+                suggestions = await chat_service.generate_followup_suggestions(
+                    user_message=user_message,
+                    answer=content,
+                    context_type=ctx_type,
+                    reference_id=ref_id,
+                )
             if suggestions:
                 yield _sse("suggestions", {"questions": suggestions})
                 # Reflect them in the terminal `done` message + persist so a reload shows the chips.

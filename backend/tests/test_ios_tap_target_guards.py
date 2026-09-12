@@ -411,8 +411,11 @@ def test_the_header_slop_cannot_overlap_a_neighbouring_icon():
     wrong one". The right icons sit `AppSpacing.md` apart, so the slop must be at
     most half of that."""
     theme = _code(_REPO / "frontend/ios/ios/Theme/AppTheme.swift")
-    md = int(re.search(r"static let md:\s*CGFloat\s*=\s*(\d+)", theme).group(1))
-    slop = int(re.search(r"static let standard:\s*CGFloat\s*=\s*(\d+)", _code(_HIT_SLOP)).group(1))
+    md_m = re.search(r"static let md:\s*CGFloat\s*=\s*(\d+)", theme)
+    assert md_m, "AppSpacing.md not found in AppTheme.swift — renamed?"
+    slop_m = re.search(r"static let standard:\s*CGFloat\s*=\s*(\d+)", _code(_HIT_SLOP))
+    assert slop_m, "HitSlop.standard not found — renamed?"
+    md, slop = int(md_m.group(1)), int(slop_m.group(1))
     assert "HStack(spacing: AppSpacing.md)" in _code(_DETAIL_HEADER), (
         "the right-hand icon row no longer uses AppSpacing.md — re-derive the slop "
         "against whatever spacing replaced it"

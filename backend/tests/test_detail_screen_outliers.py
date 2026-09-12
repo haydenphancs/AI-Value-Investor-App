@@ -1797,7 +1797,10 @@ def test_every_served_commodity_classifies_as_a_commodity():
     # generic `endswith("USD")` crypto rule instead of refusing it as a commodity.
     from app.services.commodity_service import _WITHDRAWN_COMMODITIES
 
-    assert set(_WITHDRAWN_COMMODITIES) == {"KC", "CT", "CC", "HG", "ZW", "ZC", "ZS", "SB"}
+    # + LB / OJ / Z since 2026-09-11 (roots `asset_class` classifies as commodities that
+    # otherwise fell through to a retry-forever generic error).
+    assert set(_WITHDRAWN_COMMODITIES) == {"KC", "CT", "CC", "HG", "ZW", "ZC", "ZS", "SB",
+                                          "LB", "OJ", "Z"}
     still_classified = [
         f"{r}USD" for r in _WITHDRAWN_COMMODITIES
         if detect_asset_class(f"{r}USD") == "commodity"
@@ -1829,15 +1832,45 @@ def test_backend_and_ios_agree_on_the_commodity_set():
 
 
 def test_technical_analysis_uses_the_shared_classifier():
-    """It used a bare `endswith('USD')`, so all 15 commodities were treated as crypto."""
+    """It used a bare `endswith('USD')`, so all 15 commodities were treated as crypto.
+
+    ⚠️ COMMENT-STRIPPED AND FUNCTION-BOUND, per `.claude/rules/testing.md` §3. This was the
+    one scan in this file that broke all three rules at once: it read the WHOLE module
+    un-stripped and presence-only, while the classifier has TWO call sites — `get_analysis`
+    and `get_analysis_detail` — each preceded by a six-line comment block containing the
+    phrase `endswith("USD")`. So one call site vouched for the other, and the explanatory
+    prose vouched for both: reverting either function alone kept this green, and so did
+    reverting BOTH as long as a comment survived.
+    """
+    import ast
     import inspect
+    import re
     from app.services import technical_analysis_service as ta
 
     src = inspect.getsource(ta)
-    assert "detect_asset_class(ticker) == \"crypto\"" in src
-    assert 'ticker.endswith("USD") and not ticker.startswith("$")' not in src, (
-        "the bare suffix heuristic is still deciding the asset class"
-    )
+    tree = ast.parse(src)
+
+    def _code(fn_name: str) -> str:
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == fn_name),
+            None,
+        )
+        assert fn is not None, f"{fn_name} not found — re-point this guard"
+        body = ast.get_source_segment(src, fn)
+        assert body
+        return "\n".join(re.sub(r"#.*$", "", line) for line in body.splitlines())
+
+    # BOTH call sites, independently. Either one reverting is the bug.
+    for fn_name in ("get_analysis", "get_analysis_detail"):
+        code = _code(fn_name)
+        assert 'detect_asset_class(ticker) == "crypto"' in code, (
+            f"{fn_name} no longer asks the shared classifier — a bare suffix test treats "
+            "all 15 commodities as crypto"
+        )
+        assert 'ticker.endswith("USD")' not in code, (
+            f"the bare suffix heuristic is back in {fn_name}"
+        )
 
 
 @pytest.mark.asyncio
@@ -2099,8 +2132,11 @@ async def test_etf_browsing_every_range_shares_one_history_fetch(monkeypatch):
     # `_fetch_all_daily` stops after one page here because the fake returns < 5000 rows.
     assert calls["hist"] == 2, f"history fetched {calls['hist']}x, expected 2 (own + SPY)"
     assert calls["news"] == 0, "the dead news call is back — iOS never reads that field"
-    for kind in ("profile", "info", "holders", "sectors", "dividends"):
+    for kind in ("profile", "info", "holders", "sectors"):
         assert calls[kind] == 1, f"{kind} fetched {calls[kind]}x, not once"
+    # `/dividends` is outside the FMP licence: the fan-out stopped calling it on 2026-09-11
+    # (it was refused by the entitlement pre-flight and logged a WARNING per cold build).
+    assert calls["dividends"] == 0, "the unlicensed dividend feed is being called again"
     assert calls["quote"] == 1, f"quote fetched {calls['quote']}x, not once"
     assert calls["intraday"] == 2, "only 1D and 1W are genuinely sub-daily"
 
@@ -2277,10 +2313,11 @@ async def test_etf_side_endpoints_reuse_the_detail_fundamentals(monkeypatch):
     await svc.get_holdings_risk("SPY")
 
     assert calls == baseline, f"a side endpoint re-fetched: {baseline} -> {calls}"
-    # ...and the dividends endpoint still gets all 100 rows, not the detail card's 20.
-    assert len(divs.dividends) == 100, (
-        f"the shared section truncated the dividends endpoint to {len(divs.dividends)}"
-    )
+    # The per-payment feed is outside the FMP licence, so the shared section carries an
+    # empty list and the endpoint derives ex-dividend DATES from the entitled history —
+    # never by calling `get_dividend_history` (2026-09-11).
+    assert calls["dividends"] == 0
+    assert divs.symbol == "SPY"
 
 
 @pytest.mark.asyncio
@@ -2484,6 +2521,12 @@ def _index_svc(monkeypatch):
     # `_compute_index_pe_from_sectors` reads the shared `sector_benchmarks` table — real
     # Supabase I/O on the cold path, so the test would measure production's data.
     monkeypatch.setattr(M, "_compute_index_pe_from_sectors", lambda: 21.0)
+    # The constituents endpoints are outside the FMP licence, so `_get_constituent_count`
+    # now consults the manifest and never calls them (2026-09-11). This file's
+    # call-counting assertions describe the ENTITLED pipeline — caching, sharing, the
+    # count-not-list store — so pretend the package is bought here;
+    # tests/test_index_constituents_entitlement_quiet.py covers the unlicensed branch.
+    monkeypatch.setattr(M, "is_entitled", lambda path: True)
 
     async def _stories(self, **kw):
         return ("valuation story", "sector story", "macro story", [])
@@ -2788,6 +2831,10 @@ async def test_etf_a_stale_derived_row_degrades_instead_of_500ing(monkeypatch):
             "not-a-dict",                          # not even a row
         ],
         "benchmark_summary": {"benchmark_name": "S&P 500"},   # missing the numbers
+        # `sma_50` is the section's payload version: WITHOUT it the row is a miss and gets
+        # rebuilt (tests/test_etf_sma50_from_history.py); WITH it, this test still
+        # exercises the re-validation path it was written for.
+        "sma_50": 123.0,
     }
 
     resp = await svc.get_etf_detail("QQQ", chart_range="3M")

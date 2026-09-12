@@ -13,7 +13,13 @@ struct MarketPulseCard: View {
     var onTap: (() -> Void)? = nil
 
     private var changeColor: Color {
-        item.isPositive ? AppColors.bullish : AppColors.bearish
+        // NEUTRAL when the move was never measured. `isPositive` is false for an unknown
+        // change, and without this branch the tile would paint a RED "—" — a fabricated
+        // decline, which is the same trap a `*_known` flag introduced on the index header
+        // in the 2026-09-11 pass: the flag needs a neutral state in EVERY reader, not just
+        // the one that formats the text.
+        guard item.changeKnown else { return AppColors.textSecondary }
+        return item.isPositive ? AppColors.bullish : AppColors.bearish
     }
 
     var body: some View {
@@ -48,8 +54,16 @@ struct MarketPulseCard: View {
                 if !item.spark.isEmpty {
                     SparklineView(
                         data: item.spark,
-                        isPositive: item.isPositive,
-                        referencePrice: item.previousClose,
+                        // Direction of the SERIES when today's change is unknown, so the
+                        // line is not painted red under a dash. Same rule as
+                        // `IndexHeaderRenderable.chartIsPositive`.
+                        isPositive: item.changeKnown
+                            ? item.isPositive
+                            : ((item.spark.last ?? 0) >= (item.spark.first ?? 0)),
+                        // No dashed reference either: it is the line the colour is judged
+                        // against, and an unknown change means we cannot say which side of
+                        // it today sits on.
+                        referencePrice: item.changeKnown ? item.previousClose : nil,
                         // Bitcoin and the S&P fill different fractions at the same
                         // instant — their sessions are 00:00-24:00 and 09:30-16:00.
                         spanFrom: item.sparkFrom,

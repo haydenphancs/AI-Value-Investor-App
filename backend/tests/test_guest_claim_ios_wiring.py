@@ -124,7 +124,12 @@ def test_auth_transition_invokes_the_claim():
 def test_claim_runs_before_the_credit_refresh():
     """Ordering matters: the claim moves the rows a later read would report on."""
     src = _read(_APP_STATE)
-    body = re.search(r"private func onAuthenticated\([^)]*\) async \{(.*?)\n    \}", src, re.DOTALL).group(1)
+    # Guarded like the sibling above: an unguarded `.group(1)` over a file another
+    # session was mid-edit on produced the one intermittent
+    # "'NoneType' object has no attribute 'group'" in a full-suite run (2026-09-11).
+    on_auth = re.search(r"private func onAuthenticated\([^)]*\) async \{(.*?)\n    \}", src, re.DOTALL)
+    assert on_auth, "onAuthenticated() not found in AppState — did it get renamed or re-indented?"
+    body = on_auth.group(1)
     assert body.index("claimGuestData") < body.index("refreshCredits"), (
         "claimGuestDataIfNeeded() must run before refreshCredits()"
     )

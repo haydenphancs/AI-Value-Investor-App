@@ -36,6 +36,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.database import get_supabase
+from app.services.asset_class import detect_asset_class
 # Shared close-aligned freshness (schema floor + trading-close cycle) so this
 # collection cache refreshes on the SAME boundary as ticker_report_cache —
 # critical, else a post-close report regen would reuse stale historical here.
@@ -394,10 +395,18 @@ async def get_or_collect(ticker: str, fetch_fresh) -> Any:
         # fail fast through their own error/refund path, then re-raise our cancel.
         if not fut.done():
             fut.set_exception(RuntimeError("ticker collection was cancelled"))
+            fut.exception()  # mark retrieved — see the Exception arm
         raise
     except Exception as e:
         if not fut.done():
             fut.set_exception(e)
+            # Mark the exception retrieved. The owner re-raises `e` on its own frame and
+            # is the only party that has to see it; when NO waiter ever attached, the
+            # future is garbage-collected unread and asyncio logs "Future exception was
+            # never retrieved" with a full traceback at ERROR (5 per 2 h on Railway,
+            # 2026-09-11 — every one a Sentry event). Attached waiters are unaffected:
+            # their `await` still raises the stored exception.
+            fut.exception()
         raise
     finally:
         _INFLIGHT.pop(ticker, None)
@@ -409,6 +418,11 @@ async def get_or_collect(ticker: str, fetch_fresh) -> Any:
 # at once (same-ticker already collapses via _INFLIGHT). Lazily built inside the
 # loop so it binds to the running event loop.
 _WARM_SEMAPHORE: Optional["asyncio.Semaphore"] = None
+
+# Symbols whose warm was skipped because the report collector cannot serve their asset
+# class. Once-per-process INFO so the hourly pre-warmer does not re-announce ^GSPC every
+# cycle; a set (not a TTL) because the classification of a symbol never changes.
+_NON_EQUITY_WARM_SKIPPED: set = set()
 
 
 def _get_warm_semaphore() -> "asyncio.Semaphore":
@@ -435,6 +449,24 @@ async def warm_ticker_collection(ticker: str) -> None:
         # Normalize INSIDE the try so the "never raises" contract holds even for
         # a non-str input (e.g. a malformed RPC row).
         ticker = ticker.upper().strip()
+        # Equity-only. `get_top_watchlist_tickers` now carries indices, coins and commodity
+        # pairs, and the report collector hard-fails on anything without a company profile:
+        # ^GSPC / BTCUSD / ETHUSD / SOLUSD / DOGEUSD each cost ~20 FMP calls, nine
+        # "Invalid ticker symbol" collectors, a 402 on `historical` and FINRA/Nasdaq errors
+        # (~15 WARNINGs per symbol per hourly cycle, measured on Railway 2026-09-11) before
+        # raising "No company profile found". ETFs classify as "stock" here on purpose — they
+        # carry a profile and the collector degrades rather than fails, and a real report
+        # request would collect exactly the same thing. A bare "BTC" is the Grayscale ETF
+        # (asset_class.py), so include_bare_coins stays False.
+        asset_class = detect_asset_class(ticker)
+        if asset_class != "stock":
+            if ticker not in _NON_EQUITY_WARM_SKIPPED:
+                _NON_EQUITY_WARM_SKIPPED.add(ticker)
+                logger.info(
+                    "ticker_data_cache warm skipped for %s (%s — the report collector is "
+                    "equity-only; logged once per process)", ticker, asset_class,
+                )
+            return
         # Fast path: already fresh → don't even take a slot (steady state).
         # Probes `cached_at` ONLY. This used to call `get_cached_collection`, which selects
         # `collected_data` too — a ~930 KB read plus a full Pydantic deserialization, on every

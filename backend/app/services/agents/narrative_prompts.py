@@ -50,7 +50,6 @@ FALLBACK = {
         "Live commentary unavailable. Numbers below reflect the latest filings."
     ),
     "overall_assessment_text": "Quality scoring updated; narrative unavailable.",
-    "guidance_quote": None,
     "revenue_analysis_note": None,
     "revenue_forecast_insight": (
         "Forecast reflects analyst estimates; commentary unavailable."
@@ -68,7 +67,6 @@ FALLBACK = {
     "insider_key_insight": (
         "Insider data refreshed; commentary unavailable."
     ),
-    "fundamental_quality_label": "—",
     "critical_factor_description": "Signal unavailable for this factor.",
     "critical_factor_watch": None,
     "wall_street_insight": None,
@@ -275,6 +273,12 @@ def stage_a_thinking_budget() -> Optional[int]:
     return _resolve_budget(settings.REPORT_STAGE_A_THINKING_BUDGET)
 
 
+def agentic_thinking_budget() -> Optional[int]:
+    """The deep-research tool loop (`ResearchAgent._agentic_research`) — up to five
+    calls per deep report that had no budget knob at all until 2026-09-11."""
+    return _resolve_budget(getattr(settings, "REPORT_AGENTIC_THINKING_BUDGET", 0))
+
+
 async def run_narrative_jobs(
     jobs: List[NarrativeJob],
     gemini: GeminiClient,
@@ -363,14 +367,48 @@ async def run_narrative_jobs(
 # attached separately by the runner via `system_instruction`.
 
 
+# Character budget for the REPORT VERDICTS block in the executive summary prompt.
+_VERDICTS_CHAR_CAP = 2200
+
+
 def _executive_summary_text_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
+    # `shell` is the ASSEMBLED report (build_narrative_jobs runs after assemble_report), so
+    # the deterministic module verdicts already exist. This prompt took `shell` and never
+    # read it — the summary was written blind to the report it summarises, from the raw
+    # evidence alone. The digest is the same one the bull/bear synthesis reads, capped so
+    # it orients rather than argues.
+    digest = ""
+    try:
+        digest = (build_module_digest(shell) or "").strip()
+    except Exception as e:  # noqa: BLE001 — a digest failure must not lose the summary
+        logger.warning("executive summary: module digest failed (%s: %s)", type(e).__name__, e)
+    # Whole lines only: the digest is ~9 fixed-order module lines and a character cut
+    # landed mid-number inside MOAT/MACRO and silently dropped the modules after it. The
+    # FUNDAMENTALS line (~450 chars of ratios) is skipped — EVIDENCE already carries every
+    # one of those numbers — and the cap is sized to a fully populated digest (~1.8-2k
+    # chars) so MACRO / WALL STREET / HIDDEN SIGNALS, the last three in `_DIGEST_ORDER`,
+    # are not the ones that always fall off.
+    kept: List[str] = []
+    used = 0
+    for line in digest.splitlines():
+        if line.upper().startswith("FUNDAMENTALS"):
+            continue
+        if used + len(line) + 1 > _VERDICTS_CHAR_CAP:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    verdicts = (
+        "\nREPORT VERDICTS (the sections below reached these; agree with them):\n"
+        + "\n".join(kept) + "\n"
+        if kept else ""
+    )
     return f"""Write the Executive Summary — a GENERAL, plain-English overview that orients the reader before the detailed sections below.
 
 EVIDENCE:
 {evidence}
-
+{verdicts}
 {_style_block(persona)}
 LENGTH: Write 3-4 sentences, total under 65 words.
 
@@ -925,26 +963,6 @@ Use the YoY numbers above — don't invent them, don't restate them as a list.
 Name what is shifting (or what is concentrated) and what it means for the business."""
 
 
-def _revenue_forecast_guidance_quote_prompt(
-    persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
-) -> str:
-    guidance = (
-        shell.get("revenue_forecast", {}).get("management_guidance")
-        or "maintained"
-    )
-    return f"""Paraphrase what management has effectively been telling the Street about forward growth, in their voice.
-
-OFFICIAL GUIDANCE STANCE: {guidance}
-
-EVIDENCE:
-{evidence}
-
-{_style_block(persona)}
-LENGTH: 1-2 sentences, total under 30 words.
-
-If there's no real guidance signal in the data, write the literal word: NULL"""
-
-
 def _revenue_forecast_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
 ) -> str:
@@ -1218,45 +1236,6 @@ LENGTH: One short fragment under 15 words. NO period.
 Lead with the action (who/what), e.g., "CFO selling into the rip" or "Net buying despite the selloff"."""
 
 
-def _fundamental_quality_label_prompt(
-    persona: PersonaConfig,
-    evidence: str,
-    card: Dict[str, Any],
-) -> str:
-    title = card.get("title", "Card")
-    rating = card.get("star_rating", 3)
-    metrics = card.get("metrics", [])
-    metric_str = ", ".join(
-        f"{m.get('label')}={m.get('value')}" for m in metrics
-    ) or "no metrics"
-    return f"""Write a 3-5 word verdict label for this fundamentals card.
-
-CARD: {title}
-RATING: {rating}/5 stars
-METRICS: {metric_str}
-
-{_style_block(persona)}
-LENGTH: 3 to 5 words. NO period. Title-case if it reads like a noun phrase, sentence-case otherwise.
-
-PLAIN ENGLISH — STRICT:
-Write for a non-finance reader. Do NOT use these jargon terms or their close synonyms: "Owner Earnings", "Margin of Safety", "Free Cash Flow", "FCF", "Operating Leverage", "Compounding", "Premium Multiple", "Capital Allocation". Translate the concept instead:
-  - "Burning Cash" — not "Negative FCF" / "Owner Earnings Vanishing"
-  - "Pricey Stock" / "Too Pricey vs. Sector" — not "Premium Multiple" / "Rich Price"
-  - "Heavy Debt Load" — not "High Leverage"
-  - "Slowing Sales" — not "Top-Line Decel"
-  - "Cheap For A Reason" — not "Value Trap"
-
-Examples of good output:
-  - "Fat Margins, High Debt"
-  - "Slowing Sales, Steady Profits"
-  - "Pricey Stock, Real Growth"
-  - "Heavy Debt Load"
-  - "Burning Cash Quarterly"
-  - "Too Pricey vs. Sector"
-
-Pick something specific to the metrics above, not generic praise. Anchor on the most striking number in the card."""
-
-
 def _critical_factor_description_prompt(
     persona: PersonaConfig,
     evidence: str,
@@ -1514,7 +1493,7 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="revenue_engine_analysis_note",
             prompt=_revenue_engine_analysis_note_prompt(persona, evidence, shell),
-            word_cap=22,
+            word_cap=30,  # prompt asks for < 25 words; the cap had been 22 (clipped compliant answers)
             apply=_setter_for_dict_key(re_section, "analysis_note"),
             fallback_value=FALLBACK["revenue_analysis_note"],
             nullable=True,
@@ -1594,8 +1573,6 @@ def build_narrative_jobs(
     # ticker_report_data_collector._snapshot_to_card (see card_verdict.py) — so the
     # comment always agrees with the data, the star rating, and the chart bands.
     # The section "✨ Insight" (overall_assessment, below) stays AI-generated.
-    # (The now-unused _fundamental_quality_label_prompt / _setter_for_label_with_
-    # sentiment / _classify_label_sentiment helpers are left for reference.)
 
     # ── critical_factors[i].description + watch (fan out) ─────────────
     # Each factor gets TWO Stage-B lines: a short SIGNAL (description) and a
@@ -1626,7 +1603,7 @@ def build_narrative_jobs(
         jobs.append(NarrativeJob(
             label="wall_street_insight",
             prompt=_wall_street_insight_prompt(persona, evidence, shell),
-            word_cap=45,
+            word_cap=50,  # prompt asks for < 45 words; zero headroom clipped mid-sentence
             apply=_setter_with_null(ws, "wall_street_insight"),
             fallback_value=FALLBACK["wall_street_insight"],
             nullable=True,
@@ -1645,12 +1622,10 @@ def _setter_for_dict_key(target: Dict[str, Any], key: str) -> Callable[[Any], No
 
 
 # ── Fundamentals-card footer sentiment ────────────────────────────────
-# The per-card footer label ("Debt 4.21, Far Too High") is AI-written and can
-# contradict the card's star rating — which is FMP's snapshot rating, mirrored
-# from the Financials tab for cross-view parity, so we don't touch it. iOS
-# colors the footer by this derived sentiment instead, so a negative takeaway
-# reads red even on a high-starred card. Deterministic + testable; the label
-# vocabulary is constrained by `_fundamental_quality_label_prompt`.
+# The per-card footer label and its sentiment are computed DETERMINISTICALLY by
+# `card_verdict.generate_card_verdict` (no AI job). `_classify_label_sentiment` below is
+# kept as the reference classifier for that vocabulary and is exercised only by
+# tests/test_card_label_sentiment.py — nothing in production calls it.
 _LABEL_NEG_CUES = (
     "too high", "far too high", "heavy debt", "high debt", "deep debt",
     "debt load", "burning cash", "cash burn", "too pricey", "pricey",
@@ -1682,20 +1657,6 @@ def _classify_label_sentiment(text: Optional[str]) -> str:
     if pos and not neg:
         return "positive"
     return "neutral"
-
-
-def _setter_for_label_with_sentiment(
-    card: Dict[str, Any],
-) -> Callable[[Any], None]:
-    """Apply for the per-card label job: writes both `quality_label` and the
-    derived `quality_sentiment`, so the footer color tracks the takeaway, not
-    the (Financials-tab-mirrored) star rating."""
-    def _apply(value: Any) -> None:
-        card["quality_label"] = value
-        card["quality_sentiment"] = _classify_label_sentiment(
-            value if isinstance(value, str) else ""
-        )
-    return _apply
 
 
 def _setter_with_null(target: Dict[str, Any], key: str) -> Callable[[Any], None]:

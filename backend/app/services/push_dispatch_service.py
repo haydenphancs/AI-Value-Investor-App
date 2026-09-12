@@ -1297,163 +1297,228 @@ class PushDispatchService:
         # Keyed on the pair now, and read through the timezone-aware bulk counter.
         charged: Dict[Tuple[str, str], int] = {}
 
-        for row in rows:
-            uid, key = row.get("user_id"), row.get("dedup_key")
-            if not uid or not key:
-                # The claim RPC has already flipped this row to `pending`, and both
-                # halves of its identity are needed to address it again — so it can
-                # neither be re-claimed nor marked. Say so instead of skipping silently;
-                # it means a row was written without a user or a dedup key, which the
-                # claim path cannot produce.
-                stats["failed"] += 1
-                logger.error(
-                    "push: deferred row id=%r has no user_id/dedup_key — it is now "
-                    "stranded at 'pending' and cannot be addressed; this row was not "
-                    "written by claim_send",
-                    row.get("id"),
-                )
-                continue
+        # INDEX OF THE ROW BEING PROCESSED. An index, deliberately, NOT a set of rows
+        # already handled: several paths below mark a row terminally FAILED and `continue`,
+        # and a "not in the handled set" test would re-defer those — resurrecting a row
+        # that was correctly given up on. Everything from `cursor` onward is untouched by
+        # definition. See the CancelledError arm below.
+        cursor = 0
 
-            # ⚠️ THE WHOLE PER-ROW BODY IS GUARDED, not just the delivery.
-            #
-            # `_category_counts_bulk` and `decide` used to sit OUTSIDE the try, so one
-            # raising row did not merely fail itself — it escaped the loop and left every
-            # REMAINING row in the batch flipped to `pending` with nothing to put them
-            # back. One bad row now costs one row.
-            try:
-                # STALENESS IS MEASURED FROM WHEN THE ROW WAS DUE, NOT WHEN IT WAS PARKED.
-                #
-                # ⚠️ This used to read `claimed_at < now - NOTIFICATION_MAX_DEFER_HOURS`,
-                # which silently turned §11.5's "DEFER, never drop" into "drop" for any
-                # quiet window longer than 12 hours. Nothing bounds that window — neither
-                # `resolve_window` (it only rejects start == end), nor `sanitize_preferences`,
-                # nor the iOS pickers — so a perfectly legal 20:00 → 10:00 (14h) meant every
-                # quiet-hours-respecting notification claimed at 20:01 was marked `failed`
-                # at flush. The user set an ordinary preference and silently stopped
-                # receiving alerts.
-                #
-                # `deliver_after` is the instant the row was SUPPOSED to fire — the end of
-                # the user's own window, computed by `quiet_hours.next_end_utc`. Measuring
-                # from there keeps a real staleness bound (a row we failed to flush for 12h
-                # AFTER it came due is genuinely stuck, and a 14-hour-late "AAPL moved 8%"
-                # is misinformation) while making every window the user can set work.
-                #
-                # Falls back to `claimed_at` when `deliver_after` is absent, which is only
-                # possible for a row written before this column was populated.
-                def _ts(value: Any) -> Optional[datetime]:
-                    try:
-                        raw = str(value or "").replace("Z", "+00:00")
-                        if not raw:
-                            return None
-                        parsed = datetime.fromisoformat(raw)
-                        return (
-                            parsed.replace(tzinfo=timezone.utc)
-                            if parsed.tzinfo is None
-                            else parsed
-                        )
-                    except ValueError:
-                        return None
-
-                due_at = _ts(row.get("deliver_after")) or _ts(row.get("claimed_at")) or now
-
-                if due_at < cutoff:
-                    stats["stale"] += 1
-                    await asyncio.to_thread(
-                        self.mark_state, uid, key, STATE_FAILED,
-                        error="stale: deferred past the max window", sent=False,
+        # A SHUTDOWN MID-BATCH MUST NOT STRAND THE REST OF IT.
+        #
+        # `claim_due_notifications` has already flipped every row in `rows` from
+        # `deferred` to `pending`. `asyncio.CancelledError` is a BaseException, so the
+        # per-row `except Exception` below cannot see it: when the lifespan teardown
+        # cancelled this task while row k was awaiting a delivery, the loop simply exited
+        # and rows k..N stayed `pending` FOREVER — the claim RPC only ever selects
+        # `deferred`, nothing re-reads `pending`, and `mark_state` never ran for them. No
+        # push, no terminal state, and an inbox row reading "pending" for its whole 30-day
+        # retention. That is the same stranded state the per-row handler exists to prevent,
+        # reached by the one path that handler cannot catch.
+        try:
+            for cursor, row in enumerate(rows):
+                uid, key = row.get("user_id"), row.get("dedup_key")
+                if not uid or not key:
+                    # The claim RPC has already flipped this row to `pending`, and both
+                    # halves of its identity are needed to address it again — so it can
+                    # neither be re-claimed nor marked. Say so instead of skipping silently;
+                    # it means a row was written without a user or a dedup key, which the
+                    # claim path cannot produce.
+                    stats["failed"] += 1
+                    logger.error(
+                        "push: deferred row id=%r has no user_id/dedup_key — it is now "
+                        "stranded at 'pending' and cannot be addressed; this row was not "
+                        "written by claim_send",
+                        row.get("id"),
                     )
                     continue
 
+                # ⚠️ THE WHOLE PER-ROW BODY IS GUARDED, not just the delivery.
+                #
+                # `_category_counts_bulk` and `decide` used to sit OUTSIDE the try, so one
+                # raising row did not merely fail itself — it escaped the loop and left every
+                # REMAINING row in the batch flipped to `pending` with nothing to put them
+                # back. One bad row now costs one row.
                 try:
-                    nkind = get_kind(row.get("kind") or "")
-                except KeyError:
-                    # A kind removed from the registry while rows were parked. Fail the
-                    # row loudly rather than guessing a preference key and buzzing an
-                    # opted-out user.
-                    stats["failed"] += 1
-                    await asyncio.to_thread(
-                        self.mark_state, uid, key, STATE_FAILED,
-                        error=f"unknown kind {row.get('kind')!r}", sent=False,
-                    )
-                    continue
+                    # STALENESS IS MEASURED FROM WHEN THE ROW WAS DUE, NOT WHEN IT WAS PARKED.
+                    #
+                    # ⚠️ This used to read `claimed_at < now - NOTIFICATION_MAX_DEFER_HOURS`,
+                    # which silently turned §11.5's "DEFER, never drop" into "drop" for any
+                    # quiet window longer than 12 hours. Nothing bounds that window — neither
+                    # `resolve_window` (it only rejects start == end), nor `sanitize_preferences`,
+                    # nor the iOS pickers — so a perfectly legal 20:00 → 10:00 (14h) meant every
+                    # quiet-hours-respecting notification claimed at 20:01 was marked `failed`
+                    # at flush. The user set an ordinary preference and silently stopped
+                    # receiving alerts.
+                    #
+                    # `deliver_after` is the instant the row was SUPPOSED to fire — the end of
+                    # the user's own window, computed by `quiet_hours.next_end_utc`. Measuring
+                    # from there keeps a real staleness bound (a row we failed to flush for 12h
+                    # AFTER it came due is genuinely stuck, and a 14-hour-late "AAPL moved 8%"
+                    # is misinformation) while making every window the user can set work.
+                    #
+                    # Falls back to `claimed_at` when `deliver_after` is absent, which is only
+                    # possible for a row written before this column was populated.
+                    def _ts(value: Any) -> Optional[datetime]:
+                        try:
+                            raw = str(value or "").replace("Z", "+00:00")
+                            if not raw:
+                                return None
+                            parsed = datetime.fromisoformat(raw)
+                            return (
+                                parsed.replace(tzinfo=timezone.utc)
+                                if parsed.tzinfo is None
+                                else parsed
+                            )
+                        except ValueError:
+                            return None
 
-                prefs = preferences.get(uid) or {}
-                budget_key = (uid, nkind.category)
-                if budget_key not in charged:
-                    # The user's own day boundary, not ET — the same helper, and the same
-                    # cutoffs, the claim path uses.
-                    counts = await asyncio.to_thread(
-                        self._category_counts_bulk,
-                        [uid],
-                        nkind.category,
-                        {uid: flush_cutoffs.get(uid, now)},
-                    )
-                    charged[budget_key] = counts.get(uid, 0)
-                recipient = _Recipient(
-                    user_id=uid,
-                    preferences=prefs,
-                    devices=devices.get(uid, []),
-                    unread=unread.get(uid, 0),
-                    # NO +1 here: this row was inserted unread when it was DEFERRED, so
-                    # `unread_counts_bulk` above already includes it. Adding one made every
-                    # flushed notification badge one higher than the truth.
-                    badge=unread.get(uid, 0),
-                    category_sent_today=charged[budget_key],
-                )
+                    due_at = _ts(row.get("deliver_after")) or _ts(row.get("claimed_at")) or now
 
-                # Re-run preference + cap ONLY. Quiet hours are deliberately NOT
-                # re-checked: this row is being flushed precisely because its window
-                # ended, and asking again would re-defer it forever on a window that
-                # spans the flush.
-                gate = self.decide(recipient, nkind, now)
-                if not gate.send and gate.deliver_after is None:
-                    stats["suppressed"] = stats.get("suppressed", 0) + 1
-                    await asyncio.to_thread(
-                        self.mark_state, uid, key, STATE_FAILED,
-                        error=f"suppressed on flush: {gate.reason}", sent=False,
-                    )
-                    continue
+                    if due_at < cutoff:
+                        stats["stale"] += 1
+                        await asyncio.to_thread(
+                            self.mark_state, uid, key, STATE_FAILED,
+                            error="stale: deferred past the max window", sent=False,
+                        )
+                        continue
 
-                route = row.get("route") if isinstance(row.get("route"), dict) else {}
-                if await self._deliver(
-                    recipient, nkind,
-                    title=row.get("title") or "",
-                    body=row.get("body") or "",
-                    dedup_key=key,
-                    route=route,
-                ):
-                    stats["sent"] += 1
-                    # Charge it locally so the rest of THIS batch sees the new total.
-                    # Re-reading per row would be N queries and would still race the
-                    # `mark_state` write that stamps `sent_at`.
-                    charged[budget_key] = charged.get(budget_key, 0) + 1
-                elif not recipient.devices:
-                    stats["no_device"] += 1
-                else:
-                    stats["failed"] += 1
-            except Exception as e:
+                    try:
+                        nkind = get_kind(row.get("kind") or "")
+                    except KeyError:
+                        # A kind removed from the registry while rows were parked. Fail the
+                        # row loudly rather than guessing a preference key and buzzing an
+                        # opted-out user.
+                        stats["failed"] += 1
+                        await asyncio.to_thread(
+                            self.mark_state, uid, key, STATE_FAILED,
+                            error=f"unknown kind {row.get('kind')!r}", sent=False,
+                        )
+                        continue
+
+                    prefs = preferences.get(uid) or {}
+                    budget_key = (uid, nkind.category)
+                    if budget_key not in charged:
+                        # The user's own day boundary, not ET — the same helper, and the same
+                        # cutoffs, the claim path uses.
+                        counts = await asyncio.to_thread(
+                            self._category_counts_bulk,
+                            [uid],
+                            nkind.category,
+                            {uid: flush_cutoffs.get(uid, now)},
+                        )
+                        charged[budget_key] = counts.get(uid, 0)
+                    recipient = _Recipient(
+                        user_id=uid,
+                        preferences=prefs,
+                        devices=devices.get(uid, []),
+                        unread=unread.get(uid, 0),
+                        # NO +1 here: this row was inserted unread when it was DEFERRED, so
+                        # `unread_counts_bulk` above already includes it. Adding one made every
+                        # flushed notification badge one higher than the truth.
+                        badge=unread.get(uid, 0),
+                        category_sent_today=charged[budget_key],
+                    )
+
+                    # Re-run preference + cap ONLY. Quiet hours are deliberately NOT
+                    # re-checked: this row is being flushed precisely because its window
+                    # ended, and asking again would re-defer it forever on a window that
+                    # spans the flush.
+                    gate = self.decide(recipient, nkind, now)
+                    if not gate.send and gate.deliver_after is None:
+                        stats["suppressed"] = stats.get("suppressed", 0) + 1
+                        await asyncio.to_thread(
+                            self.mark_state, uid, key, STATE_FAILED,
+                            error=f"suppressed on flush: {gate.reason}", sent=False,
+                        )
+                        continue
+
+                    route = row.get("route") if isinstance(row.get("route"), dict) else {}
+                    if await self._deliver(
+                        recipient, nkind,
+                        title=row.get("title") or "",
+                        body=row.get("body") or "",
+                        dedup_key=key,
+                        route=route,
+                    ):
+                        stats["sent"] += 1
+                        # Charge it locally so the rest of THIS batch sees the new total.
+                        # Re-reading per row would be N queries and would still race the
+                        # `mark_state` write that stamps `sent_at`.
+                        charged[budget_key] = charged.get(budget_key, 0) + 1
+                    elif not recipient.devices:
+                        stats["no_device"] += 1
+                    else:
+                        stats["failed"] += 1
+                except Exception as e:
+                    logger.warning(
+                        "push: deferred delivery to user=%s key=%s failed (%s: %s)",
+                        uid, key, type(e).__name__, e,
+                    )
+                    # PUT THE ROW BACK. `claim_due_notifications` moved it `deferred` →
+                    # `pending`, so an exception here used to leave it at `pending` forever:
+                    # the claim RPC only ever selects `deferred`, nothing re-reads `pending`,
+                    # and `mark_state` was never called. No push, no terminal state, and an
+                    # inbox row reading "pending" for the rest of its 30-day retention.
+                    outcome = await asyncio.to_thread(
+                        self._requeue_or_fail, uid, key,
+                        int(row.get("attempts") or 0), f"{type(e).__name__}: {e}",
+                    )
+                    # Counted as ONE thing, not two. `failed` and `requeued` in the same dict
+                    # must not both describe the same row, or `failed: 5, requeued: 5` reads
+                    # at 2am as ten problems instead of five rows that will be retried in
+                    # sixty seconds. A row is `requeued` until the attempt ceiling turns it
+                    # into a real, terminal `failed`.
+                    if outcome == STATE_DEFERRED:
+                        stats["requeued"] += 1
+                    else:
+                        stats["failed"] += 1
+        except asyncio.CancelledError:
+            # `cursor` INCLUSIVE: the row in flight when the cancel landed has an
+            # indeterminate state — `mark_state` had not run for it either way. Re-defer it
+            # too. A duplicate buzz is not possible: the dedup claim already exists, which
+            # is the same reasoning the per-row requeue above is built on.
+            unsettled = [
+                r for r in rows[cursor:]
+                if r.get("user_id") and r.get("dedup_key")
+            ]
+            if unsettled:
+                # SHIELDED, for the same reason `claimed_job`'s release is: this runs
+                # DURING a cancellation, so an unshielded await would be cancelled too and
+                # the rows would stay stranded anyway.
+                #
+                # `mark_state` directly, NOT `_requeue_or_fail`: a redeploy is not the
+                # row's fault, and spending one of `MAX_FLUSH_ATTEMPTS` on it would let a
+                # few unlucky restarts fail a notification terminally. `deliver_after` is
+                # already in the past and untouched by the claim, so writing `deferred`
+                # back is enough for the next cycle to re-claim it.
+                def _return_to_deferred() -> int:
+                    returned = 0
+                    for r in unsettled:
+                        try:
+                            self.mark_state(
+                                r["user_id"], r["dedup_key"], STATE_DEFERRED,
+                                error="flush cancelled mid-batch (shutdown) — requeued",
+                                sent=False,
+                            )
+                            returned += 1
+                        except Exception as exc:            # pragma: no cover - best effort
+                            logger.error(
+                                "push: could not return row user=%s key=%s to deferred "
+                                "during shutdown (%s: %s) — it is STRANDED at pending",
+                                r.get("user_id"), r.get("dedup_key"),
+                                type(exc).__name__, exc,
+                            )
+                    return returned
+
+                returned = await asyncio.shield(asyncio.to_thread(_return_to_deferred))
+                stats["requeued"] += returned
                 logger.warning(
-                    "push: deferred delivery to user=%s key=%s failed (%s: %s)",
-                    uid, key, type(e).__name__, e,
+                    "push: quiet-hours flush CANCELLED mid-batch — returned %d/%d "
+                    "unfinished row(s) to deferred so the next cycle retries them",
+                    returned, len(unsettled),
                 )
-                # PUT THE ROW BACK. `claim_due_notifications` moved it `deferred` →
-                # `pending`, so an exception here used to leave it at `pending` forever:
-                # the claim RPC only ever selects `deferred`, nothing re-reads `pending`,
-                # and `mark_state` was never called. No push, no terminal state, and an
-                # inbox row reading "pending" for the rest of its 30-day retention.
-                outcome = await asyncio.to_thread(
-                    self._requeue_or_fail, uid, key,
-                    int(row.get("attempts") or 0), f"{type(e).__name__}: {e}",
-                )
-                # Counted as ONE thing, not two. `failed` and `requeued` in the same dict
-                # must not both describe the same row, or `failed: 5, requeued: 5` reads
-                # at 2am as ten problems instead of five rows that will be retried in
-                # sixty seconds. A row is `requeued` until the attempt ceiling turns it
-                # into a real, terminal `failed`.
-                if outcome == STATE_DEFERRED:
-                    stats["requeued"] += 1
-                else:
-                    stats["failed"] += 1
+            raise
 
         logger.info("push: quiet-hours flush %s", stats)
         return stats

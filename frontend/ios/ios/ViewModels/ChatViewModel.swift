@@ -59,6 +59,13 @@ class ChatViewModel: ObservableObject {
         if case APIError.businessError(let code, _) = error {
             return terminalPreflightCodes.contains(code)
         }
+        // A 429 carries no ErrorCode (the limiter raises a plain 429 with Retry-After), so
+        // it is matched on the transport error. It is terminal for the same reason as the
+        // codes above: POST /messages shares the SAME `chat` limiter bucket as the stream,
+        // so the fallback would re-429 and merely spend two extra round trips.
+        if case APIError.rateLimited = error {
+            return true
+        }
         return false
     }
 
@@ -912,7 +919,13 @@ class ChatViewModel: ObservableObject {
                     revealPending = ""; revealShown = ""; revealFinished = false
                     reasonTask?.cancel(); reasonTask = nil
                     reasonPending = ""; reasonShown = ""; reasonFinished = false
-                    if let id = liveId { setMessageText(id: id, text: "") }
+                    if let id = liveId {
+                        setMessageText(id: id, text: "")
+                        // The reasoning already on the card belongs to the discarded stream: for the
+                        // whole fallback generation (seconds) it stayed on screen above an empty
+                        // bubble. `done` replaces thinking wholesale, so this only closes the gap.
+                        setMessageReasoning(id: id, text: "")
+                    }
 
                 case "done":
                     guard let dto = Self.decodeDoneMessage(event.data) else {
@@ -1083,15 +1096,12 @@ class ChatViewModel: ObservableObject {
     /// Human-readable label for a backend tool name. Falls back to a de-snake-cased form so a
     /// newly added tool still reads sensibly instead of showing a raw identifier.
     static func thinkingLabel(forTool name: String) -> String {
+        // Exactly the seven tools `chat_tools.TOOL_DESCRIPTIONS` declares — the backend has
+        // never emitted any other name. Six phantom cases (get_stock_quote, get_quote,
+        // get_company_profile, get_financials, get_income_statement, get_ticker_report,
+        // search_news) used to sit here; they matched nothing and read as capabilities the
+        // product does not have. A genuinely new tool falls to `default:` and still renders.
         switch name {
-        case "get_stock_quote", "get_quote":      return "Checking the latest price"
-        case "get_company_profile":               return "Reading the company profile"
-        case "get_financials", "get_income_statement": return "Pulling the financials"
-        case "get_ticker_report":                 return "Reading the research report"
-        case "search_news":                       return "Scanning recent news"
-        // The four tools the backend has ACTUALLY been sending all along. Without these
-        // the `default:` arm rendered them as "Get stock chart data" — a de-snake-cased
-        // function name, shown to the user as a progress step.
         case "get_stock_chart_data":              return "Checking the latest price"
         case "get_sentiment_analysis":            return "Reading the market mood"
         case "get_analyst_analysis":              return "Checking analyst coverage"
@@ -1111,10 +1121,16 @@ class ChatViewModel: ObservableObject {
 
     private func appendThinkingStage(id: UUID, stage: String) {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
-        var stages = messages[idx].thinking?.stages ?? []
+        let t = messages[idx].thinking
+        var stages = t?.stages ?? []
         if stages.last != stage { stages.append(stage) }
+        // Patch ONLY the stage list. This used to rebuild `ChatThinking` without `reasoning`,
+        // so every `tool_step` / `routing` frame that landed mid-stream blanked the
+        // reasoning paragraph the thinking card was showing and dropped it back to the
+        // stage list until the next reasoning delta arrived.
         messages[idx].thinking = ChatThinking(
-            stages: stages, sourceCount: messages[idx].sources?.count ?? 0, elapsedMs: nil
+            stages: stages, sourceCount: messages[idx].sources?.count ?? t?.sourceCount,
+            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning
         )
     }
 
@@ -1122,8 +1138,12 @@ class ChatViewModel: ObservableObject {
     private func applyLiveSources(id: UUID, sources: [ChatSource]) {
         guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[idx].sources = sources
-        let stages = messages[idx].thinking?.stages ?? []
-        messages[idx].thinking = ChatThinking(stages: stages, sourceCount: sources.count, elapsedMs: nil)
+        let t = messages[idx].thinking
+        // Same rule as `appendThinkingStage`: one channel's frame must not clobber another's.
+        messages[idx].thinking = ChatThinking(
+            stages: t?.stages ?? [], sourceCount: sources.count,
+            elapsedMs: t?.elapsedMs, reasoning: t?.reasoning
+        )
     }
 
     /// Set the visible text of the streaming bubble in place (preserves thinking/sources).

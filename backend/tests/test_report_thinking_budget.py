@@ -273,3 +273,36 @@ async def test_the_post_assembly_syntheses_are_deliberately_uncapped():
         "the post-assembly syntheses are deliberately uncapped — "
         "see REPORT_STAGE_A_THINKING_BUDGET's comment in config.py"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_critical_factors_synthesis_is_deliberately_uncapped_too():
+    """The docs say BOTH syntheses are uncapped and pinned here; the test above drove only
+    `synthesize_core_thesis`. Drive the second with a report that lets it run."""
+    from app.services.agents.narrative_prompts import synthesize_critical_factors
+    from app.services.agents.persona_config import get_persona_config
+
+    seen: list = []
+    factors = [
+        {"title": "Rates stay high", "severity": "high", "description": "d", "watch": "w"},
+        {"title": "Margin compression", "severity": "medium", "description": "d", "watch": "w"},
+    ]
+
+    class _StrictGemini:
+        async def generate_json(self, prompt=None, system_instruction=None,
+                                model_name=None, response_schema=None,
+                                thinking_budget=None):
+            seen.append(thinking_budget)
+            import json as _json
+            return {"text": _json.dumps({"critical_factors": factors})}
+
+    report = {
+        "symbol": "AAPL", "company_name": "Apple Inc.",
+        "price_action": {"change_pct": 4.2, "window_label": "5 days"},
+        "critical_factors": [dict(f) for f in factors],
+        "core_thesis": {"bull_case": "b", "bear_case": "r"},
+    }
+    await synthesize_critical_factors(report, get_persona_config("warren_buffett"),
+                                      _StrictGemini(), "EVIDENCE")
+    assert seen, "VACUOUS: synthesize_critical_factors never reached generate_json"
+    assert all(budget is None for budget in seen)

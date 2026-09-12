@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.integrations.fmp_entitlements import INDEX_CONSTITUENT_PATHS, is_entitled
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
@@ -32,11 +33,16 @@ from app.schemas.index import (
     ValuationSnapshotResponse,
 )
 from app.database import get_supabase
+from app.utils.postgrest_paging import fetch_all_rows
 from app.utils.market_hours import market_status_fields, to_utc_instant
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
+
+# Index symbols whose constituents endpoint was found unlicensed — announced once per
+# process (a set, not a TTL: the licence does not change at runtime).
+_CONSTITUENTS_UNENTITLED_LOGGED: set = set()
 
 
 # ── Static index profile metadata ────────────────────────────────
@@ -176,6 +182,12 @@ _INTRADAY_CHART_TTL = 60    # 1D/1W bars; the only genuinely per-range fetch
 _SECTOR_PERF_TTL = 900      # 15 min — today's sector moves, shared by every index
 _HISTORY_TTL = 43_200       # 12h — daily EOD bars only change at the close
 _DERIVED_TTL = 43_200       # 12h — performance periods + the moving averages
+# `_compute_index_pe_from_sectors` pages its read: PostgREST clamps a response to ~1,000
+# rows however large a `.limit()` you pass, and the sector-aggregate pe_ratio set is 11
+# sectors × the quarterly backfill depth — already ~880 rows and growing one page per year.
+_PE_PAGE = 1000
+_PE_MAX_PAGES = 20
+
 _CONSTITUENTS_TTL = 43_200  # 12h — index membership changes quarterly at most
 
 # Hard cap on live entries — see stock_overview_service for rationale. Eviction
@@ -393,23 +405,50 @@ def _compute_index_pe_from_sectors() -> Optional[float]:
     Queries the sector_benchmarks table for pe_ratio entries,
     picks the most recent quarterly period that has >= 8 sectors,
     and returns the simple average across all sectors.
+
+    ⚠️ TWO things this read must do, and did not until 2026-09-12:
+
+    1. **`industry = ''` — the sector-AGGREGATE rows only.** `sector_benchmarks` is ONE
+       table where `industry=''` IS the sector row (migration 072); the quarterly job
+       writes a row per INDUSTRY too — 153 of them against 11 sectors
+       (`data/benchmark_universe.json`). Without the filter the "simple average across all
+       sectors" was an unweighted mean of industry medians, and it shipped with
+       `pe_known=True`. Both siblings already filter: `sector_benchmark_lookup._fetch_rows`
+       and `sector_benchmark_service._get_existing_periods`.
+    2. **Page it.** PostgREST clamps any response to 1,000 rows whatever you ask for
+       (verified in `market_movers_service`), and even filtered this is 11 sectors ×
+       ~80 quarterly labels ≈ 880 rows — one more backfilled quarter and the newest
+       period silently falls off the page, which is invisible because the read succeeds.
     """
     try:
         supabase = get_supabase()
-        result = (
-            supabase.table("sector_benchmarks")
+        # `fetch_all_rows`, NOT a hand-rolled `.range()` loop. This read was written as one
+        # in the same change that introduced the shared helper, and it reproduced both of
+        # the defects the helper exists to prevent:
+        #   * NO `ORDER BY` — Postgres may order each page independently, so a row can
+        #     appear on two pages or on neither. `sector_benchmarks.id` (bigint identity)
+        #     is the unique key the helper's contract asks for.
+        #   * a SILENT cap — it stopped at 20 pages with no log, which is the same
+        #     "the read succeeded, so the truncation is invisible" failure it was fixing.
+        #     The helper WARNs when it hits its own backstop.
+        rows: List[Dict[str, Any]] = fetch_all_rows(
+            lambda: supabase.table("sector_benchmarks")
             .select("sector, period_type, period_label, median_value")
             .eq("metric_name", "pe_ratio")
             .eq("period_type", "quarterly")
-            .execute()
+            .eq("industry", ""),
+            order_by="id",
+            what="index P/E: sector benchmark medians",
+            page_size=_PE_PAGE,
+            max_pages=_PE_MAX_PAGES,
         )
-        if not result.data:
+        if not rows:
             return None
 
         # Group by period_label
         from collections import defaultdict
         periods: Dict[str, List[float]] = defaultdict(list)
-        for row in result.data:
+        for row in rows:
             val = row.get("median_value")
             if val and val > 0:
                 periods[row["period_label"]].append(val)
@@ -743,9 +782,23 @@ class IndexService:
             return db["count"]
 
         # NOT proxied. `sp500-constituent` / `nasdaq-constituent` / `dowjones-constituent`
-        # are the "Indexes" package and stay 402 whatever symbol you pass, so this always
-        # takes the fallback — the fund's published holding count from `_INDEX_PROFILES`.
-        # That is now a statement about the ETF, which is what the screen describes.
+        # are the "Indexes" package and stay 402 whatever symbol you pass, so this takes
+        # the fallback — the fund's published holding count from `_INDEX_PROFILES`. That
+        # is a statement about the ETF, which is what the screen describes. The manifest
+        # knows the package is unlicensed, so the call is not even attempted: a permanent,
+        # by-design condition earns one INFO per process, not two WARNINGs per index per
+        # pre-warm cycle (6 per half hour in prod). A NEW 402 on any other endpoint still
+        # WARNs through `FMPClient._note_unpredicted_402`.
+        path = INDEX_CONSTITUENT_PATHS.get(symbol.upper())
+        if path and not is_entitled(path):
+            if symbol not in _CONSTITUENTS_UNENTITLED_LOGGED:
+                _CONSTITUENTS_UNENTITLED_LOGGED.add(symbol)
+                logger.info(
+                    "Index constituents for %s: %r is outside the FMP licence (Indexes "
+                    "package) — using the profile constituent count (%s); logged once "
+                    "per process", symbol, path, fallback,
+                )
+            return fallback
         try:
             rows = await self.fmp.get_index_constituents(symbol)
         except Exception as e:
@@ -1380,8 +1433,22 @@ class IndexService:
         five_year_return = derived.get("five_year_return")
         ten_year_return = derived.get("ten_year_return")
 
-        # Forward P/E estimate (simple: if PE is known, forward = PE * 0.85)
-        forward_pe = pe * 0.85 if pe and pe > 0 else 0
+        # Forward P/E: NOT COMPUTED, and it never was.
+        #
+        # This used to be `pe * 0.85` — a flat 15% haircut on the trailing figure, with no
+        # forward-earnings input of any kind. It shipped as a "Fwd P/E" metric pill AND was
+        # narrated as "the forward P/E of 17.9x … suggests analysts expect earnings to catch
+        # up", which is a fabricated statement about analyst expectations on every index,
+        # every day. Forward estimates are the FMP "Analyst Estimates" package, which is not
+        # on the Order Form, so there is no honest source — and an unknown number is None,
+        # never a number derived from a different number.
+        #
+        # 0 is the wire sentinel the shipped builds already treat as unknown: iOS renders
+        # `forwardPEDisplay` as "—" when `forwardPE <= 0` (IndexDetailModels.swift), and the
+        # `{FORWARD_PE}` placeholder in the story resolves to the same "—". So this needs no
+        # schema change and no new client build; what it needs is for the SENTENCE that
+        # asserted the estimate to go, which it has (see `_build_story_templates`).
+        forward_pe = 0.0
         earnings_yield = (1 / pe * 100) if pe and pe > 0 else 0
 
         # Step 4 (build chart data) is gone: `chart_data` arrives from `_get_chart` in
@@ -1768,11 +1835,12 @@ class IndexService:
                 f"That's {'a premium to' if pe and pe > historical_avg_pe else 'below'} "
                 f"the {{HISTORICAL_PERIOD}} average of {{HISTORICAL_AVG_PE}} — "
                 f"{'investors are pricing in strong future growth' if pe and pe > historical_avg_pe else 'suggesting potential value'}. "
-                f"The forward P/E of {{FORWARD_PE}} tells a "
-                f"{'slightly better' if forward_pe and forward_pe < pe else 'similar'} story, "
-                f"suggesting analysts expect earnings to "
-                f"{'catch up' if forward_pe and forward_pe < pe else 'remain steady'}."
             )
+            # NO forward-P/E sentence. It read "The forward P/E of {FORWARD_PE} tells a
+            # slightly better story, suggesting analysts expect earnings to catch up" —
+            # narrating a number that was `trailing × 0.85`, i.e. an invented claim about
+            # analyst expectations. Forward estimates are an unpurchased FMP package; when
+            # one exists, add the sentence back WITH the source.
 
         advancing = sum(1 for s in sectors if s.change_percent >= 0)
         sector_template = (
@@ -1850,7 +1918,6 @@ IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", 
 
 Current data:
 - P/E Ratio (TTM): {pe:.1f}x
-- Forward P/E: {forward_pe:.1f}x
 - Earnings Yield: {earnings_yield:.2f}%
 - Historical Avg P/E ({historical_period}): {historical_avg_pe}x
 - Valuation Level: {val_label}
@@ -1859,7 +1926,7 @@ Current data:
 
 Generate exactly 2 items separated by "---":
 
-1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio, how it compares to historical average, and forward outlook. Use these placeholders in your text: {{PE_RATIO}}, {{FORWARD_PE}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
+1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio and how it compares to the historical average. There is NO forward-earnings input, so do NOT mention a forward P/E or any analyst estimate of future earnings. Use these placeholders in your text: {{PE_RATIO}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
 
 ---
 
@@ -1881,7 +1948,6 @@ IMPORTANT: Do NOT mention any specific index names like "S&P 500", "Dow Jones", 
 
 Current data:
 - P/E Ratio (TTM): {pe:.1f}x
-- Forward P/E: {forward_pe:.1f}x
 - Earnings Yield: {earnings_yield:.2f}%
 - Historical Avg P/E ({historical_period}): {historical_avg_pe}x
 - Valuation Level: {val_label}
@@ -1890,7 +1956,7 @@ Current data:
 
 Generate exactly 3 items separated by "---":
 
-1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio, how it compares to historical average, and forward outlook. Use these placeholders in your text: {{PE_RATIO}}, {{FORWARD_PE}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
+1. VALUATION STORY (2-3 sentences about the market valuation — do NOT name any index. Use "the market" instead. Mention the P/E ratio and how it compares to the historical average. There is NO forward-earnings input, so do NOT mention a forward P/E or any analyst estimate of future earnings. Use these placeholders in your text: {{PE_RATIO}}, {{EARNINGS_YIELD}}, {{VALUATION_LABEL}}, {{HISTORICAL_AVG_PE}}, {{HISTORICAL_PERIOD}})
 
 ---
 
@@ -1993,9 +2059,13 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                                     ))
                                 if parsed_indicators:
                                     default_macro_indicators = parsed_indicators
-                                    # Cache macro in Supabase for 7 days
-                                    self._upsert_macro_cache(
-                                        symbol, macro_template, parsed_indicators
+                                    # Cache macro in Supabase for 7 days — OFF THE LOOP.
+                                    # The sibling `_tier2_put` twenty lines below was
+                                    # already threaded; this one was left synchronous, on
+                                    # the same request path.
+                                    await asyncio.to_thread(
+                                        self._upsert_macro_cache,
+                                        symbol, macro_template, parsed_indicators,
                                     )
                     except (json.JSONDecodeError, KeyError, TypeError) as e:
                         logger.warning(f"Failed to parse Gemini macro indicators: {e}")

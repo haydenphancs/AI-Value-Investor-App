@@ -29,6 +29,7 @@ from app.schemas.home import (
 from app.services.price_service import price_source
 from app.services.price_window import normalize_history
 from app.services.chart_helper import _finite_or_none
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -255,11 +256,12 @@ class HomeService:
         try:
             sb = get_supabase()
             result = (
-                sb.table("market_insights")
-                .select("headline, bullet_points, sentiment, created_at")
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
+                (await sb_exec(
+                    sb.table("market_insights")
+                    .select("headline, bullet_points, sentiment, created_at")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                ))
             )
             if result.data:
                 row = result.data[0]
@@ -271,8 +273,14 @@ class HomeService:
                 )
                 _cache_set("market_insight", insight)
                 return insight
-        except Exception:
-            pass  # table may not exist yet
+        except Exception as exc:
+            # Was a bare `pass` — which is how a 42501 on this table (no service_role grant
+            # until migration 169) went unlogged for months while every request fell
+            # through to the SPY-derived headline below.
+            logger.warning(
+                "home: market_insights read failed (%s: %s) — falling back to the "
+                "SPY-derived headline", type(exc).__name__, exc,
+            )
 
         # 2. Fallback: derive from S&P 500 quote
         try:
@@ -335,12 +343,13 @@ class HomeService:
         try:
             sb = get_supabase()
             result = (
-                sb.table("daily_briefings")
-                .select("type, title, subtitle, date, badge_text")
-                .eq("is_active", True)
-                .order("priority", desc=True)
-                .limit(5)
-                .execute()
+                (await sb_exec(
+                    sb.table("daily_briefings")
+                    .select("type, title, subtitle, date, badge_text")
+                    .eq("is_active", True)
+                    .order("priority", desc=True)
+                    .limit(5)
+                ))
             )
             if result.data:
                 for row in result.data:
@@ -352,8 +361,11 @@ class HomeService:
                         badge_text=row.get("badge_text"),
                     ))
                 return briefings
-        except Exception:
-            pass  # table may not exist
+        except Exception as exc:
+            logger.warning(
+                "home: daily_briefings read failed (%s: %s) — falling back to the FMP "
+                "earnings calendar", type(exc).__name__, exc,
+            )
 
         # 2. Fallback: FMP earnings calendar
         try:
@@ -420,16 +432,17 @@ class HomeService:
         try:
             sb = get_supabase()
             result = (
-                sb.table("research_reports")
-                .select(
+                (await sb_exec(
+                    sb.table("research_reports")
+                    .select(
                     "id, ticker, company_name, investor_persona, title, "
                     "executive_summary, overall_score, fair_value_estimate, created_at"
-                )
-                .eq("user_id", user_id)
-                .eq("status", "completed")
-                .order("created_at", desc=True)
-                .limit(5)
-                .execute()
+                    )
+                    .eq("user_id", user_id)
+                    .eq("status", "completed")
+                    .order("created_at", desc=True)
+                    .limit(5)
+                ))
             )
 
             if not result.data:

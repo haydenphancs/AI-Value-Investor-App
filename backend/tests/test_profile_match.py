@@ -319,18 +319,41 @@ from app.services.notification_senders import profile_match_sender as pms
 
 
 class _FakeTable:
+    """PostgREST stand-in that also models the SERVER-SIDE ROW CAP.
+
+    ⚠️ It must honour `.order()` and `.range()`, and it must never return more than
+    `_SERVER_MAX_ROWS` from one `execute()`. Before `_load_profiles` was paged, this fake
+    returned the whole list from a single call — which is exactly why its `.limit(5000)`
+    looked like it worked while production silently got 1,000 rows and the ceiling warning
+    could never fire. A fake more capable than the real server hides the bug it exists to
+    catch.
+    """
+
+    #: What PostgREST actually clamps a response to on this project.
+    _SERVER_MAX_ROWS = 1000
+
     def __init__(self, rows, sink):
         self._rows, self._sink = rows, sink
+        self._range = None
+        self._order = None
 
     def select(self, cols):
         self._sink["columns"] = cols
         return self
 
     def limit(self, n):
+        self._sink["limited"] = n
         return self
 
-    def order(self, *a, **kw):
+    def order(self, col=None, *a, **kw):
         self._sink["ordered"] = True
+        self._sink["order_by"] = col
+        self._order = col
+        return self
+
+    def range(self, start, end):
+        self._sink.setdefault("ranges", []).append((start, end))
+        self._range = (start, end)
         return self
 
     @property
@@ -342,7 +365,13 @@ class _FakeTable:
         return self
 
     def execute(self):
-        return type("R", (), {"data": self._rows})()
+        rows = list(self._rows)
+        if self._order:
+            rows.sort(key=lambda r: r.get(self._order))
+        if self._range is not None:
+            start, end = self._range
+            rows = rows[start:end + 1]
+        return type("R", (), {"data": rows[: self._SERVER_MAX_ROWS]})()
 
 
 def _install_profile_rows(monkeypatch, rows):
@@ -386,6 +415,32 @@ def test_the_scan_is_ordered_so_the_cap_does_not_starve_the_same_readers(monkeyp
     sink = _install_profile_rows(monkeypatch, [])
     pms._load_profiles()
     assert sink.get("ordered"), "the profile scan has no ORDER BY"
+    assert sink.get("order_by") == "user_id", (
+        "the scan must order on the table's PRIMARY KEY — OFFSET paging on a non-unique "
+        f"column can skip or duplicate rows at a page boundary (got {sink.get('order_by')!r})"
+    )
+
+
+def test_the_scan_pages_past_the_servers_1000_row_cap(monkeypatch):
+    """`.limit(_MAX_PROFILES)` was INERT. PostgREST clamps every response to ~1,000 rows
+    whatever the client asks for, so consented reader number 1,001 onward never received a
+    profile-match notification on ANY daily run — and `len(rows) >= _MAX_PROFILES`, the
+    ceiling warning that was supposed to say so, could never be true either.
+    """
+    rows = [
+        {"user_id": f"u{i:05d}", "topics": ["technology"], "follow_signals": [],
+         "consented_at": _CONSENT}
+        for i in range(2_400)
+    ]
+    sink = _install_profile_rows(monkeypatch, rows)
+    loaded = pms._load_profiles()
+    assert len(sink.get("ranges", [])) > 1, (
+        "a single un-paged read silently truncates at the server cap"
+    )
+    assert len(loaded) == 2_400, (
+        f"only {len(loaded)} of 2,400 consented readers were considered — the rest are "
+        "silently never notified"
+    )
 
 
 def test_a_consented_but_silent_reader_is_still_excluded(monkeypatch):

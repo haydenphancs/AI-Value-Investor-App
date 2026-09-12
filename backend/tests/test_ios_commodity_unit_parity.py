@@ -155,3 +155,30 @@ def test_the_profile_card_hides_contract_size_and_tick_size_when_empty():
             f"the {label!r} row must be wrapped in `if !profile.{field}.isEmpty` — an ETF "
             "screen sends it empty and a blank row is the honest render"
         )
+
+
+# ── 3. parity: every backend category has a case (same `default:` hazard as units) ──
+
+
+def _category_switch() -> str:
+    body = _block(_src(_RESPONSE_MODELS), "func toModel() -> CommodityProfile")
+    i = body.find("let resolvedCategory")
+    assert i != -1, "guard is stale — `resolvedCategory` moved out of toModel()"
+    return _block(body[i:], "switch")
+
+
+def _backend_categories() -> set[str]:
+    return {str(meta.get("category", "")) for meta in cs._COMMODITY_PROFILES.values()}
+
+
+def test_backend_categories_are_the_expected_set():
+    cats = _backend_categories()
+    assert cats and cats <= {"metals", "energy", "agriculture", "consumables"}, cats
+
+
+@pytest.mark.parametrize("category", sorted(_backend_categories()))
+def test_every_backend_category_has_an_explicit_ios_case(category):
+    assert f'case "{category.lower()}":' in _category_switch(), (
+        f"backend emits category={category!r} but the iOS switch has no case for it — it "
+        "would fall through `default:` and be labelled Metals"
+    )

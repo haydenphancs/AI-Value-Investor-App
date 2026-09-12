@@ -45,7 +45,7 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Contact Info → **Name** | Yes | App Functionality | Optional profile display name; `public.users.display_name` |
 | Identifiers → **User ID** | Yes | App Functionality | Account UUID |
 | Identifiers → **Device ID** | Yes | App Functionality | Random per-install UUID in the Keychain, sent as `X-Guest-Id` (`GuestIdentity.swift`). Rate limiting + pre-sign-in learning progress |
-| Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_holdings.shares`, `market_value`) |
+| Financial Info → **Other Financial Info** | Yes | App Functionality | Self-entered share counts / position values for the diversification score (`portfolio_items.shares`, `market_value`) |
 | User Content → **Other User Content** | Yes | App Functionality | Chat messages, report ratings and written feedback |
 | User Content → **Photos or Videos** | Yes | App Functionality | Optional screenshot the user attaches to a Help Us Improve bug report, emailed to support@. Out-of-process `PhotosPicker`, one image at a time, visible in the composer before it sends |
 | Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities, and the optional learning preferences (experience level, explanation style, answer length, topics of interest) in `user_investor_profile` |

@@ -226,6 +226,12 @@ class ResearchReportListItem(BaseModel):
     progress: Optional[int] = None
     current_step: Optional[str] = None
     created_at: str
+    # When the report acquired its agent slot and work actually began (NULL while queued
+    # behind the agent semaphore). The server's 600 s RESEARCH_PIPELINE_TIMEOUT_SECONDS runs
+    # from HERE, not from created_at — iOS's local timeout pass keys on it for the same
+    # reason: ageing a queued report from created_at flipped it to "failed" while the server
+    # was still generating it, and Retry then charged a second 20 credits.
+    processing_started_at: Optional[str] = None
     completed_at: Optional[str] = None
     user_rating: Optional[int] = None
     # Credit lifecycle (migration 041): drives the iOS "[Refunded]" chip on failed cards.

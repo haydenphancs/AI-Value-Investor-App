@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from supabase import Client
 
+from app.utils.supabase_errors import retry_idempotent_async
 from app.database import get_supabase
 from app.dependencies import get_watchlist_identity
 from app.schemas.tracking import PortfolioInsightsResponse
@@ -42,6 +43,7 @@ from app.services.asset_class import canonical_stored_symbol
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
 from app.utils.supabase_errors import is_unique_violation
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +291,30 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
             supabase.table("portfolio_items").insert(item_rows).execute()
 
 
+#: Slack between a row's `created_at` and `updated_at` at INSERT time. Both default to
+#: `now()` in the same statement so they are normally identical, but they are two separate
+#: evaluations and a dump/restore can round them differently; a second is far below any
+#: human edit and far above that noise.
+_NEVER_EDITED_SLACK_SECONDS = 2.0
+
+
+def _has_been_edited(p: "PortfolioResponse") -> bool:
+    """True when the user has saved this group at least once since it was created."""
+    # `getattr`, not attribute access: this probe sits on the `GET /portfolios` path
+    # BEFORE its try/except, so a shape without the timestamps would 500 the list rather
+    # than skip a best-effort heal.
+    created = getattr(p, "created_at", None)
+    updated = getattr(p, "updated_at", None)
+    if created is None or updated is None:
+        # Unknown provenance: treat as edited, i.e. do NOT touch the user's data.
+        return True
+    try:
+        return (updated - created).total_seconds() > _NEVER_EDITED_SLACK_SECONDS
+    except TypeError:
+        # One side naive, one aware — cannot compare. Fail toward leaving data alone.
+        return True
+
+
 def _backfill_lone_empty_portfolio(supabase: Client, user_id: str, portfolios):
     """Repair the one-shot-seed race: a lone EMPTY portfolio next to a non-empty watchlist.
 
@@ -300,16 +326,40 @@ def _backfill_lone_empty_portfolio(supabase: Client, user_id: str, portfolios):
     up with tickers on their watchlist (visible in Updates) and a permanently empty Assets tab —
     exactly the "No tickers yet" state, unfixable except by re-adding each ticker by hand.
 
-    Deliberately NARROW: only when the user has EXACTLY ONE portfolio and it holds zero items.
-    A user who owns several portfolios, or who deliberately emptied one of several, is left
-    alone. The single-empty-portfolio-with-a-non-empty-watchlist state is not something a user
-    can reach on purpose — the only way to empty your lone portfolio is to remove every ticker,
-    which removes it from the watchlist too.
+    Deliberately NARROW: only when the user has EXACTLY ONE portfolio, it holds zero items,
+    AND it has never been edited.
+
+    ⚠️ That last condition is load-bearing, and this docstring used to assert the opposite
+    ("the only way to empty your lone portfolio is to remove every ticker, which removes it
+    from the watchlist too"). It does not: a group is a SUBSET of the watchlist by design,
+    `set_portfolio_tickers` only ever writes `portfolio_items`, and iOS documents the same
+    ("removes the ticker from the active portfolio only. The master watchlist is
+    untouched"). So a user with one group who swipe-deletes every ticker reaches exactly
+    this state ON PURPOSE — and an unconditional heal put all of them back on the next cold
+    start, every time, which is the symptom this repair claims to have closed.
+
+    `updated_at > created_at` is the honest signal for "the user has saved this group at
+    least once": `_seed_default_portfolio` inserts with both defaulted to `now()`, and every
+    mutation path (`PUT /tickers`, rename, reorder, activate) bumps `updated_at`. A group
+    that was never touched is the one-shot-seed race; a group the user emptied is not.
     """
     if len(portfolios) != 1:
         return portfolios
     only = portfolios[0]
-    if getattr(only, "tickers", None):
+    # `only.items` — NOT `getattr(only, "tickers", None)`, which this read as until
+    # 2026-09-12. `PortfolioResponse` has no `tickers` attribute, so the guard evaluated
+    # None on EVERY call and the "deliberately narrow, only when it holds zero items"
+    # contract above was never enforced: every `GET /portfolios` for a single-group user
+    # re-seeded the group from `watchlist_items`. Because a group is a SUBSET of the
+    # watchlist by design, removing a ticker from the group leaves its watchlist row
+    # alone — so the next launch silently put it back, and the user's removal looked like
+    # it had never happened. A plain attribute access is also what keeps this honest: a
+    # rename now breaks the build instead of silently disarming the guard.
+    if only.items:
+        return portfolios
+    if _has_been_edited(only):
+        # Emptied on purpose. Re-seeding here silently reverses the user's own removal on
+        # every launch — see the docstring.
         return portfolios
 
     try:
@@ -460,12 +510,13 @@ async def create_portfolio(
 
     # New portfolio appends at the end of the user's existing list.
     existing = (
-        supabase.table("portfolios")
-        .select("sort_order")
-        .eq("user_id", user["id"])
-        .order("sort_order", desc=True)
-        .limit(1)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .select("sort_order")
+            .eq("user_id", user["id"])
+            .order("sort_order", desc=True)
+            .limit(1)
+        ))
         .data
         or []
     )
@@ -477,16 +528,17 @@ async def create_portfolio(
     # explicitly when the user picks it. The sole exception is the very first group, which
     # has to be active or the user has none.
     row = (
-        supabase.table("portfolios")
-        .insert(
+        (await sb_exec(
+            supabase.table("portfolios")
+            .insert(
             {
-                "user_id": user["id"],
-                "name": name,
-                "sort_order": next_order,
-                "is_active": False,
+            "user_id": user["id"],
+            "name": name,
+            "sort_order": next_order,
+            "is_active": False,
             }
-        )
-        .execute()
+            )
+        ))
         .data[0]
     )
 
@@ -510,10 +562,11 @@ async def reorder_portfolios(
 ):
     """Bulk-update sort_order from the order of the supplied portfolio_ids."""
     rows = (
-        supabase.table("portfolios")
-        .select("id")
-        .eq("user_id", user["id"])
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .select("id")
+            .eq("user_id", user["id"])
+        ))
         .data
         or []
     )
@@ -526,9 +579,11 @@ async def reorder_portfolios(
 
     now = datetime.utcnow().isoformat()
     for index, pid in enumerate(request.portfolio_ids):
-        supabase.table("portfolios").update(
+        (await sb_exec(
+            supabase.table("portfolios").update(
             {"sort_order": index, "updated_at": now}
-        ).eq("user_id", user["id"]).eq("id", pid).execute()
+            ).eq("user_id", user["id"]).eq("id", pid)
+        ))
 
     return {"message": "Reordered", "count": len(request.portfolio_ids)}
 
@@ -550,11 +605,12 @@ async def rename_portfolio(
         )
 
     row = (
-        supabase.table("portfolios")
-        .update({"name": name, "updated_at": datetime.utcnow().isoformat()})
-        .eq("user_id", user["id"])
-        .eq("id", portfolio_id)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .update({"name": name, "updated_at": datetime.utcnow().isoformat()})
+            .eq("user_id", user["id"])
+            .eq("id", portfolio_id)
+        ))
         .data[0]
     )
 
@@ -574,11 +630,12 @@ async def delete_portfolio(
     # active context. The iOS UI hides the destructive button in that state,
     # but we backstop it here too.
     other_count = (
-        supabase.table("portfolios")
-        .select("id", count="exact")
-        .eq("user_id", user["id"])
-        .neq("id", portfolio_id)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .select("id", count="exact")
+            .eq("user_id", user["id"])
+            .neq("id", portfolio_id)
+        ))
         .count
         or 0
     )
@@ -587,9 +644,11 @@ async def delete_portfolio(
             status_code=409, detail="Cannot delete your only portfolio."
         )
 
-    supabase.table("portfolios").delete().eq("user_id", user["id"]).eq(
+    (await sb_exec(
+        supabase.table("portfolios").delete().eq("user_id", user["id"]).eq(
         "id", portfolio_id
-    ).execute()
+        )
+    ))
 
     # Deleting the ACTIVE group would otherwise leave the user with none, and Home plus
     # Updates would silently fall back to the whole master watchlist under a stale label.
@@ -615,10 +674,12 @@ async def activate_portfolio(
     _get_portfolio_or_404(supabase, user["id"], portfolio_id)
 
     try:
-        switched = supabase.rpc(
-            "set_active_portfolio",
-            {"p_user_id": user["id"], "p_portfolio_id": portfolio_id},
-        ).execute().data
+        switched = (await sb_exec(
+                       supabase.rpc(
+                       "set_active_portfolio",
+                       {"p_user_id": user["id"], "p_portfolio_id": portfolio_id},
+                       )
+                   )).data
     except Exception as e:
         logger.error(
             "set_active_portfolio failed for user=%s portfolio=%s: %s: %s",
@@ -690,11 +751,12 @@ async def set_portfolio_tickers(
                 if cand not in lookup:
                     lookup.append(cand)
         watchlist = (
-            supabase.table("watchlist_items")
-            .select("ticker")
-            .eq("user_id", user["id"])
-            .in_("ticker", lookup)
-            .execute()
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .select("ticker")
+                .eq("user_id", user["id"])
+                .in_("ticker", lookup)
+            ))
             .data
             or []
         )
@@ -718,10 +780,11 @@ async def set_portfolio_tickers(
     # Capture existing holdings so kept tickers don't lose shares /
     # market_value when we delete + reinsert below.
     existing_items = (
-        supabase.table("portfolio_items")
-        .select("ticker,shares,market_value")
-        .eq("portfolio_id", portfolio_id)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolio_items")
+            .select("ticker,shares,market_value")
+            .eq("portfolio_id", portfolio_id)
+        ))
         .data
         or []
     )
@@ -733,37 +796,83 @@ async def set_portfolio_tickers(
         for item in existing_items
     }
 
-    supabase.table("portfolio_items").delete().eq(
-        "portfolio_id", portfolio_id
-    ).execute()
-    if accepted:
-        rows = []
-        for i, t in enumerate(accepted):
-            prior = existing_holdings.get(t, {})
-            rows.append(
-                {
-                    "portfolio_id": portfolio_id,
-                    "ticker": t,
-                    "position": i,
-                    "shares": prior.get("shares"),
-                    "market_value": prior.get("market_value"),
-                }
-            )
-        supabase.table("portfolio_items").insert(rows).execute()
+    # DELETE + INSERT as ONE replayable unit.
+    #
+    # These are two independent PostgREST statements with no transaction between them, and
+    # `rows` is the only carrier of the user's hand-entered `shares` / `market_value` for
+    # the tickers being KEPT. If the INSERT failed after the DELETE committed — a Supabase
+    # 520 edge page (`project_supabase_transient_520`), or a 23505 because a concurrent
+    # watchlist write-through slipped a row into the now-empty group — the group was left
+    # EMPTY and those holdings were gone for good: the client's retry re-reads
+    # `existing_items` (now []) and restores membership with every `shares` NULL, so the
+    # loss looks like "you never entered them".
+    #
+    # `retry_idempotent_async` takes a callable for exactly this shape; its own docstring
+    # names it ("wrapping a delete-then-insert sequence forces the whole block, including
+    # its leading DELETE, into one replayable unit"). Re-running the block is safe: the
+    # DELETE is idempotent and the INSERT rebuilds the same rows from the snapshot taken
+    # BEFORE the block, which is why `existing_holdings` is captured outside it.
+    def _replace_items() -> None:
+        supabase.table("portfolio_items").delete().eq(
+            "portfolio_id", portfolio_id
+        ).execute()
+        if accepted:
+            rows = []
+            for i, t in enumerate(accepted):
+                prior = existing_holdings.get(t, {})
+                rows.append(
+                    {
+                        "portfolio_id": portfolio_id,
+                        "ticker": t,
+                        "position": i,
+                        "shares": prior.get("shares"),
+                        "market_value": prior.get("market_value"),
+                    }
+                )
+            supabase.table("portfolio_items").insert(rows).execute()
 
-    supabase.table("portfolios").update(
+    try:
+        # `retry_idempotent_async`, NOT the sync twin. `set_portfolio_tickers` is
+        # `async def`, and the sync form's backoff is a bare `time.sleep` in the
+        # coroutine's own frame: three attempts is ~0.75 s of FROZEN event loop plus up to
+        # six serialised blocking PostgREST round trips, on the single Railway uvicorn
+        # worker — worst exactly when Supabase is degraded and the most requests are
+        # queued. The async form runs the same sync callable via `asyncio.to_thread` with
+        # the same idempotency contract; its own docstring names this as the reason it
+        # exists. ⚠️ Note `is_transient_supabase_error` deliberately EXCLUDES 23505, so a
+        # duplicate-key collision is re-raised on attempt 1 rather than retried — the
+        # error log below is what surfaces it.
+        await retry_idempotent_async(
+            _replace_items,
+            what=f"portfolio_items replace portfolio={portfolio_id}",
+            logger=logger,
+        )
+    except Exception as exc:
+        # The group may now be EMPTY on disk while the client still shows the old list.
+        # Say so loudly with the ids — this is a data-loss window, not a failed read.
+        logger.error(
+            "[Portfolios] PUT tickers failed to replace items for portfolio=%s user=%s "
+            "(%s: %s) — the group may be empty and per-ticker holdings lost",
+            portfolio_id, user["id"], type(exc).__name__, exc, exc_info=True,
+        )
+        raise
+
+    (await sb_exec(
+        supabase.table("portfolios").update(
         {"updated_at": datetime.utcnow().isoformat()}
-    ).eq("id", portfolio_id).execute()
+        ).eq("id", portfolio_id)
+    ))
 
     # Membership changed → the cached Assets feed is stale. Left alone, the next
     # refresh reads pre-write state and the client's orphan purge acts on it.
     invalidate_feed_cache(user["id"])
 
     refreshed = (
-        supabase.table("portfolios")
-        .select("*")
-        .eq("id", portfolio_id)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .select("*")
+            .eq("id", portfolio_id)
+        ))
         .data[0]
     )
     items = _fetch_portfolio_items(supabase, portfolio_id)
@@ -788,40 +897,56 @@ async def set_portfolio_holdings(
     """
     _get_portfolio_or_404(supabase, user["id"], portfolio_id)
 
+    # VALIDATE EVERYTHING BEFORE WRITING ANYTHING.
+    #
+    # This used to validate and write in ONE loop, then raise 400 at the end — so a payload
+    # with one bad row persisted every good row that preceded it and still answered a
+    # failure. iOS routes a non-2xx through `reportMutationFailure` and reverts its
+    # optimistic UI, so the user saw their edit undone while the server kept half of it,
+    # and the two only disagreed until something forced a refetch. A 400 must mean nothing
+    # happened.
     errors: List[str] = []
     for item in request.items:
         ticker = item.ticker.upper()
         if item.shares is not None and item.shares < 0:
             errors.append(f"{ticker}: shares cannot be negative")
-            continue
-        if item.market_value is not None and item.market_value < 0:
+        elif item.market_value is not None and item.market_value < 0:
             errors.append(f"{ticker}: market_value cannot be negative")
-            continue
-
-        # Raw first, then the canonical spelling — the row for a coin is "BTCUSD", and a
-        # client sending "BTC" for it used to update 0 rows and report success.
-        raw_ticker = ticker
-        canonical = canonical_stored_symbol(raw_ticker, None)
-        result = supabase.table("portfolio_items").update(
-            {"shares": item.shares, "market_value": item.market_value}
-        ).eq("portfolio_id", portfolio_id).eq("ticker", raw_ticker).execute()
-        if not result.data and canonical != raw_ticker:
-            supabase.table("portfolio_items").update(
-                {"shares": item.shares, "market_value": item.market_value}
-            ).eq("portfolio_id", portfolio_id).eq("ticker", canonical).execute()
-
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
-    supabase.table("portfolios").update(
+    for item in request.items:
+        # Raw first, then the canonical spelling — the row for a coin is "BTCUSD", and a
+        # client sending "BTC" for it used to update 0 rows and report success.
+        raw_ticker = item.ticker.upper()
+        canonical = canonical_stored_symbol(raw_ticker, None)
+        values = {"shares": item.shares, "market_value": item.market_value}
+        result = (await sb_exec(
+            supabase.table("portfolio_items")
+            .update(values)
+            .eq("portfolio_id", portfolio_id)
+            .eq("ticker", raw_ticker)
+        ))
+        if not result.data and canonical != raw_ticker:
+            (await sb_exec(
+                supabase.table("portfolio_items")
+                .update(values)
+                .eq("portfolio_id", portfolio_id)
+                .eq("ticker", canonical)
+            ))
+
+    (await sb_exec(
+        supabase.table("portfolios").update(
         {"updated_at": datetime.utcnow().isoformat()}
-    ).eq("id", portfolio_id).execute()
+        ).eq("id", portfolio_id)
+    ))
 
     refreshed = (
-        supabase.table("portfolios")
-        .select("*")
-        .eq("id", portfolio_id)
-        .execute()
+        (await sb_exec(
+            supabase.table("portfolios")
+            .select("*")
+            .eq("id", portfolio_id)
+        ))
         .data[0]
     )
     items = _fetch_portfolio_items(supabase, portfolio_id)

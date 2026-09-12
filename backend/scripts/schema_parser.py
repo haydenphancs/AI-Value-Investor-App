@@ -586,7 +586,10 @@ def parse_triggers(sql: str, tables: dict[str, Table]) -> list[Trigger]:
 
 
 _RE_VIEW = re.compile(
-    rf"^CREATE (?:OR REPLACE )?VIEW ({_IDENT})\.({_IDENT}) AS\n(.*?);\n", re.M | re.S
+    # `WITH (security_invoker='true')` sits between the name and AS on a PG15+ view
+    # (vector_search_stats since migration 164); without the optional group the view
+    # silently vanished from the atlas and `--check` reported views: 0.
+    rf"^CREATE (?:OR REPLACE )?VIEW ({_IDENT})\.({_IDENT})(?: WITH \([^)]*\))? AS\n(.*?);\n", re.M | re.S
 )
 
 

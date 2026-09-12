@@ -596,6 +596,13 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "INSUFFICIENT_CREDITS" {
                 return .insufficientCredits(required: 0, available: 0)
             }
+            // The avatar upload failed upstream (Storage), not because of anything the
+            // user did. `retry_later` is the action the backend pairs with this code, and
+            // without a branch here it fell through to `.apiError`, whose generic copy
+            // offers no action at all — the one ErrorCode in the enum with no mapping.
+            if code == "AVATAR_UPLOAD_FAILED" {
+                return .serverError(statusCode: 503)
+            }
             // A PLAN gate (403), not a balance one. Kept distinct from the credits branch
             // above because the two send the user to different places: credits → Buy
             // Credits, this → the plan sheet. Buying credits never unlocks a follow slot.

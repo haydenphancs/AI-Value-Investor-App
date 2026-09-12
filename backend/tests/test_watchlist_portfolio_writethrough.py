@@ -29,6 +29,7 @@ No network / Supabase.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import pytest
 
 import app.api.v1.endpoints.watchlist as wl
@@ -50,6 +51,10 @@ class _Q:
     def eq(self, c, v): self._filters[c] = v; return self
     def in_(self, c, vals): self._in = (c, list(vals)); return self
     def limit(self, n): self._limit = n; return self
+    # The backfill orders its watchlist read (`.order("added_at", desc=True)`). Without
+    # this the chain raised AttributeError, the caller's best-effort `except` swallowed
+    # it, and the heal-path assertions passed because the heal never ran (2026-09-12).
+    def order(self, col, desc=False): self._order = (col, desc); return self
 
     def upsert(self, payload, on_conflict=None, ignore_duplicates=False):
         self._op, self._payload, self._conflict = "upsert", payload, on_conflict
@@ -58,17 +63,21 @@ class _Q:
     def execute(self):
         rows = self.store.setdefault(self.table, [])
         if self._op == "upsert":
-            p = self._payload
-            # Model portfolio_items_portfolio_id_ticker_key.
-            dupe = any(
-                r.get("portfolio_id") == p["portfolio_id"] and r.get("ticker") == p["ticker"]
-                for r in rows
-            )
-            if not dupe:
-                rows.append(dict(p))
-                self.log.append(("upsert", self.table, p["ticker"]))
-            else:
-                self.log.append(("upsert-noop", self.table, p["ticker"]))
+            # postgrest accepts a single row OR a list; `_backfill_lone_empty_portfolio`
+            # sends a list, and modelling only the dict made that whole path unreachable.
+            payload = self._payload
+            batch = payload if isinstance(payload, list) else [payload]
+            for p in batch:
+                # Model portfolio_items_portfolio_id_ticker_key.
+                dupe = any(
+                    r.get("portfolio_id") == p["portfolio_id"] and r.get("ticker") == p["ticker"]
+                    for r in rows
+                )
+                if not dupe:
+                    rows.append(dict(p))
+                    self.log.append(("upsert", self.table, p["ticker"]))
+                else:
+                    self.log.append(("upsert-noop", self.table, p["ticker"]))
             return type("R", (), {"data": []})()
         matched = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]
         if self._in:
@@ -79,6 +88,9 @@ class _Q:
                 rows.remove(r)
             self.log.append(("delete", self.table, len(matched)))
             return type("R", (), {"data": [dict(r) for r in matched]})()
+        if getattr(self, "_order", None):
+            col, desc = self._order
+            matched = sorted(matched, key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
         if self._limit is not None:
             matched = matched[: self._limit]
         return type("R", (), {"data": [dict(r) for r in matched]})()
@@ -352,19 +364,133 @@ def test_backfill_is_wired_into_the_portfolio_list():
 
 def test_backfill_only_touches_a_lone_empty_portfolio():
     """Narrow on purpose: a user with several portfolios, or one deliberately emptied among
-    several, must not be re-populated on every list call."""
+    several, must not be re-populated on every list call.
+
+    ⚠️ Build the REAL `PortfolioResponse`, not a stand-in. This test used a `_P` stub whose
+    attribute was named `tickers`, matching the production guard's
+    `getattr(only, "tickers", None)` — and the model's field is `items`, so the guard was
+    dead in production while this test was green (found 2026-09-12). A stub that agrees
+    with the bug proves the bug.
+    """
     import app.api.v1.endpoints.portfolios as pf
 
-    class _P:
-        def __init__(self, pid, tickers):
-            self.id, self.tickers = pid, tickers
+    def _p(pid, tickers):
+        return pf.PortfolioResponse(
+            id=pid, name=pid, sort_order=0,
+            items=[pf.PortfolioItemResponse(ticker=t) for t in tickers],
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
 
     sb = _SB(_store([]))
-    two = [_P("p1", []), _P("p2", ["AAPL"])]
+    two = [_p("p1", []), _p("p2", ["AAPL"])]
     assert pf._backfill_lone_empty_portfolio(sb, _USER, two) is two, "touched a multi-portfolio user"
 
-    non_empty = [_P("p1", ["AAPL"])]
-    assert pf._backfill_lone_empty_portfolio(sb, _USER, non_empty) is non_empty
+    # The real scenario, and the one the dead guard broke: the user removed MSFT from
+    # their only group. A group is a SUBSET of the watchlist by design, so MSFT's
+    # watchlist row survives — and the backfill must NOT put it back.
+    store = _store([_group("p1")], items=[{"portfolio_id": "p1", "ticker": "AAPL", "position": 0}])
+    store["watchlist_items"] = [
+        {"user_id": _USER, "ticker": "MSFT", "added_at": "2026-01-03"},
+        {"user_id": _USER, "ticker": "AAPL", "added_at": "2026-01-01"},
+    ]
+    sb_removed = _SB(store)
+    non_empty = [_p("p1", ["AAPL"])]
+    assert pf._backfill_lone_empty_portfolio(sb_removed, _USER, non_empty) is non_empty
+    assert [r["ticker"] for r in store["portfolio_items"]] == ["AAPL"], (
+        "a lone NON-EMPTY group was re-seeded from the watchlist — this silently restores "
+        "every ticker the user removed from the group, on every launch"
+    )
+
+    # …and the heal it exists for still runs: a lone EMPTY group IS seeded from the
+    # watchlist. Without this control the test above passes on a guard that rejects
+    # everything.
+    store = _store([_group("p1")])
+    store["watchlist_items"] = [
+        {"user_id": _USER, "ticker": "AAPL", "added_at": "2026-01-02",
+         "shares": None, "market_value": None},
+    ]
+    sb2 = _SB(store)
+    pf._backfill_lone_empty_portfolio(sb2, _USER, [_p("p1", [])])
+    assert [r["ticker"] for r in store["portfolio_items"]] == ["AAPL"], (
+        "the lone-empty-group heal never ran — the guard now rejects everything"
+    )
+
+
+def test_backfill_leaves_a_group_the_user_deliberately_emptied_alone():
+    """A lone group emptied ON PURPOSE must stay empty.
+
+    The guard's docstring used to justify the unconditional empty-group arm with "the only
+    way to empty your lone portfolio is to remove every ticker, which removes it from the
+    watchlist too". That is false, and the comment six lines below it says so correctly: a
+    group is a SUBSET of the watchlist, `set_portfolio_tickers` only ever writes
+    `portfolio_items`, and iOS documents the same ("removes the ticker from the active
+    portfolio only. The master watchlist is untouched"). So a one-group user who
+    swipe-deletes their last three tickers hit the backfill on every cold start and watched
+    all three come back — the exact symptom the repair claims to have closed.
+
+    `updated_at > created_at` is the separator: the seed inserts both as the same `now()`,
+    and every save bumps `updated_at`.
+    """
+    import app.api.v1.endpoints.portfolios as pf
+
+    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def _p(pid, tickers, *, edited: bool):
+        return pf.PortfolioResponse(
+            id=pid, name=pid, sort_order=0,
+            items=[pf.PortfolioItemResponse(ticker=t) for t in tickers],
+            created_at=created,
+            updated_at=created + timedelta(hours=5) if edited else created,
+        )
+
+    watchlist = [
+        {"user_id": _USER, "ticker": "AAPL", "added_at": "2026-01-02",
+         "shares": None, "market_value": None},
+        {"user_id": _USER, "ticker": "MSFT", "added_at": "2026-01-03",
+         "shares": None, "market_value": None},
+    ]
+
+    # EDITED and emptied by hand → left alone.
+    store = _store([_group("p1")])
+    store["watchlist_items"] = list(watchlist)
+    sb = _SB(store)
+    emptied = [_p("p1", [], edited=True)]
+    assert pf._backfill_lone_empty_portfolio(sb, _USER, emptied) is emptied
+    assert store["portfolio_items"] == [], (
+        "the user emptied their only group on purpose and the next launch put every "
+        "ticker back — a deliberate removal silently reversed, forever"
+    )
+
+    # NEVER edited (the one-shot-seed race) → still healed. Without this control the
+    # assertion above passes on a guard that rejects everything.
+    store2 = _store([_group("p1")])
+    store2["watchlist_items"] = list(watchlist)
+    sb2 = _SB(store2)
+    pf._backfill_lone_empty_portfolio(sb2, _USER, [_p("p1", [], edited=False)])
+    assert sorted(r["ticker"] for r in store2["portfolio_items"]) == ["AAPL", "MSFT"], (
+        "the one-shot-seed race no longer heals — the guard now rejects everything"
+    )
+
+
+def test_the_never_edited_probe_tolerates_missing_or_mixed_timestamps():
+    """Fail toward leaving the user's data alone."""
+    import app.api.v1.endpoints.portfolios as pf
+
+    aware = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    naive = datetime(2026, 1, 1)
+
+    class _Bare:
+        def __init__(self, c, u):
+            self.created_at, self.updated_at = c, u
+
+    assert pf._has_been_edited(_Bare(None, aware)) is True
+    assert pf._has_been_edited(_Bare(aware, None)) is True
+    assert pf._has_been_edited(_Bare(naive, aware)) is True, "naive vs aware must not raise"
+    assert pf._has_been_edited(_Bare(aware, aware)) is False
+    assert pf._has_been_edited(_Bare(aware, aware + timedelta(seconds=1))) is False, \
+        "sub-second insert slack is not an edit"
+    assert pf._has_been_edited(_Bare(aware, aware + timedelta(minutes=1))) is True
 
 
 def test_the_claim_path_clears_is_active_when_moving_a_guest_group():

@@ -271,6 +271,18 @@ SUBSTITUTION: Dict[str, str] = {
 }
 
 
+# The three index-membership endpoints, keyed by the index symbol the services use. They
+# are the "Indexes" package (not purchased), so `index_service` consults `is_entitled`
+# on the mapped path BEFORE calling — a permanent 402 is skipped with one INFO per
+# process, not re-announced as a WARNING every pre-warm cycle. Buying the package is
+# one line in PURCHASED_PACKAGES and the call resumes.
+INDEX_CONSTITUENT_PATHS: Dict[str, str] = {
+    "^GSPC": "sp500-constituent",
+    "^DJI": "dowjones-constituent",
+    "^IXIC": "nasdaq-constituent",
+}
+
+
 def is_entitled(path: str) -> bool:
     """True when ``path`` belongs to a package on :data:`PURCHASED_PACKAGES`."""
     return PACKAGE_OF.get(normalize_path(path)) in PURCHASED_PACKAGES

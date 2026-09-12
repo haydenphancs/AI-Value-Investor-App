@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.utils.postgrest_paging import fetch_all_rows
 from app.database import get_supabase
 from app.integrations.openfda import (
     OpenFDAException,
@@ -515,17 +516,21 @@ class IPIntelService:
     def _load_top_watchlist_tickers(self, limit: int) -> List[str]:
         try:
             sb = get_supabase()
-            res = (
-                sb.table("watchlist_items")
-                .select("ticker")
-                .limit(50_000)
-                .execute()
+            rows = fetch_all_rows(
+                lambda: sb.table("watchlist_items").select("ticker"),
+                order_by="id",
+                what="ip_intel: watchlist universe",
             )
+            # `.limit(50_000)` never lifted PostgREST's ~1,000-row cap, so this counted
+            # watchers from an arbitrary UNORDERED first page: a ticker watched by 40
+            # users could be absent while one watched by 3 made the top-N, and the
+            # refresh then spent its whole budget on the wrong tickers. Silent, because
+            # the read succeeded.
         except Exception as exc:
             logger.warning("ip_intel: watchlist read failed: %s", exc)
             return []
         counts: Dict[str, int] = {}
-        for row in res.data or []:
+        for row in rows:
             t = (row.get("ticker") or "").upper().strip()
             if not t:
                 continue

@@ -118,6 +118,11 @@ class ETFNetYieldResponse(BaseModel):
     # states are distinguishable. Additive + defaulted True, so an older client is
     # unaffected. Same three-state idea as `stock_overview_service`'s Dividends stat.
     dividend_yield_known: bool = True
+    # Was the expense ratio actually available? `expense_ratio` is a shipped non-Optional
+    # float and 0.0 means UNAVAILABLE, never "this fund is free" — the service says so at
+    # its `expense_ratio <= 0` branch. Without this the client rendered "Fee: 0%" directly
+    # above "Expense ratio unavailable for this fund." Defaults True (the old meaning).
+    expense_ratio_known: bool = True
 
 
 class ETFAssetAllocationResponse(BaseModel):

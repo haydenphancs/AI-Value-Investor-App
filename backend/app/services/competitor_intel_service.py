@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.utils.postgrest_paging import fetch_all_rows
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
@@ -796,19 +797,23 @@ class CompetitorIntelService:
         """
         try:
             sb = get_supabase()
-            res = (
-                sb.table("watchlist_items")
-                .select("ticker")
-                .limit(50_000)
-                .execute()
+            rows = fetch_all_rows(
+                lambda: sb.table("watchlist_items").select("ticker"),
+                order_by="id",
+                what="competitor_intel: watchlist universe",
             )
+            # `.limit(50_000)` never lifted PostgREST's ~1,000-row cap, so this counted
+            # watchers from an arbitrary UNORDERED first page: a ticker watched by 40
+            # users could be absent while one watched by 3 made the top-N, and the
+            # refresh then spent its whole budget on the wrong tickers. Silent, because
+            # the read succeeded.
         except Exception as exc:
             logger.warning(
                 "competitor_intel: failed to read watchlist_items: %s", exc,
             )
             return []
         counts: Dict[str, int] = {}
-        for row in res.data or []:
+        for row in rows:
             t = (row.get("ticker") or "").upper().strip()
             if not t:
                 continue

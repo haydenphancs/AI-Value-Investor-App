@@ -110,11 +110,35 @@ async def test_a_market_card_with_an_unknown_number_is_dropped_not_zeroed(monkey
 
     monkeypatch.setattr(hs.HomeService, "_get_sparkline", _spark)
     svc = hs.HomeService()
-    cards = await svc._get_market_tickers() if hasattr(svc, "_get_market_tickers") else None
-    if cards is None:
-        pytest.skip("builder renamed — re-point this test")
+    # ⚠️ NO `hasattr` + `pytest.skip`. This used to disable ITSELF on a rename, turning a
+    # missing builder into a silent green for all three parametrised cases — the exact
+    # "a vacuous guard is worse than no guard" shape of `.claude/rules/testing.md` §3.
+    assert hasattr(svc, "_get_market_tickers"), (
+        "HomeService._get_market_tickers is gone — RE-POINT this guard, do not let the "
+        "fabricated-zero sweep quietly stop covering the market cards"
+    )
+    hs._cache.pop("market_tickers", None)
+    cards = await svc._get_market_tickers()
+
+    # ⚠️ AND NO BARE `all(...)`. Both assertions below are vacuously true on an empty list,
+    # so a builder that returned [] for ANY reason — a swallowed exception included —
+    # satisfied them while proving nothing. The control at the end is what makes the
+    # dropped-card assertions mean something.
     assert all(c.price > 0 for c in cards)
     assert all(c.symbol != "SPY" for c in cards), "the SPY card was published from an unknown number"
+
+    # CONTROL, in the same test so it cannot drift away from it: with a healthy quote the
+    # SAME builder DOES publish a SPY card. If this stops holding, the assertions above
+    # are passing on an empty list.
+    hs._cache.pop("market_tickers", None)
+    monkeypatch.setattr(
+        hs, "price_source",
+        lambda owner=None: _HomePS({"symbol": "SPY", "price": 651.2, "changesPercentage": 0.8}),
+    )
+    healthy = await svc._get_market_tickers()
+    assert healthy, "the builder returns nothing even for a healthy quote — the drop "\
+        "assertions above are vacuous"
+    assert any(c.symbol == "SPY" and c.price > 0 for c in healthy), [c.symbol for c in healthy]
 
 
 @pytest.mark.asyncio

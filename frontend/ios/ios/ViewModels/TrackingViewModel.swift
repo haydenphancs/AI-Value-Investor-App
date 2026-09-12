@@ -227,7 +227,18 @@ class TrackingViewModel: ObservableObject {
     /// the tab; this covers the first visit. `loadData()`'s own single-flight guard means an
     /// overlap between the two costs one request, not two.
     func loadIfNeeded() async {
-        guard !hasLoadedOnce else { return }
+        guard !hasLoadedOnce else {
+            // RE-ACTIVATION. `TrackingView`'s `.task(id: isActiveTab)` teardown now calls
+            // `stopPriceRefreshTimer()` when the tab goes away, and `ContentView` keeps
+            // every tab's `@StateObject` alive — so `hasLoadedOnce` is still true when the
+            // user comes back and this guard returns before ever reaching the
+            // `startPriceRefreshTimer()` below. The stop had a caller and the start did
+            // not: after one tab switch, Holdings prices and P/L froze for the rest of the
+            // process, silently. Restarting here is safe — the timer cancels any prior
+            // task before arming a new one.
+            startPriceRefreshTimer()
+            return
+        }
         await loadData()
         // Latch only on a genuine completion. `.task(id:)` cancels its body when the tab
         // switches away, and latching there would leave the tab permanently empty.
@@ -676,6 +687,10 @@ class TrackingViewModel: ObservableObject {
     }
 
     private func loadWhaleList(retryCount: Int = 3) async {
+        // Captured BEFORE the request. `WhaleService.reset()` bumps this on sign-out, so a
+        // response that lands afterwards is refused rather than re-persisted into the
+        // device-global follows key (auth.md §7).
+        let whaleSyncEpoch = WhaleService.shared.currentIdentityEpoch
         var lastError: Error?
         for attempt in 1...retryCount {
             do {
@@ -690,8 +705,10 @@ class TrackingViewModel: ObservableObject {
                 }
                 let allWhales = decoded.elements.map { $0.toTrendingWhale() }
 
-                // Sync follow state from API
-                WhaleService.shared.syncFromAPIResponse(allWhales)
+                // Sync follow state from API, under the epoch this request STARTED in —
+                // a response that lands after sign-out must not re-persist the ended
+                // session's follows into the device-global key.
+                WhaleService.shared.syncFromAPIResponse(allWhales, asOf: whaleSyncEpoch)
 
                 // Split into followed vs not-followed
                 self.trackedWhales = allWhales.filter { $0.isFollowing }
@@ -895,6 +912,10 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
+    /// Called from `TrackingView`'s `.task(id: isActiveTab)` teardown and on background.
+    /// It had NO caller at all: the 30-second poll started on the tab's first load and ran
+    /// for the life of the process, re-fetching `/tracking/assets` from every other tab and
+    /// after sign-out — on the single uvicorn worker, for every installed app.
     func stopPriceRefreshTimer() {
         priceRefreshTask?.cancel()
         priceRefreshTask = nil

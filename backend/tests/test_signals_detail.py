@@ -34,12 +34,22 @@ class _FakeQuery:
     def in_(self, *a, **k): return self
     def gt(self, *a, **k): return self
     def limit(self, *a, **k): return self
+    # These two arrived with `fetch_all_rows` (2026-09-12): the reads are PAGED now,
+    # because `.limit(5000)` never lifted PostgREST's ~1,000-row server cap and the
+    # "N funds adding" count was silently truncated. A fake that lacks them makes every
+    # caller degrade through its `except` and the tests pass for the wrong reason.
+    def order(self, *a, **k): return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
 
     def execute(self):
         class _R:
             pass
         r = _R()
-        r.data = self._data
+        start, end = getattr(self, "_range", (0, len(self._data)))
+        r.data = self._data[start:end + 1]
         return r
 
 

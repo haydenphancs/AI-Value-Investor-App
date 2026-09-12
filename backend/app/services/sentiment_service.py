@@ -242,15 +242,16 @@ class SentimentService:
         articles = results[0] if not isinstance(results[0], Exception) else []
         price_data = results[1] if not isinstance(results[1], Exception) else {}
         hist_prices = results[2] if not isinstance(results[2], Exception) else []
-        social_24h = results[3] if not isinstance(results[3], Exception) else (0, 0)
-        social_7d = results[4] if not isinstance(results[4], Exception) else (0, 0)
+        # A timeout / exception is an UNKNOWN count, never a measured zero.
+        social_24h = results[3] if not isinstance(results[3], Exception) else (0, 0, False)
+        social_7d = results[4] if not isinstance(results[4], Exception) else (0, 0, False)
 
         for i, name in enumerate(["articles", "price", "historical", "social_24h", "social_7d"]):
             if isinstance(results[i], Exception):
                 logger.warning(f"Sentiment fetch '{name}' failed for {ticker}: {results[i]}")
 
-        social_cur_24h, social_prev_24h = social_24h
-        social_cur_7d, social_prev_7d = social_7d
+        social_cur_24h, social_prev_24h, social_known_24h = social_24h
+        social_cur_7d, social_prev_7d, social_known_7d = social_7d
 
         logger.info(
             f"Sentiment data for {ticker}: "
@@ -321,6 +322,7 @@ class SentimentService:
             social_mentions_change=self._pct_change(
                 float(social_cur_24h), float(social_prev_24h)
             ),
+            social_mentions_known=bool(social_known_24h),
             news_articles=news_cur_24h,
             news_articles_change=self._pct_change(
                 float(news_cur_24h), float(news_prev_24h)
@@ -335,6 +337,7 @@ class SentimentService:
             social_mentions_change_7d=self._pct_change(
                 float(social_cur_7d), float(social_prev_7d)
             ),
+            social_mentions_7d_known=bool(social_known_7d),
             news_articles_7d=news_cur_7d,
             news_articles_change_7d=self._pct_change(
                 float(news_cur_7d), float(news_prev_7d)
@@ -645,16 +648,11 @@ class SentimentService:
                 uses_coingecko_price(ticker)
                 and str(settings.CRYPTO_PRICE_SOURCE or "").lower() != "fmp"
             ):
-                from app.integrations.coingecko import get_coingecko_client
-                from app.services.coingecko_adapter import (
-                    crypto_base_symbol,
-                    market_chart_to_rows,
-                )
+                from app.services.coingecko_adapter import crypto_base_symbol
+                from app.services.crypto_service import get_crypto_service
 
-                payload = await get_coingecko_client().get_market_chart(
-                    crypto_base_symbol(ticker), 12, interval="daily"
-                )
-                hist = market_chart_to_rows(payload, intraday=False)
+                # Shared memo / dedup / negative-cache rules — see technical_analysis_service.
+                hist = list(await get_crypto_service()._cg_history(crypto_base_symbol(ticker), 12))
                 hist.sort(key=lambda p: p.get("date") or "")
                 return hist
 

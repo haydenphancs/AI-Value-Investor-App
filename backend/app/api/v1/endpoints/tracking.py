@@ -45,6 +45,7 @@ from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService
 from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.price_service import price_source
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +199,10 @@ async def add_holding(
         data["market_value"] = request.shares * current_price
 
     result = (
-        supabase.table("watchlist_items")
-        .upsert(data, on_conflict="user_id,ticker")
-        .execute()
+        (await sb_exec(
+            supabase.table("watchlist_items")
+            .upsert(data, on_conflict="user_id,ticker")
+        ))
     )
     row = result.data[0] if result.data else data
     return _row_to_holding(row)
@@ -252,11 +254,12 @@ async def update_holding(
     raw_ticker = ticker.upper()
     canonical = canonical_stored_symbol(raw_ticker, request.asset_type)
     result = (
-        supabase.table("watchlist_items")
-        .update(updates)
-        .eq("user_id", user["id"])
-        .eq("ticker", raw_ticker)
-        .execute()
+        (await sb_exec(
+            supabase.table("watchlist_items")
+            .update(updates)
+            .eq("user_id", user["id"])
+            .eq("ticker", raw_ticker)
+        ))
     )
     if not result.data and canonical != raw_ticker:
         logger.info(
@@ -264,11 +267,12 @@ async def update_holding(
             raw_ticker, user["id"], canonical,
         )
         result = (
-            supabase.table("watchlist_items")
-            .update(updates)
-            .eq("user_id", user["id"])
-            .eq("ticker", canonical)
-            .execute()
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .update(updates)
+                .eq("user_id", user["id"])
+                .eq("ticker", canonical)
+            ))
         )
 
     if not result.data:
@@ -301,19 +305,21 @@ async def delete_holding(
     raw_ticker = ticker.upper()
     canonical = canonical_stored_symbol(raw_ticker, None)
     result = (
-        supabase.table("watchlist_items")
-        .update({"shares": None, "market_value": None})
-        .eq("user_id", user["id"])
-        .eq("ticker", raw_ticker)
-        .execute()
-    )
-    if not result.data and canonical != raw_ticker:
-        result = (
+        (await sb_exec(
             supabase.table("watchlist_items")
             .update({"shares": None, "market_value": None})
             .eq("user_id", user["id"])
-            .eq("ticker", canonical)
-            .execute()
+            .eq("ticker", raw_ticker)
+        ))
+    )
+    if not result.data and canonical != raw_ticker:
+        result = (
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .update({"shares": None, "market_value": None})
+                .eq("user_id", user["id"])
+                .eq("ticker", canonical)
+            ))
         )
     if not result.data:
         logger.warning(
@@ -371,19 +377,21 @@ async def bulk_update_holdings(
         raw_ticker = ticker
         canonical = canonical_stored_symbol(raw_ticker, None)
         result = (
-            supabase.table("watchlist_items")
-            .update(updates)
-            .eq("user_id", user["id"])
-            .eq("ticker", raw_ticker)
-            .execute()
-        )
-        if not result.data and canonical != raw_ticker:
-            result = (
+            (await sb_exec(
                 supabase.table("watchlist_items")
                 .update(updates)
                 .eq("user_id", user["id"])
-                .eq("ticker", canonical)
-                .execute()
+                .eq("ticker", raw_ticker)
+            ))
+        )
+        if not result.data and canonical != raw_ticker:
+            result = (
+                (await sb_exec(
+                    supabase.table("watchlist_items")
+                    .update(updates)
+                    .eq("user_id", user["id"])
+                    .eq("ticker", canonical)
+                ))
             )
         if result.data:
             updated += 1

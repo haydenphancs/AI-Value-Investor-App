@@ -52,6 +52,10 @@ class WhaleService: ObservableObject {
     /// (auth.md §7), reintroduced through the back door.
     private var identityEpoch = 0
 
+    /// The epoch a caller must capture BEFORE its request and hand back to
+    /// `syncFromAPIResponse`. See that method for why.
+    var currentIdentityEpoch: Int { identityEpoch }
+
     private init(apiClient: APIClient = .shared) {
         self.apiClient = apiClient
         loadFollowedWhales()
@@ -186,7 +190,22 @@ class WhaleService: ObservableObject {
     /// UNCONDITIONALLY: an all-false response (the user unfollowed everyone, incl.
     /// on another device) must CLEAR stale local ids, not be ignored. The old
     /// `if !apiFollowed.isEmpty` guard silently kept stale follows forever.
-    func syncFromAPIResponse(_ whales: [TrendingWhale]) {
+    /// Adopt the server's follow set — the SECOND writer of the device-global
+    /// `followedWhaleIds` key, and the one `reset()`'s epoch guard did not cover.
+    ///
+    /// `toggleFollow` captures `identityEpoch` and refuses to persist under a stale one;
+    /// this method did neither. So a `loadWhaleList()` that account A started and that
+    /// resolved AFTER A signed out re-wrote A's follows into the key `reset()` had just
+    /// removed — handing them to account B on the next sign-in. Same bleed, different
+    /// door (auth.md §7).
+    ///
+    /// `asOf` is the epoch the caller read before its request. It is REQUIRED rather than
+    /// defaulted: a default would silently reopen the door for the next caller.
+    func syncFromAPIResponse(_ whales: [TrendingWhale], asOf epoch: Int) {
+        guard epoch == identityEpoch else {
+            print("[WhaleService] ⏭️ Ignoring a follow sync from an ended session")
+            return
+        }
         let apiFollowed = Set(whales.filter { $0.isFollowing }.map { $0.id })
         followedWhaleIds = apiFollowed
         saveFollowedWhales()

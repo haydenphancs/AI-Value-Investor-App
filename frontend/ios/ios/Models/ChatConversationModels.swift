@@ -755,6 +755,37 @@ struct ChatTurnCostDTO: Codable, Equatable, Sendable {
     /// showing a number that was true once.
     let balance: Int?
 
+    enum CodingKeys: String, CodingKey { case outcome, credits, reason, label, balance }
+
+    init(outcome: String, credits: Int, reason: String? = nil, label: String? = nil, balance: Int? = nil) {
+        self.outcome = outcome
+        self.credits = credits
+        self.reason = reason
+        self.label = label
+        self.balance = balance
+    }
+
+    /// NEVER-THROWING, like every other rich-content decoder in this file. `credit` rides
+    /// inside `rich_content` on the persisted row, and `ChatMessageDTO` decodes the whole
+    /// history in one pass — a synthesized decoder here would have let ONE row with a
+    /// missing `credits` or a non-integer collapse the entire conversation into a blank
+    /// screen. The backend writes this shape today; the guard is for the row it writes next
+    /// year. A missing outcome reads as a plain charge, which renders nothing.
+    init(from decoder: Decoder) throws {
+        // The container fetch itself must not throw either: a `credit` value that is not
+        // an object (a bare string, a number, `[]`) would otherwise propagate through the
+        // synthesized `ChatMessageDTO` decoder and fail the whole history.
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            outcome = "charged"; credits = 0; reason = nil; label = nil; balance = nil
+            return
+        }
+        outcome = (try? c.decodeIfPresent(String.self, forKey: .outcome)) ?? "charged"
+        credits = (try? c.decodeIfPresent(Int.self, forKey: .credits)) ?? 0
+        reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        label = try? c.decodeIfPresent(String.self, forKey: .label)
+        balance = try? c.decodeIfPresent(Int.self, forKey: .balance)
+    }
+
     /// Whether this turn actually moved the balance, i.e. whether a refresh is worth a request.
     var movedCredits: Bool { outcome == "charged" || outcome == "refunded" }
 

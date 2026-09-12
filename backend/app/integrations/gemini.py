@@ -144,6 +144,19 @@ class _QuotaCircuitBreaker:
     def half_open(self) -> bool:
         return self._opened_at > 0.0 and self._trial_started_at > 0.0
 
+    @property
+    def tripped(self) -> bool:
+        """Non-mutating: is the breaker currently refusing calls? `is_open()` ADMITS the
+        half-open trial as a side effect, so it must be consulted once per logical call;
+        every other check reads this."""
+        if self._opened_at <= 0.0:
+            return False
+        now = time.time()
+        cooldown = settings.GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS
+        if now - self._opened_at < cooldown:
+            return True
+        return self._trial_started_at > 0.0 and now - self._trial_started_at < cooldown
+
     def is_open(self) -> bool:
         if self._opened_at <= 0.0:
             return False
@@ -307,13 +320,31 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
             quota_attempt = 0      # quota/429 failures
             overload_attempt = 0   # server-overload / 5xx failures
             timeout_attempt = 0    # per-call timeouts (own budget, default 0)
+            admitted = False       # the breaker gate is consulted ONCE per logical call
+            is_trial = False       # ...and only the admitted half-open TRIAL may ignore a trip
             while True:
                 # Fail fast while the breaker is open — don't add load to an
                 # already-exhausted quota; the caller's sentinel fallback fires.
-                if _quota_circuit.is_open():
+                #
+                # Consulted ONCE: `is_open()` admits the single half-open trial as a side
+                # effect, so re-checking it on every retry iteration made the trial call
+                # reject ITSELF — an overload/5xx retry came back to the loop top, saw its
+                # own trial marker, and raised a quota error for a retryable 503.
+                if not admitted:
+                    if _quota_circuit.is_open():
+                        raise GeminiQuotaError(
+                            "Gemini quota circuit open (resource_exhausted) — "
+                            "failing fast"
+                        )
+                    admitted = True
+                    is_trial = _quota_circuit.half_open
+                elif not is_trial and _quota_circuit.tripped:
+                    # Admitted while CLOSED, then slept through a backoff while other
+                    # callers tripped the breaker: don't wake up and add one more request
+                    # to an exhausted quota (whose 429 would be booked as a trial failure).
+                    # The trial itself is exempt — it is the one call allowed to probe.
                     raise GeminiQuotaError(
-                        "Gemini quota circuit open (resource_exhausted) — "
-                        "failing fast"
+                        "Gemini quota circuit opened during backoff — failing fast"
                     )
                 try:
                     result = await func(*args, **kwargs)
@@ -361,7 +392,7 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                         quota_attempt += 1
                         if (
                             quota_attempt > settings.GEMINI_QUOTA_MAX_RETRIES
-                            or _quota_circuit.is_open()
+                            or _quota_circuit.tripped
                         ):
                             logger.error(
                                 f"Quota/rate-limit error — giving up after "
@@ -666,8 +697,12 @@ def truncate_tool_result(result: Any, budget: Optional[int] = None) -> Any:
     for list_cap, str_cap in ((25, 1200), (12, 600), (6, 300), (3, 160), (1, 80)):
         dropped = 0
         pruned = _prune(result, list_cap, str_cap)
+        # Always marked, whatever the shape: a bare list or string that was cut down
+        # must not read as the complete answer.
         if isinstance(pruned, dict):
             pruned = {**pruned, "_truncated": True, "_dropped": dropped}
+        else:
+            pruned = {"result": pruned, "_truncated": True, "_dropped": dropped}
         if _size(pruned) <= limit:
             return pruned
     # A single enormous scalar (or a non-dict shape that will not prune): keep a valid
@@ -683,6 +718,18 @@ def _response_finish(response: Any) -> Optional[str]:
         return getattr(fr, "name", fr) if fr is not None else None
     except Exception:
         return None
+
+
+# Per-tool ceilings, in seconds. The default (`CHAT_TOOL_TIMEOUT_SECONDS`) fits a quote or a
+# cached read; the two market tools can legitimately run long — `explain_price_move` may
+# escalate to a grounded web search (a model chain with retries, ~90 s per request at the
+# ceiling), and `get_market_snapshot` sweeps several cached services. Cancelling those at
+# 8 s would waste the paid search AND strand its claimed daily unit.
+_TOOL_TIMEOUTS: Dict[str, float] = {
+    "explain_price_move": 75.0,
+    "get_market_snapshot": 30.0,
+    "get_market_overview": 20.0,
+}
 
 
 async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[str, Any]) -> Any:
@@ -703,7 +750,7 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
     if handler is None:
         logger.warning("Gemini requested unknown tool: %s", name)
         return {"error": f"unknown tool: {name}"}
-    timeout = float(getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
+    timeout = float(_TOOL_TIMEOUTS.get(name) or getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
     try:
         return await asyncio.wait_for(handler(args), timeout=timeout)
     except asyncio.TimeoutError:
@@ -1119,7 +1166,18 @@ class GeminiClient:
             )
             embedding = list(result.embeddings[0].values)
             self._embedding_cache.set(key, embedding)
-            _log_gemini_usage(_response_usage(result), call_site="generate_embedding", model=model_name)
+            # EmbedContentResponse carries no usage_metadata, and
+            # `metadata.billable_character_count` is populated only on Vertex — this client
+            # is the Developer API (api_key), where it is always None. The embed price is
+            # per input character, so log the input length, which IS the billed quantity.
+            try:
+                billable = getattr(getattr(result, "metadata", None), "billable_character_count", None)
+                logger.info(
+                    "GEMINI_EMBED call_site=generate_embedding model=%s chars=%d billable_chars=%s dim=%s",
+                    model_name, len(str(text)), billable, len(embedding),
+                )
+            except Exception:  # pragma: no cover — telemetry must never break a call
+                pass
             return embedding
         except Exception as e:
             if not is_transient_gemini_error(e):
@@ -1256,6 +1314,7 @@ class GeminiClient:
             )
 
             tool_results: List[Dict[str, Any]] = []
+            tool_errors: List[Dict[str, Any]] = []   # {name, error} per call that failed
             candidate = (response.candidates or [None])[0]
             parts = (candidate.content.parts if candidate and candidate.content else None) or []
 
@@ -1276,9 +1335,9 @@ class GeminiClient:
                     if handler is not None:
                         logger.info(f"Gemini invoked tool '{fc.name}' with args: {args}")
                     handler_result = await _run_tool_handler(fc.name, handler, args)
-                    if handler is not None and not (
-                        isinstance(handler_result, dict) and handler_result.get("error")
-                    ):
+                    if isinstance(handler_result, dict) and handler_result.get("error"):
+                        tool_errors.append({"name": fc.name, "error": handler_result["error"]})
+                    elif handler is not None:
                         tool_results.append(handler_result)
                     response_parts.append(types.Part.from_function_response(
                         name=fc.name,
@@ -1309,6 +1368,7 @@ class GeminiClient:
                     "tokens_used": _response_tokens(follow_up),
                     "finish_reason": _response_finish(follow_up),
                     "tool_results": tool_results,
+                    "tool_errors": tool_errors,
                 }
 
             # No function call — return normal text response.
@@ -1319,6 +1379,7 @@ class GeminiClient:
                 "tokens_used": _response_tokens(response),
                 "finish_reason": _response_finish(response),
                 "tool_results": tool_results,
+                "tool_errors": tool_errors,
             }
 
         except Exception as e:

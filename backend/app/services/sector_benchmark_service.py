@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -896,10 +897,12 @@ class SectorBenchmarkService:
         for i in range(0, len(rows_to_upsert), UPSERT_BATCH_SIZE):
             batch = rows_to_upsert[i:i + UPSERT_BATCH_SIZE]
             try:
-                self.supabase.table("sector_benchmarks").upsert(
+                (await sb_exec(
+                    self.supabase.table("sector_benchmarks").upsert(
                     batch,
                     on_conflict="sector,industry,metric_name,period_type,period_label",
-                ).execute()
+                    )
+                ))
                 upserted += len(batch)
             except Exception as e:
                 logger.error(f"  Upsert batch failed for {sector}: {e}")

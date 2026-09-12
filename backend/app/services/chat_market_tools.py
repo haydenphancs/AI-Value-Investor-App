@@ -165,6 +165,20 @@ async def _claim_web_search() -> bool:
     return True
 
 
+async def _release_web_search() -> None:
+    """Give back a claimed unit when the grounded call produced nothing.
+
+    The claim is taken BEFORE the search (correctly — it is the spend gate). Released ONLY
+    when the search provably did not run (the call raised before reaching Gemini, or the
+    tool runner cancelled it); an empty-but-billed result keeps its unit. Best-effort: a
+    failure here only costs one unit of a 200-unit ceiling.
+    """
+    try:
+        await asyncio.to_thread(get_chat_budget_service().refund_turn, _WEB_SEARCH_BUCKET)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chat web-search unit release failed (%s: %s)", type(e).__name__, e)
+
+
 # ── Tool 1: the ticker's recent news ──────────────────────────────────────────
 
 async def fetch_ticker_news(ticker: str, is_crypto: bool = False) -> Dict[str, Any]:
@@ -619,16 +633,44 @@ async def _maybe_web_catalyst(
     if cached is not None:
         return _catalyst_digest(cached, paid=False)
 
+    # Don't CLAIM a unit the search provably cannot spend. `get_catalyst` answers None for
+    # "not attempted" and "attempted but unusable" alike, so the release below can only
+    # distinguish a raise; the two no-attempt cases we CAN see up front are the kill switch
+    # and an open quota breaker (every grounded attempt then fails fast before any HTTP).
+    # Claiming for those walled the day off at 200 units with nothing bought.
+    if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
+        return None
+    from app.integrations.gemini import _quota_circuit
+    if _quota_circuit.tripped:
+        logger.info("chat tool: grounded catalyst for %s skipped — Gemini quota breaker open", sym)
+        return None
+
     if not await _claim_web_search():
         return None
 
     try:
         fresh = await svc.get_catalyst(sym, change, "today")
+    except asyncio.CancelledError:
+        # The tool runner's timeout cancelled us mid-search. Whether Google billed the
+        # search is unknowable from here; the unit is refunded in a detached task (awaiting
+        # inside a cancelled task would itself be cancelled), which errs on the side of not
+        # walling the day off over a timeout.
+        asyncio.get_running_loop().create_task(_release_web_search())
+        raise
     except Exception as e:  # noqa: BLE001
+        # `get_catalyst` handles Gemini failures INTERNALLY (it returns None with a
+        # `gemini_error` status); a raise here is the cache / DB layer around the call, i.e.
+        # the search most likely never ran.
         logger.warning("chat tool: grounded catalyst failed for %s (%s: %s)",
                        sym, type(e).__name__, e)
+        await _release_web_search()
         return None
-    return _catalyst_digest(fresh, paid=True) if fresh else None
+    if not fresh:
+        # NOT released: a None here includes "the grounded call ran and answered, but the
+        # output was unusable" (no JSON fence, truncated JSON) — Google billed that search.
+        # A spend gate refunds only what provably was not spent.
+        return None
+    return _catalyst_digest(fresh, paid=True)
 
 
 def _catalyst_digest(catalyst: Dict[str, Any], *, paid: bool) -> Optional[Dict[str, Any]]:

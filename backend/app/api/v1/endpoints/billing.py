@@ -7,9 +7,12 @@ This router only exposes the public, guest-safe tier catalog so the paywall
 renders for signed-out users too.
 """
 
+from typing import Dict
+import time
 import asyncio
 import logging
 
+from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.error_response import ErrorCode, make_error_response
@@ -227,6 +230,89 @@ async def verify_purchase(
     )
 
 
+#: Per-IP ceiling for the ONE unauthenticated route in the app. Apple's real traffic is a
+#: handful of notifications a minute even for a busy product, and it retries a non-2xx over
+#: DAYS rather than seconds, so a low ceiling cannot lose a genuine notification: a 429 is
+#: simply retried later. Without it, anyone who knows the path can make the backend do
+#: unbounded JWS certificate-chain verification — the most CPU-expensive work in the
+#: process — on the single uvicorn worker, with no credential at all.
+_WEBHOOK_MAX_PER_MINUTE = 120
+
+#: Ceiling on the whole route, across every key. The per-IP bucket alone is NOT a bound:
+#: both `Procfile` and `Dockerfile` start uvicorn with `--forwarded-allow-ips='*'`, so
+#: `request.client.host` is whatever `X-Forwarded-For` says — i.e. attacker-chosen. One
+#: caller varying that header gets a fresh allowance every request. This second ceiling
+#: needs no key at all and therefore cannot be evaded by minting them. Apple's real
+#: traffic is single-digit notifications a minute, and a 429 is retried for days, so a
+#: genuine notification cannot be lost here.
+_WEBHOOK_MAX_PER_MINUTE_GLOBAL = 600
+
+#: How many distinct keys the per-IP map may hold before it is pruned.
+_WEBHOOK_MAX_KEYS = 10_000
+_WEBHOOK_PRUNE_BATCH = 5_000
+
+_webhook_hits: Dict[str, list] = defaultdict(list)
+_webhook_global: list = []
+
+
+def _webhook_rate_limited(request: Request) -> bool:
+    """True when this caller — or the route as a whole — has exceeded its ceiling.
+
+    Keyed on the proxy-aware client IP for the per-caller ceiling, and on nothing at all
+    for the global one. ⚠️ The IP is NOT trustworthy: uvicorn runs with
+    `--forwarded-allow-ips='*'`, so it is the `X-Forwarded-For` value verbatim. The per-IP
+    bucket is a courtesy that separates honest callers; `_WEBHOOK_MAX_PER_MINUTE_GLOBAL`
+    is what actually bounds the work.
+    """
+    now = time.monotonic()
+    cutoff = now - 60.0
+    # `getattr`, not attribute access: this guard must never be the thing that 500s the
+    # webhook. A real Starlette Request always has `.client`, but a limiter that can raise
+    # would turn a flood into an outage — and Apple would retry the 500 for days.
+    client = getattr(request, "client", None)
+    ip = (getattr(client, "host", None) if client else None) or "unknown"
+
+    # PRUNE BEFORE TOUCHING THIS CALLER'S BUCKET.
+    #
+    # Doing it after was a self-disabling limiter: `_webhook_hits[ip]` mints an EMPTY list
+    # for a first-time caller, the prune selected keys "whose list is empty", so it popped
+    # the key it had just created — and `hits.append(now)` then appended to a list no
+    # longer in the dict. Past 10,000 keys every bucket was orphaned on arrival, `len(hits)`
+    # was permanently 0, and the ceiling never bit again for anyone, for the life of the
+    # process. Measured: 10,050 keys, then 2,000 requests from ONE ip → 0 blocked.
+    if len(_webhook_hits) > _WEBHOOK_MAX_KEYS:
+        stale = [
+            k for k, v in _webhook_hits.items()
+            if k != ip and (not v or v[-1] <= cutoff)
+        ][:_WEBHOOK_PRUNE_BATCH]
+        for key in stale:
+            _webhook_hits.pop(key, None)
+        if len(_webhook_hits) > _WEBHOOK_MAX_KEYS:
+            # Every remaining bucket is live (a genuinely distributed flood). Evict the
+            # oldest outright rather than let the map grow without bound — the global
+            # ceiling below is what protects the CPU in that case, not this map.
+            oldest = sorted(
+                (k for k in _webhook_hits if k != ip),
+                key=lambda k: (_webhook_hits[k][-1] if _webhook_hits[k] else float("-inf")),
+            )[:_WEBHOOK_PRUNE_BATCH]
+            for key in oldest:
+                _webhook_hits.pop(key, None)
+
+    # Global ceiling first: it is the one an attacker cannot sidestep by varying a header.
+    _webhook_global[:] = [t for t in _webhook_global if t > cutoff]
+    if len(_webhook_global) >= _WEBHOOK_MAX_PER_MINUTE_GLOBAL:
+        return True
+
+    hits = _webhook_hits[ip]
+    hits[:] = [t for t in hits if t > cutoff]
+    if len(hits) >= _WEBHOOK_MAX_PER_MINUTE:
+        return True
+
+    hits.append(now)
+    _webhook_global.append(now)
+    return False
+
+
 @router.post("/app-store-notifications")
 async def app_store_notifications(
     request: Request,
@@ -246,6 +332,17 @@ async def app_store_notifications(
     transaction we have no user for) would just generate retries forever. What happened is
     recorded in `outcome` and the logs.
     """
+    # The only route in the app with NO credential, and the work behind it — Apple's JWS
+    # certificate-chain verification — is the most CPU-expensive in the process. Rate-limit
+    # BEFORE parsing the body, so a flood costs a dict lookup rather than a JSON parse.
+    if _webhook_rate_limited(request):
+        logger.warning(
+            "IAP webhook rate-limited: >%d/min from %s",
+            _WEBHOOK_MAX_PER_MINUTE,
+            getattr(getattr(request, "client", None), "host", None) or "unknown",
+        )
+        raise HTTPException(status_code=429, detail="Too many requests")
+
     try:
         body = await request.json()
     except Exception:

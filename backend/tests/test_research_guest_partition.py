@@ -152,7 +152,10 @@ def test_the_direct_report_path_also_requires_an_account():
     """
     src = (_REPO / "backend" / "app" / "api" / "v1" / "endpoints" / "ticker_report.py").read_text()
     assert "Depends(get_current_user_or_guest)" not in src
-    assert src.count("Depends(get_current_user)") >= 2
+    # >= 1 since 2026-09-11: the report-chat route (the file's other strict dependency) was
+    # deleted. What matters is that the report door itself still takes get_current_user.
+    assert src.count("Depends(get_current_user)") >= 1
+    assert "async def get_ticker_report(" in src
 
 
 def test_no_ai_route_still_claims_the_guest_report_budget():

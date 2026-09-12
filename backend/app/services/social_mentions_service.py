@@ -16,6 +16,7 @@ from app.database import get_supabase
 from app.integrations.apewisdom import (
     get_all_mentions,
     get_ticker_mentions,
+    is_cache_populated,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,8 +33,11 @@ class SocialMentionsService:
         """
         Fetch all mention data from ApeWisdom and store in DB.
 
-        Should be called once every 24h. Rate-limit-safe — the
-        ApeWisdom client handles page delays internally.
+        Called once per UTC day by `main._run_social_snapshot_loop` (it had NO caller from
+        2025 until 2026-09-11 — the table stayed empty and every 7-day count was 0). The
+        upsert is idempotent on (ticker, snapshot_date, source), so a retry within the day
+        rewrites the same rows. Rate-limit-safe — the ApeWisdom client handles page delays
+        internally. Supabase calls run off the event loop.
 
         Returns number of tickers stored.
         """
@@ -63,10 +67,11 @@ class SocialMentionsService:
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
             try:
-                self.supabase.table("social_mentions_history").upsert(
-                    chunk,
-                    on_conflict="ticker,snapshot_date,source",
-                ).execute()
+                await asyncio.to_thread(
+                    lambda c=chunk: self.supabase.table("social_mentions_history").upsert(
+                        c, on_conflict="ticker,snapshot_date,source",
+                    ).execute()
+                )
                 total_upserted += len(chunk)
             except Exception as e:
                 logger.error(
@@ -81,9 +86,11 @@ class SocialMentionsService:
         # Cleanup old data (>30 days)
         try:
             cutoff = (date.today() - timedelta(days=30)).isoformat()
-            self.supabase.table("social_mentions_history").delete().lt(
-                "snapshot_date", cutoff
-            ).execute()
+            await asyncio.to_thread(
+                lambda: self.supabase.table("social_mentions_history").delete().lt(
+                    "snapshot_date", cutoff
+                ).execute()
+            )
         except Exception as e:
             logger.warning(f"Social mentions cleanup failed: {e}")
 
@@ -93,25 +100,31 @@ class SocialMentionsService:
 
     async def get_mentions_24h(
         self, ticker: str
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, bool]:
         """
         Get 24h mention counts for a ticker.
 
-        Returns (current_mentions, previous_24h_mentions).
-        Uses ApeWisdom in-memory cache (fast).
-        Falls back to latest DB row if cache is empty.
+        Returns (current_mentions, previous_24h_mentions, known).
+
+        `known` is False when the answer could not be LOOKED UP — the ApeWisdom cache is
+        still cold AND the DB fallback failed or is empty — as opposed to "looked up and
+        Reddit is not talking about it", which is a real 0. Both used to come back as
+        (0, 0), and the response published the fabricated zero as a measured count.
+        Uses ApeWisdom in-memory cache (fast); falls back to the latest DB row, off the
+        event loop.
         """
         ticker = ticker.upper()
 
         # Try ApeWisdom cache first
         data = await get_ticker_mentions(ticker)
         if data is not None:
-            return data["mentions"], data["mentions_24h_ago"]
+            return data["mentions"], data["mentions_24h_ago"], True
+        cache_consulted = is_cache_populated()
 
         # Fallback: latest DB row
         try:
-            result = (
-                self.supabase.table("social_mentions_history")
+            result = await asyncio.to_thread(
+                lambda: self.supabase.table("social_mentions_history")
                 .select("mentions")
                 .eq("ticker", ticker)
                 .order("snapshot_date", desc=True)
@@ -120,25 +133,30 @@ class SocialMentionsService:
             )
             if result.data:
                 mentions = result.data[0].get("mentions", 0)
-                return mentions, 0  # No previous data from single row
+                return mentions, 0, True  # No previous data from single row
         except Exception as e:
             logger.warning(
                 f"DB fallback for 24h mentions failed for {ticker}: {e}"
             )
+            return 0, 0, False
 
-        return 0, 0
+        # Nothing anywhere: a real "not tracked" only if ApeWisdom was actually consulted.
+        return 0, 0, cache_consulted
 
     # ── 7d lookups (from DB history) ──────────────────────────────
 
     async def get_mentions_7d(
         self, ticker: str
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, bool]:
         """
         Get 7-day mention counts for a ticker.
 
-        Returns (current_7d_total, previous_7d_total).
-        Queries accumulated daily snapshots from Supabase.
-        Returns (0, 0) during warmup period (first 7 days).
+        Returns (current_7d_total, previous_7d_total, known).
+        Queries accumulated daily snapshots from Supabase, off the event loop (two sync
+        PostgREST round-trips used to run INSIDE the request coroutine).
+        `known` is False only when the query FAILED (the 42501 of 2026-09-11 answered
+        every ticker "0 mentions this week" for months); a successful empty query — the
+        first-week warm-up, a ticker nobody mentions — is a real (0, 0, True).
         """
         ticker = ticker.upper()
 
@@ -147,38 +165,38 @@ class SocialMentionsService:
             week_ago = (today - timedelta(days=7)).isoformat()
             two_weeks_ago = (today - timedelta(days=14)).isoformat()
 
-            # Current 7 days
-            cur_result = (
-                self.supabase.table("social_mentions_history")
-                .select("mentions")
-                .eq("ticker", ticker)
-                .gte("snapshot_date", week_ago)
-                .execute()
-            )
+            def _query():
+                cur = (
+                    self.supabase.table("social_mentions_history")
+                    .select("mentions")
+                    .eq("ticker", ticker)
+                    .gte("snapshot_date", week_ago)
+                    .execute()
+                )
+                prev = (
+                    self.supabase.table("social_mentions_history")
+                    .select("mentions")
+                    .eq("ticker", ticker)
+                    .gte("snapshot_date", two_weeks_ago)
+                    .lt("snapshot_date", week_ago)
+                    .execute()
+                )
+                return cur, prev
+
+            cur_result, prev_result = await asyncio.to_thread(_query)
             current_total = sum(
                 r.get("mentions", 0) for r in (cur_result.data or [])
-            )
-
-            # Previous 7 days (for % change)
-            prev_result = (
-                self.supabase.table("social_mentions_history")
-                .select("mentions")
-                .eq("ticker", ticker)
-                .gte("snapshot_date", two_weeks_ago)
-                .lt("snapshot_date", week_ago)
-                .execute()
             )
             previous_total = sum(
                 r.get("mentions", 0) for r in (prev_result.data or [])
             )
-
-            return current_total, previous_total
+            return current_total, previous_total, True
 
         except Exception as e:
             logger.warning(
-                f"7d mentions query failed for {ticker}: {e}"
+                f"7d mentions query failed for {ticker}: {type(e).__name__}: {e}"
             )
-            return 0, 0
+            return 0, 0, False
 
 
 # ── Singleton ─────────────────────────────────────────────────────

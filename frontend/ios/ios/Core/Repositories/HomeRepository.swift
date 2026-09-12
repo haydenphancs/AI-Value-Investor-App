@@ -113,7 +113,8 @@ final class HomeRepository: HomeRepositoryProtocol {
             spark: tile.spark,
             previousClose: tile.previousClose,
             sparkFrom: tile.sparkFrom,
-            sparkTo: tile.sparkTo
+            sparkTo: tile.sparkTo,
+            changeKnown: tile.changeKnown
         )
     }
 
@@ -133,13 +134,17 @@ final class HomeRepository: HomeRepositoryProtocol {
         // sign bit and prints "-0.00%". The backend now normalises too; this keeps
         // the client correct against any older/other producer.
         let change = dto.changePercent == 0 ? 0 : dto.changePercent
+        // `?? true` — absent means the backend predates the flag, i.e. "measured".
+        let changeKnown = dto.changeKnown ?? true
         return MarketPulseItem(
             name: dto.name,
             symbol: dto.symbol,
             type: type,
             priceText: formatPrice(dto.price, type: type),
-            changeText: formatPercent(change),
-            isPositive: change >= 0,
+            // An unmeasured move renders as a dash in the neutral colour, never as a
+            // green "+0.00%" — `isPositive` is what the tile colours off.
+            changeText: changeKnown ? formatPercent(change) : "—",
+            isPositive: changeKnown && change >= 0,
             // Backend sends the latest-session intraday closes oldest-first, and
             // `previousClose` is the dashed reference line — so the card colours
             // green ABOVE / red BELOW it, exactly like the Holdings cards.
@@ -150,7 +155,16 @@ final class HomeRepository: HomeRepositoryProtocol {
             // the full width — what the tile drew before the backend sent a span,
             // and what an older/degraded response still gets.
             sparkFrom: dto.sparkFrom ?? 0,
-            sparkTo: dto.sparkTo ?? 1
+            sparkTo: dto.sparkTo ?? 1,
+            // ON THE MODEL, not only in the two strings above. `MarketPulseCard` gates
+            // THREE more readers on this flag — the change colour, the sparkline's
+            // up/down tint, and whether `previousClose` is used as the chart baseline —
+            // and the init defaults it to `true`, so omitting it here left all three
+            // neutral branches dead. `isPositive` is deliberately `false` for an unknown
+            // move, so the colour guard fell through to the bearish arm: the tile painted
+            // a RED "—", i.e. a fabricated decline, which is the exact regression the
+            // flag exists to prevent.
+            changeKnown: changeKnown
         )
     }
 

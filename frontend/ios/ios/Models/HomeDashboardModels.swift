@@ -35,6 +35,11 @@ struct MarketPulseItem: Identifiable, Hashable {
     /// Pre-formatted change (e.g. "+0.62%", "-1.85%").
     let changeText: String
     let isPositive: Bool
+    /// False when the backend could not measure today's move (a stale or missing
+    /// `market_close_snapshot` row leaves the screener path with no denominator). The
+    /// card then shows `changeText` — "—" — in the NEUTRAL colour rather than a green
+    /// "+0.00%", which is a tile asserting flat-and-up about an unknown move.
+    var changeKnown: Bool = true
     /// Latest-session intraday series, ascending = later in the session.
     let spark: [Double]
     /// Prior trading day's close. The card draws a dashed reference line here and
@@ -52,7 +57,9 @@ struct MarketPulseItem: Identifiable, Hashable {
     init(name: String, symbol: String, type: MarketTickerType,
          priceText: String, changeText: String, isPositive: Bool,
          spark: [Double], previousClose: Double? = nil,
-         sparkFrom: Double = 0, sparkTo: Double = 1) {
+         sparkFrom: Double = 0, sparkTo: Double = 1,
+         changeKnown: Bool = true) {
+        self.changeKnown = changeKnown
         self.name = name
         self.symbol = symbol
         self.type = type
@@ -277,6 +284,11 @@ struct MarketPulseItemDTO: Decodable {
     let type: String          // "index" | "crypto" | "commodity" | "stock" | "etf"
     let price: Double
     let changePercent: Double
+    /// Was `changePercent` actually measured? Optional for the same reason `sparkFrom`
+    /// is: a non-Optional field named in `CodingKeys` throws `keyNotFound` against a
+    /// backend that predates it, which would blank the WHOLE Home dashboard until
+    /// Railway deploys. `HomeRepository` substitutes `true` — the pre-flag meaning.
+    let changeKnown: Bool?
     /// Prior trading day's close → the dashed reference line. May be null.
     let previousClose: Double?
     /// Latest-session intraday closes, oldest-first. May be empty.
@@ -296,6 +308,7 @@ struct MarketPulseItemDTO: Decodable {
     enum CodingKeys: String, CodingKey {
         case symbol, name, type, price, spark
         case changePercent = "change_percent"
+        case changeKnown = "change_known"
         case previousClose = "previous_close"
         case sparkFrom = "spark_from"
         case sparkTo = "spark_to"

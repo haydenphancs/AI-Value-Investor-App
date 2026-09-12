@@ -16,7 +16,6 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
-from google.genai import types
 
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -35,7 +34,13 @@ from app.services._analyst_common import (
     analyst_is_usable,
     analyst_section_available,
 )
-from app.services.agents.chat_tools import tools_for_asset_type
+from app.services.agents.chat_tools import (
+    build_chat_tool_declarations,
+    build_chat_tool_handlers,
+    capability_block,
+    tools_for_asset_type,
+    widget_from_tool_result,
+)
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
@@ -45,176 +50,10 @@ from app.utils.market_hours import session_trading_date
 
 logger = logging.getLogger(__name__)
 
-# ── Gemini Function-Calling tool declaration ────────────────────────
-
-_STOCK_CHART_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_stock_chart_data",
-            description=(
-                "Fetch current stock quote and 30-day historical price data "
-                "for a given ticker symbol. Call this tool whenever the user "
-                "asks about a specific stock's price, performance, chart, or "
-                "whether they should buy/sell a stock."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                },
-                required=["ticker"],
-            ),
-        )
-    ]
-)
-
-_ANALYST_ANALYSIS_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_analyst_analysis",
-            description=(
-                "Fetch Wall Street analyst ratings, consensus, price targets, "
-                "and recent upgrade/downgrade actions for a given ticker symbol. "
-                "Call this tool when the user asks about analyst opinions, "
-                "consensus ratings, price targets, upgrades, downgrades, or "
-                "why a stock is rated as a buy or sell."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                },
-                required=["ticker"],
-            ),
-        )
-    ]
-)
-
-_SENTIMENT_ANALYSIS_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_sentiment_analysis",
-            description=(
-                "Fetch market sentiment analysis and mood data for a given ticker symbol. "
-                "This includes social media mentions, news sentiment scores, and an overall "
-                "0-100 mood gauge. Call this tool when the user asks about market sentiment, "
-                "mood, why a stock feels bearish or bullish, social media buzz, or "
-                "what people are saying about a stock."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                },
-                required=["ticker"],
-            ),
-        )
-    ]
-)
-
-
-_MARKET_OVERVIEW_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_market_overview",
-            description=(
-                "Fetch current market valuation (P/E ratio, forward P/E, earnings yield), "
-                "sector performance (all 11 sectors with daily change), and macroeconomic "
-                "indicators. Call this tool when the user asks about the overall market, "
-                "market deep dive, sector rotation, market valuation, or macro outlook. "
-                "This is for INDEX analysis only, not individual stocks."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "symbol": types.Schema(
-                        type=types.Type.STRING,
-                        description="The index symbol (e.g. ^GSPC, ^DJI, ^IXIC).",
-                    ),
-                },
-                required=["symbol"],
-            ),
-        )
-    ]
-)
-
-
-_TICKER_NEWS_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_ticker_news",
-            description=(
-                "Fetch the most recent news headlines for a ticker, with key points and "
-                "publisher. Call whenever the user asks what is happening with a company, "
-                "what the news is, or what is behind a story — and before saying you do "
-                "not know why something happened."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                },
-                required=["ticker"],
-            ),
-        )
-    ]
-)
-
-_PRICE_MOVE_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="explain_price_move",
-            description=(
-                "Explain why a ticker moved TODAY. Returns the identified cause (earnings, "
-                "analyst action, company news, a sector-wide move, or an overnight gap), how "
-                "unusual the move is for THIS ticker specifically, how its industry and the "
-                "wider market did, recent headlines, and — for a large unexplained move — a "
-                "web-researched catalyst with sources. ALWAYS call this for any 'why is X "
-                "up/down' question rather than answering from the price alone."
-            ),
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "ticker": types.Schema(
-                        type=types.Type.STRING,
-                        description="The stock ticker symbol (e.g. AAPL, TSLA, MSFT).",
-                    ),
-                },
-                required=["ticker"],
-            ),
-        )
-    ]
-)
-
-_MARKET_SNAPSHOT_TOOL = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name="get_market_snapshot",
-            description=(
-                "Fetch how the market is doing TODAY: every sector's daily move, the leading "
-                "and lagging industries, the biggest gaining and losing stocks, and today's "
-                "market news summary with its cited catalyst. Takes no arguments. Call for "
-                "any question about sectors, market breadth, what is hot or trending today, "
-                "sector rotation, or why the market moved — including when the user names "
-                "one sector, such as Basic Materials or Technology."
-            ),
-            parameters=types.Schema(type=types.Type.OBJECT, properties={}),
-        )
-    ]
-)
-
+# Tool declarations live in `agents/chat_tools.py` — ONE registry for both chat paths.
+# This file used to keep a second copy of every FunctionDeclaration for the non-streaming
+# path, and the two drifted (this copy told the model to fetch a chart "or whether they
+# should buy/sell a stock", which contradicts ADVICE_BOUNDARY). Removed 2026-09-11.
 
 # Asset classes that carry a single live quote, so the `stock_chart` card is meaningful for
 # them. INDEX is deliberately absent — it has no single quote and gets `market_overview`.
@@ -288,6 +127,41 @@ class ChatService:
         self.gemini = get_gemini_client()
         self.fmp = get_fmp_client()
 
+    # ── Screen grounding (shared by both entry points) ───────────────
+
+    async def _resolve_grounding(
+        self, context_type, reference_id, client_context, user_id, context_is_replayed: bool,
+    ):
+        """Resolve the screen's grounding block and decide what it IS.
+
+        Returns ``(context, server_grounded, context_is_replayed)``. The resolver returns
+        the client's own string when it passes through, times out or fails; anything ELSE
+        is a block it just built from the live services. The "replayed snapshot — may be
+        out of date" framing is only true of the pass-through case: the endpoint computes
+        `context_is_replayed` from the REQUEST shape (no client context, a persisted one on
+        the row), which told the model a fresh ETF/CRYPTO/INDEX block was stale on every
+        history reopen. One helper so the streaming and non-streaming paths cannot drift.
+        """
+        from app.services.chat_context_resolver import get_chat_context_resolver
+        context = await get_chat_context_resolver().resolve(
+            context_type, reference_id, client_context=client_context, user_id=user_id,
+        )
+        server_grounded = bool(context) and context != client_context
+        # Cleared only when the resolver REPLACED the client text with a block it built.
+        # COMMODITY *appends* a static bundled profile to the client string — the price /
+        # key-stat figures in that string are still the persisted snapshot on a reopen, so
+        # they keep the "replayed — may be out of date" framing.
+        replaced = server_grounded and not (client_context and client_context in (context or ""))
+        if replaced:
+            context_is_replayed = False
+        return context, server_grounded, context_is_replayed
+
+    @staticmethod
+    def _snapshot_summary_has_data(summary: Optional[str]) -> bool:
+        """True only when at least one snapshot actually arrived — a present category renders
+        a `(N/5).` rating; the all-missing marker never does."""
+        return bool(summary) and "/5)." in summary
+
     # ── Public entry-point ──────────────────────────────────────────
 
     async def generate_response(
@@ -314,9 +188,8 @@ class ChatService:
         legacy) or none on a miss.
         """
         # Screen-aware grounding (never raises; degrades to client context/None).
-        from app.services.chat_context_resolver import get_chat_context_resolver
-        context = await get_chat_context_resolver().resolve(
-            context_type, reference_id, client_context=context, user_id=user_id,
+        context, _server_grounded, context_is_replayed = await self._resolve_grounding(
+            context_type, reference_id, context, user_id, context_is_replayed,
         )
 
         # Step 1: Conversation history
@@ -368,35 +241,7 @@ class ChatService:
 
         # Step 4: Generate with function-calling tools
         widget: Optional[Dict[str, Any]] = None
-
-        async def _handle_stock_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Called when Gemini decides it needs stock data."""
-            ticker = self._chat_symbol(args.get("ticker", ""))
-            return await self._fetch_stock_widget_data(ticker)
-
-        async def _handle_analyst_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Called when Gemini decides it needs analyst data."""
-            ticker = self._chat_symbol(args.get("ticker", ""))
-            return await self._fetch_analyst_data(ticker)
-
-        async def _handle_sentiment_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Called when Gemini decides it needs sentiment data."""
-            ticker = self._chat_symbol(args.get("ticker", ""))
-            return await self._fetch_sentiment_data(ticker)
-
-        async def _handle_market_overview_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Called when Gemini decides it needs market overview data."""
-            symbol = args.get("symbol", "^GSPC").upper()
-            return await self._fetch_market_overview_data(symbol)
-
-        async def _handle_ticker_news_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._fetch_ticker_news_data(self._chat_symbol(args.get("ticker", "")))
-
-        async def _handle_price_move_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._fetch_price_move_data(self._chat_symbol(args.get("ticker", "")))
-
-        async def _handle_market_snapshot_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._fetch_market_snapshot_data()
+        degraded: Optional[str] = None
 
         # Return cached deep dive if available (zero Gemini cost)
         if cached_report:
@@ -407,27 +252,18 @@ class ChatService:
                 "tokens_used": 0,
             }
 
-        # Tools the asset class may call — one shared table with the streaming path
-        # (`agents.chat_tools.tools_for_asset_type`), so the two cannot drift.
-        #
-        # This used to be append-only: the three EQUITY tools went out on EVERY chat and
-        # asset_type could only ADD the index tool. So a crypto chat could call
-        # `get_analyst_analysis("BTCUSD")` — nothing covers a coin — and an index chat could
-        # ask for per-ticker sentiment on ^GSPC. Both come back empty and the model then has to
-        # narrate around a hole it dug itself.
+        # Tools the asset class may call — the SAME declarations and handlers the streaming
+        # path uses (`agents.chat_tools`), so the two paths cannot drift. Filtered by
+        # `tools_for_asset_type`: a crypto chat must not be able to call
+        # `get_analyst_analysis("BTCUSD")` and narrate around the hole it dug.
         allowed = tools_for_asset_type(asset_type)
-        _ALL_TOOLS = {
-            "get_stock_chart_data": (_STOCK_CHART_TOOL, _handle_stock_tool),
-            "get_analyst_analysis": (_ANALYST_ANALYSIS_TOOL, _handle_analyst_tool),
-            "get_sentiment_analysis": (_SENTIMENT_ANALYSIS_TOOL, _handle_sentiment_tool),
-            "get_market_overview": (_MARKET_OVERVIEW_TOOL, _handle_market_overview_tool),
-            "get_ticker_news": (_TICKER_NEWS_TOOL, _handle_ticker_news_tool),
-            "explain_price_move": (_PRICE_MOVE_TOOL, _handle_price_move_tool),
-            "get_market_snapshot": (_MARKET_SNAPSHOT_TOOL, _handle_market_snapshot_tool),
-        }
-        tools = [tool for name, (tool, _) in _ALL_TOOLS.items() if name in allowed]
+        tools = build_chat_tool_declarations(asset_type)
         handlers = {
-            name: handler for name, (_, handler) in _ALL_TOOLS.items() if name in allowed
+            name: handler
+            for name, handler in build_chat_tool_handlers(
+                self, screen_symbol=stock_id, screen_asset_type=asset_type,
+            ).items()
+            if name in allowed
         }
 
         try:
@@ -443,23 +279,50 @@ class ChatService:
                 max_output_tokens=_chat_output_cap(is_deep_dive),
             )
 
-            # If the tool was invoked, extract the widget payload
-            tool_results = response.get("tool_results", [])
-            if tool_results:
-                raw = tool_results[0]
-                if raw and raw.get("widget_type") in ("stock_chart", "market_overview"):
-                    widget = raw
+            # If a renderable tool ran, extract its card — from ANY of the parallel calls
+            # (gemini-2.5 emits several in one turn; `tool_results[0]` was the news result
+            # and the chart was dropped), through the same helper the stream path uses.
+            for raw in response.get("tool_results", []) or []:
+                widget = widget_from_tool_result(raw)
+                if widget is not None:
+                    break
 
         except Exception as e:
             logger.warning(
-                f"Function-calling generation failed, falling back to plain text: {e}"
+                "Function-calling generation failed (%s: %s) — falling back to plain text "
+                "WITHOUT live data; the turn is marked degraded so the caller can refund it",
+                type(e).__name__, e,
             )
-            # Graceful fallback — plain text without widget
+            # Graceful fallback — plain text, no tools, no widget. The answer to a stock
+            # question with no live data is materially less than what was charged for; the
+            # stream path already refunds its degraded shapes, this path did not even say so.
+            degraded = "no_tools"
             response = await self.gemini.generate_text(
                 prompt=prompt,
-                system_instruction=system_instruction,
+                # Rebuilt WITHOUT tool claims: the fallback has no tools, and a prompt that
+                # says "you have explain_price_move" to a model with nothing attached is an
+                # invitation to supply the tool's output from memory.
+                system_instruction=self._build_system_instruction(
+                    session_type, stock_id, profit_summary=profit_summary,
+                    snapshot_summary=snapshot_summary,
+                    company_profile_summary=company_profile_summary,
+                    client_context=context, asset_type=asset_type,
+                    context_is_replayed=context_is_replayed, reader_lens=reader_lens,
+                    is_deep_dive=is_deep_dive, reference_id=reference_id,
+                    tools_granted=False,
+                ),
                 max_output_tokens=_chat_output_cap(is_deep_dive),
             )
+        else:
+            # The round succeeded, but if EVERY tool the model called came back as an error
+            # (an FMP rate limit, a timeout) the answer has none of its live data either.
+            errs = response.get("tool_errors") or []
+            if errs and not response.get("tool_results"):
+                logger.warning(
+                    "Every tool call failed on the non-streaming turn (%s) — marking degraded",
+                    ", ".join(f"{e.get('name')}: {e.get('error')}" for e in errs)[:300],
+                )
+                degraded = "no_tools"
 
         ai_text = response["text"]
 
@@ -478,6 +341,8 @@ class ChatService:
             "citations": citations if citations else None,
             "tokens_used": response.get("tokens_used"),
         }
+        if degraded:
+            result["degraded"] = degraded
         if widget:
             result["widget"] = widget
 
@@ -509,9 +374,8 @@ class ChatService:
         Returns ``{prompt, system_instruction, citations, widget}``.
         """
         # Screen-aware grounding (never raises).
-        from app.services.chat_context_resolver import get_chat_context_resolver
-        context = await get_chat_context_resolver().resolve(
-            context_type, reference_id, client_context=context, user_id=user_id,
+        context, server_grounded, context_is_replayed = await self._resolve_grounding(
+            context_type, reference_id, context, user_id, context_is_replayed,
         )
 
         history = self._get_recent_messages(session_id, limit=20)
@@ -550,14 +414,22 @@ class ChatService:
                 self._get_company_profile_summary(stock_id),
             )
 
-        system_instruction = self._build_system_instruction(
-            session_type, stock_id, profit_summary=profit_summary,
+        instr_kwargs = dict(
+            profit_summary=profit_summary,
             snapshot_summary=snapshot_summary,
             company_profile_summary=company_profile_summary,
             client_context=context, asset_type=asset_type,
             context_is_replayed=context_is_replayed, reader_lens=reader_lens,
             is_deep_dive=is_deep_dive,
             reference_id=reference_id,
+        )
+        system_instruction = self._build_system_instruction(session_type, stock_id, **instr_kwargs)
+        # The same instruction WITHOUT tool claims, for the calls on this turn that carry no
+        # tools: the synthesis MERGE (`stream_text` over the specialists' answers). Telling a
+        # tool-less model "call explain_price_move before answering" invites it to supply
+        # that tool's output from memory.
+        system_instruction_no_tools = self._build_system_instruction(
+            session_type, stock_id, tools_granted=False, **instr_kwargs,
         )
         prompt = self._build_prompt(user_message, conversation_block, chunks)
         widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
@@ -567,17 +439,32 @@ class ChatService:
         quote_line = self._widget_grounding_line(widget)
         if quote_line:
             system_instruction += quote_line
+        # EARNED, for every context type: a pill says "this answer used X", and it must be
+        # true. Server-side enrichment (profile / margins / snapshots) counts ONLY on a
+        # STOCK screen — a TICKER_REPORT chat whose report never resolved falls through to
+        # the same live enrichment, and "Cay research report · AAPL" must not be earned by
+        # a company profile. And only enrichment that actually arrived counts: the
+        # all-snapshots-missing marker is text for the model, not grounding.
+        ctype = (context_type or "").strip().upper()
+        enrichment_arrived = bool(profit_summary or company_profile_summary) or \
+            self._snapshot_summary_has_data(snapshot_summary)
+        grounded = bool(context) or (ctype == "STOCK" and enrichment_arrived)
         sources = self._build_sources(
-            context_type, reference_id, citations, resolved_context=context
+            context_type, reference_id, citations, resolved_context=context, grounded=grounded,
         )
 
         return {
             "prompt": prompt,
             "system_instruction": system_instruction,
+            "system_instruction_no_tools": system_instruction_no_tools,
             "citations": citations if citations else None,
             "widget": widget,
             "sources": sources if sources else None,
             "asset_type": asset_type,
+            # Did grounding actually arrive? The `sources` pill above is the consumer today;
+            # the iOS chip still keys on the context TYPE and is a follow-up.
+            "grounded": grounded,
+            "server_grounded": server_grounded,
             # The endpoint uses these to serve a cache hit without touching Gemini, and to
             # write the answer back after a successful stream.
             "is_deep_dive": is_deep_dive,
@@ -683,7 +570,9 @@ class ChatService:
         merge_yielded = False
         try:
             async for kind, text in self.gemini.stream_text(
-                synth_prompt, system_instruction=prep["system_instruction"],
+                synth_prompt,
+                # No tools on this call → the instruction must claim none (see prep).
+                system_instruction=prep.get("system_instruction_no_tools") or prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
             ):
                 if kind == "answer" and text:
@@ -722,17 +611,15 @@ class ChatService:
     # context_types whose reference_id is a user-readable ticker (vs. a slug/order id).
     _TICKER_CONTEXTS = {"TICKER_REPORT", "STOCK", "ETF", "CRYPTO", "INDEX", "COMMODITY"}
 
-    # context_types whose grounding is ENTIRELY client-supplied: `ChatContextResolver`
-    # passes BOOK straight through (the guide text is bundled in the iOS app) and has no
-    # server-side source to fall back on. For these the pill must be EARNED by text
-    # actually arriving, not asserted because the context type was set.
-    #
-    # It previously was asserted, and the result was a lie on screen: chat RAG is off
-    # (CHAT_RAG_ENABLED), `book_chunks` is empty and nothing calls `search_book_chunks`,
-    # so "Grounded on Book · 1 source" appeared above an answer drawn from the model's own
-    # recollection of the published book — which is both the copyright-exposed path and a
-    # claim Terms of Use section 8 specifically disclaims.
-    _CLIENT_GROUNDED_CONTEXTS = {"BOOK"}
+    # The pill must be EARNED by grounding actually arriving, not asserted because the
+    # context type was set — for EVERY context type (2026-09-11; it used to apply to BOOK
+    # alone). The BOOK case is why the rule exists: chat RAG is off, `book_chunks` is
+    # empty, so "Grounded on Book · 1 source" appeared above an answer drawn from the
+    # model's own recollection of the published book — the copyright-exposed path, under
+    # a claim Terms of Use section 8 disclaims. TICKER_REPORT had the same shape: iOS sends
+    # no context for it, the resolver returns None on a cache miss, the chat answers from
+    # the live quote — and the card said "Cay research report · AAPL". The resolver's 4 s
+    # timeout produces the same false pill on ETF/CRYPTO/INDEX/COMMODITY.
 
     # RAG chunk source_type → the human "source" pill label. Absent/unknown → "SEC filing"
     # (the filing-only stock path, whose chunks carry no source_type).
@@ -746,17 +633,22 @@ class ChatService:
         citations: Optional[List[Dict]],
         *,
         resolved_context: Optional[str] = None,
+        grounded: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """Build the small "sources" list for the thinking card from the grounding we
         already resolved: one pill for the screen context + one per distinct SEC-filing
         section surfaced by RAG. No web/URL sources — this is our cached grounding only.
-        Never raises; returns [] when there's nothing to show."""
+        Never raises; returns [] when there's nothing to show.
+
+        The screen pill is emitted only when grounding actually ARRIVED: `grounded` when
+        the caller knows (prepare_stream_generation does), else whether `resolved_context`
+        carries text. A context type alone never earns it."""
         sources: List[Dict[str, Any]] = []
         ctype = (context_type or "").strip().upper()
         label = cls._CONTEXT_SOURCE_LABEL.get(ctype)
-        if label and ctype in cls._CLIENT_GROUNDED_CONTEXTS:
-            if not (resolved_context or "").strip():
-                label = None
+        earned = grounded if grounded is not None else bool((resolved_context or "").strip())
+        if label and not earned:
+            label = None
         if label:
             detail = None
             ref = (reference_id or "").strip()
@@ -823,8 +715,9 @@ class ChatService:
             asset_type = (
                 self._detect_asset_type(symbol, context_type) if symbol else "NORMAL"
             )
+            # No tools on this call → the instruction must claim none.
             system = self._build_system_instruction(
-                "NORMAL", None, asset_type=asset_type,
+                "NORMAL", None, asset_type=asset_type, tools_granted=False,
             )
             prompt = (
                 "Given this question-and-answer, propose EXACTLY 2 short follow-up questions "
@@ -872,8 +765,14 @@ class ChatService:
             if asset_type == "CRYPTO":
                 # The crypto screen may hand us the bare form; the coin is priced as the pair.
                 symbol = canonical_stored_symbol(symbol, "crypto")
+            # Bounded like a tool handler. On INDEX this re-enters `get_index_detail` —
+            # the exact cold-cache recompute the context resolver caps at 4 s — and it
+            # used to sit in the pre-first-token path with NO bound.
+            timeout = float(getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
             if asset_type == "INDEX":
-                raw = await self._fetch_market_overview_data(symbol)
+                raw = await asyncio.wait_for(
+                    self._fetch_market_overview_data(symbol), timeout=timeout,
+                )
                 if raw and raw.get("widget_type") == "market_overview":
                     return raw
             elif asset_type in _QUOTED_WIDGET_ASSET_TYPES:
@@ -884,9 +783,14 @@ class ChatService:
                 # `StockChartWidget` and iOS renders P/E only when it is present. The model
                 # could ALREADY produce this exact card for a coin via `get_stock_chart_data`,
                 # so the path is proven — it just wasn't deterministic.
-                raw = await self._fetch_stock_widget_data(symbol)
+                raw = await asyncio.wait_for(self._fetch_stock_widget_data(symbol), timeout=timeout)
                 if raw and raw.get("widget_type") == "stock_chart":
                     return raw
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Deterministic widget fetch TIMED OUT (%s/%s/%s) — answering without the card",
+                asset_type, stock_id, reference_id,
+            )
         except Exception as e:
             logger.warning(
                 f"Deterministic widget fetch failed ({asset_type}/{stock_id}/{reference_id}): {e}"
@@ -1215,7 +1119,9 @@ class ChatService:
 
     # ── Sentiment data fetching for the sentiment tool ───────────
 
-    async def _fetch_sentiment_data(self, ticker: str) -> Dict[str, Any]:
+    async def _fetch_sentiment_data(
+        self, ticker: str, is_crypto: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """
         Fetch sentiment analysis data for use in chat responses.
         Returns a dict summary suitable for Gemini to interpret.
@@ -1233,7 +1139,8 @@ class ChatService:
             from app.services.sentiment_service import get_sentiment_service
 
             service = get_sentiment_service()
-            is_crypto = detect_asset_class(ticker, include_bare_coins=True) == "crypto"
+            if is_crypto is None:
+                is_crypto = detect_asset_class(ticker, include_bare_coins=True) == "crypto"
             # FMP wants the pair ("BTCUSD"); ApeWisdom wants the bare base ("BTC"). The crypto
             # endpoint already splits them this way — mirror it, or social mentions come back
             # empty for every coin. Trailing-only strip: a global replace turns USDT into T.
@@ -1299,28 +1206,34 @@ class ChatService:
     # ── Market awareness (see `services/chat_market_tools.py` for the why) ────────
     #
     # Thin delegations on purpose. The logic lives in one module so the streaming and
-    # non-streaming registries — which build their `types.Tool` objects separately and
-    # have drifted before — cannot end up with two different implementations of the same
-    # tool name.
+    # ONE registry for both chat paths (`agents.chat_tools`) — see `build_chat_tool_declarations`.
 
-    async def _fetch_ticker_news_data(self, ticker: str) -> Dict[str, Any]:
+    async def _fetch_ticker_news_data(
+        self, ticker: str, is_crypto: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """Recent headlines for a ticker. The tool chat has never had."""
         from app.services.chat_market_tools import fetch_ticker_news
 
         # Derived here rather than defaulted downstream, exactly as `_fetch_sentiment_data`
         # does: a coin routed through the equity news feed comes back empty, and the model
         # then reports "no news" for the most-discussed asset on the screen.
-        return await fetch_ticker_news(
-            ticker, is_crypto=detect_asset_class(ticker, include_bare_coins=True) == "crypto"
-        )
+        if is_crypto is None:
+            is_crypto = detect_asset_class(ticker, include_bare_coins=True) == "crypto"
+        return await fetch_ticker_news(ticker, is_crypto=is_crypto)
 
-    async def _fetch_price_move_data(self, ticker: str) -> Dict[str, Any]:
-        """Why this ticker moved today — deterministic first, web search only if needed."""
+    async def _fetch_price_move_data(
+        self, ticker: str, is_crypto: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Why this ticker moved today — deterministic first, web search only if needed.
+
+        `is_crypto` may be passed by a handler that KNOWS the asset class (the screen's own
+        symbol on an equity screen); otherwise it is detected, bare coins included.
+        """
         from app.services.chat_market_tools import explain_price_move
 
-        return await explain_price_move(
-            ticker, is_crypto=detect_asset_class(ticker, include_bare_coins=True) == "crypto"
-        )
+        if is_crypto is None:
+            is_crypto = detect_asset_class(ticker, include_bare_coins=True) == "crypto"
+        return await explain_price_move(ticker, is_crypto=is_crypto)
 
     async def _fetch_market_snapshot_data(self) -> Dict[str, Any]:
         """Sector/industry breadth, today's movers, and the Updates AI market card."""
@@ -1561,16 +1474,39 @@ class ChatService:
             )
 
             rating_labels = {5: "High", 4: "Solid", 3: "Moderate", 2: "Soft", 1: "Low"}
-            parts = []
+            # The exact `category` each service renders, so a missing entry is named the
+            # same way a present one would be (the model must not read "Price" and
+            # "Valuation" as two different vitals).
+            names = ("Profitability", "Growth", "Price", "Financial Health", "Insiders & Ownership")
+            parts: List[str] = []
+            missing: List[str] = []
 
-            for snap in results:
-                if isinstance(snap, Exception):
+            for name, snap in zip(names, results):
+                if isinstance(snap, Exception) or snap is None:
+                    # Named, not skipped. The model reads this block as "the company's
+                    # vitals"; a silently dropped category read as a company with no
+                    # such vital, and a three-of-five block was answered as if complete.
+                    if isinstance(snap, Exception):
+                        logger.warning(
+                            "Snapshot %s unavailable for %s (%s: %s)",
+                            name, ticker, type(snap).__name__, snap,
+                        )
+                    missing.append(name)
                     continue
                 metrics_str = ", ".join(f"{m.name}: {m.value}" for m in snap.metrics)
                 label = rating_labels.get(snap.rating, "Unknown")
                 parts.append(f"{snap.category}: {label} ({snap.rating}/5). {metrics_str}.")
 
-            return f"Snapshots for {ticker}: " + " ".join(parts) if parts else None
+            if not parts and not missing:
+                return None
+            summary = f"Snapshots for {ticker}: " + " ".join(parts) if parts else f"Snapshots for {ticker}:"
+            if missing:
+                summary += (
+                    f" {', '.join(missing)} snapshot{'s' if len(missing) > 1 else ''} "
+                    f"unavailable right now — say the data could not be checked; do not "
+                    f"describe {'them' if len(missing) > 1 else 'it'} as absent, weak or unknown."
+                )
+            return summary
         except Exception as e:
             logger.warning(f"Snapshot summary fetch failed for {ticker}: {e}")
             return None
@@ -1838,15 +1774,25 @@ class ChatService:
         reader_lens: Optional[str] = None,
         is_deep_dive: bool = False,
         reference_id: Optional[str] = None,
+        tools_granted: bool = True,
     ) -> str:
+        # The tools this chat is ACTUALLY granted. Every tool the prompt names below is
+        # conditioned on this set: a clause that says "when you have access to the X tool"
+        # on a chat that has no X tool is an invitation to supply X from memory.
+        # `tools_granted=False` is the tool-less fallback: the SAME prompt with tool claims
+        # would tell a model that has no tools to "call explain_price_move before answering".
+        allowed = tools_for_asset_type(asset_type) if tools_granted else frozenset()
         base = (
             # Single source of truth for the identity guard (persona_config.IDENTITY_RULE),
             # so the chat surface and the report-persona surface can never drift.
             IDENTITY_RULE
             + "You specialize in value investing education. "
-            "When you have access to real stock data from the get_stock_chart_data tool, "
-            "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
-            "analysis. "
+            + (
+                "When you have access to real stock data from the get_stock_chart_data tool, "
+                "incorporate the actual numbers (price, change, volume, P/E, etc.) into your "
+                "analysis. "
+                if "get_stock_chart_data" in allowed else ""
+            )
             # Conditional on the LICENCE, not on the asset class. `get_analyst_analysis` is
             # withheld entirely when `grades` / `price-target-consensus` are unentitled
             # (`tools_for_asset_type`), and instructing a model to incorporate output from a
@@ -1855,67 +1801,32 @@ class ChatService:
                 "When you have access to analyst data from the get_analyst_analysis tool, "
                 "incorporate the consensus rating, price targets, analyst counts, and "
                 "recent upgrade/downgrade actions into your analysis. "
-                if analyst_section_available()
+                if analyst_section_available() and "get_analyst_analysis" in allowed
                 else "You have NO analyst ratings or price-target data. If asked about analyst "
                 "consensus, price targets, or upgrades/downgrades, say plainly that Caydex "
                 "does not have that data rather than estimating or recalling it. "
             )
-            + "When you have access to sentiment data from the get_sentiment_analysis tool, "
-            "incorporate the mood score, social mentions, and news sentiment into your analysis. "
-            "Explain what the sentiment means in plain language. "
+            + (
+                "When you have access to sentiment data from the get_sentiment_analysis tool, "
+                "incorporate the mood score, social mentions, and news sentiment into your "
+                "analysis. Explain what the sentiment means in plain language. "
+                if "get_sentiment_analysis" in allowed else ""
+            )
             # ── WHAT YOU CAN DO ──
             #
-            # This block exists because its absence shipped a user-visible refusal. Asked why
-            # a sector was lagging, the model answered "My tools are designed to analyze
-            # individual company stocks rather than entire sectors" — a sentence written by no
-            # prompt in this repo. It was a reasonable inference: the only capability named
-            # positively above was a ticker-keyed price tool, and the analyst clause right
-            # before it is a REFUSAL TEMPLATE. With two ticker tools in view and an example of
-            # declining, declining generalised.
-            #
-            # So the fix is not a "be more helpful" exhortation, which would only push the
-            # model to answer from memory. It is naming the tools that now exist, and saying
-            # which question each one answers.
-            + "WHAT YOU CAN ANSWER. You are not limited to a single company's price. You also "
-            "have: get_ticker_news for recent headlines about a company or coin; "
-            "explain_price_move for why a specific ticker moved TODAY — it returns the actual "
-            "cause, how unusual the move is for that ticker, how its industry and the market "
-            "did, and for a big unexplained move a web-researched catalyst with sources; and "
-            "get_market_snapshot for how the market itself is doing today — every sector's "
-            "move, leading and lagging industries, the day's biggest gainers and losers, and "
-            "today's market news summary. "
-            "WHEN THE USER ASKS 'WHY', CALL A TOOL BEFORE ANSWERING. 'Why is X down today?' "
-            "means call explain_price_move — never restate the price, the change and the "
-            "volume back to the user and stop, because that answers a different question than "
-            "the one asked. 'Why is <sector> lagging?', 'what's hot today?' and 'what topics "
-            "are hot?' mean call get_market_snapshot; it covers every sector by name, so you "
-            "can answer sector questions and must not say you only handle individual stocks. "
-            # ── NEVER A DEAD END ──
-            #
-            # Added after a follow-up chip Cay AI had itself PROPOSED — "What caused copper to
-            # drop?" — came back "I don't have specific information on what caused copper to
-            # drop today." The tool surface was not the problem that time: the snapshot knew
-            # copper-related industries were down ~6%, and the turn before had named the
-            # market-wide driver. The model simply declined.
-            #
-            # The rule is therefore about the SHAPE of the answer, not about trying harder.
-            # "It moved the way it normally moves" and "no single catalyst is visible" are
-            # both real answers to "why". "I don't know" is not, and a product that asks the
-            # question must not shrug at it.
-            "NEVER END A 'WHY' QUESTION WITH 'I DON'T HAVE THAT INFORMATION'. Every such "
-            "question gets one of exactly three answers: (a) the actual cause, when a tool "
-            "gives you one; (b) that the move is ordinary — say it moved within its normal "
-            "range, the everyday up-and-down, and give the number; or (c) that the move is "
-            "genuinely large but no single catalyst is visible in today's news — say that "
-            "plainly and then give the context you DO have. The explain_price_move tool "
-            "returns a `bottom_line` written for exactly this; use it rather than declining. "
-            "THIS APPLIES TO SECTORS, INDUSTRIES, COMMODITIES AND THEMES TOO, not only "
-            "tickers. get_market_snapshot lists every sector and every industry that moved, "
-            "so for 'why is copper down' or 'what's happening in semiconductors' name the "
-            "move, compare it with its sector and the market, and use the market news "
-            "summary for the wider driver. Never supply a reason a tool did not give you, "
-            "and never pad an answer with a guess — but never stop at 'I don't know' either. "
-            "Write your response in clean markdown. "
+            # Rendered from the tools this asset class is ACTUALLY granted
+            # (`chat_tools.capability_block(tools_for_asset_type(asset_type))`). The
+            # previous hardcoded paragraph named get_ticker_news / explain_price_move /
+            # get_market_snapshot unconditionally and ORDERED the model to call
+            # explain_price_move — on an INDEX chat, which has neither news tool, and on a
+            # COMMODITY chat, which has no explain_price_move. Telling a model to call a
+            # tool it cannot see is how it ends up explaining that it cannot do sectors
+            # (the exact failure the macro-lens comment in chat_specialists documents),
+            # or supplying the tool's output from memory. It also carries the "never a
+            # dead end" rule, whose `bottom_line` hint is attached only where the tool
+            # that returns it exists.
+            + capability_block(allowed)
+            +             "Write your response in clean markdown. "
             # Brevity for an ordinary question, a structured brief for the AI Analyst button.
             # These two CONTRADICT each other, which is why only one may ever be present: the
             # deep-dive prompt asks for fundamentals + valuation + moat + risks + outlook, and

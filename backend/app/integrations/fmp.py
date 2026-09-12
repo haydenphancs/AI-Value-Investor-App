@@ -33,6 +33,7 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
 
 
 from app.integrations.fmp_entitlements import (
+    INDEX_CONSTITUENT_PATHS,
     SYMBOL_SENSITIVE_PREFIXES,
     entitlement_error,
     is_blocked_symbol,
@@ -424,10 +425,19 @@ class FMPClient:
         market_cap_more_than: Optional[int] = None,
         exchange: Optional[str] = None,
         actively_trading: Optional[bool] = None,
+        is_fund: Optional[bool] = None,
+        is_etf: Optional[bool] = None,
         limit: int = 10000,
         page: int = 0,
     ) -> List[Dict[str, Any]]:
         """Screener sweep — the entitled BATCH price source.
+
+        `is_fund` / `is_etf` map to the screener's `isFund` / `isEtf` filters and are sent
+        only when given, so existing callers are unchanged. Measured 2026-09-11 for the
+        universe sweep (>$50M, NASDAQ/NYSE/AMEX, actively trading): WITHOUT `isFund=false`
+        page 0 is 10,000 rows of which 3,719 are open-end mutual funds (GOLDX-style, one
+        NAV print a day, `volume: 0`) and a second 1,648-row page follows; WITH it the
+        whole universe fits in one 7,116-row page.
 
         Replaces `batch-quote` ("Real-time Market Data", not purchased). Returns
         ``symbol, companyName, marketCap, sector, industry, beta, price, volume,
@@ -450,6 +460,10 @@ class FMPClient:
             params["exchange"] = exchange
         if actively_trading is not None:
             params["isActivelyTrading"] = "true" if actively_trading else "false"
+        if is_fund is not None:
+            params["isFund"] = "true" if is_fund else "false"
+        if is_etf is not None:
+            params["isEtf"] = "true" if is_etf else "false"
         data = await self._make_request("company-screener", params=params)
         return data if isinstance(data, list) else []
 
@@ -820,6 +834,13 @@ class FMPClient:
                     head = listing[0]
                     year = _yr(head)
                     quarter = int(head.get("quarter") or 0)
+            except FMPNotEntitledException as e:
+                # `earning-call-transcript-dates` is the "Earnings Call Transcripts" package,
+                # not on the Order Form: `_raise_if_not_entitled` refuses it before any HTTP
+                # call. A permanent, by-design condition is not a WARNING per cold
+                # collection (five symbols × every pre-warm cycle in prod).
+                logger.debug("earning-call-transcript-dates skipped for %s: %s", symbol, e)
+                return ""
             except Exception as e:
                 logger.warning(
                     f"earning-call-transcript-dates failed for {symbol}: {e}"
@@ -1098,12 +1119,7 @@ class FMPClient:
 
     async def get_index_constituents(self, symbol: str) -> List[Dict[str, Any]]:
         """Get constituent list for a given index symbol."""
-        endpoint_map = {
-            "^GSPC": "sp500-constituent",
-            "^DJI": "dowjones-constituent",
-            "^IXIC": "nasdaq-constituent",
-        }
-        endpoint = endpoint_map.get(symbol.upper())
+        endpoint = INDEX_CONSTITUENT_PATHS.get(symbol.upper())
         if not endpoint:
             return []
         try:

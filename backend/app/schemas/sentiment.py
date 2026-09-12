@@ -39,3 +39,10 @@ class SentimentAnalysisResponse(BaseModel):
     news_neutral_7d: int = 0           # neutral articles in 7d
     # Social data availability
     social_data_available: bool         # True if ApeWisdom has data for this ticker
+    # Per-window "was this LOOKED UP" flags. `social_mentions*` are shipped non-Optional
+    # floats (old builds decode a plain Double), so an unknown count still travels as 0.0
+    # — these say whether that 0.0 was measured. False = the lookup failed (a DB error,
+    # an ApeWisdom timeout); the client renders "—", not "0 mentions". Default True so
+    # any other builder keeps the old meaning; `sentiment_service` sets both explicitly.
+    social_mentions_known: bool = True
+    social_mentions_7d_known: bool = True

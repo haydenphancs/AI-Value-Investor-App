@@ -72,12 +72,22 @@ class BenchmarkSummaryResponse(BaseModel):
     """Commodity's copy of the benchmark shape. Same contract as `schemas.etf`’s —
     read the invariant documented there before changing either.
 
-    `badge_threshold` is absent on purpose, so iOS falls back to 0 and shows the verdict
-    badge on any non-zero gap.
+    ⚠️ `badge_threshold` is SENT, explicitly 0.0 — it used to be absent "so iOS falls back
+    to 0", and that premise was wrong. There is ONE shared decoder for this shape on the
+    client (`BenchmarkSummaryDTO` in `CryptoAPIModels.swift`, whose own comment warns that
+    "a field added here reaches all four screens at once — and so does a mistake"), and its
+    fallback is `badgeThreshold ?? 5.0` — CRYPTO's threshold, chosen because crypto CAGRs
+    are large enough that a sub-5-point gap is noise. Commodities are not. Gold, silver and
+    palladium all land within a few points of the S&P's CAGR over the ~19-year window FMP's
+    5,000-row cap yields, so the most-viewed commodity screens were exactly the ones that
+    silently lost their "Outperforming / Underperforming all-time" verdict, while an
+    identically sized gap on a stock or ETF (both of which send 0.0 explicitly) drew it.
+    Relying on a client default that disagrees with the server's intent is not a contract.
     """
 
     avg_annual_return: float
     sp_benchmark: float
+    badge_threshold: float = 0.0
     benchmark_name: str = "S&P 500"
     since_date: Optional[str] = None
     window_label: Optional[str] = None

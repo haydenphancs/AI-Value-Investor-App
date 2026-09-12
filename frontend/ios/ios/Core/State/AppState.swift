@@ -1131,6 +1131,11 @@ final class AppState {
         // Same argument, one layer down: a signed book URL minted for the ended session is
         // still valid for hours, and this store is keyed by nothing but curriculum order.
         BookAudioURLStore.shared.reset()
+        // And the BYTES those two guards protect. `LearnAudioCache` mirrors Pro/Max-gated
+        // narration into Library/Caches (up to 400 MB); locking the entitlement and dropping
+        // the signed URLs left every downloaded clip on disk for the next account on this
+        // phone — playable through any path that reads the cache before it asks the gate.
+        LearnAudioCache.shared.purgeAll()
         // The widget snapshot is the same bug class with the widest blast radius: it lives in
         // a device-global App Group container, and unlike everything else here it is visible
         // on the HOME SCREEN — the previous account's holdings and their biggest mover,

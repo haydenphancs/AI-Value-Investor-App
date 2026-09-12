@@ -464,25 +464,102 @@ def test_chat_symbol_resolves_a_bare_coin_to_the_pair(raw, expected):
     assert ChatService._chat_symbol(raw) == expected
 
 
-def test_every_ticker_tool_handler_resolves_through_chat_symbol():
-    """Brace-bound to the handler closures: each `args.get("ticker"...)` read inside a
-    `_handle_*_tool` must pass through `_chat_symbol`, not a bare `.upper()`."""
-    import inspect
-    import re
-    src = inspect.getsource(ChatService)
-    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
-    handlers = re.findall(
-        r"async def (_handle_\w+_tool)\(args[^\n]*\n(.*?)(?=\n        async def |\n        [a-zA-Z_]+ = )",
-        code, re.S,
-    )
-    names = [h for h, _ in handlers]
-    assert {"_handle_stock_tool", "_handle_sentiment_tool", "_handle_ticker_news_tool",
-            "_handle_price_move_tool"} <= set(names), names
-    for name, body in handlers:
-        if 'args.get("ticker"' not in body:
-            continue
-        assert "_chat_symbol(" in body, f"{name} fetches on the raw ticker"
-        assert 'args.get("ticker", "").upper()' not in body, f"{name} bypasses _chat_symbol"
+@pytest.mark.asyncio
+async def test_every_ticker_tool_handler_resolves_through_chat_symbol():
+    """Every ticker-keyed tool handler must fetch on `ChatService._chat_symbol(...)`, not the
+    raw model argument: a typed "BTC" means Bitcoin in chat, and the bare form routes to the
+    Grayscale ETF's $34 quote under a 24/7 "Live" dot.
+
+    BEHAVIOURAL, against the ONE handler registry both chat paths now share
+    (`chat_tools.build_chat_tool_handlers`). The previous version source-scanned the
+    `_handle_*_tool` closures inside `generate_response`, which no longer exist — the
+    non-streaming path's private copy of the tools was the drift that let this bug in.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc = _svc()
+    seen: dict = {}
+    for name in ("_fetch_stock_widget_data", "_fetch_analyst_data", "_fetch_sentiment_data",
+                 "_fetch_ticker_news_data", "_fetch_price_move_data"):
+        async def _rec(ticker, _name=name):
+            seen[_name] = ticker
+            return {"ok": True}
+        setattr(svc, name, _rec)
+    svc._fetch_market_overview_data = AsyncMock(return_value={})
+    svc._fetch_market_snapshot_data = AsyncMock(return_value={})
+
+    handlers = build_chat_tool_handlers(svc)
+    for tool in ("get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
+                 "get_ticker_news", "explain_price_move"):
+        await handlers[tool]({"ticker": "btc"})
+    # The real static `_chat_symbol` ran: bare coin → the pair the data path prices.
+    assert set(seen.values()) == {"BTCUSD"}, seen
+    assert len(seen) == 5, "every ticker-keyed handler must be exercised"
+
+    for tool in ("get_stock_chart_data", "get_ticker_news"):
+        await handlers[tool]({"ticker": "aapl"})
+    assert seen["_fetch_stock_widget_data"] == "AAPL" and seen["_fetch_ticker_news_data"] == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_the_screens_own_symbol_is_not_canonicalised_as_a_coin():
+    """On the LTC Properties (NYSE: LTC) detail screen the model calls
+    get_stock_chart_data("LTC") and means the REIT on screen, not Litecoin. The screen
+    already resolved the asset class; canonicalising here re-created the bare-coin
+    collision migration 160 fixed. A DIFFERENT ticker keeps chat's bare-coin rule."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc = _svc()
+    seen: dict = {}
+
+    async def _rec(ticker):
+        seen["ticker"] = ticker
+        return {"ok": True}
+
+    svc._fetch_stock_widget_data = _rec
+    handlers = build_chat_tool_handlers(svc, screen_symbol="ltc", screen_asset_type="STOCK")
+    await handlers["get_stock_chart_data"]({"ticker": "ltc"})
+    assert seen["ticker"] == "LTC"
+    await handlers["get_stock_chart_data"]({"ticker": "btc"})
+    assert seen["ticker"] == "BTCUSD"
+    # No screen (a global chat): the bare coin IS the coin, as before.
+    handlers = build_chat_tool_handlers(svc)
+    await handlers["get_stock_chart_data"]({"ticker": "ltc"})
+    assert seen["ticker"] == "LTCUSD"
+    # A CRYPTO session may still store the bare coin (pre-2026-08-20 installs): no exemption,
+    # or the chart leg serves the Grayscale trust beside a Bitcoin base card.
+    handlers = build_chat_tool_handlers(svc, screen_symbol="BTC", screen_asset_type="CRYPTO")
+    await handlers["get_stock_chart_data"]({"ticker": "btc"})
+    assert seen["ticker"] == "BTCUSD"
+
+
+@pytest.mark.asyncio
+async def test_the_equity_screen_exemption_travels_as_is_crypto_false():
+    """The news / sentiment / price-move fetchers re-derive `is_crypto` from the TICKER with
+    bare coins included, so "LTC" on the LTC Properties screen would still route to the
+    crypto branch. The exemption must arrive as an explicit `is_crypto=False`."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc = _svc()
+    seen: dict = {}
+
+    def _rec(name):
+        async def _f(ticker, is_crypto=None):
+            seen[name] = (ticker, is_crypto)
+            return {"ok": True}
+        return _f
+    for name in ("_fetch_sentiment_data", "_fetch_ticker_news_data", "_fetch_price_move_data"):
+        setattr(svc, name, _rec(name))
+
+    handlers = build_chat_tool_handlers(svc, screen_symbol="LTC", screen_asset_type="STOCK")
+    for tool in ("get_sentiment_analysis", "get_ticker_news", "explain_price_move"):
+        await handlers[tool]({"ticker": "ltc"})
+    assert set(seen.values()) == {("LTC", False)}, seen
+    # A user-typed OTHER coin keeps the default detection (None → derive from the ticker).
+    await handlers["get_ticker_news"]({"ticker": "eth"})
+    assert seen["_fetch_ticker_news_data"] == ("ETHUSD", None)
 
 
 def test_the_deterministic_crypto_widget_fetches_the_pair():

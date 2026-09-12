@@ -69,10 +69,10 @@ _REPORT_CHAT_PREFIX = "report_chat:"
 #:
 #: Sources, so this stays auditable:
 #:   report_charge            endpoints/research.py, endpoints/ticker_report.py
-#:   chat_charge              endpoints/chat.py, endpoints/ticker_report.py
+#:   chat_charge              endpoints/chat.py (ticker_report.py's report-chat route was deleted 2026-09-11)
 #:   report_refund*           endpoints/research.py, endpoints/ticker_report.py,
 #:                            services/research_reconciliation_service.py
-#:   chat_*                   endpoints/chat.py, endpoints/ticker_report.py
+#:   chat_*                   endpoints/chat.py (ticker_report.py's report-chat route was deleted 2026-09-11)
 #:   grant / monthly_reset    SQL: create_user_credits(), ensure_credit_period()
 #:   tier_upgrade/_revoked    SQL: grant_tier_upgrade(), revoke_tier_credits()
 #:   pack_purchase/_revoked   SQL: add_purchased_credits(), revoke_purchased_credits()

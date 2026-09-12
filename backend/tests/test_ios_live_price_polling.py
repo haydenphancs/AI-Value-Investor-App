@@ -125,16 +125,39 @@ def test_the_etf_refresh_arms_instead_of_guarding_on_a_socket():
     assert "isConnected" not in body, "a permanently-false guard blocks the refresh"
 
 
-@pytest.mark.parametrize("vm", ["TickerDetailViewModel", "ETFDetailViewModel",
-                                "IndexDetailViewModel"])
+@pytest.mark.parametrize("vm", ["TickerDetailViewModel"])
 def test_the_intraday_chart_timer_is_gated_on_the_interval_alone(vm):
-    """`isIntraday && isConnected` is false forever once the socket is gone."""
+    """`isIntraday && isConnected` is false forever once the socket is gone.
+
+    Only `TickerDetailViewModel` still gates the TIMER on the interval, and there that is
+    correct: its timer body itself begins `guard selectedInterval.isIntraday`, so on a
+    daily chart the timer would do nothing anyway.
+    """
     code = _strip_comments(_read(f"ViewModels/{vm}.swift"))
     m = re.search(r"if\s+[\w.]*[Rr]ange\.defaultInterval\.isIntraday([^\{]*)\{", code)
     assert m, f"{vm}: the intraday chart-refresh gate is missing — scan drifted"
     assert "isConnected" not in m.group(1), (
         f"{vm}: the chart timer is still conjoined with a socket check"
     )
+
+
+@pytest.mark.parametrize("vm", ["ETFDetailViewModel", "IndexDetailViewModel"])
+def test_the_level_refresh_is_not_killed_by_a_daily_range(vm):
+    """These two refresh the LEVEL on every tick and only the BARS when intraday — their
+    timer bodies say so. Stopping the timer on a non-intraday range therefore froze the
+    price header the moment the user tapped 3M, with nothing to restart it (2026-09-12).
+    Half of that fix had landed inside the timer; this is the range sink."""
+    code = _strip_comments(_read(f"ViewModels/{vm}.swift"))
+    i = code.index("{ [weak self] newRange in")
+    j = code.index("$selectedInterval", i)
+    sink = code[i:j]
+    assert "startChartRefreshTimer()" in sink, f"{vm}: the sink no longer arms the timer"
+    assert "stopChartRefreshTimer()" not in sink, (
+        f"{vm}: tapping a daily range still kills the 30-second level refresh"
+    )
+    # Anti-vacuity: the body really does refresh the level regardless of the interval.
+    body = _func_body(_read(f"ViewModels/{vm}.swift"), "private func startChartRefreshTimer()")
+    assert "includeChart:" in body, f"{vm}: timer body shape changed — re-read this test"
 
 
 @pytest.mark.parametrize("vm", _VIEWMODELS)

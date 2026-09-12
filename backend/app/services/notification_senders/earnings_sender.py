@@ -26,6 +26,7 @@ A sender that reached past that would be a sender that can ignore an opt-out.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,6 +59,10 @@ MIN_ABS_ESTIMATE = 0.01
 # single evening could fan out to every ticker on the calendar. The per-user category
 # cap (4/day) is the backstop, but doing the work at all is the cost being avoided.
 MAX_SYMBOLS_PER_PASS = 60
+
+#: How many distinct watched tickers the RPC returns. Far above any plausible
+#: watchlist breadth, so the filter itself never becomes the truncation.
+_WATCHED_LOOKUP_LIMIT = 5000
 
 
 def _et_today(now: Optional[datetime] = None) -> date:
@@ -188,6 +193,45 @@ def result_copy(symbol: str, surprise: float) -> Tuple[str, str]:
     )
 
 
+def _watched_tickers() -> set:
+    """Every ticker at least one user watches, upper-cased.
+
+    RAISES on a read failure — it does NOT return an empty set.
+
+    An empty set is indistinguishable from "nobody watches anything", and the caller
+    filters the calendar down to it, sends nothing, and then marks the pass successful —
+    which stamps `run_day` and stops the day from ever being retried. So a single
+    Cloudflare 520 or a momentary 42501 on this one RPC used to cost EVERY user their
+    whole day of earnings notifications, leaving one WARNING line as the only trace.
+    Before this read existed the pass made no Supabase call at all, so no transient DB
+    failure could consume a day; raising restores that property. `run_earnings_notifications`
+    is explicitly documented to raise on an upstream failure because that IS the retry
+    mechanism.
+
+    `get_top_watchlist_tickers` is the same SECURITY DEFINER RPC the pre-warmers use, so
+    this adds no new surface.
+    """
+    from app.database import get_supabase
+
+    try:
+        rows = get_supabase().rpc(
+            "get_top_watchlist_tickers", {"n": _WATCHED_LOOKUP_LIMIT}
+        ).execute().data or []
+    except Exception as e:
+        logger.warning(
+            "earnings notifications: watched-ticker read failed (%s: %s) — failing the "
+            "pass so the day is RETRIED rather than stamped complete",
+            type(e).__name__, e,
+        )
+        raise
+    return {str(r["ticker"]).upper() for r in rows if r.get("ticker")}
+
+
+def _only_watched(selected, watched: set):
+    """Keep the calendar rows somebody actually watches, in the selector's own order."""
+    return [row for row in selected if row and str(row[0]).upper() in watched]
+
+
 async def _dispatch(
     *,
     kind: str,
@@ -255,8 +299,26 @@ async def run_earnings_notifications(now: Optional[datetime] = None) -> Dict[str
             run.success = True
             return stats
 
-        upcoming = select_upcoming(rows, today)[:MAX_SYMBOLS_PER_PASS]
-        results = select_results(rows, today)[:MAX_SYMBOLS_PER_PASS]
+        # WATCHED FIRST, then cap.
+        #
+        # `rows` is the MARKET-WIDE calendar — hundreds of companies on a heavy day — and
+        # the cap used to slice the selection positionally, before anyone asked who was
+        # watching. So on exactly the days that matter most, whether a user heard about
+        # their own holding came down to where FMP happened to place it in the response;
+        # and `run.success = True` then stamped the day complete, so nothing retried.
+        # Filtering to the watched set first makes the cap bite only when more than
+        # MAX_SYMBOLS_PER_PASS *watched* companies report on the same day.
+        watched = await asyncio.to_thread(_watched_tickers)
+        upcoming_all = _only_watched(select_upcoming(rows, today), watched)
+        results_all = _only_watched(select_results(rows, today), watched)
+        upcoming = upcoming_all[:MAX_SYMBOLS_PER_PASS]
+        results = results_all[:MAX_SYMBOLS_PER_PASS]
+        if len(upcoming_all) > len(upcoming) or len(results_all) > len(results):
+            logger.warning(
+                "earnings notifications: %d upcoming / %d result symbol(s) WATCHED but the "
+                "per-pass cap is %d — the tail is not notified today",
+                len(upcoming_all), len(results_all), MAX_SYMBOLS_PER_PASS,
+            )
         stats["symbols"] = len(upcoming) + len(results)
 
         for symbol, when, timing in upcoming:

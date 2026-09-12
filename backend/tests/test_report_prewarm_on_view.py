@@ -13,7 +13,9 @@ get_or_collect with mocked cache I/O.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -411,3 +413,146 @@ async def test_warm_fast_path_probes_cached_at_only(monkeypatch):
     assert selected == ["cached_at"], selected
     # Fresh row → no collection work at all.
     assert _FakeCollector.calls == 0
+
+
+# ── F3: the warm path is equity-only ─────────────────────────────────────────────────
+# `get_top_watchlist_tickers` feeds the hourly pre-warmer with whatever users watch — now
+# including ^GSPC, BTCUSD/ETHUSD/SOLUSD/DOGEUSD and GCUSD-style pairs. The report collector
+# hard-fails on anything without a company profile after a ~20-call FMP fan-out (measured on
+# Railway 2026-09-11: ~15 WARNINGs per symbol per cycle). The gate has to sit BEFORE the
+# semaphore and the collector import.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sym, cls", [
+    ("^GSPC", "index"), ("BTCUSD", "crypto"), ("ETHUSD", "crypto"),
+    ("DOGEUSD", "crypto"), ("GCUSD", "commodity"),
+])
+async def test_warm_skips_non_equity_before_the_semaphore_and_collector(monkeypatch, caplog, sym, cls):
+    _patch_collection_boundaries(monkeypatch, fresh=False)
+    tdc._NON_EQUITY_WARM_SKIPPED.clear()
+    # Pre-acquire the ONLY slot: if the gate were placed after the semaphore the call would
+    # block here, so the 1 s wait_for is what proves "before the semaphore".
+    sema = asyncio.Semaphore(1)
+    await sema.acquire()
+    tdc._WARM_SEMAPHORE = sema
+    with caplog.at_level(logging.INFO, logger="app.services.ticker_data_cache"):
+        await asyncio.wait_for(tdc.warm_ticker_collection(sym), 1)
+        await asyncio.wait_for(tdc.warm_ticker_collection(sym.lower()), 1)
+    assert _FakeCollector.calls == 0, f"{sym} reached the report collector"
+    assert not tdc._INFLIGHT
+    skipped = [r for r in caplog.records if "warm skipped" in r.getMessage()]
+    assert len(skipped) == 1 and cls in skipped[0].getMessage() and sym in skipped[0].getMessage(), \
+        "one INFO per symbol per process, naming the asset class"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sym", ["AAPL", "SPY", "GLD", "BTC"])   # ETFs and the bare-BTC ETF keep warming
+async def test_warm_still_collects_equities_and_etfs(monkeypatch, sym):
+    _patch_collection_boundaries(monkeypatch, fresh=False)
+    tdc._NON_EQUITY_WARM_SKIPPED.clear()
+    await tdc.warm_ticker_collection(sym)
+    assert _FakeCollector.calls == 1
+    assert sym not in tdc._NON_EQUITY_WARM_SKIPPED
+
+
+# ── F2: an owner failure with no waiter must not become an asyncio ERROR at GC ───────
+# get_or_collect stores the owner's exception on the shared _INFLIGHT future for any waiter;
+# when nobody attached, the future was collected unread and asyncio logged "Future
+# exception was never retrieved" + traceback at ERROR (5 per 2 h in prod, each a Sentry
+# event). The fix marks the exception retrieved; waiters still receive it.
+
+
+def _capture_loop_errors(loop):
+    seen: list = []
+    loop.set_exception_handler(lambda _l, ctx: seen.append(ctx))
+    return seen
+
+
+def _never_retrieved(seen) -> list:
+    return [c for c in seen if "never retrieved" in str(c.get("message", ""))]
+
+
+@pytest.mark.asyncio
+async def test_harness_detects_an_unretrieved_future():
+    """Positive control — without it the two tests below could pass vacuously."""
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        fut = loop.create_future()
+        fut.set_exception(RuntimeError("bare"))
+        del fut
+        gc.collect()
+        assert _never_retrieved(seen), "the harness did not observe asyncio's GC report"
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_get_or_collect_unwaited_failure_is_not_reported_as_never_retrieved(monkeypatch):
+    _patch_collection_boundaries(monkeypatch, fresh=False)
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        async def _boom():
+            raise RuntimeError("collector exploded")
+
+        try:
+            await tdc.get_or_collect("X", _boom)
+        except RuntimeError:
+            pass  # deliberately not bound: a live traceback would pin the owner frame
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+        assert not tdc._INFLIGHT
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_get_or_collect_cancelled_unwaited_owner_is_not_reported(monkeypatch):
+    _patch_collection_boundaries(monkeypatch, fresh=False)
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        started = asyncio.Event()
+
+        async def _park():
+            started.set()
+            await asyncio.Event().wait()
+
+        owner = asyncio.create_task(tdc.get_or_collect("Y", _park))
+        await started.wait()
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        del owner
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+        assert not tdc._INFLIGHT
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_get_or_collect_waiter_still_receives_the_owner_exception(monkeypatch):
+    """Marking the exception retrieved must not swallow it for a real waiter."""
+    _patch_collection_boundaries(monkeypatch, fresh=False)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _fail_later():
+        started.set()
+        await release.wait()
+        raise RuntimeError("upstream 500")
+
+    owner = asyncio.create_task(tdc.get_or_collect("Z", _fail_later))
+    await started.wait()
+    waiter = asyncio.create_task(tdc.get_or_collect("Z", _fail_later))
+    await asyncio.sleep(0)   # let the waiter attach to the _INFLIGHT future
+    assert "Z" in tdc._INFLIGHT
+    release.set()
+    with pytest.raises(RuntimeError, match="upstream 500"):
+        await owner
+    with pytest.raises(RuntimeError, match="upstream 500"):
+        await waiter
+    assert not tdc._INFLIGHT

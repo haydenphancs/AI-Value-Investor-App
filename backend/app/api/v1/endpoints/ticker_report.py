@@ -1,6 +1,6 @@
 """
 Ticker Report Endpoints — generates a comprehensive stock analysis report
-for the TickerReportView screen, plus a chat endpoint for follow-up Q&A.
+for the TickerReportView screen.
 
 Cache layer:
   - `ticker_report_cache` table (24h TTL, keyed by ticker+persona) is
@@ -19,17 +19,15 @@ Phase 3 error contract:
 
 Endpoints:
   GET  /stocks/{ticker}/report?persona=warren_buffett
-  POST /stocks/{ticker}/report/chat
 """
 
 import asyncio
 import logging
-import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from app.api.error_response import (
     ErrorCode,
@@ -40,7 +38,6 @@ from app.config import settings
 from app.database import get_supabase
 from app.dependencies import (
     get_current_user,
-    ChatRateLimit,
     ReportRateLimit,
 )
 from app.schemas.ticker_report import TickerReportResponse
@@ -414,129 +411,3 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
         return None
 
     return await asyncio.to_thread(_query)
-
-
-# ── Chat with Report ──────────────────────────────────────────────────────────
-
-
-class TickerReportChatRequest(BaseModel):
-    ticker: str
-    message: str
-    persona: str = "warren_buffett"
-
-
-class TickerReportChatResponseModel(BaseModel):
-    reply: str
-    ticker: str
-
-
-@router.post("/{ticker}/report/chat")
-async def chat_with_ticker_report(
-    ticker: str,
-    body: TickerReportChatRequest,
-    user: dict = Depends(get_current_user),
-    _rate: None = ChatRateLimit,
-):
-    """
-    Ask a follow-up question about a stock using the same persona.
-
-    This is a lightweight AI Q&A endpoint — it fetches a quick snapshot
-    of FMP data and sends the user's question to Gemini with the
-    persona context. Much faster than a full report (5-15 seconds).
-    """
-    ticker = ticker.upper().strip()
-
-    if not ticker or len(ticker) > 10:
-        return make_error_response(
-            ErrorCode.INVALID_INPUT,
-            message=f"Invalid ticker symbol: {ticker!r}",
-            details={"ticker": ticker},
-        )
-
-    persona = body.persona
-    if persona not in VALID_PERSONAS:
-        # Soft-coerce for chat — keep the prior behavior of falling back
-        # to Buffett rather than rejecting outright. Logged so we still
-        # see the bad request in production.
-        logger.info(
-            f"chat_with_ticker_report: unknown persona {persona!r}, "
-            f"falling back to warren_buffett"
-        )
-        persona = "warren_buffett"
-
-    message = body.message.strip()
-    if not message:
-        return make_error_response(
-            ErrorCode.INVALID_INPUT,
-            message="Empty chat message",
-            user_message="Type a question to send.",
-        )
-
-    if len(message) > 2000:
-        return make_error_response(
-            ErrorCode.INVALID_INPUT,
-            message=f"Chat message too long ({len(message)} chars > 2000)",
-            user_message="Your message is too long — keep it under 2000 characters.",
-            details={"length": len(message), "limit": 2000},
-        )
-
-    # Meter this Q&A like the main chat: CHAT_CREDIT_COST per turn (this is a full Gemini
-    # answer — otherwise a free denial-of-wallet bypass). Refund on any non-delivery via the
-    # finally. The guest no-op that used to sit here is gone with the endpoint's move to
-    # account-only, which also removes the need for the per-install daily-turn budget this
-    # surface never had.
-    credit_service = CreditService()
-    # One ref per DEBIT, not per (user, ticker). The literal `f"report_chat:{ticker}"` was
-    # identical for every report-chat turn this user ever sent about this ticker, so the
-    # ledger held a run of indistinguishable `(ref_id, -CHAT_CREDIT_COST)` rows and
-    # `refund_credits` — which pairs to the NEWEST un-reversed match — could reverse a
-    # different turn's debit and adopt its recorded granted/purchased split. Same defect
-    # migration 124 documents for chat.py, and the same fix. Bound once and reused below:
-    # it was previously written out twice, so the charge and its refund could drift apart,
-    # and a mismatched ref is silent (`no_matching_debit` — the user is simply never repaid).
-    turn_ref = f"report_chat:{ticker}:{uuid.uuid4().hex}"
-    try:
-        remaining = credit_service.precharge(
-            user["id"], settings.CHAT_CREDIT_COST,
-            reason="chat_charge", ref_id=turn_ref,
-        )
-    except CreditServiceUnavailable:
-        return make_error_response(
-            ErrorCode.SYSTEM_BUSY, status_code=409,
-            message="spend_credits RPC unavailable (transient)",
-            details={"user_id": user["id"], "ticker": ticker, "step": "chat_credit_charge"},
-        )
-    if remaining is None:
-        return make_error_response(
-            ErrorCode.INSUFFICIENT_CREDITS,
-            message="insufficient credits for report chat",
-            details={"user_id": user["id"], "required": settings.CHAT_CREDIT_COST},
-        )
-
-    delivered = False
-    try:
-        service = TickerReportService()
-        reply = await service.chat_about_ticker(ticker, message, persona)
-        result = TickerReportChatResponseModel(reply=reply, ticker=ticker).model_dump()
-        delivered = True
-        return result
-    except ValueError as e:
-        return error_response_from_exception(
-            e, ticker=ticker, persona=persona, step="chat_collector",
-        )
-    except Exception as e:
-        logger.error(
-            f"Ticker report chat failed for {ticker}/{persona}: "
-            f"{type(e).__name__}: {e}",
-            exc_info=True,
-        )
-        return error_response_from_exception(
-            e, ticker=ticker, persona=persona, step="chat_generation",
-        )
-    finally:
-        # Non-delivery (error or client-disconnect CancelledError) → refund the charge once.
-        if not delivered:
-            credit_service.refund_ledgered(
-                user["id"], settings.CHAT_CREDIT_COST,
-                reason="chat_refund", ref_id=turn_ref,
-            )

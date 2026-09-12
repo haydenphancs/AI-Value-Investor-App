@@ -91,6 +91,16 @@ final class PriceAlertStore: ObservableObject {
     /// can all call `loadIfStale` in the same run loop.
     private var loadTask: Task<Void, Never>?
 
+    /// Bumped by `reset()`. A load already past its `await` still runs its completion
+    /// branch — cancellation alone does not stop it — so it captures this value and
+    /// refuses to publish under a stale one.
+    ///
+    /// Without it, a fetch account A started that resolved AFTER A signed out re-filled
+    /// `alerts` with A's rules and stamped `lastLoadedAt`, which then SUPPRESSED the
+    /// reload that would have healed it for the next 5 minutes. Same shape as
+    /// `WhaleService.identityEpoch` (auth.md §7).
+    private var identityEpoch = 0
+
     /// Long enough that tab-flipping is free, short enough that a rule created on another
     /// device shows up without a manual pull. `nonisolated` because it is used as a DEFAULT
     /// ARGUMENT below, and a default argument is evaluated at the call site under nonisolated
@@ -173,14 +183,19 @@ final class PriceAlertStore: ObservableObject {
             lastLoadedAt = nil
             return
         }
+        let epoch = identityEpoch
         do {
             let page = try await repository.fetchPriceAlerts(ticker: nil)
+            // The session that asked for these is over — publishing them would show the
+            // previous account's alerts AND stamp them fresh, blocking the heal.
+            guard epoch == identityEpoch else { return }
             alerts = page.items
             maxPerUser = page.maxPerUser
             maxPerTicker = page.maxPerTicker
             state = .loaded
             lastLoadedAt = Date()
         } catch {
+            guard epoch == identityEpoch else { return }
             let appError = AppError.from(error)
             // A failure that is never logged is diagnosed from nothing. Type + operation, so
             // it is greppable without a repro.
@@ -284,6 +299,9 @@ final class PriceAlertStore: ObservableObject {
     /// auth.md §7 — this list is the caller's own data and must not survive a session end.
     /// Called from `AppState.discardDataForEndedSession()`, beside `PortfolioStore.shared.reset()`.
     func reset() {
+        // Bump FIRST, so a load already past its `await` fails its epoch check below and
+        // cannot re-publish the ended session's alerts after this clears them.
+        identityEpoch &+= 1
         loadTask?.cancel()
         loadTask = nil
         alerts = []

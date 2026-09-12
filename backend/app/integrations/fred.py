@@ -64,6 +64,14 @@ def _warn_unconfigured_once(name: str, env_var: str) -> None:
 _CACHE: Dict[Tuple[str, str], Tuple[float, Any]] = {}
 _CACHE_TTL_SECONDS = 6 * 3600  # 6 hours
 
+#: A FAILED fetch is remembered only this long — a transient timeout is not "FRED has no
+#: observations for six hours". WTI and Henry Hub are FRED-sourced end to end, so one read
+#: timeout used to answer `commodity core has no usable price for CL` (a 503 telling the
+#: user to retry) on EVERY retry for the whole 6-hour window: `commodity_service` refuses
+#: to cache its own empty results for exactly this reason, and the memo one layer down
+#: defeated that. Long enough to be a herd guard, short enough to self-heal.
+_FAILURE_TTL_SECONDS = 120
+
 
 def _cache_get(key: Tuple[str, str]) -> Any:
     entry = _CACHE.get(key)
@@ -76,8 +84,29 @@ def _cache_get(key: Tuple[str, str]) -> Any:
     return value
 
 
+#: When a fetch FAILED, keyed like the value cache. Kept separate from `_CACHE` on
+#: purpose: a failure and a real empty answer must not be the same entry, and a later
+#: success must clear it. Mirrors `universe_data`'s `_failed_at` / `_FAILURE_RETRY_SECONDS`.
+_FAILED_AT: Dict[Tuple[str, str], float] = {}
+
+
+def _failed_recently(key: Tuple[str, str]) -> bool:
+    ts = _FAILED_AT.get(key)
+    if ts is None:
+        return False
+    if time.time() - ts > _FAILURE_TTL_SECONDS:
+        del _FAILED_AT[key]
+        return False
+    return True
+
+
+def _mark_failed(key: Tuple[str, str]) -> None:
+    _FAILED_AT[key] = time.time()
+
+
 def _cache_set(key: Tuple[str, str], value: Any) -> None:
     _CACHE[key] = (time.time(), value)
+    _FAILED_AT.pop(key, None)   # a good answer retires the failure memo
 
 
 @dataclass
@@ -137,6 +166,10 @@ class FREDClient:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached  # type: ignore[no-any-return]
+        if _failed_recently(cache_key):
+            # A recent FAILURE, not an answer — see `_mark_failed` below. Serving [] here
+            # is the herd guard; the short window is what lets the next caller retry.
+            return []
 
         params = {
             "series_id": series_id,
@@ -157,7 +190,14 @@ class FREDClient:
                 f"FRED observations failed for {series_id}: "
                 f"{type(e).__name__}: {e}"
             )
-            _cache_set(cache_key, [])
+            # A FAILURE, memoised for `_FAILURE_TTL_SECONDS`, NOT the 6-hour success TTL.
+            # This used to go into the normal cache, so one `httpx.ReadTimeout` became
+            # "FRED has no observations for this series" for six hours — and because
+            # `_fred_quote` turns an empty series into `{}`, `get_commodity_core` raised
+            # `FMPUnavailableException` → a 503 that tells the user to retry, on a path
+            # where every retry short-circuited on the memo without touching FRED. Both
+            # the WTI and Henry Hub screens went down for up to 6 h after one blip.
+            _mark_failed(cache_key)
             return []
 
         out: List[FREDObservation] = []
@@ -193,6 +233,11 @@ class FREDClient:
         # plus a buffer so the 6M point (obs[6]) lands on real data.
         obs = await self.get_observations(series_id, limit=14)
         if not obs:
+            # Only memoise "this series genuinely has no observations". When the
+            # observations read FAILED, `_failed_recently` is what holds the herd back —
+            # caching None here for 6 h would re-create the bug one level up.
+            if _failed_recently((series_id, "obs:14")):
+                return None
             _cache_set(cache_key, None)
             return None
         latest = obs[0]

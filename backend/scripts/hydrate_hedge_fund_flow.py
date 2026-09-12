@@ -64,6 +64,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Ensure backend app package is importable (mirrors hydrate_whales.py).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app.utils.postgrest_paging import fetch_all_rows
 from app.config import settings  # noqa: E402,F401  (import triggers .env load)
 from app.database import get_supabase  # noqa: E402
 from app.integrations.fmp import FMPClient, FMPRateLimitException  # noqa: E402
@@ -199,8 +200,14 @@ async def _build_ticker_universe(fmp: FMPClient, top_n: int) -> List[str]:
     wl_counts: Dict[str, int] = {}
     try:
         sb = get_supabase()
-        res = sb.table("watchlist_items").select("ticker").limit(50_000).execute()
-        for row in res.data or []:
+        # PAGED: `.limit(50_000)` never lifted PostgREST's ~1,000-row server cap, so the
+        # hydration universe was an arbitrary unordered first page of the watchlist.
+        rows = fetch_all_rows(
+            lambda: sb.table("watchlist_items").select("ticker"),
+            order_by="id",
+            what="hedge fund flow: watchlist universe",
+        )
+        for row in rows:
             t = (row.get("ticker") or "").upper().strip()
             if t and t in caps and t not in top_set:
                 wl_counts[t] = wl_counts.get(t, 0) + 1

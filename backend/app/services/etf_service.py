@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
 from app.services.agents.persona_config import neutral_system_instruction
 from app.services.benchmark_math import format_since, overlapping_cagrs
 from app.integrations.gemini import get_gemini_client
@@ -43,6 +43,15 @@ from app.services.corporate_actions_service import corporate_actions_source
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
+
+
+async def _no_dividend_feed() -> List[Dict]:
+    """The per-payment dividend feed is outside the FMP licence (Market Calendar package).
+
+    Stands in for `get_dividend_history` in the fundamentals fan-out so the section keeps
+    its five-slot shape without issuing a call the entitlement guard refuses anyway.
+    """
+    return []
 
 # The ex-dividend derivation window used ONLY for the pay-frequency label. The default
 # open window (`corporate_actions_service.window_for_range(None, today)`) is 400 days,
@@ -285,6 +294,27 @@ def dividend_yield_from_profile(
     if known and last_div > 0:
         return round((last_div / priced) * 100, 2), True
     return 0.0, known
+
+
+def _sma(prices: List[Dict], window: int) -> Optional[float]:
+    """Simple moving average of the last `window` closes, or None when there are not
+    enough finite closes to fill the window (a young listing must read "—", not a
+    number averaged over fewer days than its label claims).
+
+    `prices` is the shared daily history, oldest first; a row's close is `close` or
+    `adjClose`, like every other reader of that series in this file.
+    """
+    closes: List[float] = []
+    for row in reversed(prices or []):
+        if not isinstance(row, dict):
+            continue
+        c = row.get("close") or row.get("adjClose")
+        if not isinstance(c, (int, float)) or isinstance(c, bool) or not math.isfinite(c) or c <= 0:
+            continue
+        closes.append(float(c))
+        if len(closes) == window:
+            return sum(closes) / window
+    return None
 
 
 def _finite_num(v: Any, default: float = 0.0) -> float:
@@ -548,9 +578,12 @@ class ETFService:
         price — the `profile` payload does, so it is stored as an explicit PROJECTION of
         the fields this service actually reads rather than raw.
 
-        Dividends are fetched at limit=100 (what `get_dividend_history` wants) rather than
-        the detail's 20, so the dividends endpoint can share this section without silently
-        losing 80 rows. The detail slices what it needs.
+        `dividends` is stored as an EMPTY list: `/stable/dividends` is the "Market Calendar"
+        package, which is not on the Order Form, so the call was refused by the entitlement
+        pre-flight on every cold build and logged a WARNING for a permanent condition (one per
+        symbol per 12 h). Ex-dividend DATES still come from the entitled price history — see
+        `get_dividends`. The slot is kept so the section's shape (and Tier-2 rows written
+        before 2026-09-11) stay valid.
         """
         key = f"etf:fund:{symbol}"
         cached = _cache_get(key)
@@ -568,7 +601,7 @@ class ETFService:
             self.fmp.get_etf_info(symbol),
             self.fmp.get_etf_holders(symbol, limit=20),
             self.fmp.get_etf_sector_weightings(symbol),
-            self.fmp.get_dividend_history(symbol, limit=100),
+            _no_dividend_feed(),
             return_exceptions=True,
         )
         names = ("profile", "etf_info", "holders", "sector_weights", "dividends")
@@ -704,7 +737,10 @@ class ETFService:
             return cached
 
         db = await asyncio.to_thread(self._tier2_get, symbol, "derived")
-        if isinstance(db, dict) and db:
+        # `sma_50` doubles as the payload version: a row written before it existed is a
+        # MISS, not a hit with a blank moving average (the formatted-cache lesson — a
+        # schema default laundering stale rows into confident wrong values).
+        if isinstance(db, dict) and db and "sma_50" in db:
             logger.info("ETF derived tier-2 HIT for %s", symbol)
             _cache_set(key, db, _DERIVED_TTL)
             return db
@@ -725,6 +761,11 @@ class ETFService:
         derived = {
             "performance_periods": [p.model_dump() for p in perf],
             "benchmark_summary": bench.model_dump() if bench else None,
+            # The quote source has no `priceAvg50` any more (`price_service._shape` emits
+            # a fixed key set), so "50-Day Avg" was permanently "—" on both key-stat
+            # lists while the full daily series sat in this very cache. Computed here,
+            # persisted with the section, zero extra FMP calls.
+            "sma_50": _sma(historical, 50),
         }
 
         # Degradation gate: a failed or empty history yields an empty Performance card.
@@ -964,7 +1005,13 @@ class ETFService:
             # A zero-price core would paint "$0.00" under a live badge as the FIRST thing
             # on screen. Refuse: the client fetches core with `try?`, so this simply
             # leaves the skeleton up until the full response lands.
-            raise ValueError(f"ETF core has no usable price for {symbol}")
+            # TYPED, not a bare ValueError. `classify_exception` only maps a
+            # ValueError whose message contains "profile" (→ TICKER_NOT_FOUND);
+            # everything else falls through to a bare 500, which on this path the
+            # client renders as "Something went wrong" for what is actually a
+            # retryable upstream gap. `index_service` and `commodity_service`
+            # already raise the typed exception for the identical condition.
+            raise FMPUnavailableException(f"ETF core has no usable price for {symbol}")
 
         change = _finite_num(quote.get("change"))
         change_pct = _finite_num(
@@ -1092,7 +1139,8 @@ class ETFService:
         )
         year_high = _finite_num(quote.get("yearHigh"))
         year_low = _finite_num(quote.get("yearLow"))
-        price_avg_50 = _finite_num(quote.get("priceAvg50"))
+        # `price_avg_50` is resolved below from the `derived` section (the quote row has
+        # carried no `priceAvg50` since the quote endpoint went unlicensed).
         market_cap = _finite_num(quote.get("marketCap") or profile.get("marketCap"))
         beta = _finite_num(profile.get("beta") or quote.get("beta"))
 
@@ -1159,6 +1207,10 @@ class ETFService:
         # was `_fetch_all_daily` — up to 5 paged calls — on EVERY request.
 
         # ── Step 4: Build key statistics ──────────────────────────
+        # Fetched HERE (not after the key statistics, where it used to sit) because the
+        # 50-day average now comes from it. Same memo/Tier-2 read either way.
+        derived = await self._get_derived(symbol, index_tracked=index_tracked)
+        price_avg_50 = _finite_num(quote.get("priceAvg50")) or _finite_num(derived.get("sma_50"))
         key_statistics, key_statistics_groups = self._build_key_statistics(
             nav=nav,
             total_assets=total_assets,
@@ -1181,7 +1233,6 @@ class ETFService:
         # Both are pure functions of the two histories, so they live in the 12h `derived`
         # section and survive a redeploy without re-pulling the 1.1 MB. Re-validated
         # rather than trusted: a Tier-2 row is JSON that a previous schema wrote.
-        derived = await self._get_derived(symbol, index_tracked=index_tracked)
         perf_periods = _revalidate_rows(
             PerformancePeriodResponse, derived.get("performance_periods"), symbol, "performance"
         )
@@ -1286,6 +1337,11 @@ class ETFService:
 
         net_yield = ETFNetYieldResponse(
             expense_ratio=expense_ratio,
+            # 0.0 stays on the wire (shipped builds decode a plain Double); this is what
+            # tells a current client to render "—" instead of "0%" beside the
+            # "Expense ratio unavailable for this fund." sentence the backend already
+            # produces. Same companion-bool pattern as `dividend_yield_known` beside it.
+            expense_ratio_known=expense_ratio > 0,
             fee_context=fee_context,
             dividend_yield=dividend_yield,
             pay_frequency=pay_frequency,
@@ -1445,7 +1501,12 @@ class ETFService:
             logger.info(f"Dividend in-memory HIT for {symbol}")
             return cached
 
-        db_data = self._check_snapshot_cache(symbol, category)
+        # OFF THE LOOP. These three side-endpoints (/etfs/{s}/dividends, /profile,
+        # /holdings-risk) are request paths on a single uvicorn worker, and both calls are
+        # plain sync PostgREST round trips — the same class the 2026-08-27 event-loop fix
+        # threaded in `_get_fundamentals`/`_get_derived` two hundred lines above, missed
+        # here because these endpoints have their OWN cache helpers.
+        db_data = await asyncio.to_thread(self._check_snapshot_cache, symbol, category)
         if db_data is not None:
             try:
                 response = ETFDividendHistoryResponse(**db_data)
@@ -1527,7 +1588,9 @@ class ETFService:
         # ── Cache in both tiers ─────────────────────────────────
         _cache_set(mem_key, response)
         try:
-            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+            await asyncio.to_thread(
+                self._upsert_snapshot_cache, symbol, category, response.model_dump()
+            )
         except Exception as e:
             logger.warning(f"Dividend snapshot cache failed for {symbol}: {e}")
 
@@ -1550,7 +1613,12 @@ class ETFService:
             logger.info(f"Profile in-memory HIT for {symbol}")
             return cached
 
-        db_data = self._check_snapshot_cache(symbol, category)
+        # OFF THE LOOP. These three side-endpoints (/etfs/{s}/dividends, /profile,
+        # /holdings-risk) are request paths on a single uvicorn worker, and both calls are
+        # plain sync PostgREST round trips — the same class the 2026-08-27 event-loop fix
+        # threaded in `_get_fundamentals`/`_get_derived` two hundred lines above, missed
+        # here because these endpoints have their OWN cache helpers.
+        db_data = await asyncio.to_thread(self._check_snapshot_cache, symbol, category)
         if db_data is not None:
             try:
                 response = ETFProfileResponse(**db_data)
@@ -1603,7 +1671,9 @@ class ETFService:
         # ── Cache in both tiers ─────────────────────────────────
         _cache_set(mem_key, response)
         try:
-            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+            await asyncio.to_thread(
+                self._upsert_snapshot_cache, symbol, category, response.model_dump()
+            )
         except Exception as e:
             logger.warning(f"Profile snapshot cache failed for {symbol}: {e}")
 
@@ -1635,7 +1705,12 @@ class ETFService:
             logger.info(f"HoldingsRisk in-memory HIT for {symbol}")
             return cached
 
-        db_data = self._check_snapshot_cache(symbol, category)
+        # OFF THE LOOP. These three side-endpoints (/etfs/{s}/dividends, /profile,
+        # /holdings-risk) are request paths on a single uvicorn worker, and both calls are
+        # plain sync PostgREST round trips — the same class the 2026-08-27 event-loop fix
+        # threaded in `_get_fundamentals`/`_get_derived` two hundred lines above, missed
+        # here because these endpoints have their OWN cache helpers.
+        db_data = await asyncio.to_thread(self._check_snapshot_cache, symbol, category)
         if db_data is not None:
             try:
                 response = ETFHoldingsRiskResponse(**db_data)
@@ -1687,7 +1762,9 @@ class ETFService:
         # ── Cache in both tiers ─────────────────────────────────
         _cache_set(mem_key, response)
         try:
-            self._upsert_snapshot_cache(symbol, category, response.model_dump())
+            await asyncio.to_thread(
+                self._upsert_snapshot_cache, symbol, category, response.model_dump()
+            )
         except Exception as e:
             logger.warning(f"HoldingsRisk snapshot cache failed for {symbol}: {e}")
 
@@ -2299,8 +2376,24 @@ class ETFService:
         else:
             age_pts = 0.1
 
-        # Expense ratio component (0-1 point) — lower = better
-        if expense_ratio <= 0.05:
+        # Expense ratio component (0-1 point) — lower = better.
+        #
+        # ⚠️ `expense_ratio <= 0` means UNAVAILABLE, not free (the net-yield builder says
+        # so in as many words: "expense_ratio == 0 here means the value is UNAVAILABLE …
+        # NOT a genuinely free fund"). Scoring it against `<= 0.05` therefore awarded the
+        # CHEAPEST-possible full point to a fund whose fee we never learned, inflating the
+        # rating exactly when we know least. The component is DROPPED instead and the
+        # remaining three are rescaled, so the score stays 0-5 and an unknown fee neither
+        # helps nor punishes.
+        fee_known = expense_ratio > 0
+        if not fee_known:
+            # MIDPOINT, not full marks and not zero. Rescaling the other three components
+            # instead was tried and rejected: the AUM band is worth 2 points, so a large
+            # well-diversified fund came out level with the cheapest fund in the catalogue
+            # anyway. Scoring the unknown dimension as average is strictly below a known
+            # cheap fee and strictly above a known expensive one, which is the whole point.
+            fee_pts = 0.5
+        elif expense_ratio <= 0.05:
             fee_pts = 1.0
         elif expense_ratio <= 0.15:
             fee_pts = 0.8

@@ -472,14 +472,3 @@ class TickerReportViewModel: ObservableObject {
         return "Could not load report. Please check your connection and try again."
     }
 }
-
-// MARK: - Chat Response DTO
-
-struct TickerReportChatResponse: Codable {
-    let reply: String
-    let ticker: String
-
-    enum CodingKeys: String, CodingKey {
-        case reply, ticker
-    }
-}

@@ -1373,6 +1373,10 @@ struct SentimentAnalysisDTO: Codable {
     let newsNeutral7d: Int
     // Social data availability
     let socialDataAvailable: Bool
+    // Per-window "was it looked up" companions (2026-09-11). Optional on the wire because
+    // older backends did not send them; absent means "measured", the pre-flag meaning.
+    let socialMentionsKnown: Bool?
+    let socialMentions7dKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -1395,6 +1399,8 @@ struct SentimentAnalysisDTO: Codable {
         case newsBearish7d = "news_bearish_7d"
         case newsNeutral7d = "news_neutral_7d"
         case socialDataAvailable = "social_data_available"
+        case socialMentionsKnown = "social_mentions_known"
+        case socialMentions7dKnown = "social_mentions_7d_known"
     }
 
     func toDisplayModel() -> SentimentAnalysisData {
@@ -1417,7 +1423,9 @@ struct SentimentAnalysisDTO: Codable {
             newsBullish7d: newsBullish7d,
             newsBearish7d: newsBearish7d,
             newsNeutral7d: newsNeutral7d,
-            socialDataAvailable: socialDataAvailable
+            socialDataAvailable: socialDataAvailable,
+            socialMentionsKnown: socialMentionsKnown ?? true,
+            socialMentions7dKnown: socialMentions7dKnown ?? true
         )
     }
 }

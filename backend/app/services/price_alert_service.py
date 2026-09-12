@@ -33,6 +33,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.utils.postgrest_paging import fetch_all_rows
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
@@ -48,7 +49,7 @@ from app.services.price_alert_engine import (
 )
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
-from app.services.asset_class import detect_asset_class, uses_coingecko_price
+from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -276,17 +277,17 @@ class PriceAlertService:
 
     def _active_universe(self) -> List[str]:
         try:
-            rows = (
-                self.supabase.table(TABLE)
-                .select("ticker")
-                .eq("is_active", True)
-                # Deterministic truncation — see the note in push_dispatch_service.watchers_of.
-                # Unordered, the same users' rules fall off the end of every cycle forever.
-                .order("id")
-                .limit(MAX_RULES)
-                .execute()
-                .data
-                or []
+            # PAGED. `.limit(MAX_RULES)` did not lift PostgREST's ~1,000-row server cap
+            # (it clamps whatever you ask for), so every active rule past row 1,000 was
+            # silently never evaluated — and because the read SUCCEEDS there was nothing
+            # to see. The `.order("id")` the old comment relied on made the truncation
+            # DETERMINISTIC, which is worse: the same users' alerts fell off the end of
+            # every cycle, forever.
+            rows = fetch_all_rows(
+                lambda: self.supabase.table(TABLE).select("ticker").eq("is_active", True),
+                order_by="id",
+                what="price alerts: active rules",
+                max_pages=max(1, MAX_RULES // 1000),
             )
         except Exception as e:
             logger.warning(
@@ -306,17 +307,18 @@ class PriceAlertService:
 
     def _active_rules(self, tickers: List[str]) -> List[dict]:
         try:
-            return (
-                self.supabase.table(TABLE)
+            # PAGED, same reason as `_alerted_tickers` above: a rule past row 1,000 is
+            # never evaluated, and the `.order("id")` made that deterministic — the same
+            # users' alerts silently dropped off every cycle.
+            return fetch_all_rows(
+                lambda: self.supabase.table(TABLE)
                 .select("id, user_id, ticker, asset_type, kind, threshold, repeat_mode, "
                         "armed, last_price, trigger_count")
                 .eq("is_active", True)
-                .in_("ticker", tickers)
-                .order("id")
-                .limit(MAX_RULES)
-                .execute()
-                .data
-                or []
+                .in_("ticker", tickers),
+                order_by="id",
+                what="price alerts: rules for the evaluated tickers",
+                max_pages=max(1, MAX_RULES // 1000),
             )
         except Exception as e:
             logger.warning(

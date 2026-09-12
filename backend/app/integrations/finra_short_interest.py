@@ -17,6 +17,7 @@ masked for a full cycle — while still collapsing repeated views into a single
 call (FINRA limit ~1,200/min, so the extra calls are immaterial).
 """
 
+import asyncio
 import base64
 import logging
 import os
@@ -62,12 +63,61 @@ _SUPABASE_TTL_DAYS = 3  # matches in-memory; under the ~14-day publish cadence (
 # Nasdaq tickers — mirrors the ticker_report_cache schema-floor pattern.
 _SI_SCHEMA_FLOOR = datetime(2026, 6, 7, 0, 0, 0, tzinfo=timezone.utc)
 
+#: Sentinel: the primary source ANSWERED and has no rows for this symbol, as opposed to
+#: `None`, which means the attempt failed. They were the same value, so an authoritative
+#: "this index has no short interest" was retried against a fallback that covers strictly
+#: less — and logged as a failure every cycle.
+_NO_DATA: Dict[str, Any] = {}
+
 # ── Nasdaq safeguards ───────────────────────────────────────────
 
 _nasdaq_kill_switch: bool = False
 _nasdaq_consecutive_failures: int = 0
 _MAX_CONSECUTIVE_FAILURES = 10
 _nasdaq_rate_limited_until: float = 0
+
+#: A TRANSIENT run of failures disables Nasdaq for a WINDOW, not for the process.
+#:
+#: `_nasdaq_kill_switch` is a permanent latch with no reset anywhere in this module, which
+#: is right for 402/403 — credential-shaped, persistent conditions — and wrong for the
+#: timeouts and connect errors the `except Exception` arm also counts. `_build_shorts` fans
+#: the short universe out under `asyncio.Semaphore(10)`, so ONE ten-second network blip
+#: raises ten times concurrently, trips the counter, and costs the fallback until the next
+#: deploy. The counter is also only zeroed on an HTTP 200, which by this module's own
+#: premise ("Nasdaq black-holes this User-Agent") essentially never happens — so
+#: "consecutive" was really "cumulative for the life of the process".
+_NASDAQ_TRANSIENT_DISABLE_SECONDS = 900
+_nasdaq_disabled_until: float = 0
+
+#: Read timeout for the Nasdaq FALLBACK. It shared the 15 s client timeout with the FINRA
+#: path, and Nasdaq's public endpoint now black-holes this User-Agent — so every miss hung
+#: the request for the full 15 s and returned an exception whose `str()` is EMPTY
+#: ("Nasdaq API error for BTCUSD: " is the literal production log line). A fallback that
+#: only ever runs after the primary already answered must not cost more than the primary.
+_NASDAQ_TIMEOUT_SECONDS = 4.0
+
+#: How long a completely unanswerable symbol is remembered as "no data". `get_short_interest`
+#: returned `{}` WITHOUT caching it, so `/stocks/{t}/overview` re-ran the whole FINRA+Nasdaq
+#: attempt — up to 15 s of it — on every 120 s cache miss, forever, for any ticker neither
+#: source covers. Short enough that a genuine outage recovers on its own; long enough that a
+#: permanently-uncovered ticker stops costing a request-path round trip every two minutes.
+#:
+#: ⚠️ This applies ONLY when a source actually ANSWERED "no rows" — see `_FAILURE_TTL_SECONDS`.
+_EMPTY_TTL_SECONDS = 900
+
+#: How long an UNANSWERED symbol is remembered, i.e. when nothing was reached at all: a
+#: FINRA 5xx, the 429 cooldown, a kill switch, a Nasdaq timeout.
+#:
+#: This has to be its own, much shorter number. `_NO_DATA` exists precisely so that "FINRA
+#: answered and has no rows" is distinguishable from "the attempt failed" — and writing the
+#: same 900-second `{}` memo for both threw that distinction away three lines after making
+#: it, pinning a transient as a measured answer. A FINRA 429 sets a 300 s cooldown; the memo
+#: outlived it by ten minutes, so `/stocks/{t}/overview` and Home's Skeptical Money scan
+#: kept reporting "no short interest" for ~10 minutes after the upstream was healthy. Short
+#: enough to ride out every backoff this module has, long enough to stop a per-request 4 s
+#: Nasdaq timeout storm. Same rule `fred._mark_failed` and `commodity_service._get_quote`
+#: follow: a failure and a real empty answer must never become the same cache entry.
+_FAILURE_TTL_SECONDS = 60
 
 
 # ── FINRA API safeguards ───────────────────────────────────────
@@ -351,6 +401,15 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
                 logger.warning(f"FINRA auth failed for {ticker}: {resp.status_code}")
             return None
 
+        if resp.status_code == 204:
+            # 204 = FINRA answered, and has no short-interest rows for this symbol. That is
+            # a REAL answer — FINRA covers every exchange-listed and OTC equity, so an index
+            # (^GSPC), a crypto pair (BTCUSD) or a fund simply has none and never will. It
+            # was logged as `FINRA API failed for ^GSPC: 204` at WARNING every cycle and
+            # then fell through to the Nasdaq fallback, which cannot know better either.
+            _finra_consecutive_failures = 0
+            logger.debug("FINRA: no short-interest rows for %s (204)", ticker)
+            return _NO_DATA
         if resp.status_code != 200:
             logger.warning(f"FINRA API failed for {ticker}: {resp.status_code}")
             return None
@@ -456,8 +515,12 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
     No authentication required. Only covers NASDAQ-listed stocks.
     """
     global _nasdaq_kill_switch, _nasdaq_consecutive_failures, _nasdaq_rate_limited_until
+    global _nasdaq_disabled_until
 
     if _nasdaq_kill_switch:
+        return None
+
+    if time.time() < _nasdaq_disabled_until:
         return None
 
     if time.time() < _nasdaq_rate_limited_until:
@@ -466,7 +529,7 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
     try:
         client = await _get_client()
         url = _NASDAQ_SHORT_INTEREST_URL.format(ticker=ticker.upper())
-        resp = await client.get(url, headers=_HEADERS)
+        resp = await client.get(url, headers=_HEADERS, timeout=_NASDAQ_TIMEOUT_SECONDS)
 
         if resp.status_code == 429:
             _nasdaq_rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN
@@ -534,7 +597,30 @@ async def _fetch_from_nasdaq(ticker: str) -> Optional[Dict[str, Any]]:
         return result
 
     except Exception as e:
-        logger.warning(f"Nasdaq API error for {ticker}: {e}")
+        # Count it. The kill switch only ever incremented on a 403, so the failure mode
+        # Nasdaq actually exhibits — a silent black-hole that ends in a timeout whose
+        # `str()` is empty — could never trip it, and every call kept paying the timeout.
+        _nasdaq_consecutive_failures += 1
+        if _nasdaq_consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            # A WINDOW, not the permanent latch. These are timeouts and connect errors —
+            # transient by nature — and ten of them land together from one blip because
+            # `_build_shorts` fans out under a semaphore of 10. Zeroing the counter is part
+            # of the fix: without it the switch re-trips on the very next failure after the
+            # window and the disable is permanent by another route.
+            _nasdaq_disabled_until = time.time() + _NASDAQ_TRANSIENT_DISABLE_SECONDS
+            _nasdaq_consecutive_failures = 0
+            logger.warning(
+                "Nasdaq short-interest disabled for %ds after %d consecutive failures "
+                "(last: %s) — FINRA remains the primary source",
+                _NASDAQ_TRANSIENT_DISABLE_SECONDS, _MAX_CONSECUTIVE_FAILURES,
+                type(e).__name__,
+            )
+        else:
+            # `type(e).__name__` because a timeout's str() is empty: the production log
+            # read "Nasdaq API error for BTCUSD: " with nothing after the colon.
+            logger.warning(
+                "Nasdaq API error for %s: %s: %s", ticker, type(e).__name__, e or "(no message)",
+            )
         return None
 
 
@@ -559,27 +645,41 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
     # Tier 1: In-memory cache (skip a stale pre-feature snapshot → re-fetch)
     cached = _mem_cache_get(mem_key)
     if cached is not None and not _is_stale_finra_snapshot(cached):
+        # `{}` is a real memoised answer ("nothing anywhere, recently"), and it is falsy —
+        # so this must test `is not None`, which it does.
         return cached
 
-    # Tier 2: Supabase cache (same self-heal)
-    sb_data = _supabase_cache_get(ticker)
+    # Tier 2 / Tier 3: Supabase. All three of these are SYNCHRONOUS PostgREST round trips
+    # on a request path (`/stocks/{t}/overview` gathers this alongside 13 FMP coroutines,
+    # and `/home/dashboard` calls it per ticker) and the app runs ONE uvicorn worker, so
+    # each one used to suspend every other in-flight request. The 2026-08-27 event-loop fix
+    # threaded `stock_overview_service`'s own three calls and declared the path clean; this
+    # integration's three, on the same path, were missed.
+    sb_data = await asyncio.to_thread(_supabase_cache_get, ticker)
     if sb_data is not None and not _is_stale_finra_snapshot(sb_data):
         _mem_cache_set(mem_key, sb_data)
         return sb_data
 
     # Tier 3: Stale Supabase data (any age) — better than N/A
-    stale = _supabase_cache_get_stale(ticker)
+    stale = await asyncio.to_thread(_supabase_cache_get_stale, ticker)
 
     # Try FINRA API first (covers ALL exchanges)
     result = await _fetch_from_finra(ticker)
 
-    # Fallback 1: Nasdaq (covers NASDAQ-listed stocks)
-    if not result:
+    answered_empty = result is _NO_DATA
+    if answered_empty:
+        # FINRA answered "no rows for this symbol" (204). It covers every exchange-listed
+        # and OTC equity, so Nasdaq — which covers a SUBSET — cannot know better. Skipping
+        # the fallback here is what stops an index or a crypto pair from paying the Nasdaq
+        # timeout on every request.
+        result = None
+    elif not result:
+        # Fallback 1: Nasdaq (covers NASDAQ-listed stocks)
         result = await _fetch_from_nasdaq(ticker)
 
     if result:
         _mem_cache_set(mem_key, result)
-        _supabase_cache_set(ticker, result)
+        await asyncio.to_thread(_supabase_cache_set, ticker, result)
         return result
 
     # Fall back to stale cache data
@@ -587,6 +687,22 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
         _mem_cache_set(mem_key, stale)
         return stale
 
+    # NOTHING anywhere. Memoise BRIEFLY — in memory only, never in Supabase (a persisted
+    # empty would outlive the outage that caused it). Without this, `/stocks/{t}/overview`
+    # re-ran the full FINRA attempt plus, until the timeout fix above, a 15 s Nasdaq wait
+    # on EVERY 120 s cache miss, forever, for any ticker neither source covers — the single
+    # largest avoidable cost on the detail-screen path.
+    #
+    # ⚠️ TWO DIFFERENT TTLs, because this line is reached for two different facts.
+    # `answered_empty` means FINRA returned a clean 204 — a measured "this company has no
+    # reported short interest", stable for days. Everything else (a 5xx, the 429 cooldown,
+    # a kill switch, a Nasdaq timeout) means nothing was reached at all, and writing the
+    # 900-second memo for that pinned a transient as an answer: FINRA's own 429 cooldown is
+    # 300 s, so Home's Skeptical Money scan kept reporting "no short interest" for ten
+    # minutes after the upstream recovered. `_NO_DATA` exists to tell these apart; this is
+    # where that distinction has to be spent.
+    ttl = _EMPTY_TTL_SECONDS if answered_empty else _FAILURE_TTL_SECONDS
+    _cache[mem_key] = (time.time() - (_CACHE_TTL - ttl), {})
     return {}
 
 

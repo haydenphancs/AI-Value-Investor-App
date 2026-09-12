@@ -46,6 +46,8 @@ _REASON_CALLS = {
     "refund_ledgered": "reason",    # CreditService.refund_ledgered(..., reason=...)
     "log_transaction": "reason",    # CreditService.log_transaction(..., reason=...)
     "refund_once": 0,               # _ChatQuota.refund_once(reason)  — positional
+    "settle_no_cost": 0,            # _ChatQuota.settle_no_cost(reason) — positional; the
+                                    # DELIVERED-but-free settlement (cache hit, degraded)
 }
 
 #: A ledger row written as a dict literal (the seeding script does this) is identified by
@@ -200,6 +202,15 @@ def test_every_reason_written_in_sql_is_mapped():
     )
 
 
+# Reasons no code writes any more but whose rows are STILL in the ledger, so the map must
+# keep rendering them. An entry here needs the writer that retired and when; a reason that
+# was never written anywhere does not belong here.
+_RETIRED_WRITERS: dict[str, str] = {
+    "chat_refund": "POST /stocks/{ticker}/report/chat, deleted 2026-09-11 (no client caller; "
+                   "bypassed every chat guardrail). Its refund rows persist in credit_transactions.",
+}
+
+
 def test_the_map_has_no_entries_nothing_writes():
     """The other direction: a mapping for a reason production no longer emits is dead
     copy. Not fatal, so this reports rather than being merged into the guard above — but
@@ -207,10 +218,12 @@ def test_the_map_has_no_entries_nothing_writes():
     """
     written = set(_scan_python()) | set(_scan_sql())
     # A prefix family is written as `chat_degraded_` + a runtime suffix, so the concrete
-    # keys it covers never appear literally. Exclude anything a known prefix explains.
+    # keys it covers never appear literally. Exclude anything a known prefix explains,
+    # and anything a RETIRED writer left behind in the ledger.
     orphans = {
         reason for reason in KNOWN_REASONS
         if reason not in written and not reason.startswith(KNOWN_REASON_PREFIXES)
+        and reason not in _RETIRED_WRITERS
     }
     assert not orphans, (
         f"credit_history_service maps reasons nothing writes any more: {sorted(orphans)}"
@@ -224,3 +237,13 @@ def test_no_mapped_reason_is_shadowed_by_a_prefix_family(reason):
     assert not reason.startswith(KNOWN_REASON_PREFIXES), (
         f"{reason!r} is both an exact key and prefix-matched — make them disjoint"
     )
+
+
+def test_retired_writers_are_really_retired():
+    """Anti-vacuity for the allowance above: a reason listed as retired must NOT be written
+    anywhere (or the allowance is hiding a live entry), and must still be mapped."""
+    written = set(_scan_python()) | set(_scan_sql())
+    for reason, why in _RETIRED_WRITERS.items():
+        assert reason not in written, f"{reason} is written again — remove it from _RETIRED_WRITERS"
+        assert _is_mapped(reason), f"{reason} must stay mapped: its ledger rows still render"
+        assert len(why) > 30

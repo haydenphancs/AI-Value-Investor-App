@@ -26,6 +26,7 @@ from app.schemas.watchlist import (
     RemoveFromWatchlistRequest,
     WatchlistItemResponse,
 )
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +47,12 @@ async def get_watchlist(
 
     try:
         result = (
-            supabase.table("watchlist_items")
-            .select("*")
-            .eq("user_id", user_id)
-            .order("added_at", desc=True)
-            .execute()
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("added_at", desc=True)
+            ))
         )
         logger.info("[Watchlist] Returned %d items", len(result.data or []))
         return result.data or []
@@ -86,11 +88,12 @@ async def add_to_watchlist(
     # Check for duplicate
     try:
         existing = (
-            supabase.table("watchlist_items")
-            .select("id")
-            .eq("user_id", user_id)
-            .eq("ticker", ticker)
-            .execute()
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .select("id")
+                .eq("user_id", user_id)
+                .eq("ticker", ticker)
+            ))
         )
         if existing.data:
             # On the watchlist already — but that no longer means "already where the user
@@ -187,7 +190,7 @@ async def add_to_watchlist(
     data.update(classification)
 
     try:
-        result = supabase.table("watchlist_items").insert(data).execute()
+        result = (await sb_exec(supabase.table("watchlist_items").insert(data)))
         item = result.data[0] if result.data else data
         logger.info("[Watchlist] Added %s to watchlist (id=%s)", ticker, item.get("id", "?"))
         # The Assets tab refreshes right after an add and purges portfolio tickers
@@ -347,21 +350,23 @@ async def remove_from_watchlist(
     ticker = first
     try:
         result = (
-            supabase.table("watchlist_items")
-            .delete()
-            .eq("user_id", user_id)
-            .eq("ticker", first)
-            .execute()
+            (await sb_exec(
+                supabase.table("watchlist_items")
+                .delete()
+                .eq("user_id", user_id)
+                .eq("ticker", first)
+            ))
         )
         if not result.data and second != first:
             logger.info("[Watchlist] no %s row for user=%s — retrying as %s",
                         first, user_id, second)
             result = (
-                supabase.table("watchlist_items")
-                .delete()
-                .eq("user_id", user_id)
-                .eq("ticker", second)
-                .execute()
+                (await sb_exec(
+                    supabase.table("watchlist_items")
+                    .delete()
+                    .eq("user_id", user_id)
+                    .eq("ticker", second)
+                ))
             )
             if result.data:
                 ticker = second

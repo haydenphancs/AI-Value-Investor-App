@@ -30,12 +30,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+
+from app.config import settings
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from google.genai import types
 
 from app.integrations.fmp import FMPClient
 from app.integrations.gemini import GeminiClient, _call_with_timeout
+from app.integrations.gemini import _log_gemini_usage, _response_usage, truncate_tool_result
 from app.services.agents.fmp_tools import (
     build_fmp_tool_declarations,
     build_tool_handlers,
@@ -51,6 +54,7 @@ from app.services.agents.narrative_prompts import (
     parse_stage_a_response,
     run_narrative_jobs,
     stage_a_fallback,
+    agentic_thinking_budget,
     stage_a_thinking_budget,
     synthesize_core_thesis,
     synthesize_critical_factors,
@@ -249,7 +253,12 @@ class ResearchAgent:
                 system_instruction=persona_instruction,
                 tools=[tools],
                 temperature=0.7,
-                max_output_tokens=8192,
+                max_output_tokens=settings.GEMINI_MAX_TOKENS,
+                # Its OWN setting (SYSTEM_DESIGN_GUIDELINES 9b.7). This loop is up to
+                # five calls per deep report and had no thinking knob at all, so it
+                # billed thought tokens at the output rate while every other stage
+                # was capped — and eval_report_thinking.py never measured it.
+                thinking_budget=agentic_thinking_budget(),
             )
 
             final_text = ""
@@ -264,6 +273,10 @@ class ResearchAgent:
                     response = await _call_with_timeout(
                         chat.send_message(research_prompt),
                         what=f"Stage-A agentic round 1 ({self.persona.key})",
+                    )
+                    _log_gemini_usage(
+                        _response_usage(response), call_site="research_agentic",
+                        model=self.gemini.model_name, tag=f"{ticker}:{self.persona.key}:r1",
                     )
 
                 # Walk parts: handle function calls; collect tool responses
@@ -303,8 +316,10 @@ class ResearchAgent:
                     response_parts.append(
                         types.Part.from_function_response(
                             name=fc.name,
+                            # One structural budget for every tool result (was a hard
+                            # `[:5000]` cut that handed the model broken JSON).
                             response={
-                                "result": json.dumps(result, default=str)[:5000]
+                                "result": json.dumps(truncate_tool_result(result), default=str)
                             },
                         )
                     )
@@ -313,6 +328,11 @@ class ResearchAgent:
                     response = await _call_with_timeout(
                         chat.send_message(response_parts),
                         what=f"Stage-A tool follow-up ({self.persona.key})",
+                    )
+                    _log_gemini_usage(
+                        _response_usage(response), call_site="research_agentic",
+                        model=self.gemini.model_name,
+                        tag=f"{ticker}:{self.persona.key}:r{round_num + 2}",
                     )
                     continue
 
@@ -346,11 +366,15 @@ class ResearchAgent:
             #
             # Do the synthesis the loop never got to instead. The single-pass fallback
             # already exists for the "loop blew up" case and sees the same evidence.
+            # AGENTIC_ROUNDS_EXHAUSTED is the marker to grep: this is the deep door's silent
+            # degradation, and the rate matters most while REPORT_AGENTIC_THINKING_BUDGET=0
+            # is unmeasured on this path (thinking OFF is exactly the setting that could
+            # make the model keep calling tools rather than judge it has enough).
             logger.warning(
-                "Agent %s exhausted all %d rounds without calling research_complete — "
-                "running the single-pass synthesis so Stage A gets real findings "
-                "instead of a placeholder",
-                self.persona.key, MAX_AGENTIC_ROUNDS,
+                "AGENTIC_ROUNDS_EXHAUSTED ticker=%s persona=%s rounds=%d — no research_complete; "
+                "running the single-pass synthesis so Stage A gets real findings instead of a "
+                "placeholder",
+                ticker, self.persona.key, MAX_AGENTIC_ROUNDS,
             )
             return await self._fallback_text_analysis(out, evidence)
 

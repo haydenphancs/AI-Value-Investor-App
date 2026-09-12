@@ -27,6 +27,7 @@ from app.schemas.auth import (
     MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
     OAuthSignInRequest, SessionExchangeRequest,
 )
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -174,9 +175,11 @@ async def sign_in(
         # PGRST116 → postgrest APIError) when the row is missing. So the fallback was dead
         # code, and a user whose signup trigger had not seeded public.users got a 500 on a
         # correct password instead of the intended graceful degradation to the auth id.
-        db_user = supabase.table("users").select("id, email").eq(
-            "id", str(user.id)
-        ).limit(1).execute()
+        db_user = (await sb_exec(
+                      supabase.table("users").select("id, email").eq(
+                      "id", str(user.id)
+                      ).limit(1)
+                  ))
 
         db_rows = db_user.data or []
         if not db_rows:
@@ -286,9 +289,11 @@ async def sign_up(
 
         # DB trigger auto-creates public.users row.
         # Update display_name (trigger may not copy it from metadata).
-        supabase.table("users").update({
+        (await sb_exec(
+            supabase.table("users").update({
             "display_name": request.display_name,
-        }).eq("id", str(user.id)).execute()
+            }).eq("id", str(user.id))
+        ))
 
         # The confirmation gate. `email_confirmed_at` is set by Supabase only once the
         # address is verified; absent means "unconfirmed", so no tokens are issued.
@@ -770,7 +775,7 @@ async def session_exchange(
     # The DB trigger creates public.users on auth.users insert. Confirm it landed rather
     # than minting tokens for an id with no app-level row.
     try:
-        row = supabase.table("users").select("id").eq("id", user_id).single().execute()
+        row = (await sb_exec(supabase.table("users").select("id").eq("id", user_id).single()))
         if not (row.data or {}).get("id"):
             raise ValueError("no public.users row")
     except Exception as e:
@@ -975,7 +980,7 @@ async def change_password(
         # handle — became an indistinguishable 500 instead of the 404 below. That 500 is a
         # bare-string body iOS cannot decode, so it surfaced as `.serverError` and used to be
         # auto-retried twice, burning three of five attempts per tap.
-        result = supabase.table("users").select("email").eq("id", user_id).limit(1).execute()
+        result = (await sb_exec(supabase.table("users").select("email").eq("id", user_id).limit(1)))
         rows = result.data or []
         email = rows[0].get("email") if rows else None
     except Exception as e:
@@ -1179,7 +1184,7 @@ async def set_password(
     # somebody else's mailbox. `limit(1)` not `single()`, which raises on zero rows (see the
     # identical note in change-password).
     try:
-        result = supabase.table("users").select("email").eq("id", user_id).limit(1).execute()
+        result = (await sb_exec(supabase.table("users").select("email").eq("id", user_id).limit(1)))
         rows = result.data or []
         email = rows[0].get("email") if rows else None
     except Exception as e:

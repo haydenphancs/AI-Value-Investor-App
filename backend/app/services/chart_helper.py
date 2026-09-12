@@ -390,9 +390,12 @@ async def _fetch_crypto_chart_data(
     from datetime import date as _date
 
     from app.services.coingecko_adapter import crypto_base_symbol
+    from app.services.crypto_service import _INTRADAY_RANGES
 
     base = crypto_base_symbol(symbol)
-    intraday_days = {"1D": 1, "1W": 7}.get(range_code)
+    # The SAME table `crypto_service` uses, so the chat card and the detail screen can
+    # never disagree about which ranges are sub-daily.
+    intraday_days = _INTRADAY_RANGES.get(range_code)
     # CoinGecko Basic caps history at CRYPTO_HISTORY_YEARS; asking past it is refused
     # locally by the client rather than spending a call.
     cap_days = max(1, int(getattr(settings, "CRYPTO_HISTORY_YEARS", 2)) * 365)

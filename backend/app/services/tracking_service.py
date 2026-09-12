@@ -59,6 +59,11 @@ from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
 
+#: Asset classes whose `company_profile_cache` row can actually carry a `sector`.
+#: Everything else (crypto, indices, commodities, FX) has no sector by construction, so
+#: leaving it in the backfill's "missing" set re-queries it on every single request.
+_CLASSIFIABLE_ASSET_TYPES = {"stock", "etf"}
+
 
 class WatchlistUnavailableError(Exception):
     """The user's watchlist rows could not be READ from Supabase.
@@ -488,9 +493,23 @@ class TrackingService:
         feed that renders without a sector badge is fine; a 500 because a cache lookup
         blipped is not.
         """
+        # EQUITIES ONLY. A coin, an index or a commodity has no `sector` in
+        # `company_profile_cache` and never will, so an unfiltered list kept every one of
+        # them permanently "missing": the same symbols were looked up on EVERY tracking
+        # request, forever, and every lookup came back empty. `resolve_asset_class` is the
+        # same classifier the rest of this file already uses, so a row's stored
+        # `asset_type` is honoured and a ticker-shape fallback covers a row written before
+        # the column existed.
+        #
+        # ETFs are included deliberately: FMP's profile DOES carry a sector for many of
+        # them, and an ETF that has none simply stays unclassified as before.
         missing = [
             item for item in watchlist
-            if item.get("ticker") and not item.get("sector")
+            if item.get("ticker")
+            and not item.get("sector")
+            and resolve_asset_class(
+                str(item["ticker"]), item.get("asset_type")
+            ).lower() in _CLASSIFIABLE_ASSET_TYPES
         ]
         if not missing:
             return
@@ -812,8 +831,12 @@ class TrackingService:
 
         sb = get_supabase()
         try:
-            result = (
-                sb.table("whale_trades")
+            # OFF THE LOOP. This sits inside the tracking feed's `asyncio.gather`, so a
+            # blocking PostgREST round trip here does not just stall this coroutine — it
+            # stalls every sibling in the fan-out AND every other request on the single
+            # uvicorn worker, which is the opposite of what gathering them is for.
+            result = await asyncio.to_thread(
+                lambda: sb.table("whale_trades")
                 .select("ticker, company_name, action, amount, amount_range, date, created_at, whale_id, whales(name, avatar_url, firm_name)")
                 .in_("ticker", ticker_list)
                 .gte("created_at", cutoff_iso)

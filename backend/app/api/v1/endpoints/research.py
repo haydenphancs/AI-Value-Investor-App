@@ -698,8 +698,8 @@ async def get_my_reports(
     result = supabase.table("research_reports").select(
         "id, ticker, company_name, industry, investor_persona, status, title, "
         "executive_summary, overall_score, fair_value_estimate, progress, "
-        "current_step, created_at, completed_at, user_rating, is_refunded, "
-        "credits_charged, pdf_status"
+        "current_step, created_at, processing_started_at, completed_at, user_rating, "
+        "is_refunded, credits_charged, pdf_status"
     ).eq("user_id", user["id"]).neq(
         "status", "deleted"
     ).order(

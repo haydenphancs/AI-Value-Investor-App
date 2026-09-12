@@ -70,7 +70,7 @@ _LIMITER_CLASSES = (
 # market-mover route must live on the client one (auth.md §8a point 3).
 GUARDED_ROUTES = [
     (ticker_report, "get_ticker_report", "router", ReportRateLimit),
-    (ticker_report, "chat_with_ticker_report", "router", ChatRateLimit),
+    # (ticker_report.chat_with_ticker_report was deleted 2026-09-11 — no client called it.)
     (chat, "create_chat_session", "router", ChatRateLimit),
     (chat, "send_chat_message", "router", ChatRateLimit),
     (chat, "stream_chat_message", "router", ChatRateLimit),

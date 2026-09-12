@@ -123,13 +123,13 @@ class ETFDetailViewModel: ObservableObject {
                 self.suppressIntervalReload = false
 
                 // Restart or stop chart refresh timer based on new range
-                // Interval alone: the `isConnected` conjunct this used to carry would be
-                // permanently false now the FMP stream is gone, freezing the intraday chart.
-                if newRange.defaultInterval.isIntraday {
-                    self.startChartRefreshTimer()
-                } else {
-                    self.stopChartRefreshTimer()
-                }
+                // The timer runs on EVERY range — same correction as IndexDetailViewModel
+                // (2026-09-12). Stopping it on a non-intraday range permanently killed the
+                // 30-second LEVEL refresh the moment the user tapped 3M, with nothing to
+                // restart it, while this timer's own body already decides per tick whether
+                // to include chart bars and says so: "The level header refreshes either
+                // way — the old `isIntraday` guard froze it entirely on a daily chart."
+                self.startChartRefreshTimer()
 
                 Task { await self.fetchChartForRange(newRange) }
             }

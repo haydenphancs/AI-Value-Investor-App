@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from app.database import get_supabase
+from app.utils.postgrest_paging import fetch_all_rows
 from app.services.entitlements import signals_unlocked
 from app.services.notification_jobs import JOB_PROFILE_MATCH, claimed_job
 from app.services.notification_kinds import KIND_PROFILE_MATCH, ticker_route
@@ -102,20 +103,23 @@ def _load_profiles() -> List[Dict[str, Any]]:
     Filtered in SQL rather than in Python so the row cap and the tier read below are spent
     on candidates that can actually be notified.
     """
+    # PAGED. `.limit(_MAX_PROFILES)` was inert: PostgREST clamps every response to its
+    # server-side `max-rows` (~1,000 here) whatever the client asks for, so this read
+    # returned 1,000 rows and `len(rows) >= _MAX_PROFILES` — the ceiling warning three
+    # lines below — could never be true. Consented reader number 1,001 onward simply never
+    # received a profile-match notification, on every daily run, with nothing in the log.
+    # The `.order("user_id")` made that stable, i.e. it was always the SAME readers.
     try:
-        res = (
-            get_supabase().table("user_investor_profile")
+        rows = fetch_all_rows(
+            lambda: get_supabase().table("user_investor_profile")
             .select("user_id, topics, follow_signals, consented_at")
-            .not_.is_("consented_at", "null")
-            # Deterministic order: an unordered LIMIT returns an arbitrary but STABLE
-            # subset (physical heap order), so once the table exceeds the cap the same
-            # readers were excluded on every daily run, forever, while the log below
-            # implied a transient miss.
-            .order("user_id")
-            .limit(_MAX_PROFILES)
-            .execute()
+            .not_.is_("consented_at", "null"),
+            # `user_id` is this table's PRIMARY KEY, so it is a total order — required for
+            # OFFSET paging, which can otherwise skip or duplicate rows at a page boundary.
+            order_by="user_id",
+            what="profile match: consented readers",
+            max_pages=max(1, _MAX_PROFILES // 1000),
         )
-        rows = res.data or []
     except Exception as e:
         logger.warning(
             "profile match: profile read failed (%s: %s) — no sends this pass",

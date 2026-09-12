@@ -545,6 +545,9 @@ struct BackendReportListItem: Sendable {
     let progress: Int?
     let currentStep: String?
     let createdAt: String
+    /// When work actually STARTED (after the agent semaphore); nil while queued. Optional so
+    /// old backend builds decode unchanged. See `ResearchViewModel.applyClientSideTimeoutPass`.
+    let processingStartedAt: String?
     let completedAt: String?
     let userRating: Int?
     let isRefunded: Bool?
@@ -564,6 +567,7 @@ struct BackendReportListItem: Sendable {
         case progress
         case currentStep = "current_step"
         case createdAt = "created_at"
+        case processingStartedAt = "processing_started_at"
         case completedAt = "completed_at"
         case userRating = "user_rating"
         case isRefunded = "is_refunded"

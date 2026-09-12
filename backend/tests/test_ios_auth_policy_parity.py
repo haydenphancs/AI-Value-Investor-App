@@ -233,7 +233,7 @@ def test_backend_strict_routes_are_discoverable():
         "generateResearch", "getResearchStatus", "getResearchReport",
         "getResearchReportPDF", "regenerateResearchReportPDF", "getResearchTickerReport",
         "getMyReports", "rateReport", "deleteReport",
-        "getTickerReport", "chatWithTickerReport", "prewarmReportCollection",
+        "getTickerReport", "prewarmReportCollection",
     ],
 )
 def test_strict_endpoints_are_signInRequired(case_name):

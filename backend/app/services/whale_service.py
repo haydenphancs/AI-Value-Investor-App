@@ -93,6 +93,8 @@ from app.schemas.whale import (
     WhaleAlertBannerResponse,
     FollowResponse,
 )
+from app.utils.supabase_errors import retry_idempotent_async
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -584,17 +586,18 @@ class WhaleService:
         if category:
             query = query.eq("category", category)
         query = query.order("followers_count", desc=True).limit(_ROSTER_PAGE)
-        result = query.execute()
+        result = (await sb_exec(query))
         whales = result.data or []
 
         # Fetch followed whale IDs for this user
         followed_ids: set = set()
         if user_id:
             follows = (
-                sb.table("whale_follows")
-                .select("whale_id")
-                .eq("user_id", user_id)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_follows")
+                    .select("whale_id")
+                    .eq("user_id", user_id)
+                ))
             )
             followed_ids = {f["whale_id"] for f in (follows.data or [])}
 
@@ -612,11 +615,12 @@ class WhaleService:
             # for an active one we had not re-hydrated lately. `date` is TEXT in
             # `YYYY-MM-DD`, so a lexical `gte` is a chronological one.
             tg_result = (
-                sb.table("whale_trade_groups")
-                .select("whale_id, trade_count")
-                .gte("date", cutoff)
-                .limit(_TRADE_COUNT_ROWS)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_trade_groups")
+                    .select("whale_id, trade_count")
+                    .gte("date", cutoff)
+                    .limit(_TRADE_COUNT_ROWS)
+                ))
             )
             rows = tg_result.data or []
             if len(rows) >= _TRADE_COUNT_ROWS:
@@ -751,8 +755,8 @@ class WhaleService:
             logger.info("Force refresh requested for whale %s — busting all caches", whale_id)
             _whale_profile_cache.pop(mem_key, None)
             try:
-                sb.table("whale_profile_cache").delete().eq("whale_id", whale_id).execute()
-                sb.table("whale_filing_snapshots").delete().eq("whale_id", whale_id).execute()
+                (await sb_exec(sb.table("whale_profile_cache").delete().eq("whale_id", whale_id)))
+                (await sb_exec(sb.table("whale_filing_snapshots").delete().eq("whale_id", whale_id)))
             except Exception as e:
                 logger.warning("Cache bust failed for %s: %s", whale_id, e)
         else:
@@ -765,10 +769,11 @@ class WhaleService:
             # ── Tier 2: Supabase profile cache (24h TTL) ───────────────
             try:
                 cache_row = (
-                    sb.table("whale_profile_cache")
-                    .select("profile_json, cached_at")
-                    .eq("whale_id", whale_id)
-                    .execute()
+                    (await sb_exec(
+                        sb.table("whale_profile_cache")
+                        .select("profile_json, cached_at")
+                        .eq("whale_id", whale_id)
+                    ))
                 )
                 if cache_row.data:
                     row = cache_row.data[0]
@@ -844,18 +849,20 @@ class WhaleService:
             if profile_no_follow is not None and not _degraded:
                 _cache_set(_whale_profile_cache, mem_key, profile_no_follow)
                 try:
-                    sb.table("whale_profile_cache").upsert(
+                    (await sb_exec(
+                        sb.table("whale_profile_cache").upsert(
                         {
-                            "whale_id": whale_id,
-                            "profile_json": profile_no_follow.model_dump(),
-                            # UTC-AWARE. A naive local stamp written into a `timestamptz`
-                            # is interpreted as UTC by Postgres, so on any non-UTC host
-                            # the row reads back in the future, `age_hours` goes negative
-                            # and the 24h TTL never expires.
-                            "cached_at": datetime.now(timezone.utc).isoformat(),
+                        "whale_id": whale_id,
+                        "profile_json": profile_no_follow.model_dump(),
+                        # UTC-AWARE. A naive local stamp written into a `timestamptz`
+                        # is interpreted as UTC by Postgres, so on any non-UTC host
+                        # the row reads back in the future, `age_hours` goes negative
+                        # and the 24h TTL never expires.
+                        "cached_at": datetime.now(timezone.utc).isoformat(),
                         },
                         on_conflict="whale_id",
-                    ).execute()
+                        )
+                    ))
                 except Exception as e:
                     logger.warning(
                         "whale_profile_cache write failed for %s: %s", whale_id, e
@@ -925,7 +932,7 @@ class WhaleService:
         # Step 1: Fetch whale record
         try:
             result = (
-                sb.table("whales").select("*").eq("id", whale_id).execute()
+                (await sb_exec(sb.table("whales").select("*").eq("id", whale_id)))
             )
         except Exception as e:
             logger.error(
@@ -974,7 +981,7 @@ class WhaleService:
         # deletes the snapshot rows first.
         if not served_from_storage:
             try:
-                refreshed = sb.table("whales").select("*").eq("id", whale_id).execute()
+                refreshed = (await sb_exec(sb.table("whales").select("*").eq("id", whale_id)))
                 if refreshed.data:
                     whale = refreshed.data[0]
             except Exception as e:
@@ -989,11 +996,12 @@ class WhaleService:
         if user_id:
             try:
                 follow_result = (
-                    sb.table("whale_follows")
-                    .select("id")
-                    .eq("user_id", user_id)
-                    .eq("whale_id", whale_id)
-                    .execute()
+                    (await sb_exec(
+                        sb.table("whale_follows")
+                        .select("id")
+                        .eq("user_id", user_id)
+                        .eq("whale_id", whale_id)
+                    ))
                 )
                 is_following = bool(follow_result.data)
             except Exception as e:
@@ -1073,12 +1081,13 @@ class WhaleService:
         # Historical trade groups from DB (dedup by date)
         try:
             db_groups = (
-                sb.table("whale_trade_groups")
-                .select("*")
-                .eq("whale_id", whale_id)
-                .order("date", desc=True)
-                .limit(12)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_trade_groups")
+                    .select("*")
+                    .eq("whale_id", whale_id)
+                    .order("date", desc=True)
+                    .limit(12)
+                ))
             )
             existing_dates = {g.date for g in trade_groups}
             fresh_rows = [
@@ -1225,11 +1234,12 @@ class WhaleService:
         """The uncached body of `get_whale_activity_feed`. See its docstring."""
         # Get followed whale IDs
         follows = (
-            sb.table("whale_follows")
-            .select("whale_id")
-            .eq("user_id", user_id)
-            .limit(_ROSTER_PAGE)
-            .execute()
+            (await sb_exec(
+                sb.table("whale_follows")
+                .select("whale_id")
+                .eq("user_id", user_id)
+                .limit(_ROSTER_PAGE)
+            ))
         )
         whale_ids = [f["whale_id"] for f in (follows.data or [])]
 
@@ -1261,21 +1271,23 @@ class WhaleService:
         # equal dates — so out-of-order rows produced repeated/misplaced date
         # headers. This matches the profile path (which also orders by date).
         trade_groups = (
-            sb.table("whale_trade_groups")
-            .select("*")
-            .in_("whale_id", [str(w) for w in whale_ids])
-            .order("date", desc=True)
-            .limit(_ACTIVITY_FEED_PAGE)
-            .execute()
+            (await sb_exec(
+                sb.table("whale_trade_groups")
+                .select("*")
+                .in_("whale_id", [str(w) for w in whale_ids])
+                .order("date", desc=True)
+                .limit(_ACTIVITY_FEED_PAGE)
+            ))
         )
 
         # Fetch whale names
         whales = (
-            sb.table("whales")
-            .select("id, name, avatar_url, category, firm_name")
-            .in_("id", [str(w) for w in whale_ids])
-            .limit(_ROSTER_PAGE)
-            .execute()
+            (await sb_exec(
+                sb.table("whales")
+                .select("id, name, avatar_url, category, firm_name")
+                .in_("id", [str(w) for w in whale_ids])
+                .limit(_ROSTER_PAGE)
+            ))
         )
         whale_map = {
             str(w["id"]): w for w in (whales.data or [])
@@ -1333,12 +1345,13 @@ class WhaleService:
         sb = get_supabase()
         try:
             result = (
-                sb.table("whale_trade_groups")
-                .select("*")
-                .eq("whale_id", whale_id)
-                .order("date", desc=True)
-                .limit(_TRADE_GROUPS_PAGE)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_trade_groups")
+                    .select("*")
+                    .eq("whale_id", whale_id)
+                    .order("date", desc=True)
+                    .limit(_TRADE_GROUPS_PAGE)
+                ))
             )
             rows = result.data or []
             if not rows:
@@ -1418,23 +1431,25 @@ class WhaleService:
             return None
         try:
             result = (
-                sb.table("whale_trade_groups")
-                .select("*")
-                .eq("id", group_id)
-                .eq("whale_id", whale_id)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_trade_groups")
+                    .select("*")
+                    .eq("id", group_id)
+                    .eq("whale_id", whale_id)
+                ))
             )
             if not result.data:
                 return None
             tg = result.data[0]
 
             db_trades = (
-                sb.table("whale_trades")
-                .select("*")
-                .eq("trade_group_id", group_id)
-                .order("amount", desc=True)
-                .limit(_TRADES_PER_PAGE)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_trades")
+                    .select("*")
+                    .eq("trade_group_id", group_id)
+                    .order("amount", desc=True)
+                    .limit(_TRADES_PER_PAGE)
+                ))
             )
 
             return self._assemble_group_response(
@@ -1463,10 +1478,12 @@ class WhaleService:
         try:
             if follow:
                 already_followed = self._assert_may_follow(sb, user_id, whale_id, tier)
-                sb.table("whale_follows").upsert(
+                (await sb_exec(
+                    sb.table("whale_follows").upsert(
                     {"user_id": user_id, "whale_id": whale_id},
                     on_conflict="user_id,whale_id",
-                ).execute()
+                    )
+                ))
                 if not already_followed:
                     # `_assert_may_follow` is SELECT-then-count-then-INSERT — a textbook
                     # TOCTOU. Two taps racing at 9/10 both read 9, both pass, and the user
@@ -1476,9 +1493,11 @@ class WhaleService:
                     # gets the same paywall they would have got serially.
                     self._compensate_if_over_limit(sb, user_id, whale_id, tier)
             else:
-                sb.table("whale_follows").delete().eq(
+                (await sb_exec(
+                    sb.table("whale_follows").delete().eq(
                     "user_id", user_id
-                ).eq("whale_id", whale_id).execute()
+                    ).eq("whale_id", whale_id)
+                ))
         except WhaleFollowLockedException:
             raise                                  # the endpoint maps this to a paywall
         except Exception as e:
@@ -1499,20 +1518,22 @@ class WhaleService:
         count = 0
         try:
             confirm = (
-                sb.table("whale_follows")
-                .select("whale_id")
-                .eq("user_id", user_id)
-                .eq("whale_id", whale_id)
-                .limit(1)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_follows")
+                    .select("whale_id")
+                    .eq("user_id", user_id)
+                    .eq("whale_id", whale_id)
+                    .limit(1)
+                ))
             )
             is_following = bool(confirm.data)
             whale = (
-                sb.table("whales")
-                .select("followers_count")
-                .eq("id", whale_id)
-                .limit(1)
-                .execute()
+                (await sb_exec(
+                    sb.table("whales")
+                    .select("followers_count")
+                    .eq("id", whale_id)
+                    .limit(1)
+                ))
             )
             count = (whale.data[0].get("followers_count") or 0) if whale.data else 0
         except Exception as e:
@@ -1674,27 +1695,29 @@ class WhaleService:
             # Prefer a valid alert from a followed whale.
             if user_id:
                 follows = (
-                    sb.table("whale_follows")
-                    .select("whale_id")
-                    .eq("user_id", user_id)
-                    .execute()
+                    (await sb_exec(
+                        sb.table("whale_follows")
+                        .select("whale_id")
+                        .eq("user_id", user_id)
+                    ))
                 )
                 whale_ids = [f["whale_id"] for f in (follows.data or [])]
                 if whale_ids:
                     followed_result = (
-                        sb.table("whale_alerts")
-                        .select("*")
-                        # Expiry filtered IN THE QUERY. Taking the newest 5 and then
-                        # filtering in Python meant that if all 5 happened to be expired,
-                        # a perfectly valid 6th was invisible — a hard 5-row window
-                        # masquerading as an expiry check. `expires_at IS NULL` means
-                        # "never expires" and must still qualify.
-                        .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
-                        .eq("is_active", True)
-                        .in_("whale_id", whale_ids)
-                        .order("created_at", desc=True)
-                        .limit(5)
-                        .execute()
+                        (await sb_exec(
+                            sb.table("whale_alerts")
+                            .select("*")
+                            # Expiry filtered IN THE QUERY. Taking the newest 5 and then
+                            # filtering in Python meant that if all 5 happened to be expired,
+                            # a perfectly valid 6th was invisible — a hard 5-row window
+                            # masquerading as an expiry check. `expires_at IS NULL` means
+                            # "never expires" and must still qualify.
+                            .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
+                            .eq("is_active", True)
+                            .in_("whale_id", whale_ids)
+                            .order("created_at", desc=True)
+                            .limit(5)
+                        ))
                     )
                     for alert in followed_result.data or []:
                         if not _alert_is_expired(alert):
@@ -1705,13 +1728,14 @@ class WhaleService:
             # small window (not limit(1)) means a stale expired latest no longer
             # suppresses a still-valid older one.
             result = (
-                sb.table("whale_alerts")
-                .select("*")
-                .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
-                .eq("is_active", True)
-                .order("created_at", desc=True)
-                .limit(5)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_alerts")
+                    .select("*")
+                    .or_(f"expires_at.is.null,expires_at.gt.{_now_iso()}")
+                    .eq("is_active", True)
+                    .order("created_at", desc=True)
+                    .limit(5)
+                ))
             )
             for alert in result.data or []:
                 if not _alert_is_expired(alert):
@@ -1831,11 +1855,12 @@ class WhaleService:
 
         # Step 2: Check Supabase cache
         existing = (
-            sb.table("whale_filing_snapshots")
-            .select("*")
-            .eq("whale_id", whale_id)
-            .eq("filing_period", period)
-            .execute()
+            (await sb_exec(
+                sb.table("whale_filing_snapshots")
+                .select("*")
+                .eq("whale_id", whale_id)
+                .eq("filing_period", period)
+            ))
         )
         if existing.data:
             row = existing.data[0]
@@ -2104,9 +2129,11 @@ class WhaleService:
         }
 
         try:
-            sb.table("whale_filing_snapshots").upsert(
+            (await sb_exec(
+                sb.table("whale_filing_snapshots").upsert(
                 snapshot, on_conflict="whale_id,filing_period"
-            ).execute()
+                )
+            ))
         except Exception as e:
             logger.error("Failed to persist filing snapshot: %s", e)
 
@@ -2134,11 +2161,12 @@ class WhaleService:
 
         # Check cache
         existing = (
-            sb.table("whale_filing_snapshots")
-            .select("*")
-            .eq("whale_id", whale_id)
-            .eq("filing_period", period)
-            .execute()
+            (await sb_exec(
+                sb.table("whale_filing_snapshots")
+                .select("*")
+                .eq("whale_id", whale_id)
+                .eq("filing_period", period)
+            ))
         )
         if existing.data:
             return existing.data[0]
@@ -2212,9 +2240,11 @@ class WhaleService:
             # render and synced to the whale_trade_groups table below). Sending it
             # in the upsert would make PostgREST reject the whole row (PGRST204),
             # silently killing the snapshot cache tier. Strip it for the DB write.
-            sb.table("whale_filing_snapshots").upsert(
+            (await sb_exec(
+                sb.table("whale_filing_snapshots").upsert(
                 snapshot_db_row(snapshot), on_conflict="whale_id,filing_period"
-            ).execute()
+                )
+            ))
         except Exception as e:
             logger.exception(
                 "Failed to persist congressional snapshot whale_id=%s period=%s: %s: %s",
@@ -2237,12 +2267,13 @@ class WhaleService:
         try:
             sb = get_supabase()
             result = (
-                sb.table("whale_filing_snapshots")
-                .select("*")
-                .eq("whale_id", whale_id)
-                .order("processed_at", desc=True)
-                .limit(1)
-                .execute()
+                (await sb_exec(
+                    sb.table("whale_filing_snapshots")
+                    .select("*")
+                    .eq("whale_id", whale_id)
+                    .order("processed_at", desc=True)
+                    .limit(1)
+                ))
             )
             return result.data[0] if result.data else None
         except Exception as e:
@@ -2993,10 +3024,11 @@ class WhaleService:
         uncached_tickers: List[str] = []
         try:
             cache_result = (
-                sb.table("company_profile_cache")
-                .select("ticker, profile_json, cached_at")
-                .in_("ticker", tickers)
-                .execute()
+                (await sb_exec(
+                    sb.table("company_profile_cache")
+                    .select("ticker, profile_json, cached_at")
+                    .in_("ticker", tickers)
+                ))
             )
             now = datetime.now(timezone.utc)
             for row in cache_result.data or []:
@@ -3041,9 +3073,11 @@ class WhaleService:
                     # Best-effort: the cache write is an optimization, and failing it must
                     # not lose the profiles we just fetched and already applied above.
                     try:
-                        sb.table("company_profile_cache").upsert(
+                        (await sb_exec(
+                            sb.table("company_profile_cache").upsert(
                             rows, on_conflict="ticker"
-                        ).execute()
+                            )
+                        ))
                     except Exception as e:
                         logger.warning(
                             "company_profile_cache bulk upsert failed for %d ticker(s): "
@@ -3606,53 +3640,80 @@ class WhaleService:
                     # em-dash, at least stop captioning that zero as a CAGR.
                     else unavailable_return_label(result.status)
                 )
-            sb.table("whales").update(whale_update).eq("id", whale_id).execute()
+            (await sb_exec(sb.table("whales").update(whale_update).eq("id", whale_id)))
         except Exception as e:
             logger.error("[sync] whale record update failed for %s: %s", whale_id, e)
 
-        # 2. Replace holdings
-        try:
-            sb.table("whale_holdings").delete().eq(
-                "whale_id", whale_id
-            ).execute()
-            # ONE insert for all 30 rows. The DELETE-then-write shape is preserved
-            # deliberately: a partial failure must replay from the DELETE, never resume
-            # mid-loop, or it collides with `whale_holdings_whale_id_ticker_key`.
-            # Bulking makes that stronger, not weaker — the insert is now atomic, so
-            # there is no longer a partial state to resume into.
-            rows = [
-                {
-                    "whale_id": whale_id,
-                    "ticker": h["ticker"],
-                    "company_name": h.get("company_name", h["ticker"]),
-                    "logo_url": h.get("logo_url"),
-                    "allocation": h.get("allocation", 0),
-                    "change_percent": h.get("change_percent", 0),
-                }
-                for h in holdings[:30]
-            ]
-            if rows:
-                sb.table("whale_holdings").insert(rows).execute()
-        except Exception as e:
-            logger.error("[sync] holdings sync failed for %s: %s", whale_id, e)
+        # 2. Replace holdings — DELETE + INSERT as ONE REPLAYABLE UNIT.
+        #
+        # The comment below said "a partial failure must replay from the DELETE" and
+        # nothing replayed: the error was logged and the function moved on with the rows
+        # already gone, leaving the whale with ZERO holdings until the next nightly
+        # hydration. This runs on the LIVE profile-build path (reachable from
+        # `GET /whales/{id}/profile` on a Tier-2 miss, and from `?force_refresh=true`,
+        # which has already deleted the profile cache by then), so a transient Supabase
+        # blip emptied a whale's holdings on a user-facing request. `retry_idempotent_async`
+        # re-runs the WHOLE block including its leading DELETE, which is why the rows are
+        # rebuilt inside the callable rather than captured outside it.
+        holding_rows = [
+            {
+                "whale_id": whale_id,
+                "ticker": h["ticker"],
+                "company_name": h.get("company_name", h["ticker"]),
+                "logo_url": h.get("logo_url"),
+                "allocation": h.get("allocation", 0),
+                "change_percent": h.get("change_percent", 0),
+            }
+            for h in holdings[:30]
+        ]
 
-        # 3. Replace sector allocations
+        def _replace_holdings() -> None:
+            # ONE insert for all 30 rows. Re-running from the DELETE never resumes
+            # mid-loop, so it cannot collide with `whale_holdings_whale_id_ticker_key`.
+            sb.table("whale_holdings").delete().eq("whale_id", whale_id).execute()
+            if holding_rows:
+                sb.table("whale_holdings").insert(holding_rows).execute()
+
         try:
-            sb.table("whale_sector_allocations").delete().eq(
-                "whale_id", whale_id
-            ).execute()
-            rows = [
-                {
-                    "whale_id": whale_id,
-                    "sector": sec["name"],
-                    "allocation": sec["allocation"],
-                }
-                for sec in sectors
-            ]
-            if rows:
-                sb.table("whale_sector_allocations").insert(rows).execute()
+            await retry_idempotent_async(
+                _replace_holdings,
+                what=f"whale_holdings replace whale={whale_id}",
+                logger=logger,
+            )
         except Exception as e:
-            logger.error("[sync] sector sync failed for %s: %s", whale_id, e)
+            logger.error(
+                "[sync] holdings sync failed for %s after retries (%s: %s) — the whale "
+                "may now have ZERO holdings until the next hydration",
+                whale_id, type(e).__name__, e, exc_info=True,
+            )
+
+        # 3. Replace sector allocations — same replayable shape as step 2.
+        sector_rows = [
+            {
+                "whale_id": whale_id,
+                "sector": sec["name"],
+                "allocation": sec["allocation"],
+            }
+            for sec in sectors
+        ]
+
+        def _replace_sectors() -> None:
+            sb.table("whale_sector_allocations").delete().eq("whale_id", whale_id).execute()
+            if sector_rows:
+                sb.table("whale_sector_allocations").insert(sector_rows).execute()
+
+        try:
+            await retry_idempotent_async(
+                _replace_sectors,
+                what=f"whale_sector_allocations replace whale={whale_id}",
+                logger=logger,
+            )
+        except Exception as e:
+            logger.error(
+                "[sync] sector sync failed for %s after retries (%s: %s) — the whale's "
+                "sector breakdown may now be EMPTY until the next hydration",
+                whale_id, type(e).__name__, e, exc_info=True,
+            )
 
         # 4. Insert trade groups + trades (one row per filing, deduped by date).
         # The SELECT-then-INSERT is best-effort; the UNIQUE(whale_id, date)
@@ -3670,15 +3731,17 @@ class WhaleService:
                 # check-then-act: a concurrent writer winning the race made this one
                 # `continue` AFTER its group row existed, stranding that filing's trades
                 # under nobody. It also cost an extra round-trip per group.
-                tg_result = sb.table("whale_trade_groups").upsert({
-                    "whale_id": whale_id,
-                    "date": trade_group["date"],
-                    "trade_count": trade_group["trade_count"],
-                    "net_action": trade_group["net_action"],
-                    "net_amount": trade_group["net_amount"],
-                    "summary": trade_group.get("summary"),
-                    "insights": trade_group.get("insights", []),
-                }, on_conflict="whale_id,date").execute()
+                tg_result = (await sb_exec(
+                                sb.table("whale_trade_groups").upsert({
+                                "whale_id": whale_id,
+                                "date": trade_group["date"],
+                                "trade_count": trade_group["trade_count"],
+                                "net_action": trade_group["net_action"],
+                                "net_amount": trade_group["net_amount"],
+                                "summary": trade_group.get("summary"),
+                                "insights": trade_group.get("insights", []),
+                                }, on_conflict="whale_id,date")
+                            ))
 
                 if tg_result.data:
                     tg_id = tg_result.data[0]["id"]
@@ -3687,12 +3750,13 @@ class WhaleService:
                     # changed nothing. Read the id back rather than `continue`-ing —
                     # that is exactly how trades used to be stranded.
                     lookup = (
-                        sb.table("whale_trade_groups")
-                        .select("id")
-                        .eq("whale_id", whale_id)
-                        .eq("date", trade_group["date"])
-                        .limit(1)
-                        .execute()
+                        (await sb_exec(
+                            sb.table("whale_trade_groups")
+                            .select("id")
+                            .eq("whale_id", whale_id)
+                            .eq("date", trade_group["date"])
+                            .limit(1)
+                        ))
                     )
                     if not lookup.data:
                         logger.warning(

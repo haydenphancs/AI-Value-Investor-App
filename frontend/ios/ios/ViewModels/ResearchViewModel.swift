@@ -132,16 +132,27 @@ class ResearchViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     /// Backend report IDs the client has locally given up on because they've
-    /// been .processing past `processingTimeoutSeconds`. Survives across
+    /// been .processing past its timeout clock (see `startedTimeoutSeconds`). Survives across
     /// loadReports() calls so a stubborn backend "processing" row stays
     /// flipped to .failed in the UI. Cleared per-id when the backend reports
     /// a terminal status (.ready / .failed).
     private var locallyTimedOutReportIds: Set<String> = []
 
-    /// Generous upper bound — real generations finish in 3-5 min. After
-    /// 10 min with no terminal status, we assume Railway is down (or the
-    /// task got abandoned) and surface the error card.
-    private let processingTimeoutSeconds: TimeInterval = 600
+    /// Local age-out for a report the server has already given up on. Two clocks,
+    /// because the server has two:
+    ///
+    /// - A STARTED report (`processingStartedAt` set) is killed and refunded by the
+    ///   server's `RESEARCH_PIPELINE_TIMEOUT_SECONDS` (600 s) counted from work START —
+    ///   after the agent semaphore. 660 s from that stamp is past the kill with margin.
+    /// - A report still QUEUED (no stamp) is aged from `date` (`created_at`) against a much
+    ///   longer bound: the server's own queue-abandon threshold is derived from the caps
+    ///   (~11,400 s), and a queued report is still coming.
+    ///
+    /// This used to be one 600 s clock from `created_at` for every row, which flipped a
+    /// report queued for two minutes to "failed" while the server was still generating it —
+    /// and Retry then charged a second 20 credits (see `retryReport`).
+    private let startedTimeoutSeconds: TimeInterval = 660
+    private let queuedTimeoutSeconds: TimeInterval = 1800
 
     /// Backend report IDs the user has retried out of (or otherwise
     /// dismissed). The failed card disappears from the list immediately
@@ -382,7 +393,7 @@ class ResearchViewModel: ObservableObject {
         }
     }
 
-    /// Detect reports stuck in .processing past `processingTimeoutSeconds`,
+    /// Detect reports stuck in .processing past their timeout clock,
     /// register their backend IDs, and flip them to `.failed` locally so the
     /// ReportCard's failed branch (with the Retry button) appears. Runs
     /// against `self.reports` in-place after every load attempt. Mock
@@ -397,9 +408,14 @@ class ResearchViewModel: ObservableObject {
                 locallyTimedOutReportIds.remove(backendId)
                 return report
             }
-            // Still .processing — age out if past the timeout.
-            let age = now.timeIntervalSince(report.date)
-            if age > processingTimeoutSeconds {
+            // Still .processing — age out against the clock the server actually uses.
+            let timedOut: Bool
+            if let started = report.processingStartedAt {
+                timedOut = now.timeIntervalSince(started) > startedTimeoutSeconds
+            } else {
+                timedOut = now.timeIntervalSince(report.date) > queuedTimeoutSeconds
+            }
+            if timedOut {
                 locallyTimedOutReportIds.insert(backendId)
             }
             if locallyTimedOutReportIds.contains(backendId) {
@@ -1004,14 +1020,15 @@ class ResearchViewModel: ObservableObject {
     ///
     /// A card reaches `.failed` two ways. The backend may genuinely have failed it
     /// (already refunded, via the `is_refunded` CAS). Or `applyClientSideTimeoutPass`
-    /// flipped it locally after `processingTimeoutSeconds` (600s) — and that fires on
-    /// reports the server is still happily working on: a queued report waits behind
-    /// the 8-slot agent semaphore, and the reconciliation sweep does not consider a
-    /// never-started row abandoned until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS`,
-    /// which is DERIVED from the caps and is ~11,400s at current settings — 19× the
-    /// client's patience. Retrying in that window charged a second 20 credits for a
-    /// report that was still coming, and the original was added to
-    /// `dismissedReportIds`, so it completed into a list the user never saw it in.
+    /// flipped it locally (`startedTimeoutSeconds` from `processing_started_at`, or
+    /// `queuedTimeoutSeconds` from `created_at` for a row that never started) — and the
+    /// queued arm can still fire on a report the server is working on: a queued report
+    /// waits behind the 8-slot agent semaphore, and the reconciliation sweep does not
+    /// consider a never-started row abandoned until `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS`,
+    /// which is DERIVED from the caps and is ~11,400s at current settings. Retrying in
+    /// that window charged a second 20 credits for a report that was still coming, and
+    /// the original was added to `dismissedReportIds`, so it completed into a list the
+    /// user never saw it in.
     ///
     /// `DELETE /research/reports/{id}` resolves that: it claims the row through the
     /// same at-most-once `is_refunded` compare-and-set the sweep uses and refunds an

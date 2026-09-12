@@ -183,6 +183,15 @@ _SCANNER_ROWS = 10                          # top-N rows per leaderboard
 _SCANNER_CACHE_TTL_SECONDS = 1200           # 20 min — scanners move slowly; the
                                             # short-interest scan is too costly for 5 min
 _SCANNER_CACHE_KEY = "scanners"
+#: How long a DEGRADED scanner build is held. `_build_scanner_groups` never raises (it
+#: gathers with `return_exceptions=True`), so a build in which the shared universe was
+#: unavailable — every `changePercentage` None, hence no gainers, no losers, no volume
+#: rows — was an ordinary success and went into the 20-minute cache. That outlived the
+#: outage by a wide margin: `market_movers_service` memoises its own degraded universe for
+#: FIFTEEN SECONDS precisely so the next request recovers, and this pinned the empty
+#: result over it for twenty minutes. Long enough to be a herd guard, short enough that
+#: Home repopulates on its own.
+_SCANNER_DEGRADED_TTL_SECONDS = 30
 _SCANNER_BUILD_TIMEOUT_SECONDS = 8          # never let a cold shorts scan block the dashboard
 _MOVERS_MIN_PRICE = 5.0
 _MOVERS_MIN_AVG_VOLUME = 1_000_000
@@ -532,6 +541,21 @@ def _is_quality_company(profile: Any) -> bool:
         )
         return False
     if avg_volume < _MOVERS_MIN_AVG_VOLUME:
+        return False
+    # THE PRICE FLOOR. `_MOVERS_MIN_PRICE` was defined and never read, so the "sub-$5
+    # penny names" this gate's own docstring says it exists to keep out were only ever
+    # excluded incidentally, by the market-cap and volume bars — and a $2 name with a
+    # $250M cap and heavy volume passed all three and could head Today's Top Movers on a
+    # +40% day. The profile carries `price`; a missing/non-finite one fails closed, like
+    # the two checks above.
+    price = _finite_float(profile.get("price"))
+    if price is None:
+        logger.debug(
+            "Quality gate dropped %s: price missing/non-finite (%r)",
+            profile.get("symbol"), profile.get("price"),
+        )
+        return False
+    if price < _MOVERS_MIN_PRICE:
         return False
     return True
 
@@ -1185,7 +1209,21 @@ class HomeDashboardService:
         try:
             try:
                 result = await self._build_scanner_groups()
-                self._scanner_cache[_SCANNER_CACHE_KEY] = (time.time(), result)
+                # A build with NOTHING in it is a degraded build, not an answer: the three
+                # cards are independent, so all-None means the shared inputs were missing
+                # rather than "the market has no movers today" (which cannot happen — the
+                # movers card ranks the whole universe). Cached only briefly so the herd is
+                # still guarded while the next request retries.
+                degraded = not (result.movers or result.volume or result.shorts)
+                stamp = time.time()
+                if degraded:
+                    stamp -= (_SCANNER_CACHE_TTL_SECONDS - _SCANNER_DEGRADED_TTL_SECONDS)
+                    logger.warning(
+                        "Scanners built empty (movers/volume/shorts all unavailable) — "
+                        "held for %ds, not the full %ds",
+                        _SCANNER_DEGRADED_TTL_SECONDS, _SCANNER_CACHE_TTL_SECONDS,
+                    )
+                self._scanner_cache[_SCANNER_CACHE_KEY] = (stamp, result)
             except Exception as exc:  # noqa: BLE001 — scanners must never fail the dashboard
                 logger.warning("Scanner build failed: %s: %s", type(exc).__name__, exc)
                 result = ScannerGroupsResponse()  # empty; not cached → retries
@@ -1812,25 +1850,28 @@ class HomeDashboardService:
             return None
 
         change_f = _finite_float(change)
+        change_known = change_f is not None
         if change_f is None:
-            # ⚠️ KNOWN TRADE-OFF, decided deliberately — do not "fix" this to a drop
-            # without changing the wire shape first.
+            # THE THREE-STATE PATTERN, now made (2026-09-12). The note that used to sit
+            # here said 0.0 renders "+0.00%" in GREEN — a tile asserting flat-and-up when
+            # the move is unknown — and that the house answer was a `change_known`
+            # companion bool "which has not been made". It has now.
             #
-            # 0.0 here renders "+0.00%" in GREEN (the strip colours off `>= 0`), i.e. a
-            # tile asserting flat-and-up when the move is actually unknown. Dropping the
-            # tile instead was tried and reverted: `test_pulse_non_finite_price_drops_tile_
-            # and_never_serializes_nan` pins that a non-finite CHANGE must degrade rather
-            # than remove a tile whose PRICE is perfectly good.
+            # The premise that kept it tolerable had also expired: it read "these five
+            # symbols are heavily traded ETFs read from `/stable/profile`, so an absent
+            # change is a corrupt token rather than a routine state". `_build_pulse` now
+            # reads them through the SCREENER batch (`get_quotes_list`), where
+            # `_from_screener` leaves the change None on any stale/missing
+            # `market_close_snapshot` row — the routine degraded state, not a corruption.
+            # One missed overnight ingest painted all five tiles green at +0.00%.
             #
-            # The house answer is the three-state pattern — a `change_known` companion
-            # bool beside the non-Optional float (`MarketPulseItemResponse.change_percent`
-            # is a plain `Double` on iOS, so it cannot become nullable). That is a wire +
-            # iOS change and has not been made. In practice these five symbols are heavily
-            # traded ETFs read from `/stable/profile`, so an absent change is a corrupt
-            # token rather than a routine state.
+            # The tile is still NOT dropped: `test_pulse_non_finite_price_drops_tile_and_
+            # never_serializes_nan` pins that a good PRICE survives a bad change. 0.0 stays
+            # on the wire for shipped builds; `change_known=False` is what tells a current
+            # client to render "—" in the neutral colour.
             logger.warning(
-                "Quote for %s has a price but no usable change — rendering 0.00%%; see the "
-                "note here before changing this", symbol,
+                "Quote for %s has a price but no usable change — tile served with "
+                "change_known=false", symbol,
             )
             change_f = 0.0
 
@@ -1850,6 +1891,7 @@ class HomeDashboardService:
             # read "-0.00%" in green. Same normalization _movers_from_universe and
             # _theme_change already apply.
             change_percent=round(change_f, 2) + 0.0,
+            change_known=change_known,
             previous_close=previous_close,
             spark=spark,
             spark_from=spark_from,

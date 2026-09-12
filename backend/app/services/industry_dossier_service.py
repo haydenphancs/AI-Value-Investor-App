@@ -93,6 +93,7 @@ _ALL_INDUSTRY_FRED_LABEL = "BEA US total GDP (all industries, via FRED)"
 # path idioms for this one directory, and the file is FMP-derived so it has to be
 # able to move out of the repo (ToS §2.6.1) without a hunt.
 from app.services.universe_data import INDUSTRY_UNIVERSE, load_universe, universe_path
+from app.utils.supabase_async import sb_exec
 
 
 # ── Data class ──────────────────────────────────────────────────────────
@@ -293,11 +294,12 @@ class IndustryDossierService:
         try:
             sb = get_supabase()
             res = (
-                sb.table("industry_dossier")
-                .select("*")
-                .eq("industry", industry)
-                .limit(1)
-                .execute()
+                (await sb_exec(
+                    sb.table("industry_dossier")
+                    .select("*")
+                    .eq("industry", industry)
+                    .limit(1)
+                ))
             )
             rows = res.data or []
         except Exception as exc:
@@ -450,9 +452,10 @@ class IndustryDossierService:
             # is what the `computed_at` column is for.
             try:
                 existing = (
-                    sb.table("industry_dossier")
-                    .select("industry, current_tam_b")
-                    .execute()
+                    (await sb_exec(
+                        sb.table("industry_dossier")
+                        .select("industry, current_tam_b")
+                    ))
                 )
                 has_real_tam = {
                     r["industry"] for r in (existing.data or [])
@@ -489,9 +492,11 @@ class IndustryDossierService:
 
             for batch in _chunked(rows, 100):
                 try:
-                    sb.table("industry_dossier").upsert(
+                    (await sb_exec(
+                        sb.table("industry_dossier").upsert(
                         batch, on_conflict="industry"
-                    ).execute()
+                        )
+                    ))
                     rows_upserted += len(batch)
                 except Exception as exc:
                     logger.error("industry_dossier upsert failed: %s", exc, exc_info=True)

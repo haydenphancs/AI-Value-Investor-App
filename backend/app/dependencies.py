@@ -3,6 +3,7 @@ FastAPI Dependencies
 Auth, rate limiting, and utility dependencies.
 """
 
+import asyncio
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
@@ -350,7 +351,17 @@ async def get_current_user(
         # error: iOS `AppError.isAuthError` covers only unauthorized/tokenExpired/forbidden,
         # so the client keeps a token that can never resolve and retries forever instead of
         # signing the user out. Same idiom already used by get_current_user_or_guest below.
-        result = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+        # OFF THE LOOP. `supabase.Client` is the SYNC SDK, so this is a blocking HTTP
+        # round trip — and this dependency backs every `.signInRequired` route (136 of
+        # 147 per auth.md), on a single uvicorn worker. A launch fan-out of ~14
+        # authenticated requests therefore serialised ~14 Railway→Supabase RTTs of dead
+        # loop before any handler even started, and a Supabase edge stall (the 520/525
+        # pages in `project_supabase_transient_520`) froze the whole instance behind
+        # whichever request hit it first. The module already moved the JWKS fetch off the
+        # loop for exactly this reason; the DB read was left behind.
+        result = await asyncio.to_thread(
+            lambda: supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+        )
         rows = result.data or []
         if not rows:
             # 401, not 404: the token is valid but names an account that no longer exists
@@ -462,7 +473,9 @@ async def get_current_user_or_guest(
             # monthly reset. Surface a retryable error instead. (limit(1), not
             # single(), so "no row" is an empty list, not an exception.)
             try:
-                result = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+                result = await asyncio.to_thread(   # same reason as get_current_user above
+                    lambda: supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
+                )
             except Exception as e:
                 logger.error(
                     "auth: users read failed for authenticated user=%s on %s: %s: %s",

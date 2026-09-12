@@ -434,7 +434,9 @@ def test_both_generation_paths_require_an_account():
     from pathlib import Path
 
     endpoints = Path(__file__).resolve().parents[1] / "app/api/v1/endpoints"
-    for name, minimum in (("research.py", 9), ("ticker_report.py", 2)):
+    # ticker_report.py: 1 since 2026-09-11 — `POST /stocks/{t}/report/chat` (its second strict
+    # dependency) was deleted; the report door itself is the one that must stay gated.
+    for name, minimum in (("research.py", 9), ("ticker_report.py", 1)):
         src = (endpoints / name).read_text()
         strict = src.count("Depends(get_current_user)") + src.count("Depends(get_current_user_id)")
         assert strict >= minimum, (

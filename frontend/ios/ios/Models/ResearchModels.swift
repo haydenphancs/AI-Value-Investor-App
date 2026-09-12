@@ -622,6 +622,11 @@ struct AnalysisReport: Identifiable, Hashable {
     /// chip's amount so an old row shows its real refund, not a hardcoded constant. Optional
     /// for decode resilience + mock/UI-only reports (the view falls back to the current cost).
     var creditsCharged: Int? = nil
+    /// When the server actually STARTED the work (`processing_started_at`); nil while the
+    /// report is still queued behind the agent semaphore, and for mock / old-backend rows.
+    /// The server's 600 s pipeline ceiling runs from here, so this — not `date` — is what
+    /// the local timeout pass measures against.
+    var processingStartedAt: Date? = nil
 
     var formattedDate: String {
         ResearchFormatters.mediumDateFormatter.string(from: date)
@@ -652,7 +657,8 @@ struct AnalysisReport: Identifiable, Hashable {
             ratingLabel: ratingLabel,
             date: date,
             isRefunded: isRefunded,
-            creditsCharged: creditsCharged
+            creditsCharged: creditsCharged,
+            processingStartedAt: processingStartedAt
         )
     }
 
@@ -841,15 +847,17 @@ extension AnalysisReport {
             }
         }()
 
-        // Parse ISO 8601 date
-        let date: Date = {
+        // Parse ISO 8601 dates (with and without fractional seconds — Postgres emits both).
+        func parseISO(_ raw: String?) -> Date? {
+            guard let raw else { return nil }
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = formatter.date(from: item.createdAt) { return d }
-            // Retry without fractional seconds
+            if let d = formatter.date(from: raw) { return d }
             formatter.formatOptions = [.withInternetDateTime]
-            return formatter.date(from: item.createdAt) ?? Date()
-        }()
+            return formatter.date(from: raw)
+        }
+        let date: Date = parseISO(item.createdAt) ?? Date()
+        let processingStartedAt: Date? = parseISO(item.processingStartedAt)
 
         // Progress: backend sends 0-100 int, UI expects 0.0-1.0 Double
         let progress: Double? = {
@@ -881,7 +889,8 @@ extension AnalysisReport {
             ratingLabel: ratingLabel,
             date: date,
             isRefunded: item.isRefunded ?? false,
-            creditsCharged: item.creditsCharged
+            creditsCharged: item.creditsCharged,
+            processingStartedAt: processingStartedAt
         )
     }
 }

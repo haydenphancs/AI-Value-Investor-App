@@ -10,8 +10,13 @@
   Gemini agentic streaming with tools → guard/persist → line-by-line render, plus the streaming-vs-
   fallback split and the cross-cutting guarantees. Click any stage to inspect it.
   Source of truth: the codebase (frontend/ios/ios/ + backend/app/), traced end-to-end, and
-  SYSTEM_DESIGN_GUIDELINES.md · caydex-system-design.html · caydex-system-design-structure.html.
-  MAINTENANCE: edit the STAGES / PATHS / GUARANTEES arrays near the bottom — the diagram re-renders.
+  SYSTEM_DESIGN_GUIDELINES.md §9.3 / §9b.8 / §9b.9. Regenerated 2026-09-11 (credits pre-flight and settlement,
+  the three-leg gather with starter replay, the per-class tool registry, the redacting guardrail + intent-gated
+  disclaimer, the half-open breaker, and the non-streaming asymmetry were all missing or wrong before).
+  MAINTENANCE: edit the STAGES / PATHS / GUARANTEES arrays near the bottom — the diagram re-renders, and
+  backend/tests/test_ask_cay_ai_design_page_parity.py pins every `files:[…]` entry, every CHAT_/GEMINI_/REPORT_
+  setting or ErrorCode named in <code> inside the data block, and the SSE frame list; symbols mentioned only in
+  prose (PATHS, GUARANTEES, the overview) are unpinned.
 -->
 <style>
   :root{
@@ -180,7 +185,7 @@
     <div class="logo">C</div>
     <div>
       <h1>Caydex · Ask Cay AI</h1>
-      <p>System Design — a typed question → ground · route · stream · render</p>
+      <p>System Design — a typed question → gate · charge · ground · route · stream · settle · render</p>
     </div>
   </div>
   <div class="spacer"></div>
@@ -205,7 +210,7 @@
 <section class="band">
   <div class="band-inner">
     <h3>Two engines, one stored answer</h3>
-    <p class="sub">Streaming is the default (<code>ChatViewModel.streamingEnabled = true</code>); the non-streaming path is the automatic fallback on any stream failure. Both converge on the identical persisted message.</p>
+    <p class="sub">Streaming is the default (<code>ChatViewModel.streamingEnabled = true</code>); the non-streaming path is the automatic fallback on any stream failure that is not a terminal refusal. Both persist a turn the client adopts — but not an identical one (see the last row of each lane).</p>
     <div class="two" id="paths"></div>
   </div>
 </section>
@@ -236,25 +241,29 @@ const KINDS = {
 };
 
 const PHASES = [
-  { id:"ask",    badge:"Phase 1", name:"The user asks",        sub:"iOS · SwiftUI",         acc:"#0284c7" },
-  { id:"ground", badge:"Phase 2", name:"Build the context",    sub:"grounding · RAG · memory", acc:"#059669" },
-  { id:"reason", badge:"Phase 3", name:"Route & generate",     sub:"router · Gemini · tools", acc:"#7c3aed" },
-  { id:"stream", badge:"Phase 4", name:"Stream back & reveal", sub:"SSE frames → live bubble", acc:"#0284c7" },
-  { id:"commit", badge:"Phase 5", name:"Guard · persist · suggest", sub:"durability first",   acc:"#059669" },
-  { id:"render", badge:"Phase 6", name:"Render the answer",    sub:"finalize in place",       acc:"#0284c7" },
+  { id:"ask",    badge:"Phase 1", name:"The user asks",             sub:"iOS · SwiftUI",                    acc:"#0284c7" },
+  { id:"ground", badge:"Phase 2", name:"Gate · charge · ground",    sub:"401/404/402 · credit · context",   acc:"#059669" },
+  { id:"reason", badge:"Phase 3", name:"Route & generate",          sub:"router · tools · Gemini",          acc:"#7c3aed" },
+  { id:"stream", badge:"Phase 4", name:"Stream back & reveal",      sub:"SSE frames → live bubble",         acc:"#0284c7" },
+  { id:"commit", badge:"Phase 5", name:"Guard · persist · settle",  sub:"redact · atomic write · credits",  acc:"#059669" },
+  { id:"render", badge:"Phase 6", name:"Render the answer",         sub:"finalize in place",                acc:"#0284c7" },
 ];
 
 /* ============================================================================
    STAGES — the data model. Edit here when the flow changes; the map re-renders.
    Each stage: {id, n, phase, kind, title(html), sub, role, points[], files[], path?}
+   Every `files` entry is "path" or "path · symbol" and is pinned by
+   backend/tests/test_ask_cay_ai_design_page_parity.py — a renamed file or symbol fails there.
+   Regenerated 2026-09-11 from a traced read of the code (Phase 4 of the agent-layer review).
    ========================================================================== */
 const STAGES = [
   /* ---- Phase 1: ask ---- */
   { id:"type", n:1, phase:"ask", kind:"ios", title:"Type &amp; send", sub:"chat bar → handleSend → sendMessage",
     role:"The user types a question in the chat bar and taps Send.",
     points:[
-      "Send fires only on non-empty text while <code>!isBusy</code>; a one-in-flight guard (<code>guard !isAITyping</code>) makes a double-tap impossible.",
-      "Follow-up suggestion chips route through <code>handleFollowUpTap → sendMessage</code> directly.",
+      "Send fires only on non-empty text while <code>!isBusy</code>; a one-in-flight guard makes a double-tap impossible.",
+      "Follow-up suggestion chips and the pre-warmed starter chips route through the same <code>sendMessage</code>.",
+      "First run shows <code>DisclaimerAcknowledgementView</code> (not dismissible); the first send passes the <code>AIDataConsentView</code> gate. Both are surface-level backstops — the real disclaimer decision is made server-side (stage 15).",
     ],
     files:["Views/Molecules/CaydexAIChatBar.swift","Views/Screens/AIChatScreen.swift · handleSend","ViewModels/ChatViewModel.swift · sendMessage"] },
 
@@ -262,153 +271,200 @@ const STAGES = [
     role:"A new chat first creates a server session; existing chats skip straight to send.",
     points:[
       "Body <code>CreateChatSessionRequest{stock_id, context_type, reference_id}</code> → <code>ChatSessionDTO</code>.",
-      "<b>stock_id rides only here</b> — per-message turns don't carry it; the session persists context_type/reference_id (migration 085) so a reload re-grounds.",
+      "<b>stock_id rides only here</b> — per-message turns don't carry it. The session persists context_type/reference_id (migration 085) so a reload can REBUILD ETF/CRYPTO/INDEX/TICKER_REPORT/MONEY_MOVES/JOURNEY grounding from the reference id; STOCK and BOOK have nothing to rebuild from, so their on-screen string is persisted once as <code>chat_sessions.context_snapshot</code> (migration 087) and replayed when iOS reopens the chat with <code>context: nil</code>.",
+      "<code>stock_id</code> is regex-validated on the way in (<code>chat_security.sanitize_symbol</code>) and again at the prompt sink: it is interpolated into the SYSTEM instruction, so a crafted id used to be a prompt-injection channel.",
     ],
-    files:["ViewModels/ChatViewModel.swift · startNewConversation","Core/Services/APIEndpoint.swift · createChatSession"] },
+    files:["ViewModels/ChatViewModel.swift · startNewConversation","Core/Services/APIEndpoint.swift · createChatSession","services/chat_security.py · sanitize_symbol"] },
 
   { id:"snapshot", n:3, phase:"ask", kind:"ios", title:"Attach the on-screen snapshot", sub:"contextForCurrentTab → context",
     role:"The screen packages what the user is looking at into a plain-text context string.",
     points:[
       "<code>contextForCurrentTab</code> joins symbol · price · key stats · sector · the active tab — stored in <code>currentContext</code> and <b>re-sent verbatim every turn</b>.",
-      "Its load-bearing use is STOCK &amp; BOOK grounding; ETF/CRYPTO/INDEX are re-grounded server-side from the symbol instead.",
+      "Its load-bearing use is STOCK, BOOK and COMMODITY grounding (the commodity resolver only APPENDS a bundled profile to it, so its figures keep the replayed label on a reopen); ETF/CRYPTO/INDEX are rebuilt from the symbol and TICKER_REPORT from the report cache, with the client string as the fallback when a rebuild returns nothing.",
+      "It is <b>untrusted</b> on arrival: NFKC-normalised, fence-neutralised and length-capped (<code>CHAT_CONTEXT_MAX_CHARS</code>), then rendered inside a <code>&lt;&lt;&lt;CLIENT_CONTEXT&gt;&gt;&gt;</code> fence.",
     ],
-    files:["ViewModels/TickerDetailViewModel.swift · contextForCurrentTab"] },
+    files:["ViewModels/TickerDetailViewModel.swift · contextForCurrentTab","services/chat_security.py · sanitize_context"] },
 
   { id:"open", n:4, phase:"ask", kind:"ios", title:"Open the SSE stream", sub:"APIClient.stream → URLSession.bytes",
     role:"The default path opens a Server-Sent-Events stream to the backend.",
     points:[
-      "POSTs <code>{message, context, context_type, reference_id}</code> to <code>/messages/stream</code> (snake_case, 120s timeout).",
+      "POSTs <code>{message, context, context_type, reference_id}</code> to <code>/messages/stream</code> (snake_case, 120 s timeout).",
       "Parses <code>event:</code> / <code>data:</code> frames off <code>URLSession.bytes</code>; a blank line flushes a frame.",
+      "A <b>JSON</b> 400 / 402 / 409 / 429 before the first frame is a terminal refusal: <code>openStreamOnce</code> decodes the error contract for 400/401/402/403/409 (<code>CHAT_MESSAGE_TOO_LONG</code>, <code>INSUFFICIENT_CREDITS</code>, <code>SYSTEM_BUSY</code>…) and maps 429 to <code>APIError.rateLimited</code>; <code>isTerminalPreflightRefusal</code> matches those codes plus <code>rateLimited</code>, and iOS does <b>not</b> run the reconcile-and-re-POST fallback for them — a re-POST shares the same limiter bucket and would re-run the pre-charge.",
     ],
     files:["Core/Services/APIClient.swift · stream(endpoint:)","ViewModels/ChatViewModel.swift · streamMessageToSession"],
-    path:"Non-streaming path instead calls <code>APIClient.request</code> → <code>POST /messages</code> (60s), decoding one finished <code>ChatMessageDTO</code>." },
+    path:"Non-streaming path instead calls <code>APIClient.request</code> → <code>POST /messages</code> (60 s), decoding one finished <code>ChatMessageDTO</code>." },
 
   /* ---- Phase 2: ground ---- */
-  { id:"own", n:5, phase:"ground", kind:"backend", title:"Ownership + resolve context", sub:"404 gate · effective_context",
-    role:"The endpoint verifies the session and decides which grounding context to use.",
+  { id:"gate", n:5, phase:"ground", kind:"backend", title:"Gate the turn", sub:"401 · 15/min · hygiene · 404",
+    role:"Before anything costs money, the request is proven to be a real caller, a sane message, and their own session.",
     points:[
+      "<code>get_chat_identity</code> is <b>strict</b> since the account wall (2026-09-07): no bearer → <code>401 AUTH_REQUIRED</code>. The guest helpers in this file are unreachable and banner-commented as such.",
+      "<code>ChatRateLimit</code> — one sliding window per user (<code>CHAT_RATE_LIMIT_PER_MINUTE</code> = 15, bucket <code>chat:{user_id}</code>) SHARED by session create, POST /messages and the stream, so alternating routes buys no budget; it runs as a dependency — after the JSON body is parsed, before it is validated — so an over-long message still spends a token.",
+      "<code>validate_message</code>: NFKC, zero-width/bidi strip, <code>CHAT_MESSAGE_MAX_CHARS</code> (4000) → <code>CHAT_MESSAGE_TOO_LONG</code>; <code>scan_input</code> logs injection markers (monitor-only).",
       "<code>SELECT … WHERE id AND user_id</code> — a bad session is a real HTTP <b>404</b>, not an SSE error frame.",
-      "<code>effective_context = request.context or context_snapshot</code> — the live snapshot, else the persisted one on a history reopen (migration 087).",
-      "<code>context_is_replayed</code> flags a reopen so the prompt labels those figures point-in-time, not live.",
     ],
-    files:["api/v1/endpoints/chat.py · stream_chat_message","chat.py · _effective_context"] },
+    files:["api/v1/endpoints/chat.py · stream_chat_message","dependencies.py · ChatRateLimit","services/chat_security.py · validate_message","services/chat_security.py · scan_input"] },
 
-  { id:"meta", n:6, phase:"ground", kind:"backend", title:"Meta frame + parallel router", sub:"gather(prep, route)",
-    role:"The generator emits the first frame, then runs prep and the router concurrently.",
+  { id:"claim", n:6, phase:"ground", kind:"data", title:"Claim the credit", sub:"_claim_chat_quota → 402 / 409 as JSON",
+    role:"One credit is claimed BEFORE the stream opens, so a refusal is an ordinary HTTP error the client can act on.",
     points:[
-      "Yields <code>meta {session_id, grounded_on}</code> first.",
-      "<code>asyncio.gather(prepare_stream_generation, route_question)</code> so the router's ~400ms hides behind the retrieval work.",
-      "<code>CHAT_MULTI_AGENT_ENABLED</code> (default on) gates the whole router/specialist machinery.",
+      "<code>_claim_chat_quota</code>: if this session holds a live free follow-up (<code>claim_free_followup</code> RPC — atomic, fails <b>closed</b> to a charge, and deliberately bypasses the insufficient-credits gate because the previous turn already paid for it) the turn is free; else <code>CreditService.precharge</code> 1 credit (<code>CHAT_CREDIT_COST</code>). ⚠️ The follow-up is PARKED today: <code>CHAT_FREE_FOLLOWUP_SECONDS</code> = 0 makes <code>on_delivered</code>'s grant a no-op (migration 154 treats 0 as the kill switch), so every turn is charged until it is set in the Railway environment.",
+      "Short → <code>402 INSUFFICIENT_CREDITS</code> (action <code>upgrade</code> → Buy Credits); a charge-RPC blip → <code>409 SYSTEM_BUSY</code>, never a false 402. <code>409 CHAT_DAILY_LIMIT_REACHED</code> is the GUEST daily-turn budget (<code>chat_usage_budget</code>) and is unreachable behind the strict <code>get_chat_identity</code> — the credit balance is the per-user ceiling; iOS still lists the code as terminal.",
+      "Every charge carries a <b>per-turn</b> <code>ref_id</code> (<code>{session}:{uuid4}</code>) so a refund reverses exactly this turn's recorded pool split (§9b.2).",
+      "The claim object (<code>_ChatQuota</code>) travels the whole turn and is settled in stage 17.",
     ],
-    files:["chat.py · event_gen","services/agents/chat_router.py"] },
+    files:["api/v1/endpoints/chat.py · _claim_chat_quota","api/v1/endpoints/chat.py · _ChatQuota","services/credit_service.py · CreditService"] },
 
-  { id:"prep", n:7, phase:"ground", kind:"backend", title:"Ground · retrieve · remember", sub:"resolver + RAG + memory + prompt",
-    role:"Assembles the full LLM input: screen grounding, retrieval, conversation memory, and the deterministic widget.",
+  { id:"meta", n:7, phase:"ground", kind:"backend", title:"Meta frame + three-leg gather", sub:"gather(prep, route, warm)",
+    role:"The generator emits the first frame, then runs grounding, the router and the starter-cache lookup concurrently.",
     points:[
-      "<b>Grounding</b> — <code>ChatContextResolver.resolve()</code> (per-asset; STOCK → client context, ETF/CRYPTO/INDEX rebuilt from symbol, report from cache) under a 4s timeout, never raises.",
-      "<b>RAG</b> — embeds the query → pgvector cosine search over filing / book / article chunks → citations.",
-      "<b>Memory</b> — <code>_condense_history</code> rolls older turns into a summary.",
-      "Builds <code>_build_system_instruction</code> (identity + style + persona + grounding) &amp; <code>_build_prompt</code>; fetches the chart widget up-front and folds the live quote in (<code>_widget_grounding_line</code>).",
+      "Yields <code>meta {session_id, grounded_on, user_message}</code> first. <code>user_message</code> is the server's NORMALIZED copy of the question (NFKC + invisible/bidi strip): iOS keeps it for the failed-stream reconcile, so a smart quote can never make a persisted turn look missing and be re-sent (a second charge). iOS creates the bubble on the first <code>sources</code>/<code>routing</code>/<code>tool_step</code>/<code>reasoning</code>/<code>token</code> frame, not on meta; <code>grounded_on</code> is currently unread by the client.",
+      "<code>asyncio.gather(prepare_stream_generation, route_question, warm_lookup)</code> — the router's ~400 ms hides behind retrieval.",
+      "The warm lookup (<code>chat_starter_answers</code>, migration 162) runs <b>only for an ungrounded turn</b> (<code>_warm_if_ungrounded</code>): a global chip's answer must never replay inside a STOCK or BOOK session.",
+      "<code>CHAT_MULTI_AGENT_ENABLED</code> gates the router; the pre-bound <code>route</code>/<code>warmed</code>/<code>reader_lens</code> names are what let the fallback still deliver when prep raises.",
     ],
-    files:["services/chat_service.py · prepare_stream_generation","services/chat_context_resolver.py · resolve","chat_service.py · _retrieve_context · _condense_history"],
-    path:"Non-streaming <code>generate_response</code> resolves the same context but lets Gemini pick widget tools itself (function-calling), and additionally checks the Market Deep-Dive cache." },
+    files:["api/v1/endpoints/chat.py · event_gen","services/agents/chat_router.py · route_question","services/chat_starter_warm_service.py · lookup","ViewModels/ChatViewModel.swift · streamMessageToSession"] },
+
+  { id:"prep", n:8, phase:"ground", kind:"backend", title:"Ground · enrich · remember", sub:"resolver + enrichment + memory + prompt",
+    role:"Assembles the full LLM input: screen grounding, STOCK enrichment, conversation memory, the deterministic widget — and decides what was actually grounded.",
+    points:[
+      "<b>Grounding</b> — <code>_resolve_grounding</code> → <code>ChatContextResolver.resolve()</code> per asset (STOCK/BOOK → the client string; ETF/CRYPTO/INDEX rebuilt from the symbol; TICKER_REPORT from the report cache) under a 4 s timeout, never raises. A block the resolver <i>built</i> is live, so the &ldquo;replayed snapshot&rdquo; label is cleared for it.",
+      "<b>Enrichment</b> (STOCK only) — company profile, profit summary and the five vitals snapshots; a missing snapshot is <b>named</b> to the model (&ldquo;Growth, Financial Health snapshots unavailable — do not describe them as absent&rdquo;) rather than silently dropped.",
+      "<b>Memory</b> — the newest 20 rows are fetched; the last 6 (<code>_RECENT_TURNS</code>) go in verbatim and the older 14 roll into a cumulative flash-lite summary cached on <code>chat_sessions.memory_summary</code> (<code>_condense_history</code>). <b>RAG</b> (<code>_retrieve_context</code>) is behind <code>CHAT_RAG_ENABLED</code> = off and the chunk corpus is empty; reader-preference and memory-fact blocks are behind <code>CHAT_PERSONALIZATION_ENABLED</code> / <code>CHAT_MEMORY_FACTS_ENABLED</code> = off.",
+      "Builds <code>_build_system_instruction</code> (identity → per-tool &ldquo;when you have access&rdquo; clauses, incl. an unconditional &ldquo;you have NO analyst data&rdquo; line while that tool is licence-stripped → capability block from the <i>granted</i> tool set → markdown + style → intent-gated disclaimer rule → ADVICE_BOUNDARY → asset persona → book voice → subject → enrichment → fenced client context) plus a tool-free copy (<code>system_instruction_no_tools</code>) for the synthesis merge, and <code>_build_prompt</code> (history + fenced <code>&lt;&lt;&lt;USER_MESSAGE&gt;&gt;&gt;</code>, capped at <code>CHAT_PROMPT_MAX_CHARS</code>).",
+      "Fetches the base widget deterministically (<code>_deterministic_widget</code>, under <code>CHAT_TOOL_TIMEOUT_SECONDS</code>) and folds the live quote into the system instruction (<code>_widget_grounding_line</code>).",
+      "Returns <code>grounded</code> — true only when a context block or STOCK enrichment <b>actually arrived</b> — and the <b>earned</b> source pills (<code>_build_sources</code>): a &ldquo;Cay research report · AAPL&rdquo; pill is never shown for a report that did not resolve.",
+    ],
+    files:["services/chat_service.py · prepare_stream_generation","services/chat_service.py · _resolve_grounding","services/chat_context_resolver.py · resolve","services/chat_service.py · _build_system_instruction","services/chat_service.py · _build_sources"],
+    path:"Non-streaming <code>generate_response</code> goes through the same <code>_resolve_grounding</code> and prompt builders, then lets Gemini pick tools itself (single-round function-calling)." },
 
   /* ---- Phase 3: reason ---- */
-  { id:"router", n:8, phase:"reason", kind:"llm", title:"Router picks the lens", sub:"flash-lite · ≤3 of 7 lenses",
+  { id:"router", n:9, phase:"reason", kind:"llm", title:"Router picks the lens", sub:"flash-lite · ≤2 of 7 lenses",
     role:"A cheap classifier chooses which specialist lens(es) should answer.",
     points:[
-      "<code>gemini-2.5-flash-lite</code> picks up to 3 of 7 lenses (valuation · technicals · fundamentals · macro · sentiment · education · general).",
+      "<code>gemini-2.5-flash-lite</code> returns JSON: up to <code>CHAT_MAX_SPECIALISTS</code> (2) of 7 lenses (valuation · technicals · fundamentals · macro · sentiment · education · general).",
       "<b>single</b> vs <b>synthesize</b> — synthesize only when the model flags cross-domain AND &gt;1 lens.",
-      "Never raises — any bad JSON / quota → general/single.",
+      "Never raises — bad JSON / quota → <code>general</code>/single with <code>degraded=true</code>, which is why the disclaimer decision (stage 15) never depends on it.",
+      "<code>select_model</code> can downgrade a ticker-less conceptual turn to the cheap model, but only under <code>CHAT_MODEL_ROUTING_ENABLED</code> (off).",
     ],
-    files:["services/agents/chat_router.py · route_question"],
+    files:["services/agents/chat_router.py · route_question","services/agents/chat_router.py · select_model"],
     path:"Only the streaming path routes; non-streaming is always a single general agent." },
 
-  { id:"tools", n:9, phase:"reason", kind:"backend", title:"Tools + base widget + specialist", sub:"declarations · seed · apply lens",
-    role:"Wires the FMP tools, seeds the deterministic card, and specializes the prompt.",
+  { id:"tools", n:10, phase:"reason", kind:"backend", title:"Tools per asset class + specialist", sub:"one registry · capability block · lens",
+    role:"Wires the tools the asset class is granted, seeds the deterministic card, and specializes the prompt.",
     points:[
-      "<code>build_chat_tool_declarations</code> — stock chart · analyst · sentiment (+ market overview for INDEX); handlers map each to a cached ChatService fetch.",
-      "The deterministic base widget is seeded and deduped by <code>widget_key</code>.",
-      "<code>apply_specialist</code> appends the lens focus + an anti-meta guard; specialists keep the full tool set.",
+      "<b>ONE registry</b> (<code>chat_tools</code>) serves both paths: <code>build_chat_tool_declarations(asset_type)</code> + <code>build_chat_tool_handlers(svc, screen_symbol)</code>, filtered by <code>tools_for_asset_type</code>. STOCK/NORMAL: chart · analyst† · sentiment · news · explain_price_move · market snapshot; ETF/CRYPTO: no analyst; INDEX: market_overview + snapshot only; COMMODITY: chart · news · snapshot. †analyst is licence-stripped for everyone.",
+      "The prompt's <code>capability_block</code> is rendered from the <i>same</i> granted set, so the model is never told to call a tool it does not have — the tool-less fallback re-renders it with no claims at all.",
+      "Handlers run under <code>_run_tool_handler</code>: unknown tool → error result, an exception → <code>{error}</code> (an FMP rate limit is not a Gemini quota error), a per-tool ceiling from <code>_TOOL_TIMEOUTS</code>: <code>CHAT_TOOL_TIMEOUT_SECONDS</code> (8 s) by default; <code>explain_price_move</code> 75 s (it may run a paid grounded web search, metered by <code>CHAT_WEB_SEARCH_DAILY_CAP</code> = 200/day — a unit is claimed only when the search can actually run and released only when it provably did not); <code>get_market_snapshot</code> 30 s; <code>get_market_overview</code> 20 s. The stream sends a keepalive comment every <code>CHAT_STREAM_KEEPALIVE_SECONDS</code> (15 s) so a long tool never trips iOS's 120 s idle timeout.",
+      "Results are pruned structurally by <code>truncate_tool_result</code> (<code>GEMINI_TOOL_RESULT_MAX_CHARS</code>) with a <code>_truncated</code> marker — never sliced mid-JSON. On an EQUITY screen the screen's own symbol is never re-canonicalised as a coin, on every leg (LTC the REIT stays LTC, and its news/sentiment/price-move fetch runs with <code>is_crypto=False</code>); a CRYPTO screen's bare coin still canonicalises to the pair.",
+      "<code>apply_specialist</code> appends the lens focus + an anti-meta guard. A lens must never ORDER a tool the asset class may lack — it names <code>get_market_snapshot</code> directly only because every class grants it, and refers to anything else as &ldquo;the X tool you are offered&rdquo;.",
     ],
-    files:["services/agents/chat_tools.py","services/agents/chat_specialists.py · apply_specialist"] },
+    files:["services/agents/chat_tools.py · build_chat_tool_declarations","services/agents/chat_tools.py · capability_block","integrations/gemini.py · _run_tool_handler","integrations/gemini.py · _TOOL_TIMEOUTS","integrations/gemini.py · truncate_tool_result","services/agents/chat_specialists.py · apply_specialist"] },
 
-  { id:"agentic", n:10, phase:"reason", kind:"llm", title:"Agentic stream (≤ 4 rounds)", sub:"thought · answer · tool",
+  { id:"source", n:11, phase:"reason", kind:"backend", title:"Pick the answer source", sub:"replay → replay → synthesize → agentic",
+    role:"Four ways to produce the answer, cheapest first.",
+    points:[
+      "<b>Deep-dive replay</b> — a &ldquo;deep dive&rdquo; request on a NON-STOCK asset screen (index/ETF/crypto/commodity) whose grounding block resolved, keyed by symbol + hash(context, normalized question), 24 h TTL: the stored answer streams with <code>tokens_used = 0</code>, so the turn is settled as a cache hit and refunded (stage 17).",
+      "<b>Starter replay</b> — the warm lookup hit (ungrounded turn only): the pre-generated answer <i>and its stored chips</i> stream with no answer generation (the router classification in the same gather is still paid and discarded; a row without chips falls back to a live suggestions call). Charged, deliberately — one credit buys one answer — and recorded as 0 tokens. A degraded warm answer is never stored (and a chip that keeps refusing is parked after three strikes), so it can never be replayed.",
+      "<b>Synthesize</b> — the router asked for it (stage 13).",
+      "<b>Single agentic</b> — everything else (stage 12).",
+    ],
+    files:["api/v1/endpoints/chat.py · event_gen","services/chat_starter_warm_service.py · _warm_one"] },
+
+  { id:"agentic", n:12, phase:"reason", kind:"llm", title:"Agentic stream (≤ 4 rounds)", sub:"thought · answer · tool",
     role:"Gemini streams the answer, reasoning out loud and calling live market tools mid-stream.",
     points:[
       "Real thinking on; each round yields <b>thoughts</b> → <code>reasoning</code>, <b>answer</b> → <code>token</code>, <b>tool calls</b> → <code>tool_step</code>.",
-      "Manual function-calling (streaming can't auto-call); tool results feed the next round; only chart / market-overview results render as widgets.",
+      "Manual function-calling (streaming can't auto-call); tool results feed the next round; only chart / market-overview results render as widgets (<code>widget_from_tool_result</code>).",
       "If rounds exhaust while still calling tools, one final tools-ignored answer round always streams a reply.",
+      "Streams honour the process-wide quota breaker manually (a partial stream can't be retried) — see the guarantees below for its half-open shape.",
     ],
-    files:["integrations/gemini.py · stream_agentic","chat.py (frame mapping)"],
-    path:"Non-streaming uses <code>generate_with_tools</code> — single-round function-calling, degrading to plain <code>generate_text</code> on failure." },
+    files:["integrations/gemini.py · stream_agentic","services/agents/chat_tools.py · widget_from_tool_result"],
+    path:"Non-streaming uses <code>generate_with_tools</code> — single-round function-calling, degrading to plain <code>generate_text</code> on failure; the fallback, or a round where <i>every</i> tool errored, marks the result <code>degraded=&quot;no_tools&quot;</code>; both doors settle it no-cost (stage 17) — including when the STREAM fell back to it, and a streamed single-mode turn whose every tool failed." },
 
-  { id:"synth", n:11, phase:"reason", kind:"llm", title:"Synthesize (cross-domain)", sub:"parallel specialists → merged stream",
+  { id:"synth", n:13, phase:"reason", kind:"llm", title:"Synthesize (cross-domain)", sub:"parallel specialists → merged stream",
     role:"For multi-lens questions, specialists run in parallel and a merged answer streams.",
     points:[
-      "Each ≤3 specialist runs <code>stream_agentic</code> (max 2 rounds, non-streamed) in parallel; their widgets arrive as <code>widget</code> events.",
-      "A merge prompt embeds each labelled view and streams the unified answer (no tools — data already gathered).",
-      "Salvage: if the merge yields no text, it reuses the top specialist's already-computed answer — never a wasted third generation.",
+      "Each specialist (≤2) runs <code>stream_agentic</code> (max 2 rounds, non-streamed) in parallel; their widgets are yielded as internal (&ldquo;widget&rdquo;, …) generator events that the endpoint collects into the terminal <code>done</code> message.",
+      "If EVERY specialist fails, one general <code>stream_agentic</code> (max 4 rounds, tools on) still answers and the turn is marked <code>degraded=&quot;no_specialists&quot;</code> → refunded; the <code>routing</code> frame had already promised those lenses.",
+      "A merge prompt embeds each labelled view and streams the unified answer over the tool-free copy of the system instruction (no tools — the data is already gathered, and the prompt claims none).",
+      "Salvage: if the merge yields no text, it reuses the top specialist's already-computed answer — never a wasted third generation; an unmerged salvage is a <code>degraded</code> shape and is refunded.",
     ],
     files:["services/chat_service.py · stream_synthesis"] },
 
   /* ---- Phase 4: stream ---- */
-  { id:"reveal", n:12, phase:"stream", kind:"ios", title:"Live reveal into the bubble", sub:"frames → @Published state",
+  { id:"reveal", n:14, phase:"stream", kind:"ios", title:"Live reveal into the bubble", sub:"frames → @Published state",
     role:"iOS maps each SSE frame onto one stable bubble and reveals the answer progressively.",
     points:[
-      "<code>sources</code>/<code>reasoning</code> fill the thinking card; the first <code>token</code> starts a ~45ms line-by-line reveal with a blinking caret.",
-      "One stable UUID per turn → in-place updates, no <code>ForEach</code> flicker; <code>reset</code> blanks the bubble when the server falls back.",
+      "<code>sources</code> / <code>routing</code> / <code>tool_step</code> / <code>reasoning</code> fill the thinking card — each update preserves the live reasoning text and elapsed time; the first <code>token</code> starts a ~45 ms line-by-line reveal with a blinking caret.",
+      "One stable UUID per turn → in-place updates, no <code>ForEach</code> flicker; <code>reset</code> blanks the bubble <i>and</i> its reasoning when the server falls back.",
+      "<code>credits</code> arrives just before <code>done</code> and is HELD in a local: the chip is attached to the finalized message in the <code>done</code> arm so chip and answer land together, and only then does <code>refreshCreditsIfMoved</code> re-fetch the wallet. <code>suggestions</code> is the only informational frame (iOS ignores it; the chips land on <code>done</code>). There is NO <code>widget</code> frame — every widget arrives inside <code>done</code>. Comment lines (<code>: keepalive</code>) are skipped by the parser.",
       "Every mutation checks <code>sessionId == currentSessionId</code> + Task cancellation, so navigating away can't clobber the next chat.",
     ],
-    files:["ViewModels/ChatViewModel.swift · streamMessageToSession · nextRevealChunk"] },
+    files:["ViewModels/ChatViewModel.swift · streamMessageToSession","ViewModels/ChatViewModel.swift · appendThinkingStage","ViewModels/ChatViewModel.swift · nextRevealChunk"] },
 
   /* ---- Phase 5: commit ---- */
-  { id:"guard", n:13, phase:"commit", kind:"backend", title:"Guardrail scan", sub:"advice / identity drift — log only",
-    role:"A safety net scans the finished answer but never blocks it.",
+  { id:"guard", n:15, phase:"commit", kind:"backend", title:"Guardrail: redact · tag · disclaim", sub:"enforce_answer + scan_answer + intent gate",
+    role:"The finished answer is redacted where it must be, tagged where it drifts, and given the disclaimer only where reliance actually happens.",
     points:[
-      "<code>scan_answer</code> flags advice-boundary (“you should buy/sell”) &amp; identity-leak drift with whole-token regex.",
-      "<b>Log-only</b> — a false positive dropping a good answer is worse than a flag; the system-prompt rules are the real defense.",
-      "Empty content raises instead of persisting blank → forces the fallback.",
+      "<code>enforce_answer</code> <b>REDACTS</b>: first-person model/provider self-reveals → &ldquo;Cay AI&rdquo;; API-key / JWT shapes and internal schema identifiers → <code>***</code>. Legit AI-sector prose (&ldquo;an AI chip maker&rdquo;) survives because the patterns are first-person-anchored.",
+      "<code>scan_answer</code> tags advice-boundary phrasing (&ldquo;you should buy&rdquo;) and identity drift — logged, not blocked.",
+      "The disclaimer is <b>decided in code</b>: <code>is_trade_intent(question)</code> OR the <code>advice_directive</code> tag → <code>finalize_disclaimer</code> guarantees the line; an informational turn gets nothing and a volunteered boilerplate is stripped. Deterministic on purpose — the LLM router fails open.",
+      "Empty content raises instead of persisting blank → forces the fallback. The non-streaming path runs the same four helpers; history replay runs only the STRIP half (<code>is_trade_intent</code> of the preceding question OR <code>advice_directive</code> decides whether a stored trailing disclaimer is kept — nothing is redacted or appended on read). On the pure-streamed path the guaranteed line is emitted as one trailing <code>token</code> frame; after a fallback it arrives only inside <code>done</code>. The streamed reasoning goes through <code>enforce_answer</code> too before it is persisted.",
     ],
-    files:["services/agents/chat_guardrails.py · scan_answer"] },
+    files:["services/agents/chat_guardrails.py · enforce_answer","services/agents/chat_guardrails.py · scan_answer","services/chat_intent.py · is_trade_intent","services/chat_security.py · finalize_disclaimer"] },
 
-  { id:"persist", n:14, phase:"commit", kind:"data", title:"Persist-before-suggestions", sub:"atomic user + assistant insert",
+  { id:"persist", n:16, phase:"commit", kind:"data", title:"Persist-before-suggestions", sub:"atomic user + assistant insert",
     role:"The turn is durably written before anything that can hang.",
     points:[
-      "One atomic <code>insert([user, ai])</code> with a +1ms assistant offset preserving order; <code>rich_content</code> JSONB carries thinking / widgets / sources / suggestions.",
+      "One atomic <code>insert([user, ai])</code> with a +1 ms assistant offset preserving order; <code>rich_content</code> JSONB carries thinking / widgets / sources / suggestions / the turn-cost payload.",
       "Written <b>before</b> the follow-up call, because a disconnect during throttled-Gemini suggestions raises <code>CancelledError</code> that would lose the turn.",
+      "A fresh deep-dive answer (&gt;100 chars) was already upserted to <code>market_deep_dive_cache</code> (24 h) right after generation — BEFORE the guardrail and this persist — so the stored text is unredacted; a replay runs through the same guardrail step, which is what makes that safe.",
       "<code>message_count</code> / <code>last_message_at</code> are owned by a DB trigger; <code>_persist_context_snapshot</code> writes best-effort.",
+      "After the insert: a best-effort <code>chat_sessions</code> update — <code>preview_message</code> and, on the first exchange only, an auto-title from the question (never clobbers a rename). Suggestions land via a second <code>rich_content</code> UPDATE that must reuse the dict <code>_attach_turn_cost</code> returned, or it would clobber the <code>credit</code> key.",
     ],
-    files:["chat.py (two-row insert + session update)","chat.py · _persist_context_snapshot"] },
+    files:["api/v1/endpoints/chat.py · event_gen","api/v1/endpoints/chat.py · _persist_context_snapshot"] },
 
-  { id:"suggest", n:15, phase:"commit", kind:"backend", title:"Follow-up chips → done", sub:"best-effort · terminal frame",
+  { id:"settle", n:17, phase:"commit", kind:"data", title:"Settle the credit", sub:"delivered · no-cost · undelivered",
+    role:"The claim from stage 6 is resolved exactly once, and the user is told what the turn cost.",
+    points:[
+      "<b>Delivered at full value</b> → <code>on_delivered</code>: a <i>charged</i> turn earns this session one free follow-up (non-chainable — a free turn never earns another).",
+      "<b>Delivered but cost nothing / less</b> (a deep-dive cache replay, <code>tokens_used == 0</code> — the starter-warm replay is NOT one, it stays charged; or a <code>degraded</code> shape: <code>no_specialists</code> / <code>unmerged</code> from a synthesis, <code>no_tools</code> from a turn whose every tool failed or a plain-text fallback, on either door) → <code>settle_no_cost</code>: a charged turn is refunded through the ledger; a free turn stays free and is <b>not</b> re-granted (that chain would be unbounded off one credit).",
+      "<b>Never arrived</b> (<code>chat_stream_empty</code>, <code>chat_stream_fallback_failed</code>, <code>chat_stream_persist_failed</code>, <code>chat_stream_cancelled</code> — the <code>finally</code> backstop — and <code>chat_undelivered</code> on POST /messages) → <code>refund_once</code>: refund the credit or restore the free-follow-up allowance. Idempotent through one settled flag; a failed <i>free</i> turn never touches the ledger (that path minted credits once). Every reason string is a key into <code>credit_history_service</code>'s label map — the history row the user sees.",
+      "Token accounting is best-effort: a live stream records <code>len(content)//4</code> (the SSE generators surface no usage; the GEMINI_USAGE log lines carry the real bill), the fallback records <code>generate_response</code>'s real <code>tokens_used</code>, and a served replay records 0. Then <code>_attach_turn_cost</code> writes <code>rich_content.credit = {outcome, credits, reason, label}</code> — ONLY for a free or refunded turn (a plain charge persists nothing, by design) and never <code>balance</code>, which would be stale on replay — while the live <code>credits</code> frame <code>{outcome, credits, reason, label, balance}</code> is always sent so the client can refresh its balance; <code>label</code> is server-authored and rendered verbatim.",
+    ],
+    files:["api/v1/endpoints/chat.py · _ChatQuota","api/v1/endpoints/chat.py · _attach_turn_cost","api/v1/endpoints/chat.py · _record_chat_tokens","services/credit_history_service.py"] },
+
+  { id:"suggest", n:18, phase:"commit", kind:"backend", title:"Follow-up chips → done", sub:"best-effort · terminal frame",
     role:"Generates suggestion chips, then closes the stream with the authoritative message.",
     points:[
-      "<code>generate_followup_suggestions</code> — 2 first-person chips, deduped, never raises → none.",
-      "Yields <code>suggestions</code>, then the terminal <code>done {message}</code> frame.",
+      "<code>generate_followup_suggestions</code> (<code>CHAT_CHEAP_MODEL</code>) — 2 first-person chips, deduped, never raises → none. A starter replay reuses its <i>stored</i> chips instead of paying for this call.",
+      "Yields <code>suggestions</code>, <code>credits</code>, then the terminal <code>done {message}</code> frame.",
       "<code>X-Accel-Buffering: no</code> defeats Railway/nginx SSE buffering.",
     ],
-    files:["services/chat_service.py · generate_followup_suggestions","chat.py (done frame)"],
-    path:"The non-streaming path runs no guardrail scan and generates no suggestions." },
+    files:["services/chat_service.py · generate_followup_suggestions","api/v1/endpoints/chat.py · event_gen"],
+    path:"The non-streaming path runs the same guardrail + disclaimer helpers but generates no suggestions and persists only <code>{widget}</code> (when a widget exists) plus <code>credit</code> on a free or refunded turn — no thinking, sources or chips." },
 
   /* ---- Phase 6: render ---- */
-  { id:"finalize", n:16, phase:"render", kind:"ios", title:"Finalize in place", sub:"decode-safe · same-id swap",
+  { id:"finalize", n:19, phase:"render", kind:"ios", title:"Finalize in place", sub:"decode-safe · same-id swap",
     role:"On the done frame, iOS drains the reveal and swaps in the authoritative bubble.",
     points:[
       "<code>decodeDoneMessage → ChatMessageDTO.toRichChatMessage()</code>; replaces the message by the same id (no flicker).",
-      "Every DTO uses <b>never-throwing decoders</b> — one malformed row can't collapse the whole conversation into a blank screen.",
-      "A stream with no <code>done</code> / an <code>error</code> frame / a malformed done throws → the fallback runs.",
+      "Every rich-content DTO (<code>ChatSource</code>, <code>ChatThinking</code>, <code>ChatWidgetData</code>, <code>ChatTurnCostDTO</code>) uses a <b>never-throwing decoder</b>, so a malformed <code>rich_content</code> can't collapse the whole conversation into a blank screen; the row's five core columns remain required.",
+      "A stream with no <code>done</code> / an <code>error</code> frame / a malformed done throws → iOS first RECONCILES: it reloads history and, if the turn is already there (matched on the server-normalized <code>user_message</code> from <code>meta</code>, counting repeats), ADOPTS it without re-sending; only a genuinely absent turn is regenerated via POST /messages. A terminal pre-flight refusal (stage 4) skips both.",
+      "The <code>done</code> swap attaches the <code>credits</code> frame held since it arrived (preferred over the persisted <code>credit</code>, which has no balance), then <code>refreshCreditsIfMoved</code> refreshes the wallet — after the answer is on screen, never before.",
     ],
-    files:["ViewModels/ChatViewModel.swift · decodeDoneMessage","Models/ChatConversationModels.swift · toRichChatMessage"] },
+    files:["ViewModels/ChatViewModel.swift · decodeDoneMessage","Models/ChatConversationModels.swift · toRichChatMessage","Models/ChatConversationModels.swift · ChatTurnCostDTO"] },
 
-  { id:"render", n:17, phase:"render", kind:"ios", title:"SwiftUI lays it out", sub:"header · thinking · body · chips",
+  { id:"render", n:20, phase:"render", kind:"ios", title:"SwiftUI lays it out", sub:"thinking · body · pills · cost · chips",
     role:"The final assistant bubble renders top-to-bottom.",
     points:[
-      "Header → collapsible thinking card (“Done in Xs · N sources”) → answer body (<code>MarkdownText</code> + chart / market-overview widgets) → source pills → follow-up chips.",
+      "Collapsible thinking card (&ldquo;Done in Xs · N sources&rdquo;) holding the reasoning/stages AND the earned source pills → answer body (widgets first, then <code>MarkdownText</code>) → follow-up chips (latest finished answer only) → the timestamp line, where the turn-cost badge rides when a turn cost less than usual.",
       "The scroll key follows in-place growth to the bottom; <code>MarkdownText</code> falls back to raw text on a half-streamed fragment.",
-      "<code>GroundedContextChip</code> shows when the chat is grounded on a screen.",
+      "<code>GroundedContextChip</code> shows when the chat is grounded on a screen (keyed on the context <i>type</i>; the server's <code>grounded</code> truth drives the pills).",
     ],
-    files:["Views/Organisms/ChatMessagesList.swift","Views/Molecules/AIMessageContent.swift","Views/Molecules/ChatStockWidgetView.swift"] },
+    files:["Views/Organisms/ChatMessagesList.swift","Views/Molecules/AIMessageContent.swift","Views/Molecules/ChatStockWidgetView.swift","Views/Molecules/GroundedContextChip.swift"] },
 ];
 
 /* ============================================================================
@@ -416,27 +472,32 @@ const STAGES = [
    ========================================================================== */
 const PATHS = {
   stream:[
-    "<b>Generation:</b> <code>stream_agentic</code> / <code>stream_synthesis</code>, manual mid-stream tools",
-    "<b>Multi-agent:</b> router + specialists + <code>routing</code>/<code>tool_step</code>/<code>reasoning</code> frames",
+    "<b>Generation:</b> <code>stream_agentic</code> / <code>stream_synthesis</code>, manual mid-stream tools, or a zero-Gemini replay (deep-dive cache, starter cache)",
+    "<b>Multi-agent:</b> router + ≤2 specialists + <code>routing</code>/<code>tool_step</code>/<code>reasoning</code> frames",
     "<b>Widgets:</b> deterministic base card up-front + tool widgets, deduped by <code>widget_key</code>",
-    "<b>Persist:</b> full <code>thinking · widgets · sources · suggestions</code> + follow-up chips",
-    "<b>Error:</b> an SSE <code>error</code> frame (quota vs internal)",
+    "<b>Persist:</b> full <code>thinking · widgets · sources · suggestions · credit</code> in <code>rich_content</code>",
+    "<b>Credits:</b> pre-charged as JSON 402/409 before the stream; settled after delivery; <code>credits</code> frame",
+    "<b>Error:</b> an SSE <code>error</code> frame (quota vs internal) — then the client's fallback",
   ],
   fall:[
-    "<b>Generation:</b> <code>generate_response</code> → single-round function-calling",
+    "<b>Generation:</b> <code>generate_response</code> → single-round function-calling from the <i>same</i> tool registry, plain text on failure",
     "<b>Multi-agent:</b> none — a single general agent",
-    "<b>Widgets:</b> Gemini-chosen tool widget, deterministic card as fallback",
-    "<b>Deep-dive cache:</b> <b>only</b> this path checks / writes <code>market_deep_dive_cache</code>",
-    "<b>Convergence:</b> emits <code>reset</code>; iOS adopts the persisted turn instead of re-POSTing",
+    "<b>Widgets:</b> Gemini-chosen tool widget (from any of its parallel calls), deterministic card as fallback",
+    "<b>Guardrails:</b> the same <code>enforce_answer</code> + intent-gated disclaimer; <b>no</b> suggestions",
+    "<b>Persist:</b> <code>rich_content = {widget?, credit?}</code> — the widget when there is one, plus the turn-cost payload on a free/refunded turn; no thinking, sources or chips: the stored turn is NOT identical to a streamed one",
+    "<b>Convergence:</b> two fallbacks. Server-side — when the stream dies mid-answer, <code>event_gen</code> itself calls <code>generate_response</code>, emits <code>reset</code> (only if tokens already streamed) and finishes over SSE with the full persist shape. Client-side — on an <code>error</code> frame / missing <code>done</code>, iOS reconciles against history first and re-POSTs only a genuinely absent turn",
   ],
 };
 
 const GUARANTEES = [
-  { acc:"#059669", t:"Never-raises grounding", d:"The resolver runs every branch under a <code>4s</code> timeout and degrades to client context; RAG returns empty on error — the chat proceeds ungrounded rather than failing." },
+  { acc:"#d97706", t:"Charge first, settle once", d:"One credit is claimed before the stream opens (a refusal is a JSON 402/409, never an SSE frame) and resolved exactly once afterwards: delivered → keep, no-cost → refund, never arrived → refund or restore the free follow-up. A failed <em>free</em> turn never reaches the ledger. (The free follow-up itself is parked today: <code>CHAT_FREE_FOLLOWUP_SECONDS</code> = 0.)" },
+  { acc:"#059669", t:"Never-raises grounding", d:"The resolver runs every branch under a <code>4s</code> timeout and degrades to client context; enrichment names what is missing. The chat proceeds ungrounded rather than failing — and says so: the source pill is <em>earned</em> by what arrived, never asserted from the context type." },
+  { acc:"#7c3aed", t:"Tools are class-scoped and prompt-honest", d:"One registry decides what an asset class may call; the prompt's capability block is rendered from that same set on every tool-bearing call, and every tool-less call — the plain-text fallback, the synthesis merge, the follow-up suggestions — runs over a copy that claims nothing (<code>tools_granted=False</code>)." },
   { acc:"#d97706", t:"Persist-on-complete", d:"The turn is written atomically <em>before</em> anything that can hang. Empty content raises rather than persisting blank — nothing saved until a complete answer exists." },
-  { acc:"#7c3aed", t:"Quota circuit breaker", d:"A process-wide breaker opens after 20 consecutive quota errors and fails fast for 30s. Streaming honors it manually — retrying a partial stream would replay tokens." },
-  { acc:"#0284c7", t:"Cay AI identity rule", d:"Prepended at every LLM surface — base prompt, router, specialists, suggestions — so the underlying model never leaks into user-facing text." },
-  { acc:"#0284c7", t:"iOS decode-safety", d:"Thinking, sources, and widgets use never-throwing initializers; unknown widget types degrade to nothing — one malformed row can't collapse the history." },
+  { acc:"#7c3aed", t:"Quota circuit breaker — half-open", d:"A process-wide breaker opens after <code>GEMINI_QUOTA_CIRCUIT_THRESHOLD</code> (20) consecutive quota errors, fails fast for <code>GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS</code> (30 s), then admits exactly ONE trial call; success closes it, failure re-opens from now. An FMP rate limit inside a tool never counts toward it. Streaming honors it manually — retrying a partial stream would replay tokens." },
+  { acc:"#059669", t:"Disclaimer decided in code", d:"<code>is_trade_intent</code> + the <code>advice_directive</code> tag gate the line deterministically on both paths and on replay, so a provider blip can never drop it — and it is not trained into invisibility on &ldquo;Hi&rdquo;." },
+  { acc:"#0284c7", t:"Cay AI identity rule", d:"Prepended at every user-facing LLM surface — the base prompt (which specialists extend) and follow-up suggestions; the JSON-only router carries its own &lsquo;never mention being an AI, a model, or any provider&rsquo; line — and enforced on output by first-person-anchored redaction, so the underlying model never leaks into user-facing text." },
+  { acc:"#0284c7", t:"iOS decode-safety", d:"Thinking, sources, widgets and the turn-cost payload use never-throwing initializers (the container fetch included); unknown widget types degrade to nothing — one malformed <code>rich_content</code> can't collapse the history. The row's five core columns remain required." },
   { acc:"#059669", t:"One-in-flight isolation", d:"A second send is blocked while a reply streams, and every mutation checks the session is still active — navigating away mid-stream can't clobber the next chat." },
 ];
 
@@ -547,15 +608,15 @@ function showOverview(){
     <div class="eyebrow" style="--acc:#8fa0b6">Overview</div>
     <h2>🧭 How to read this</h2>
     <div class="tag">One question, six phases, top to bottom. Requests flow down; the SSE stream flows back up.</div>
-    <p class="role">“Ask Cay AI” grounds a question on what's on screen, enriches it with retrieval + memory, routes it to specialist lenses, streams a multi-round agentic answer with live market tools, then persists and reveals it.</p>
+    <p class="role">“Ask Cay AI” claims one credit up front, grounds the question on what's on screen, routes it to specialist lenses, streams a multi-round agentic answer with class-scoped live market tools (or replays a cached one with zero model calls — a deep-dive replay is refunded, a starter-chip replay stays charged), redacts and disclaims it in code, persists it atomically, settles the credit, then reveals it.</p>
     <div class="sec"><h4>The six phases</h4>
       <ul>
         <li><b style="color:var(--ios)">Ask</b> — the iOS app creates a session, attaches the on-screen snapshot, opens an SSE stream.</li>
-        <li><b style="color:var(--backend)">Ground</b> — the backend resolves screen grounding + RAG chunks + rolling memory into one prompt.</li>
-        <li><b style="color:var(--llm)">Reason</b> — a router picks lenses; Gemini streams a multi-round agentic answer with FMP tools.</li>
+        <li><b style="color:var(--backend)">Gate · charge · ground</b> — 401/404, one credit claimed as a JSON 402/409, then screen grounding + enrichment + rolling memory into one prompt (RAG and personalization are flagged off).</li>
+        <li><b style="color:var(--llm)">Reason</b> — a router picks ≤2 lenses; a deep-dive cache hit replays and is refunded, a starter-chip hit replays and stays charged, else Gemini streams a multi-round agentic answer with the tools its asset class is granted.</li>
         <li><b style="color:var(--ios)">Stream</b> — SSE frames reveal the answer line-by-line into one stable bubble.</li>
-        <li><b style="color:var(--backend)">Commit</b> — a log-only guardrail, then an atomic persist before best-effort chips.</li>
-        <li><b style="color:var(--ios)">Render</b> — the finished bubble: thinking card, markdown, widgets, sources, chips.</li>
+        <li><b style="color:var(--backend)">Commit</b> — a redacting guardrail + intent-gated disclaimer, an atomic persist, the credit settled exactly once, then best-effort chips.</li>
+        <li><b style="color:var(--ios)">Render</b> — the finished bubble: thinking card, markdown, widgets, earned source pills, turn cost, chips.</li>
       </ul>
     </div>
     <div class="sec"><h4>Try it</h4>

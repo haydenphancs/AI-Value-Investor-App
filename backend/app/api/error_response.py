@@ -25,6 +25,8 @@ helper stays cheap to import and resilient to dependency changes.
 
 from __future__ import annotations
 
+from app.log_redaction import redact_secrets
+
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
@@ -841,8 +843,17 @@ def error_response_from_exception(
     exactly where in the pipeline it failed.
     """
     code, status_code = classify_exception(exc)
+    # REDACT BEFORE TRUNCATING. `str(exc)` on an httpx error is
+    # "Client error '403 Forbidden' for url 'https://…/search-symbol?query=AAPL&apikey=<key>'"
+    # — FMP appends the key to the query string (`fmp.py`), and `_make_request` re-raises
+    # the ORIGINAL exception for any status outside the four it types, so the raw object
+    # reaches here and both fields below go straight into the client's JSON body (and, in
+    # the twin builder, into `research_reports.error_message` in Supabase). The repo's
+    # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
+    # prefix, so the order matters.
+    safe = redact_secrets(exc)
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {str(exc)[:200]}",
+        "underlying": f"{type(exc).__name__}: {safe[:200]}",
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -856,7 +867,7 @@ def error_response_from_exception(
     return make_error_response(
         code,
         status_code=status_code,
-        message=f"{type(exc).__name__}: {str(exc)[:300]}",
+        message=f"{type(exc).__name__}: {safe[:300]}",
         details=details,
     )
 
@@ -915,8 +926,17 @@ def error_body_from_exception(
     body — used by `_run_research_task` to persist a structured
     error blob into `research_reports.error_message`."""
     code, _status = classify_exception(exc)
+    # REDACT BEFORE TRUNCATING. `str(exc)` on an httpx error is
+    # "Client error '403 Forbidden' for url 'https://…/search-symbol?query=AAPL&apikey=<key>'"
+    # — FMP appends the key to the query string (`fmp.py`), and `_make_request` re-raises
+    # the ORIGINAL exception for any status outside the four it types, so the raw object
+    # reaches here and both fields below go straight into the client's JSON body (and, in
+    # the twin builder, into `research_reports.error_message` in Supabase). The repo's
+    # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
+    # prefix, so the order matters.
+    safe = redact_secrets(exc)
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {str(exc)[:200]}",
+        "underlying": f"{type(exc).__name__}: {safe[:200]}",
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -929,6 +949,6 @@ def error_body_from_exception(
 
     return make_error_body(
         code,
-        message=f"{type(exc).__name__}: {str(exc)[:300]}",
+        message=f"{type(exc).__name__}: {safe[:300]}",
         details=details,
     )

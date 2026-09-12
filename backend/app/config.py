@@ -238,8 +238,8 @@ class Settings(BaseSettings):
     # plan). One credit == one "Ask Cay AI" chat turn. A full report is ~20x a chat
     # turn by token/$ weight, so it costs 20 credits. Tier monthly allocations live
     # in the plan_credits DB table (free 50 / pro 1200 / premium="Max" 4000). These
-    # constants are the per-ACTION debit amounts; the enforcement phase charges them
-    # against the monthly pool (chat is not yet wired to the pool).
+    # constants are the per-ACTION debit amounts, charged against the monthly pool by
+    # `_claim_chat_quota` (chat) and the two report doors.
     CHAT_CREDIT_COST: int = 1
     REPORT_CREDIT_COST: int = 20
 
@@ -456,7 +456,8 @@ class Settings(BaseSettings):
     #     1024        847      9,927      10,774     $0.0480   (-22%)
     #
     # An earlier estimate put Stage B at ~5,470; it is ~3x that. Per-job thinking
-    # ranges 259-2,767 across the 12-18 jobs, not a flat ~391.
+    # ranges 259-2,767 across the jobs (12 fixed + 2 per critical factor, 10-22,
+    # typically 16-18), not a flat ~391.
     #
     # ⚠️ THE CAP IS NOT FREE, and the earlier "outputs substantively identical at
     # 0/512/1024/default" claim was based on ONE job. Across all of them, a
@@ -484,10 +485,37 @@ class Settings(BaseSettings):
     #
     # NOT capped, and that is a decision rather than an oversight: the two
     # post-assembly syntheses (`synthesize_core_thesis`,
-    # `synthesize_critical_factors`), the agentic-fallback single-pass analysis,
-    # and report chat.
+    # `synthesize_critical_factors`) and the agentic-fallback single-pass analysis.
+    # (Report chat was in this list; the route was deleted 2026-09-11 — it had no
+    # client caller and bypassed every chat guardrail.)
+    #
+    # THE DEEP-RESEARCH AGENTIC LOOP (research_agent._agentic_research) was neither
+    # capped NOR on this list: `create_tool_chat` had no thinking knob, so up to five
+    # calls per deep report thought at the model default, and the $/report table
+    # above — measured on the DIRECT path, which never runs the loop — silently
+    # excluded them. It now has its own setting, same semantics as the two above,
+    # and the loop emits GEMINI_USAGE per round so the deep door can be measured.
+    # Re-run scripts/eval_report_thinking.py on the deep path before moving it.
     REPORT_NARRATIVE_THINKING_BUDGET: int = 0
     REPORT_STAGE_A_THINKING_BUDGET: int = 0
+    REPORT_AGENTIC_THINKING_BUDGET: int = 0
+
+    # ── Function-calling tool results ─────────────────────────────────────────
+    # One budget for every tool result fed back to the model. Three call sites used
+    # to hard-cut `json.dumps(result)[:N]` at 8000 / 5000 / unbounded, handing the
+    # model broken JSON with no marker; `gemini.truncate_tool_result` now prunes
+    # structurally and stamps `_truncated`. Tool handlers also get a per-call
+    # timeout: an INDEX tool recomputing a cold detail cache used to hold the whole
+    # stream with no bound (the context resolver caps the same call at 4 s).
+    GEMINI_TOOL_RESULT_MAX_CHARS: int = 8000
+    CHAT_TOOL_TIMEOUT_SECONDS: float = 8.0
+    # SSE keepalive interval on the chat stream. iOS's stream request times out after
+    # 120 s of SILENCE, and two things legitimately go quiet longer than that used to be
+    # possible: a synthesis round buffers its specialists until the gather completes, and
+    # a grounded web search may run ~75 s inside one tool call. A comment frame
+    # (": keepalive") every N seconds resets the client's idle clock; every SSE client
+    # ignores comment lines, so old builds are unaffected.
+    CHAT_STREAM_KEEPALIVE_SECONDS: float = 15.0
 
     # Multi-agent chat (Phase 3): a cheap router classifies each question and routes to a topic
     # specialist (valuation/technicals/macro/…); genuinely cross-domain questions run several
@@ -625,8 +653,10 @@ class Settings(BaseSettings):
     CHAT_RATE_LIMIT_PER_MINUTE: int = 15
     # Durable per-user daily budget (Supabase chat_usage_budget, migration 096).
     # A turn is claimed atomically BEFORE the Gemini call; over the cap → 409
-    # CHAT_DAILY_LIMIT_REACHED. Token count is best-effort observability + a soft
-    # secondary ceiling. Set the turn limit to 0 to disable chat generation entirely.
+    # CHAT_DAILY_LIMIT_REACHED. The token count recorded beside it is observability
+    # only — nothing enforces a token ceiling (a `CHAT_DAILY_TOKEN_LIMIT` used to be
+    # declared here and read by nothing; removed 2026-09-11). Set the turn limit to 0
+    # to disable chat generation entirely.
     CHAT_DAILY_TURN_LIMIT: int = 60
     # Anti-rotation ceiling for GUESTS only, keyed on `trusted_client_ip` rather than the
     # client-chosen `X-Guest-Id`. The per-install budget above is the fair-use limit; this is
@@ -635,7 +665,6 @@ class Settings(BaseSettings):
     # bounds abuse, it is not a second fair-use limit. Signed-in users are exempt: their bucket
     # is a real account id, which is not rotatable.
     CHAT_DAILY_TURN_LIMIT_PER_IP: int = 300
-    CHAT_DAILY_TOKEN_LIMIT: int = 200000
 
     # ── Chat web search (the one paid step in `chat_market_tools`) ────────────────
     #

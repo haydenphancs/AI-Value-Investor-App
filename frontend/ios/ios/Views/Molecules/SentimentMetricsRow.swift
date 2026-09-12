@@ -14,13 +14,29 @@ struct SentimentMetricsRow: View {
     var body: some View {
         HStack(spacing: AppSpacing.lg) {
             // Social Mentions
-            if sentimentData.socialDataAvailable {
+            //
+            // THE `known` FLAG HAS TO BE PART OF THIS GATE. `socialDataAvailable` is
+            // computed backend-side as `count_24h > 0 or count_7d > 0`, and a lookup that
+            // FAILED also reports 0 — so on its own it sends every failure down the else
+            // branch, which states "Not tracked on Reddit" as a measured fact about a
+            // question that was never answered. That is precisely the incident the flag
+            // was added for (the 42501 that answered every ticker "0 mentions this week"
+            // for months). When the window is unknown, take the accessor branch: its three
+            // readers already render "—" / "Reddit data unavailable" / muted.
+            if sentimentData.socialDataAvailable
+                || !sentimentData.socialKnown(for: selectedTimeframe) {
                 SentimentMetricCard(
                     iconName: "bubble.left.and.bubble.right.fill",
                     title: "Social Mentions",
                     value: sentimentData.formattedSocialMentions(for: selectedTimeframe),
                     change: sentimentData.formattedSocialChange(for: selectedTimeframe),
-                    changeColor: sentimentData.socialChangeColor(for: selectedTimeframe)
+                    changeColor: sentimentData.socialChangeColor(for: selectedTimeframe),
+                    isDimmed: !sentimentData.socialKnown(for: selectedTimeframe),
+                    // Only the UNKNOWN string ("Reddit data unavailable") is long enough
+                    // to need the smaller size; a measured "+12% today" keeps the card's
+                    // default `caption` exactly as it shipped.
+                    changeFont: sentimentData.socialKnown(for: selectedTimeframe)
+                        ? AppTypography.caption : AppTypography.captionSmall
                 )
             } else {
                 SentimentMetricCard(

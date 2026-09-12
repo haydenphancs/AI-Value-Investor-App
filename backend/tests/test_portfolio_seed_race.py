@@ -14,6 +14,8 @@ recovered by the pre-existing `_backfill_lone_empty_portfolio` heal rather than 
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 import app.api.v1.endpoints.portfolios as pf
@@ -137,7 +139,15 @@ def test_the_existing_backfill_heal_recovers_the_dropped_items():
     """Proves the items are RECOVERABLE, not lost — the premise of the test above."""
     class _Empty:
         id = "winner"
-        tickers: list = []
+        # `items`, not `tickers`. The production guard read `getattr(only, "tickers", ...)`
+        # against a model whose field is `items`, so it was dead — and every stub that
+        # spelled it the buggy way kept that invisible (fixed 2026-09-12).
+        items: list = []
+        # NEVER EDITED — the seed inserts `created_at` and `updated_at` from the same
+        # `now()`. The heal is scoped to exactly that state now, because a group the user
+        # deliberately emptied must NOT be re-seeded from the watchlist on every launch.
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     sb = _SB(rows={("watchlist_items", "select"): _WATCHLIST})
     captured = {}

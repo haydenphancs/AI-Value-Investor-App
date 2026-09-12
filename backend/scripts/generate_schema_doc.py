@@ -93,12 +93,22 @@ EXPECTED: dict[str, int] = {
     # when they are, expect: policies -3 (163) -43 (164) -20 (165), tables -8 / public -8 /
     # rls -8 / policies -(their remaining service policies) (168), functions -1 (168 drops
     # cleanup_expired_news_articles). Move these numbers in the same change as the re-dump.
-    "tables": 136,
-    "public": 101,
-    "fk": 28,
-    "policies": 199,
-    "rls": 101,
-    "functions": 43,
+    # Refreshed 2026-09-11 (evening) after applying 163-168 and re-dumping WITH grants:
+    #   -8 tables / -8 public / -8 rls  -> 168 dropped portfolio_holdings, user_lesson_progress,
+    #                                      user_study_schedules, user_bookmarks, asset_snapshots,
+    #                                      etf_detail_cache, index_detail_cache, news_articles
+    #   -5 fk                           -> the users/lessons FKs those tables carried
+    #   -1 function                     -> cleanup_expired_news_articles (168)
+    #   policies 199 -> 109             -> 163 (-3 users_*_own, -1 credits_select_own),
+    #                                      164 (-43 public-read / *_select_all, +2 service),
+    #                                      165 (-24 per-user), 168 (-22 on the dropped tables)
+    # The dump now carries GRANT/REVOKE (576 statements); the parser ignores them.
+    "tables": 128,
+    "public": 93,
+    "fk": 23,
+    "policies": 109,
+    "rls": 93,
+    "functions": 42,
     "enums": 14,
     "views": 1,
 }

@@ -72,6 +72,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.services._analyst_common import analyst_section_available
+from app.services.asset_class import uses_coingecko_price
 from app.integrations.fmp import get_fmp_client
 from app.schemas.widget import (
     WidgetBasketResponse,
@@ -431,9 +432,27 @@ def _parsed_session(stamp: Optional[str]) -> Optional[date]:
         return None
 
 
+def _is_round_the_clock(ticker: str) -> bool:
+    """True for an asset with no session at all — a CoinGecko-priced crypto pair.
+
+    Its change is a ROLLING 24-hour move, so it neither belongs to an equity session nor
+    can be stale relative to one. It must therefore be exempt from BOTH halves of the
+    session machinery below: it cannot set `newest_session` (stamping it with today would
+    age out every legitimately Friday-stamped equity at Monday pre-market — the very
+    mis-drop `drop_prior_session_movers` exists to prevent), and it can never be dropped
+    as a prior-session row.
+    """
+    return uses_coingecko_price(ticker or "")
+
+
 def newest_session(ranked: Sequence[RankedMover]) -> Optional[date]:
     """The most recent `changeSession` stamp in the batch, or None if none is stamped."""
-    stamps = [d for d in (_parsed_session(m.change_session) for m in ranked) if d]
+    stamps = [
+        d for d in (
+            _parsed_session(m.change_session)
+            for m in ranked if not _is_round_the_clock(m.ticker)
+        ) if d
+    ]
     return max(stamps) if stamps else None
 
 
@@ -457,6 +476,10 @@ def drop_prior_session_movers(
     current: List[RankedMover] = []
     stale: List[RankedMover] = []
     for m in ranked:
+        if _is_round_the_clock(m.ticker):
+            # Never stale: an asset that never closes has no prior session to lag.
+            current.append(m)
+            continue
         stamped = _parsed_session(m.change_session)
         (stale if stamped is not None and stamped < newest else current).append(m)
     return current, stale
@@ -884,10 +907,16 @@ class WidgetMoversService:
             return None
         m = ranked[0]
 
-        today = session_trading_date()
-        ctx = await self._market_context([sym], index_rows)
+        # THE ROW'S session, not the wall clock — the same derivation the widget payload
+        # uses. Ask Cay AI and the Home Screen widget must give the same answer for the
+        # same market day, and this path asked `session_trading_date()` directly: at 07:30
+        # ET Monday that is MONDAY, while the screener is still reporting Friday's close,
+        # so the news and earnings detectors were queried for a day the move did not happen
+        # on and returned the confident negative "no company news today".
+        today, today_iso, _word = self._session_of([m], session_trading_date())
+        ctx = await self._market_context([sym], index_rows, today_iso)
         classified, had_news, card_checked = _classified_today_news(
-            cards.get(sym), today.isoformat()
+            cards.get(sym), today_iso
         )
         industry = ctx.industry_for(sym)
         a = attribute(
@@ -1047,8 +1076,8 @@ class WidgetMoversService:
     async def _market_context(
         self,
         tickers: Sequence[str],
-        index_rows: Optional[Dict[str, Dict[str, Any]]] = None,
-        session_date: Optional[str] = None,
+        index_rows: Optional[Dict[str, Dict[str, Any]]],
+        session_date: str,
     ) -> "_MarketContext":
         """Two universe-wide FMP calls plus one batched Supabase read.
 
@@ -1098,9 +1127,12 @@ class WidgetMoversService:
         # The session the PAYLOAD describes (the head's `changeSession`, see
         # `_session_of`) — not the wall clock — so the industry and sector gates compare
         # like with like: pre-market Monday, Friday's industry move for Friday's change.
-        return shared.for_tickers(
-            industry_map, session_date or session_trading_date().isoformat(), index_rows
-        )
+        # ⚠️ NO `or session_trading_date()` FALLBACK. `session_date` used to be
+        # `Optional[str] = None` resolved that way, i.e. the gate FAILED OPEN to the wall
+        # clock — and one of the three call sites relied on it, so a pre-market Monday
+        # attribution compared Friday's change against Monday's sector rows. A required
+        # parameter makes that a signature error instead of a silent mis-gate.
+        return shared.for_tickers(industry_map, session_date, index_rows)
 
     async def _industry_for_one(self, ticker: str) -> Optional[str]:
         try:
@@ -1319,6 +1351,12 @@ class WidgetMoversService:
         grade_rows: Optional[Sequence[Dict[str, Any]]] = None,
         session_word: str = "today",
     ) -> WidgetMoverResponse:
+        # PER-ROW session word. A round-the-clock asset's move is always its own rolling
+        # 24 hours, whatever session the equities in the same batch are reporting — and
+        # equally, an equity row keeps the equity word even when the tile's HEAD is a
+        # crypto pair. One word for the whole tile made one of those two wrong.
+        if _is_round_the_clock(m.ticker):
+            session_word = "today"
         classified, had_news, card_checked = _classified_today_news(
             cards.get(m.ticker), today_iso
         )
@@ -1396,6 +1434,17 @@ class WidgetMoversService:
         rows stamped older than it, so every stamped row agrees; a batch with no stamp
         at all (older shape) keeps the live session.
         """
+        # ⚠️ THE DATE IS ALWAYS THE EQUITY ONE. A 24/7 head does get the word "today" —
+        # labelling a crypto pair's rolling 24-hour move "on Fri" asserts a session that
+        # asset does not have — but that override belongs on the ROW, not here: this
+        # function's return also carries the date every detector is gated on. Returning
+        # the live session for a crypto head moved that date too, so on a Monday
+        # pre-market with the screener still on Friday's close, the equity RUNNERS
+        # narrated Friday's −4.8% as "…today", `_classified_today_news` was keyed on
+        # Monday and matched nothing (printing the confident negative "No company news
+        # today"), and the tile's own label presented a Friday move as Monday's — which
+        # is verbatim the cross-session bug this function exists to kill. `_build_mover`
+        # now applies the 24/7 word per row.
         stamped = newest_session(ranked) or live_session
         if stamped >= live_session:
             return live_session, live_session.isoformat(), "today"
@@ -1530,11 +1579,38 @@ class WidgetMoversService:
             sigmas = {}
 
         rows = []
+        funds: List[str] = []
+        index_set = {s.upper() for s in index_syms}
         for sym in symbols:
+            if sym.upper() in index_set:
+                # THE MARKET BAND CANNOT ALSO BE THE MOVER. The comment on the batch above
+                # promises this ("excluded from ranking below; an index is not a 'mover'
+                # the widget can attribute") and it held only for the symbols APPENDED for
+                # quoting — a user who watchlists SPY put it into `symbols`, where it
+                # ranked like anything else.
+                #
+                # `market_change` is literally `index_rows[MARKET_INDEX_SYMBOL]`'s own
+                # change, so a SPY headline attributes SPY's move to itself: "The market
+                # fell 1.6% today; SPY moved with it." And the whole band is the row the
+                # tile already draws above the headline, so any of them headlining prints
+                # the same number twice. On a market-driven day the index proxy also has
+                # the highest z of a small portfolio BY CONSTRUCTION — σ is smaller for
+                # the index than for its constituents — so in portfolio mode this is
+                # systematic, not rare.
+                continue
             q = quotes.get(sym) or {}
+            if q.get("isFund"):
+                # An open-end mutual fund prints ONE NAV a day and can never be "today's
+                # mover". The universe sweep no longer carries funds, but a watchlisted fund
+                # still reaches here through the `/stable/profile` fallback — UNSTAMPED
+                # (`_from_profile` has no `changeSession`), so it would rank instead of
+                # being dropped as prior-session. Refused here, on the flag, not the name.
+                funds.append(sym)
+                continue
             rows.append(
                 {
                     "ticker": sym,
+                    "change_session": q.get("changeSession"),
                     "change_percent": q.get("changePercentage"),
                     "price": q.get("price"),
                     "company_name": q.get("name"),
@@ -1542,10 +1618,14 @@ class WidgetMoversService:
                     "sigma_daily": sigmas.get(sym),
                     "open": q.get("open"),
                     "previous_close": q.get("previousClose"),
-                    "change_session": q.get("changeSession"),
                 }
             )
 
+        if funds:
+            logger.info(
+                "widget: %d open-end fund row(s) excluded from the ranking (no intraday "
+                "print): %s", len(funds), ", ".join(funds[:10]),
+            )
         ranked, stale = drop_prior_session_movers(rank_movers(rows))
         if stale:
             logger.warning(

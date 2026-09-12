@@ -1,1 +1,6 @@
+# NOT the live entrypoint. railway.toml selects `builder = "dockerfile"`, so Railway runs
+# the CMD in backend/Dockerfile and never reads this file; it is kept equivalent for
+# anyone starting the app with a Procfile runner. tests/test_deploy_command_parity.py
+# fails the build if the two drift — and if either grows `--workers`: every lifespan job
+# in app/main.py runs UNCLAIMED and is safe only because exactly ONE uvicorn worker runs.
 web: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'

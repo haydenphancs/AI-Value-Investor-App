@@ -28,6 +28,12 @@ class MarketPulseItemResponse(BaseModel):
     type: str                   # "index" | "crypto" | "commodity" | "stock" | "etf"
     price: float                # latest quote price (raw)
     change_percent: float       # today's % change (raw; iOS derives sign/colour)
+    # Was today's change actually MEASURED? `change_percent` is a shipped non-Optional
+    # float (iOS decodes a plain `Double`), so an unknown move still travels as 0.0 —
+    # which the strip painted as a GREEN "+0.00%", a tile asserting flat-and-up. This is
+    # the three-state companion the builder's own note called for. Default True so any
+    # other producer keeps the old meaning; `_fetch_pulse_item` sets it explicitly.
+    change_known: bool = True
     # Prior trading day's close — the iOS sparkline draws a dashed reference line
     # here and colours the line green ABOVE / red BELOW it (same as the Holdings
     # cards). Null when FMP didn't return a previous close.

@@ -438,7 +438,21 @@ def verify_api_key(api_key: str, valid_keys: set[str]) -> bool:
     Returns:
         bool: True if API key is valid
     """
-    return secrets.compare_digest(api_key, next(iter(valid_keys)))
+    # EVERY key, and never a raise. `next(iter(valid_keys))` compared against exactly one
+    # arbitrary member — so a second valid key silently never authenticated — and raised
+    # `StopIteration` on an empty set, which inside a generator or an async frame surfaces
+    # as an unrelated RuntimeError rather than "no keys configured".
+    #
+    # The loop is NOT short-circuited on a match, so the work is the same whichever key
+    # matches (and for none): `compare_digest` is constant-time per comparison, and
+    # short-circuiting would leak which key matched through timing.
+    if not api_key or not valid_keys:
+        return False
+    matched = False
+    for candidate in valid_keys:
+        if secrets.compare_digest(api_key, candidate):
+            matched = True
+    return matched
 
 
 # Rate Limiting Utilities

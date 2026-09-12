@@ -352,7 +352,7 @@ def test_build_sources_context_pill_and_dedup():
         {"index": 1, "source": "Risk Factors", "source_type": "filing", "source_label": "MD&A", "text": ""},
         {"index": 2, "source": "Risk Factors", "source_type": "filing", "source_label": "MD&A", "text": ""},
     ]
-    sources = ChatService._build_sources("STOCK", "AAPL", citations)
+    sources = ChatService._build_sources("STOCK", "AAPL", citations, grounded=True)
     # Screen-context pill first, then ONE deduped filing pill (the duplicate MD&A collapses).
     assert sources[0] == {"label": "Company financials", "detail": "AAPL"}
     assert [s for s in sources if s["label"] == "SEC filing"] == [{"label": "SEC filing", "detail": "MD&A"}]

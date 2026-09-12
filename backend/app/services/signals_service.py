@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import re
 
+from app.utils.postgrest_paging import fetch_all_rows
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client, FMPClient
 from app.services.earnings_service import _compute_surprise
@@ -654,13 +655,13 @@ class SignalsService:
         try:
             sb = get_supabase()
             whales = (
-                sb.table("whales")
-                .select("id, cik, last_hydrated_at")
-                .eq("data_source", "13f")
-                .limit(2000)
-                .execute()
-                .data
-                or []
+                fetch_all_rows(
+                    lambda: sb.table("whales")
+                    .select("id, cik, last_hydrated_at")
+                    .eq("data_source", "13f"),
+                    order_by="id",
+                    what="signals: 13F whale roster",
+                )
             )
             if not whales:
                 logger.info(
@@ -683,17 +684,27 @@ class SignalsService:
                     hydrated.append(str(hd)[:10])
 
             holdings = (
-                sb.table("whale_holdings")
-                .select("whale_id, ticker, company_name, change_percent")
-                .gt("change_percent", 0)
-                # Explicit high limit: PostgREST caps at 1000 rows by default, which
-                # (25 whales × up-to-30 holdings) is close today and WILL truncate as
-                # the registry grows — silently dropping funds from the count.
-                .limit(10000)
-                .execute()
-                .data
-                or []
+                fetch_all_rows(
+                    lambda: sb.table("whale_holdings")
+                    .select("whale_id, ticker, company_name, change_percent")
+                    .gt("change_percent", 0),
+                    # `id`, NOT `whale_id`. The helper's contract requires a unique-ish
+                    # sort key, and `whale_id` repeats up to 30 times (one row per holding
+                    # per whale, `whale_service._sync_to_whale_tables`). This is the ONE
+                    # read here that genuinely crosses 1,000 rows, so the page boundary
+                    # lands INSIDE a tie group: each query orders the tie independently, so
+                    # a row can land on both pages or on neither. A dropped row under-counts
+                    # "N funds adding" — and under `_WHALE_MIN_FUNDS` the Accumulation card
+                    # disappears. The old `.limit(10000)` truncated deterministically; an
+                    # unordered pager fails nondeterministically, which is worse.
+                    order_by="id",
+                    what="signals: whale_holdings accumulation",
+                )
             )
+            # The old `.limit(10000)` did NOT lift PostgREST's ~1,000-row cap — the very
+            # truncation its own comment warned about was already happening: the registry
+            # is 45 13F whales × up to 30 holdings, so the `change_percent > 0` subset
+            # crosses 1,000 and "N funds adding" under-counted, unordered and silently.
             as_of = max(hydrated) if hydrated else None
             return _aggregate_whale(holdings, cik_map, as_of=as_of)
         except Exception as exc:  # noqa: BLE001 — degrade this card, never the dashboard
@@ -893,13 +904,13 @@ class SignalsService:
         try:
             sb = get_supabase()
             whales = (
-                sb.table("whales")
-                .select("id, name, cik, firm_name, last_hydrated_at")
-                .eq("data_source", "13f")
-                .limit(2000)
-                .execute()
-                .data
-                or []
+                fetch_all_rows(
+                    lambda: sb.table("whales")
+                    .select("id, name, cik, firm_name, last_hydrated_at")
+                    .eq("data_source", "13f"),
+                    order_by="id",
+                    what="signals: 13F whale roster (detail)",
+                )
             )
             wmap: Dict[Any, Dict[str, str]] = {}   # whale_id -> {name, firm, cik(dedup key)}
             hydrated: List[str] = []
@@ -925,27 +936,33 @@ class SignalsService:
             # Class-share tickers store either delimiter; match both forms.
             variants = list({sym, sym.replace("-", ".")})
             holdings = (
-                sb.table("whale_holdings")
-                .select("whale_id, ticker, allocation, change_percent")
-                .in_("ticker", variants)
-                .gt("change_percent", 0)
-                .limit(5000)
-                .execute()
-                .data
-                or []
+                fetch_all_rows(
+                    lambda: sb.table("whale_holdings")
+                    .select("whale_id, ticker, allocation, change_percent")
+                    .in_("ticker", variants)
+                    .gt("change_percent", 0),
+                    # Unique key — see the accumulation read above. Single-page today
+                    # thanks to the ticker filter, so this is latent rather than live.
+                    order_by="id",
+                    what="signals: holders of this ticker",
+                )
             )
+            # NOTE: disclosure_date is congress-only (migration 076) — always NULL for
+            # 13F, so it's not selected here (avoids that coupling); the 13F `date` IS
+            # the filing date, which iOS renders as "Filed …".
             trades = (
-                sb.table("whale_trades")
-                # NOTE: disclosure_date is congress-only (migration 076) — always NULL
-                # for 13F, so it's not selected here (avoids that coupling); the 13F
-                # `date` IS the filing date, which iOS renders as "Filed …".
-                .select("whale_id, ticker, action, trade_type, amount, date")
-                .in_("ticker", variants)
-                .eq("action", "BOUGHT")
-                .limit(5000)
-                .execute()
-                .data
-                or []
+                fetch_all_rows(
+                    lambda: sb.table("whale_trades")
+                    .select("whale_id, ticker, action, trade_type, amount, date")
+                    .in_("ticker", variants)
+                    .eq("action", "BOUGHT"),
+                    # `date` is a TEXT column on which every fund filing in the same
+                    # quarter ties — not a paging key. Ordering is irrelevant to this
+                    # caller's result anyway: the most-recent-per-whale pick below is a
+                    # full scan of `trades` in Python, so the read only has to be COMPLETE.
+                    order_by="id",
+                    what="signals: BOUGHT trades for this ticker",
+                )
             )
             # MOST-RECENT BOUGHT trade per whale (latest filing date; tie-break larger $)
             # → the "how much" + "when". Using the latest (not the largest-$) keeps

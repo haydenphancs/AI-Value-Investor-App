@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict jtpC1SSs4bXXOM0asrIb9U508pGUbXxhO0wlmeJZuBu9i3RVOYdjRwSZli0Agy6
+\restrict TAovLsjwjgmhyPJaKuPrgQhnG59v03cfh9nzukZBMOtF2074LjZGYTxwobRgKqk
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1440,22 +1440,6 @@ $$;
 
 
 --
--- Name: cleanup_expired_news_articles(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.cleanup_expired_news_articles() RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
-    AS $$
-BEGIN
-    -- NULL expires_at counts as expired: a writer that forgets to set a retention
-    -- bound must not get indefinite storage by default.
-    DELETE FROM news_articles WHERE expires_at IS NULL OR expires_at < now();
-END;
-$$;
-
-
---
 -- Name: cleanup_expired_news_cache(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2198,7 +2182,7 @@ $$;
 -- Name: FUNCTION refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) IS 'Reverses the RECORDED split of a spend. Returns JSONB {outcome, refunded, spendable} as of migration 142 (was INTEGER spendable). outcome: refunded | already_refunded | no_matching_debit | guest | invalid | no_credits_row. `no_matching_debit` means the user is OWED credits — credit_service.refund_ledgered logs it as a REFUND LEAK at ERROR.';
+COMMENT ON FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) IS 'Reverses the RECORDED split of a spend. Returns JSONB {outcome, refunded, spendable} as of migration 142 (was INTEGER spendable). outcome: refunded | already_refunded | no_matching_debit | capped_to_zero | guest | invalid | no_credits_row. TWO of those mean the user is OWED credits and credit_service.refund_ledgered logs them as a REFUND LEAK at ERROR: `no_matching_debit` (no debit matched this ref_id/amount) and `capped_to_zero` (the debit matched but the pools absorbed none of it — the month-boundary case, because ensure_credit_period resets `used`). `already_refunded` is an idempotent replay and must NOT page. Excludes pack_revoked / tier_revoked rows from the debit match (139) so a report refund can never reverse an Apple clawback.';
 
 
 --
@@ -5446,52 +5430,6 @@ CREATE TABLE public.article_chunks (
 
 
 --
--- Name: asset_snapshots; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.asset_snapshots (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    symbol text NOT NULL,
-    asset_type public.asset_type NOT NULL,
-    snapshot_type text NOT NULL,
-    title text,
-    content jsonb NOT NULL,
-    generated_by text,
-    generated_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: TABLE asset_snapshots; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.asset_snapshots IS 'AI-generated analysis snapshots for ETFs, indexes, crypto, commodities. Refreshed weekly by Gemini.';
-
-
---
--- Name: COLUMN asset_snapshots.snapshot_type; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.asset_snapshots.snapshot_type IS 'e.g. identity_rating, strategy, net_yield, holdings_risk (ETF); valuation, sector_performance, macro_forecast (Index)';
-
-
---
--- Name: COLUMN asset_snapshots.content; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.asset_snapshots.content IS 'JSONB: full snapshot payload. Schema varies by asset_type + snapshot_type.';
-
-
---
--- Name: COLUMN asset_snapshots.generated_by; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.asset_snapshots.generated_by IS 'Model identifier, e.g. "Gemini 2.0 Flash"';
-
-
---
 -- Name: book_chapters; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6157,28 +6095,6 @@ CREATE TABLE public.earnings_cache (
 
 
 --
--- Name: etf_detail_cache; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.etf_detail_cache (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    symbol text NOT NULL,
-    response_json jsonb NOT NULL,
-    cached_at timestamp with time zone DEFAULT now(),
-    cache_key text NOT NULL,
-    chart_range text,
-    "interval" text
-);
-
-
---
--- Name: TABLE etf_detail_cache; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.etf_detail_cache IS 'RETIRED. Held the whole ETF detail response under a symbol_range_interval key. No longer read or written: etf_service now caches per section in etf_snapshot_cache, because a 24-hour row of the FULL payload froze current_price and the quote-derived key statistics along with it — the only reason _refresh_volatile ever existed. Kept unread for one release so a rollback is a code revert; drop it after that.';
-
-
---
 -- Name: etf_snapshot_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6349,19 +6265,6 @@ CREATE TABLE public.index_cache (
 --
 
 COMMENT ON TABLE public.index_cache IS 'Per-section index detail cache (12h TTL, enforced in application code via cached_at). cache_key = "{SYMBOL}:{category}" for category=derived or constituents, or "{SYMBOL}:chart:{range}:{interval}" for category=chart. Holds only sections that are expensive to rebuild AND slow to change; the quote, every quote-derived key statistic and the raw daily history are deliberately excluded (a persisted price is a stale price, and the history is large enough that reading it back is slower than re-fetching it). Supersedes the whole-payload index_detail_cache from migration 032. Written by app/services/index_service.py.';
-
-
---
--- Name: index_detail_cache; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.index_detail_cache (
-    cache_key text NOT NULL,
-    symbol text NOT NULL,
-    chart_range text NOT NULL,
-    response_json jsonb NOT NULL,
-    cached_at timestamp with time zone DEFAULT now() NOT NULL
-);
 
 
 --
@@ -6799,62 +6702,6 @@ COMMENT ON COLUMN public.money_move_articles.image_url IS 'Public URL of the 120
 
 
 --
--- Name: news_articles; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.news_articles (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    headline text NOT NULL,
-    summary text,
-    source_name text NOT NULL,
-    source_logo_url text,
-    source_is_verified boolean DEFAULT false NOT NULL,
-    sentiment public.news_sentiment,
-    published_at timestamp with time zone NOT NULL,
-    thumbnail_url text,
-    related_tickers jsonb,
-    category text,
-    is_breaking boolean DEFAULT false NOT NULL,
-    article_url text,
-    insight_summary text,
-    insight_key_points jsonb,
-    key_takeaways jsonb,
-    read_time_minutes integer,
-    external_id text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone
-);
-
-
---
--- Name: TABLE news_articles; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.news_articles IS 'Aggregated news articles with AI-enriched insights';
-
-
---
--- Name: COLUMN news_articles.related_tickers; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.news_articles.related_tickers IS 'JSONB array of ticker strings: ["AAPL", "MSFT"]';
-
-
---
--- Name: COLUMN news_articles.key_takeaways; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.news_articles.key_takeaways IS 'JSONB array: [{index, text}]';
-
-
---
--- Name: COLUMN news_articles.expires_at; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.news_articles.expires_at IS 'Retention bound for cached third-party article content. Any writer MUST set this. NULL rows are treated as expired by cleanup_expired_news_articles().';
-
-
---
 -- Name: notification_job_state; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6901,34 +6748,6 @@ CREATE TABLE public.plan_credits (
     CONSTRAINT plan_credits_monthly_nonneg CHECK ((monthly_credits >= 0)),
     CONSTRAINT plan_credits_price_nonneg CHECK ((price_cents >= 0))
 );
-
-
---
--- Name: portfolio_holdings; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.portfolio_holdings (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    ticker text NOT NULL,
-    company_name text NOT NULL,
-    market_value numeric(18,2) DEFAULT 0 NOT NULL,
-    sector text,
-    asset_type text DEFAULT 'Stock'::text NOT NULL,
-    country text DEFAULT 'US'::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    shares numeric(20,4),
-    CONSTRAINT portfolio_holdings_market_value_nonneg CHECK ((market_value >= (0)::numeric)),
-    CONSTRAINT portfolio_holdings_shares_nonneg CHECK (((shares IS NULL) OR (shares >= (0)::numeric)))
-);
-
-
---
--- Name: COLUMN portfolio_holdings.shares; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.portfolio_holdings.shares IS 'Share count. When set, market_value is recomputed from FMP live price on read.';
 
 
 --
@@ -7358,10 +7177,17 @@ CREATE TABLE public.social_mentions_history (
     mentions integer DEFAULT 0 NOT NULL,
     upvotes integer DEFAULT 0 NOT NULL,
     rank integer,
-    source text DEFAULT 'apewisdom'::text,
+    source text DEFAULT 'apewisdom'::text NOT NULL,
     snapshot_date date NOT NULL,
     created_at timestamp with time zone DEFAULT now()
 );
+
+
+--
+-- Name: TABLE social_mentions_history; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.social_mentions_history IS 'Daily ApeWisdom Reddit-mention snapshots per ticker (30-day retention), written by the social snapshot job and read by social_mentions_service for the 7-day counts. Service-role-only; migration 169 added the table GRANT that 078 omitted.';
 
 
 --
@@ -7419,7 +7245,7 @@ CREATE TABLE public.ticker_data_cache (
 CREATE TABLE public.ticker_news_cache (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     ticker text NOT NULL,
-    external_id text,
+    external_id text NOT NULL,
     headline text NOT NULL,
     summary text,
     summary_bullets jsonb DEFAULT '[]'::jsonb,
@@ -7565,26 +7391,6 @@ ALTER SEQUENCE public.updates_insight_state_id_seq OWNED BY public.updates_insig
 
 
 --
--- Name: user_bookmarks; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.user_bookmarks (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    bookmarkable_type public.bookmark_type NOT NULL,
-    bookmarkable_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: TABLE user_bookmarks; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.user_bookmarks IS 'Polymorphic bookmarks: book, lesson, article, or report';
-
-
---
 -- Name: user_credits; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7613,7 +7419,7 @@ CREATE TABLE public.user_credits (
 -- Name: TABLE user_credits; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.user_credits IS 'Credit balances, TWO POOLS: granted (total/used, monthly, use-it-or-lose-it) and purchased (purchased_total/purchased_used, from consumable IAP, NEVER expires per App Store Guideline 3.1.1). `spendable` is the sum and the number the API serves. SERVICE-ROLE ONLY: every write goes through a SECURITY DEFINER RPC (spend_credits / refund_credits / ensure_credit_period / grant_tier_upgrade / revoke_tier_credits / add_purchased_credits / revoke_purchased_credits). Do not GRANT to anon or authenticated — `remaining` and `spendable` are generated columns and the invariants live in those functions, not in constraints. See migrations 115 and 117.';
+COMMENT ON TABLE public.user_credits IS 'Credit balances, TWO POOLS: granted (total/used, monthly, use-it-or-lose-it) and purchased (purchased_total/purchased_used, from consumable IAP, NEVER expires per App Store Guideline 3.1.1). `spendable` is the sum and the number the API serves. SERVICE-ROLE ONLY: every write goes through a SECURITY DEFINER RPC (spend_credits / refund_credits / ensure_credit_period / grant_tier_upgrade / revoke_tier_credits / add_purchased_credits / revoke_purchased_credits). Do not GRANT to anon or authenticated. `remaining` and `spendable` are generated columns. The ORDERING and pool-selection invariants (spend granted first, refund the recorded split) live in those functions; the non-negativity and used <= total invariants are CHECK constraints on this table (115/117/140), so a direct UPDATE that breaks them fails with 23514 and an RPC that would must handle it. See migrations 115, 117, 139, 140, 166.';
 
 
 --
@@ -7725,19 +7531,6 @@ ALTER SEQUENCE public.user_learn_progress_id_seq OWNED BY public.user_learn_prog
 
 
 --
--- Name: user_lesson_progress; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.user_lesson_progress (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    lesson_id uuid NOT NULL,
-    status public.lesson_status DEFAULT 'notStarted'::public.lesson_status NOT NULL,
-    completed_at timestamp with time zone
-);
-
-
---
 -- Name: user_memory_facts; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7793,27 +7586,6 @@ CREATE TABLE public.user_settings (
 
 
 --
--- Name: user_study_schedules; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.user_study_schedules (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    daily_reminder_enabled boolean DEFAULT false NOT NULL,
-    morning_session_time text,
-    review_time text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: TABLE user_study_schedules; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.user_study_schedules IS 'User learning schedule preferences';
-
-
---
 -- Name: users; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7841,7 +7613,7 @@ COMMENT ON TABLE public.users IS 'Core user profiles. id = auth.users.id (direct
 -- Name: COLUMN users.tier; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.users.tier IS 'Subscription tier: free (default), pro, premium';
+COMMENT ON COLUMN public.users.tier IS 'Entitlement tier (free/pro/premium). Sizes the monthly credit grant via plan_credits and gates feature limits. Written ONLY by iap_service as service_role after Apple verification. Table is service-role-only since migration 163: anon/authenticated hold no privilege on public.users at all, so this column cannot be self-set through PostgREST. Do not GRANT the table back to either role.';
 
 
 --
@@ -7855,14 +7627,14 @@ COMMENT ON COLUMN public.users.password_changed_at IS 'When the account password
 -- Name: COLUMN users.is_admin; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.users.is_admin IS 'Grants access to /api/v1/admin/*. Set manually — never by registration, signup trigger, or any application code path. See migration 113.';
+COMMENT ON COLUMN public.users.is_admin IS 'Grants access to /api/v1/admin/*. Set manually — never by registration, signup trigger, or any application code path. Migration 113''s column-level REVOKE was inert while authenticated held table-level UPDATE; migration 163 revoked the TABLE, which is what actually makes this unwritable through PostgREST.';
 
 
 --
 -- Name: vector_search_stats; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.vector_search_stats AS
+CREATE VIEW public.vector_search_stats WITH (security_invoker='true') AS
  SELECT 'book_chunks'::text AS table_name,
     count(*) AS total_vectors,
     count(*) FILTER (WHERE (book_chunks.embedding IS NOT NULL)) AS indexed_vectors,
@@ -7883,6 +7655,13 @@ UNION ALL
     COALESCE(avg(company_filing_chunks.token_count), (0)::numeric) AS avg_tokens,
     count(DISTINCT company_filing_chunks.ticker) AS unique_sources
    FROM public.company_filing_chunks;
+
+
+--
+-- Name: VIEW vector_search_stats; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.vector_search_stats IS 'Operator dashboard over the three RAG chunk tables. security_invoker since migration 164 so it cannot read them with owner privileges; service_role only. Created by hand in the SQL editor originally — migration 164 is its first provenance.';
 
 
 --
@@ -8939,22 +8718,6 @@ ALTER TABLE ONLY public.article_chunks
 
 
 --
--- Name: asset_snapshots asset_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.asset_snapshots
-    ADD CONSTRAINT asset_snapshots_pkey PRIMARY KEY (id);
-
-
---
--- Name: asset_snapshots asset_snapshots_symbol_asset_type_snapshot_type_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.asset_snapshots
-    ADD CONSTRAINT asset_snapshots_symbol_asset_type_snapshot_type_key UNIQUE (symbol, asset_type, snapshot_type);
-
-
---
 -- Name: book_chapters book_chapters_book_id_chapter_number_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9115,6 +8878,21 @@ ALTER TABLE ONLY public.credit_transactions
 
 
 --
+-- Name: credit_transactions credit_transactions_split_sums; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE public.credit_transactions
+    ADD CONSTRAINT credit_transactions_split_sums CHECK (((delta = (granted_delta + purchased_delta)) OR ((granted_delta = 0) AND (purchased_delta = 0)))) NOT VALID;
+
+
+--
+-- Name: CONSTRAINT credit_transactions_split_sums ON credit_transactions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON CONSTRAINT credit_transactions_split_sums ON public.credit_transactions IS 'delta must equal granted_delta + purchased_delta, except the pre-117 rows that recorded no split (both zero). refund_credits reverses the RECORDED split, so a row that violates this would refund the wrong pool. Added NOT VALID in 166; VALIDATE once the count in that migration''s header returns 0. The (0,0) exemption is still being written by add_credit_transaction (credit_service.log_transaction) — tighten it only after that RPC records the split.';
+
+
+--
 -- Name: crypto_coin_id_cache crypto_coin_id_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9184,14 +8962,6 @@ ALTER TABLE ONLY public.device_tokens
 
 ALTER TABLE ONLY public.earnings_cache
     ADD CONSTRAINT earnings_cache_pkey PRIMARY KEY (id);
-
-
---
--- Name: etf_detail_cache etf_detail_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.etf_detail_cache
-    ADD CONSTRAINT etf_detail_cache_pkey PRIMARY KEY (id);
 
 
 --
@@ -9296,14 +9066,6 @@ ALTER TABLE ONLY public.holders_cache
 
 ALTER TABLE ONLY public.index_cache
     ADD CONSTRAINT index_cache_pkey PRIMARY KEY (id);
-
-
---
--- Name: index_detail_cache index_detail_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.index_detail_cache
-    ADD CONSTRAINT index_detail_cache_pkey PRIMARY KEY (cache_key);
 
 
 --
@@ -9427,22 +9189,6 @@ ALTER TABLE ONLY public.money_move_articles
 
 
 --
--- Name: news_articles news_articles_external_id_source_name_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_articles
-    ADD CONSTRAINT news_articles_external_id_source_name_key UNIQUE (external_id, source_name);
-
-
---
--- Name: news_articles news_articles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.news_articles
-    ADD CONSTRAINT news_articles_pkey PRIMARY KEY (id);
-
-
---
 -- Name: notification_events notification_events_dedup_unique; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9472,22 +9218,6 @@ ALTER TABLE ONLY public.notification_job_state
 
 ALTER TABLE ONLY public.plan_credits
     ADD CONSTRAINT plan_credits_pkey PRIMARY KEY (tier);
-
-
---
--- Name: portfolio_holdings portfolio_holdings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings
-    ADD CONSTRAINT portfolio_holdings_pkey PRIMARY KEY (id);
-
-
---
--- Name: portfolio_holdings portfolio_holdings_user_id_ticker_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings
-    ADD CONSTRAINT portfolio_holdings_user_id_ticker_key UNIQUE (user_id, ticker);
 
 
 --
@@ -9811,22 +9541,6 @@ ALTER TABLE ONLY public.sector_benchmarks
 
 
 --
--- Name: user_bookmarks user_bookmarks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_bookmarks
-    ADD CONSTRAINT user_bookmarks_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_bookmarks user_bookmarks_user_id_bookmarkable_type_bookmarkable_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_bookmarks
-    ADD CONSTRAINT user_bookmarks_user_id_bookmarkable_type_bookmarkable_id_key UNIQUE (user_id, bookmarkable_type, bookmarkable_id);
-
-
---
 -- Name: user_credits user_credits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9867,22 +9581,6 @@ ALTER TABLE ONLY public.user_learn_progress
 
 
 --
--- Name: user_lesson_progress user_lesson_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_lesson_progress
-    ADD CONSTRAINT user_lesson_progress_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_lesson_progress user_lesson_progress_user_id_lesson_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_lesson_progress
-    ADD CONSTRAINT user_lesson_progress_user_id_lesson_id_key UNIQUE (user_id, lesson_id);
-
-
---
 -- Name: user_memory_facts user_memory_facts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9904,22 +9602,6 @@ ALTER TABLE ONLY public.user_memory_facts
 
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_pkey PRIMARY KEY (user_id);
-
-
---
--- Name: user_study_schedules user_study_schedules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_study_schedules
-    ADD CONSTRAINT user_study_schedules_pkey PRIMARY KEY (id);
-
-
---
--- Name: user_study_schedules user_study_schedules_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_study_schedules
-    ADD CONSTRAINT user_study_schedules_user_id_key UNIQUE (user_id);
 
 
 --
@@ -10632,27 +10314,6 @@ CREATE INDEX idx_book_chunks_embedding_hnsw ON public.book_chunks USING hnsw (em
 
 
 --
--- Name: idx_bookmarks_target; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bookmarks_target ON public.user_bookmarks USING btree (bookmarkable_type, bookmarkable_id);
-
-
---
--- Name: idx_bookmarks_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bookmarks_user ON public.user_bookmarks USING btree (user_id);
-
-
---
--- Name: idx_bookmarks_user_type; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_bookmarks_user_type ON public.user_bookmarks USING btree (user_id, bookmarkable_type);
-
-
---
 -- Name: idx_books_level; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10821,6 +10482,13 @@ CREATE INDEX idx_credit_transactions_user ON public.credit_transactions USING bt
 
 
 --
+-- Name: idx_credit_transactions_user_id_desc; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_credit_transactions_user_id_desc ON public.credit_transactions USING btree (user_id, id DESC);
+
+
+--
 -- Name: idx_crypto_fundamentals_cache_symbol; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10853,13 +10521,6 @@ CREATE INDEX idx_device_tokens_user ON public.device_tokens USING btree (user_id
 --
 
 CREATE UNIQUE INDEX idx_earnings_cache_ticker ON public.earnings_cache USING btree (ticker);
-
-
---
--- Name: idx_etf_detail_cache_symbol; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_etf_detail_cache_symbol ON public.etf_detail_cache USING btree (symbol);
 
 
 --
@@ -10968,13 +10629,6 @@ CREATE INDEX idx_index_cache_symbol ON public.index_cache USING btree (symbol);
 
 
 --
--- Name: idx_index_detail_cache_symbol; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_index_detail_cache_symbol ON public.index_detail_cache USING btree (symbol);
-
-
---
 -- Name: idx_industry_dossier_computed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11049,20 +10703,6 @@ CREATE INDEX idx_ip_intel_audit_ticker ON public.ip_intel_audit USING btree (tic
 --
 
 CREATE INDEX idx_ip_intel_cache_expires ON public.ip_intel_cache USING btree (expires_at);
-
-
---
--- Name: idx_lesson_progress_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_lesson_progress_status ON public.user_lesson_progress USING btree (user_id, status);
-
-
---
--- Name: idx_lesson_progress_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_lesson_progress_user ON public.user_lesson_progress USING btree (user_id);
 
 
 --
@@ -11150,55 +10790,6 @@ CREATE INDEX idx_money_moves_category ON public.money_move_articles USING btree 
 
 
 --
--- Name: idx_news_articles_expires_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_articles_expires_at ON public.news_articles USING btree (expires_at);
-
-
---
--- Name: idx_news_breaking; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_breaking ON public.news_articles USING btree (is_breaking, published_at DESC) WHERE (is_breaking = true);
-
-
---
--- Name: idx_news_category; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_category ON public.news_articles USING btree (category) WHERE (category IS NOT NULL);
-
-
---
--- Name: idx_news_published; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_published ON public.news_articles USING btree (published_at DESC);
-
-
---
--- Name: idx_news_related_tickers; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_related_tickers ON public.news_articles USING gin (related_tickers jsonb_path_ops);
-
-
---
--- Name: idx_news_sentiment; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_sentiment ON public.news_articles USING btree (sentiment) WHERE (sentiment IS NOT NULL);
-
-
---
--- Name: idx_news_source; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_news_source ON public.news_articles USING btree (source_name);
-
-
---
 -- Name: idx_notification_events_category_sent; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11231,20 +10822,6 @@ CREATE INDEX idx_notification_events_inbox ON public.notification_events USING b
 --
 
 CREATE INDEX idx_notification_events_unread ON public.notification_events USING btree (user_id) WHERE (read_at IS NULL);
-
-
---
--- Name: idx_portfolio_holdings_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_portfolio_holdings_user ON public.portfolio_holdings USING btree (user_id);
-
-
---
--- Name: idx_portfolio_holdings_user_ticker; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_portfolio_holdings_user_ticker ON public.portfolio_holdings USING btree (user_id, ticker);
 
 
 --
@@ -11322,6 +10899,13 @@ CREATE INDEX idx_profit_power_cache_ticker ON public.profit_power_cache USING bt
 --
 
 CREATE INDEX idx_push_send_log_sent_at ON public.push_send_log USING btree (sent_at);
+
+
+--
+-- Name: idx_reports_completed_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_completed_created ON public.research_reports USING btree (created_at DESC) WHERE (status = 'completed'::public.report_status);
 
 
 --
@@ -11437,27 +11021,6 @@ CREATE INDEX idx_signals_cache_lookup ON public.signals_cache USING btree (cache
 
 
 --
--- Name: idx_snapshots_expires; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_snapshots_expires ON public.asset_snapshots USING btree (expires_at) WHERE (expires_at IS NOT NULL);
-
-
---
--- Name: idx_snapshots_symbol; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_snapshots_symbol ON public.asset_snapshots USING btree (symbol, asset_type);
-
-
---
--- Name: idx_snapshots_type; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_snapshots_type ON public.asset_snapshots USING btree (asset_type, snapshot_type);
-
-
---
 -- Name: idx_social_mentions_ticker_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11469,13 +11032,6 @@ CREATE INDEX idx_social_mentions_ticker_date ON public.social_mentions_history U
 --
 
 CREATE INDEX idx_stock_fundamentals_cache_ticker ON public.stock_fundamentals_cache USING btree (ticker);
-
-
---
--- Name: idx_study_schedules_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_study_schedules_user ON public.user_study_schedules USING btree (user_id);
 
 
 --
@@ -11696,6 +11252,13 @@ CREATE INDEX idx_whale_trade_groups_whale ON public.whale_trade_groups USING btr
 
 
 --
+-- Name: idx_whale_trades_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_whale_trades_created_at ON public.whale_trades USING btree (created_at DESC);
+
+
+--
 -- Name: idx_whale_trades_group; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -11703,10 +11266,10 @@ CREATE INDEX idx_whale_trades_group ON public.whale_trades USING btree (trade_gr
 
 
 --
--- Name: idx_whale_trades_ticker; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_whale_trades_ticker_created; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_whale_trades_ticker ON public.whale_trades USING btree (ticker);
+CREATE INDEX idx_whale_trades_ticker_created ON public.whale_trades USING btree (ticker, created_at DESC);
 
 
 --
@@ -11749,13 +11312,6 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 --
 
 CREATE UNIQUE INDEX uq_commodity_cache_key ON public.commodity_cache USING btree (cache_key);
-
-
---
--- Name: uq_etf_detail_cache_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_etf_detail_cache_key ON public.etf_detail_cache USING btree (cache_key);
 
 
 --
@@ -11917,13 +11473,6 @@ CREATE TRIGGER trg_chat_message_count AFTER INSERT ON public.chat_messages FOR E
 --
 
 CREATE TRIGGER trg_create_user_credits AFTER INSERT ON public.users FOR EACH ROW EXECUTE FUNCTION public.create_user_credits();
-
-
---
--- Name: user_study_schedules trg_study_schedules_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_study_schedules_updated_at BEFORE UPDATE ON public.user_study_schedules FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 --
@@ -12196,14 +11745,6 @@ ALTER TABLE ONLY public.notification_events
 
 
 --
--- Name: portfolio_holdings portfolio_holdings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.portfolio_holdings
-    ADD CONSTRAINT portfolio_holdings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: portfolio_items portfolio_items_portfolio_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12228,35 +11769,11 @@ ALTER TABLE ONLY public.subscriptions
 
 
 --
--- Name: user_bookmarks user_bookmarks_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_bookmarks
-    ADD CONSTRAINT user_bookmarks_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: user_credits user_credits_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.user_credits
     ADD CONSTRAINT user_credits_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: user_lesson_progress user_lesson_progress_lesson_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_lesson_progress
-    ADD CONSTRAINT user_lesson_progress_lesson_id_fkey FOREIGN KEY (lesson_id) REFERENCES public.lessons(id) ON DELETE CASCADE;
-
-
---
--- Name: user_lesson_progress user_lesson_progress_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_lesson_progress
-    ADD CONSTRAINT user_lesson_progress_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -12273,14 +11790,6 @@ ALTER TABLE ONLY public.user_memory_facts
 
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: user_study_schedules user_study_schedules_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.user_study_schedules
-    ADD CONSTRAINT user_study_schedules_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -12508,31 +12017,10 @@ ALTER TABLE auth.sso_providers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: sector_benchmarks Allow public read access; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Allow public read access" ON public.sector_benchmarks FOR SELECT USING (true);
-
-
---
 -- Name: sector_benchmarks Allow service_role full access; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY "Allow service_role full access" ON public.sector_benchmarks TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: portfolio_holdings Service role full access on holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access on holdings" ON public.portfolio_holdings TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: portfolio_holdings Service role full access on portfolio_holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Service role full access on portfolio_holdings" ON public.portfolio_holdings USING ((auth.role() = 'service_role'::text));
 
 
 --
@@ -12554,52 +12042,6 @@ CREATE POLICY "Service role full access on portfolios" ON public.portfolios TO s
 --
 
 CREATE POLICY "Service role full access on watchlist" ON public.watchlist_items TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: portfolio_holdings Users can delete own holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can delete own holdings" ON public.portfolio_holdings FOR DELETE USING ((user_id = auth.uid()));
-
-
---
--- Name: portfolio_holdings Users can insert own holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can insert own holdings" ON public.portfolio_holdings FOR INSERT WITH CHECK ((user_id = auth.uid()));
-
-
---
--- Name: portfolio_holdings Users can update own holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can update own holdings" ON public.portfolio_holdings FOR UPDATE USING ((user_id = auth.uid()));
-
-
---
--- Name: portfolio_holdings Users can view own holdings; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can view own holdings" ON public.portfolio_holdings FOR SELECT USING ((user_id = auth.uid()));
-
-
---
--- Name: portfolio_items Users manage own portfolio items; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users manage own portfolio items" ON public.portfolio_items USING ((EXISTS ( SELECT 1
-   FROM public.portfolios p
-  WHERE ((p.id = portfolio_items.portfolio_id) AND (p.user_id = auth.uid()))))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.portfolios p
-  WHERE ((p.id = portfolio_items.portfolio_id) AND (p.user_id = auth.uid())))));
-
-
---
--- Name: portfolios Users manage own portfolios; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users manage own portfolios" ON public.portfolios USING ((auth.uid() = user_id)) WITH CHECK ((auth.uid() = user_id));
 
 
 --
@@ -12628,13 +12070,6 @@ CREATE POLICY ai_insight_budget_service_all ON public.ai_insight_budget TO servi
 ALTER TABLE public.ai_insight_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: ai_insight_cache ai_insight_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ai_insight_cache_public_read ON public.ai_insight_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: ai_insight_cache ai_insight_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12661,13 +12096,6 @@ CREATE POLICY analytics_events_service_all ON public.analytics_events TO service
 ALTER TABLE public.article_chunks ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: article_chunks article_chunks_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY article_chunks_select_all ON public.article_chunks FOR SELECT USING (true);
-
-
---
 -- Name: article_chunks article_chunks_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12675,23 +12103,10 @@ CREATE POLICY article_chunks_service_all ON public.article_chunks USING ((auth.r
 
 
 --
--- Name: asset_snapshots; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.asset_snapshots ENABLE ROW LEVEL SECURITY;
-
---
 -- Name: book_chapters; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.book_chapters ENABLE ROW LEVEL SECURITY;
-
---
--- Name: book_chapters book_chapters_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY book_chapters_select_all ON public.book_chapters FOR SELECT USING (true);
-
 
 --
 -- Name: book_chapters book_chapters_service_all; Type: POLICY; Schema: public; Owner: -
@@ -12707,13 +12122,6 @@ CREATE POLICY book_chapters_service_all ON public.book_chapters USING ((auth.rol
 ALTER TABLE public.book_chunks ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: book_chunks book_chunks_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY book_chunks_select_all ON public.book_chunks FOR SELECT USING (true);
-
-
---
 -- Name: book_chunks book_chunks_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12721,38 +12129,10 @@ CREATE POLICY book_chunks_service_all ON public.book_chunks USING ((auth.role() 
 
 
 --
--- Name: user_bookmarks bookmarks_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY bookmarks_delete_own ON public.user_bookmarks FOR DELETE USING ((auth.uid() = user_id));
-
-
---
--- Name: user_bookmarks bookmarks_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY bookmarks_insert_own ON public.user_bookmarks FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_bookmarks bookmarks_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY bookmarks_select_own ON public.user_bookmarks FOR SELECT USING ((auth.uid() = user_id));
-
-
---
 -- Name: books; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.books ENABLE ROW LEVEL SECURITY;
-
---
--- Name: books books_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY books_select_all ON public.books FOR SELECT USING (true);
-
 
 --
 -- Name: books books_service_all; Type: POLICY; Schema: public; Owner: -
@@ -12768,24 +12148,6 @@ CREATE POLICY books_service_all ON public.books USING ((auth.role() = 'service_r
 ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: chat_messages chat_messages_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_messages_insert_own ON public.chat_messages FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.chat_sessions
-  WHERE ((chat_sessions.id = chat_messages.session_id) AND (chat_sessions.user_id = auth.uid())))));
-
-
---
--- Name: chat_messages chat_messages_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_messages_select_own ON public.chat_messages FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM public.chat_sessions
-  WHERE ((chat_sessions.id = chat_messages.session_id) AND (chat_sessions.user_id = auth.uid())))));
-
-
---
 -- Name: chat_messages chat_messages_service_insert; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12799,38 +12161,10 @@ CREATE POLICY chat_messages_service_insert ON public.chat_messages USING ((auth.
 ALTER TABLE public.chat_sessions ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: chat_sessions chat_sessions_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_sessions_delete_own ON public.chat_sessions FOR DELETE USING ((auth.uid() = user_id));
-
-
---
--- Name: chat_sessions chat_sessions_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_sessions_insert_own ON public.chat_sessions FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: chat_sessions chat_sessions_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_sessions_select_own ON public.chat_sessions FOR SELECT USING ((auth.uid() = user_id));
-
-
---
 -- Name: chat_sessions chat_sessions_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY chat_sessions_service_all ON public.chat_sessions USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: chat_sessions chat_sessions_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_sessions_update_own ON public.chat_sessions FOR UPDATE USING ((auth.uid() = user_id));
 
 
 --
@@ -12898,13 +12232,6 @@ ALTER TABLE public.company_filing_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.company_profile_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: company_profile_cache company_profile_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY company_profile_cache_public_read ON public.company_profile_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: company_profile_cache company_profile_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12918,13 +12245,6 @@ CREATE POLICY company_profile_cache_service_write ON public.company_profile_cach
 ALTER TABLE public.competitor_intel_audit ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: competitor_intel_audit competitor_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY competitor_intel_audit_public_read ON public.competitor_intel_audit FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: competitor_intel_audit competitor_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -12936,13 +12256,6 @@ CREATE POLICY competitor_intel_audit_service_write ON public.competitor_intel_au
 --
 
 ALTER TABLE public.competitor_intel_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: competitor_intel_cache competitor_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY competitor_intel_cache_public_read ON public.competitor_intel_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: competitor_intel_cache competitor_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13018,13 +12331,6 @@ CREATE POLICY credit_transactions_service_all ON public.credit_transactions TO s
 
 
 --
--- Name: user_credits credits_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY credits_select_own ON public.user_credits FOR SELECT USING ((auth.uid() = user_id));
-
-
---
 -- Name: user_credits credits_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13036,13 +12342,6 @@ CREATE POLICY credits_service_all ON public.user_credits USING ((auth.role() = '
 --
 
 ALTER TABLE public.crypto_coin_id_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: crypto_coin_id_cache crypto_coin_id_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY crypto_coin_id_cache_public_read ON public.crypto_coin_id_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: crypto_coin_id_cache crypto_coin_id_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13058,13 +12357,6 @@ CREATE POLICY crypto_coin_id_cache_service_write ON public.crypto_coin_id_cache 
 ALTER TABLE public.crypto_fundamentals_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: crypto_fundamentals_cache crypto_fundamentals_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY crypto_fundamentals_cache_public_read ON public.crypto_fundamentals_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: crypto_fundamentals_cache crypto_fundamentals_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13076,13 +12368,6 @@ CREATE POLICY crypto_fundamentals_cache_service_write ON public.crypto_fundament
 --
 
 ALTER TABLE public.crypto_snapshots ENABLE ROW LEVEL SECURITY;
-
---
--- Name: crypto_snapshots crypto_snapshots_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY crypto_snapshots_public_read ON public.crypto_snapshots FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: crypto_snapshots crypto_snapshots_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13111,38 +12396,10 @@ CREATE POLICY daily_briefings_service_all ON public.daily_briefings TO service_r
 ALTER TABLE public.device_tokens ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: device_tokens device_tokens_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY device_tokens_delete_own ON public.device_tokens FOR DELETE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: device_tokens device_tokens_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY device_tokens_insert_own ON public.device_tokens FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: device_tokens device_tokens_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY device_tokens_select_own ON public.device_tokens FOR SELECT TO authenticated USING ((auth.uid() = user_id));
-
-
---
 -- Name: device_tokens device_tokens_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY device_tokens_service_all ON public.device_tokens TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: device_tokens device_tokens_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY device_tokens_update_own ON public.device_tokens FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
 
 
 --
@@ -13159,19 +12416,6 @@ CREATE POLICY earnings_cache_service_role_all ON public.earnings_cache TO servic
 
 
 --
--- Name: etf_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.etf_detail_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: etf_detail_cache etf_detail_cache_service_write; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY etf_detail_cache_service_write ON public.etf_detail_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
 -- Name: etf_snapshot_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -13182,13 +12426,6 @@ ALTER TABLE public.etf_snapshot_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY etf_snapshot_cache_service_write ON public.etf_snapshot_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: company_filing_chunks filing_chunks_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY filing_chunks_select_all ON public.company_filing_chunks FOR SELECT USING (true);
 
 
 --
@@ -13216,13 +12453,6 @@ CREATE POLICY geopolitical_macro_audit_service_all ON public.geopolitical_macro_
 --
 
 ALTER TABLE public.geopolitical_macro_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: geopolitical_macro_cache geopolitical_macro_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY geopolitical_macro_cache_public_read ON public.geopolitical_macro_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: geopolitical_macro_cache geopolitical_macro_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13310,37 +12540,10 @@ CREATE POLICY index_cache_service_role_all ON public.index_cache TO service_role
 
 
 --
--- Name: index_detail_cache; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.index_detail_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: index_detail_cache index_detail_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY index_detail_cache_public_read ON public.index_detail_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
--- Name: index_detail_cache index_detail_cache_service_write; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY index_detail_cache_service_write ON public.index_detail_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
 -- Name: index_macro_forecast_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.index_macro_forecast_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: index_macro_forecast_cache index_macro_forecast_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY index_macro_forecast_cache_public_read ON public.index_macro_forecast_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: index_macro_forecast_cache index_macro_forecast_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13356,13 +12559,6 @@ CREATE POLICY index_macro_forecast_cache_service_write ON public.index_macro_for
 ALTER TABLE public.industry_dossier ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: industry_dossier industry_dossier_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY industry_dossier_public_read ON public.industry_dossier FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: industry_dossier industry_dossier_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13374,13 +12570,6 @@ CREATE POLICY industry_dossier_service_write ON public.industry_dossier TO servi
 --
 
 ALTER TABLE public.industry_moat_benchmarks ENABLE ROW LEVEL SECURITY;
-
---
--- Name: industry_moat_benchmarks industry_moat_benchmarks_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY industry_moat_benchmarks_public_read ON public.industry_moat_benchmarks FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: industry_moat_benchmarks industry_moat_benchmarks_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13396,13 +12585,6 @@ CREATE POLICY industry_moat_benchmarks_service_write ON public.industry_moat_ben
 ALTER TABLE public.industry_override_audit ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: industry_override_audit industry_override_audit_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY industry_override_audit_public_read ON public.industry_override_audit FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: industry_override_audit industry_override_audit_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13414,13 +12596,6 @@ CREATE POLICY industry_override_audit_service_write ON public.industry_override_
 --
 
 ALTER TABLE public.ip_intel_audit ENABLE ROW LEVEL SECURITY;
-
---
--- Name: ip_intel_audit ip_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ip_intel_audit_public_read ON public.ip_intel_audit FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: ip_intel_audit ip_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13436,45 +12611,10 @@ CREATE POLICY ip_intel_audit_service_write ON public.ip_intel_audit TO service_r
 ALTER TABLE public.ip_intel_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: ip_intel_cache ip_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ip_intel_cache_public_read ON public.ip_intel_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: ip_intel_cache ip_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY ip_intel_cache_service_write ON public.ip_intel_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: user_lesson_progress lesson_progress_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY lesson_progress_insert_own ON public.user_lesson_progress FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_lesson_progress lesson_progress_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY lesson_progress_select_own ON public.user_lesson_progress FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: user_lesson_progress lesson_progress_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY lesson_progress_service_all ON public.user_lesson_progress USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: user_lesson_progress lesson_progress_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY lesson_progress_update_own ON public.user_lesson_progress FOR UPDATE USING ((auth.uid() = user_id));
 
 
 --
@@ -13517,13 +12657,6 @@ CREATE POLICY market_close_snapshot_service_all ON public.market_close_snapshot 
 ALTER TABLE public.market_deep_dive_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: market_deep_dive_cache market_deep_dive_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY market_deep_dive_cache_public_read ON public.market_deep_dive_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: market_deep_dive_cache market_deep_dive_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13550,13 +12683,6 @@ CREATE POLICY market_insights_service_all ON public.market_insights TO service_r
 ALTER TABLE public.moat_intel_audit ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: moat_intel_audit moat_intel_audit_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY moat_intel_audit_public_read ON public.moat_intel_audit FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: moat_intel_audit moat_intel_audit_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13568,13 +12694,6 @@ CREATE POLICY moat_intel_audit_service_write ON public.moat_intel_audit TO servi
 --
 
 ALTER TABLE public.moat_intel_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: moat_intel_cache moat_intel_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY moat_intel_cache_public_read ON public.moat_intel_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: moat_intel_cache moat_intel_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13601,26 +12720,6 @@ CREATE POLICY money_moves_select_all ON public.money_move_articles FOR SELECT US
 --
 
 CREATE POLICY money_moves_service_all ON public.money_move_articles USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: news_articles; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.news_articles ENABLE ROW LEVEL SECURITY;
-
---
--- Name: news_articles news_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY news_select_all ON public.news_articles FOR SELECT USING (true);
-
-
---
--- Name: news_articles news_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY news_service_all ON public.news_articles USING ((auth.role() = 'service_role'::text));
 
 
 --
@@ -13684,38 +12783,16 @@ CREATE POLICY plan_credits_service_all ON public.plan_credits TO service_role US
 
 
 --
--- Name: portfolio_holdings; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.portfolio_holdings ENABLE ROW LEVEL SECURITY;
-
---
 -- Name: portfolio_items; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.portfolio_items ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: portfolio_items portfolio_items_owner; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY portfolio_items_owner ON public.portfolio_items USING ((portfolio_id IN ( SELECT portfolios.id
-   FROM public.portfolios
-  WHERE (portfolios.user_id = auth.uid()))));
-
-
---
 -- Name: portfolios; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.portfolios ENABLE ROW LEVEL SECURITY;
-
---
--- Name: portfolios portfolios_owner; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY portfolios_owner ON public.portfolios USING ((user_id = auth.uid()));
-
 
 --
 -- Name: price_alerts; Type: ROW SECURITY; Schema: public; Owner: -
@@ -13748,13 +12825,6 @@ CREATE POLICY price_catalyst_audit_service_all ON public.price_catalyst_audit TO
 --
 
 ALTER TABLE public.price_catalyst_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: price_catalyst_cache price_catalyst_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY price_catalyst_cache_public_read ON public.price_catalyst_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: price_catalyst_cache price_catalyst_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13790,38 +12860,10 @@ CREATE POLICY push_send_log_service_all ON public.push_send_log TO service_role 
 
 
 --
--- Name: research_reports reports_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY reports_delete_own ON public.research_reports FOR DELETE USING ((auth.uid() = user_id));
-
-
---
--- Name: research_reports reports_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY reports_insert_own ON public.research_reports FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: research_reports reports_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY reports_select_own ON public.research_reports FOR SELECT USING ((auth.uid() = user_id));
-
-
---
 -- Name: research_reports reports_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY reports_service_all ON public.research_reports USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: research_reports reports_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY reports_update_own ON public.research_reports FOR UPDATE USING ((auth.uid() = user_id));
 
 
 --
@@ -13850,10 +12892,10 @@ CREATE POLICY revenue_breakdown_cache_service_all ON public.revenue_breakdown_ca
 ALTER TABLE public.sector_aggregates ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: sector_aggregates sector_aggregates_read_authenticated; Type: POLICY; Schema: public; Owner: -
+-- Name: sector_aggregates sector_aggregates_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY sector_aggregates_read_authenticated ON public.sector_aggregates FOR SELECT TO authenticated USING (true);
+CREATE POLICY sector_aggregates_service_all ON public.sector_aggregates TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -13867,13 +12909,6 @@ ALTER TABLE public.sector_benchmarks ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.short_interest_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: short_interest_cache short_interest_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY short_interest_cache_public_read ON public.short_interest_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: short_interest_cache short_interest_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -13902,13 +12937,6 @@ CREATE POLICY signal_of_confidence_cache_service_all ON public.signal_of_confide
 ALTER TABLE public.signals_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: signals_cache signals_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY signals_cache_public_read ON public.signals_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: signals_cache signals_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -13922,31 +12950,10 @@ CREATE POLICY signals_cache_service_write ON public.signals_cache TO service_rol
 ALTER TABLE public.snapshot_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: snapshot_cache snapshot_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY snapshot_cache_public_read ON public.snapshot_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: snapshot_cache snapshot_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY snapshot_cache_service_write ON public.snapshot_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: asset_snapshots snapshots_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY snapshots_select_all ON public.asset_snapshots FOR SELECT USING (true);
-
-
---
--- Name: asset_snapshots snapshots_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY snapshots_service_all ON public.asset_snapshots USING ((auth.role() = 'service_role'::text));
 
 
 --
@@ -13969,45 +12976,10 @@ CREATE POLICY social_mentions_history_service_all ON public.social_mentions_hist
 ALTER TABLE public.stock_fundamentals_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: stock_fundamentals_cache stock_fundamentals_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY stock_fundamentals_cache_public_read ON public.stock_fundamentals_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: stock_fundamentals_cache stock_fundamentals_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY stock_fundamentals_cache_service_write ON public.stock_fundamentals_cache TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: user_study_schedules study_schedules_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY study_schedules_insert_own ON public.user_study_schedules FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_study_schedules study_schedules_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY study_schedules_select_own ON public.user_study_schedules FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: user_study_schedules study_schedules_service_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY study_schedules_service_all ON public.user_study_schedules USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: user_study_schedules study_schedules_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY study_schedules_update_own ON public.user_study_schedules FOR UPDATE USING ((auth.uid() = user_id));
 
 
 --
@@ -14063,13 +13035,6 @@ CREATE POLICY ticker_news_cache_service_all ON public.ticker_news_cache USING ((
 ALTER TABLE public.ticker_report_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: ticker_report_cache ticker_report_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ticker_report_cache_public_read ON public.ticker_report_cache FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: ticker_report_cache ticker_report_cache_service_write; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14081,13 +13046,6 @@ CREATE POLICY ticker_report_cache_service_write ON public.ticker_report_cache TO
 --
 
 ALTER TABLE public.ticker_volatility_cache ENABLE ROW LEVEL SECURITY;
-
---
--- Name: ticker_volatility_cache ticker_volatility_cache_public_read; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ticker_volatility_cache_public_read ON public.ticker_volatility_cache FOR SELECT TO authenticated, anon USING (true);
-
 
 --
 -- Name: ticker_volatility_cache ticker_volatility_cache_service_write; Type: POLICY; Schema: public; Owner: -
@@ -14130,12 +13088,6 @@ CREATE POLICY updates_insight_state_service_all ON public.updates_insight_state 
 
 
 --
--- Name: user_bookmarks; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_bookmarks ENABLE ROW LEVEL SECURITY;
-
---
 -- Name: user_credits; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14161,45 +13113,11 @@ CREATE POLICY user_investor_profile_service_all ON public.user_investor_profile 
 ALTER TABLE public.user_learn_progress ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: user_learn_progress user_learn_progress_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_learn_progress_delete_own ON public.user_learn_progress FOR DELETE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_learn_progress user_learn_progress_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_learn_progress_insert_own ON public.user_learn_progress FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_learn_progress user_learn_progress_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_learn_progress_select_own ON public.user_learn_progress FOR SELECT TO authenticated USING ((auth.uid() = user_id));
-
-
---
 -- Name: user_learn_progress user_learn_progress_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY user_learn_progress_service_all ON public.user_learn_progress TO service_role USING (true) WITH CHECK (true);
 
-
---
--- Name: user_learn_progress user_learn_progress_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_learn_progress_update_own ON public.user_learn_progress FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_lesson_progress; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_lesson_progress ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: user_memory_facts; Type: ROW SECURITY; Schema: public; Owner: -
@@ -14221,20 +13139,6 @@ CREATE POLICY user_memory_facts_service_all ON public.user_memory_facts TO servi
 ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: user_settings user_settings_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_settings_insert_own ON public.user_settings FOR INSERT TO authenticated WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: user_settings user_settings_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_settings_select_own ON public.user_settings FOR SELECT TO authenticated USING ((auth.uid() = user_id));
-
-
---
 -- Name: user_settings user_settings_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14242,37 +13146,10 @@ CREATE POLICY user_settings_service_all ON public.user_settings TO service_role 
 
 
 --
--- Name: user_settings user_settings_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_settings_update_own ON public.user_settings FOR UPDATE TO authenticated USING ((auth.uid() = user_id));
-
-
---
--- Name: user_study_schedules; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_study_schedules ENABLE ROW LEVEL SECURITY;
-
---
 -- Name: users; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
-
---
--- Name: users users_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_insert_own ON public.users FOR INSERT WITH CHECK ((auth.uid() = id));
-
-
---
--- Name: users users_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_select_own ON public.users FOR SELECT USING ((auth.uid() = id));
-
 
 --
 -- Name: users users_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14282,38 +13159,10 @@ CREATE POLICY users_service_all ON public.users USING ((auth.role() = 'service_r
 
 
 --
--- Name: users users_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_update_own ON public.users FOR UPDATE USING ((auth.uid() = id));
-
-
---
--- Name: watchlist_items watchlist_delete_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY watchlist_delete_own ON public.watchlist_items FOR DELETE USING ((auth.uid() = user_id));
-
-
---
--- Name: watchlist_items watchlist_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY watchlist_insert_own ON public.watchlist_items FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
 -- Name: watchlist_items; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.watchlist_items ENABLE ROW LEVEL SECURITY;
-
---
--- Name: watchlist_items watchlist_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY watchlist_select_own ON public.watchlist_items FOR SELECT USING ((auth.uid() = user_id));
-
 
 --
 -- Name: watchlist_items watchlist_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14323,24 +13172,10 @@ CREATE POLICY watchlist_service_all ON public.watchlist_items USING ((auth.role(
 
 
 --
--- Name: watchlist_items watchlist_update_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY watchlist_update_own ON public.watchlist_items FOR UPDATE USING ((auth.uid() = user_id));
-
-
---
 -- Name: whale_alerts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.whale_alerts ENABLE ROW LEVEL SECURITY;
-
---
--- Name: whale_alerts whale_alerts_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_alerts_select_all ON public.whale_alerts FOR SELECT USING (true);
-
 
 --
 -- Name: whale_alerts whale_alerts_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14356,13 +13191,6 @@ CREATE POLICY whale_alerts_service_all ON public.whale_alerts USING ((auth.role(
 ALTER TABLE public.whale_filing_snapshots ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: whale_filing_snapshots whale_filing_snapshots_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_filing_snapshots_select_all ON public.whale_filing_snapshots FOR SELECT USING (true);
-
-
---
 -- Name: whale_filing_snapshots whale_filing_snapshots_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14376,24 +13204,10 @@ CREATE POLICY whale_filing_snapshots_service_all ON public.whale_filing_snapshot
 ALTER TABLE public.whale_follows ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: whale_follows whale_follows_delete_own; Type: POLICY; Schema: public; Owner: -
+-- Name: whale_follows whale_follows_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY whale_follows_delete_own ON public.whale_follows FOR DELETE USING ((auth.uid() = user_id));
-
-
---
--- Name: whale_follows whale_follows_insert_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_follows_insert_own ON public.whale_follows FOR INSERT WITH CHECK ((auth.uid() = user_id));
-
-
---
--- Name: whale_follows whale_follows_select_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_follows_select_own ON public.whale_follows FOR SELECT USING ((auth.uid() = user_id));
+CREATE POLICY whale_follows_service_all ON public.whale_follows TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -14401,13 +13215,6 @@ CREATE POLICY whale_follows_select_own ON public.whale_follows FOR SELECT USING 
 --
 
 ALTER TABLE public.whale_holdings ENABLE ROW LEVEL SECURITY;
-
---
--- Name: whale_holdings whale_holdings_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_holdings_select_all ON public.whale_holdings FOR SELECT USING (true);
-
 
 --
 -- Name: whale_holdings whale_holdings_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14423,13 +13230,6 @@ CREATE POLICY whale_holdings_service_all ON public.whale_holdings USING ((auth.r
 ALTER TABLE public.whale_profile_cache ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: whale_profile_cache whale_profile_cache_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_profile_cache_select_all ON public.whale_profile_cache FOR SELECT USING (true);
-
-
---
 -- Name: whale_profile_cache whale_profile_cache_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14441,13 +13241,6 @@ CREATE POLICY whale_profile_cache_service_all ON public.whale_profile_cache USIN
 --
 
 ALTER TABLE public.whale_sector_allocations ENABLE ROW LEVEL SECURITY;
-
---
--- Name: whale_sector_allocations whale_sectors_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_sectors_select_all ON public.whale_sector_allocations FOR SELECT USING (true);
-
 
 --
 -- Name: whale_sector_allocations whale_sectors_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14463,13 +13256,6 @@ CREATE POLICY whale_sectors_service_all ON public.whale_sector_allocations USING
 ALTER TABLE public.whale_trade_groups ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: whale_trade_groups whale_trade_groups_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_trade_groups_select_all ON public.whale_trade_groups FOR SELECT USING (true);
-
-
---
 -- Name: whale_trade_groups whale_trade_groups_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14483,13 +13269,6 @@ CREATE POLICY whale_trade_groups_service_all ON public.whale_trade_groups USING 
 ALTER TABLE public.whale_trades ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: whale_trades whale_trades_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whale_trades_select_all ON public.whale_trades FOR SELECT USING (true);
-
-
---
 -- Name: whale_trades whale_trades_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -14501,13 +13280,6 @@ CREATE POLICY whale_trades_service_all ON public.whale_trades USING ((auth.role(
 --
 
 ALTER TABLE public.whales ENABLE ROW LEVEL SECURITY;
-
---
--- Name: whales whales_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY whales_select_all ON public.whales FOR SELECT USING (true);
-
 
 --
 -- Name: whales whales_service_all; Type: POLICY; Schema: public; Owner: -
@@ -14648,6 +13420,2408 @@ CREATE PUBLICATION supabase_realtime WITH (publish = 'insert, update, delete, tr
 
 
 --
+-- Name: SCHEMA auth; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA auth TO anon;
+GRANT USAGE ON SCHEMA auth TO authenticated;
+GRANT USAGE ON SCHEMA auth TO service_role;
+GRANT ALL ON SCHEMA auth TO supabase_auth_admin;
+GRANT ALL ON SCHEMA auth TO dashboard_user;
+GRANT USAGE ON SCHEMA auth TO postgres;
+
+
+--
+-- Name: SCHEMA extensions; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA extensions TO anon;
+GRANT USAGE ON SCHEMA extensions TO authenticated;
+GRANT USAGE ON SCHEMA extensions TO service_role;
+GRANT ALL ON SCHEMA extensions TO dashboard_user;
+
+
+--
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: -
+--
+
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO anon;
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT ALL ON SCHEMA public TO service_role;
+
+
+--
+-- Name: SCHEMA realtime; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA realtime TO postgres WITH GRANT OPTION;
+GRANT USAGE ON SCHEMA realtime TO anon;
+GRANT USAGE ON SCHEMA realtime TO authenticated;
+GRANT USAGE ON SCHEMA realtime TO service_role;
+GRANT ALL ON SCHEMA realtime TO supabase_realtime_admin;
+
+
+--
+-- Name: SCHEMA storage; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA storage TO postgres WITH GRANT OPTION;
+GRANT USAGE ON SCHEMA storage TO anon;
+GRANT USAGE ON SCHEMA storage TO authenticated;
+GRANT USAGE ON SCHEMA storage TO service_role;
+GRANT ALL ON SCHEMA storage TO supabase_storage_admin WITH GRANT OPTION;
+GRANT ALL ON SCHEMA storage TO dashboard_user;
+
+
+--
+-- Name: SCHEMA vault; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA vault TO postgres WITH GRANT OPTION;
+GRANT USAGE ON SCHEMA vault TO service_role;
+
+
+--
+-- Name: FUNCTION email(); Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON FUNCTION auth.email() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION jwt(); Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON FUNCTION auth.jwt() TO postgres;
+GRANT ALL ON FUNCTION auth.jwt() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION role(); Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON FUNCTION auth.role() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uid(); Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON FUNCTION auth.uid() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION armor(bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.armor(bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.armor(bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.armor(bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION armor(bytea, text[], text[]); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.armor(bytea, text[], text[]) FROM postgres;
+GRANT ALL ON FUNCTION extensions.armor(bytea, text[], text[]) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.armor(bytea, text[], text[]) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION crypt(text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.crypt(text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.crypt(text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.crypt(text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION dearmor(text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.dearmor(text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.dearmor(text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.dearmor(text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION decrypt(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.decrypt(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.decrypt(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.decrypt(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION decrypt_iv(bytea, bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.decrypt_iv(bytea, bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.decrypt_iv(bytea, bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.decrypt_iv(bytea, bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION digest(bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.digest(bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.digest(bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.digest(bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION digest(text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.digest(text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.digest(text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.digest(text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION encrypt(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.encrypt(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.encrypt(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.encrypt(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION encrypt_iv(bytea, bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.encrypt_iv(bytea, bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.encrypt_iv(bytea, bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.encrypt_iv(bytea, bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION gen_random_bytes(integer); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.gen_random_bytes(integer) FROM postgres;
+GRANT ALL ON FUNCTION extensions.gen_random_bytes(integer) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.gen_random_bytes(integer) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION gen_random_uuid(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.gen_random_uuid() FROM postgres;
+GRANT ALL ON FUNCTION extensions.gen_random_uuid() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.gen_random_uuid() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION gen_salt(text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.gen_salt(text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.gen_salt(text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.gen_salt(text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION gen_salt(text, integer); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.gen_salt(text, integer) FROM postgres;
+GRANT ALL ON FUNCTION extensions.gen_salt(text, integer) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.gen_salt(text, integer) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION grant_pg_cron_access(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.grant_pg_cron_access() FROM supabase_admin;
+GRANT ALL ON FUNCTION extensions.grant_pg_cron_access() TO supabase_admin WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.grant_pg_cron_access() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION grant_pg_graphql_access(); Type: ACL; Schema: extensions; Owner: -
+--
+
+GRANT ALL ON FUNCTION extensions.grant_pg_graphql_access() TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: FUNCTION grant_pg_net_access(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.grant_pg_net_access() FROM supabase_admin;
+GRANT ALL ON FUNCTION extensions.grant_pg_net_access() TO supabase_admin WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.grant_pg_net_access() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION hmac(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.hmac(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.hmac(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.hmac(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION hmac(text, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.hmac(text, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.hmac(text, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.hmac(text, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pg_stat_statements(showtext boolean, OUT userid oid, OUT dbid oid, OUT toplevel boolean, OUT queryid bigint, OUT query text, OUT plans bigint, OUT total_plan_time double precision, OUT min_plan_time double precision, OUT max_plan_time double precision, OUT mean_plan_time double precision, OUT stddev_plan_time double precision, OUT calls bigint, OUT total_exec_time double precision, OUT min_exec_time double precision, OUT max_exec_time double precision, OUT mean_exec_time double precision, OUT stddev_exec_time double precision, OUT rows bigint, OUT shared_blks_hit bigint, OUT shared_blks_read bigint, OUT shared_blks_dirtied bigint, OUT shared_blks_written bigint, OUT local_blks_hit bigint, OUT local_blks_read bigint, OUT local_blks_dirtied bigint, OUT local_blks_written bigint, OUT temp_blks_read bigint, OUT temp_blks_written bigint, OUT shared_blk_read_time double precision, OUT shared_blk_write_time double precision, OUT local_blk_read_time double precision, OUT local_blk_write_time double precision, OUT temp_blk_read_time double precision, OUT temp_blk_write_time double precision, OUT wal_records bigint, OUT wal_fpi bigint, OUT wal_bytes numeric, OUT jit_functions bigint, OUT jit_generation_time double precision, OUT jit_inlining_count bigint, OUT jit_inlining_time double precision, OUT jit_optimization_count bigint, OUT jit_optimization_time double precision, OUT jit_emission_count bigint, OUT jit_emission_time double precision, OUT jit_deform_count bigint, OUT jit_deform_time double precision, OUT stats_since timestamp with time zone, OUT minmax_stats_since timestamp with time zone); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pg_stat_statements(showtext boolean, OUT userid oid, OUT dbid oid, OUT toplevel boolean, OUT queryid bigint, OUT query text, OUT plans bigint, OUT total_plan_time double precision, OUT min_plan_time double precision, OUT max_plan_time double precision, OUT mean_plan_time double precision, OUT stddev_plan_time double precision, OUT calls bigint, OUT total_exec_time double precision, OUT min_exec_time double precision, OUT max_exec_time double precision, OUT mean_exec_time double precision, OUT stddev_exec_time double precision, OUT rows bigint, OUT shared_blks_hit bigint, OUT shared_blks_read bigint, OUT shared_blks_dirtied bigint, OUT shared_blks_written bigint, OUT local_blks_hit bigint, OUT local_blks_read bigint, OUT local_blks_dirtied bigint, OUT local_blks_written bigint, OUT temp_blks_read bigint, OUT temp_blks_written bigint, OUT shared_blk_read_time double precision, OUT shared_blk_write_time double precision, OUT local_blk_read_time double precision, OUT local_blk_write_time double precision, OUT temp_blk_read_time double precision, OUT temp_blk_write_time double precision, OUT wal_records bigint, OUT wal_fpi bigint, OUT wal_bytes numeric, OUT jit_functions bigint, OUT jit_generation_time double precision, OUT jit_inlining_count bigint, OUT jit_inlining_time double precision, OUT jit_optimization_count bigint, OUT jit_optimization_time double precision, OUT jit_emission_count bigint, OUT jit_emission_time double precision, OUT jit_deform_count bigint, OUT jit_deform_time double precision, OUT stats_since timestamp with time zone, OUT minmax_stats_since timestamp with time zone) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements(showtext boolean, OUT userid oid, OUT dbid oid, OUT toplevel boolean, OUT queryid bigint, OUT query text, OUT plans bigint, OUT total_plan_time double precision, OUT min_plan_time double precision, OUT max_plan_time double precision, OUT mean_plan_time double precision, OUT stddev_plan_time double precision, OUT calls bigint, OUT total_exec_time double precision, OUT min_exec_time double precision, OUT max_exec_time double precision, OUT mean_exec_time double precision, OUT stddev_exec_time double precision, OUT rows bigint, OUT shared_blks_hit bigint, OUT shared_blks_read bigint, OUT shared_blks_dirtied bigint, OUT shared_blks_written bigint, OUT local_blks_hit bigint, OUT local_blks_read bigint, OUT local_blks_dirtied bigint, OUT local_blks_written bigint, OUT temp_blks_read bigint, OUT temp_blks_written bigint, OUT shared_blk_read_time double precision, OUT shared_blk_write_time double precision, OUT local_blk_read_time double precision, OUT local_blk_write_time double precision, OUT temp_blk_read_time double precision, OUT temp_blk_write_time double precision, OUT wal_records bigint, OUT wal_fpi bigint, OUT wal_bytes numeric, OUT jit_functions bigint, OUT jit_generation_time double precision, OUT jit_inlining_count bigint, OUT jit_inlining_time double precision, OUT jit_optimization_count bigint, OUT jit_optimization_time double precision, OUT jit_emission_count bigint, OUT jit_emission_time double precision, OUT jit_deform_count bigint, OUT jit_deform_time double precision, OUT stats_since timestamp with time zone, OUT minmax_stats_since timestamp with time zone) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements(showtext boolean, OUT userid oid, OUT dbid oid, OUT toplevel boolean, OUT queryid bigint, OUT query text, OUT plans bigint, OUT total_plan_time double precision, OUT min_plan_time double precision, OUT max_plan_time double precision, OUT mean_plan_time double precision, OUT stddev_plan_time double precision, OUT calls bigint, OUT total_exec_time double precision, OUT min_exec_time double precision, OUT max_exec_time double precision, OUT mean_exec_time double precision, OUT stddev_exec_time double precision, OUT rows bigint, OUT shared_blks_hit bigint, OUT shared_blks_read bigint, OUT shared_blks_dirtied bigint, OUT shared_blks_written bigint, OUT local_blks_hit bigint, OUT local_blks_read bigint, OUT local_blks_dirtied bigint, OUT local_blks_written bigint, OUT temp_blks_read bigint, OUT temp_blks_written bigint, OUT shared_blk_read_time double precision, OUT shared_blk_write_time double precision, OUT local_blk_read_time double precision, OUT local_blk_write_time double precision, OUT temp_blk_read_time double precision, OUT temp_blk_write_time double precision, OUT wal_records bigint, OUT wal_fpi bigint, OUT wal_bytes numeric, OUT jit_functions bigint, OUT jit_generation_time double precision, OUT jit_inlining_count bigint, OUT jit_inlining_time double precision, OUT jit_optimization_count bigint, OUT jit_optimization_time double precision, OUT jit_emission_count bigint, OUT jit_emission_time double precision, OUT jit_deform_count bigint, OUT jit_deform_time double precision, OUT stats_since timestamp with time zone, OUT minmax_stats_since timestamp with time zone) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pg_stat_statements_info(OUT dealloc bigint, OUT stats_reset timestamp with time zone); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pg_stat_statements_info(OUT dealloc bigint, OUT stats_reset timestamp with time zone) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements_info(OUT dealloc bigint, OUT stats_reset timestamp with time zone) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements_info(OUT dealloc bigint, OUT stats_reset timestamp with time zone) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pg_stat_statements_reset(userid oid, dbid oid, queryid bigint, minmax_only boolean); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pg_stat_statements_reset(userid oid, dbid oid, queryid bigint, minmax_only boolean) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements_reset(userid oid, dbid oid, queryid bigint, minmax_only boolean) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pg_stat_statements_reset(userid oid, dbid oid, queryid bigint, minmax_only boolean) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_armor_headers(text, OUT key text, OUT value text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_armor_headers(text, OUT key text, OUT value text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_armor_headers(text, OUT key text, OUT value text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_armor_headers(text, OUT key text, OUT value text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_key_id(bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_key_id(bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_key_id(bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_key_id(bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt(bytea, bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt(bytea, bytea, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt(bytea, bytea, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt_bytea(bytea, bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt_bytea(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_decrypt_bytea(bytea, bytea, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_decrypt_bytea(bytea, bytea, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_encrypt(text, bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_encrypt(text, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt(text, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_encrypt_bytea(bytea, bytea); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_pub_encrypt_bytea(bytea, bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_pub_encrypt_bytea(bytea, bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_decrypt(bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_decrypt(bytea, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt(bytea, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_decrypt_bytea(bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_decrypt_bytea(bytea, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_decrypt_bytea(bytea, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_encrypt(text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_encrypt(text, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt(text, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_encrypt_bytea(bytea, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgp_sym_encrypt_bytea(bytea, text, text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text, text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text, text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.pgp_sym_encrypt_bytea(bytea, text, text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION pgrst_ddl_watch(); Type: ACL; Schema: extensions; Owner: -
+--
+
+GRANT ALL ON FUNCTION extensions.pgrst_ddl_watch() TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: FUNCTION pgrst_drop_watch(); Type: ACL; Schema: extensions; Owner: -
+--
+
+GRANT ALL ON FUNCTION extensions.pgrst_drop_watch() TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: FUNCTION set_graphql_placeholder(); Type: ACL; Schema: extensions; Owner: -
+--
+
+GRANT ALL ON FUNCTION extensions.set_graphql_placeholder() TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: FUNCTION uuid_generate_v1(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_generate_v1() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v1() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v1() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_generate_v1mc(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_generate_v1mc() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v1mc() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v1mc() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_generate_v3(namespace uuid, name text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_generate_v3(namespace uuid, name text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v3(namespace uuid, name text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v3(namespace uuid, name text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_generate_v4(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_generate_v4() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v4() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v4() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_generate_v5(namespace uuid, name text); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_generate_v5(namespace uuid, name text) FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v5(namespace uuid, name text) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_generate_v5(namespace uuid, name text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_nil(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_nil() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_nil() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_nil() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_ns_dns(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_ns_dns() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_ns_dns() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_ns_dns() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_ns_oid(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_ns_oid() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_ns_oid() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_ns_oid() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_ns_url(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_ns_url() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_ns_url() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_ns_url() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION uuid_ns_x500(); Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON FUNCTION extensions.uuid_ns_x500() FROM postgres;
+GRANT ALL ON FUNCTION extensions.uuid_ns_x500() TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION extensions.uuid_ns_x500() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION graphql("operationName" text, query text, variables jsonb, extensions jsonb); Type: ACL; Schema: graphql_public; Owner: -
+--
+
+GRANT ALL ON FUNCTION graphql_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO postgres;
+GRANT ALL ON FUNCTION graphql_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO anon;
+GRANT ALL ON FUNCTION graphql_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO authenticated;
+GRANT ALL ON FUNCTION graphql_public.graphql("operationName" text, query text, variables jsonb, extensions jsonb) TO service_role;
+
+
+--
+-- Name: FUNCTION pg_reload_conf(); Type: ACL; Schema: pg_catalog; Owner: -
+--
+
+GRANT ALL ON FUNCTION pg_catalog.pg_reload_conf() TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: FUNCTION get_auth(p_usename text); Type: ACL; Schema: pgbouncer; Owner: -
+--
+
+REVOKE ALL ON FUNCTION pgbouncer.get_auth(p_usename text) FROM PUBLIC;
+GRANT ALL ON FUNCTION pgbouncer.get_auth(p_usename text) TO pgbouncer;
+
+
+--
+-- Name: FUNCTION account_auth_methods(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.account_auth_methods(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.account_auth_methods(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION add_chat_tokens(p_user_id uuid, p_day date, p_tokens integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.add_chat_tokens(p_user_id uuid, p_day date, p_tokens integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_chat_tokens(p_user_id uuid, p_day date, p_tokens integer) TO service_role;
+
+
+--
+-- Name: FUNCTION add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) TO service_role;
+
+
+--
+-- Name: FUNCTION add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone) TO service_role;
+
+
+--
+-- Name: FUNCTION charge_user_credits(p_user_id uuid, p_amount integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_chat_turn(p_user_id uuid, p_day date, p_turn_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_chat_turn(p_user_id uuid, p_day date, p_turn_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_chat_turn(p_user_id uuid, p_day date, p_turn_limit integer) TO service_role;
+
+
+--
+-- Name: TABLE notification_events; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.notification_events TO service_role;
+
+
+--
+-- Name: FUNCTION claim_due_notifications(p_now timestamp with time zone, p_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_due_notifications(p_now timestamp with time zone, p_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_due_notifications(p_now timestamp with time zone, p_limit integer) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_free_followup(p_session_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_free_followup(p_session_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_free_followup(p_session_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_guest_report(p_bucket_key uuid, p_period date, p_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_guest_report(p_bucket_key uuid, p_period date, p_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_guest_report(p_bucket_key uuid, p_period date, p_limit integer) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_notification_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_notification_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_notification_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_scheduled_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer, p_timezone text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_scheduled_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer, p_timezone text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_scheduled_job(p_job text, p_now timestamp with time zone, p_stale_seconds integer, p_timezone text) TO service_role;
+
+
+--
+-- Name: FUNCTION claim_updates_insight_scope(p_scope text, p_now timestamp with time zone, p_stale_seconds integer, p_attempt_cap integer, p_daily_cap integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_updates_insight_scope(p_scope text, p_now timestamp with time zone, p_stale_seconds integer, p_attempt_cap integer, p_daily_cap integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_updates_insight_scope(p_scope text, p_now timestamp with time zone, p_stale_seconds integer, p_attempt_cap integer, p_daily_cap integer) TO service_role;
+
+
+--
+-- Name: FUNCTION cleanup_expired_news_cache(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.cleanup_expired_news_cache() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.cleanup_expired_news_cache() TO service_role;
+
+
+--
+-- Name: FUNCTION cleanup_old_social_mentions(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.cleanup_old_social_mentions() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.cleanup_old_social_mentions() TO service_role;
+
+
+--
+-- Name: FUNCTION create_user_credits(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_user_credits() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION ensure_active_portfolio(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.ensure_active_portfolio(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.ensure_active_portfolio(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION ensure_credit_period(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.ensure_credit_period(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.ensure_credit_period(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION finish_notification_job(p_job text, p_now timestamp with time zone, p_success boolean, p_notified integer, p_cursor timestamp with time zone, p_error text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.finish_notification_job(p_job text, p_now timestamp with time zone, p_success boolean, p_notified integer, p_cursor timestamp with time zone, p_error text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.finish_notification_job(p_job text, p_now timestamp with time zone, p_success boolean, p_notified integer, p_cursor timestamp with time zone, p_error text) TO service_role;
+
+
+--
+-- Name: FUNCTION finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer, p_error text, p_timezone text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer, p_error text, p_timezone text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer, p_error text, p_timezone text) TO service_role;
+
+
+--
+-- Name: FUNCTION get_top_watchlist_tickers(n integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.get_top_watchlist_tickers(n integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.get_top_watchlist_tickers(n integer) TO service_role;
+
+
+--
+-- Name: FUNCTION grant_free_followup(p_session_id uuid, p_seconds integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.grant_free_followup(p_session_id uuid, p_seconds integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.grant_free_followup(p_session_id uuid, p_seconds integer) TO service_role;
+
+
+--
+-- Name: FUNCTION grant_tier_upgrade(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.grant_tier_upgrade(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.grant_tier_upgrade(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION guest_bucket_has_data(p_bucket uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guest_bucket_has_data(p_bucket uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.guest_bucket_has_data(p_bucket uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION handle_new_auth_user(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.handle_new_auth_user() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION increment_ai_insight_budget(p_day date, p_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.increment_ai_insight_budget(p_day date, p_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.increment_ai_insight_budget(p_day date, p_limit integer) TO service_role;
+
+
+--
+-- Name: FUNCTION increment_chat_message_count(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.increment_chat_message_count() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION increment_updates_insight_success(p_scope text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.increment_updates_insight_success(p_scope text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.increment_updates_insight_success(p_scope text) TO service_role;
+
+
+--
+-- Name: FUNCTION refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.refund_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) TO service_role;
+
+
+--
+-- Name: FUNCTION refund_user_credits(p_user_id uuid, p_amount integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.refund_user_credits(p_user_id uuid, p_amount integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.refund_user_credits(p_user_id uuid, p_amount integer) TO service_role;
+
+
+--
+-- Name: FUNCTION release_chat_turn(p_user_id uuid, p_day date); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.release_chat_turn(p_user_id uuid, p_day date) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.release_chat_turn(p_user_id uuid, p_day date) TO service_role;
+
+
+--
+-- Name: FUNCTION release_guest_report(p_bucket_key uuid, p_period date); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.release_guest_report(p_bucket_key uuid, p_period date) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.release_guest_report(p_bucket_key uuid, p_period date) TO service_role;
+
+
+--
+-- Name: FUNCTION revoke_purchased_credits(p_transaction_id text, p_environment text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.revoke_purchased_credits(p_transaction_id text, p_environment text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.revoke_purchased_credits(p_transaction_id text, p_environment text) TO service_role;
+
+
+--
+-- Name: FUNCTION revoke_tier_credits(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.revoke_tier_credits(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.revoke_tier_credits(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION search_all_chunks(query_embedding public.vector, match_threshold double precision, match_count integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.search_all_chunks(query_embedding public.vector, match_threshold double precision, match_count integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.search_all_chunks(query_embedding public.vector, match_threshold double precision, match_count integer) TO service_role;
+
+
+--
+-- Name: FUNCTION search_article_chunks(query_embedding public.vector, match_threshold double precision, match_count integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.search_article_chunks(query_embedding public.vector, match_threshold double precision, match_count integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.search_article_chunks(query_embedding public.vector, match_threshold double precision, match_count integer) TO service_role;
+
+
+--
+-- Name: FUNCTION search_book_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_book_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.search_book_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_book_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.search_book_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_book_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION search_filing_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_ticker text, filter_filing_type text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.search_filing_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_ticker text, filter_filing_type text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.search_filing_chunks(query_embedding public.vector, match_threshold double precision, match_count integer, filter_ticker text, filter_filing_type text) TO service_role;
+
+
+--
+-- Name: FUNCTION set_active_portfolio(p_user_id uuid, p_portfolio_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.set_active_portfolio(p_user_id uuid, p_portfolio_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.set_active_portfolio(p_user_id uuid, p_portfolio_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION spend_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.spend_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.spend_credits(p_user_id uuid, p_amount integer, p_reason text, p_ref_id text) TO service_role;
+
+
+--
+-- Name: FUNCTION touch_whale_snapshot_processed_at(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.touch_whale_snapshot_processed_at() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION update_updated_at_column(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.update_updated_at_column() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION update_whale_followers_count(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.update_whale_followers_count() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION apply_rls(wal jsonb, max_record_bytes integer); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO postgres;
+GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO anon;
+GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO authenticated;
+GRANT ALL ON FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer) TO service_role;
+
+
+--
+-- Name: FUNCTION broadcast_changes(topic_name text, event_name text, operation text, table_name text, table_schema text, new record, old record, level text); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.broadcast_changes(topic_name text, event_name text, operation text, table_name text, table_schema text, new record, old record, level text) TO postgres;
+GRANT ALL ON FUNCTION realtime.broadcast_changes(topic_name text, event_name text, operation text, table_name text, table_schema text, new record, old record, level text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]) TO postgres;
+GRANT ALL ON FUNCTION realtime.build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]) TO anon;
+GRANT ALL ON FUNCTION realtime.build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]) TO authenticated;
+GRANT ALL ON FUNCTION realtime.build_prepared_statement_sql(prepared_statement_name text, entity regclass, columns realtime.wal_column[]) TO service_role;
+
+
+--
+-- Name: FUNCTION "cast"(val text, type_ regtype); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime."cast"(val text, type_ regtype) TO postgres;
+GRANT ALL ON FUNCTION realtime."cast"(val text, type_ regtype) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime."cast"(val text, type_ regtype) TO anon;
+GRANT ALL ON FUNCTION realtime."cast"(val text, type_ regtype) TO authenticated;
+GRANT ALL ON FUNCTION realtime."cast"(val text, type_ regtype) TO service_role;
+
+
+--
+-- Name: FUNCTION check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) TO postgres;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) TO anon;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) TO authenticated;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text) TO service_role;
+
+
+--
+-- Name: FUNCTION check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) TO postgres;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) TO anon;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) TO authenticated;
+GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) TO service_role;
+
+
+--
+-- Name: FUNCTION is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) TO postgres;
+GRANT ALL ON FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) TO anon;
+GRANT ALL ON FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) TO authenticated;
+GRANT ALL ON FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) TO service_role;
+
+
+--
+-- Name: FUNCTION list_changes(publication name, slot_name name, max_changes integer, max_record_bytes integer); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.list_changes(publication name, slot_name name, max_changes integer, max_record_bytes integer) TO postgres;
+GRANT ALL ON FUNCTION realtime.list_changes(publication name, slot_name name, max_changes integer, max_record_bytes integer) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION quote_wal2json(entity regclass); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.quote_wal2json(entity regclass) TO postgres;
+GRANT ALL ON FUNCTION realtime.quote_wal2json(entity regclass) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.quote_wal2json(entity regclass) TO anon;
+GRANT ALL ON FUNCTION realtime.quote_wal2json(entity regclass) TO authenticated;
+GRANT ALL ON FUNCTION realtime.quote_wal2json(entity regclass) TO service_role;
+
+
+--
+-- Name: FUNCTION send(payload jsonb, event text, topic text, private boolean); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.send(payload jsonb, event text, topic text, private boolean) TO postgres;
+GRANT ALL ON FUNCTION realtime.send(payload jsonb, event text, topic text, private boolean) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION send_binary(payload bytea, event text, topic text, private boolean); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean) TO postgres;
+GRANT ALL ON FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION subscription_check_filters(); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.subscription_check_filters() TO postgres;
+GRANT ALL ON FUNCTION realtime.subscription_check_filters() TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.subscription_check_filters() TO anon;
+GRANT ALL ON FUNCTION realtime.subscription_check_filters() TO authenticated;
+GRANT ALL ON FUNCTION realtime.subscription_check_filters() TO service_role;
+
+
+--
+-- Name: FUNCTION to_regrole(role_name text); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.to_regrole(role_name text) TO postgres;
+GRANT ALL ON FUNCTION realtime.to_regrole(role_name text) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.to_regrole(role_name text) TO anon;
+GRANT ALL ON FUNCTION realtime.to_regrole(role_name text) TO authenticated;
+GRANT ALL ON FUNCTION realtime.to_regrole(role_name text) TO service_role;
+
+
+--
+-- Name: FUNCTION topic(); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.topic() TO postgres;
+GRANT ALL ON FUNCTION realtime.topic() TO dashboard_user;
+
+
+--
+-- Name: FUNCTION wal2json_escape_identifier(name text); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.wal2json_escape_identifier(name text) TO postgres;
+GRANT ALL ON FUNCTION realtime.wal2json_escape_identifier(name text) TO dashboard_user;
+
+
+--
+-- Name: FUNCTION _crypto_aead_det_decrypt(message bytea, additional bytea, key_id bigint, context bytea, nonce bytea); Type: ACL; Schema: vault; Owner: -
+--
+
+GRANT ALL ON FUNCTION vault._crypto_aead_det_decrypt(message bytea, additional bytea, key_id bigint, context bytea, nonce bytea) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION vault._crypto_aead_det_decrypt(message bytea, additional bytea, key_id bigint, context bytea, nonce bytea) TO service_role;
+
+
+--
+-- Name: FUNCTION create_secret(new_secret text, new_name text, new_description text, new_key_id uuid); Type: ACL; Schema: vault; Owner: -
+--
+
+GRANT ALL ON FUNCTION vault.create_secret(new_secret text, new_name text, new_description text, new_key_id uuid) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION vault.create_secret(new_secret text, new_name text, new_description text, new_key_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION update_secret(secret_id uuid, new_secret text, new_name text, new_description text, new_key_id uuid); Type: ACL; Schema: vault; Owner: -
+--
+
+GRANT ALL ON FUNCTION vault.update_secret(secret_id uuid, new_secret text, new_name text, new_description text, new_key_id uuid) TO postgres WITH GRANT OPTION;
+GRANT ALL ON FUNCTION vault.update_secret(secret_id uuid, new_secret text, new_name text, new_description text, new_key_id uuid) TO service_role;
+
+
+--
+-- Name: TABLE audit_log_entries; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.audit_log_entries TO dashboard_user;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.audit_log_entries TO postgres;
+GRANT SELECT ON TABLE auth.audit_log_entries TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE custom_oauth_providers; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.custom_oauth_providers TO postgres;
+GRANT ALL ON TABLE auth.custom_oauth_providers TO dashboard_user;
+
+
+--
+-- Name: TABLE flow_state; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.flow_state TO postgres;
+GRANT SELECT ON TABLE auth.flow_state TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.flow_state TO dashboard_user;
+
+
+--
+-- Name: TABLE identities; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.identities TO postgres;
+GRANT SELECT ON TABLE auth.identities TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.identities TO dashboard_user;
+
+
+--
+-- Name: TABLE instances; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.instances TO dashboard_user;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.instances TO postgres;
+GRANT SELECT ON TABLE auth.instances TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE mfa_amr_claims; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.mfa_amr_claims TO postgres;
+GRANT SELECT ON TABLE auth.mfa_amr_claims TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.mfa_amr_claims TO dashboard_user;
+
+
+--
+-- Name: TABLE mfa_challenges; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.mfa_challenges TO postgres;
+GRANT SELECT ON TABLE auth.mfa_challenges TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.mfa_challenges TO dashboard_user;
+
+
+--
+-- Name: TABLE mfa_factors; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.mfa_factors TO postgres;
+GRANT SELECT ON TABLE auth.mfa_factors TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.mfa_factors TO dashboard_user;
+
+
+--
+-- Name: TABLE oauth_authorizations; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.oauth_authorizations TO postgres;
+GRANT ALL ON TABLE auth.oauth_authorizations TO dashboard_user;
+
+
+--
+-- Name: TABLE oauth_client_states; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.oauth_client_states TO postgres;
+GRANT ALL ON TABLE auth.oauth_client_states TO dashboard_user;
+
+
+--
+-- Name: TABLE oauth_clients; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.oauth_clients TO postgres;
+GRANT ALL ON TABLE auth.oauth_clients TO dashboard_user;
+
+
+--
+-- Name: TABLE oauth_consents; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.oauth_consents TO postgres;
+GRANT ALL ON TABLE auth.oauth_consents TO dashboard_user;
+
+
+--
+-- Name: TABLE one_time_tokens; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.one_time_tokens TO postgres;
+GRANT SELECT ON TABLE auth.one_time_tokens TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.one_time_tokens TO dashboard_user;
+
+
+--
+-- Name: TABLE refresh_tokens; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.refresh_tokens TO dashboard_user;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.refresh_tokens TO postgres;
+GRANT SELECT ON TABLE auth.refresh_tokens TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: SEQUENCE refresh_tokens_id_seq; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON SEQUENCE auth.refresh_tokens_id_seq TO dashboard_user;
+GRANT ALL ON SEQUENCE auth.refresh_tokens_id_seq TO postgres;
+
+
+--
+-- Name: TABLE saml_providers; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.saml_providers TO postgres;
+GRANT SELECT ON TABLE auth.saml_providers TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.saml_providers TO dashboard_user;
+
+
+--
+-- Name: TABLE saml_relay_states; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.saml_relay_states TO postgres;
+GRANT SELECT ON TABLE auth.saml_relay_states TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.saml_relay_states TO dashboard_user;
+
+
+--
+-- Name: TABLE schema_migrations; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT SELECT ON TABLE auth.schema_migrations TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE sessions; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.sessions TO postgres;
+GRANT SELECT ON TABLE auth.sessions TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.sessions TO dashboard_user;
+
+
+--
+-- Name: TABLE sso_domains; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.sso_domains TO postgres;
+GRANT SELECT ON TABLE auth.sso_domains TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.sso_domains TO dashboard_user;
+
+
+--
+-- Name: TABLE sso_providers; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.sso_providers TO postgres;
+GRANT SELECT ON TABLE auth.sso_providers TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE auth.sso_providers TO dashboard_user;
+
+
+--
+-- Name: TABLE users; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.users TO dashboard_user;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE auth.users TO postgres;
+GRANT SELECT ON TABLE auth.users TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE webauthn_challenges; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.webauthn_challenges TO postgres;
+GRANT ALL ON TABLE auth.webauthn_challenges TO dashboard_user;
+
+
+--
+-- Name: TABLE webauthn_credentials; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.webauthn_credentials TO postgres;
+GRANT ALL ON TABLE auth.webauthn_credentials TO dashboard_user;
+
+
+--
+-- Name: TABLE pg_stat_statements; Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON TABLE extensions.pg_stat_statements FROM postgres;
+GRANT ALL ON TABLE extensions.pg_stat_statements TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE extensions.pg_stat_statements TO dashboard_user;
+
+
+--
+-- Name: TABLE pg_stat_statements_info; Type: ACL; Schema: extensions; Owner: -
+--
+
+REVOKE ALL ON TABLE extensions.pg_stat_statements_info FROM postgres;
+GRANT ALL ON TABLE extensions.pg_stat_statements_info TO postgres WITH GRANT OPTION;
+GRANT ALL ON TABLE extensions.pg_stat_statements_info TO dashboard_user;
+
+
+--
+-- Name: TABLE agent_personas; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.agent_personas TO service_role;
+
+
+--
+-- Name: TABLE ai_insight_budget; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ai_insight_budget TO service_role;
+
+
+--
+-- Name: TABLE ai_insight_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ai_insight_cache TO service_role;
+
+
+--
+-- Name: SEQUENCE ai_insight_cache_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.ai_insight_cache_id_seq TO service_role;
+
+
+--
+-- Name: TABLE analytics_events; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.analytics_events TO service_role;
+
+
+--
+-- Name: SEQUENCE analytics_events_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.analytics_events_id_seq TO service_role;
+
+
+--
+-- Name: TABLE article_chunks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.article_chunks TO service_role;
+
+
+--
+-- Name: TABLE book_chapters; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.book_chapters TO service_role;
+
+
+--
+-- Name: TABLE book_chunks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.book_chunks TO service_role;
+
+
+--
+-- Name: TABLE books; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.books TO service_role;
+
+
+--
+-- Name: TABLE chat_messages; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.chat_messages TO service_role;
+
+
+--
+-- Name: TABLE chat_sessions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.chat_sessions TO service_role;
+
+
+--
+-- Name: TABLE chat_starter_answers; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.chat_starter_answers TO service_role;
+
+
+--
+-- Name: TABLE chat_starters; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.chat_starters TO service_role;
+
+
+--
+-- Name: TABLE chat_usage_budget; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.chat_usage_budget TO service_role;
+
+
+--
+-- Name: TABLE commodity_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.commodity_cache TO service_role;
+
+
+--
+-- Name: TABLE company_filing_chunks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.company_filing_chunks TO service_role;
+
+
+--
+-- Name: TABLE company_profile_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.company_profile_cache TO service_role;
+
+
+--
+-- Name: TABLE competitor_intel_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.competitor_intel_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE competitor_intel_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.competitor_intel_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE competitor_intel_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.competitor_intel_cache TO service_role;
+
+
+--
+-- Name: TABLE corporate_action_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.corporate_action_cache TO service_role;
+
+
+--
+-- Name: TABLE credit_packs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.credit_packs TO anon;
+GRANT SELECT ON TABLE public.credit_packs TO authenticated;
+GRANT ALL ON TABLE public.credit_packs TO service_role;
+
+
+--
+-- Name: TABLE credit_purchases; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.credit_purchases TO service_role;
+
+
+--
+-- Name: SEQUENCE credit_purchases_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.credit_purchases_id_seq TO service_role;
+
+
+--
+-- Name: TABLE credit_transactions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.credit_transactions TO authenticated;
+GRANT ALL ON TABLE public.credit_transactions TO service_role;
+
+
+--
+-- Name: SEQUENCE credit_transactions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.credit_transactions_id_seq TO service_role;
+
+
+--
+-- Name: TABLE crypto_coin_id_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.crypto_coin_id_cache TO service_role;
+
+
+--
+-- Name: TABLE crypto_fundamentals_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.crypto_fundamentals_cache TO service_role;
+
+
+--
+-- Name: TABLE crypto_snapshots; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.crypto_snapshots TO service_role;
+
+
+--
+-- Name: TABLE daily_briefings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.daily_briefings TO service_role;
+
+
+--
+-- Name: TABLE device_tokens; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.device_tokens TO service_role;
+
+
+--
+-- Name: SEQUENCE device_tokens_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.device_tokens_id_seq TO service_role;
+
+
+--
+-- Name: TABLE earnings_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.earnings_cache TO service_role;
+
+
+--
+-- Name: TABLE etf_snapshot_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.etf_snapshot_cache TO service_role;
+
+
+--
+-- Name: TABLE geopolitical_macro_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.geopolitical_macro_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE geopolitical_macro_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.geopolitical_macro_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE geopolitical_macro_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.geopolitical_macro_cache TO service_role;
+
+
+--
+-- Name: TABLE growth_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.growth_cache TO service_role;
+
+
+--
+-- Name: TABLE guest_report_budget; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.guest_report_budget TO service_role;
+
+
+--
+-- Name: TABLE health_check_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.health_check_cache TO service_role;
+
+
+--
+-- Name: TABLE hedge_fund_quarters; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.hedge_fund_quarters TO service_role;
+
+
+--
+-- Name: TABLE holders_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.holders_cache TO service_role;
+
+
+--
+-- Name: TABLE index_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.index_cache TO service_role;
+
+
+--
+-- Name: TABLE index_macro_forecast_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.index_macro_forecast_cache TO service_role;
+
+
+--
+-- Name: TABLE industry_dossier; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.industry_dossier TO service_role;
+
+
+--
+-- Name: SEQUENCE industry_dossier_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.industry_dossier_id_seq TO service_role;
+
+
+--
+-- Name: TABLE industry_moat_benchmarks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.industry_moat_benchmarks TO service_role;
+
+
+--
+-- Name: SEQUENCE industry_moat_benchmarks_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.industry_moat_benchmarks_id_seq TO service_role;
+
+
+--
+-- Name: TABLE industry_override_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.industry_override_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE industry_override_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.industry_override_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE ip_intel_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ip_intel_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE ip_intel_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.ip_intel_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE ip_intel_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ip_intel_cache TO service_role;
+
+
+--
+-- Name: TABLE lessons; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.lessons TO anon;
+GRANT SELECT ON TABLE public.lessons TO authenticated;
+GRANT ALL ON TABLE public.lessons TO service_role;
+
+
+--
+-- Name: TABLE market_close_snapshot; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.market_close_snapshot TO service_role;
+
+
+--
+-- Name: TABLE market_deep_dive_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.market_deep_dive_cache TO service_role;
+
+
+--
+-- Name: TABLE market_insights; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.market_insights TO service_role;
+
+
+--
+-- Name: TABLE moat_intel_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.moat_intel_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE moat_intel_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.moat_intel_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE moat_intel_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.moat_intel_cache TO service_role;
+
+
+--
+-- Name: TABLE money_move_articles; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.money_move_articles TO anon;
+GRANT SELECT ON TABLE public.money_move_articles TO authenticated;
+GRANT ALL ON TABLE public.money_move_articles TO service_role;
+
+
+--
+-- Name: TABLE notification_job_state; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.notification_job_state TO service_role;
+
+
+--
+-- Name: TABLE plan_credits; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.plan_credits TO anon;
+GRANT SELECT ON TABLE public.plan_credits TO authenticated;
+GRANT ALL ON TABLE public.plan_credits TO service_role;
+
+
+--
+-- Name: TABLE portfolio_items; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.portfolio_items TO service_role;
+
+
+--
+-- Name: TABLE portfolios; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.portfolios TO service_role;
+
+
+--
+-- Name: TABLE price_alerts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.price_alerts TO service_role;
+
+
+--
+-- Name: TABLE price_catalyst_audit; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.price_catalyst_audit TO service_role;
+
+
+--
+-- Name: SEQUENCE price_catalyst_audit_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.price_catalyst_audit_id_seq TO service_role;
+
+
+--
+-- Name: TABLE price_catalyst_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.price_catalyst_cache TO service_role;
+
+
+--
+-- Name: TABLE profit_power_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.profit_power_cache TO service_role;
+
+
+--
+-- Name: TABLE push_send_log; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.push_send_log TO service_role;
+
+
+--
+-- Name: TABLE research_reports; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.research_reports TO service_role;
+
+
+--
+-- Name: TABLE revenue_breakdown_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.revenue_breakdown_cache TO service_role;
+
+
+--
+-- Name: TABLE sector_aggregates; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.sector_aggregates TO service_role;
+
+
+--
+-- Name: TABLE sector_benchmarks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.sector_benchmarks TO service_role;
+
+
+--
+-- Name: SEQUENCE sector_benchmarks_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.sector_benchmarks_id_seq TO service_role;
+
+
+--
+-- Name: TABLE short_interest_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.short_interest_cache TO service_role;
+
+
+--
+-- Name: TABLE signal_of_confidence_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.signal_of_confidence_cache TO service_role;
+
+
+--
+-- Name: TABLE signals_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.signals_cache TO service_role;
+
+
+--
+-- Name: SEQUENCE signals_cache_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.signals_cache_id_seq TO service_role;
+
+
+--
+-- Name: TABLE snapshot_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.snapshot_cache TO service_role;
+
+
+--
+-- Name: TABLE social_mentions_history; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.social_mentions_history TO service_role;
+
+
+--
+-- Name: TABLE stock_fundamentals_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.stock_fundamentals_cache TO service_role;
+
+
+--
+-- Name: TABLE subscriptions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.subscriptions TO authenticated;
+GRANT ALL ON TABLE public.subscriptions TO service_role;
+
+
+--
+-- Name: TABLE ticker_data_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ticker_data_cache TO service_role;
+
+
+--
+-- Name: TABLE ticker_news_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ticker_news_cache TO service_role;
+
+
+--
+-- Name: TABLE ticker_report_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ticker_report_cache TO service_role;
+
+
+--
+-- Name: TABLE ticker_volatility_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.ticker_volatility_cache TO service_role;
+
+
+--
+-- Name: TABLE trending_themes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.trending_themes TO anon;
+GRANT SELECT ON TABLE public.trending_themes TO authenticated;
+GRANT ALL ON TABLE public.trending_themes TO service_role;
+
+
+--
+-- Name: TABLE updates_insight_state; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.updates_insight_state TO service_role;
+
+
+--
+-- Name: SEQUENCE updates_insight_state_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.updates_insight_state_id_seq TO service_role;
+
+
+--
+-- Name: TABLE user_credits; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_credits TO service_role;
+
+
+--
+-- Name: TABLE user_investor_profile; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_investor_profile TO service_role;
+
+
+--
+-- Name: TABLE user_learn_progress; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_learn_progress TO service_role;
+
+
+--
+-- Name: SEQUENCE user_learn_progress_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.user_learn_progress_id_seq TO service_role;
+
+
+--
+-- Name: TABLE user_memory_facts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_memory_facts TO service_role;
+
+
+--
+-- Name: SEQUENCE user_memory_facts_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.user_memory_facts_id_seq TO service_role;
+
+
+--
+-- Name: TABLE user_settings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_settings TO service_role;
+
+
+--
+-- Name: TABLE users; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.users TO service_role;
+
+
+--
+-- Name: TABLE vector_search_stats; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.vector_search_stats TO service_role;
+
+
+--
+-- Name: TABLE watchlist_items; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.watchlist_items TO service_role;
+
+
+--
+-- Name: TABLE whale_alerts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_alerts TO service_role;
+
+
+--
+-- Name: TABLE whale_filing_snapshots; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_filing_snapshots TO service_role;
+
+
+--
+-- Name: TABLE whale_follows; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_follows TO service_role;
+
+
+--
+-- Name: TABLE whale_holdings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_holdings TO service_role;
+
+
+--
+-- Name: TABLE whale_profile_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_profile_cache TO service_role;
+
+
+--
+-- Name: TABLE whale_sector_allocations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_sector_allocations TO service_role;
+
+
+--
+-- Name: TABLE whale_trade_groups; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_trade_groups TO service_role;
+
+
+--
+-- Name: TABLE whale_trades; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whale_trades TO service_role;
+
+
+--
+-- Name: TABLE whales; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.whales TO service_role;
+
+
+--
+-- Name: TABLE messages; Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON TABLE realtime.messages TO postgres;
+GRANT ALL ON TABLE realtime.messages TO dashboard_user;
+GRANT SELECT,INSERT,UPDATE ON TABLE realtime.messages TO anon;
+GRANT SELECT,INSERT,UPDATE ON TABLE realtime.messages TO authenticated;
+GRANT SELECT,INSERT,UPDATE ON TABLE realtime.messages TO service_role;
+
+
+--
+-- Name: TABLE subscription; Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON TABLE realtime.subscription TO postgres;
+GRANT ALL ON TABLE realtime.subscription TO dashboard_user;
+GRANT SELECT ON TABLE realtime.subscription TO anon;
+GRANT SELECT ON TABLE realtime.subscription TO authenticated;
+GRANT SELECT ON TABLE realtime.subscription TO service_role;
+
+
+--
+-- Name: SEQUENCE subscription_id_seq; Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON SEQUENCE realtime.subscription_id_seq TO postgres;
+GRANT ALL ON SEQUENCE realtime.subscription_id_seq TO dashboard_user;
+GRANT USAGE ON SEQUENCE realtime.subscription_id_seq TO anon;
+GRANT USAGE ON SEQUENCE realtime.subscription_id_seq TO authenticated;
+GRANT USAGE ON SEQUENCE realtime.subscription_id_seq TO service_role;
+
+
+--
+-- Name: TABLE buckets; Type: ACL; Schema: storage; Owner: -
+--
+
+REVOKE ALL ON TABLE storage.buckets FROM supabase_storage_admin;
+GRANT ALL ON TABLE storage.buckets TO supabase_storage_admin WITH GRANT OPTION;
+GRANT ALL ON TABLE storage.buckets TO service_role;
+GRANT ALL ON TABLE storage.buckets TO authenticated;
+GRANT ALL ON TABLE storage.buckets TO anon;
+GRANT ALL ON TABLE storage.buckets TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE buckets_analytics; Type: ACL; Schema: storage; Owner: -
+--
+
+GRANT ALL ON TABLE storage.buckets_analytics TO service_role;
+GRANT ALL ON TABLE storage.buckets_analytics TO authenticated;
+GRANT ALL ON TABLE storage.buckets_analytics TO anon;
+
+
+--
+-- Name: TABLE buckets_vectors; Type: ACL; Schema: storage; Owner: -
+--
+
+GRANT SELECT ON TABLE storage.buckets_vectors TO service_role;
+GRANT SELECT ON TABLE storage.buckets_vectors TO authenticated;
+GRANT SELECT ON TABLE storage.buckets_vectors TO anon;
+
+
+--
+-- Name: TABLE objects; Type: ACL; Schema: storage; Owner: -
+--
+
+REVOKE ALL ON TABLE storage.objects FROM supabase_storage_admin;
+GRANT ALL ON TABLE storage.objects TO supabase_storage_admin WITH GRANT OPTION;
+GRANT ALL ON TABLE storage.objects TO service_role;
+GRANT ALL ON TABLE storage.objects TO authenticated;
+GRANT ALL ON TABLE storage.objects TO anon;
+GRANT ALL ON TABLE storage.objects TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE s3_multipart_uploads; Type: ACL; Schema: storage; Owner: -
+--
+
+GRANT ALL ON TABLE storage.s3_multipart_uploads TO service_role;
+GRANT SELECT ON TABLE storage.s3_multipart_uploads TO authenticated;
+GRANT SELECT ON TABLE storage.s3_multipart_uploads TO anon;
+
+
+--
+-- Name: TABLE s3_multipart_uploads_parts; Type: ACL; Schema: storage; Owner: -
+--
+
+GRANT ALL ON TABLE storage.s3_multipart_uploads_parts TO service_role;
+GRANT SELECT ON TABLE storage.s3_multipart_uploads_parts TO authenticated;
+GRANT SELECT ON TABLE storage.s3_multipart_uploads_parts TO anon;
+
+
+--
+-- Name: TABLE vector_indexes; Type: ACL; Schema: storage; Owner: -
+--
+
+GRANT SELECT ON TABLE storage.vector_indexes TO service_role;
+GRANT SELECT ON TABLE storage.vector_indexes TO authenticated;
+GRANT SELECT ON TABLE storage.vector_indexes TO anon;
+
+
+--
+-- Name: TABLE secrets; Type: ACL; Schema: vault; Owner: -
+--
+
+GRANT SELECT,REFERENCES,DELETE,TRUNCATE ON TABLE vault.secrets TO postgres WITH GRANT OPTION;
+GRANT SELECT,DELETE ON TABLE vault.secrets TO service_role;
+
+
+--
+-- Name: TABLE decrypted_secrets; Type: ACL; Schema: vault; Owner: -
+--
+
+GRANT SELECT,REFERENCES,DELETE,TRUNCATE ON TABLE vault.decrypted_secrets TO postgres WITH GRANT OPTION;
+GRANT SELECT,DELETE ON TABLE vault.decrypted_secrets TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: auth; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON SEQUENCES TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: auth; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON FUNCTIONS TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: auth; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT ALL ON TABLES TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: extensions; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA extensions GRANT ALL ON SEQUENCES TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: extensions; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA extensions GRANT ALL ON FUNCTIONS TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: extensions; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA extensions GRANT ALL ON TABLES TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: graphql; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON SEQUENCES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON SEQUENCES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON SEQUENCES TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: graphql; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON FUNCTIONS TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON FUNCTIONS TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON FUNCTIONS TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: graphql; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON TABLES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON TABLES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql GRANT ALL ON TABLES TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: graphql_public; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON SEQUENCES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON SEQUENCES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON SEQUENCES TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: graphql_public; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON FUNCTIONS TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON FUNCTIONS TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON FUNCTIONS TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: graphql_public; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON TABLES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON TABLES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA graphql_public GRANT ALL ON TABLES TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: realtime; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON SEQUENCES TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: realtime; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON FUNCTIONS TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: realtime; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON TABLES TO dashboard_user;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: storage; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON SEQUENCES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON SEQUENCES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON SEQUENCES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON SEQUENCES TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR FUNCTIONS; Type: DEFAULT ACL; Schema: storage; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON FUNCTIONS TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON FUNCTIONS TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON FUNCTIONS TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON FUNCTIONS TO service_role;
+
+
+--
+-- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: storage; Owner: -
+--
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON TABLES TO anon;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON TABLES TO authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA storage GRANT ALL ON TABLES TO service_role;
+
+
+--
 -- Name: issue_graphql_placeholder; Type: EVENT TRIGGER; Schema: -; Owner: -
 --
 
@@ -14703,5 +15877,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict jtpC1SSs4bXXOM0asrIb9U508pGUbXxhO0wlmeJZuBu9i3RVOYdjRwSZli0Agy6
+\unrestrict TAovLsjwjgmhyPJaKuPrgQhnG59v03cfh9nzukZBMOtF2074LjZGYTxwobRgKqk
 

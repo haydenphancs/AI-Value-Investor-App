@@ -157,6 +157,15 @@ def insider_copy(symbol: str, name: str, action: str, dollars: float) -> Tuple[s
     )
 
 
+def equity_tickers(symbols) -> List[str]:
+    """Form 4 filings exist for companies only. The watchlist universe now carries indices,
+    coins and commodity pairs; each cost one real (entitled) `insider-trading/search` call
+    per run for an empty answer."""
+    from app.services.asset_class import detect_asset_class
+
+    return [s for s in dict.fromkeys(symbols) if s and detect_asset_class(s) == "stock"]
+
+
 async def _run_insider_phase(now: datetime) -> int:
     """Form 4 pass. Returns notifications delivered."""
     supabase = get_supabase()
@@ -166,7 +175,7 @@ async def _run_insider_phase(now: datetime) -> int:
             rows = supabase.rpc(
                 "get_top_watchlist_tickers", {"n": INSIDER_UNIVERSE}
             ).execute().data or []
-            return [str(r["ticker"]).upper() for r in rows if r.get("ticker")]
+            return equity_tickers(str(r["ticker"]).upper() for r in rows if r.get("ticker"))
         except Exception as e:
             logger.warning(
                 "smart money: watchlist universe read failed (%s: %s) — skipping the "

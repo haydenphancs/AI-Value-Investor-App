@@ -134,8 +134,18 @@ def test_the_price_alert_create_canonicalises_before_seeding():
     )
     i = stripped.find("canonical_stored_symbol")
     assert i != -1, "the alert ticker must be canonicalised"
-    seed = stripped.find("get_quotes_list")
-    assert seed == -1 or i < seed, (
+    # ⚠️ FAIL CLOSED. This read `seed == -1 or i < seed` against the literal
+    # "get_quotes_list" — a METHOD NAME, not a structural fact. `price_service` exposes
+    # `get_quote`, `get_quotes` and `get_quotes_list` as interchangeable entry points (the
+    # last is documented there as the legacy shape, "prefer `get_quotes` in new code"), so
+    # renaming the seed call to either sibling made `seed == -1` and short-circuited the
+    # whole ordering assertion — the guard disarmed itself on a rename.
+    seeds = [m.start() for m in re.finditer(r"price_source\(\)\.get_quote\w*\(", stripped)]
+    assert seeds, (
+        "no seed quote call found in create_price_alert — if the baseline is fetched some "
+        "other way now, re-point this guard rather than letting it pass"
+    )
+    assert i < min(seeds), (
         "canonicalise BEFORE the seed quote, or the baseline is fetched for the wrong asset"
     )
 

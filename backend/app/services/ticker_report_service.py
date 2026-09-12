@@ -33,7 +33,6 @@ import asyncio
 import logging
 from typing import Any, Dict
 
-from app.integrations.fmp import get_fmp_client
 from app.integrations.gemini import get_gemini_client
 from app.services.agents.narrative_prompts import (
     build_narrative_jobs,
@@ -69,96 +68,12 @@ from app.services.report_degradation import (  # noqa: E402
     _degraded_reason,
     _mark_degraded,
 )
-from app.services.price_service import price_source
 
 
 class TickerReportService:
     def __init__(self):
         self.collector: TickerReportDataCollector = get_collector()
         self.gemini = get_gemini_client()
-        self.fmp = get_fmp_client()  # used only by chat_about_ticker
-
-    # ── Chat (shares Stage-B style for tonal consistency) ────────────
-
-    async def chat_about_ticker(
-        self, ticker: str, message: str, persona_key: str = "warren_buffett"
-    ) -> str:
-        """Quick AI Q&A about a ticker — minimal FMP + persona-styled Gemini.
-
-        Uses the same anti-cliché / anti-hedge style brief as the
-        report's Stage-B narratives so chat answers read in the same
-        voice as the report itself.
-        """
-        tasks = {
-            "profile": self.fmp.get_company_profile(ticker),
-            "quote": price_source(self).get_quote(ticker),
-        }
-        keys = list(tasks.keys())
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-
-        data: Dict[str, Any] = {}
-        for key, result in zip(keys, results):
-            data[key] = {} if isinstance(result, Exception) else result
-
-        profile = data.get("profile", {})
-        quote = data.get("quote", {})
-        if not profile:
-            raise ValueError(f"No company profile found for ticker: {ticker}")
-
-        persona = get_persona_config(persona_key)
-        company_name = profile.get("companyName", ticker)
-        # `or "N/A"`, not `.get(k, "N/A")`: `price_service._shape()` emits `price` as a
-        # PRESENT key holding None when the symbol has no usable price, and `dict.get`'s
-        # default is only reached for an ABSENT key — so the old form put the literal
-        # string "None" into the prompt. `pe` is genuinely absent (the retired `quote`
-        # endpoint carried it), so its default does fire, but it is written the same way
-        # so the next edit cannot reintroduce the asymmetry.
-        price = quote.get("price") or "N/A"
-        pe = quote.get("pe") or "N/A"
-        mkt_cap = profile.get("mktCap", "N/A")
-        sector = profile.get("sector", "N/A")
-        industry = profile.get("industry", "N/A")
-        mkt_cap_str = (
-            f"${mkt_cap:,.0f}" if isinstance(mkt_cap, (int, float))
-            else str(mkt_cap)
-        )
-
-        prompt = f"""The user is asking about {company_name} ({ticker}).
-
-Quick facts:
-- Price: ${price}
-- P/E: {pe}
-- Market Cap: {mkt_cap_str}
-- Sector: {sector} | Industry: {industry}
-
-User question: {message}
-
-STYLE: Catchy, punchy, plain-English. Sound like a sharp portfolio manager
-talking to a smart friend — confident, specific, never marketing-speak.
-NEVER use clichés ("strong tailwinds", "well-positioned", "going forward").
-NEVER hedge ("could potentially", "may possibly"). Cite a concrete number when
-available. Apply your lens: {persona.narrative_lens or "your investment philosophy"}.
-
-LENGTH: 2-4 sentences, total under 90 words."""
-
-        try:
-            result = await self.gemini.generate_text(
-                prompt=prompt,
-                system_instruction=persona.system_prompt,
-            )
-        except Exception as e:
-            # RAISE (don't swallow into a polite sentinel): the /report/chat endpoint charges
-            # CHAT_CREDIT_COST upfront and refunds on any raised exception. Returning a sentinel
-            # string would set delivered=True and BILL the user for a non-answer.
-            logger.error(
-                f"Chat generation failed for {ticker}: {type(e).__name__}: {e}"
-            )
-            raise
-        reply = (result.get("text") or "").strip()
-        if not reply:
-            # An empty generation is also a non-delivery → raise so the endpoint refunds.
-            raise RuntimeError(f"empty chat generation for {ticker}")
-        return reply
 
     # ── Main entry point ──────────────────────────────────────────────
 

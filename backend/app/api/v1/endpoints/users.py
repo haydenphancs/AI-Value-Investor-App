@@ -87,6 +87,7 @@ from app.services.credit_history_service import (
     get_credit_history_service,
 )
 from app.utils.supabase_errors import is_unique_violation
+from app.utils.supabase_async import sb_exec
 
 logger = logging.getLogger(__name__)
 
@@ -244,9 +245,11 @@ async def get_user_credits(
     # of a hand-applied migration versus a deploy is not guaranteed. The row is 9 small columns
     # and `credits_response_from_rows` defaults anything missing.
     try:
-        result = supabase.table("user_credits").select(
-            "*"
-        ).eq("user_id", user["id"]).limit(1).execute()
+        result = (await sb_exec(
+                     supabase.table("user_credits").select(
+                     "*"
+                     ).eq("user_id", user["id"]).limit(1)
+                 ))
     except Exception as e:
         logger.error(
             "Credits read failed for user=%s: %s: %s", user["id"], type(e).__name__, e
@@ -1018,9 +1021,11 @@ async def update_profile(
     # this the column claims the row has not changed since signup.
     update_data["updated_at"] = _now_iso()
 
-    result = supabase.table("users").update(update_data).eq(
-        "id", user["id"]
-    ).execute()
+    result = (await sb_exec(
+                 supabase.table("users").update(update_data).eq(
+                 "id", user["id"]
+                 )
+             ))
 
     # A Supabase UPDATE that matches ZERO rows does not raise — it returns `data == []`.
     # Falling back to `user` answers 200 carrying the PRE-update values, so the client

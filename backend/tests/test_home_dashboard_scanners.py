@@ -51,9 +51,13 @@ from _price_fakes import PriceFromFMPFake
 from _price_fakes import MoversFromFMPFake
 
 
-def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, **extra):
+def _profile(symbol, *, mc=1e9, avg=2e6, etf=False, fund=False, price=25.0, **extra):
+    # `price` defaults ABOVE `_MOVERS_MIN_PRICE`. The quality gate's docstring always
+    # promised a sub-$5 penny-stock floor; the constant existed and was never read until
+    # 2026-09-12, and this fixture omitted the field entirely — so a profile with no price
+    # at all sailed through, which is exactly what a fail-closed gate must refuse.
     p = {"symbol": symbol, "companyName": symbol, "marketCap": mc,
-         "averageVolume": avg, "isEtf": etf, "isFund": fund}
+         "averageVolume": avg, "isEtf": etf, "isFund": fund, "price": price}
     p.update(extra)
     return p
 
@@ -1074,3 +1078,22 @@ def test_skeptical_money_drops_a_row_whose_change_is_unknown():
     assert re.search(r"if change is None:\s*\n\s*continue", code), (
         "the candidate must be skipped when its change cannot be determined"
     )
+
+
+# ── the penny-stock floor the header promises (2026-09-12) ─────────────────────────
+
+
+def test_a_sub_five_dollar_name_is_not_a_quality_company():
+    """`_MOVERS_MIN_PRICE = 5.0` was defined and never read. A $2 name with a $250M cap
+    and heavy volume passed cap + volume and could head Today's Top Movers on a +40% day —
+    the "micro-cap pump" the gate exists to keep out."""
+    assert _is_quality_company(_profile("PENNY", price=2.0, mc=2.5e8, avg=5e6)) is False
+    assert _is_quality_company(_profile("REAL", price=25.0, mc=2.5e8, avg=5e6)) is True
+
+
+def test_a_missing_price_fails_closed():
+    """Same rule the marketCap / averageVolume checks already follow."""
+    p = _profile("NOPRICE")
+    p.pop("price")
+    assert _is_quality_company(p) is False
+    assert _is_quality_company(_profile("NAN", price=float("nan"))) is False

@@ -490,9 +490,10 @@ actor APIClient {
                     )
                 }
                 throw APIError.unauthorized
-            case 402, 403, 409:
-                // The pre-flight refusals: INSUFFICIENT_CREDITS (402), AUTH_FORBIDDEN (403)
-                // and SYSTEM_BUSY (409). These reached the `default:` arm before and became
+            case 400, 402, 403, 409:
+                // The pre-flight refusals: CHAT_MESSAGE_TOO_LONG (400), INSUFFICIENT_CREDITS
+                // (402), AUTH_FORBIDDEN (403) and SYSTEM_BUSY (409). These reached the
+                // `default:` arm before and became
                 // a bare `serverError`, which is why running out of credits mid-chat showed
                 // "something went wrong" instead of an Upgrade button — the streamed path is
                 // the one users are actually on. They are business outcomes with a machine

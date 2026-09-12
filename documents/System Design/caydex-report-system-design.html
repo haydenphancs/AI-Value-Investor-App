@@ -38,7 +38,7 @@
   </figure>
   <ul>
     <li><strong>TickerDetailView</strong> → <code>GET /stocks/{ticker}/*</code> (≈19 endpoints) → cached services → <strong>FMP</strong>. No Gemini, no semaphore — it is FMP-bound. On open it also fires <code>POST /prewarm-report</code>, which <strong>writes <code>ticker_data_cache</code></strong> (the report's bundled collection).</li>
-    <li><strong>TickerReportView</strong> → <code>POST /research/generate</code> → the <strong>report pipeline</strong> (admission → semaphore → agent) → the agent's collector <strong>reuses the same cached services + <code>ticker_data_cache</code></strong>, and additionally calls <strong>Gemini</strong>.</li>
+    <li><strong>TickerReportView</strong> → <code>POST /research/generate</code> (deep door) or <code>GET /stocks/{ticker}/report</code> (direct door — same cost on a cache miss, both account-only) → the <strong>report pipeline</strong> (admission → semaphore → agent) → the agent's collector <strong>reuses the same cached services + <code>ticker_data_cache</code></strong>, and additionally calls <strong>Gemini</strong>.</li>
     <li><strong>The overlap</strong> is the gray layer: the report collector pulls from the same <code>analyst / holders / snapshots / revenue / earnings</code> caches the detail view populates (~8–9 of its ~20 sub-fetches), and both read/write <code>ticker_data_cache</code>. Opening the detail view is a <em>partial warm</em> of a future report — FMP side only; the Gemini half is report-exclusive.</li>
   </ul>
 
@@ -49,10 +49,10 @@
   </figure>
   <ul>
     <li><strong>Admit</strong> — the per-user cap (≤4) is irrelevant (100 different users, 1 each); the global cap (≤150) admits all 100. If it were 200, ~50 would fast-fail with <code>409 SYSTEM_BUSY</code>.</li>
-    <li><strong>Charge + enqueue</strong> — 5 credits ×100, 100 <code>pending</code> rows, 100 fire-and-forget tasks.</li>
+    <li><strong>Charge + enqueue</strong> — 20 credits ×100 (<code>REPORT_CREDIT_COST</code>; refunded on failure, timeout or admission refusal), 100 <code>pending</code> rows, 100 fire-and-forget tasks.</li>
     <li><strong>Cache</strong> — 100 distinct tickers → 100 misses (no dedup). Same ticker instead → collapses to <strong>1</strong> run via <code>_INFLIGHT</code>.</li>
     <li><strong>The gate</strong> — the global semaphore = <strong>8</strong>. Only 8 compute at once; the other 92 park cheaply and drain as slots free.</li>
-    <li><strong>Per running report</strong> — ~25–40 FMP calls through the <strong>shared 20-connection pool / 750 RPM</strong>, and ~22 Gemini calls (15 Stage-B narratives in parallel, context-cached). This is the bottleneck pair.</li>
+    <li><strong>Per running report</strong> — ~25–40 FMP calls through the <strong>shared 20-connection pool / 750 RPM</strong>, and ~21–26 Gemini calls: the agentic pre-stage (≤4 tool rounds, deep door only) → Stage A JSON shell → 12–22 Stage-B narratives in parallel (12 fixed + 2 per critical factor, context-cached) ‖ the core-thesis synthesis → the critical-factors synthesis. This is the bottleneck pair.</li>
     <li><strong>Finish</strong> — a <em>conditional</em> completion write delivers the report, <strong>XOR</strong> the reconciliation safety net refunds it (never both) — the credit invariant, kept honest by the <code>processing_started_at</code> clock.</li>
   </ul>
 
@@ -60,7 +60,7 @@
     <strong>Takeaway.</strong> Reports are <strong>Gemini-bound</strong> (8-slot semaphore + tier TPM); the detail view is <strong>FMP-bound</strong> (20-conn pool + 750 RPM) — different ceilings. 100 distinct reports drain in ~13 waves of 8 (≈10–15 min; first users ~1 min); 100 distinct detail views are far cheaper (no Gemini, no semaphore). Under overload nothing crashes — it sheds load (409), paces Gemini (429 backoff + circuit breaker), and refunds anything it can't deliver.
   </div>
 
-  <footer>Caydex report scaling — Phase 0/1 + detail-view pre-warm. Tunables: <code>MAX_CONCURRENT_AGENT_RUNS</code> (8), <code>MAX_GLOBAL_INFLIGHT_REPORTS</code> (150). Last updated 2026-06-19.</footer>
+  <footer>Caydex report scaling — Phase 0/1 + detail-view pre-warm. Tunables: <code>MAX_CONCURRENT_AGENT_RUNS</code> (8), <code>MAX_GLOBAL_INFLIGHT_REPORTS</code> (150). Last updated 2026-09-11 (credits 5→20 on 2026-08; four-phase pipeline; two doors).</footer>
 </main>
 </body>
 </html>

@@ -81,7 +81,14 @@ def test_only_one_day_and_one_week_take_the_intraday_series():
     """
     src = _source()
     normalised = src.replace("'", '"')
-    assert '{"1D": 1, "1W": 7}' in normalised, "intraday selection must be a RANGE map"
+    # The map moved into `crypto_service._INTRADAY_RANGES` (2026-09-11) so the chat card
+    # and the detail screen cannot disagree about which ranges are sub-daily. Assert the
+    # PROPERTY — keyed on the range code, and exactly 1D/1W — not the literal.
+    assert "_INTRADAY_RANGES.get(range_code)" in normalised, (
+        "intraday selection must be a RANGE map lookup, keyed on the range code"
+    )
+    from app.services.crypto_service import _INTRADAY_RANGES
+    assert _INTRADAY_RANGES == {"1D": 1, "1W": 7}, _INTRADAY_RANGES
     assert 'resolved_interval != "daily"' not in normalised, (
         "branching on the interval misroutes 5Y and ALL into the intraday path"
     )

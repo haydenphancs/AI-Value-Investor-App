@@ -404,6 +404,14 @@ _CURATED_TABLES = {
     # had to be earned rather than asserted. Curated so dropping it fails here
     # instead of quietly orphaning that paragraph.
     "book_chunks",
+    # 2026-09-11: §3.3 names the reference implementation's table (`cached_at`-based, the
+    # majority pattern) and §9.1 names the four tables whose `user_id` FK was dropped.
+    "profit_power_cache", "portfolios",
+    # §3.3 / §10: the two integrations that still own a Supabase cache, the long-TTL
+    # AI-intel caches, the soft/hard-expiry one; §9.1: the never-FK'd unlinked tables.
+    "short_interest_cache", "crypto_coin_id_cache", "competitor_intel_cache",
+    "moat_intel_cache", "ip_intel_cache", "ai_insight_cache",
+    "user_learn_progress", "push_send_log",
 }
 
 
@@ -447,7 +455,7 @@ def test_every_real_table_the_doc_mentions_is_curated() -> None:
 # compensating value. Both frontend/ios/ios_structure.txt and iOS_ARCHITECTURE_GUIDE.md proved
 # that — every one of their file counts had drifted 20-70% before this pass.
 EXPECTED = {
-    "middleware_registered": 4,   # CORS, GZip, cap_json_body, add_process_time  (§8.3, §10)
+    "middleware_registered": 5,   # CORS, GZip, _security_headers, cap_json_body, add_process_time  (§8.3, §10)
     "integrations": 11,           # app/integrations/*.py excluding __init__     (§2)
 }
 
@@ -548,6 +556,150 @@ def test_doc_does_not_reintroduce_code_samples() -> None:
         f"SYSTEM_DESIGN_GUIDELINES.md has regained language-tagged code fences: {banned}. "
         f"Per §0, prescriptive code belongs in .claude/rules/*.md, not here — that duplication is "
         f"exactly what let version 1.x drift for eight months."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G. Fenced DIAGRAMS — the names drawn in boxes must be real
+# ─────────────────────────────────────────────────────────────────────────────
+# `_doc_prose()` strips fenced blocks on purpose (box-drawing noise), which is exactly why the
+# §2 and §4 diagrams rotted unnoticed until 2026-09-11: they named `EducationAgent`,
+# `NewsSummarizer`, `UserService`, `NewsService`, `WatchlistState.items`,
+# `ResearchState.generating` and `ResearchState.selectedPersona` — none of which existed,
+# and one of which (`selectedPersona`) the code carries a standing comment FORBIDDING.
+# The check is deliberately narrow: only tokens that LOOK like a declared type (a known
+# suffix) or a backend module, so a diagram can still say "Views" or "+ 8 more".
+
+_DIAGRAM_TYPE_SUFFIXES = ("State", "Service", "Agent", "Repository", "Manager", "Client",
+                          "Summarizer", "ViewModel")
+# Framework / language types a diagram may legitimately draw without the repo declaring them.
+_DIAGRAM_FOREIGN_TYPES = {"NavigationStack", "URLCache", "UserDefaults"}
+_DIAGRAM_MODULE_RE = re.compile(r"\b([a-z][a-z0-9_]*_(?:service|prompts|router|specialists|agent))\b")
+
+
+def _doc_fenced() -> str:
+    return "\n".join(re.findall(r"```(?:\w+)?\n(.*?)```", _doc_text(), flags=re.S))
+
+
+def _diagram_type_tokens() -> set[str]:
+    suffix = "|".join(_DIAGRAM_TYPE_SUFFIXES)
+    toks = set(re.findall(rf"\b([A-Z][A-Za-z0-9]*(?:{suffix}))\b", _doc_fenced()))
+    return toks - _DIAGRAM_FOREIGN_TYPES
+
+
+def _declared_anywhere(sym: str) -> bool:
+    swift_pat = _SWIFT_DEF.format(sym=re.escape(sym))
+    py_pat = rf"\bclass {re.escape(sym)}\b"
+    return (any(re.search(swift_pat, src, flags=re.M) for _, src in _ios_swift())
+            or any(re.search(py_pat, src, flags=re.M) for _, src in _backend_py()))
+
+
+def test_diagram_scan_is_not_vacuous() -> None:
+    toks = _diagram_type_tokens()
+    assert {"AppState", "StockRepository", "APIClient", "ResearchAgent"} <= toks, sorted(toks)
+    mods = set(_DIAGRAM_MODULE_RE.findall(_doc_fenced()))
+    assert {"research_service", "chat_service", "narrative_prompts"} <= mods, sorted(mods)
+
+
+@pytest.mark.parametrize("sym", sorted(_diagram_type_tokens()))
+def test_every_type_drawn_in_a_diagram_is_declared(sym: str) -> None:
+    assert _declared_anywhere(sym), (
+        f"A fenced diagram in SYSTEM_DESIGN_GUIDELINES.md draws `{sym}`, but nothing in the iOS "
+        f"or backend tree declares it. Rename the box to the real type, or add it to "
+        f"_DIAGRAM_FOREIGN_TYPES if it is a framework type."
+    )
+
+
+@pytest.mark.parametrize("mod", sorted(set(_DIAGRAM_MODULE_RE.findall(_doc_text()))))
+def test_every_backend_module_drawn_in_a_diagram_exists(mod: str) -> None:
+    services = _BACKEND / "app" / "services"
+    assert (services / f"{mod}.py").exists() or (services / "agents" / f"{mod}.py").exists(), (
+        f"SYSTEM_DESIGN_GUIDELINES.md draws `{mod}` as a backend module; there is no "
+        f"app/services/{mod}.py or app/services/agents/{mod}.py"
+    )
+
+
+# §4.1 draws the MEMBERS of the four state objects. Checked brace-bound inside the declaring
+# type (testing.md §3 rule 2): a `var reports` on some other type must not satisfy
+# `ResearchState.reports`.
+_CURATED_STATE_MEMBERS = [
+    ("AuthState", "status"), ("AuthState", "accessToken"),
+    ("UserState", "profile"), ("UserState", "credits"), ("UserState", "tier"),
+    ("WatchlistState", "stocks"), ("WatchlistState", "isLoading"),
+    ("ResearchState", "reports"), ("ResearchState", "generatingReports"),
+]
+
+
+def _section_4_1_block() -> str:
+    """The one fenced block that draws the four state objects — a bare substring over ALL
+    fenced blocks would find `status` / `credits` / `tier` in unrelated diagrams."""
+    blocks = re.findall(r"```(?:\w+)?\n(.*?)```", _doc_text(), flags=re.S)
+    hits = [b for b in blocks if "AuthState" in b and "ResearchState" in b]
+    assert len(hits) == 1, f"expected exactly one §4.1 state diagram, found {len(hits)}"
+    return hits[0]
+
+
+def _swift_type_body(src: str, name: str) -> str | None:
+    m = re.search(rf"^(?:final\s+)?(?:class|struct|actor)\s+{re.escape(name)}\b[^\n]*\{{", src, flags=re.M)
+    if not m:
+        return None
+    depth, i = 0, m.end() - 1
+    while i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.end():i]
+        i += 1
+    return None
+
+
+@pytest.mark.parametrize("owner,member", _CURATED_STATE_MEMBERS,
+                         ids=[f"{o}.{m}" for o, m in _CURATED_STATE_MEMBERS])
+def test_state_members_drawn_in_section_4_exist(owner: str, member: str) -> None:
+    src = _strip_comments((_IOS / "Core" / "State" / "AppState.swift").read_text(encoding="utf-8"),
+                          swift=True)
+    body = _swift_type_body(src, owner)
+    assert body is not None, f"{owner} is not declared in AppState.swift"
+    assert re.search(rf"\bvar {re.escape(member)}\b", body), (
+        f"§4.1 draws `{owner}.{member}`, but {owner}'s body declares no such property"
+    )
+    block = _section_4_1_block()
+    assert re.search(rf"\b{re.escape(member)}\b", block), (
+        f"§4.1 no longer draws `{member}` — drop it from the curated list"
+    )
+
+
+def test_section_4_does_not_draw_the_forbidden_member() -> None:
+    """AppState.swift carries a standing comment forbidding `selectedPersona` on ResearchState;
+    the diagram drew it for months."""
+    assert "selectedPersona" not in _doc_fenced()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# H. Cross-references into .claude/rules/*.md must point at a section that exists
+# ─────────────────────────────────────────────────────────────────────────────
+_RULE_XREF = re.compile(r"\.claude/rules/([\w-]+)\.md[^\n§]{0,12}§\s*(\d+[a-z]?)")
+
+
+def _rule_xrefs() -> set[tuple[str, str]]:
+    return set(_RULE_XREF.findall(_doc_text()))
+
+
+def test_rule_xref_scan_is_not_vacuous() -> None:
+    refs = _rule_xrefs()
+    assert ("auth", "1a") in refs and len(refs) >= 3, sorted(refs)
+
+
+@pytest.mark.parametrize("rule,section", sorted(_rule_xrefs()), ids=lambda x: str(x))
+def test_every_rule_cross_reference_resolves(rule: str, section: str) -> None:
+    p = _REPO / ".claude" / "rules" / f"{rule}.md"
+    assert p.exists(), f"SYSTEM_DESIGN_GUIDELINES.md cites .claude/rules/{rule}.md, which does not exist"
+    text = p.read_text(encoding="utf-8")
+    assert re.search(rf"^#{{2,4}}\s+{re.escape(section)}\.", text, flags=re.M), (
+        f"SYSTEM_DESIGN_GUIDELINES.md cites .claude/rules/{rule}.md §{section}, "
+        f"but that file has no `## {section}.` heading"
     )
 
 

@@ -320,6 +320,11 @@ COMMODITY_NEWS_TICKERS: Dict[str, str] = {
 _WITHDRAWN_COMMODITIES: Dict[str, str] = {
     "KC": "coffee", "CT": "cotton", "CC": "cocoa",
     "HG": "copper", "ZW": "wheat", "ZC": "corn", "ZS": "soybeans", "SB": "sugar",
+    # The remaining roots `asset_class._COMMODITY_SYMBOLS` classifies as commodities. They
+    # fell through to `_resolve_fmp_symbol` → the generic entitlement error, which iOS
+    # renders with a retry button that can never succeed; this table is what turns that
+    # into the contractual FMP_NOT_ENTITLED with a human reason.
+    "LB": "lumber", "OJ": "orange juice", "Z": "wheat",
 }
 
 
@@ -1396,8 +1401,9 @@ class CommodityService:
         #      6.6%/yr — and the label said "Average Annual Return".
         #   2. `sp_benchmark=10.5` was a hardcoded literal compared against whatever
         #      window the commodity happened to have, under a label naming that window.
-        #      With no `badge_threshold` in this schema iOS falls back to 0, so the card
-        #      also rendered an "Outperforming"/"Underperforming" verdict off it.
+        #      The card also rendered an "Outperforming"/"Underperforming" verdict off it.
+        #      (`badge_threshold` is now SENT as 0.0 — the old "iOS falls back to 0" was
+        #      wrong: the shared client decoder falls back to CRYPTO's 5.0.)
         #
         # There was a third, silent one: `if _bench_base and price` lets a NaN `price`
         # through (NaN is truthy), and it survived `round()` into the REQUIRED
@@ -1426,6 +1432,11 @@ class CommodityService:
                     # so "we could not measure it" travels in `benchmark_available`.
                     sp_benchmark=sp_cagr if sp_cagr is not None else 0.0,
                     benchmark_name="S&P 500",
+                    # EXPLICIT, not defaulted on the client: the one shared
+                    # `BenchmarkSummaryDTO` decoder falls back to crypto's 5.0, which
+                    # suppressed the verdict badge on gold/silver/palladium. See the
+                    # schema docstring.
+                    badge_threshold=0.0,
                     since_date=format_since(
                         derived.get("bench_since") or _bench_base.get("date"), style="day"
                     ),

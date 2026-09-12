@@ -1727,8 +1727,15 @@ class WhaleHydrator:
             sb.table("whale_profile_cache").delete().eq(
                 "whale_id", whale_id
             ).execute()
-        except Exception:
-            pass  # Table may not exist yet
+        except Exception as exc:
+            # NOT silent. A failed delete leaves the STALE assembled profile serving as
+            # though the hydration never ran — the one outcome this call exists to prevent,
+            # and the hardest to spot because everything else in the run reports success.
+            logger.warning(
+                "whale_profile_cache invalidation failed for whale_id=%s (%s: %s) — the "
+                "stale assembled profile will keep serving until its own TTL expires",
+                whale_id, type(exc).__name__, exc,
+            )
 
         # 1. Upsert snapshot.
         # `trade_groups` is NOT a column — it lives only in-memory (synced to the

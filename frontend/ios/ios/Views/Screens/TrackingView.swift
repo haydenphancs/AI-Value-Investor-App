@@ -354,7 +354,18 @@ struct TrackingContentViewWithBinding: View {
         // auth was still restoring. Same `.task(id: isActiveTab)` idiom as HomeDashboardView,
         // UpdatesView and ResearchView.
         .task(id: isActiveTab) {
-            guard isActiveTab else { return }
+            // Leaving the tab STOPS the 30-second price poll. `.task(id:)` re-runs its
+            // body whenever `isActiveTab` flips, so this branch IS the teardown — a
+            // trailing `defer` would fire the moment the load returned and kill the timer
+            // it had just started.
+            //
+            // `stopPriceRefreshTimer()` had no caller anywhere, so the poll ran for the
+            // life of the process: re-fetching `/tracking/assets` every 30 s from every
+            // other tab, in the background, and after sign-out.
+            guard isActiveTab else {
+                viewModel.stopPriceRefreshTimer()
+                return
+            }
             await viewModel.loadIfNeeded()
         }
         // A push tap that resolved to no detail screen lands on the Alerts segment.

@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 # unmatched route.
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
+import re
 import time
 import asyncio
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.integrations.fmp import close_fmp_client
 from app.integrations.openfda import close_openfda_client
 from app.integrations.uspto import close_uspto_client
 from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
+from app.utils.supabase_async import sb_exec
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -39,6 +41,95 @@ logger = logging.getLogger(__name__)
 # side is scrubbed separately in _sentry_before_send below.
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(SecretRedactingFilter())
+
+# ── Sentry flood cap ───────────────────────────────────────────────────────
+# One upstream incident must not spend the month's error quota.
+#
+# On 2026-09-04 a single day of FMP 402s filed ~5,500 events (`quote` 2,292,
+# `batch-quote` 1,016, `historical-chart/5min` 473, …) and the project has accepted
+# NOTHING since — so the tracebacks prod emitted every hour for the next week were
+# invisible, and the outage that silenced the alarm was the same one the alarm existed
+# to report. A per-GROUP hourly ceiling keeps the first N of every distinct failure
+# (which is all triage ever reads) and drops the repeats.
+#
+# Grouped on the coarse shape Sentry itself groups on — the exception type plus the
+# logger and a digits-stripped message head — NOT on the full message, so a
+# per-symbol storm ("… failed for AAPL", "… failed for MSFT") collapses into one
+# bucket instead of minting 500 of them. The drop is announced ONCE per bucket per
+# window in the Railway log, so suppression is never silent.
+_SENTRY_GROUP_CAP = 20            # events per group per window
+_SENTRY_CAP_WINDOW_SECONDS = 3600
+_sentry_group_counts: dict = {}
+_sentry_window_started: float = 0.0
+
+
+#: Ticker-shaped tokens: a bare 1-6 letter symbol, optionally `^`-prefixed (indices) or
+#: USD/USDT-suffixed (pairs). `\b` means SNAKE_CASE error codes are untouched (the `_` is a
+#: word character, so `AUTH_REQUIRED` never matches), which is what keeps distinct failures
+#: in distinct buckets while `… failed for AAPL` / `… for ^GSPC` / `… for SOLUSD` collapse
+#: into the ONE failure they are.
+_SENTRY_SYMBOLISH = re.compile(r"\^?\b[A-Z]{1,6}(?:USDT?)?\b")
+
+
+def _sentry_crash_site(exc_value: dict) -> str:
+    """`module:function` of the frame that raised — what Sentry itself groups on."""
+    frames = ((exc_value.get("stacktrace") or {}).get("frames") or [])
+    if not frames:
+        return ""
+    last = frames[-1] if isinstance(frames[-1], dict) else {}
+    where = last.get("module") or last.get("filename") or ""
+    return f"{where}:{last.get('function') or ''}"
+
+
+def _sentry_group_key(event: dict) -> str:
+    exc_values = ((event.get("exception") or {}).get("values") or [])
+    last_exc = exc_values[-1] if exc_values and isinstance(exc_values[-1], dict) else {}
+    exc_type = last_exc.get("type") or ""
+    logger_name = event.get("logger") or ""
+    # `(… or {})`, not `.get("logentry", {})`: an explicit `"logentry": None` would make
+    # the chained `.get` raise INSIDE before_send.
+    message = (event.get("logentry") or {}).get("message") or event.get("message") or ""
+    if not isinstance(message, str):
+        message = str(message)
+    if not logger_name and not message:
+        # THE UNHANDLED-EXCEPTION SHAPE. An event from `event_from_exception` — i.e. every
+        # crash `FastApiIntegration` captures at the ASGI layer — carries only
+        # `['exception', 'level']`: no logger, no logentry, no message. So the key
+        # collapsed to "<ExcType>||" for ALL of them, and once one endpoint filed 20
+        # ValueError 500s in an hour, the next previously-unseen ValueError anywhere in the
+        # process was dropped unseen — with the "announced once per bucket" warning already
+        # spent on the unrelated storm. That is the same invisible-traceback failure the cap
+        # was written to prevent. The exception's own value plus the crashing frame (and the
+        # route, as a last resort) are what discriminate here — and they are read ONLY in
+        # this branch, so the logger path's bucketing is untouched.
+        message = str(last_exc.get("value") or "")
+        logger_name = _sentry_crash_site(last_exc) or (event.get("transaction") or "")
+    head = _SENTRY_SYMBOLISH.sub("<SYM>", re.sub(r"[0-9]+", "#", message))[:80]
+    return f"{exc_type}|{logger_name}|{head}"
+
+
+def _sentry_group_is_flooding(event: dict) -> bool:
+    """True when this group has already filed `_SENTRY_GROUP_CAP` events this window."""
+    global _sentry_window_started
+    now = time.monotonic()
+    if now - _sentry_window_started >= _SENTRY_CAP_WINDOW_SECONDS:
+        _sentry_window_started = now
+        _sentry_group_counts.clear()
+    key = _sentry_group_key(event)
+    seen = _sentry_group_counts.get(key, 0) + 1
+    _sentry_group_counts[key] = seen
+    if seen <= _SENTRY_GROUP_CAP:
+        return False
+    if seen == _SENTRY_GROUP_CAP + 1:
+        # Plain print-free, logger-based, and deliberately NOT logger.error: an error
+        # here would itself become an event and re-enter this function.
+        logging.getLogger(__name__).warning(
+            "Sentry flood cap: group %r hit %d events this hour — further copies are "
+            "dropped until the window rolls (the events are still in the Railway log)",
+            key, _SENTRY_GROUP_CAP,
+        )
+    return True
+
 
 # ── Error monitoring (Sentry) ──────────────────────────────────────────────
 # Init ONLY when a DSN is present AND we're running in production. The DSN belongs
@@ -68,6 +159,8 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
             code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
             if code:
                 tags["error_code"] = str(code)
+        if _sentry_group_is_flooding(event):
+            return None
         # Scrub any API key / token that leaked into the message or exception value
         # (e.g. FMP's apikey= in a request URL) so it is NEVER stored in Sentry.
         return scrub_sentry_event(event)
@@ -95,6 +188,12 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
         max_request_body_size="never",
     )
     logger.info("Sentry error monitoring enabled (environment=%s)", settings.ENVIRONMENT)
+
+
+#: Background tasks that are SUPPOSED to finish. Everything else `_spawn` starts is a
+#: `while True` loop whose normal return is a bug worth a WARNING; these run once by
+#: design, and flagging them every boot is how a REAL loop death gets lost in the noise.
+_ONE_SHOT_TASKS = frozenset({"run_whale_profile_pre_warmer"})
 
 
 @asynccontextmanager
@@ -172,6 +271,11 @@ async def lifespan(app: FastAPI):
                 "Background task %r DIED and will not restart (%s: %s)",
                 task.get_name(), type(exc).__name__, exc, exc_info=exc,
             )
+        elif task.get_name() in _ONE_SHOT_TASKS:
+            # A deliberate one-shot. Announcing its normal return as a dead loop trained
+            # everyone to ignore this WARNING — which is the one line that matters when a
+            # real loop dies.
+            logger.info("Background task %r completed (one-shot)", task.get_name())
         else:
             # A `while True` loop returning normally is also a bug, just a quiet one.
             logger.warning("Background task %r exited without an error", task.get_name())
@@ -213,8 +317,9 @@ async def lifespan(app: FastAPI):
         # without it, prices render but every change % is blank.
         _spawn(_run_close_snapshot_loop(), "run_close_snapshot_loop")
 
-        # Pre-warm ApeWisdom social mentions cache at startup
-        _spawn(_warm_social_cache(), "warm_social_cache")
+        # Pre-warm the ApeWisdom social mentions cache at startup, then write the daily
+        # `social_mentions_history` snapshot the 7-day counts are read from.
+        _spawn(_run_social_snapshot_loop(), "run_social_snapshot_loop")
 
         # Start background news pre-warmer for popular watchlist tickers
         _spawn(_run_news_pre_warmer(), "run_news_pre_warmer")
@@ -364,8 +469,43 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down")
 
 
-async def _warm_social_cache():
-    """Pre-warm ApeWisdom cache at startup so first sentiment requests have social data."""
+_SOCIAL_SNAPSHOT_INTERVAL_SECONDS = 3600
+
+
+async def _social_snapshot_once(last_done):
+    """Write today's `social_mentions_history` snapshot unless this process already did.
+
+    Returns the date now recorded as done — unchanged when nothing was stored (ApeWisdom
+    cache still cold, upsert failed), so the next hourly tick retries. The upsert is
+    idempotent on (ticker, snapshot_date, source), so a duplicate run is harmless.
+    """
+    from datetime import date as _date
+
+    today = _date.today()
+    if last_done == today:
+        return last_done
+    from app.services.social_mentions_service import get_social_mentions_service
+
+    stored = await get_social_mentions_service().snapshot_all()
+    if stored <= 0:
+        logger.warning(
+            "Social mentions snapshot for %s stored 0 tickers — retrying next tick", today
+        )
+        return last_done
+    logger.info("Social mentions snapshot for %s stored %d tickers", today, stored)
+    return today
+
+
+async def _run_social_snapshot_loop():
+    """Pre-warm the ApeWisdom cache at startup, then snapshot it to Supabase once a day.
+
+    `SocialMentionsService.snapshot_all` — the ONLY writer of `social_mentions_history`,
+    whose docstring said "called by scheduled task" — had no caller at all until
+    2026-09-11: the table stayed empty, `get_mentions_7d` answered (0, 0) for every
+    ticker, and the 7-day social counts on the Analysis tab were fabricated zeros (on top
+    of the missing service_role grant migration 169 fixes). This loop is that scheduled
+    task: hourly tick, one snapshot per UTC day, retried within the day on failure.
+    """
     await asyncio.sleep(5)  # let app start
     try:
         from app.integrations.apewisdom import refresh_cache
@@ -373,6 +513,16 @@ async def _warm_social_cache():
         logger.info(f"ApeWisdom cache pre-warmed: {len(cache)} tickers")
     except Exception as e:
         logger.warning(f"ApeWisdom pre-warm failed: {e}")
+
+    last_done = None
+    while True:
+        try:
+            last_done = await _social_snapshot_once(last_done)
+        except Exception as e:
+            logger.error(
+                "Social mentions snapshot failed: %s: %s", type(e).__name__, e, exc_info=True
+            )
+        await asyncio.sleep(_SOCIAL_SNAPSHOT_INTERVAL_SECONDS)
 
 
 async def _run_news_pre_warmer():
@@ -653,7 +803,7 @@ async def _run_report_pre_warmer():
 
             top_n = settings.REPORT_PREWARM_TOP_N
             sb = get_supabase()
-            rows = sb.rpc("get_top_watchlist_tickers", {"n": top_n}).execute()
+            rows = (await sb_exec(sb.rpc("get_top_watchlist_tickers", {"n": top_n})))
             tickers = [r["ticker"] for r in (rows.data or []) if r.get("ticker")]
 
             if not tickers:
@@ -967,6 +1117,19 @@ async def _run_starter_warm_loop():
         await asyncio.sleep(max(60, settings.CHAT_STARTER_WARM_INTERVAL_SECONDS))
 
 
+def _fmp_history_servable(symbols) -> list:
+    """Drop the watchlist rows FMP's `historical-price-eod` cannot serve.
+
+    `get_top_watchlist_tickers` now carries ^GSPC and BTCUSD/ETHUSD/…; each cost the σ
+    precompute one refused call and one WARNING per day for a permanent condition. The
+    manifest's symbol rule is the exact predicate (indices, FX/crypto pairs); a coin's σ
+    would need a CoinGecko series, which is a feature, not a fix.
+    """
+    from app.integrations.fmp_entitlements import is_blocked_symbol
+
+    return [s for s in dict.fromkeys(symbols) if s and not is_blocked_symbol(s)]
+
+
 async def _run_volatility_precompute_job():
     """Daily σ precompute for the Updates volatility-relative move trigger.
 
@@ -987,10 +1150,10 @@ async def _run_volatility_precompute_job():
             res = get_supabase().rpc(
                 "get_top_watchlist_tickers", {"n": 200}
             ).execute()
-            return [
+            return _fmp_history_servable(
                 str(r["ticker"]).upper()
                 for r in (res.data or []) if r.get("ticker")
-            ]
+            )
         except Exception as e:
             logger.warning(
                 "Volatility precompute: watchlist read failed: %s: %s",
@@ -1250,7 +1413,7 @@ async def _run_whale_profile_pre_warmer():
 
         sb = get_supabase()
         rows = (
-            sb.table("whales").select("id,name").limit(500).execute()
+            (await sb_exec(sb.table("whales").select("id,name").limit(500)))
         ).data or []
         if not rows:
             logger.warning("Whale profile pre-warm: no whales to warm")
@@ -1380,14 +1543,15 @@ async def _run_whale_hydration_job():
                     from app.database import get_supabase
                     sb = get_supabase()
                     politicians = (
-                        sb.table("whales")
-                        .select("*")
-                        .in_(
+                        (await sb_exec(
+                            sb.table("whales")
+                            .select("*")
+                            .in_(
                             "data_source",
                             ["congressional_house", "congressional_senate"],
-                        )
-                        .limit(500)
-                        .execute()
+                            )
+                            .limit(500)
+                        ))
                     )
                     for whale in (politicians.data or []):
                         try:
@@ -1482,14 +1646,57 @@ app = FastAPI(
 )
 
 # CORS
+#
+# ⚠️ `allow_origins=["*"]` and `allow_credentials=True` are mutually exclusive in the CORS
+# spec, and Starlette resolves the contradiction by ECHOING the caller's Origin back with
+# `access-control-allow-credentials: true` — verified live against production on
+# 2026-09-12: an `Origin: https://evil.example` preflight to /api/v1/billing/plans came
+# back with `access-control-allow-origin: https://evil.example` and credentials allowed.
+# `ALLOWED_ORIGINS` defaults to `["*"]` in config.py and nothing forces a real list in
+# production. The blast radius is small TODAY because this API authenticates with a bearer
+# header and sets no cookies, so a browser has no ambient credential to ride — but that is
+# a property of the auth design, not of this configuration, and the day anything
+# cookie-shaped ships it becomes a cross-origin read of every signed-in user's data.
+#
+# The wildcard is kept for local tooling; what is dropped is the credentials promise that
+# cannot be honoured with it. An explicit origin list still gets credentials.
+_cors_wildcard = "*" in settings.ALLOWED_ORIGINS
+if _cors_wildcard and settings.ENVIRONMENT == "production":
+    logger.warning(
+        "CORS: ALLOWED_ORIGINS is ['*'] in production — serving credentials=False. Set "
+        "ALLOWED_ORIGINS to the real origin list on Railway to restore credentialed CORS."
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Baseline headers for the browser-reachable surface.
+
+    `/privacy`, `/terms`, `/support` and the AASA file are served as real pages from this
+    same host (verified: `GET /privacy` → 200 text/html), and carried no
+    `Strict-Transport-Security`, `X-Content-Type-Options` or `X-Frame-Options` at all.
+    Cheap, and applied to every response so a future HTML route cannot forget it.
+    HSTS is only meaningful over TLS, so it is sent only when the (proxy-aware) scheme is
+    https — Railway terminates TLS and forwards `X-Forwarded-Proto`, which uvicorn's
+    `--proxy-headers` turns into `request.url.scheme`.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if request.url.scheme == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
+    return response
 
 # GZip
 app.add_middleware(GZipMiddleware, minimum_size=1000)

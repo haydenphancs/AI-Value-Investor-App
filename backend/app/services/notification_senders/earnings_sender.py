@@ -60,9 +60,18 @@ MIN_ABS_ESTIMATE = 0.01
 # cap (4/day) is the backstop, but doing the work at all is the cost being avoided.
 MAX_SYMBOLS_PER_PASS = 60
 
-#: How many distinct watched tickers the RPC returns. Far above any plausible
-#: watchlist breadth, so the filter itself never becomes the truncation.
-_WATCHED_LOOKUP_LIMIT = 5000
+#: How many distinct watched tickers the RPC returns.
+#:
+#: ⚠️ 1000, NOT a bigger number that reads as "no limit". This said 5000 and claimed to be
+#: "far above any plausible watchlist breadth, so the filter itself never becomes the
+#: truncation" — but PostgREST clamps every response on this project to ~1,000 rows
+#: whatever the client asks for, RPC results included. So the effective value was already
+#: 1000 and the constant was describing a bound that did not exist. The rows it silently
+#: drops are the LEAST-watched tickers, which is the better half of the trade, but the
+#: number has to tell the truth or the next reader will size a decision on it. If the
+#: watched universe ever genuinely exceeds this, the RPC needs paging — raising the
+#: constant alone changes nothing.
+_WATCHED_LOOKUP_LIMIT = 1000
 
 
 def _et_today(now: Optional[datetime] = None) -> date:

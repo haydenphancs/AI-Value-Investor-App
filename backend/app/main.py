@@ -1662,9 +1662,28 @@ app = FastAPI(
 # cannot be honoured with it. An explicit origin list still gets credentials.
 _cors_wildcard = "*" in settings.ALLOWED_ORIGINS
 if _cors_wildcard and settings.ENVIRONMENT == "production":
-    logger.warning(
-        "CORS: ALLOWED_ORIGINS is ['*'] in production — serving credentials=False. Set "
-        "ALLOWED_ORIGINS to the real origin list on Railway to restore credentialed CORS."
+    # INFO, not WARNING, and it no longer tells anyone to change anything.
+    #
+    # Two things were wrong with the old WARNING. First, it described a defect that does
+    # not exist here: audited 2026-09-12, NOTHING calls this API cross-origin from a
+    # browser. There is no web front end in the repo, the only HTML this host serves
+    # (/privacy, /terms, /support) is static prose with zero `<script>`, the iOS app has no
+    # WKWebView and native URLSession sends no `Origin` at all, and there is not one
+    # `set_cookie` in the backend — so `allow_credentials` is a promise with no consumer
+    # and `*` with credentials OFF grants a browser nothing it could not already fetch.
+    #
+    # Second, and worse: following it caused an OUTAGE. `ALLOWED_ORIGINS` is a `list[str]`
+    # on a pydantic-settings model, so the environment value is parsed as JSON — and
+    # `Settings()` is constructed at IMPORT. Measured: both
+    # `ALLOWED_ORIGINS=https://caydexinvest.com` and a comma-separated pair raise
+    # `SettingsError` before the app object exists, i.e. Railway boot-loops. The obvious
+    # way to obey the old sentence was the way to take production down, so the message now
+    # states the only form that parses.
+    logger.info(
+        "CORS: ALLOWED_ORIGINS is ['*'] — serving credentials=False, which is correct "
+        "while nothing calls this API cross-origin from a browser. If that ever changes, "
+        'the value MUST be a JSON array (ALLOWED_ORIGINS=["https://example.com"]); a bare '
+        "or comma-separated string raises SettingsError at import and the app will not boot."
     )
 app.add_middleware(
     CORSMiddleware,

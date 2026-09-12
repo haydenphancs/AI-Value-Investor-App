@@ -177,3 +177,59 @@ def test_an_unhandled_500_is_logged_with_the_method_path_and_request_id():
     for token in ("request.method", "request.url.path", "request_id", "exc_info=True"):
         assert token in code, f"the unhandled-500 log does not carry {token}"
 
+
+# ── the setting's own shape is a production hazard ──────────────────────────────────
+
+
+@pytest.mark.parametrize("value", [
+    "https://caydexinvest.com",
+    "https://a.example.com,https://b.example.com",
+    "*",
+])
+def test_a_non_json_allowed_origins_value_cannot_boot_the_app(value, monkeypatch):
+    """`ALLOWED_ORIGINS` is a `list[str]` on a pydantic-settings model, so the environment
+    value is parsed as JSON — and `Settings()` is constructed at IMPORT.
+
+    The obvious way to "set the real origin list" is therefore the way to take production
+    down: a bare or comma-separated string raises `SettingsError` before the app object
+    exists and Railway boot-loops. This test EXISTS TO DOCUMENT that trap next to the
+    startup message, so nobody re-words the message back into an invitation.
+    """
+    from pydantic_settings.sources import SettingsError
+
+    from app.config import Settings
+
+    monkeypatch.setenv("ALLOWED_ORIGINS", value)
+    with pytest.raises(SettingsError):
+        Settings()
+
+
+def test_the_json_array_form_is_the_one_that_parses(monkeypatch):
+    """Control — and the exact string to paste into Railway."""
+    from app.config import Settings
+
+    monkeypatch.setenv("ALLOWED_ORIGINS", '["https://caydexinvest.com"]')
+    assert Settings().ALLOWED_ORIGINS == ["https://caydexinvest.com"]
+
+
+def test_the_startup_message_names_the_json_form_and_does_not_demand_a_change():
+    """The message must not tell an operator to do the thing that boot-loops the app."""
+    import ast
+    import inspect
+    import re
+
+    import app.main as main_mod
+
+    src = inspect.getsource(main_mod)
+    i = src.index("_cors_wildcard = ")
+    block = src[i:i + 2500]
+    code = "\n".join(re.sub(r"#.*$", "", line) for line in block.splitlines())
+    assert "JSON array" in code, (
+        "the startup message does not say the value must be a JSON array — a bare string "
+        "raises SettingsError at import and the app will not boot"
+    )
+    assert "logger.warning(" not in code.split("app.add_middleware")[0], (
+        "this is not a defect while nothing calls the API cross-origin from a browser; a "
+        "WARNING trains everyone to ignore the log"
+    )
+

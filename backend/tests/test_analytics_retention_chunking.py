@@ -19,6 +19,13 @@ _SERVER_MAX_ROWS = 1000          # what PostgREST actually returns on this proje
 
 
 class _Table:
+    """Models the SERVER-SIDE ROW CAP, which is the whole point: a fake that honours the
+    client's requested limit would make the buggy 5000 look like it worked.
+
+    Rows are a COUNT plus a cursor, not a list — the bounded-pass test drains 100k rows and
+    an O(n) filter per chunk makes it quadratic.
+    """
+
     def __init__(self, state):
         self.s = state
         self._op = None
@@ -45,16 +52,19 @@ class _Table:
     def execute(self):
         if self._op == "select":
             n = min(getattr(self, "_limit", _SERVER_MAX_ROWS), _SERVER_MAX_ROWS)
-            take = self.s["rows"][:n]
-            self.s["selects"].append(len(take))
-            return type("R", (), {"data": [{"id": i} for i in take]})()
-        self.s["rows"] = [r for r in self.s["rows"] if r not in set(self._ids)]
-        self.s["deleted"] += len(self._ids)
+            take = min(n, self.s["remaining"])
+            self.s["selects"].append(take)
+            base = self.s["next_id"]
+            return type("R", (), {"data": [{"id": base + i} for i in range(take)]})()
+        n = len(self._ids)
+        self.s["remaining"] -= n
+        self.s["next_id"] += n
+        self.s["deleted"] += n
         return type("R", (), {"data": []})()
 
 
 def _svc(n_rows):
-    state = {"rows": list(range(n_rows)), "deleted": 0, "selects": []}
+    state = {"remaining": n_rows, "next_id": 0, "deleted": 0, "selects": []}
     svc = an.AnalyticsService.__new__(an.AnalyticsService)
     svc.supabase = type("S", (), {"table": lambda _s, _n: _Table(state)})()
     return svc, state
@@ -79,11 +89,14 @@ def test_one_pass_deletes_far_more_than_a_single_page():
 def test_the_pass_is_still_bounded():
     """Chunking exists so one pass cannot become an unbounded DELETE that times out and
     retries forever without progress."""
-    svc, state = _svc(400_000)
-    deleted = svc.sweep_expired()
     cap = an.AnalyticsService._SWEEP_CHUNK * an.AnalyticsService._SWEEP_MAX_CHUNKS
+    svc, state = _svc(cap * 3)
+    deleted = svc.sweep_expired()
     assert deleted == cap, f"expected the pass to stop at {cap}, got {deleted}"
-    assert state["rows"], "the sweep drained the table in one pass — it is unbounded"
+    assert state["remaining"] > 0, (
+        "the sweep drained the table in one pass — it is unbounded, and the first "
+        "post-retention sweep is exactly the one that can time out and never progress"
+    )
 
 
 def test_an_empty_table_costs_one_select_and_no_delete():

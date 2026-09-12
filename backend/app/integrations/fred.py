@@ -231,12 +231,20 @@ class FREDClient:
 
         # Fetch enough rows for a 1Y window on monthly data (13 obs)
         # plus a buffer so the 6M point (obs[6]) lands on real data.
-        obs = await self.get_observations(series_id, limit=14)
+        # ⚠️ ONE definition of the limit, because the failure-memo key below is derived
+        # from it. This read `limit=14` here and re-spelled the key as the literal
+        # `(series_id, "obs:14")` five lines down: correct today, and silently vacuous the
+        # moment anyone widens the window — `_failed_recently` would return False, the
+        # `_cache_set(cache_key, None)` would run, and one FRED timeout would again mean
+        # "this series has no observations" for six hours, which is what took the WTI and
+        # Henry Hub screens down.
+        obs_limit = 14
+        obs = await self.get_observations(series_id, limit=obs_limit)
         if not obs:
             # Only memoise "this series genuinely has no observations". When the
             # observations read FAILED, `_failed_recently` is what holds the herd back —
             # caching None here for 6 h would re-create the bug one level up.
-            if _failed_recently((series_id, "obs:14")):
+            if _failed_recently((series_id, f"obs:{obs_limit}")):
                 return None
             _cache_set(cache_key, None)
             return None

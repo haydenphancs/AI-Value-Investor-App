@@ -431,8 +431,17 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
         rows = resp.json()
 
         if not rows or not isinstance(rows, list):
-            logger.info(f"FINRA: no data for {ticker}")
-            return None
+            # `_NO_DATA`, not None — FINRA ANSWERED (HTTP 200) and has nothing for this
+            # symbol, which is the same fact a 204 carries. Returning None classified it as
+            # a FAILURE and cost twice: the caller then paid the Nasdaq fallback the 204
+            # branch exists to skip (up to `_NASDAQ_TIMEOUT_SECONDS` per attempt), and the
+            # memo got `_FAILURE_TTL_SECONDS` (60 s) instead of `_EMPTY_TTL_SECONDS`
+            # (900 s), so an unanswerable symbol was re-attempted 15x more often than
+            # intended. 204 is the dominant shape today, which is why this was only a cost
+            # bug — but any upstream change to `200 []` would have moved every uncovered
+            # ticker back onto the slow path silently.
+            logger.debug("FINRA: no short-interest rows for %s (200, empty body)", ticker)
+            return _NO_DATA
 
         # Results are oldest-first; take the last row for the most recent data
         latest = rows[-1]

@@ -328,9 +328,6 @@ async def test_fetch_from_finra_still_returns_none_on_a_real_error(monkeypatch, 
     assert any("503" in r.getMessage() for r in caplog.records)
 
 
-async def _token():
-    return "tok"
-
 
 # ── G05/F13: the Supabase tiers run off the event loop ──────────────────────────────
 
@@ -481,3 +478,62 @@ async def test_a_200_clears_both_families(monkeypatch):
     assert out and out["shares_short"] == 1000
     assert fsi._nasdaq_auth_failures == 0 and fsi._nasdaq_transient_failures == 0
 
+
+@pytest.mark.asyncio
+async def test_a_200_with_an_empty_body_is_an_ANSWER_not_a_failure(monkeypatch):
+    """FINRA answering HTTP 200 with `[]` carries the same fact as a 204: it has nothing
+    for this symbol.
+
+    Classifying it as a failure cost twice — the caller paid the Nasdaq fallback the 204
+    branch exists to skip, and the memo got the 60 s failure TTL instead of the 900 s
+    answered-empty one, so an unanswerable symbol was re-attempted 15x more often than
+    intended.
+    """
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return []
+
+    class _Client:
+        async def post(self, *a, **k):       # the FINRA API is a POST query
+            return _Resp()
+
+    monkeypatch.setattr(fsi, "_get_finra_client", lambda: _client(_Client()))
+    monkeypatch.setattr(fsi, "_fetch_finra_token", _token)
+    monkeypatch.setattr(fsi, "_finra_kill_switch", False, raising=False)
+    monkeypatch.setattr(fsi, "_finra_rate_limited_until", 0, raising=False)
+
+    out = await fsi._fetch_from_finra("ZZZZ")
+    assert out is fsi._NO_DATA, (
+        "a 200-with-empty-body is reported as a failure, so the symbol pays the Nasdaq "
+        "timeout and gets the short failure memo"
+    )
+
+
+@pytest.mark.asyncio
+async def test_that_answer_skips_nasdaq_and_gets_the_LONG_memo(monkeypatch):
+    """End to end: the classification has to reach both consequences."""
+    nasdaq_calls = []
+
+    async def _finra(ticker):
+        return fsi._NO_DATA
+
+    async def _nasdaq(ticker):
+        nasdaq_calls.append(ticker)
+        return None
+
+    monkeypatch.setattr(fsi, "_fetch_from_finra", _finra)
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", _nasdaq)
+    assert await fsi.get_short_interest("ZZZZ") == {}
+    assert nasdaq_calls == [], "the dead Nasdaq fallback was summoned for an answered symbol"
+    ts, _ = fsi._cache["finra_short:ZZZZ"]
+    remaining = fsi._CACHE_TTL - (time.time() - ts)
+    assert remaining == pytest.approx(fsi._EMPTY_TTL_SECONDS, abs=5), (
+        f"an ANSWERED-empty symbol got a {remaining:.0f}s memo, not the "
+        f"{fsi._EMPTY_TTL_SECONDS}s one"
+    )
+
+
+async def _token():
+    return "tok"

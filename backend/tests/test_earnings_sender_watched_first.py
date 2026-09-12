@@ -169,3 +169,17 @@ def test_a_truncated_watched_set_is_announced():
         "went unnoticed"
     )
     assert "MAX_SYMBOLS_PER_PASS" in code
+
+
+def test_the_watched_lookup_limit_does_not_claim_a_bound_it_does_not_have():
+    """PostgREST clamps this project's responses to ~1,000 rows whatever the client asks
+    for — RPC results included. A constant above that describes a bound that does not
+    exist, and the previous value (5000) was commented as "far above any plausible
+    watchlist breadth, so the filter itself never becomes the truncation", which was
+    exactly backwards: the truncation was already happening at 1,000.
+    """
+    assert es._WATCHED_LOOKUP_LIMIT <= 1000, (
+        f"_WATCHED_LOOKUP_LIMIT is {es._WATCHED_LOOKUP_LIMIT}, above PostgREST's ~1000-row "
+        "server cap — the constant promises a reach the read does not have"
+    )
+

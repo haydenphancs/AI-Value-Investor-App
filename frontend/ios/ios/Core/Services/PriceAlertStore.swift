@@ -118,29 +118,36 @@ final class PriceAlertStore: ObservableObject {
 
     // MARK: - Per-ticker reads (the bell's questions)
 
-    /// Alerts on one ticker.
+    /// Alerts on one ticker, as seen from a screen of `assetType`.
     ///
     /// Crypto is matched on the BARE symbol because the app carries both forms — Home hands
     /// over `BTCUSD`, search hands over `BTC`, and `CryptoDetailView` normalizes to bare. A row
-    /// written by an older client as `BTCUSD` must still light the bell on `BTC`. The bare form
-    /// is applied ONLY to rows whose `assetType` is crypto, so a stock whose symbol happens to
-    /// end in USD is never mangled.
-    func alerts(for ticker: String) -> [PriceAlertDTO] {
+    /// written by an older client as `BTCUSD` must still light the bell on `BTC`.
+    ///
+    /// The bare match is applied ONLY when the CALLER is a crypto screen. Since migration 160
+    /// a bare `BTC` / `ETH` / `LTC` is the listed security (the Grayscale trust, the ETF), and
+    /// matching every crypto row against the caller's bare symbol handed Bitcoin's rules to
+    /// the BTC ETF screen: a badge on the ETF bell, Bitcoin rules listed under the ETF, the
+    /// per-ticker cap reached so Add was disabled, and a delete from that sheet removing a
+    /// Bitcoin alert. A non-crypto caller matches the exact symbol and skips crypto rows.
+    func alerts(for ticker: String, assetType: String? = nil) -> [PriceAlertDTO] {
         let wanted = Self.normalized(ticker)
         let wantedBare = CryptoSymbol.bare(wanted)
+        let callerIsCrypto = (assetType ?? "").lowercased() == "crypto"
         return alerts.filter { alert in
             let symbol = Self.normalized(alert.ticker)
-            if alert.assetType.lowercased() == "crypto" {
-                return CryptoSymbol.bare(symbol) == wantedBare
+            let rowIsCrypto = alert.assetType.lowercased() == "crypto"
+            if callerIsCrypto {
+                return rowIsCrypto && CryptoSymbol.bare(symbol) == wantedBare
             }
-            return symbol == wanted
+            return !rowIsCrypto && symbol == wanted
         }
     }
 
     /// What the detail-header bell renders off. ACTIVE only: a rule the user has toggled off
     /// will not fire, so badging for it would promise a notification that is not coming.
-    func hasActiveAlerts(ticker: String) -> Bool {
-        alerts(for: ticker).contains(where: \.isActive)
+    func hasActiveAlerts(ticker: String, assetType: String? = nil) -> Bool {
+        alerts(for: ticker, assetType: assetType).contains(where: \.isActive)
     }
 
     /// Active count — for one ticker, or for the whole account when `ticker` is nil.
@@ -148,8 +155,8 @@ final class PriceAlertStore: ObservableObject {
     /// ACTIVE is the only correct basis, and it is what the server counts
     /// (`price_alert_service._count_for_user` filters `is_active = True`). Counting every row
     /// is what made the Tracking caption read "20 of 20" while a 21st was still creatable.
-    func activeCount(ticker: String? = nil) -> Int {
-        let pool = ticker.map { alerts(for: $0) } ?? alerts
+    func activeCount(ticker: String? = nil, assetType: String? = nil) -> Int {
+        let pool = ticker.map { alerts(for: $0, assetType: assetType) } ?? alerts
         return pool.filter(\.isActive).count
     }
 

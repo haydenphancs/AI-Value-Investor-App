@@ -43,7 +43,7 @@ def _svc(universe):
     svc = PriceAlertService()
     svc.price = _NoQuotes()
     return svc, [
-        patch.object(PriceAlertService, "_active_universe", lambda self: list(universe)),
+        patch.object(PriceAlertService, "_active_universe", lambda self, *a, **k: list(universe)),
         patch.object(PriceAlertService, "_active_rules", lambda self, tickers: []),
     ]
 
@@ -83,7 +83,7 @@ async def test_the_surviving_ticker_is_the_crypto_one_by_identity():
 
     svc = PriceAlertService()
     svc.price = _NoQuotes()
-    with patch.object(PriceAlertService, "_active_universe", lambda self: list(MIXED)), \
+    with patch.object(PriceAlertService, "_active_universe", lambda self, *a, **k: list(MIXED)), \
          patch.object(PriceAlertService, "_active_rules",
                       lambda self, tickers: seen.append(list(tickers)) or []):
         await svc.evaluate_once(only_round_the_clock=True)
@@ -110,7 +110,7 @@ async def test_a_closed_cycle_with_no_crypto_spends_no_upstream_call():
         raise AssertionError("unreachable")
 
     with patch.object(PriceAlertService, "_active_universe",
-                      lambda self: ["AAPL", "MSFT", "^GSPC"]), \
+                      lambda self, *a, **k: ["AAPL", "MSFT", "^GSPC"]), \
          patch.object(PriceAlertService, "_active_rules", lambda self, t: []), \
          patch("app.services.price_alert_service.price_source", _record):
         stats = await svc.evaluate_once(only_round_the_clock=True)

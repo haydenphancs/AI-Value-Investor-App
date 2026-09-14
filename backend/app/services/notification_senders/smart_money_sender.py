@@ -47,6 +47,7 @@ from app.services.notification_kinds import (
 from app.services.push_dispatch_service import get_push_dispatch_service
 from app.services.updates_materiality import finite
 from app.utils.market_hours import ET
+from app.utils.postgrest_paging import PAGE_SIZE, fetch_all_rows
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,10 @@ INSIDER_LOOKBACK_DAYS = 3
 # Trade-date floor for whale rows. A 13F is a quarterly snapshot, so its `date` is
 # legitimately weeks old — but not months. See `_recent_whale_rows`.
 WHALE_TRADE_MAX_AGE_DAYS = 45
+# Pages of 1,000 `whale_trades` rows one run will evaluate. A run that fills every page
+# does NOT advance its cursor, so nothing is skipped — the remainder is evaluated next run
+# (a 13F deadline day writes ~1,500 rows; ten pages is far above it).
+WHALE_PHASE_MAX_PAGES = 10
 
 # Ceiling on distinct notifications per phase, before per-user caps. A heavy filing day
 # must not turn into a fan-out storm; the per-user `smart_money` cap of 3 is the
@@ -326,18 +331,22 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
 
     def _query() -> List[Dict[str, Any]]:
         try:
-            return (
-                supabase.table("whale_trades")
+            # PAGED. The old `.order(desc).limit(1000)` read the NEWEST 1,000 rows since
+            # the cursor and then advanced the cursor to the newest stamp — so on a 13F
+            # deadline day (~1,500 rows from one hydration) the ~500 written first were
+            # never evaluated and never re-read. Paged on the unique `id` (OFFSET paging
+            # on a non-unique `created_at` can skip/duplicate a boundary row); a CAPPED
+            # read is handled by the caller, which then does not advance the cursor.
+            return fetch_all_rows(
+                lambda: supabase.table("whale_trades")
                 .select(
-                    "ticker, company_name, action, amount, amount_range, date, "
+                    "id, ticker, company_name, action, amount, amount_range, date, "
                     "created_at, whale_id, whales(name, firm_name, data_source)"
                 )
-                .gt("created_at", since.isoformat())
-                .order("created_at", desc=True)
-                .limit(1000)
-                .execute()
-                .data
-                or []
+                .gt("created_at", since.isoformat()),
+                order_by="id",
+                what="smart money: whale_trades since cursor",
+                max_pages=WHALE_PHASE_MAX_PAGES,
             )
         except Exception as e:
             logger.warning(
@@ -348,9 +357,21 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
             return []
 
     raw = await asyncio.to_thread(_query)
+    # A read that filled every page may have rows beyond it. Paging is by id, so those
+    # rows are not "the newest" — advancing the cursor to the max stamp read would skip
+    # them forever. Evaluate what arrived and leave the cursor where it was: the dedup
+    # claim makes a re-evaluation next run harmless, a skipped 13F filing is not.
+    capped = len(raw) >= WHALE_PHASE_MAX_PAGES * PAGE_SIZE
+    if capped:
+        logger.error(
+            "smart money: whale_trades read hit the %d-row cap since %s — cursor NOT "
+            "advanced; the remainder is evaluated next run",
+            WHALE_PHASE_MAX_PAGES * PAGE_SIZE, since.isoformat(),
+        )
+    next_cursor = since if capped else _max_created_at(raw, since)
     rows = _recent_whale_rows(raw, cutoff_date=cutoff_date)
     if not rows:
-        return 0, _max_created_at(raw, since)
+        return 0, next_cursor
 
     # Roll up per (whale, direction). One filing = one notification.
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -434,7 +455,7 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
             route=ticker_route(group["kind"], route_ticker, whale_id=whale_id),
         )
 
-    return sent, _max_created_at(raw, since)
+    return sent, next_cursor
 
 
 def _max_created_at(rows: Any, fallback: datetime) -> datetime:

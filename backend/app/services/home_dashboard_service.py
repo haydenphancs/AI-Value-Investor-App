@@ -949,10 +949,24 @@ class HomeDashboardService:
                 continue
             price = _finite_float(q.get("price"))
             change = _parse_pct(q.get("changePercentage"))
-            if price is None or change is None:
-                # FMP emits NaN/Infinity for thin or just-listed symbols; those
-                # serialize to invalid JSON under allow_nan=False and 500 the screen.
+            if price is None or price <= 0:
+                # A non-finite price would serialize to invalid JSON under allow_nan=False
+                # and 500 the screen; a non-positive one is not a quote.
                 continue
+            # An UNKNOWN day change is the routine degraded state on the screener path —
+            # `_from_screener` leaves `changePercentage` None whenever the
+            # `market_close_snapshot` row is stale or missing (one missed overnight
+            # ingest, or a thin name whose last print is days old). Dropping the tile
+            # made every starred stock VANISH from Home after a missed ingest while
+            # Tracking and Updates still listed them. Serve it with `change_known=False`,
+            # exactly as `_fetch_pulse_item` does one function below; iOS gates the
+            # sign, the colour and the dashed reference line on the flag.
+            change_known = change is not None
+            if not change_known:
+                logger.warning(
+                    "Home watchlist: %s has no day change (stale/missing close snapshot) "
+                    "— serving with change_known=false", sym,
+                )
             row = by_ticker.get(sym, {})
             tiles.append(MarketPulseItemResponse(
                 symbol=sym,
@@ -965,8 +979,9 @@ class HomeDashboardService:
                 # meaningful stored value and otherwise decides from the symbol.
                 type=resolve_asset_class(sym, row.get("asset_type")),
                 price=price,
-                change_percent=change,
-                previous_close=_finite_float(q.get("previousClose")),
+                change_percent=(round(change, 2) + 0.0) if change_known else 0.0,
+                change_known=change_known,
+                previous_close=_finite_float(q.get("previousClose")) if change_known else None,
                 spark=[],
             ))
         return title, is_group, tiles
@@ -1209,12 +1224,20 @@ class HomeDashboardService:
         try:
             try:
                 result = await self._build_scanner_groups()
-                # A build with NOTHING in it is a degraded build, not an answer: the three
-                # cards are independent, so all-None means the shared inputs were missing
-                # rather than "the market has no movers today" (which cannot happen — the
-                # movers card ranks the whole universe). Cached only briefly so the herd is
-                # still guarded while the next request retries.
-                degraded = not (result.movers or result.volume or result.shorts)
+                # A degraded build is not an answer, and the cards are NOT independent:
+                # movers and volume both come from one `get_scanner_inputs()` universe
+                # read, while shorts read FINRA through its own 3-day cache. A universe
+                # outage therefore yields movers=None, volume=None, shorts=<populated> —
+                # the all-None test called that a healthy build and pinned "no Top Movers,
+                # no Heavy Traffic" on Home for the full 20-minute TTL after a 15 s blip.
+                # Degraded = the universe pair is missing, OR nothing at all came back.
+                # (The movers card ranks the whole universe, so a legitimately empty pair
+                # cannot happen.) Cached only briefly so the herd is still guarded while the
+                # next request retries.
+                degraded = (
+                    (result.movers is None and result.volume is None)
+                    or not (result.movers or result.volume or result.shorts)
+                )
                 stamp = time.time()
                 if degraded:
                     stamp -= (_SCANNER_CACHE_TTL_SECONDS - _SCANNER_DEGRADED_TTL_SECONDS)

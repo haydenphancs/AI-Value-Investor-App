@@ -164,11 +164,27 @@ def _close_minute(d: date) -> int:
     )
 
 
+# Closures LEARNED from the data, not the table: an unscheduled closure (a national day of
+# mourning, a weather closure) is a weekday the holiday table does not know. The close
+# ingest's bellwether probe sees it as "not a US session" and registers it here, so the
+# next session's `previous_trading_day` steps over it instead of judging every stored
+# close one day stale — which blanked every day change app-wide until the next ingest.
+# Process-local; the daily ingest walk repopulates it after a restart.
+_OBSERVED_CLOSURES: set = set()
+
+
+def register_market_closure(d: date) -> None:
+    """Record a weekday on which the US tape did not open (learned by the ingest)."""
+    if d.weekday() < 5:
+        _OBSERVED_CLOSURES.add((d.year, d.month, d.day))
+
+
 def is_trading_day(d: date) -> bool:
     """True when the tape opens at all on ``d``. Half-days ARE trading days."""
     if d.weekday() >= 5:
         return False
-    return (d.year, d.month, d.day) not in US_MARKET_HOLIDAYS
+    key = (d.year, d.month, d.day)
+    return key not in US_MARKET_HOLIDAYS and key not in _OBSERVED_CLOSURES
 
 
 def previous_trading_day(d: date) -> date:

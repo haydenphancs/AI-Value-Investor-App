@@ -406,7 +406,7 @@ _CURATED_TABLES = {
     "book_chunks",
     # 2026-09-11: §3.3 names the reference implementation's table (`cached_at`-based, the
     # majority pattern) and §9.1 names the four tables whose `user_id` FK was dropped.
-    "profit_power_cache", "portfolios",
+    "profit_power_cache", "portfolios", "portfolio_items",
     # §3.3 / §10: the two integrations that still own a Supabase cache, the long-TTL
     # AI-intel caches, the soft/hard-expiry one; §9.1: the never-FK'd unlinked tables.
     "short_interest_cache", "crypto_coin_id_cache", "competitor_intel_cache",

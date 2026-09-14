@@ -1944,6 +1944,16 @@ async def stream_chat_message(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",   # defeat proxy buffering (Railway/nginx)
             "Connection": "keep-alive",
+            # Defeat OUR OWN buffering. `GZipMiddleware` (main.py) compresses any response whose
+            # request advertised gzip — iOS's URLSession does by default — and Starlette's
+            # streaming gzip path never flushes the compressor between chunks, so every frame
+            # (and every `: keepalive` comment) sat inside zlib until the generator closed:
+            # measured on prod 2026-09-12, `meta` arrived at the END of a 14 s turn, with the
+            # identical turn streaming from 0.56 s once gzip was declined. A response that
+            # already carries a Content-Encoding is passed through untouched by the middleware.
+            # Pinned by tests/test_chat_stream_endpoint.py::
+            # test_the_stream_is_never_gzip_buffered_for_a_gzip_accepting_client.
+            "Content-Encoding": "identity",
         },
     )
 

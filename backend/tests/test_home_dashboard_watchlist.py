@@ -277,19 +277,40 @@ async def test_a_group_ticker_with_no_watchlist_row_still_renders_as_its_symbol(
 # ── data hygiene ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_nan_and_infinite_quotes_are_dropped():
-    """FMP emits NaN/Infinity for thin or just-listed symbols; those serialize to
-    invalid JSON under allow_nan=False and 500 the whole screen."""
+async def test_a_non_finite_price_is_dropped_but_an_unknown_change_is_served():
+    """A NaN price would serialize to invalid JSON under allow_nan=False and 500 the
+    screen, so that tile is dropped. An unknown CHANGE is a different thing: on the
+    screener path `changePercentage` is None whenever the close snapshot is stale or
+    missing (one missed overnight ingest), and dropping those made every starred stock
+    vanish from Home while Tracking still listed them. Those tiles are served with
+    `change_known=False`, like the pulse tiles."""
     svc = _service(
-        rows=[{"ticker": "GOOD"}, {"ticker": "NANP"}, {"ticker": "INFP"}],
+        rows=[{"ticker": "GOOD"}, {"ticker": "NANP"}, {"ticker": "INFP"}, {"ticker": "NOCH"}],
         quotes=[
             _Q("GOOD"),
             _Q("NANP", price=float("nan")),
             _Q("INFP", pct=float("inf")),
+            _Q("NOCH", pct=None),
         ],
     )
     _, _is_group, tiles = await svc._build_watchlist("user-1")
-    assert [t.symbol for t in tiles] == ["GOOD"]
+    assert [t.symbol for t in tiles] == ["GOOD", "INFP", "NOCH"]
+    by = {t.symbol: t for t in tiles}
+    assert by["GOOD"].change_known is True
+    for sym in ("INFP", "NOCH"):
+        assert by[sym].change_known is False
+        assert by[sym].change_percent == 0.0
+        assert by[sym].previous_close is None
+    # The wire never carries NaN/Infinity.
+    import json
+    json.dumps([t.model_dump() for t in tiles], allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_zero_change_stays_known():
+    svc = _service(rows=[{"ticker": "FLAT"}], quotes=[_Q("FLAT", pct=0.0)])
+    _, _g, tiles = await svc._build_watchlist("user-1")
+    assert tiles[0].change_known is True and tiles[0].change_percent == 0.0
 
 
 @pytest.mark.asyncio

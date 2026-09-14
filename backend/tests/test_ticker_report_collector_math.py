@@ -311,12 +311,36 @@ def test_valuation_vital_no_dcf_uses_snapshot():
 
 
 def test_valuation_vital_no_dcf_no_snapshot_neutral():
-    """No DCF + no snapshot → honest fair_value default."""
+    """No DCF + no snapshot → unmeasured, and NO fair value."""
     result = _build_valuation_vital(
         current_price=100.0, fair_value=None, upside=None, valuation_snapshot=None,
     )
     assert result["status"] == "fair_value"
     assert result["upside_potential"] == 0.0
+    assert result["fair_value"] is None
+
+
+@pytest.mark.parametrize("snapshot", [None, "snap5", "snap1"])
+def test_valuation_vital_without_a_dcf_never_fabricates_the_price_as_fair_value(snapshot):
+    """Both no-DCF branches used to write `fair_value = round(current_price, 2)`. Once
+    `/stable/profile` stopped carrying `dcf` that "default" became EVERY report's
+    `fair_value_estimate` (a live AAPL report on 2026-09-12 had fair value 332.27 == price
+    332.27 and a PDF hero of "Margin of Safety +0.0% Fairly Valued" beside a bear case
+    saying "no margin of safety"). A missing model is None, whatever the snapshot says."""
+    snap = None if snapshot is None else _snap(rating=int(snapshot[-1]))
+    result = _build_valuation_vital(
+        current_price=332.27, fair_value=None, upside=None, valuation_snapshot=snap,
+    )
+    assert result["fair_value"] is None
+    assert result["current_price"] == 332.27
+
+
+def test_valuation_vital_with_a_dcf_reports_the_dcf():
+    result = _build_valuation_vital(
+        current_price=100.0, fair_value=150.25, upside=50.25, valuation_snapshot=None,
+    )
+    assert result["fair_value"] == 150.25
+    assert result["status"] == "deep_undervalued"
 
 
 def test_valuation_vital_dcf_overrides_when_snapshot_agrees():

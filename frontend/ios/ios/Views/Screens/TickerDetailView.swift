@@ -103,7 +103,7 @@ struct TickerDetailView: View {
                     onFavoriteTapped: { viewModel.toggleFavorite() },
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
-                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: tickerSymbol),
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: tickerSymbol, assetType: "stock"),
                     tickerSymbol: tickerSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
                 )

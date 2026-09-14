@@ -375,6 +375,7 @@ class CommodityDetailViewModel: ObservableObject {
             data.currentPrice = light.currentPrice
             data.priceChange = light.priceChange
             data.priceChangePercent = light.priceChangePercent
+            data.changeKnown = light.changeKnown ?? true
             data.marketStatus = CommodityMarketStatus(backend: light.marketStatus)
             data.keyStatisticsGroups = light.keyStatisticsGroups.map { $0.toModel() }
             // Keep the previous list when the refresh returns none — a 60s cache miss on

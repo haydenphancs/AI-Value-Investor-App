@@ -55,6 +55,7 @@ class _Q:
     # this the chain raised AttributeError, the caller's best-effort `except` swallowed
     # it, and the heal-path assertions passed because the heal never ran (2026-09-12).
     def order(self, col, desc=False): self._order = (col, desc); return self
+    def range(self, a, b): self._range = (a, b); return self   # paged via fetch_all_rows
 
     def upsert(self, payload, on_conflict=None, ignore_duplicates=False):
         self._op, self._payload, self._conflict = "upsert", payload, on_conflict

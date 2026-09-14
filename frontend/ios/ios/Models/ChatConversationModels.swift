@@ -435,6 +435,9 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
 
     let widgetType: String
     let peRatio: Double
+    /// `false` → `peRatio` / `earningsYield` are 0.0 placeholders (unlicensed quote, thin
+    /// sector benchmark); render "—". Optional so older backends (no key) decode as known.
+    let peKnown: Bool?
     let forwardPe: Double
     let valuationLevel: String
     let earningsYield: Double
@@ -444,9 +447,14 @@ struct MarketOverviewWidgetData: Codable, Identifiable, Sendable {
     let declining: Int
     let macroIndicators: [MarketOverviewMacroEntry]
 
+    /// The multiple is real only when the backend says so AND it is a positive number —
+    /// `0` is the unknown sentinel on this wire, exactly as for `forwardPe`.
+    var hasKnownPE: Bool { (peKnown ?? true) && peRatio > 0 }
+
     enum CodingKeys: String, CodingKey {
         case widgetType = "widget_type"
         case peRatio = "pe_ratio"
+        case peKnown = "pe_known"
         case forwardPe = "forward_pe"
         case valuationLevel = "valuation_level"
         case earningsYield = "earnings_yield"

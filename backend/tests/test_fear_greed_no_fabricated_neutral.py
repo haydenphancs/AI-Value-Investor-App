@@ -18,9 +18,9 @@ from app.integrations import alternative_me as am
 
 @pytest.fixture(autouse=True)
 def _cold_cache():
-    am._cache, am._cache_ts = None, 0.0
+    am._cache, am._cache_ts, am._failed_at = None, 0.0, 0.0
     yield
-    am._cache, am._cache_ts = None, 0.0
+    am._cache, am._cache_ts, am._failed_at = None, 0.0, 0.0
 
 
 def test_an_empty_set_is_refused_not_summarised_as_neutral():
@@ -90,9 +90,49 @@ async def test_a_cold_cache_failure_raises_instead_of_returning_nothing(monkeypa
 
 @pytest.mark.asyncio
 async def test_a_warm_cache_still_serves_through_a_failure(monkeypatch):
-    am._cache, am._cache_ts = [{"value": "55", "value_classification": "Greed", "timestamp": "1"}], 0.0
+    """A reading from 20 minutes ago is plausibly still today's: served during an outage."""
+    import time as _t
+    am._cache = [{"value": "55", "value_classification": "Greed", "timestamp": "1"}]
+    am._cache_ts = _t.time() - 20 * 60
     monkeypatch.setattr(am.httpx, "AsyncClient", lambda timeout=None: _Client(_Resp(status=503)))
     assert (await am.get_fear_greed_index(limit=30))[0]["value"] == "55"
+
+
+@pytest.mark.asyncio
+async def test_a_days_old_reading_is_not_served_as_current(monkeypatch):
+    """The index prints once a day; a 3-day-old value dressed as today's is as fabricated
+    as the Neutral 50 was. Both degrade arms (empty payload, exception) bound the age."""
+    import time as _t
+    am._cache = [{"value": "72", "value_classification": "Greed", "timestamp": "1"}]
+    am._cache_ts = _t.time() - 3 * 86400
+    monkeypatch.setattr(am.httpx, "AsyncClient", lambda timeout=None: _Client(_Resp({"data": []})))
+    with pytest.raises(am.FearGreedUnavailableException):
+        await am.get_fear_greed_index(limit=30)
+    am._failed_at = 0.0
+    monkeypatch.setattr(am.httpx, "AsyncClient", lambda timeout=None: _Client(_Resp(status=503)))
+    with pytest.raises(am.FearGreedUnavailableException):
+        await am.get_fear_greed_index(limit=30)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_is_memoised_so_viewers_do_not_fan_out(monkeypatch):
+    calls = {"n": 0}
+
+    class _Counting(_Client):
+        async def get(self, url, params=None):
+            calls["n"] += 1
+            return self.resp
+    monkeypatch.setattr(am.httpx, "AsyncClient", lambda timeout=None: _Counting(_Resp(status=503)))
+    for _ in range(5):
+        with pytest.raises(am.FearGreedUnavailableException):
+            await am.get_fear_greed_index(limit=30)
+    assert calls["n"] == 1, "every viewer hit upstream during the outage"
+    # …and a success clears the memo.
+    am._failed_at = 0.0
+    monkeypatch.setattr(am.httpx, "AsyncClient", lambda timeout=None: _Counting(
+        _Resp({"data": [{"value": "40", "value_classification": "Fear", "timestamp": "2"}]})))
+    assert (await am.get_fear_greed_index(limit=30))[0]["value"] == "40"
+    assert am._failed_at == 0.0
 
 
 @pytest.mark.asyncio

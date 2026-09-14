@@ -1415,6 +1415,11 @@ struct AddAssetSheet: View {
     private func addAsset(_ result: StockSearchResult) {
         isAdding = true
         addError = nil
+        // The spelling the PORTFOLIO must carry — the pair for a coin. The other add
+        // flow (`TrackingViewModel.addTickerFromSearch`) was fixed; this copy still sent
+        // the bare `BTC`, which `PUT /tickers` resolved raw-first to the BTC ETF and
+        // then deleted the just-mirrored `BTCUSD` row.
+        let symbol = CryptoSymbol.storedSymbol(for: result)
 
         Task { @MainActor in
             do {
@@ -1428,23 +1433,23 @@ struct AddAssetSheet: View {
                 // in the portfolio they were looking at), so it is reported
                 // rather than swallowed by a bare `try?`.
                 do {
-                    try await PortfolioStore.shared.addTicker(result.ticker)
+                    try await PortfolioStore.shared.addTicker(symbol)
                 } catch {
                     AppActions.shared.reportMutationFailure(
-                        error, action: "add \(result.ticker) to this portfolio"
+                        error, action: "add \(symbol) to this portfolio"
                     )
                 }
-                onAssetAdded?(result.ticker)
+                onAssetAdded?(symbol)
                 onDismiss?()
             } catch {
                 // Most common failure: the ticker is already on the master
                 // watchlist. Either way, push it into the active portfolio —
                 // the user clearly wants it here. The store call is idempotent.
                 do {
-                    try await PortfolioStore.shared.addTicker(result.ticker)
+                    try await PortfolioStore.shared.addTicker(symbol)
                 } catch {
                     AppActions.shared.reportMutationFailure(
-                        error, action: "add \(result.ticker) to this portfolio"
+                        error, action: "add \(symbol) to this portfolio"
                     )
                 }
                 // Don't assert "already in your watchlist" for every failure — that copy

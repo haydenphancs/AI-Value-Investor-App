@@ -65,7 +65,7 @@ async def test_the_overnight_alert_cycle_keeps_only_coingecko_priced_pairs():
     svc = PriceAlertService()
     svc.price = _NoQuotes()
     universe = ["LTC", "BTC", "BTCUSD", "ETHUSD", "AAPL", "GCUSD"]
-    with patch.object(PriceAlertService, "_active_universe", lambda self: list(universe)), \
+    with patch.object(PriceAlertService, "_active_universe", lambda self, *a, **k: list(universe)), \
          patch.object(PriceAlertService, "_active_rules",
                       lambda self, tickers: seen.append(sorted(tickers)) or []):
         await svc.evaluate_once(only_round_the_clock=True)
@@ -77,7 +77,7 @@ async def test_an_overnight_cycle_with_only_bare_securities_makes_no_quote_call(
     svc = PriceAlertService()
     quotes = _NoQuotes()
     svc.price = quotes
-    with patch.object(PriceAlertService, "_active_universe", lambda self: ["LTC", "BTC"]), \
+    with patch.object(PriceAlertService, "_active_universe", lambda self, *a, **k: ["LTC", "BTC"]), \
          patch.object(PriceAlertService, "_active_rules", lambda self, tickers: []):
         await svc.evaluate_once(only_round_the_clock=True)
     assert quotes.calls == 0

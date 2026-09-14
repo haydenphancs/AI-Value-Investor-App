@@ -19,6 +19,17 @@
 import Foundation
 
 enum CryptoSymbol {
+    /// The spelling the watchlist and every group store for a search result: the pair
+    /// for a coin (`BTC` → `BTCUSD`), the uppercased ticker for anything else. ONE rule
+    /// for adding, for membership checks and for the add sheet — `PUT /portfolios/{id}/
+    /// tickers` resolves a bare spelling raw-first, so a bare `BTC` from a user who also
+    /// holds the BTC ETF picked the ETF and DROPPED the coin they just added.
+    static func storedSymbol(for result: StockSearchResult) -> String {
+        (result.type ?? "").lowercased() == "crypto"
+            ? pair(result.ticker)
+            : result.ticker.uppercased()
+    }
+
 
     /// The bare coin symbol: `"BTCUSD" → "BTC"`, `"BTC" → "BTC"`.
     ///

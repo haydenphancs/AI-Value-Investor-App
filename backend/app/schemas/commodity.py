@@ -113,6 +113,9 @@ class CommodityQuoteResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # Mirrors `CommodityDetailResponse.change_known` — the 30 s refresh must not turn an
+    # unknown change back into a green "+$0.00 (+0.00%)". Defaults True.
+    change_known: bool = True
     market_status: str
     # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
     chart_data: List[CommodityChartPointResponse] = []
@@ -137,6 +140,11 @@ class CommodityCoreResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the quote carried no day change (a FRED series with one observation,
+    # a profile row without a change): the two floats above are then 0.0
+    # placeholders, not a flat day. Same pattern as the index header; iOS renders
+    # "—" and hides the dashed baseline. Defaults True for shipped builds.
+    change_known: bool = True
     market_status: str
     # Empty when the bars would have cost a multi-thousand-row history pull — see
     # `CommodityService._get_chart(fast_only=True)`. The full response fills them in.
@@ -149,6 +157,11 @@ class CommodityDetailResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the quote carried no day change (a FRED series with one observation,
+    # a profile row without a change): the two floats above are then 0.0
+    # placeholders, not a flat day. Same pattern as the index header; iOS renders
+    # "—" and hides the dashed baseline. Defaults True for shipped builds.
+    change_known: bool = True
     market_status: str
     chart_data: List[CommodityChartPointResponse]
     key_statistics_groups: List[KeyStatisticsGroupResponse]

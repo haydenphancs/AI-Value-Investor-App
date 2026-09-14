@@ -265,6 +265,7 @@ class _FakeTable:
     def in_(self, *a, **k): return self
     def gte(self, *a, **k): return self
     def limit(self, *a, **k): return self
+    def range(self, *a, **k): return self   # paged via fetch_all_rows
 
     def execute(self):
         class _R:
@@ -386,6 +387,7 @@ class _ExplodingTable:
     def in_(self, *a, **k): return self
     def gte(self, *a, **k): return self
     def limit(self, *a, **k): return self
+    def range(self, *a, **k): return self   # paged via fetch_all_rows
 
     def execute(self):
         raise RuntimeError("PostgREST 503: connection reset by peer")

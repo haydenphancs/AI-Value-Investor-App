@@ -316,6 +316,10 @@ class CollectedTickerData:
 
     # ── Raw FMP / service data ────────────────────────────────────────
     profile: Dict[str, Any] = field(default_factory=dict)
+    # FMP `/stable/discounted-cash-flow` row (`{symbol, date, dcf, "Stock Price"}`). The
+    # legacy v3 profile carried `dcf` inline; the stable profile does not. Empty when FMP
+    # has no model — fair value is then UNMEASURED, never the current price.
+    dcf: Dict[str, Any] = field(default_factory=dict)
     quote: Dict[str, Any] = field(default_factory=dict)
     income: List[Dict[str, Any]] = field(default_factory=list)
     balance: List[Dict[str, Any]] = field(default_factory=list)
@@ -688,6 +692,7 @@ class TickerReportDataCollector:
         # Each entry: (attribute_name, awaitable, default_on_failure)
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
+            ("dcf", self.fmp.get_dcf(ticker), {}),
             ("quote", price_source(self).get_quote(ticker), {}),
             # 10y annual depth (was 5) so the Fundamentals & Growth cards'
             # tap-to-expand history charts a full decade. All downstream
@@ -1557,7 +1562,14 @@ class TickerReportDataCollector:
         c["earnings_yield"] = compute_earnings_yield(c)
 
         # ── Fair value from FMP DCF + upside ──────────────────────────
-        dcf = _num_or_none(profile.get("dcf"))
+        # `/stable/discounted-cash-flow` first; the legacy v3 `profile.dcf` only as a
+        # back-compat read of old cached rows. A stable profile never carries `dcf`, so
+        # before the dedicated fetch existed this was None for EVERY ticker and the
+        # valuation vital fabricated fair_value = current_price (2026-09-12).
+        dcf_row = out.dcf if isinstance(out.dcf, dict) else {}
+        dcf = _num_or_none(dcf_row.get("dcf"))
+        if dcf is None:
+            dcf = _num_or_none(profile.get("dcf"))
         c["fair_value"] = dcf if dcf and dcf > 0 else None
         c["upside_pct"] = _safe_pct_change(c["fair_value"], current_price) \
             if c["fair_value"] is not None else None
@@ -2909,15 +2921,21 @@ def _build_valuation_vital(
         if snap_rating > 0:
             status, snap_upside = _snapshot_to_valuation_status(snap_rating)
             score_value = card10 if card10 is not None else _valuation_score_from_upside(snap_upside)
+            # No DCF → no fair value. This used to write `round(current_price, 2)`, and
+            # once `/stable/profile` stopped carrying `dcf` that "default" became EVERY
+            # report's `fair_value_estimate`: the PDF hero printed "Fair Value $332.27 ·
+            # Caydex estimate", "Margin of Safety +0.0% Fairly Valued" beside a $332.27
+            # price while the same report's bear case said "no margin of safety". A
+            # missing model is None end to end (`research_service` persists NULL, the
+            # schema and iOS decoders are Optional).
             return {
                 "score": {"value": score_value, "status": _valuation_score_status(score_value)},
                 "status": status,
                 "current_price": round(current_price, 2),
-                "fair_value": round(current_price, 2),
+                "fair_value": None,
                 "upside_potential": snap_upside,
             }
-        # Neither DCF nor snapshot — UNMEASURED. Keep the honest fair_value
-        # default for the display-only status/fair_value consumers, but emit
+        # Neither DCF nor snapshot — UNMEASURED: fair_value None, and emit
         # score.value=None so this dimension renormalizes OUT of the headline
         # rather than voting a neutral 5.5 that drags the score toward 50.
         return {
@@ -2927,7 +2945,7 @@ def _build_valuation_vital(
             ),
             "status": "fair_value",
             "current_price": round(current_price, 2),
-            "fair_value": round(current_price, 2),
+            "fair_value": None,
             "upside_potential": 0.0,
         }
 

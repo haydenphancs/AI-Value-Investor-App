@@ -939,7 +939,17 @@ class WidgetMoversService:
             previous_close=m.previous_close,
             industry_name=industry[0],
             industry_change_percent=industry[1],
-            market_change_percent=ctx.market_change,
+            # ⚠️ NOT for the market proxy itself. `ctx.market_change` IS
+            # `index_rows[MARKET_INDEX_SYMBOL]["changePercentage"]` — the very quote
+            # `m.change_percent` came from — so for SPY the ratio is exactly 1.0 and
+            # `detect_group_move` answers "The market fell 1.6% today; SPY moved with it."
+            # Ask Cay AI renders that verbatim. Passing None lets it fall through to a real
+            # catalyst or an honest CauseKind.NONE. (The single-symbol path reaches the
+            # band at all because `_rank_and_read(["SPY"])` is an all-band list, which the
+            # ranking exclusion deliberately yields on rather than return nothing.)
+            market_change_percent=(
+                None if sym.upper() == MARKET_INDEX_SYMBOL.upper() else ctx.market_change
+            ),
             earnings_row=ctx.earnings_for(sym),
             # `grades` is 402 under the Order Form, so the analyst detector is inert.
             # Passing None is honest; `_head_grades` would spend a guaranteed failure.

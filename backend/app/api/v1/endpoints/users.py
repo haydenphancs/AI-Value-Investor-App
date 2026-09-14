@@ -1454,11 +1454,18 @@ async def delete_account(
     failures: dict[str, str] = {}
 
     # 1. Storage objects (before the identity row disappears).
-    pdf_error = _purge_research_pdfs(supabase, user_id)
+    #
+    # OFF THE LOOP, like the table purge below. Each of these is a `for page in range(...)`
+    # of blocking `bucket.list()` + `bucket.remove()` calls — for a heavy account that is
+    # hundreds of synchronous HTTP round trips inside one handler, and Railway runs ONE
+    # uvicorn worker, so every other in-flight request was frozen for the whole of it. The
+    # `.execute()`-shaped purge three lines down was threaded while these two, the far more
+    # expensive pair, were left behind.
+    pdf_error = await asyncio.to_thread(_purge_research_pdfs, supabase, user_id)
     if pdf_error:
         failures[f"storage:{_RESEARCH_PDF_BUCKET}"] = pdf_error
 
-    avatar_error = _purge_avatars(supabase, user_id)
+    avatar_error = await asyncio.to_thread(_purge_avatars, supabase, user_id)
     if avatar_error:
         failures[f"storage:{_AVATAR_BUCKET}"] = avatar_error
 

@@ -178,6 +178,8 @@ struct CryptoDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     let marketStatus: CryptoMarketStatus
     var chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
@@ -193,7 +195,7 @@ struct CryptoDetailData: Identifiable {
     let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
-        priceChange >= 0
+        changeKnown && priceChange >= 0
     }
 
     /// Previous close (current price − 24h change). Anchors the chart's dashed
@@ -203,9 +205,11 @@ struct CryptoDetailData: Identifiable {
     }
 
     var formattedPrice: String { CryptoHeaderFormat.price(currentPrice) }
-    var formattedChange: String { CryptoHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? CryptoHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        CryptoHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? CryptoHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 

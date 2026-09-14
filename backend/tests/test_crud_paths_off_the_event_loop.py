@@ -49,6 +49,15 @@ _NOT_YET = {
 }
 
 
+_AUTH_VERBS = {
+    "sign_in_with_password", "sign_up", "sign_out", "reset_password_for_email",
+    "verify_otp", "refresh_session", "update_user", "delete_user",
+    "update_user_by_id", "generate_link", "list_users", "create_user",
+    "exchange_code_for_session", "sign_in_with_id_token",
+}
+_STORAGE_VERBS = {"upload", "download", "remove", "create_signed_url", "move", "copy"}
+
+
 class _AsyncExecFinder(ast.NodeVisitor):
     """`.execute()` whose INNERMOST enclosing scope is an `async def`.
 
@@ -92,48 +101,63 @@ class _SyncHelperFinder(ast.NodeVisitor):
     every client hits on launch was fully blocking while this file reported the path clean
     (found 2026-09-12, after the first sweep shipped).
 
-    A helper whose name is handed to `asyncio.to_thread` anywhere in the file is fine — that
-    IS the fix — so those names are excluded.
+    ⚠️ THE EXEMPTION IS PER-SITE, NOT PER-NAME. An earlier version skipped any helper whose
+    name appeared as a `to_thread` argument ANYWHERE in the file, which made the guard blind
+    at 41 of the 59 swept sites: a helper threaded in one handler and called directly in
+    another was clean by association. Measured — reverting exactly one of the two
+    `_fetch_portfolio_items` sites in `portfolios.py` produced zero hits from BOTH finders.
+    It was worse for additions than reversions: a brand-new handler appended to
+    `portfolios.py` calling `_get_portfolio_or_404` and `_fetch_portfolio_items` directly
+    would ship two blocking round trips and be green on day one.
+
+    No exemption is needed at all. A real `to_thread(_helper, ...)` passes the helper as a
+    bare `Name`, never as a Call, so it is not a Call node to this visitor; and the
+    `to_thread(lambda: _helper(sb))` form is already excluded because a Lambda pushes a
+    non-async scope. Verified app-wide: zero false positives.
     """
 
     def __init__(self, tree):
         self.blocking = self._sync_defs_with_execute(tree)
-        self.threaded = self._threaded_names(tree)
         self.stack, self.hits = [], []
 
     @staticmethod
     def _sync_defs_with_execute(tree):
+        """Sync helpers that make ANY blocking Supabase round trip.
+
+        ⚠️ Not just `.execute()`. `_purge_research_pdfs` / `_purge_avatars` are
+        `for page in range(...)` loops of blocking Storage `bucket.list()` +
+        `bucket.remove()` — hundreds of synchronous HTTP calls, the most expensive
+        blocking work in any handler — and they contain no `.execute()` at all, so an
+        execute-only key could not see them even when an `async def` called them directly.
+        """
         out = {}
         for n in ast.walk(tree):
             if not isinstance(n, ast.FunctionDef):
                 continue
             for sub in ast.walk(n):
-                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                        and sub.func.attr == "execute"):
+                if not (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)):
+                    continue
+                attr = sub.func.attr
+                if attr == "execute":
+                    out[n.name] = out.get(n.name, 0) + 1
+                    continue
+                chain, cur = [], sub.func
+                while isinstance(cur, ast.Attribute):
+                    chain.append(cur.attr)
+                    cur = cur.value
+                chain_set = set(chain)
+                # ⚠️ Key on ACQUIRING the bucket, not on the verb. `_purge_research_pdfs`
+                # does `bucket = supabase.storage.from_(...)` and then calls
+                # `bucket.list(...)` / `bucket.remove(...)` on a LOCAL NAME, so the verb's
+                # own attribute chain is just `["list"]` and a chain test never matches.
+                # Any helper that reaches into Storage at all is doing blocking HTTP.
+                if attr == "from_" and "storage" in chain_set:
+                    out[n.name] = out.get(n.name, 0) + 1
+                elif attr in _AUTH_VERBS and {"auth", "admin"} & chain_set:
+                    out[n.name] = out.get(n.name, 0) + 1
+                elif attr in _STORAGE_VERBS and {"storage", "from_"} & chain_set:
                     out[n.name] = out.get(n.name, 0) + 1
         return out
-
-    @staticmethod
-    def _threaded_names(tree):
-        names = set()
-        for n in ast.walk(tree):
-            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                    and n.func.attr == "to_thread" and n.args):
-                continue
-            a = n.args[0]
-            if isinstance(a, ast.Attribute):
-                names.add(a.attr)
-            elif isinstance(a, ast.Name):
-                names.add(a.id)
-            elif isinstance(a, ast.Lambda):
-                for sub in ast.walk(a):
-                    if isinstance(sub, ast.Call):
-                        f = sub.func
-                        if isinstance(f, ast.Attribute):
-                            names.add(f.attr)
-                        elif isinstance(f, ast.Name):
-                            names.add(f.id)
-        return names
 
     def _scope(self, node, is_async):
         self.stack.append(is_async)
@@ -149,10 +173,11 @@ class _SyncHelperFinder(ast.NodeVisitor):
     def visit_GeneratorExp(self, n):     self._scope(n, False)
 
     def visit_Call(self, n):
+        """A direct call to a blocking helper. No `to_thread` exemption — see the class
+        docstring: the exemption was per-NAME and blinded the guard at 41 of 59 sites."""
         f = n.func
         name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-        if (name in self.blocking and name not in self.threaded
-                and self.stack and self.stack[-1]):
+        if name in self.blocking and self.stack and self.stack[-1]:
             self.hits.append((n.lineno, name))
         self.generic_visit(n)
 
@@ -385,12 +410,38 @@ def test_the_sync_helper_finder_is_not_vacuous():
         "def plain(sb):\n"
         "    return _rows(sb)\n"
     )
+    # THE CASE THE OLD PER-NAME EXEMPTION MISSED: the same helper threaded in one handler
+    # and called directly in another. Only the direct call may be flagged.
+    mixed = ast.parse(
+        "import asyncio\n"
+        "def _rows(sb):\n"
+        "    return sb.table('x').select('*').execute().data\n"
+        "async def threaded(sb):\n"
+        "    return await asyncio.to_thread(_rows, sb)\n"
+        "async def direct(sb):\n"
+        "    return _rows(sb)\n"
+    )
+    lam = ast.parse(
+        "import asyncio\n"
+        "def _rows(sb):\n"
+        "    return sb.table('x').select('*').execute().data\n"
+        "async def h(sb):\n"
+        "    return await asyncio.to_thread(lambda: _rows(sb))\n"
+    )
     f1 = _SyncHelperFinder(bad); f1.visit(bad)
     f2 = _SyncHelperFinder(good); f2.visit(good)
     f3 = _SyncHelperFinder(sync_caller); f3.visit(sync_caller)
+    f4 = _SyncHelperFinder(mixed); f4.visit(mixed)
+    f5 = _SyncHelperFinder(lam); f5.visit(lam)
     assert [h[1] for h in f1.hits] == ["_rows"], "the finder cannot see a direct call"
     assert f2.hits == [], "the finder flags the to_thread FIX as the bug"
     assert f3.hits == [], "a sync caller is not on the event loop and must not be flagged"
+    assert [h[1] for h in f4.hits] == ["_rows"], (
+        "a helper threaded ELSEWHERE in the file vouched for a direct call — the per-name "
+        "exemption blinded the guard at 41 of 59 sites"
+    )
+    assert f4.hits[0][0] == 7, f4.hits
+    assert f5.hits == [], "the to_thread(lambda: ...) form must not be flagged"
 
 
 def test_no_async_handler_calls_a_blocking_sync_helper_directly():
@@ -409,3 +460,135 @@ def test_no_async_handler_calls_a_blocking_sync_helper_directly():
             for f, hits in sorted(live.items())
         )
     )
+
+
+# ── the blocking calls that are NOT `.execute()` ────────────────────────────────────
+
+#: GoTrue (`auth.*`) and Storage (`bucket.*`) round trips are synchronous httpx calls with
+#: no `.execute()`, so both finders above are structurally blind to them — and they are the
+#: HEAVIEST blocking calls in the app (a sign-in is a server-side bcrypt).
+
+#: ⚠️ DELIBERATELY NOT THREADED — do not "fix" these without changing the client model
+#: first.
+#:
+#: `database.get_auth_client()` returns a PROCESS-WIDE SINGLETON and calls
+#: `_reset_to_service_role(...)` on every resolution, so each request starts from
+#: service_role. That reset-then-use pattern is safe only because the event loop
+#: SERIALISES it. supabase-py's auth-state listener rewrites the shared
+#: `options.headers["Authorization"]` on every sign-in verb, so two sign-ins running
+#: concurrently in threads would interleave reset and rewrite on one client — which is
+#: exactly the cross-user demotion `database.py` records as having broken account
+#: deletion, change-password and reset-password in production
+#: (`project_supabase_admin_client_demotion`).
+#:
+#: Threading these therefore requires a per-request auth client (or a lock) FIRST. Listed
+#: here so the cost is visible and nobody threads them believing it is mechanical.
+#: ⚠️ Scoped to the KIND, not the whole file. A file-level exclusion also excused the
+#: STORAGE calls in `users.py`, so reverting the account-deletion purge back onto the loop
+#: was invisible — the exemption silently covered a defect it was never meant to.
+_BLOCKING_BY_DESIGN = {
+    "api/v1/endpoints/auth.py": {"auth"},     # shared GoTrue singleton — see the note above
+    "api/v1/endpoints/users.py": {"auth"},    # auth.admin.delete_user on the same client
+}
+
+
+class _NonExecuteFinder(ast.NodeVisitor):
+    """Blocking GoTrue / Storage calls whose innermost scope is an `async def`."""
+
+    def __init__(self):
+        self.stack, self.hits = [], []
+
+    def _scope(self, node, is_async):
+        self.stack.append(is_async)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    def visit_FunctionDef(self, n):      self._scope(n, False)
+    def visit_AsyncFunctionDef(self, n): self._scope(n, True)
+    def visit_Lambda(self, n):           self._scope(n, False)
+
+    def visit_Call(self, n):
+        f = n.func
+        if isinstance(f, ast.Attribute) and self.stack and self.stack[-1]:
+            chain, cur = [], f
+            while isinstance(cur, ast.Attribute):
+                chain.append(cur.attr)
+                cur = cur.value
+            chain = list(reversed(chain))
+            if f.attr in _AUTH_VERBS and ("auth" in chain or "admin" in chain):
+                self.hits.append((n.lineno, "auth", ".".join(chain)))
+            elif f.attr in _STORAGE_VERBS and ("storage" in chain or "from_" in chain):
+                self.hits.append((n.lineno, "storage", ".".join(chain)))
+        self.generic_visit(n)
+
+
+def _non_execute_sites():
+    out = {}
+    for path in sorted(_APP.rglob("*.py")):
+        rel = path.relative_to(_APP).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:                                     # pragma: no cover
+            continue
+        finder = _NonExecuteFinder()
+        finder.visit(tree)
+        if finder.hits:
+            out[rel] = finder.hits
+    return out
+
+
+def test_the_non_execute_finder_is_not_vacuous():
+    bad = ast.parse(
+        "async def h(sb):\n"
+        "    return sb.auth.sign_in_with_password({'email': e})\n"
+    )
+    good = ast.parse(
+        "import asyncio\n"
+        "async def h(sb):\n"
+        "    return await asyncio.to_thread(lambda: sb.auth.sign_in_with_password({}))\n"
+    )
+    f1 = _NonExecuteFinder(); f1.visit(bad)
+    f2 = _NonExecuteFinder(); f2.visit(good)
+    assert [h[1] for h in f1.hits] == ["auth"], "the finder cannot see a GoTrue call"
+    assert f2.hits == [], "the finder flags the to_thread fix as the bug"
+
+
+def test_no_new_blocking_auth_or_storage_call_appears_on_the_loop():
+    """Everything outside the two recorded files must stay off the loop.
+
+    The account-deletion Storage purges used to be here — each a `for page in range(...)`
+    of blocking `bucket.list()` + `bucket.remove()`, hundreds of synchronous round trips in
+    one handler — while the cheap `.execute()`-shaped purge three lines below them was
+    threaded. They are now `asyncio.to_thread`-ed.
+    """
+    live = {}
+    for f, hits in _non_execute_sites().items():
+        if f in _NOT_YET:
+            continue
+        allowed = _BLOCKING_BY_DESIGN.get(f, set())
+        remaining = [h for h in hits if h[1] not in allowed]
+        if remaining:
+            live[f] = remaining
+    assert not live, (
+        "a blocking GoTrue/Storage round trip runs on the event loop — these are the "
+        "HEAVIEST blocking calls in the app:\n  "
+        + "\n  ".join(
+            f"app/{f}: " + ", ".join(f"{t} at :{ln}" for ln, _k, t in hits)
+            for f, hits in sorted(live.items())
+        )
+    )
+
+
+def test_the_by_design_blocking_files_still_have_the_calls_they_name():
+    """An exclusion that outlives its reason is how a fix rots — same discipline as
+    `_NOT_YET`."""
+    sites = _non_execute_sites()
+    stale = [
+        f for f, kinds in sorted(_BLOCKING_BY_DESIGN.items())
+        if not any(h[1] in kinds for h in sites.get(f, []))
+    ]
+    assert not stale, (
+        "these files no longer hold a blocking auth/storage call — delete them from "
+        "_BLOCKING_BY_DESIGN: " + ", ".join(stale)
+    )
+

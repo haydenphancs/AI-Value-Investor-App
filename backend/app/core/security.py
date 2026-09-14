@@ -446,11 +446,18 @@ def verify_api_key(api_key: str, valid_keys: set[str]) -> bool:
     # The loop is NOT short-circuited on a match, so the work is the same whichever key
     # matches (and for none): `compare_digest` is constant-time per comparison, and
     # short-circuiting would leak which key matched through timing.
-    if not api_key or not valid_keys:
+    if not api_key or not valid_keys or not isinstance(api_key, str):
         return False
+    # Compare BYTES, not str (same reason as admin.py): `compare_digest` raises
+    # `TypeError: comparing strings with non-ASCII characters is not supported`, and
+    # Starlette decodes header values as latin-1, so any byte >0x7F would have turned
+    # "never a raise" into an unauthenticated 500. `errors="ignore"` cannot raise.
+    presented = api_key.encode("utf-8", "ignore")
     matched = False
     for candidate in valid_keys:
-        if secrets.compare_digest(api_key, candidate):
+        if not isinstance(candidate, str):
+            continue
+        if secrets.compare_digest(presented, candidate.encode("utf-8", "ignore")):
             matched = True
     return matched
 

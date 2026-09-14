@@ -151,7 +151,12 @@ struct TickerLiveSearchSheet: View {
             // watchlist callbacks. Lives outside the card on purpose so the
             // tap target is unambiguous: tap card = navigate, tap star = add.
             if let isInWatchlist, let onAddToWatchlist {
-                let inList = isInWatchlist(result.ticker)
+                // Ask with the spelling the group STORES: a coin is persisted as the pair
+                // (`BTCUSD`, migration 160) while search hands us the bare `BTC`. The bare
+                // key never matched a tracked coin (empty star, every tap "dead") and DID
+                // match the same-ticker security (the BTC ETF) for a user who only holds
+                // that — filled star, and a tap silently added Bitcoin.
+                let inList = isInWatchlist(CryptoSymbol.storedSymbol(for: result))
                 Button {
                     onAddToWatchlist(result)
                 } label: {

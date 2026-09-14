@@ -23,6 +23,12 @@ struct ChartSettingsSheet: View {
                             .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
+                        // The type the CANVAS is drawing, not the persisted preference: a
+                        // Candle/Bar choice made on a stock is coerced to Line on a source
+                        // with no OHLC (crypto) — see `TickerChartView` — so highlighting
+                        // the raw preference left NO row selected while a line was drawn.
+                        let effectiveChartType = assetContext.allowedChartTypes.contains(chartSettings.chartType)
+                            ? chartSettings.chartType : .line
                         HStack(spacing: AppSpacing.sm) {
                             ForEach(assetContext.allowedChartTypes) { type in
                                 Button {
@@ -38,17 +44,17 @@ struct ChartSettingsSheet: View {
                                         .padding(.vertical, AppSpacing.sm)
                                         .background(
                                             RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                                .fill(chartSettings.chartType == type
+                                                .fill(effectiveChartType == type
                                                       ? AppColors.primaryBlue.opacity(0.15)
                                                       : AppColors.cardBackgroundLight.opacity(0.5))
                                         )
                                         .overlay(
                                             RoundedRectangle(cornerRadius: AppCornerRadius.small)
-                                                .stroke(chartSettings.chartType == type
+                                                .stroke(effectiveChartType == type
                                                         ? AppColors.primaryBlue
                                                         : Color.clear, lineWidth: 1)
                                         )
-                                        .foregroundColor(chartSettings.chartType == type
+                                        .foregroundColor(effectiveChartType == type
                                                          ? AppColors.primaryBlue
                                                          : AppColors.textMuted)
                                 }

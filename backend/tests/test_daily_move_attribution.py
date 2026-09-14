@@ -100,6 +100,29 @@ def test_earnings_beat_today():
     assert "12.0%" in a.detail and "this morning" in a.detail
 
 
+def test_earnings_wording_follows_the_stamped_session_not_the_wall_clock():
+    """Pre-market Tuesday the widget attributes MONDAY's session (`today` = Monday). Monday's
+    BMO print is not "this morning" on Tuesday, and a Friday AMC print viewed Monday
+    pre-market is not "after yesterday's close" — three days ago. The sibling detectors
+    already took `session_word`; the headline line must not assert a false WHEN."""
+    monday = date(2026, 9, 14)
+    bmo = {"date": "2026-09-14", "epsActual": 1.5, "epsEstimated": 1.3, "time": "bmo"}
+    live = detect_earnings("ORCL", 9.0, bmo, today=monday)
+    assert live is not None and "this morning" in live.detail
+    stamped = detect_earnings("ORCL", 9.0, bmo, today=monday, session_word="on Mon")
+    assert stamped is not None
+    assert "this morning" not in stamped.detail and "before Monday's open" in stamped.detail
+
+    # A t-1 AMC print, attributed for a stamped (not live) session.
+    tuesday = date(2026, 9, 15)
+    amc_prior = {"date": "2026-09-14", "epsActual": 1.0, "epsEstimated": 1.2, "time": "amc"}
+    live = detect_earnings("ORCL", -6.0, amc_prior, today=tuesday)
+    assert live is not None and "after yesterday's close" in live.detail
+    stamped = detect_earnings("ORCL", -6.0, amc_prior, today=tuesday, session_word="on Tue")
+    assert stamped is not None
+    assert "yesterday" not in stamped.detail and "after the prior close" in stamped.detail
+
+
 def test_earnings_miss_from_last_night():
     a = detect_earnings("AAPL", -3.0, {"date": "2026-08-13", "epsActual": 1.0, "epsEstimated": 1.25}, TODAY)
     assert a.tag == "Earnings Miss"

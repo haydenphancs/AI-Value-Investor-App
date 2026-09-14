@@ -121,6 +121,43 @@ async def test_an_all_empty_scanner_build_is_held_seconds_not_twenty_minutes(mon
 
 
 @pytest.mark.asyncio
+async def test_a_universe_outage_with_shorts_present_is_still_degraded(monkeypatch):
+    """movers and volume share ONE `get_scanner_inputs()` read; shorts come from FINRA's
+    own 3-day cache. A universe blip therefore yields movers=None, volume=None,
+    shorts=<populated> — the all-None test called that healthy and pinned "no Top Movers,
+    no Heavy Traffic" for the full 20-minute TTL."""
+    svc = _svc()
+
+    async def _half():
+        return ScannerGroupsResponse(
+            shorts=ScannerGroupResponse(kind="shorts", gainers=[], losers=[]),
+        )
+
+    monkeypatch.setattr(svc, "_build_scanner_groups", _half, raising=False)
+    await svc.get_scanners()
+    stamp, _ = svc._scanner_cache[hd._SCANNER_CACHE_KEY]
+    age_budget = hd._SCANNER_CACHE_TTL_SECONDS - (time.time() - stamp)
+    assert age_budget <= hd._SCANNER_DEGRADED_TTL_SECONDS + 2, age_budget
+
+
+@pytest.mark.asyncio
+async def test_shorts_alone_missing_is_not_a_degraded_build(monkeypatch):
+    """FINRA data legitimately lags days; a movers+volume build without shorts is real."""
+    svc = _svc()
+
+    async def _no_shorts():
+        return ScannerGroupsResponse(
+            movers=ScannerGroupResponse(kind="movers", gainers=[], losers=[]),
+            volume=ScannerGroupResponse(kind="volume", gainers=[], losers=[]),
+        )
+
+    monkeypatch.setattr(svc, "_build_scanner_groups", _no_shorts, raising=False)
+    await svc.get_scanners()
+    stamp, _ = svc._scanner_cache[hd._SCANNER_CACHE_KEY]
+    assert time.time() - stamp < 2
+
+
+@pytest.mark.asyncio
 async def test_a_real_build_keeps_the_full_twenty_minute_ttl(monkeypatch):
     svc = _svc()
 

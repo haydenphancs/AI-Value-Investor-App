@@ -1225,8 +1225,14 @@ class CryptoService:
             # already raise the typed exception for the identical condition.
             raise FMPUnavailableException(f"crypto core has no usable price for {symbol}")
 
-        change = _finite_or_none(md.get("price_change_24h")) or 0
-        change_pct = _finite_or_none(md.get("price_change_percentage_24h")) or 0
+        change_f = _finite_or_none(md.get("price_change_24h"))
+        change_pct_f = _finite_or_none(md.get("price_change_percentage_24h"))
+        # `is not None`, never truthiness: a genuine 0.0 move is KNOWN. Only an absent /
+        # non-finite provider value is unknown, and that must not render as a green
+        # "+$0.00 (+0.00%)" with the dashed baseline on the live price.
+        change_known = change_pct_f is not None or change_f is not None
+        change = change_f or 0
+        change_pct = change_pct_f or 0
 
         # Prefer the curated profile name, then CoinGecko's, then the symbol.
         name = profile_meta.get("name")
@@ -1243,6 +1249,7 @@ class CryptoService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status="24/7 Trading",
             chart_data=[],
         )
@@ -1371,8 +1378,12 @@ class CryptoService:
             return v if isinstance(v, (int, float)) else None
 
         price = _usd("current_price")
-        change = md.get("price_change_24h", 0) or 0
-        change_pct = md.get("price_change_percentage_24h", 0) or 0
+        _change_raw = md.get("price_change_24h")
+        _change_pct_raw = md.get("price_change_percentage_24h")
+        change = _change_raw or 0
+        change_pct = _change_pct_raw or 0
+        # Known only when the provider actually said something (an explicit 0.0 counts).
+        change_known = isinstance(_change_raw, (int, float)) or isinstance(_change_pct_raw, (int, float))
 
         # CoinGecko outage / unresolved coin id → market_data is {} and every
         # _usd()/md.get() collapses to 0, shipping a bogus "$0.00 (+0.00%)" header
@@ -1395,6 +1406,7 @@ class CryptoService:
                     if _prev > 0:
                         change = round(price - _prev, 6)
                         change_pct = round(((price - _prev) / _prev) * 100, 4)
+                        change_known = True
 
         # Both legs share ONE provider now, so they fail together — refuse rather than
         # ship a zero.
@@ -1963,6 +1975,7 @@ class CryptoService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status="24/7 Trading",
             chart_data=chart_data,
             key_statistics_groups=key_stats,

@@ -90,7 +90,8 @@ async def test_the_unprocessed_rows_are_returned_to_deferred(monkeypatch):
                         raising=False)
     monkeypatch.setattr(
         svc, "mark_state",
-        lambda uid, key, state, error=None, sent=False: marks.append((uid, key, state)),
+        lambda uid, key, state, error=None, sent=False, only_if_state=None:
+            marks.append((uid, key, state, only_if_state)),
         raising=False,
     )
 
@@ -109,8 +110,70 @@ async def test_the_unprocessed_rows_are_returned_to_deferred(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await svc.flush_deferred()
 
-    returned = {(u, k) for u, k, st in marks if st == pds.STATE_DEFERRED}
+    returned = {(u, k) for u, k, st, _only in marks if st == pds.STATE_DEFERRED}
     assert ("u2", "k2") in returned, "the row in flight was left stranded at pending"
     assert ("u3", "k3") in returned and ("u4", "k4") in returned, (
         f"the un-started tail was not returned to deferred: {sorted(returned)}"
     )
+    # CONDITIONAL: every shutdown requeue is guarded on the row still reading `pending`,
+    # so a `sent` stamp racing in from `_deliver`'s worker thread is never overwritten
+    # (an unconditional write re-delivered an accepted push on the next process).
+    shutdown_marks = [(u, k, only) for u, k, st, only in marks
+                      if st == pds.STATE_DEFERRED and u in {"u2", "u3", "u4"}]
+    assert shutdown_marks and all(only == pds.STATE_PENDING for _u, _k, only in shutdown_marks), marks
+
+
+def test_mark_state_conditional_write_adds_the_state_predicate():
+    """`only_if_state` must reach the UPDATE as an `.eq("push_state", …)` filter."""
+    svc = pds.PushDispatchService.__new__(pds.PushDispatchService)
+    seen = {}
+
+    class _Q:
+        def __init__(self): self.filters = []
+        def update(self, patch): seen["patch"] = patch; return self
+        def eq(self, col, val): self.filters.append((col, val)); return self
+        def execute(self): seen["filters"] = list(self.filters); return self
+
+    class _SB:
+        def table(self, name): return _Q()
+    svc.supabase = _SB()
+    svc.mark_state("u1", "k1", pds.STATE_DEFERRED, error="x", only_if_state=pds.STATE_PENDING)
+    assert ("push_state", pds.STATE_PENDING) in seen["filters"]
+    assert seen["patch"]["push_state"] == pds.STATE_DEFERRED and "sent_at" not in seen["patch"]
+    svc.mark_state("u1", "k1", pds.STATE_SENT, sent=True)
+    assert ("push_state", pds.STATE_PENDING) not in seen["filters"]
+    assert "sent_at" in seen["patch"]
+
+
+def test_a_cancel_after_apns_accepted_leaves_the_row_sent(monkeypatch):
+    """The exact race: cancel lands while `_deliver`'s `sent` stamp is being written from a
+    worker thread. Both writes run; the `sent` one is unconditional and the requeue is
+    conditional on `pending`, so the row ends `sent` in either order."""
+    import threading
+    state = {"push_state": pds.STATE_PENDING, "sent_at": None}
+    lock = threading.Lock()
+    svc = pds.PushDispatchService.__new__(pds.PushDispatchService)
+
+    class _Q:
+        def __init__(self): self.f = {}; self.patch = None
+        def update(self, patch): self.patch = patch; return self
+        def eq(self, col, val): self.f[col] = val; return self
+        def execute(self):
+            with lock:
+                if "push_state" in self.f and state["push_state"] != self.f["push_state"]:
+                    return self
+                state.update(self.patch)
+            return self
+
+    class _SB:
+        def table(self, name): return _Q()
+    svc.supabase = _SB()
+    # order A: requeue first (row still pending) then the sent stamp lands
+    svc.mark_state("u", "k", pds.STATE_DEFERRED, only_if_state=pds.STATE_PENDING)
+    svc.mark_state("u", "k", pds.STATE_SENT, sent=True)
+    assert state["push_state"] == pds.STATE_SENT and state["sent_at"]
+    # order B: sent stamp first, then the conditional requeue is a no-op
+    state.update({"push_state": pds.STATE_PENDING, "sent_at": None})
+    svc.mark_state("u", "k", pds.STATE_SENT, sent=True)
+    svc.mark_state("u", "k", pds.STATE_DEFERRED, only_if_state=pds.STATE_PENDING)
+    assert state["push_state"] == pds.STATE_SENT

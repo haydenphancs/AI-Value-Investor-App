@@ -185,6 +185,30 @@ def test_a_price_that_moved_off_the_close_is_stamped_with_the_live_session(monke
     assert q["changeSession"] == "2026-09-14"
 
 
+def test_a_flat_close_row_is_not_stamped_with_the_live_session(monkeypatch):
+    """A name whose Friday close equals Thursday's (a halted stock, a $10.00 SPAC, a
+    preferred at par) and whose screener price is still that close has NOT traded this
+    session — its change is Friday's, like every other untraded row. It used to be
+    stamped with the LIVE session because `prev == close`, and `newest_session` then took
+    that as the batch session and evicted every real Friday mover pre-market."""
+    monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 14))
+    flat = _snap(10.0, 10.0, "2026-09-11")            # close == previous_close
+    q = PriceService._from_screener(
+        {"symbol": "SPAC", "companyName": "Blank Check", "price": 10.0, "marketCap": 3e8}, flat,
+    )
+    assert q["changePercentage"] == pytest.approx(0.0)
+    assert q["changeSession"] == "2026-09-11"
+    # ...and the moment it prints off the close, the change is the live session's.
+    q2 = PriceService._from_screener(
+        {"symbol": "SPAC", "companyName": "Blank Check", "price": 10.05, "marketCap": 3e8}, flat,
+    )
+    assert q2["changeSession"] == "2026-09-14"
+    # Direct helper contract: no price → never the live session.
+    assert PriceService._change_session(10.0, flat) == "2026-09-11"
+    assert PriceService._change_session(10.0, flat, price=None) == "2026-09-11"
+    assert PriceService._change_session(10.0, {"close": 10.0, "previous_close": 10.0}, price=10.0) is None
+
+
 def test_the_stamp_is_absent_when_there_is_no_change_to_describe():
     q = PriceService._from_screener({"symbol": "NEW", "companyName": "New Co", "price": 10.0}, None)
     assert q["changePercentage"] is None and "changeSession" not in q

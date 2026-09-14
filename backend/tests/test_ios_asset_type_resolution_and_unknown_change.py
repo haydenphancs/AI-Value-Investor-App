@@ -141,8 +141,14 @@ def test_both_index_models_keep_is_positive_gated(header):
 
 def test_add_from_search_uses_the_pair_form_for_a_coin():
     body = _block(_IOS / "ViewModels/TrackingViewModel.swift", "func addTickerFromSearch(_ result: StockSearchResult)")
+    # ONE rule, shared with the add sheet and the star check (2026-09-13): the helper
+    # carries the crypto → pair / else uppercased spelling.
+    assert "let symbol = CryptoSymbol.storedSymbol(for: result)" in body, (
+        "a starred coin reaches PUT /portfolios/{id}/tickers as the bare symbol"
+    )
+    helper = _block(_IOS / "Core/Utilities/CryptoSymbol.swift", "static func storedSymbol(for result: StockSearchResult)")
     assert re.search(
-        r'let symbol = \(result\.type \?\? ""\)\.lowercased\(\) == "crypto"\s*\n\s*\? CryptoSymbol\.pair\(result\.ticker\)\s*\n\s*: result\.ticker\.uppercased\(\)',
-        body,
-    ), "a starred coin reaches PUT /portfolios/{id}/tickers as the bare symbol"
+        r'\(result\.type \?\? ""\)\.lowercased\(\) == "crypto"\s*\n\s*\? pair\(result\.ticker\)\s*\n\s*: result\.ticker\.uppercased\(\)',
+        helper,
+    ), "the stored-symbol rule no longer maps a coin to its pair"
     assert "portfolioStore.addTicker(symbol, to: portfolioId)" in body

@@ -55,6 +55,10 @@ struct ETFQuoteResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `false` when the quote carried no day change (a profile row without one): the two
+    /// floats above are 0.0 placeholders, not a flat day. Optional so older backends (no
+    /// key) decode as known.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
     let keyStatistics: [KeyStatisticItemDTO]
@@ -66,6 +70,7 @@ struct ETFQuoteResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatistics = "key_statistics"
@@ -82,6 +87,8 @@ struct ETFDetailResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `ETFQuoteResponseDTO.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
     let keyStatistics: [KeyStatisticItemDTO]
@@ -101,6 +108,7 @@ struct ETFDetailResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatistics = "key_statistics"
@@ -432,6 +440,7 @@ extension ETFQuoteResponseDTO {
         out.currentPrice = currentPrice
         out.priceChange = priceChange
         out.priceChangePercent = priceChangePercent
+        out.changeKnown = changeKnown ?? true
         out.marketStatus = marketStatus.resolvedMarketStatus
         out.keyStatistics = keyStatistics.map {
             KeyStatistic(label: $0.label, value: $0.value,
@@ -620,6 +629,7 @@ extension ETFDetailResponseDTO {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: mktStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close, open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
@@ -692,6 +702,8 @@ struct ETFCoreResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `ETFQuoteResponseDTO.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     /// Empty when the server could only have produced bars by pulling the multi-thousand
     /// row daily history. The full response fills them in a moment later.
@@ -703,6 +715,7 @@ struct ETFCoreResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
     }
@@ -714,6 +727,7 @@ struct ETFCoreResponseDTO: Decodable {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: marketStatus.resolvedMarketStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close,
@@ -734,21 +748,25 @@ struct ETFCoreData {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     var marketStatus: MarketStatus
     /// `var`: the range pill is interactive before the full response lands, and the live
     /// socket merges ticks into the core header the same way it merges into the full one.
     var chartPricePoints: [StockPricePoint]
 
     var chartData: [Double] { chartPricePoints.map { $0.close } }
-    var isPositive: Bool { priceChange >= 0 }
+    var isPositive: Bool { changeKnown && priceChange >= 0 }
     /// Prior close, for the chart's dashed baseline — derived exactly as the full display
     /// model derives it, not shipped by the server, so there is one source for it.
     var previousClose: Double { currentPrice - priceChange }
 
     var formattedPrice: String { ETFHeaderFormat.price(currentPrice) }
-    var formattedChange: String { ETFHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? ETFHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        ETFHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? ETFHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 
@@ -769,9 +787,27 @@ protocol ETFHeaderRenderable {
     var formattedChange: String { get }
     var formattedChangePercent: String { get }
     var isPositive: Bool { get }
+    var changeKnown: Bool { get }
     var marketStatus: MarketStatus { get }
     var chartPricePoints: [StockPricePoint] { get }
     var previousClose: Double { get }
+}
+
+extension ETFHeaderRenderable {
+    /// Line colour for the chart. Follows the day change when it is known; otherwise the
+    /// series' own direction, so an unknown change is never painted as a decline.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
+    }
+
+    /// The dashed baseline: nil when the change is unknown — `previousClose` would then be
+    /// `currentPrice - 0`, a baseline sitting exactly on the live price.
+    var chartPreviousClose: Double? {
+        changeKnown ? previousClose : nil
+    }
 }
 
 extension ETFDetailData: ETFHeaderRenderable {}

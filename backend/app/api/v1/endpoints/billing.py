@@ -39,6 +39,7 @@ from app.services.iap_service import (
     get_iap_service,
 )
 from app.services.subscription_service import SubscriptionService
+from app.core.security import trusted_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -254,10 +255,17 @@ _WEBHOOK_MAX_PER_MINUTE = 120
 #: themselves noisy (`_WEBHOOK_QUIET_CALLER_PER_MINUTE`); a caller sending a handful a
 #: minute — which is Apple, even for a busy product — is never turned away by it.
 #:
-#: (An earlier comment here claimed `request.client.host` is attacker-chosen because uvicorn
-#: runs with `--forwarded-allow-ips='*'`. That is FALSE on this deployment: Railway's edge
-#: overwrites `X-Forwarded-For`, so the per-IP key is a real per-caller control. The global
-#: ceiling is therefore a CPU backstop, not an anti-evasion measure.)
+#: ⚠️ The per-IP key comes from `trusted_client_ip`, NOT `request.client.host`. A comment
+#: here briefly claimed Railway overwrites `X-Forwarded-For` so `.client.host` was safe;
+#: that is wrong and this repo already measured it. uvicorn runs with
+#: `--forwarded-allow-ips='*'`, which puts `ProxyHeadersMiddleware` in `always_trust` mode,
+#: and in that mode it rewrites `scope["client"]` to the LEFTMOST XFF entry — the part the
+#: caller sent. `core/security.trusted_client_ip` takes the RIGHTMOST entry, the one our own
+#: edge appended, and its docstring records the incident: every per-IP auth limiter keyed on
+#: `.client.host` and none of them ever fired. This was the last per-IP control in the app
+#: still on the forgeable value (auth.py uses the helper at ten sites, chat.py at its IP
+#: budget). The helper falls back to `.client.host` when there is no XFF, so this is correct
+#: under either belief about the edge.
 _WEBHOOK_MAX_PER_MINUTE_GLOBAL = 600
 
 #: A caller at or below this rate is exempt from the global ceiling. Apple's real traffic is
@@ -285,19 +293,21 @@ _webhook_global: list = []
 def _webhook_rate_limited(request: Request) -> bool:
     """True when this caller — or the route as a whole — has exceeded its ceiling.
 
-    Keyed on the proxy-aware client IP for the per-caller ceiling, and on nothing at all
-    for the global one. Railway's edge overwrites `X-Forwarded-For`, so despite uvicorn's
-    `--forwarded-allow-ips='*'` the IP reaching us is the real peer and the per-IP bucket
-    is a genuine per-caller control. The global ceiling is a bound on total WORK, and it
-    deliberately exempts quiet callers so it can never be the thing that rejects Apple.
+    Keyed on `trusted_client_ip` for the per-caller ceiling — the rightmost
+    `X-Forwarded-For` entry, which only our own edge can write — and on nothing at all for
+    the global one. The global ceiling is a bound on total WORK, and it deliberately exempts
+    quiet callers so it can never be the thing that rejects Apple.
     """
     now = time.monotonic()
     cutoff = now - 60.0
-    # `getattr`, not attribute access: this guard must never be the thing that 500s the
-    # webhook. A real Starlette Request always has `.client`, but a limiter that can raise
-    # would turn a flood into an outage — and Apple would retry the 500 for days.
-    client = getattr(request, "client", None)
-    ip = (getattr(client, "host", None) if client else None) or "unknown"
+    # Wrapped, because this guard must never be the thing that 500s the webhook: a limiter
+    # that can raise turns a flood into an outage, and Apple retries a 500 for days.
+    # `trusted_client_ip` itself falls back to `.client.host` and then to a constant.
+    try:
+        ip = trusted_client_ip(request) or "unknown"
+    except Exception:                                    # pragma: no cover - belt and braces
+        client = getattr(request, "client", None)
+        ip = (getattr(client, "host", None) if client else None) or "unknown"
 
     # PRUNE BEFORE TOUCHING THIS CALLER'S BUCKET.
     #
@@ -326,6 +336,14 @@ def _webhook_rate_limited(request: Request) -> bool:
                 _webhook_hits.pop(key, None)
 
     _webhook_global[:] = [t for t in _webhook_global if t > cutoff]
+
+    # The hard backstop reads nothing from `hits`, so it goes ABOVE the bucket mint:
+    # `_webhook_hits[ip]` is a defaultdict, and indexing it for a request we are about to
+    # reject anyway grew the resident keyspace under a rotated-header flood (measured
+    # 600 -> 10,000 keys) for no benefit.
+    if len(_webhook_global) >= _WEBHOOK_HARD_GLOBAL_PER_MINUTE:
+        return True
+
     hits = _webhook_hits[ip]
     hits[:] = [t for t in hits if t > cutoff]
 
@@ -341,11 +359,6 @@ def _webhook_rate_limited(request: Request) -> bool:
         len(_webhook_global) >= _WEBHOOK_MAX_PER_MINUTE_GLOBAL
         and len(hits) >= _WEBHOOK_QUIET_CALLER_PER_MINUTE
     ):
-        return True
-
-    # The hard backstop: past this, the exemption stops applying to anyone, because a
-    # distributed flood is made entirely of individually-quiet callers.
-    if len(_webhook_global) >= _WEBHOOK_HARD_GLOBAL_PER_MINUTE:
         return True
 
     hits.append(now)

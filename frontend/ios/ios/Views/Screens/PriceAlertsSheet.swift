@@ -203,7 +203,7 @@ struct PriceAlertsSheet: View {
 
     @ViewBuilder
     private var existingSection: some View {
-        let alerts = store.alerts(for: viewModel.ticker)
+        let alerts = store.alerts(for: viewModel.ticker, assetType: viewModel.assetType)
         switch store.state {
         case .loading:
             ProgressView().tint(AppColors.textSecondary)

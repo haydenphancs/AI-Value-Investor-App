@@ -63,6 +63,7 @@ def _svc(plan):
 @pytest.fixture(autouse=True)
 def _cold_apewisdom(monkeypatch):
     monkeypatch.setattr(ape, "_cache", {})
+    monkeypatch.setattr(ape, "_loaded", {"all-stocks": False, "all-crypto": False})
     monkeypatch.setattr(ape, "_kick_background_refresh", lambda: None)
 
 
@@ -119,7 +120,21 @@ async def test_24h_cold_cache_and_empty_db_is_unknown_not_untracked():
 @pytest.mark.asyncio
 async def test_24h_populated_cache_without_the_ticker_is_a_real_zero(monkeypatch):
     monkeypatch.setattr(ape, "_cache", {"AAPL": {"mentions": 1, "mentions_24h_ago": 1}})
+    monkeypatch.setattr(ape, "_loaded", {"all-stocks": True, "all-crypto": True})
     assert await _svc([[]]).get_mentions_24h("ZZZZ") == (0, 0, True)
+
+
+@pytest.mark.asyncio
+async def test_24h_half_loaded_cache_makes_a_miss_unknown_not_zero(monkeypatch):
+    """Boot where `all-stocks` 429'd and `all-crypto` landed: the cache is non-empty, so
+    `bool(_cache)` read as "consulted" and every stock published "0 mentions · known"
+    for 30 minutes. One cold filter makes an absent ticker UNKNOWN."""
+    monkeypatch.setattr(ape, "_cache", {"BTC": {"mentions": 9, "mentions_24h_ago": 3,
+                                                "_filter": "all-crypto"}})
+    monkeypatch.setattr(ape, "_loaded", {"all-stocks": False, "all-crypto": True})
+    assert await _svc([[]]).get_mentions_24h("AAPL") == (0, 0, False)
+    # …while a ticker that IS in the cache is known regardless.
+    assert await _svc([[]]).get_mentions_24h("BTC") == (9, 3, True)
 
 
 @pytest.mark.asyncio

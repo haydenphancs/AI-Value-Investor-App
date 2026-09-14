@@ -71,7 +71,13 @@ def _fill_keyspace(n, monkeypatch):
     The global ceiling would otherwise short-circuit at 600 and the per-IP map would never
     grow — which is correct in production but makes the prune path untestable.
     """
+    # BOTH global ceilings, or the fill stops at the hard backstop and every later request
+    # is rejected there — before `hits.append(now)` — so the per-IP path this fixture exists
+    # to reach is never exercised and the regression test below passes for structural
+    # reasons. Verified: with only the soft ceiling lifted, correct code and a mutant that
+    # restores the prune-ordering bug both read `allowed == 0`.
     monkeypatch.setattr(billing, "_WEBHOOK_MAX_PER_MINUTE_GLOBAL", 10 ** 9)
+    monkeypatch.setattr(billing, "_WEBHOOK_HARD_GLOBAL_PER_MINUTE", 10 ** 9)
     for i in range(n):
         billing._webhook_rate_limited(_req(f"10.{i // 65536}.{(i // 256) % 256}.{i % 256}"))
 
@@ -233,3 +239,74 @@ def test_the_ceiling_is_checked_before_the_body_is_parsed():
 
 def test_the_ceiling_is_generous_enough_for_real_apple_traffic():
     assert billing._WEBHOOK_MAX_PER_MINUTE >= 60
+
+
+# ── the key itself must not be forgeable ────────────────────────────────────────────
+
+
+def _xff_req(forged_head, real_peer):
+    """A request as uvicorn presents it under `--forwarded-allow-ips='*'`: `.client.host`
+    is the LEFTMOST X-Forwarded-For entry, i.e. whatever the caller sent."""
+    return SimpleNamespace(
+        client=SimpleNamespace(host=forged_head),
+        headers={"x-forwarded-for": f"{forged_head}, {real_peer}"},
+    )
+
+
+def test_the_bucket_key_is_the_edge_supplied_address_not_the_caller_supplied_one():
+    """`request.client.host` is attacker-chosen on this deployment.
+
+    uvicorn runs with `--forwarded-allow-ips='*'` (pinned by `test_deploy_command_parity`),
+    which puts `ProxyHeadersMiddleware` in `always_trust` mode — and in that mode it
+    rewrites `scope["client"]` to the LEFTMOST XFF entry, the part the caller wrote.
+    `core/security.trusted_client_ip` takes the RIGHTMOST entry instead, the one our own
+    edge appended. Its docstring records the incident that produced it: every per-IP auth
+    limiter keyed on `.client.host` and none of them ever fired. This route was the last
+    per-IP control in the app still on the forgeable value.
+    """
+    real_peer = "203.0.113.7"
+    allowed = 0
+    for i in range(billing._WEBHOOK_MAX_PER_MINUTE * 3):
+        # A fresh forged head every single request — the evasion that used to work.
+        if not billing._webhook_rate_limited(_xff_req(f"10.0.0.{i % 256}", real_peer)):
+            allowed += 1
+    assert allowed <= billing._WEBHOOK_MAX_PER_MINUTE, (
+        f"{allowed} requests got through by rotating X-Forwarded-For's leftmost entry — "
+        "the limiter is keyed on a value the caller controls"
+    )
+    assert real_peer in billing._webhook_hits, (
+        f"the bucket was not keyed on the edge-supplied peer: {list(billing._webhook_hits)[:4]}"
+    )
+
+
+def test_the_helper_is_actually_imported_not_silently_swallowed():
+    """⚠️ The resolution is wrapped in `try/except Exception` so a limiter can never 500
+    the webhook — and a missing import raises NameError, which IS an Exception. The first
+    attempt at this fix shipped without the import: every call fell into the fallback and
+    the change was INERT while all 15 tests passed. Assert the binding exists.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    tree = ast.parse(Path(billing.__file__).read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "trusted_client_ip" in imported, (
+        "billing.py uses trusted_client_ip without importing it — the NameError is "
+        "swallowed by the limiter's own except-Exception and the hardening is inert"
+    )
+    assert callable(getattr(billing, "trusted_client_ip", None))
+    src = inspect.getsource(billing._webhook_rate_limited)
+    assert "trusted_client_ip(request)" in src
+
+
+def test_a_request_with_no_forwarded_header_still_works():
+    """Control: the helper falls back to `.client.host`, so a direct (non-proxied) caller
+    — and every existing test in this file — is keyed exactly as before."""
+    assert billing._webhook_rate_limited(_req("198.51.100.5")) is False
+    assert "198.51.100.5" in billing._webhook_hits
+

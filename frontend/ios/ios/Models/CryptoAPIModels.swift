@@ -16,6 +16,9 @@ struct CryptoDetailResponse: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `false` when the provider carried no 24h change: the two floats above are 0.0
+    /// placeholders, not a flat day. Optional so older backends (no key) decode as known.
+    let changeKnown: Bool?
     let marketStatus: String
     let chartData: [StockOverviewPricePointDTO]
     let keyStatisticsGroups: [KeyStatisticsGroupDTO]
@@ -31,6 +34,7 @@ struct CryptoDetailResponse: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatisticsGroups = "key_statistics_groups"
@@ -319,6 +323,7 @@ extension CryptoDetailResponse {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: resolvedMarketStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close, open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
@@ -378,6 +383,8 @@ struct CryptoCoreResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `CryptoDetailResponse.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: String
     /// Empty when the server could only have produced bars by pulling the multi-thousand
     /// row daily history. The full response fills them in a moment later.
@@ -389,6 +396,7 @@ struct CryptoCoreResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
     }
@@ -400,6 +408,7 @@ struct CryptoCoreResponseDTO: Decodable {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: CryptoMarketStatus(backend: marketStatus),
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close,
@@ -420,21 +429,25 @@ struct CryptoCoreData {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     var marketStatus: CryptoMarketStatus
     /// `var`: the range pill is interactive before the full response lands, and the live
     /// socket merges ticks into the core header the same way it merges into the full one.
     var chartPricePoints: [StockPricePoint]
 
     var chartData: [Double] { chartPricePoints.map { $0.close } }
-    var isPositive: Bool { priceChange >= 0 }
+    var isPositive: Bool { changeKnown && priceChange >= 0 }
     /// Prior close, for the chart's dashed baseline — derived exactly as the full display
     /// model derives it, not shipped by the server, so there is one source for it.
     var previousClose: Double { currentPrice - priceChange }
 
     var formattedPrice: String { CryptoHeaderFormat.price(currentPrice) }
-    var formattedChange: String { CryptoHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? CryptoHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        CryptoHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? CryptoHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 
@@ -455,9 +468,27 @@ protocol CryptoHeaderRenderable {
     var formattedChange: String { get }
     var formattedChangePercent: String { get }
     var isPositive: Bool { get }
+    var changeKnown: Bool { get }
     var marketStatus: CryptoMarketStatus { get }
     var chartPricePoints: [StockPricePoint] { get }
     var previousClose: Double { get }
+}
+
+extension CryptoHeaderRenderable {
+    /// Line colour for the chart. Follows the 24h change when it is known; otherwise the
+    /// series' own direction, so an unknown change is never painted as a decline.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
+    }
+
+    /// The dashed baseline: nil when the change is unknown — `previousClose` would then be
+    /// `currentPrice - 0`, a baseline sitting exactly on the live price.
+    var chartPreviousClose: Double? {
+        changeKnown ? previousClose : nil
+    }
 }
 
 extension CryptoDetailData: CryptoHeaderRenderable {}

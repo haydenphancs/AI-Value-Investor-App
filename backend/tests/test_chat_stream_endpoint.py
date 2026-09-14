@@ -514,6 +514,62 @@ def test_a_quiet_stream_carries_keepalive_comments(harness, monkeypatch):
     assert quota.settled == [] and quota.delivered == 1
 
 
+def test_the_stream_is_never_gzip_buffered_for_a_gzip_accepting_client(harness):
+    """`GZipMiddleware` is registered app-wide (main.py) and Starlette's streaming gzip path
+    never flushes zlib between chunks, so for any client that advertises gzip — iOS's
+    URLSession does by default — every frame and every keepalive sat in the compressor until
+    the generator closed. Measured on prod 2026-09-12: `meta` arrived at the END of a 14 s
+    turn; declining gzip made the same turn stream from 0.56 s. The endpoint declares
+    `Content-Encoding: identity`, which the middleware passes through untouched.
+
+    TestClient runs the whole app before returning, so this drives the REAL ASGI app (with
+    the harness's overrides) and records every `http.response.body` message: the first
+    non-empty body must be plain `event: meta` text — not the gzip magic bytes — and the
+    frames must arrive as separate messages (one per yield), which is what "streaming"
+    means to the client."""
+    import asyncio as _aio
+    client, db, quota, _ = harness
+    body = json.dumps({"message": "How is Apple doing?"}).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": f"/api/v1/chat/sessions/{_SESSION}/messages/stream",
+        "raw_path": f"/api/v1/chat/sessions/{_SESSION}/messages/stream".encode(),
+        "query_string": b"", "root_path": "", "server": ("testserver", 80), "client": ("127.0.0.1", 1),
+        "headers": [
+            (b"host", b"testserver"), (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()), (b"accept", b"text/event-stream"),
+            (b"accept-encoding", b"gzip, deflate, br"),
+        ],
+    }
+    sent: List[Dict[str, Any]] = []
+    delivered = {"body": False}
+
+    async def receive():
+        if delivered["body"]:
+            await _aio.sleep(3600)  # no disconnect: the app must finish on its own
+        delivered["body"] = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    _aio.run(app(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 200, start
+    headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+    assert headers.get("content-encoding") == "identity", headers
+    bodies = [m.get("body", b"") for m in sent if m["type"] == "http.response.body"]
+    non_empty = [b for b in bodies if b]
+    assert non_empty[0][:2] != b"\x1f\x8b", "first body chunk is a gzip header"
+    assert non_empty[0].startswith(b"event: meta\n"), non_empty[0][:80]
+    # One ASGI message per yielded frame — the pump did not collapse into a single flush.
+    assert len(non_empty) >= 5, len(non_empty)
+    text = b"".join(bodies).decode()
+    names = [f[0] for f in _parse_sse(text)]
+    assert names[0] == "meta" and names[-1] == "done" and "token" in names
+    assert quota.delivered == 1
+
+
 def test_the_non_streaming_door_settles_a_degraded_answer_no_cost(harness):
     """POST /messages — the client's stream-failure retry — must settle the same
     `no_tools` result the same way, or the two doors price one answer differently."""

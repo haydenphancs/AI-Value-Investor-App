@@ -37,9 +37,25 @@ def _readable(entry: Any) -> bool:
 
 _BASE_URL = "https://api.alternative.me/fng/"
 _CACHE_TTL = 900  # 15 minutes
+# The index prints once a day. A reading older than this is not "the current reading"
+# any more than a fabricated Neutral 50 was — it is served during an outage only while
+# it is plausibly still today's, then the gauge is hidden.
+_MAX_STALE_SECONDS = 36 * 3600
+# A failed refresh is memoised this long so an outage costs one upstream call per
+# window, not one per viewer (the read used to build a fresh AsyncClient per request
+# and never moved `_cache_ts` on failure).
+_FAILURE_MEMO_SECONDS = 120
 
 _cache: Optional[List[Dict[str, Any]]] = None
 _cache_ts: float = 0
+_failed_at: float = 0
+
+
+def _stale_or_raise(limit: int, reason: str) -> List[Dict[str, Any]]:
+    """The degrade path shared by both failure arms: a bounded-age stale reading, else raise."""
+    if _cache is not None and (time.time() - _cache_ts) < _MAX_STALE_SECONDS:
+        return _cache[:limit]
+    raise FearGreedUnavailableException(reason)
 
 
 async def get_fear_greed_index(limit: int = 30) -> List[Dict[str, Any]]:
@@ -50,10 +66,12 @@ async def get_fear_greed_index(limit: int = 30) -> List[Dict[str, Any]]:
                              "timestamp": "1551157200"}, ...]
     Ordered newest-first.
     """
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _failed_at
 
     if _cache is not None and (time.time() - _cache_ts) < _CACHE_TTL:
         return _cache[:limit]
+    if (time.time() - _failed_at) < _FAILURE_MEMO_SECONDS:
+        return _stale_or_raise(limit, "Fear & Greed Index unavailable (recent failure memoised)")
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -66,11 +84,11 @@ async def get_fear_greed_index(limit: int = 30) -> List[Dict[str, Any]]:
             # An empty answer is NOT a reading. Caching it pinned "no data" for
             # `_CACHE_TTL` and the summary below turned it into a confident Neutral 50.
             logger.warning("Fear & Greed Index: upstream returned no readable entries")
-            if _cache is not None:
-                return _cache[:limit]
-            raise FearGreedUnavailableException("Fear & Greed Index returned no entries")
+            _failed_at = time.time()
+            return _stale_or_raise(limit, "Fear & Greed Index returned no entries")
         _cache = entries
         _cache_ts = time.time()
+        _failed_at = 0
 
         logger.info(f"Fear & Greed Index: fetched {len(entries)} entries")
         return entries[:limit]
@@ -79,13 +97,16 @@ async def get_fear_greed_index(limit: int = 30) -> List[Dict[str, Any]]:
         raise
     except Exception as e:
         logger.warning(f"Fear & Greed Index fetch failed: {type(e).__name__}: {e}")
-        if _cache is not None:
-            return _cache[:limit]
-        # Cold cache and a failed fetch: there is no reading to give. Raising lets the
-        # endpoint answer 502 and iOS hide the gauge — not paint a fabricated "Neutral".
-        raise FearGreedUnavailableException(
-            f"Fear & Greed Index unavailable: {type(e).__name__}: {e}"
-        ) from e
+        _failed_at = time.time()
+        # A bounded-age stale reading, else there is no reading to give. Raising lets the
+        # endpoint answer 502 and iOS hide the gauge — not paint a fabricated "Neutral",
+        # and not a multi-day-old value dressed as today's.
+        try:
+            return _stale_or_raise(
+                limit, f"Fear & Greed Index unavailable: {type(e).__name__}: {e}"
+            )
+        except FearGreedUnavailableException as exc:
+            raise exc from e
 
 
 def compute_fear_greed_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:

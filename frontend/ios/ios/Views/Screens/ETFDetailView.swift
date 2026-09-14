@@ -82,7 +82,7 @@ struct ETFDetailView: View {
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
-                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: etfSymbol),
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: etfSymbol, assetType: "etf"),
                     tickerSymbol: etfSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.etfData?.formattedPrice : nil
                 )
@@ -109,19 +109,20 @@ struct ETFDetailView: View {
                             priceChange: etfData.formattedChange,
                             priceChangePercent: etfData.formattedChangePercent,
                             isPositive: etfData.isPositive,
-                            marketStatus: etfData.marketStatus
+                            marketStatus: etfData.marketStatus,
+                            changeKnown: etfData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         // Chart
                         TickerChartView(
                             pricePoints: etfData.chartPricePoints,
-                            isPositive: etfData.isPositive,
+                            isPositive: etfData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .etf,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: etfData.previousClose
+                            previousClose: etfData.chartPreviousClose
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {

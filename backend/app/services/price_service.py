@@ -54,11 +54,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
-from app.integrations.fmp import FMPRateLimitException, get_fmp_client
+from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException, get_fmp_client
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import detect_asset_class, uses_coingecko_price
-from app.utils.market_hours import previous_trading_day, session_trading_date
+from app.utils.market_hours import previous_trading_day, session_trading_date, register_market_closure
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,10 @@ logger = logging.getLogger(__name__)
 # freshness a user perceives on a price and is what `home_dashboard_service` already
 # assumed of batch-quote.
 _UNIVERSE_TTL = 60.0
+# A failed/empty screener sweep is memoised this long so a blip is one upstream call per
+# window, not one per request — but never as a `{}` universe (see `_get_universe`).
+_UNIVERSE_DEGRADED_TTL = 15.0
+_UNIVERSE_DEGRADED_KEY = "price:universe:degraded"
 
 # A single profile is cheap; this only collapses the duplicate calls a single screen makes.
 _QUOTE_TTL = 30.0
@@ -331,7 +335,8 @@ class PriceService:
 
     @classmethod
     def _change_session(
-        cls, prev: Optional[float], snap: Optional[Dict[str, Any]]
+        cls, prev: Optional[float], snap: Optional[Dict[str, Any]],
+        price: Optional[float] = None,
     ) -> Optional[str]:
         """WHICH SESSION a change computed against `prev` describes (ISO date), or None.
 
@@ -341,11 +346,21 @@ class PriceService:
         ENDED — `trade_date`. It matters premarket: at 07:00 ET on a Monday the screener
         still reports Friday's close, so the change is FRIDAY's move, and without the
         stamp the widget printed it as "Down 4.8% today" under a Monday date.
+
+        The test is the SAME one `_pick_denominator` uses — did the PRICE move off the
+        stored close — not `prev == close`. A row whose close equals its previous close
+        (a name that did not trade, a halted stock, a $10.00 SPAC, a preferred at par)
+        used to be stamped with the LIVE session while every other untraded row carried
+        `trade_date`; `widget_movers.newest_session` takes the max stamp, so one flat
+        row evicted every real prior-session mover from the pre-market tile.
         """
         if prev is None or not snap:
             return None
         close = _finite(snap.get("close"))
-        if close is not None and abs(prev - close) < 1e-12:
+        if (
+            close is not None and price is not None
+            and abs(price - close) > max(abs(close), 1.0) * 1e-9
+        ):
             return session_trading_date().isoformat()
         return str(snap.get("trade_date") or "")[:10] or None
 
@@ -466,7 +481,7 @@ class PriceService:
         if change_pct is not None:
             # Present only when there IS a change to describe, so the fixed key set
             # every consumer reads is unchanged (`yearLow`/`yearHigh` follow the same rule).
-            session = cls._change_session(prev, snap)
+            session = cls._change_session(prev, snap, price)
             if session:
                 out["changeSession"] = session
         return out
@@ -782,11 +797,23 @@ class PriceService:
         return out
 
     async def _get_universe(self) -> Dict[str, Dict[str, Any]]:
-        """The screener sweep, keyed by symbol. One upstream call shared by every caller."""
+        """The screener sweep, keyed by symbol. One upstream call shared by every caller.
+
+        An EMPTY sweep is a failure, not an answer (`company-screener` has ~7,000 rows
+        above the cap), and it is never cached: the old writer memoised `{}` for
+        `_UNIVERSE_TTL`, so one `[]` blip blanked every equity quote — Home tiles,
+        Tracking, the widget, the alert sweep — for a full minute. Failures are instead
+        memoised for `_UNIVERSE_DEGRADED_TTL` so a blip does not become one screener call
+        per request either.
+        """
         key = "price:universe"
         hit = _cache_get(key, _UNIVERSE_TTL)
         if hit is not None:
             return hit
+        if _cache_get(_UNIVERSE_DEGRADED_KEY, _UNIVERSE_DEGRADED_TTL) is not None:
+            raise FMPUnavailableException(
+                "screener universe degraded (memoised for %ds)" % int(_UNIVERSE_DEGRADED_TTL)
+            )
 
         if key in _inflight:
             # Shielded so a caller that times out cannot cancel the shared fetch and leave
@@ -803,7 +830,18 @@ class PriceService:
                 sym = (row.get("symbol") or "").upper()
                 if sym and not is_blocked_symbol(sym):
                     universe[sym] = row
+            if not universe:
+                # The WRITER refuses the empty answer (a cached `[]` failure is
+                # indistinguishable from a real empty answer downstream).
+                _cache_set(_UNIVERSE_DEGRADED_KEY, True)
+                logger.error(
+                    "price_service: screener universe returned NO usable rows (%d raw) — "
+                    "not caching; equity quotes degrade for up to %ds",
+                    len(rows), int(_UNIVERSE_DEGRADED_TTL),
+                )
+                raise FMPUnavailableException("screener universe returned no rows")
             _cache_set(key, universe)
+            _cache.pop(_UNIVERSE_DEGRADED_KEY, None)
             if not future.done():
                 future.set_result(universe)
             return universe
@@ -816,6 +854,7 @@ class PriceService:
                 future.set_exception(RuntimeError("shared fetch was cancelled"))
             raise
         except Exception as e:
+            _cache_set(_UNIVERSE_DEGRADED_KEY, True)
             if not future.done():
                 future.set_exception(e)
             raise
@@ -1102,6 +1141,14 @@ class PriceService:
                 "price_service: %s is not a US session (%d rows, bellwethers missing) "
                 "— stepping back", target, len(rows or []),
             )
+            # Teach the calendar. An UNSCHEDULED closure otherwise reads as a missed
+            # ingest the next morning: `previous_trading_day` lands on the closure, the
+            # stored close (the day before it) is judged stale, and every day change is
+            # None until ~20:00 ET (`_snapshot_is_current`).
+            try:
+                register_market_closure(date.fromisoformat(str(target)[:10]))
+            except ValueError:
+                pass
             target = self._step_back(target)
         return target, []
 

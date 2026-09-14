@@ -100,6 +100,11 @@ class CryptoCoreResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the provider carried no 24h change (a coin with <24h of history, or a
+    # CoinGecko data gap): `price_change` / `price_change_percent` are then 0.0
+    # placeholders, not a flat day. Same pattern as the index header; iOS renders
+    # "—" and hides the dashed baseline. Defaults True for shipped builds.
+    change_known: bool = True
     market_status: str
     chart_data: List[Dict[str, Any]] = []
 
@@ -110,6 +115,11 @@ class CryptoDetailResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the provider carried no 24h change (a coin with <24h of history, or a
+    # CoinGecko data gap): `price_change` / `price_change_percent` are then 0.0
+    # placeholders, not a flat day. Same pattern as the index header; iOS renders
+    # "—" and hides the dashed baseline. Defaults True for shipped builds.
+    change_known: bool = True
     market_status: str  # "24/7 Trading" or "Maintenance"
     chart_data: List[Dict[str, Any]]
     key_statistics_groups: List[KeyStatisticsGroupResponse]

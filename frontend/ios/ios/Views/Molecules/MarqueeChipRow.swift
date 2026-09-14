@@ -269,6 +269,11 @@ struct MarqueeChipRow: View {
         // is nearly all of them.
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                // A row that FITS never moves: `isPaused` is permanently true and `base` is
+                // written only by this drag, so a 5 pt swipe right folded through `wrapped`
+                // into `5 - unit` — the whole row translated off-screen for the life of the
+                // view. Same guard `accessibilityScrollAction` already applies.
+                guard overflows else { return }
                 if !isTouching {
                     base = offset(at: .now)
                     anchor = .now
@@ -289,8 +294,16 @@ struct MarqueeChipRow: View {
                     // So the release is armed at touch-DOWN with a generous timeout, and
                     // `onEnded` merely replaces it with the shorter, nicer one. A dropped
                     // `onEnded` now costs a couple of still seconds instead of the feature.
-                    scheduleResume(after: Self.cancelledGestureTimeout)
                 }
+                // RE-ARMED ON EVERY EVENT, not only at touch-down. Armed once, the watchdog
+                // fired MID-DRAG on any touch held longer than the timeout (drag, then hold
+                // to read the chip under the finger — exactly what `resumeDelay` says users
+                // do): `isTouching` released while the finger was still down, the row began
+                // drifting under it, and the next 1 pt move re-entered the touch-down branch,
+                // reset `lastTranslation` to 0 and re-applied the WHOLE translation as a
+                // second delta — a ~150 pt jump. A live drag now keeps pushing the deadline
+                // back; a cancelled gesture (no more events) still heals in the same time.
+                scheduleResume(after: Self.cancelledGestureTimeout)
                 let delta = value.translation.width - lastTranslation
                 lastTranslation = value.translation.width
                 base = wrapped(base + delta)
@@ -308,6 +321,7 @@ struct MarqueeChipRow: View {
                 }
             }
             .onEnded { _ in
+                guard overflows else { return }
                 anchor = .now
                 lastTranslation = 0
                 // A beat before drifting again, so letting go to read something does not

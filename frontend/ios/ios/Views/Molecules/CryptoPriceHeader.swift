@@ -15,9 +15,14 @@ struct CryptoPriceHeader: View {
     let priceChangePercent: String
     let isPositive: Bool
     let marketStatus: CryptoMarketStatus
+    /// `false` when the backend said the 24h change is UNKNOWN (`change_known`): the
+    /// caller's `isPositive` is then a placeholder, so the header must not assert a
+    /// direction — neutral colour, no arrow. Defaults `true` for callers without the flag.
+    var changeKnown: Bool = true
 
     private var changeColor: Color {
-        isPositive ? AppColors.bullish : AppColors.bearish
+        guard changeKnown else { return AppColors.textSecondary }
+        return isPositive ? AppColors.bullish : AppColors.bearish
     }
 
     private var arrowIcon: String {
@@ -45,9 +50,11 @@ struct CryptoPriceHeader: View {
 
                 // Price change
                 HStack(spacing: 4) {
-                    Image(systemName: arrowIcon)
-                        .font(AppTypography.iconTiny).fontWeight(.semibold)
-                        .foregroundColor(changeColor)
+                    if changeKnown {
+                        Image(systemName: arrowIcon)
+                            .font(AppTypography.iconTiny).fontWeight(.semibold)
+                            .foregroundColor(changeColor)
+                    }
 
                     Text("\(priceChange) \(priceChangePercent)")
                         .font(AppTypography.labelSmall)

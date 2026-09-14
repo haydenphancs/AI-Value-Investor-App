@@ -16,6 +16,12 @@ struct SparklineView: View {
     /// the previous trading day's close) the chart anchors to it instead of the
     /// first data point — matching Apple Stocks / Robinhood.
     var referencePrice: Double? = nil
+    /// `false` → no dashed reference line and no green/red split; the series is stroked in
+    /// ONE tone by `isPositive`. This is the neutral state a tile uses when the day change
+    /// is UNKNOWN: passing `referencePrice: nil` does NOT remove the line (nil means
+    /// "anchor to the first point"), so a "no reference" caller still got a dashed line at
+    /// `data[0]` and a red segment beneath it.
+    var showReference: Bool = true
     /// Where `data` sits inside its trading session, as fractions of the width.
     ///
     /// Server-supplied (`spark_from` / `spark_to`). The series is a bare `[Double]`
@@ -82,6 +88,35 @@ struct SparklineView: View {
 
                 let lastPoint = points.last!
                 let endIsAbove = data.last! >= referenceValue
+
+                if !showReference {
+                    // Single tone, no reference, no split — the series' own direction.
+                    let tone = isPositive ? AppColors.bullish : AppColors.bearish
+                    Canvas { context, size in
+                        let line = buildLinePath(points: points)
+                        let fillShape = buildFillPath(points: points, baseY: plot.maxY)
+                        context.fill(
+                            fillShape,
+                            with: .linearGradient(
+                                Gradient(colors: [tone.opacity(0.18), tone.opacity(0.0)]),
+                                startPoint: CGPoint(x: 0, y: plot.minY),
+                                endPoint: CGPoint(x: 0, y: plot.maxY)
+                            )
+                        )
+                        context.stroke(
+                            line,
+                            with: .color(tone),
+                            style: AppSentiment.strokeStyle(isPositive: isPositive,
+                                                            differentiate: differentiate,
+                                                            lineWidth: lineWidth,
+                                                            dash: [3, 2])
+                        )
+                        let dotRect = CGRect(x: lastPoint.x - dotRadius, y: lastPoint.y - dotRadius,
+                                             width: dotRadius * 2, height: dotRadius * 2)
+                        context.fill(Path(ellipseIn: dotRect), with: .color(tone))
+                        _ = size
+                    }
+                } else {
 
                 Canvas { context, size in
                     // --- Green gradient fill (above reference) ---
@@ -177,6 +212,7 @@ struct SparklineView: View {
                     } else {
                         context.fill(dotPath, with: .color(dotColor))
                     }
+                }
                 }
             }
         }

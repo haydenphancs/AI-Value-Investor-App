@@ -317,6 +317,18 @@ def _sma(prices: List[Dict], window: int) -> Optional[float]:
     return None
 
 
+def _finite_or_none_num(v: Any) -> Optional[float]:
+    """Finite float or None — the three-state read `change_known` needs (a coerced 0.0
+    cannot tell an unknown change from a flat day)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def _finite_num(v: Any, default: float = 0.0) -> float:
     """Coerce to a finite float, or ``default``.
 
@@ -1013,10 +1025,17 @@ class ETFService:
             # already raise the typed exception for the identical condition.
             raise FMPUnavailableException(f"ETF core has no usable price for {symbol}")
 
-        change = _finite_num(quote.get("change"))
-        change_pct = _finite_num(
-            quote.get("changePercentage") or quote.get("changesPercentage")
+        _raw_change = _finite_or_none_num(quote.get("change"))
+        _raw_pct = _finite_or_none_num(
+            quote.get("changePercentage") if quote.get("changePercentage") is not None
+            else quote.get("changesPercentage")
         )
+        # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day. Only an
+        # absent change is unknown — it used to fabricate "+$0.00 (+0.00%)" in green with
+        # the dashed baseline on the live price (the index twin got `change_known`).
+        change_known = _raw_change is not None or _raw_pct is not None
+        change = _raw_change or 0.0
+        change_pct = _raw_pct or 0.0
         prev_close = _finite_num(quote.get("previousClose"))
         if not change_pct and change and prev_close > 0:
             change_pct = round((change / prev_close) * 100, 4)
@@ -1031,6 +1050,7 @@ class ETFService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
         )
@@ -1063,6 +1083,7 @@ class ETFService:
             current_price=full.current_price,
             price_change=full.price_change,
             price_change_percent=full.price_change_percent,
+            change_known=full.change_known,
             market_status=full.market_status,
             # Bars only when the caller asked for a range — the 30s loop skips them on a
             # daily chart, where nothing below the last candle can have moved.
@@ -1124,8 +1145,14 @@ class ETFService:
         # a computed field; float("nan") succeeds and, forwarded into a REQUIRED
         # response float, makes Starlette (allow_nan=False) 500 the whole ETF detail.
         price = _finite_num(quote.get("price"))
-        change = _finite_num(quote.get("change"))
-        change_pct = _finite_num(quote.get("changePercentage") or quote.get("changesPercentage"))
+        _raw_change = _finite_or_none_num(quote.get("change"))
+        _raw_pct = _finite_or_none_num(
+            quote.get("changePercentage") if quote.get("changePercentage") is not None
+            else quote.get("changesPercentage")
+        )
+        change_known = _raw_change is not None or _raw_pct is not None
+        change = _raw_change or 0.0
+        change_pct = _raw_pct or 0.0
         prev_close = _finite_num(quote.get("previousClose"))
         # Safety net: compute from change/previousClose if FMP didn't return percentage
         if not change_pct and change and prev_close > 0:
@@ -1408,6 +1435,7 @@ class ETFService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
             key_statistics=key_statistics,

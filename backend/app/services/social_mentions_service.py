@@ -119,7 +119,7 @@ class SocialMentionsService:
         data = await get_ticker_mentions(ticker)
         if data is not None:
             return data["mentions"], data["mentions_24h_ago"], True
-        cache_consulted = is_cache_populated()
+        cache_consulted = is_cache_populated(ticker)
 
         # Fallback: latest DB row
         try:

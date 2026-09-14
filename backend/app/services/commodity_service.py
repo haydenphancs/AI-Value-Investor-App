@@ -129,9 +129,19 @@ def _commodity_market_status(symbol: str = "") -> str:
     # was live at 03:00 ET, when the last trade was 16:00 the previous day. Same class of
     # error as the index "$0.00 under a live badge", just in the other direction.
     if symbol and _source_of(symbol) == _COMMODITY_SOURCE_ETF and _get_meta(symbol):
-        from app.utils.market_hours import SESSION_CLOSED, session_phase
+        from app.utils.market_hours import (
+            SESSION_AFTERHOURS, SESSION_PREMARKET, SESSION_REGULAR, session_phase,
+        )
 
-        return "Market Closed" if session_phase() == SESSION_CLOSED else "Market Open"
+        # PHASE-SPECIFIC, like the ETF's own screen. "Market Open" for the whole 04:00–20:00
+        # ET span claimed a 16:00 profile print was live at 07:00, over a Trading Hours
+        # card on the same screen reading "9:30 AM – 4:00 PM ET"; the client already maps
+        # "Pre-Market" / "After-Hours" (`CommodityMarketStatus(backend:)`).
+        return {
+            SESSION_PREMARKET: "Pre-Market",
+            SESSION_REGULAR: "Market Open",
+            SESSION_AFTERHOURS: "After-Hours",
+        }.get(session_phase(), "Market Closed")
 
     now = datetime.now(tz=ZoneInfo("America/New_York"))
     weekday = now.weekday()  # 0=Mon … 5=Sat, 6=Sun
@@ -527,9 +537,16 @@ class CommodityService:
                 f"commodity core has no usable price for {symbol}"
             )
 
-        change = _finite_or_none(quote.get("change")) or 0
-        change_pct = (_finite_or_none(quote.get("changePercentage"))
-                      or _finite_or_none(quote.get("changesPercentage")) or 0)
+        _raw_change = _finite_or_none(quote.get("change"))
+        _raw_pct = (_finite_or_none(quote.get("changePercentage"))
+                    if quote.get("changePercentage") is not None
+                    else _finite_or_none(quote.get("changesPercentage")))
+        # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day; only an
+        # absent change (a FRED series with a single observation, a profile row without
+        # one) is unknown, and that must not render as "+$0.00 (+0.00%)".
+        change_known = _raw_change is not None or _raw_pct is not None
+        change = _raw_change or 0
+        change_pct = _raw_pct or 0
         prev_close = _finite_or_none(quote.get("previousClose")) or 0
         if not change_pct and change and prev_close:
             try:
@@ -564,6 +581,7 @@ class CommodityService:
             current_price=round(price, 2),
             price_change=round(change, 2),
             price_change_percent=round(change_pct, 2),
+            change_known=change_known,
             market_status=_commodity_market_status(fmp_symbol),
             chart_data=chart_data,
         )
@@ -599,6 +617,7 @@ class CommodityService:
             current_price=full.current_price,
             price_change=full.price_change,
             price_change_percent=full.price_change_percent,
+            change_known=full.change_known,
             market_status=full.market_status,
             # Bars only when the caller asked for a range — the 30s loop skips them on a
             # daily chart, where nothing below the last candle can have moved.
@@ -1169,7 +1188,9 @@ class CommodityService:
         # decode on iOS (or 500s via Starlette allow_nan=False). Coerce to finite.
         from app.services.chart_helper import _finite_or_none
         price = _finite_or_none(quote.get("price")) or 0
-        change = _finite_or_none(quote.get("change")) or 0
+        _raw_change = _finite_or_none(quote.get("change"))
+        change = _raw_change or 0
+        change_known = _raw_change is not None
 
         # A failed quote must NOT become "$0.00". `quote` degrades to `{}` above when
         # the FMP call raised, and every read below then defaults to 0 — so an FMP 429 or
@@ -1204,14 +1225,19 @@ class CommodityService:
             price = last_close
             if prev_close_hist:
                 change = last_close - prev_close_hist
+                change_known = True
                 quote = dict(quote or {})
                 quote.setdefault("previousClose", prev_close_hist)
         # FMP /quote returns the daily move under `changesPercentage` (plural) for
         # most symbols; some feeds use `changePercentage`. Read both, then fall
         # back to computing it from change/previousClose so commodity screens
         # never show a hard 0.00%.
-        change_pct = (_finite_or_none(quote.get("changePercentage"))
-                      or _finite_or_none(quote.get("changesPercentage")) or 0)
+        _raw_pct = (_finite_or_none(quote.get("changePercentage"))
+                    if quote.get("changePercentage") is not None
+                    else _finite_or_none(quote.get("changesPercentage")))
+        change_pct = _raw_pct or 0
+        if _raw_pct is not None:
+            change_known = True
         day_high = quote.get("dayHigh") or 0
         day_low = quote.get("dayLow") or 0
         year_high = quote.get("yearHigh") or 0
@@ -1456,6 +1482,7 @@ class CommodityService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_commodity_market_status(fmp_symbol),
             chart_data=chart_data,
             key_statistics_groups=key_statistics_groups,

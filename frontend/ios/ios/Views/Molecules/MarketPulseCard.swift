@@ -62,8 +62,10 @@ struct MarketPulseCard: View {
                             : ((item.spark.last ?? 0) >= (item.spark.first ?? 0)),
                         // No dashed reference either: it is the line the colour is judged
                         // against, and an unknown change means we cannot say which side of
-                        // it today sits on.
+                        // it today sits on. `showReference: false` is what removes it —
+                        // `referencePrice: nil` alone means "anchor to the first point".
                         referencePrice: item.changeKnown ? item.previousClose : nil,
+                        showReference: item.changeKnown,
                         // Bitcoin and the S&P fill different fractions at the same
                         // instant — their sessions are 00:00-24:00 and 09:30-16:00.
                         spanFrom: item.sparkFrom,

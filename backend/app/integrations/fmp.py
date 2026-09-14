@@ -492,6 +492,21 @@ class FMPClient:
         )
         return _normalize_profile(data[0]) if data else {}
 
+    async def get_dcf(self, ticker: str) -> Dict[str, Any]:
+        """FMP's discounted-cash-flow fair value: ``{symbol, date, dcf, "Stock Price"}``.
+
+        The legacy v3 ``/profile`` carried a ``dcf`` field and the report collector read
+        it from there; ``/stable/profile`` does not, so after the FMP rebuild every report's
+        fair value silently fell back to the current price (2026-09-12). This is the
+        entitled path (``fmp_entitlements.ENTITLED_PATHS``: "unnamed, serves 200"). Empty
+        dict when FMP has no model for the symbol — callers must treat that as UNKNOWN,
+        never as "fair value = price".
+        """
+        data = await self._make_request(
+            "discounted-cash-flow", params={"symbol": ticker.upper()}
+        )
+        return data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+
     async def get_stock_price_quote(self, ticker: str) -> Dict[str, Any]:
         """Get real-time stock quote."""
         data = await self._make_request(
@@ -2203,20 +2218,23 @@ class FMPClient:
                 "senate-trades returned %s for %s, expected a list",
                 type(data).__name__, symbol,
             )
+        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException):
+            # RE-RAISE. A rate limit, a bad key or a licence refusal on the one-call path
+            # is not cured by four parallel pages of `senate-latest` — it multiplied a 429
+            # into a 5-request sweep per symbol, per Holders build, and the fallback's
+            # own `except` then swallowed the partial into `[]`, which the caller's
+            # `critical=True` guard assumed could never happen.
+            raise
         except Exception as e:
             logger.warning(
                 "senate-trades failed for %s: %s: %s — falling back to senate-latest",
                 symbol, type(e).__name__, e,
             )
 
-        try:
-            all_trades = await self._fetch_congress_pages("senate-latest", 1000)
-        except Exception as e:
-            logger.warning(
-                "Senate disclosure fallback failed for %s: %s: %s",
-                symbol, type(e).__name__, e,
-            )
-            return []
+        # The paginated fallback FAILS CLOSED: `_fetch_congress_pages` raises
+        # `FMPPartialPageException` on a lost page (and the typed exceptions above), and
+        # those propagate — a truncated sweep is not "this member holds nothing".
+        all_trades = await self._fetch_congress_pages("senate-latest", 1000)
         symbol_upper = symbol.upper()
         return [
             t for t in all_trades
@@ -2254,20 +2272,23 @@ class FMPClient:
                 "house-trades returned %s for %s, expected a list",
                 type(data).__name__, symbol,
             )
+        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException):
+            # RE-RAISE. A rate limit, a bad key or a licence refusal on the one-call path
+            # is not cured by four parallel pages of `house-latest` — it multiplied a 429
+            # into a 5-request sweep per symbol, per Holders build, and the fallback's
+            # own `except` then swallowed the partial into `[]`, which the caller's
+            # `critical=True` guard assumed could never happen.
+            raise
         except Exception as e:
             logger.warning(
                 "house-trades failed for %s: %s: %s — falling back to house-latest",
                 symbol, type(e).__name__, e,
             )
 
-        try:
-            all_trades = await self._fetch_congress_pages("house-latest", 1000)
-        except Exception as e:
-            logger.warning(
-                "House disclosure fallback failed for %s: %s: %s",
-                symbol, type(e).__name__, e,
-            )
-            return []
+        # The paginated fallback FAILS CLOSED: `_fetch_congress_pages` raises
+        # `FMPPartialPageException` on a lost page (and the typed exceptions above), and
+        # those propagate — a truncated sweep is not "this member holds nothing".
+        all_trades = await self._fetch_congress_pages("house-latest", 1000)
         symbol_upper = symbol.upper()
         return [
             t for t in all_trades

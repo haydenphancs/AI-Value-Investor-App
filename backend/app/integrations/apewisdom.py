@@ -40,6 +40,14 @@ _HEADERS = {
 _cache: Dict[str, Dict[str, Any]] = {}
 _cache_ts: float = 0
 _fetch_lock: Optional[asyncio.Lock] = None
+# Which filters have EVER landed. `is_cache_populated` used to test `bool(_cache)`, so a
+# boot where `all-stocks` 429'd and `all-crypto` succeeded read as "consulted" for every
+# stock: the Sentiment tab published "0 mentions · known" for 30 minutes and the daily
+# snapshot wrote crypto-only rows and marked the day done.
+_loaded: Dict[str, bool] = {"all-stocks": False, "all-crypto": False}
+# After a PARTIAL refresh (one filter failed) the cache is deemed fresh only this long, so
+# the failed filter is retried well before the full TTL without hammering the site.
+_PARTIAL_RETRY_SECONDS = 300
 
 
 def _get_lock() -> asyncio.Lock:
@@ -58,11 +66,13 @@ def _is_cache_fresh() -> bool:
 async def _fetch_filter(
     client: httpx.AsyncClient,
     filter_name: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> Optional[Dict[str, Dict[str, Any]]]:
     """
     Fetch all pages for a filter (e.g., 'all-stocks').
 
-    Returns dict keyed by ticker with mentions data.
+    Returns dict keyed by ticker with mentions data, or **None when page 1 failed** — a
+    failed filter must be distinguishable from an empty one, or `refresh_cache` replaces a
+    good cache with half a fetch and stamps it fresh.
     Fetches one page at a time with delays to avoid rate limiting.
     """
     result: Dict[str, Dict[str, Any]] = {}
@@ -78,11 +88,11 @@ async def _fetch_filter(
             logger.warning(
                 f"ApeWisdom {filter_name} page 1 failed: {r.status_code}"
             )
-            return result
+            return None
 
         data = r.json()
         total_pages = data.get("pages", 1)
-        _parse_page(data, result)
+        _parse_page(data, result, filter_name)
 
         logger.info(
             f"ApeWisdom {filter_name}: page 1/{total_pages}, "
@@ -90,8 +100,8 @@ async def _fetch_filter(
         )
 
     except Exception as e:
-        logger.warning(f"ApeWisdom {filter_name} page 1 error: {e}")
-        return result
+        logger.warning(f"ApeWisdom {filter_name} page 1 error: {type(e).__name__}: {e}")
+        return None
 
     # Remaining pages with delay
     for page in range(2, total_pages + 1):
@@ -110,7 +120,7 @@ async def _fetch_filter(
                 continue
 
             page_data = r.json()
-            _parse_page(page_data, result)
+            _parse_page(page_data, result, filter_name)
 
         except Exception as e:
             logger.warning(
@@ -127,6 +137,7 @@ async def _fetch_filter(
 def _parse_page(
     data: Dict[str, Any],
     into: Dict[str, Dict[str, Any]],
+    filter_name: str = "",
 ) -> None:
     """Parse a single page response into the result dict."""
     for item in data.get("results", []):
@@ -139,6 +150,9 @@ def _parse_page(
             "mentions_24h_ago": int(item.get("mentions_24h_ago") or 0),
             "upvotes": int(item.get("upvotes") or 0),
             "rank": int(item.get("rank") or 0),
+            # Which filter produced the row, so a partial refresh can keep the previous
+            # entries of the filter that failed.
+            "_filter": filter_name,
         }
 
 
@@ -214,27 +228,54 @@ async def refresh_cache() -> Dict[str, Dict[str, Any]]:
             # Fetch crypto
             crypto = await _fetch_filter(client, "all-crypto")
 
+        # A filter that FAILED (None) keeps its previous entries; a filter that answered
+        # replaces its own. The writer never swaps a good cache for half a fetch.
+        previous = _cache
+        parts: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for name, fetched in (("all-stocks", stocks), ("all-crypto", crypto)):
+            if fetched is not None:
+                parts[name] = fetched
+                _loaded[name] = True
+            else:
+                kept = {t: v for t, v in previous.items() if v.get("_filter") == name}
+                parts[name] = kept
+                logger.warning(
+                    "ApeWisdom %s filter FAILED this refresh — keeping %d previous "
+                    "entries (%s)",
+                    name, len(kept),
+                    "will retry in %ds" % _PARTIAL_RETRY_SECONDS if previous or kept
+                    else "cache for this class stays cold",
+                )
         # Merge into cache (stocks take priority on collision)
-        merged = {**crypto, **stocks}
+        merged = {**parts["all-crypto"], **parts["all-stocks"]}
         _cache = merged
-        _cache_ts = time.time()
+        if stocks is not None and crypto is not None:
+            _cache_ts = time.time()
+        else:
+            # Fresh for only a short while, so the failed half is retried soon.
+            _cache_ts = time.time() - _CACHE_TTL + _PARTIAL_RETRY_SECONDS
 
         logger.info(
             f"ApeWisdom cache refreshed: "
-            f"{len(stocks)} stocks + {len(crypto)} crypto = "
+            f"{len(parts['all-stocks'])} stocks + {len(parts['all-crypto'])} crypto = "
             f"{len(merged)} total"
+            + ("" if stocks is not None and crypto is not None else " (PARTIAL)")
         )
         return _cache
 
 
-def is_cache_populated() -> bool:
-    """True once at least one ApeWisdom page has landed in the process cache.
+def is_cache_populated(ticker: Optional[str] = None) -> bool:
+    """True when a miss for `ticker` may be read as "Reddit is not talking about it".
 
     `get_ticker_mentions` answers None both for "not tracked on Reddit" and for "the cache
     is still cold" — the caller needs to tell those apart before it may claim a ticker has
-    zero mentions.
+    zero mentions. A ticker present in the cache is trivially known; an absent one is a
+    real zero only when BOTH filters have landed at least once (a bare ticker does not say
+    which class it belongs to, so one cold filter makes every miss unknown).
     """
-    return bool(_cache)
+    if ticker and ticker.upper().strip() in _cache:
+        return True
+    return _loaded["all-stocks"] and _loaded["all-crypto"]
 
 
 async def get_ticker_mentions(

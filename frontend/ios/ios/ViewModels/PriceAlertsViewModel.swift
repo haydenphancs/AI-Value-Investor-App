@@ -43,7 +43,7 @@ final class PriceAlertsViewModel: ObservableObject {
     /// True when this ticker is already at its per-ticker cap. Drives a disabled Add
     /// button with a reason, rather than letting the user fill in a form that will 409.
     /// ACTIVE only, matching the server's own quota.
-    var atCap: Bool { store.activeCount(ticker: ticker) >= store.maxPerTicker }
+    var atCap: Bool { store.activeCount(ticker: ticker, assetType: assetType) >= store.maxPerTicker }
 
     var parsedThreshold: Double? {
         // Accept a leading "$" or a trailing "%" — people type what the field means.

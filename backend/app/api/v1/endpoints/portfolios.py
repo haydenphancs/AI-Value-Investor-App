@@ -28,7 +28,7 @@ Routes:
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,7 +44,9 @@ from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import invalidate_feed_cache
 from app.utils.supabase_errors import is_unique_violation
 from app.utils.supabase_async import sb_exec
+from app.utils.postgrest_paging import fetch_all_rows
 import asyncio
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,12 @@ class SetPortfolioHoldingsRequest(BaseModel):
     items: List[HoldingItem]
 
 
+# `portfolio_items.shares` is numeric(20,4) and `market_value` numeric(20,2): 16 and 18
+# integer digits. Reject before writing anything — see `set_portfolio_holdings`.
+_MAX_SHARES = 1e16
+_MAX_MARKET_VALUE = 1e18
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -153,6 +161,22 @@ def _fetch_portfolio_items(
     ]
 
 
+def _read_watchlist_seed_rows(supabase: Client, user_id: str) -> List[Dict[str, Any]]:
+    """Every watchlist row for the user, newest first — PAGED past PostgREST's ~1,000-row
+    clamp (a truncated read here seeded a group missing the user's oldest tickers, and the
+    feed's own truncated read made the client purge them). Paged on the unique id, then
+    ordered by `added_at` in Python."""
+    rows = fetch_all_rows(
+        lambda: supabase.table("watchlist_items")
+        .select("id,ticker,added_at,shares,market_value")
+        .eq("user_id", user_id),
+        order_by="id",
+        what=f"watchlist seed rows for user={user_id}",
+    )
+    rows.sort(key=lambda r: str(r.get("added_at") or ""), reverse=True)
+    return rows
+
+
 def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResponse]:
     """Return all of the user's portfolios with their items, ordered by sort_order."""
     rows = (
@@ -168,15 +192,18 @@ def _fetch_user_portfolios(supabase: Client, user_id: str) -> List[PortfolioResp
         return []
 
     portfolio_ids = [r["id"] for r in rows]
-    item_rows = (
-        supabase.table("portfolio_items")
-        .select("portfolio_id,ticker,position,shares,market_value")
-        .in_("portfolio_id", portfolio_ids)
-        .order("position")
-        .execute()
-        .data
-        or []
+    # PAGED. PostgREST clamps every answer to ~1,000 rows: a user whose groups held more
+    # got a silently truncated GET, `PortfolioStore` took it as the truth, and the next
+    # `PUT /tickers` (a whole-list replace) DELETED the rows it never saw. Page on the
+    # unique id, then order by position in Python — `position` is unique only per group.
+    item_rows = fetch_all_rows(
+        lambda: supabase.table("portfolio_items")
+        .select("id,portfolio_id,ticker,position,shares,market_value")
+        .in_("portfolio_id", portfolio_ids),
+        order_by="id",
+        what=f"portfolio_items for user={user_id}",
     )
+    item_rows.sort(key=lambda r: (str(r.get("portfolio_id")), int(r.get("position") or 0)))
 
     by_portfolio: dict[str, List[PortfolioItemResponse]] = {
         pid: [] for pid in portfolio_ids
@@ -200,15 +227,7 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
     who already filled in Insights values doesn't lose them on the first call
     after migration 038.
     """
-    seed_rows = (
-        supabase.table("watchlist_items")
-        .select("ticker,added_at,shares,market_value")
-        .eq("user_id", user_id)
-        .order("added_at", desc=True)
-        .execute()
-        .data
-        or []
-    )
+    seed_rows = _read_watchlist_seed_rows(supabase, user_id)
 
     # Seeded ACTIVE: this is the user's only group, so it is by definition the one Home,
     # Updates and Tracking should follow. Leaving it inactive would leave every surface
@@ -364,15 +383,7 @@ def _backfill_lone_empty_portfolio(supabase: Client, user_id: str, portfolios):
         return portfolios
 
     try:
-        seed_rows = (
-            supabase.table("watchlist_items")
-            .select("ticker,added_at,shares,market_value")
-            .eq("user_id", user_id)
-            .order("added_at", desc=True)
-            .execute()
-            .data
-            or []
-        )
+        seed_rows = _read_watchlist_seed_rows(supabase, user_id)
         item_rows = [
             {
                 "portfolio_id": only.id,
@@ -906,13 +917,25 @@ async def set_portfolio_holdings(
     # optimistic UI, so the user saw their edit undone while the server kept half of it,
     # and the two only disagreed until something forced a refetch. A 400 must mean nothing
     # happened.
+    # Sign, FINITENESS and MAGNITUDE. The columns are numeric(20,4) / numeric(20,2), so a
+    # value at or past 1e16 shares / 1e18 dollars raises 22003 on THAT row's UPDATE after
+    # the earlier rows were already written — exactly the half-persisted state the loop
+    # above this comment was split to prevent. NaN/inf would do the same (or 500 first).
     errors: List[str] = []
     for item in request.items:
         ticker = item.ticker.upper()
-        if item.shares is not None and item.shares < 0:
-            errors.append(f"{ticker}: shares cannot be negative")
-        elif item.market_value is not None and item.market_value < 0:
-            errors.append(f"{ticker}: market_value cannot be negative")
+        for label, value, ceiling in (
+            ("shares", item.shares, _MAX_SHARES),
+            ("market_value", item.market_value, _MAX_MARKET_VALUE),
+        ):
+            if value is None:
+                continue
+            if not math.isfinite(value):
+                errors.append(f"{ticker}: {label} must be a finite number")
+            elif value < 0:
+                errors.append(f"{ticker}: {label} cannot be negative")
+            elif value >= ceiling:
+                errors.append(f"{ticker}: {label} is too large")
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
 

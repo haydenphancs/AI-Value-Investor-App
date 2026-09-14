@@ -221,6 +221,8 @@ struct ETFDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     // `var` on everything the 30-second light slice merges in place. The loop used to
     // replace this whole struct, which erased every WebSocket tick since the last
     // refresh; it now writes only the fields the slice actually carries.
@@ -242,7 +244,7 @@ struct ETFDetailData: Identifiable {
     let benchmarkSummary: PerformanceBenchmarkSummary?
 
     var isPositive: Bool {
-        priceChange >= 0
+        changeKnown && priceChange >= 0
     }
 
     /// Previous close (current price − today's change). Anchors the chart's
@@ -252,12 +254,15 @@ struct ETFDetailData: Identifiable {
     }
 
     var formattedPrice: String { ETFHeaderFormat.price(currentPrice) }
-    var formattedChange: String { ETFHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? ETFHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        ETFHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? ETFHeaderFormat.changePercent(priceChangePercent) : ""
     }
 
     var formattedChangePill: String {
+        guard changeKnown else { return "—" }
         let sign = priceChangePercent >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", priceChangePercent))%"
     }

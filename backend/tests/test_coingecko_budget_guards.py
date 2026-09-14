@@ -22,8 +22,13 @@ from app.services import crypto_service as cs
 # ── 1. Retry-After is capped ─────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_a_huge_retry_after_sleeps_at_most_the_cap(monkeypatch):
+async def test_a_huge_retry_after_is_terminal_and_latches_fail_fast(monkeypatch):
+    """Capping the SLEEP was not enough: 86,400 → 60 s, retry, 60 s, retry, raise = 120 s
+    per cold key while the iOS `/core` request had timed out at 20 s, and every viewer
+    queued behind the same shielded leader. Past the cap the request is over — no sleep,
+    no retry — and the client fails fast for the cap window."""
     client = cg.CoinGeckoClient()
+    client._quota_exhausted_until = 0.0
     calls = {"n": 0}
 
     async def _once(endpoint, params):
@@ -39,9 +44,42 @@ async def test_a_huge_retry_after_sleeps_at_most_the_cap(monkeypatch):
     monkeypatch.setattr(cg.asyncio, "sleep", _sleep)
     with pytest.raises(cg.CoinGeckoRateLimitException):
         await client._make_request("coins/bitcoin", {})
-    assert slept, "no retry sleep happened"
-    assert max(slept) <= client._MAX_RETRY_AFTER_SECONDS, slept
+    assert slept == [], "an over-cap Retry-After must not be slept on at all"
+    assert calls["n"] == 1, "an over-cap 429 must not be retried"
+    # Latched: the next request (any key) fails fast without touching upstream.
+    with pytest.raises(cg.CoinGeckoRateLimitException) as exc:
+        await client._make_request("coins/ethereum", {})
+    assert calls["n"] == 1
+    assert 0 < (exc.value.retry_after or 0) <= client._MAX_RETRY_AFTER_SECONDS
+    # …and clears after the window.
+    client._quota_exhausted_until = 0.0
+    with pytest.raises(cg.CoinGeckoRateLimitException):
+        await client._make_request("coins/ethereum", {})
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["soon", None, ""])
+async def test_an_unparseable_retry_after_is_a_normal_bounded_retry(monkeypatch, bad):
+    client = cg.CoinGeckoClient()
+    client._quota_exhausted_until = 0.0
+    calls = {"n": 0}
+
+    async def _once(endpoint, params):
+        calls["n"] += 1
+        raise cg.CoinGeckoRateLimitException("429", retry_after=bad)
+
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(client, "_request_once", _once)
+    monkeypatch.setattr(cg.asyncio, "sleep", _sleep)
+    with pytest.raises(cg.CoinGeckoRateLimitException):
+        await client._make_request("coins/bitcoin", {})
     assert calls["n"] == client._MAX_RETRIES
+    assert slept and max(slept) <= client._MAX_RETRY_AFTER_SECONDS
 
 
 @pytest.mark.asyncio
@@ -56,11 +94,13 @@ async def test_a_small_retry_after_is_still_honoured(monkeypatch):
     async def _sleep(secs):
         slept.append(secs)
 
+    client._quota_exhausted_until = 0.0
     monkeypatch.setattr(client, "_request_once", _once)
     monkeypatch.setattr(cg.asyncio, "sleep", _sleep)
     with pytest.raises(cg.CoinGeckoRateLimitException):
         await client._make_request("coins/bitcoin", {})
     assert slept and slept[0] >= 7
+    assert client._quota_exhausted_until == 0.0, "a small Retry-After must not latch"
 
 
 # ── 2. an empty series is memoised ───────────────────────────────────────────

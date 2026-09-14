@@ -83,7 +83,7 @@ struct CommodityDetailView: View {
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
-                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: commoditySymbol),
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: commoditySymbol, assetType: "commodity"),
                     tickerSymbol: commoditySymbol,
                     tickerPrice: isTabBarPinned ? viewModel.commodityData?.formattedPrice : nil
                 )
@@ -110,19 +110,20 @@ struct CommodityDetailView: View {
                             priceChange: commodityData.formattedChange,
                             priceChangePercent: commodityData.formattedChangePercent,
                             isPositive: commodityData.isPositive,
-                            marketStatus: commodityData.marketStatus
+                            marketStatus: commodityData.marketStatus,
+                            changeKnown: commodityData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         // Chart
                         TickerChartView(
                             pricePoints: commodityData.chartPricePoints,
-                            isPositive: commodityData.isPositive,
+                            isPositive: commodityData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .commodity,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: commodityData.previousClose
+                            previousClose: commodityData.chartPreviousClose
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {

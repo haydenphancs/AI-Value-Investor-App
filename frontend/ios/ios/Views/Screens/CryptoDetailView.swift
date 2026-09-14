@@ -86,7 +86,7 @@ struct CryptoDetailView: View {
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
-                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: cryptoSymbol),
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: cryptoSymbol, assetType: "crypto"),
                     tickerSymbol: cryptoSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.cryptoData?.formattedPrice : nil
                 )
@@ -113,19 +113,20 @@ struct CryptoDetailView: View {
                             priceChange: cryptoData.formattedChange,
                             priceChangePercent: cryptoData.formattedChangePercent,
                             isPositive: cryptoData.isPositive,
-                            marketStatus: cryptoData.marketStatus
+                            marketStatus: cryptoData.marketStatus,
+                            changeKnown: cryptoData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         // Chart
                         TickerChartView(
                             pricePoints: cryptoData.chartPricePoints,
-                            isPositive: cryptoData.isPositive,
+                            isPositive: cryptoData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .crypto,
                             chartDataVersion: viewModel.chartDataVersion,
-                            previousClose: cryptoData.previousClose
+                            previousClose: cryptoData.chartPreviousClose
                         )
                         .padding(.top, AppSpacing.lg)
                     } else if let errorMessage = viewModel.errorMessage {

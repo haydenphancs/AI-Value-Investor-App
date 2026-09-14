@@ -290,7 +290,12 @@ class CoinGeckoClient:
     _BACKOFF_BASE_SECONDS = 1.0
     # Longest we will honour a 429 Retry-After for before giving the caller its
     # degrade path. A monthly-quota 429 can carry hours; nobody is waiting for that.
+    # A Retry-After PAST this cap is terminal for the request (no capped sleep, no
+    # retry — capping the sleep alone still parked the leader and every shielded joiner
+    # for 2 × 60 s per cold key while the iOS request had timed out at 20 s) and latches
+    # the client for the cap window so the next requests fail fast instead of queueing.
     _MAX_RETRY_AFTER_SECONDS = 60.0
+    _quota_exhausted_until: float = 0.0
 
     @staticmethod
     def _error_code(response: "httpx.Response") -> Optional[int]:
@@ -395,6 +400,14 @@ class CoinGeckoClient:
         self._inflight[key] = fut
         try:
             last: Optional[Exception] = None
+            remaining = self._quota_exhausted_until - time.monotonic()
+            if remaining > 0:
+                # Latched by an earlier over-cap 429: fail fast for the cap window rather
+                # than sleeping the cap again on every cold key.
+                raise CoinGeckoRateLimitException(
+                    f"CoinGecko quota exhausted (fail-fast for {remaining:.0f}s more)",
+                    retry_after=remaining,
+                )
             for attempt in range(self._MAX_RETRIES):
                 try:
                     result = await self._request_once(endpoint, params)
@@ -412,9 +425,25 @@ class CoinGeckoClient:
                         # float; an unbounded sleep here parked the in-flight leader — and
                         # every joiner shielded on its future — for the full value, hours
                         # in the quota case, while each HTTP handler timed out client-side
-                        # and the server task lived on. Past the cap the caller degrades
-                        # (its own except arm) instead of waiting.
-                        wait = max(wait, min(float(e.retry_after), self._MAX_RETRY_AFTER_SECONDS))
+                        # and the server task lived on. Past the cap the request is OVER:
+                        # the caller degrades (its own except arm) now, and the client
+                        # fails fast for the cap window.
+                        try:
+                            retry_after = float(e.retry_after)
+                        except (TypeError, ValueError):
+                            retry_after = 0.0
+                        if retry_after > self._MAX_RETRY_AFTER_SECONDS:
+                            self._quota_exhausted_until = (
+                                time.monotonic() + self._MAX_RETRY_AFTER_SECONDS
+                            )
+                            logger.error(
+                                "CoinGecko %s: Retry-After %.0fs exceeds the %.0fs cap — "
+                                "treating as quota exhaustion, failing fast for %.0fs",
+                                endpoint, retry_after, self._MAX_RETRY_AFTER_SECONDS,
+                                self._MAX_RETRY_AFTER_SECONDS,
+                            )
+                            break
+                        wait = max(wait, retry_after)
                     logger.warning(
                         "CoinGecko %s attempt %d/%d failed (%s) — retrying in %.1fs",
                         endpoint, attempt + 1, self._MAX_RETRIES, e, wait,
@@ -483,14 +512,24 @@ class CoinGeckoClient:
             logger.warning(f"CoinGecko /search returned no results for: {symbol}")
             return None
 
-        # Pick best match: exact symbol match with highest market cap rank
+        # Pick best match: exact symbol match with highest market cap rank. NO fuzzy
+        # fallback: `/search` matches NAMES by substring, so `coins[0]` for a symbol
+        # nobody lists was some unrelated coin — and once written to
+        # `crypto_coin_id_cache` (no TTL) that coin's price, market cap and supply were
+        # served under the requested symbol for every user until the row was deleted by
+        # hand. An unresolved symbol hides the surface instead.
         best = None
         for c in coins:
-            if c.get("symbol", "").upper() == symbol:
+            if (c.get("symbol") or "").upper() == symbol:
                 if best is None or (c.get("market_cap_rank") or 9999) < (best.get("market_cap_rank") or 9999):
                     best = c
         if not best:
-            best = coins[0]  # fallback to first result
+            logger.info(
+                "CoinGecko /search has no exact symbol match for %s (%d fuzzy hits, "
+                "first %r) — unresolved, not cached",
+                symbol, len(coins), (coins[0].get("symbol") if isinstance(coins[0], dict) else None),
+            )
+            return None
 
         coin_id = best.get("id")
         coin_name = best.get("name", symbol)

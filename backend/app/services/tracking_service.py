@@ -25,6 +25,7 @@ from app.services.chart_helper import (
     _finite_or_none,
 )
 from app.services.asset_class import resolve_asset_class, symbol_trades_extended_hours
+from app.utils.postgrest_paging import fetch_all_rows
 from app.services.crypto_names import display_name_for_row
 from app.database import get_supabase
 from app.utils.supabase_errors import retry_idempotent_async
@@ -212,6 +213,15 @@ def _downsample(values: List[float], target: int) -> List[float]:
 # ── Service ─────────────────────────────────────────────────────────
 
 
+class _Rows:
+    """A `.data`-shaped wrapper so a paged read fits the retry helper's result contract."""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data):
+        self.data = data
+
+
 class TrackingService:
     """Builds the enriched tracking feed from Supabase watchlist + FMP data."""
 
@@ -231,13 +241,17 @@ class TrackingService:
         sb = get_supabase()
 
         def _read_watchlist():
-            return (
-                sb.table("watchlist_items")
-                .select("*")
-                .eq("user_id", user_id)
-                .order("added_at", desc=True)
-                .execute()
+            # PAGED past PostgREST's ~1,000-row clamp: a truncated read here dropped the
+            # user's OLDEST tickers from the feed, and the client's `purgeTickers` then
+            # removed them from every group. Paged on the unique id, ordered by
+            # `added_at` in Python; wrapped so the retry helper's `.data` contract holds.
+            rows = fetch_all_rows(
+                lambda: sb.table("watchlist_items").select("*").eq("user_id", user_id),
+                order_by="id",
+                what=f"tracking feed watchlist user={user_id}",
             )
+            rows.sort(key=lambda r: str(r.get("added_at") or ""), reverse=True)
+            return _Rows(rows)
 
         try:
             # Idempotent (a pure read), so a Supabase gateway blip is RETRIED rather

@@ -1189,6 +1189,7 @@ class ChatService:
 
             widget = MarketOverviewWidget(
                 pe_ratio=val.pe_ratio,
+                pe_known=bool(getattr(val, "pe_known", True)) and val.pe_ratio > 0,
                 forward_pe=val.forward_pe,
                 valuation_level=self._get_valuation_level(val.pe_ratio),
                 earnings_yield=val.earnings_yield,

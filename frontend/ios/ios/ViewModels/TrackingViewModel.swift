@@ -999,9 +999,7 @@ class TrackingViewModel: ObservableObject {
         // `BTC`. `PUT /portfolios/{id}/tickers` resolves a bare spelling raw-first, so a
         // user who also holds the same-ticker security (the BTC ETF) would have had the
         // security chosen and the coin they just starred DROPPED from the portfolio.
-        let symbol = (result.type ?? "").lowercased() == "crypto"
-            ? CryptoSymbol.pair(result.ticker)
-            : result.ticker.uppercased()
+        let symbol = CryptoSymbol.storedSymbol(for: result)
 
         Task { @MainActor in
             // Self-heal: if the user taps the star before portfolios have

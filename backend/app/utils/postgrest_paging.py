@@ -58,6 +58,18 @@ def fetch_all_rows(
     one accumulates the previous page's range.
     """
     rows: List[Dict[str, Any]] = []
+    if page_size > PAGE_SIZE:
+        # The server clamps every page to PAGE_SIZE whatever is asked, so a larger
+        # request would make the first (short) page look like the last one and return
+        # PAGE_SIZE rows as "complete" — the exact silent truncation this helper exists
+        # to remove. Clamp, and page more times instead.
+        logger.warning(
+            "%s: page_size %d exceeds the PostgREST cap %d — clamping",
+            what, page_size, PAGE_SIZE,
+        )
+        page_size = PAGE_SIZE
+    if page_size <= 0:
+        raise ValueError(f"{what}: page_size must be positive, got {page_size}")
     for page in range(max_pages):
         start = page * page_size
         batch = (

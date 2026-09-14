@@ -300,6 +300,14 @@ def build_context(
     # consensus misattributes it to third parties (and is affirmatively misleading).
     ws_target = _num((data.get("wall_street_consensus") or {}).get("target_price"))
     own_estimate = _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
+    # Reports persisted between the FMP rebuild and 2026-09-12 carry a FABRICATED
+    # `fair_value_estimate` equal to the frozen current price (the collector wrote
+    # `round(current_price, 2)` whenever the DCF was missing, and `/stable/profile`
+    # never carries one). Those rows are immutable, so treat "estimate == price to the
+    # cent" as no estimate rather than printing "Fairly Valued +0.0%". A genuine DCF
+    # that lands on the price to the cent is not a number worth a hero card either.
+    if own_estimate is not None and current_price and abs(own_estimate - current_price) < 0.005:
+        own_estimate = None
     if ws_target:
         fair_value = ws_target
         fair_value_basis = "Per Wall Street consensus"

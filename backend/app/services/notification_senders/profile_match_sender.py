@@ -139,23 +139,41 @@ def _load_profiles() -> List[Dict[str, Any]]:
     ]
 
 
+# One `IN (...)` list per request: the URL has a hard length limit (~200 ids is what
+# push_dispatch_service uses for the same reason) and PostgREST clamps every answer to
+# ~1,000 rows regardless of how many ids were asked for.
+_TIER_BATCH = 200
+
+
 def _tiers_for(user_ids: Sequence[str]) -> Dict[str, str]:
-    """user_id → tier, in ONE batched read. Missing → "free" (falls closed)."""
+    """user_id → tier, in CHUNKED batched reads. Missing → "free" (falls closed).
+
+    `_load_profiles` now pages to completion (up to 5,000 consented readers), and handing
+    all of them to a single `.in_("id", …)` did two things at once: past ~1,000 rows
+    PostgREST clamped the answer so readers 1,001+ read as "free" and were skipped, and
+    past the URL limit the whole request 414'd and NOBODY was notified while the job
+    recorded success.
+    """
     if not user_ids:
         return {}
-    try:
-        res = (
-            get_supabase().table("users")
-            .select("id, tier").in_("id", list(user_ids)).execute()
-        )
-        return {r["id"]: (r.get("tier") or "free") for r in (res.data or []) if r.get("id")}
-    except Exception as e:
-        logger.warning(
-            "profile match: tier read failed (%s: %s) — treating everyone as free, so "
-            "nothing is sent rather than risking a paid-ticker leak",
-            type(e).__name__, e,
-        )
-        return {}
+    ids = [u for u in dict.fromkeys(user_ids) if u]
+    out: Dict[str, str] = {}
+    for start in range(0, len(ids), _TIER_BATCH):
+        chunk = ids[start:start + _TIER_BATCH]
+        try:
+            res = (
+                get_supabase().table("users")
+                .select("id, tier").in_("id", chunk).execute()
+            )
+            out.update({r["id"]: (r.get("tier") or "free")
+                        for r in (res.data or []) if r.get("id")})
+        except Exception as e:
+            logger.warning(
+                "profile match: tier read failed for %d user(s) (%s: %s) — treating "
+                "them as free, so nothing is sent rather than risking a paid-ticker leak",
+                len(chunk), type(e).__name__, e,
+            )
+    return out
 
 
 def _sector_map(symbols: Sequence[str]) -> Dict[str, Optional[str]]:

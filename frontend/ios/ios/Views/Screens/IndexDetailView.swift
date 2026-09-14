@@ -82,7 +82,7 @@ struct IndexDetailView: View {
                     onFavoriteTapped: viewModel.toggleFavorite,
                     onMoreTapped: handleShareTapped,
                     isFavorite: viewModel.isFavorite,
-                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: indexSymbol),
+                    hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: indexSymbol, assetType: "index"),
                     tickerSymbol: indexSymbol,
                     tickerPrice: isTabBarPinned ? viewModel.indexData?.formattedPrice : nil
                 )

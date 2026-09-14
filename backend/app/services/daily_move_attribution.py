@@ -244,7 +244,8 @@ def session_words(session_word: str = "today") -> tuple[str, str, str]:
 
 
 def detect_earnings(
-    ticker: str, change: float, earnings_row: Optional[Dict[str, Any]], today: date
+    ticker: str, change: float, earnings_row: Optional[Dict[str, Any]], today: date,
+    session_word: str = "today",
 ) -> Optional[Attribution]:
     """Reported today or last night — and ONLY if it has actually reported.
 
@@ -290,18 +291,24 @@ def detect_earnings(
         # tape is not supportable either.
         return None
 
+    # `today` is the STAMPED session, not the wall-clock day: pre-market Tuesday it is
+    # Monday, and Monday's BMO print is not "this morning" any more. The sibling
+    # detectors already take `session_word`; without it the headline asserted a false
+    # WHEN ("reported this morning" shown Tuesday 07:00 about Monday's print).
+    _adverb, possessive, _cap = session_words(session_word)
+    live_session = session_word == "today"
     if when == today:
         # A same-day AFTER-CLOSE print cannot explain the session that preceded it.
         if timing == AFTER_CLOSE:
             return None
-        when_word = "this morning"
+        when_word = "this morning" if live_session else f"before {possessive} open"
     else:
         # Yesterday's row: say which side of the session it landed on rather than
         # assuming "after the close". A BMO print is ~30 hours old and belongs to the
         # PREVIOUS session's move, not this one.
         if timing == BEFORE_OPEN:
             return None
-        when_word = "after yesterday's close"
+        when_word = "after yesterday's close" if live_session else "after the prior close"
 
     beat: Optional[bool] = None
     surprise: Optional[float] = None
@@ -544,7 +551,7 @@ def attribute(
 
     considered: List[str] = []
     for name, detector in (
-        ("earnings", lambda: detect_earnings(ticker, change, earnings_row, today)),
+        ("earnings", lambda: detect_earnings(ticker, change, earnings_row, today, session_word)),
         ("analyst", lambda: detect_analyst_action(ticker, grade_rows, today, session_word)),
         ("company_news", lambda: detect_company_news(ticker, classified_news)),
         (

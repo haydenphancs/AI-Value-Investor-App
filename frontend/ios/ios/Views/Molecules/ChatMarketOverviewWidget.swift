@@ -74,7 +74,12 @@ struct ChatMarketOverviewWidget: View {
 
     private var valuationMetrics: some View {
         HStack(spacing: 0) {
-            metricPill(label: "P/E (TTM)", value: String(format: "%.1fx", data.peRatio))
+            // Gated like the Fwd P/E pill below: an unknown market multiple is a "—", not
+            // "0.0x" beside a badge that says Unknown.
+            metricPill(
+                label: "P/E (TTM)",
+                value: data.hasKnownPE ? String(format: "%.1fx", data.peRatio) : "—"
+            )
             Spacer()
             // `0` IS THE UNKNOWN SENTINEL on this wire, not a real multiple. The index
             // service emits 0 when no forward-estimate source is licensed, and
@@ -87,7 +92,11 @@ struct ChatMarketOverviewWidget: View {
                     ? String(format: "%.1fx", data.forwardPe) : "—"
             )
             Spacer()
-            metricPill(label: "Yield", value: String(format: "%.1f%%", data.earningsYield))
+            metricPill(
+                label: "Yield",
+                value: data.hasKnownPE && data.earningsYield > 0
+                    ? String(format: "%.1f%%", data.earningsYield) : "—"
+            )
             Spacer()
             metricPill(label: "10Y Avg", value: String(format: "%.0fx", data.historicalAvgPe))
         }
@@ -235,6 +244,7 @@ struct ChatMarketOverviewWidget: View {
         ChatMarketOverviewWidget(data: MarketOverviewWidgetData(
             widgetType: "market_overview",
             peRatio: 21.4,
+            peKnown: true,
             forwardPe: 18.2,
             valuationLevel: "Fair Value",
             earningsYield: 4.68,

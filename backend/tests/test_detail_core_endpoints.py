@@ -50,6 +50,9 @@ _INDEX_KEYS = {
 _ETF_KEYS = {
     "symbol", "name", "current_price", "price_change",
     "price_change_percent", "market_status", "chart_data",
+    # The index header's `change_known` pattern, extended to the other three classes
+    # (2026-09-13): iOS decodes `Bool?` on every core/detail/quote DTO.
+    "change_known",
 }
 _COMMODITY_KEYS = set(_ETF_KEYS)
 _CRYPTO_KEYS = set(_ETF_KEYS)

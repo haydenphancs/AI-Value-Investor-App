@@ -35,6 +35,7 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.services.asset_class import resolve_asset_class
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
     AllocationResponse,
@@ -441,9 +442,14 @@ class PortfolioInsightsService:
         Best-effort: any FMP or write failure is logged and skipped — the score
         still computes from whatever data is present.
         """
+        # Only classes FMP profiles: `profile?symbol=BTCUSD` is crypto data we do not
+        # licence (and it never carries a sector, so the row stayed "missing" and the call
+        # repeated on EVERY insights load). Same predicate as
+        # `tracking_service._backfill_classification`.
         missing = [
             r["ticker"] for r in rows
-            if not r.get("sector") or r.get("market_cap") is None
+            if (not r.get("sector") or r.get("market_cap") is None)
+            and resolve_asset_class(r["ticker"], r.get("asset_type")).lower() in {"stock", "etf"}
         ]
         if not missing:
             return

@@ -103,6 +103,25 @@ def test_the_touch_latch_cannot_outlive_a_cancelled_gesture():
     assert "scheduleResume(" in ended, "the polite post-drag resume is gone"
 
 
+def test_the_watchdog_is_re_armed_on_every_move_not_only_at_touch_down():
+    """Armed only inside the touch-down branch, the 3 s watchdog fired MID-DRAG on any
+    finger held longer than that: `isTouching` released under the finger, the row drifted,
+    and the next 1 pt move re-entered the branch, zeroed `lastTranslation` and re-applied
+    the whole translation — a ~150 pt jump. The `scheduleResume(after:
+    cancelledGestureTimeout)` call must sit AFTER the `if !isTouching { … }` block so a
+    live drag keeps pushing the deadline back."""
+    pan = _braced(_source(), "private var pan")
+    changed, _, _ended = pan.partition(".onEnded")
+    touch_down = _braced(changed, "if !isTouching")
+    assert "scheduleResume(after: Self.cancelledGestureTimeout)" not in touch_down, (
+        "the watchdog is armed once at touch-down and never re-armed"
+    )
+    after_block = changed[changed.index(touch_down) + len(touch_down):]
+    assert "scheduleResume(after: Self.cancelledGestureTimeout)" in after_block
+    # …and it is armed before the delta is applied, on every event.
+    assert after_block.index("scheduleResume(after: Self.cancelledGestureTimeout)") < after_block.index("let delta")
+
+
 def test_leaving_the_screen_clears_the_touch_latch():
     """Cancelling the pending release without clearing the latch is the same freeze by
     another door: the row returns believing a finger is still down."""

@@ -149,6 +149,8 @@ struct CommodityDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     // `var`, like the three price fields above: the light-refresh path merges into this
     // struct IN PLACE. It used to replace the whole value every 30s, which erased every
     // WebSocket tick that had landed since — a 30-second sawtooth on a live price.
@@ -165,7 +167,7 @@ struct CommodityDetailData: Identifiable {
     }
 
     var isPositive: Bool {
-        priceChange >= 0
+        changeKnown && priceChange >= 0
     }
 
     /// Previous close (current price − today's change). Anchors the chart's
@@ -175,9 +177,11 @@ struct CommodityDetailData: Identifiable {
     }
 
     var formattedPrice: String { CommodityHeaderFormat.price(currentPrice) }
-    var formattedChange: String { CommodityHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? CommodityHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        CommodityHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? CommodityHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 

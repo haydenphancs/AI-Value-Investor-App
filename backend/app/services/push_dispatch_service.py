@@ -65,6 +65,8 @@ from app.services.notification_kinds import (
 )
 from app.services.push_service import LEDGER_BODY_LIMIT, PushService, truncate_for_banner
 
+from app.utils.postgrest_paging import PAGE_SIZE, fetch_all_rows
+
 logger = logging.getLogger(__name__)
 
 _ET = ZoneInfo("America/New_York")
@@ -571,17 +573,20 @@ class PushDispatchService:
             # is far more than any cap.
             limit = len(chunk) * _DAILY_COUNT_PROBE
             try:
-                rows = (
-                    self.supabase.table(TABLE)
-                    .select("user_id, sent_at")
+                # PAGED. `.limit(10_000)` was clamped to ~1,000 rows by PostgREST, so the
+                # `>= limit` probe below could never fire and users whose rows fell past
+                # the clamp were counted at 0 — the per-category cap failed open and
+                # over-sent, silently.
+                rows = fetch_all_rows(
+                    lambda: self.supabase.table(TABLE)
+                    .select("id, user_id, sent_at")
                     .in_("user_id", list(chunk))
                     .eq("category", category)
                     .not_.is_("sent_at", "null")
-                    .gte("sent_at", window_start)
-                    .limit(limit)
-                    .execute()
-                    .data
-                    or []
+                    .gte("sent_at", window_start),
+                    order_by="id",
+                    what=f"push: {category} daily counts",
+                    max_pages=max(1, -(-limit // PAGE_SIZE)),
                 )
             except Exception as e:
                 # Fail OPEN (0 = "none yet"). A DB blip silencing someone's alerts is a
@@ -638,17 +643,19 @@ class PushDispatchService:
         for chunk in _chunks(list(user_ids)):
             limit = len(chunk) * _DAILY_COUNT_PROBE
             try:
-                rows = (
-                    self.supabase.table(TABLE)
-                    .select("user_id")
+                # PAGED (see `_category_counts_bulk`): the old `.order("user_id").limit(N)`
+                # was clamped to ~1,000 rows, and the ordering made it deterministic — the
+                # lowest-uuid users consumed the page and everyone after them got badge 0,
+                # which APNs treats as "clear the icon badge".
+                rows = fetch_all_rows(
+                    lambda: self.supabase.table(TABLE)
+                    .select("id, user_id")
                     .in_("user_id", list(chunk))
                     .is_("read_at", "null")
-                    .eq("push_state", STATE_SENT)
-                    .order("user_id")
-                    .limit(limit)
-                    .execute()
-                    .data
-                    or []
+                    .eq("push_state", STATE_SENT),
+                    order_by="id",
+                    what="push: unread counts",
+                    max_pages=max(1, -(-limit // PAGE_SIZE)),
                 )
                 if len(rows) >= limit:
                     logger.warning(
@@ -831,11 +838,19 @@ class PushDispatchService:
         *,
         error: Optional[str] = None,
         sent: bool = False,
+        only_if_state: Optional[str] = None,
     ) -> None:
         """Stamp the outcome on a claimed row. Best-effort.
 
         `sent_at` is what the per-category cap counts, so it is set ONLY on a real
         delivery — a deferred, dry-run or failed row must not consume the budget.
+
+        `only_if_state` makes the write CONDITIONAL (`push_state = only_if_state`). The
+        shutdown requeue uses it: a row whose APNs POST was accepted has its `sent` stamp
+        written from a worker thread that a task cancellation does not stop, and an
+        unconditional `deferred` overwrite from the cancel arm re-delivered it 60 s later
+        on the new process — the same "AAPL moved 8%" buzz twice, and a second `sent_at`
+        against the daily cap.
 
         A failure here is deliberately non-fatal but LOUD: the notification did go out,
         and losing the stamp costs an inbox state and a cap increment, not a duplicate
@@ -847,13 +862,15 @@ class PushDispatchService:
         if error:
             patch["last_error"] = error[:500]
         try:
-            (
+            q = (
                 self.supabase.table(TABLE)
                 .update(patch)
                 .eq("user_id", user_id)
                 .eq("dedup_key", dedup_key)
-                .execute()
             )
+            if only_if_state is not None:
+                q = q.eq("push_state", only_if_state)
+            q.execute()
         except Exception as e:
             logger.warning(
                 "push: could not stamp state=%s for user=%s key=%s (%s: %s) — "
@@ -1303,6 +1320,7 @@ class PushDispatchService:
         # that was correctly given up on. Everything from `cursor` onward is untouched by
         # definition. See the CancelledError arm below.
         cursor = 0
+        delivery_started = False
 
         # A SHUTDOWN MID-BATCH MUST NOT STRAND THE REST OF IT.
         #
@@ -1434,13 +1452,16 @@ class PushDispatchService:
                         continue
 
                     route = row.get("route") if isinstance(row.get("route"), dict) else {}
-                    if await self._deliver(
+                    delivery_started = True
+                    delivered = await self._deliver(
                         recipient, nkind,
                         title=row.get("title") or "",
                         body=row.get("body") or "",
                         dedup_key=key,
                         route=route,
-                    ):
+                    )
+                    delivery_started = False
+                    if delivered:
                         stats["sent"] += 1
                         # Charge it locally so the rest of THIS batch sees the new total.
                         # Re-reading per row would be N queries and would still race the
@@ -1451,6 +1472,7 @@ class PushDispatchService:
                     else:
                         stats["failed"] += 1
                 except Exception as e:
+                    delivery_started = False
                     logger.warning(
                         "push: deferred delivery to user=%s key=%s failed (%s: %s)",
                         uid, key, type(e).__name__, e,
@@ -1475,13 +1497,25 @@ class PushDispatchService:
                         stats["failed"] += 1
         except asyncio.CancelledError:
             # `cursor` INCLUSIVE: the row in flight when the cancel landed has an
-            # indeterminate state — `mark_state` had not run for it either way. Re-defer it
-            # too. A duplicate buzz is not possible: the dedup claim already exists, which
-            # is the same reasoning the per-row requeue above is built on.
+            # indeterminate state. Its requeue is CONDITIONAL on the row still reading
+            # `pending` (`only_if_state` below): if the cancel landed AFTER APNs accepted
+            # the push, `_deliver`'s `sent` stamp is still being written from a worker
+            # thread that cancellation does not stop, and whichever write lands last must
+            # leave the row `sent` — an unconditional `deferred` here re-delivered it on
+            # the next process. The dedup claim only blocks a NEW claim; a `deferred` row
+            # with `deliver_after` in the past is re-claimed by `claim_due_notifications`.
+            # If the cancel landed DURING the APNs POST there is no stamp to protect and
+            # the requeue may duplicate; that case is logged by name.
             unsettled = [
                 r for r in rows[cursor:]
                 if r.get("user_id") and r.get("dedup_key")
             ]
+            if delivery_started and cursor < len(rows):
+                logger.warning(
+                    "push: flush cancelled while user=%s key=%s was mid-delivery — "
+                    "requeued only if its state is still pending",
+                    rows[cursor].get("user_id"), rows[cursor].get("dedup_key"),
+                )
             if unsettled:
                 # SHIELDED, for the same reason `claimed_job`'s release is: this runs
                 # DURING a cancellation, so an unshielded await would be cancelled too and
@@ -1500,6 +1534,7 @@ class PushDispatchService:
                                 r["user_id"], r["dedup_key"], STATE_DEFERRED,
                                 error="flush cancelled mid-batch (shutdown) — requeued",
                                 sent=False,
+                                only_if_state=STATE_PENDING,
                             )
                             returned += 1
                         except Exception as exc:            # pragma: no cover - best effort

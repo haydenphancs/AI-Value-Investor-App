@@ -56,8 +56,11 @@ logger = logging.getLogger(__name__)
 
 TABLE = "price_alerts"
 
-# Bound on the tickers quoted per cycle. Well above any realistic alerted universe;
-# exceeding it is logged rather than silently truncated.
+# Bound on the tickers quoted per ONE cycle. Past it the universe is evaluated in a
+# ROTATING window (a different slice every cycle), never a fixed prefix: the old
+# `tickers[:MAX_UNIVERSE]` over an id-ordered read dropped the same newest tickers every
+# minute, forever — the "silently never evaluated" defect the paged read fixed, one layer
+# up. The round-the-clock (crypto) filter is applied BEFORE the cap for the same reason.
 MAX_UNIVERSE = 500
 
 # Bound on rules loaded per cycle.
@@ -275,7 +278,7 @@ class PriceAlertService:
 
     # ── evaluation ───────────────────────────────────────────────────
 
-    def _active_universe(self) -> List[str]:
+    def _active_universe(self, only_round_the_clock: bool = False) -> List[str]:
         try:
             # PAGED. `.limit(MAX_RULES)` did not lift PostgREST's ~1,000-row server cap
             # (it clamps whatever you ask for), so every active rule past row 1,000 was
@@ -296,13 +299,21 @@ class PriceAlertService:
             )
             return []
         tickers = list(dict.fromkeys(str(r["ticker"]).upper() for r in rows if r.get("ticker")))
+        if only_round_the_clock:
+            # SOURCE, not classification: a bare BTC/LTC row is the ETF/REIT and closes
+            # with the equity session; only a CoinGecko-priced pair moves overnight.
+            # Filter BEFORE the cap, or a coin past the 500th equity is never quoted.
+            tickers = [t for t in tickers if uses_coingecko_price(t)]
         if len(tickers) > MAX_UNIVERSE:
+            start = getattr(self, "_universe_cursor", 0) % len(tickers)
+            window = (tickers[start:] + tickers[:start])[:MAX_UNIVERSE]
+            self._universe_cursor = (start + MAX_UNIVERSE) % len(tickers)
             logger.warning(
                 "price alerts: %d distinct alerted tickers exceeds the %d cap — "
-                "evaluating the first %d this cycle",
-                len(tickers), MAX_UNIVERSE, MAX_UNIVERSE,
+                "evaluating a rotating window (offset %d) this cycle",
+                len(tickers), MAX_UNIVERSE, start,
             )
-            tickers = tickers[:MAX_UNIVERSE]
+            tickers = window
         return tickers
 
     def _active_rules(self, tickers: List[str]) -> List[dict]:
@@ -392,10 +403,10 @@ class PriceAlertService:
         """
         stats = {"tickers": 0, "rules": 0, "fired": 0, "sent": 0}
 
-        tickers = await asyncio.to_thread(self._active_universe)
+        tickers = await asyncio.to_thread(self._active_universe, only_round_the_clock)
         if only_round_the_clock:
-            # SOURCE, not classification: a bare BTC/LTC row is the ETF/REIT and closes
-            # with the equity session; only a CoinGecko-priced pair moves overnight.
+            # Belt: `_active_universe` already filtered before its cap; this keeps a
+            # patched/foreign universe honest too.
             tickers = [t for t in tickers if uses_coingecko_price(t)]
         if not tickers:
             # Short-circuit BEFORE the quote call. Outside market hours with no crypto

@@ -211,6 +211,10 @@ class ETFQuoteResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the quote carried no day change (a profile row without one): the two
+    # floats above are then 0.0 placeholders, not a flat day. Same pattern as the
+    # index header; iOS renders "—" and hides the dashed baseline. Defaults True.
+    change_known: bool = True
     market_status: MarketStatusResponse
     # Empty unless `range` was supplied — the loop only needs bars on an intraday chart.
     chart_data: List[Dict[str, Any]] = []
@@ -239,6 +243,10 @@ class ETFCoreResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the quote carried no day change (a profile row without one): the two
+    # floats above are then 0.0 placeholders, not a flat day. Same pattern as the
+    # index header; iOS renders "—" and hides the dashed baseline. Defaults True.
+    change_known: bool = True
     market_status: MarketStatusResponse
     # Empty when the bars would have cost a multi-thousand-row history pull — see
     # `ETFService._get_chart(fast_only=True)`. The full response fills them in.
@@ -251,6 +259,10 @@ class ETFDetailResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when the quote carried no day change (a profile row without one): the two
+    # floats above are then 0.0 placeholders, not a flat day. Same pattern as the
+    # index header; iOS renders "—" and hides the dashed baseline. Defaults True.
+    change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[Dict[str, Any]]
     key_statistics: List[KeyStatisticItem]

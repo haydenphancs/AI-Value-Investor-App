@@ -430,7 +430,17 @@ async def _fetch_from_finra(ticker: str) -> Optional[Dict[str, Any]]:
         _finra_consecutive_failures = 0
         rows = resp.json()
 
-        if not rows or not isinstance(rows, list):
+        if not isinstance(rows, list):
+            # A 200 carrying something that is not a list at all — an error or quota
+            # envelope, say. That is NOT "this symbol has no short interest": booking it as
+            # an answer skips the fallback and pins a 900 s memo on a body we do not
+            # understand. Back to the failure path and its 60 s TTL, loudly.
+            logger.warning(
+                "FINRA: unexpected 200 body type %s for %s — treating as a failure",
+                type(rows).__name__, ticker,
+            )
+            return None
+        if not rows:
             # `_NO_DATA`, not None — FINRA ANSWERED (HTTP 200) and has nothing for this
             # symbol, which is the same fact a 204 carries. Returning None classified it as
             # a FAILURE and cost twice: the caller then paid the Nasdaq fallback the 204

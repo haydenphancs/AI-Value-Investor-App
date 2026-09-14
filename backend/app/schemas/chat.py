@@ -145,6 +145,12 @@ class MarketOverviewWidget(BaseModel):
     """Structured payload the frontend uses to render a market overview card."""
     widget_type: str = "market_overview"
     pe_ratio: float
+    # False when the market multiple is UNKNOWN (`/stable/quote` is unlicensed, so the P/E
+    # comes only from the sector-benchmark composite; a thin recompute leaves it 0):
+    # `pe_ratio` / `earnings_yield` are then 0.0 placeholders. Same flag the index screen
+    # carries (`ValuationSnapshotResponse.pe_known`); the card rendered "P/E (TTM) 0.0x ·
+    # Yield 0.0%" under a badge reading "Unknown" without it. Defaults True.
+    pe_known: bool = True
     forward_pe: float
     valuation_level: str  # "Bargain", "Fair Value", "Expensive", "Overheated"
     earnings_yield: float

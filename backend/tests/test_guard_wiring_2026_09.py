@@ -87,8 +87,10 @@ async def test_the_index_quote_is_requested_for_the_fund(monkeypatch):
 
 # ── 3. an ETF-backed commodity follows the equity session ────────────────────
 
+# Phase-specific since 2026-09-13: "Market Open" for the whole 04:00–20:00 span claimed a
+# 16:00 profile print was live at 07:00 (see tests/test_commodity_badge_phase.py).
 @pytest.mark.parametrize("phase, expected", [("closed", "Market Closed"), ("regular", "Market Open"),
-                                             ("premarket", "Market Open")])
+                                             ("premarket", "Pre-Market"), ("afterhours", "After-Hours")])
 def test_a_metal_screen_reports_the_equity_session(monkeypatch, phase, expected):
     from app.services import commodity_service as cs
     from app.utils import market_hours as mh

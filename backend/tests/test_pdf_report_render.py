@@ -141,6 +141,33 @@ def test_fair_value_prefers_wall_street_target():
     assert ctx2["fair_value"] == 196.0  # no consensus target → fall back to the estimate
 
 
+def test_a_fair_value_equal_to_the_price_is_no_estimate():
+    """Rows persisted between the FMP rebuild and 2026-09-12 carry a FABRICATED
+    `fair_value_estimate` equal to the frozen current price (the collector wrote
+    `round(current_price, 2)` whenever the DCF was missing). Those rows are immutable, so
+    the hero must render "—" with an empty basis rather than "Fairly Valued +0.0%"."""
+    sample = _sample()
+    sample["wall_street_consensus"]["target_price"] = None
+    price = sample["price_action"]["current_price"]
+    ctx = build_context(sample, fair_value_estimate=price)
+    assert ctx["fair_value"] is None
+    assert ctx["valuation_word"] == "—"
+    assert ctx["fair_value_basis"] == ""
+    assert ctx["margin_of_safety_pct"] is None
+    # Half a cent either side is still "equal" (the persisted value was round(price, 2)).
+    ctx_close = build_context(sample, fair_value_estimate=price + 0.004)
+    assert ctx_close["fair_value"] is None
+    # A genuinely different estimate is still used.
+    ctx2 = build_context(sample, fair_value_estimate=price * 1.2)
+    assert ctx2["fair_value"] == price * 1.2
+    assert ctx2["valuation_word"] == "Undervalued"
+    # No price at all → the estimate stands (nothing to compare against).
+    sample2 = _sample()
+    sample2["wall_street_consensus"]["target_price"] = None
+    sample2["price_action"]["current_price"] = None
+    assert build_context(sample2, fair_value_estimate=150.0)["fair_value"] == 150.0
+
+
 def test_render_html_embeds_data_and_charts():
     html = render_html(build_context(_sample(), 196.0))
     assert "Oracle Corporation" in html

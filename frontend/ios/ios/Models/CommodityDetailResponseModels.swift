@@ -40,6 +40,8 @@ struct CommodityQuoteResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `CommodityDetailResponseDTO.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: String
     let chartData: [CommodityChartPointDTO]
     let keyStatisticsGroups: [KeyStatisticsGroupDTO]
@@ -50,6 +52,7 @@ struct CommodityQuoteResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatisticsGroups = "key_statistics_groups"
@@ -63,6 +66,10 @@ struct CommodityDetailResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `false` when the quote carried no day change (a FRED series with one observation):
+    /// the two floats above are 0.0 placeholders, not a flat day. Optional so older
+    /// backends (no key) decode as known.
+    let changeKnown: Bool?
     let marketStatus: String
     let chartData: [CommodityChartPointDTO]
     let keyStatisticsGroups: [KeyStatisticsGroupDTO]
@@ -77,6 +84,7 @@ struct CommodityDetailResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatisticsGroups = "key_statistics_groups"
@@ -299,6 +307,7 @@ extension CommodityDetailResponseDTO {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: resolvedMarketStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date, close: $0.close, open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
@@ -342,6 +351,8 @@ struct CommodityCoreResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `CommodityDetailResponseDTO.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: String
     /// Empty when the server could only have produced bars by pulling the multi-thousand
     /// row daily history. The full response fills them in a moment later.
@@ -353,6 +364,7 @@ struct CommodityCoreResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
     }
@@ -364,6 +376,7 @@ struct CommodityCoreResponseDTO: Decodable {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: CommodityMarketStatus(backend: marketStatus),
             // `date` is non-optional on CommodityChartPointDTO (unlike the shared
             // StockOverviewPricePointDTO the other three screens use), so no coalescing.
@@ -386,21 +399,25 @@ struct CommodityCoreData {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
+    /// False → the change floats are placeholders; render "—", no arrow, no baseline.
+    var changeKnown: Bool = true
     var marketStatus: CommodityMarketStatus
     /// `var`: the range pill is interactive before the full response lands, and the live
     /// socket merges ticks into the core header the same way it merges into the full one.
     var chartPricePoints: [StockPricePoint]
 
     var chartData: [Double] { chartPricePoints.map { $0.close } }
-    var isPositive: Bool { priceChange >= 0 }
+    var isPositive: Bool { changeKnown && priceChange >= 0 }
     /// Prior close, for the chart's dashed baseline — derived exactly as the full display
     /// model derives it, not shipped by the server, so there is one source for it.
     var previousClose: Double { currentPrice - priceChange }
 
     var formattedPrice: String { CommodityHeaderFormat.price(currentPrice) }
-    var formattedChange: String { CommodityHeaderFormat.change(priceChange) }
+    var formattedChange: String {
+        changeKnown ? CommodityHeaderFormat.change(priceChange) : "—"
+    }
     var formattedChangePercent: String {
-        CommodityHeaderFormat.changePercent(priceChangePercent)
+        changeKnown ? CommodityHeaderFormat.changePercent(priceChangePercent) : ""
     }
 }
 
@@ -421,9 +438,27 @@ protocol CommodityHeaderRenderable {
     var formattedChange: String { get }
     var formattedChangePercent: String { get }
     var isPositive: Bool { get }
+    var changeKnown: Bool { get }
     var marketStatus: CommodityMarketStatus { get }
     var chartPricePoints: [StockPricePoint] { get }
     var previousClose: Double { get }
+}
+
+extension CommodityHeaderRenderable {
+    /// Line colour for the chart. Follows the day change when it is known; otherwise the
+    /// series' own direction, so an unknown change is never painted as a decline.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
+    }
+
+    /// The dashed baseline: nil when the change is unknown — `previousClose` would then be
+    /// `currentPrice - 0`, a baseline sitting exactly on the live price.
+    var chartPreviousClose: Double? {
+        changeKnown ? previousClose : nil
+    }
 }
 
 extension CommodityDetailData: CommodityHeaderRenderable {}

@@ -57,6 +57,9 @@ class _Q:
     def order(self, *a, **k):
         return self
 
+    def range(self, *a, **k):   # the paged reads go through fetch_all_rows
+        return self
+
     def limit(self, *a, **k):
         return self
 

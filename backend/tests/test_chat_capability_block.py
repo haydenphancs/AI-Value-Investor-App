@@ -75,6 +75,17 @@ def test_no_tools_means_no_claims():
     assert chat_tools.capability_block(frozenset()) == ""
 
 
+@pytest.mark.parametrize("asset_type", ["STOCK", "INDEX", "COMMODITY", "CRYPTO", "ETF"])
+def test_the_session_word_rule_rides_with_the_snapshot(asset_type, licensed_analyst_data):
+    """Every class that gets `get_market_snapshot` (all of them today) is told to use the
+    tool's own session word. Pre-market Monday the snapshot's numbers are Friday's; the
+    tool now stamps `as_of_session.word` = "on Fri", and a prompt that never mentions it
+    leaves the model saying "today" about a session that ended three days earlier."""
+    block = chat_tools.capability_block(chat_tools.tools_for_asset_type(asset_type))
+    assert "get_market_snapshot" in block, "fixture: the snapshot must be granted"
+    assert "as_of_session.word" in block and "'on Fri', not 'today'" in block
+
+
 @pytest.mark.parametrize("asset_type,symbol", [
     ("INDEX", "^GSPC"), ("COMMODITY", "GCUSD"), ("STOCK", "AAPL"), ("CRYPTO", "BTCUSD"),
 ])

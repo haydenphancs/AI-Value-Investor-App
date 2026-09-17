@@ -197,7 +197,13 @@ class SentimentService:
         self, ticker: str, social_ticker: Optional[str] = None,
         is_crypto: bool = False,
     ) -> SentimentAnalysisResponse:
-        ticker = ticker.upper()
+        ticker = (ticker or "").strip().upper()
+        if not ticker:
+            # Refused at the door. `_fetch_news("")` reaches `fmp.get_stock_news` with no
+            # `symbols` filter, and FMP answers THAT with its default Apple feed — ~1,000
+            # Apple rows persisted under `ticker=""` and read back as some other company's
+            # mood. A blank ticker is a caller bug, never a market-wide request.
+            raise ValueError("sentiment requires a ticker")
         # For crypto: FMP uses "ETHUSD" but ApeWisdom uses "ETH"
         social_key = (social_ticker or ticker).upper()
         # `is_crypto` is REQUEST state and is threaded down as a parameter. It used to be

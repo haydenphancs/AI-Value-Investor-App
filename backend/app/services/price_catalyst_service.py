@@ -38,6 +38,13 @@ from app.integrations.gemini import get_gemini_client
 
 logger = logging.getLogger(__name__)
 
+
+class CatalystNotAttempted(Exception):
+    """No grounded search RAN: the call was refused before generation (the quota breaker's
+    fail-fast, a 429 the whole ladder gave up on) or by the kill switch. Distinct from "searched,
+    nothing usable" (`None`) so a caller that pre-claimed a paid web-search unit can release
+    it — a refused call never spent one. Propagated through `get_catalyst` on purpose."""
+
 # Tier-1 in-memory cache + inflight dedup (module scope → shared across reports).
 _MEM_TTL_SECONDS = 300
 _mem_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
@@ -85,7 +92,26 @@ def _ctx_key(ticker: str, window_label: str, change_pct: Optional[float]) -> str
     """
     wl = (window_label or "").strip().lower()
     direction = "u" if (change_pct is None or change_pct >= 0) else "d"
+    if wl == "today":
+        # A "today" reason is specific to ONE session. Keyed on the label alone, a row
+        # written mid-session Monday was a valid "today" answer until the same clock time
+        # Tuesday (24 h TTL) — Tuesday's move served with Monday's cause, marked
+        # `from_web_search`. The ET trading date is part of the identity.
+        return f"{ticker}|{wl}|{_et_today_iso()}|{direction}"
     return f"{ticker}|{wl}|{direction}"
+
+
+def _et_today_iso() -> str:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+
+def _today_window_expiry(now: datetime) -> datetime:
+    """A "today" row expires at the end of the current ET calendar day — never later."""
+    from zoneinfo import ZoneInfo
+    et = now.astimezone(ZoneInfo("America/New_York"))
+    end_of_day = et.replace(hour=23, minute=59, second=59, microsecond=0)
+    return end_of_day.astimezone(timezone.utc)
 
 
 def _ctx_matches(
@@ -184,6 +210,8 @@ class PriceCatalystService:
         if ctx_key in _inflight:
             try:
                 return await asyncio.shield(_inflight[ctx_key])
+            except CatalystNotAttempted:
+                raise
             except Exception:
                 return None
 
@@ -202,7 +230,7 @@ class PriceCatalystService:
                 )
                 if not future.done():
                     future.set_result(None)
-                return None
+                raise CatalystNotAttempted("PRICE_CATALYST_AI_ENABLED is off")
 
             result = await self._do_grounded(focal, change_pct, window_label)
             await asyncio.to_thread(
@@ -233,13 +261,18 @@ class PriceCatalystService:
             if not future.done():
                 future.set_result(served)
             return served
+        except CatalystNotAttempted as exc:
+            # Not an error: nothing ran. Joiners get the same signal; the caller releases
+            # its pre-claimed unit.
+            if not future.done():
+                future.set_exception(exc)
+            raise
         except Exception as exc:
             logger.exception(
                 "price_catalyst: unhandled error for %s: %s", focal, exc,
             )
             if not future.done():
-                if not future.done():
-                    future.set_exception(exc)
+                future.set_exception(exc)
             return None
         finally:
             _inflight.pop(ctx_key, None)
@@ -252,6 +285,8 @@ class PriceCatalystService:
     async def _grounded_with_fallback(self, prompt: str) -> Optional[Dict[str, Any]]:
         """Try each model in the chain with backoff; return the first success
         or None if all are exhausted (503 storms, quota, etc.)."""
+        from app.integrations.gemini import GeminiQuotaError
+
         gem = self._get_gemini()
         for model in _MODEL_CHAIN:
             for attempt in range(_RETRIES_PER_MODEL):
@@ -259,6 +294,17 @@ class PriceCatalystService:
                     return await gem.generate_grounded_research(
                         prompt=prompt, model_name=model, max_output_tokens=8192,
                     )
+                except GeminiQuotaError as exc:
+                    # The breaker's fail-fast or a 429 the retry ladder gave up on: no
+                    # generation happened, and the quota is SHARED across the model chain,
+                    # so stepping to the next model only re-runs the refusal. Stop, and say
+                    # "not attempted" rather than "nothing found" — the caller's web-search
+                    # unit was never spent.
+                    logger.warning(
+                        "price_catalyst: grounded search refused (model=%s): %s — not attempted",
+                        model, exc,
+                    )
+                    raise CatalystNotAttempted(str(exc)) from exc
                 except Exception as exc:  # 503/UNAVAILABLE, transient errors
                     last = attempt == _RETRIES_PER_MODEL - 1
                     logger.warning(
@@ -386,7 +432,12 @@ class PriceCatalystService:
             "window_label": window_label,
             "change_pct": change_pct,
             "computed_at": now.isoformat(),
-            "expires_at": (now + timedelta(hours=ttl_hours)).isoformat(),
+            # A "today" reason must not outlive today (see `_ctx_key`).
+            "expires_at": (
+                min(now + timedelta(hours=ttl_hours), _today_window_expiry(now))
+                if (window_label or "").strip().lower() == "today"
+                else now + timedelta(hours=ttl_hours)
+            ).isoformat(),
         }
         try:
             sb = get_supabase()

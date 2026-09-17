@@ -371,6 +371,12 @@ class MoveExplanation:
     industry_change_percent: Optional[float]
     market_change_percent: Optional[float]
     attribution: Attribution
+    # The session the change belongs to — "today", or "on Fri" pre-market Monday — and its
+    # ISO date. `attribute()` already received the word; consumers (Ask Cay AI's
+    # `explain_price_move`) did not, so their own lines said "today" beside an explanation
+    # that said "on Fri", and a paid "today" search was bought for a prior session's move.
+    session_word: str = "today"
+    session_date: Optional[str] = None
 
 
 def rank_movers(rows: Sequence[Dict[str, Any]]) -> List[RankedMover]:
@@ -971,6 +977,8 @@ class WidgetMoversService:
             industry_change_percent=industry[1],
             market_change_percent=ctx.market_change,
             attribution=a,
+            session_word=session_word,
+            session_date=today_iso,
         )
 
     # ── cache plumbing ───────────────────────────────────────────────

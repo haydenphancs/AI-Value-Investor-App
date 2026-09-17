@@ -181,3 +181,97 @@ async def test_same_context_still_served_from_mem_without_a_second_call():
     b = await svc.get_catalyst("AAPL", 5.0, "today")   # same ctx bucket (today, up)
     assert fake.calls == 1     # second served from mem
     assert a == b
+
+
+# ── 2026-09-16: a refused search is "not attempted", and the ladder's cost is pinned ──
+
+class _QuotaGemini(_FakeGemini):
+    async def generate_grounded_research(self, prompt, model_name=None, max_output_tokens=8192):
+        from app.integrations.gemini import GeminiQuotaError
+        self.calls += 1
+        raise GeminiQuotaError("quota circuit open (resource_exhausted)")
+
+
+@pytest.mark.asyncio
+async def test_a_quota_refusal_raises_not_attempted_and_stops_the_chain():
+    """The breaker's fail-fast used to be swallowed per attempt, the whole model ladder
+    slept through, and `get_catalyst` returned None — indistinguishable from "searched,
+    nothing found", so the caller kept the paid web-search unit it had claimed."""
+    fake = _QuotaGemini()
+    with pytest.raises(pcs.CatalystNotAttempted):
+        await _svc(fake).get_catalyst("AAPL", 9.0, "today")
+    assert fake.calls == 1, "the quota is shared across the chain — no second model, no retries"
+    assert pcs._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_of_a_refused_search_gets_the_same_signal():
+    import asyncio as _aio
+    fake = _QuotaGemini()
+    svc = _svc(fake)
+    results = await _aio.gather(
+        svc.get_catalyst("AAPL", 9.0, "today"), svc.get_catalyst("AAPL", 9.0, "today"),
+        return_exceptions=True,
+    )
+    assert all(isinstance(r, pcs.CatalystNotAttempted) for r in results), results
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_is_not_attempted_either(monkeypatch):
+    monkeypatch.setattr(pcs.settings, "PRICE_CATALYST_AI_ENABLED", False)
+    fake = _FakeGemini(text=_fence("x", "y"))
+    with pytest.raises(pcs.CatalystNotAttempted):
+        await _svc(fake).get_catalyst("AAPL", 9.0, "today")
+    assert fake.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_503_storm_still_walks_the_ladder_with_real_backoff(monkeypatch):
+    """Pins the ladder's COST (F7-9): N retries per model with exponential sleeps, and the
+    exhausted case is a plain None (searched, nothing usable — the unit stays spent)."""
+    sleeps = []
+
+    async def _sleep(secs):
+        sleeps.append(secs)
+    monkeypatch.setattr(pcs.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(pcs, "_RETRY_BASE_SECONDS", 1.0)
+    fake = _FakeGemini(raise_times=10_000)
+    res = await _svc(fake).get_catalyst("MSFT", 7.0, "Since May 1")
+    assert res is None
+    assert fake.calls == len(pcs._MODEL_CHAIN) * pcs._RETRIES_PER_MODEL
+    per_model = [1.0 * (2 ** a) for a in range(pcs._RETRIES_PER_MODEL - 1)]
+    assert sleeps == per_model * len(pcs._MODEL_CHAIN)
+
+
+# ── 2026-09-16: a "today" reason is specific to ONE session ──────────────────────
+
+def test_a_today_key_carries_the_et_trading_date(monkeypatch):
+    monkeypatch.setattr(pcs, "_et_today_iso", lambda: "2026-09-14")
+    assert pcs._ctx_key("AAPL", "today", -3.0) == "AAPL|today|2026-09-14|d"
+    monkeypatch.setattr(pcs, "_et_today_iso", lambda: "2026-09-15")
+    assert pcs._ctx_key("AAPL", "today", -3.0) == "AAPL|today|2026-09-15|d"
+    # Multi-day windows are unchanged.
+    assert pcs._ctx_key("AAPL", "Since May 1", 3.0) == "AAPL|since may 1|u"
+
+
+def test_a_today_row_never_expires_past_the_et_day():
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    now = datetime(2026, 9, 14, 20, 30, tzinfo=timezone.utc)      # 16:30 ET Monday
+    exp = pcs._today_window_expiry(now)
+    assert exp.astimezone(ZoneInfo("America/New_York")).date().isoformat() == "2026-09-14"
+    assert exp > now
+    # …and the write uses the tighter of TTL vs end-of-day for "today" only.
+    captured = {}
+
+    class _T:
+        def upsert(self, row): captured.update(row); return self
+        def execute(self): return None
+
+    class _SB:
+        def table(self, name): return _T()
+    import unittest.mock as um
+    with um.patch.object(pcs, "get_supabase", lambda: _SB()), \
+         um.patch.object(pcs, "datetime", um.MagicMock(now=lambda tz=None: now, fromisoformat=datetime.fromisoformat)):
+        pcs.PriceCatalystService()._write_cache("AAPL", {"tag": "x", "reason": "y"}, "m", "today", -3.0)
+    assert captured["expires_at"] == exp.isoformat()

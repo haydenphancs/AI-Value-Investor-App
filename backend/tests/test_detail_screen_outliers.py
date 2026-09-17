@@ -1239,9 +1239,34 @@ def test_deep_dive_cache_separates_two_different_questions():
     # never hits for the canned prompt it exists to serve.
     assert ChatService._deep_dive_cache_key(ctx, "Deep Dive On Gold") == \
         ChatService._deep_dive_cache_key(ctx, "  deep   dive on gold ")
-    # And the context still participates.
-    assert ChatService._deep_dive_cache_key(ctx, "deep dive") != \
+    # The CONTEXT does NOT participate (2026-09-16). For ETF / CRYPTO / INDEX the resolver
+    # rebuilds the block every turn with the live price in its lead line, refreshed on a
+    # 45–120 s quote TTL — so hashing it made the "24 h" cache a 45 s cache and every re-tap
+    # of the deep-dive button a fresh 1-credit generation. The symbol is the row's own key.
+    assert ChatService._deep_dive_cache_key(ctx, "deep dive") == \
         ChatService._deep_dive_cache_key(ctx + "!", "deep dive")
+    assert ChatService._deep_dive_cache_key("Price $520.12 (+0.35%)", "deep dive") == \
+        ChatService._deep_dive_cache_key("Price $520.40 (+0.41%)", "deep dive")
+    # But the ASSET TYPE does: "BTC" is the Grayscale trust on the ETF screen and Bitcoin on
+    # the crypto screen, and both write rows under symbol "BTC".
+    assert ChatService._deep_dive_cache_key(ctx, "deep dive", "ETF") != \
+        ChatService._deep_dive_cache_key(ctx, "deep dive", "CRYPTO")
+    assert ChatService._deep_dive_cache_key(ctx, "deep dive", "etf") == \
+        ChatService._deep_dive_cache_key(ctx, "deep dive", "ETF")
+
+
+def test_a_client_grounded_deep_dive_is_answered_but_never_cached():
+    """With a stable 24 h key, a brief built on CLIENT context (resolver timeout / fallback)
+    would be served to every user. `deep_dive_context` — the stream door's write-side
+    context — must be None unless the block is server-grounded."""
+    import inspect
+    from app.services.chat_service import ChatService
+    src = inspect.getsource(ChatService.prepare_stream_generation)
+    assert '"deep_dive_context": context if (is_deep_dive and server_grounded) else None' in src
+    src2 = inspect.getsource(ChatService.generate_response)
+    i = src2.index("self._upsert_deep_dive_cache")
+    gate = src2[src2.rindex("if (", 0, i):i]
+    assert "_server_grounded" in gate and "not degraded" in gate
 
 
 def test_streamed_reasoning_passes_output_enforcement():

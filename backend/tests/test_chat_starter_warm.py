@@ -400,3 +400,255 @@ async def test_the_daily_cap_bounds_distinct_questions(monkeypatch):
     monkeypatch.setattr(warm, "_warm_one", _one)
     assert await warm.warm_todays_starters() == 1, "cap 3 minus 2 already warmed = 1"
     assert len(calls) == 1
+
+
+# ── 7. The tape-bound chips are not a once-a-day answer (2026-09-16) ─────────
+#
+# The loop runs from 04:00 ET. At 04:05 on a Monday the screener still reports FRIDAY's
+# close, so "What tickers are hot today?" warmed then was Friday's leaderboard, replayed
+# (and charged) as "today" until midnight. And a hot-ticker row warmed at 09:35 stood at
+# 15:50 with a 09:35 price under a green "Live" dot.
+
+from datetime import datetime, timedelta, timezone
+
+
+def _chips(*pairs):
+    return SimpleNamespace(global_starters=[SimpleNamespace(text=t, kind=k) for t, k in pairs])
+
+
+def _wire(monkeypatch, starters, *, already, phase, calls):
+    monkeypatch.setattr(
+        "app.services.chat_starters_service.get_chat_starters_service",
+        lambda: SimpleNamespace(get_starters=AsyncMock(return_value=starters)),
+    )
+    monkeypatch.setattr(warm, "_warmed_hashes", lambda day: dict(already))
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: phase)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+
+    async def _one(q, day):
+        calls.append(q)
+        return True
+
+    monkeypatch.setattr(warm, "_warm_one", _one)
+    warm._refusals.clear()
+    warm._rewarms.clear()
+
+
+def _ago(seconds):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["premarket", "closed"])
+async def test_a_tape_bound_chip_is_not_warmed_before_the_regular_session(monkeypatch, phase):
+    """04:05 ET Monday: the fixed asks, the hot slots and the trending chip wait; the
+    evergreen question is warmed as before."""
+    calls = []
+    _wire(monkeypatch, _chips(
+        ("What tickers are hot today?", "fixed"),
+        ("Why is NVDA up 14% today?", "hot_ticker"),
+        ("Why is Technology leading today?", "hot_sector"),
+        ("What's driving AI Infrastructure today?", "hot_topic"),
+        ("Why is everyone talking about TSLA?", "trending"),
+        ("What is a P/E ratio?", "evergreen"),
+    ), already={}, phase=phase, calls=calls)
+    assert await warm.warm_todays_starters() == 1
+    assert calls == ["What is a P/E ratio?"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["regular", "afterhours"])
+async def test_a_tape_bound_chip_is_warmed_once_the_tape_is_todays(monkeypatch, phase):
+    calls = []
+    _wire(monkeypatch, _chips(
+        ("What tickers are hot today?", "fixed"),
+        ("What is a P/E ratio?", "evergreen"),
+    ), already={}, phase=phase, calls=calls)
+    assert await warm.warm_todays_starters() == 2
+    assert set(calls) == {"What tickers are hot today?", "What is a P/E ratio?"}
+
+
+@pytest.mark.asyncio
+async def test_a_stale_tape_row_is_rewarmed_during_the_session_and_a_fresh_one_is_not(monkeypatch):
+    """Through the regular session a tape-bound row older than the TTL is regenerated;
+    one inside the TTL, and an evergreen row of ANY age, cost nothing."""
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
+    calls = []
+    hot, fresh, evergreen = ("What tickers are hot today?", "Why is NVDA up 14% today?",
+                             "What is a P/E ratio?")
+    _wire(monkeypatch, _chips((hot, "fixed"), (fresh, "hot_ticker"), (evergreen, "evergreen")),
+          already={warm.question_hash(hot): _ago(3601),
+                   warm.question_hash(fresh): _ago(600),
+                   warm.question_hash(evergreen): _ago(6 * 3600)},
+          phase="regular", calls=calls)
+    assert await warm.warm_todays_starters() == 1
+    assert calls == [hot]
+    assert warm._rewarms == {"2026-09-14": 1}
+
+
+@pytest.mark.asyncio
+async def test_no_rewarm_after_the_close(monkeypatch):
+    """After hours the tape is static: the last regular-session write stands, and the
+    evening is not spent re-paying Gemini for the same close."""
+    calls = []
+    hot = "What tickers are hot today?"
+    _wire(monkeypatch, _chips((hot, "fixed")),
+          already={warm.question_hash(hot): _ago(5 * 3600)}, phase="afterhours", calls=calls)
+    assert await warm.warm_todays_starters() == 0
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_created_at_keeps_the_once_a_day_behaviour(monkeypatch):
+    """None / garbage must neither re-warm on every pass (a budget leak) nor crash."""
+    calls = []
+    hot = "What tickers are hot today?"
+    for stamp in (None, "", "not-a-timestamp", 12345):
+        calls.clear()
+        _wire(monkeypatch, _chips((hot, "fixed")),
+              already={warm.question_hash(hot): stamp}, phase="regular", calls=calls)
+        assert await warm.warm_todays_starters() == 0, stamp
+        assert calls == [], stamp
+
+
+@pytest.mark.asyncio
+async def test_rewarms_count_against_the_daily_cap(monkeypatch):
+    """A re-warm replaces a row, so a cap that counts ROWS would never see it — and the
+    cap is a Gemini-spend bound."""
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_DAILY_CAP", 2)
+    calls = []
+    hot, new = "What tickers are hot today?", "What is a P/E ratio?"
+    _wire(monkeypatch, _chips((hot, "fixed")),
+          already={warm.question_hash(hot): _ago(7200)}, phase="regular", calls=calls)
+    assert await warm.warm_todays_starters() == 1          # 1 row + 1 rewarm = cap
+    assert warm._rewarms == {"2026-09-14": 1}
+    # Same day, a new evergreen chip appears: 1 stored + 1 rewarm leaves NO room.
+    monkeypatch.setattr(
+        "app.services.chat_starters_service.get_chat_starters_service",
+        lambda: SimpleNamespace(get_starters=AsyncMock(return_value=_chips((hot, "fixed"), (new, "evergreen")))),
+    )
+    monkeypatch.setattr(warm, "_warmed_hashes", lambda day: {warm.question_hash(hot): _ago(1)})
+    calls.clear()
+    assert await warm.warm_todays_starters() == 0
+    assert calls == []
+
+
+def test_row_age_reads_every_stamp_shape_and_refuses_none_of_them_loudly():
+    now = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
+    assert warm._row_age_seconds("2026-09-14T14:00:00+00:00", now) == 3600
+    assert warm._row_age_seconds("2026-09-14T14:00:00Z", now) == 3600
+    assert warm._row_age_seconds("2026-09-14T14:00:00.123456+00:00", now) == pytest.approx(3599.88, abs=0.01)
+    assert warm._row_age_seconds("2026-09-14T14:00:00", now) == 3600, "naive = UTC"
+    assert warm._row_age_seconds(datetime(2026, 9, 14, 14, 0, tzinfo=timezone.utc), now) == 3600
+    assert warm._row_age_seconds("2026-09-14T16:00:00+00:00", now) == 0.0, "future stamp clamps"
+    for bad in (None, "", "garbage", 42, object()):
+        assert warm._row_age_seconds(bad, now) is None, bad
+
+
+@pytest.mark.asyncio
+async def test_the_stored_row_stamps_created_at_itself(monkeypatch):
+    """An upsert onto the existing key UPDATES the row and the column default only fires
+    on INSERT — a re-warmed row would otherwise keep its first write's stamp forever."""
+    class _Svc:
+        async def generate_response(self, **kwargs):
+            return {"content": "x" * 200, "tokens_used": 1}
+
+        async def generate_followup_suggestions(self, *a, **k):
+            return []
+
+    monkeypatch.setattr("app.services.chat_service.ChatService", _Svc)
+    rows = []
+
+    class _Table:
+        def upsert(self, row, on_conflict=None):
+            rows.append(row)
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[])
+
+    monkeypatch.setattr(warm, "get_supabase", lambda: SimpleNamespace(table=lambda n: _Table()))
+    assert await warm._warm_one("What tickers are hot today?", "2026-09-14") is True
+    stamp = rows[0]["created_at"]
+    assert warm._row_age_seconds(stamp) is not None and warm._row_age_seconds(stamp) < 5
+
+
+# ── the read side ──
+
+def _lookup_db(monkeypatch, row):
+    class _Q:
+        def __init__(self):
+            self._row = row
+
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+
+        def execute(self):
+            return SimpleNamespace(data=[self._row] if self._row else [])
+
+    monkeypatch.setattr(warm, "get_supabase", lambda: SimpleNamespace(table=lambda n: _Q()))
+
+
+@pytest.mark.asyncio
+async def test_lookup_refuses_a_tape_row_older_than_twice_the_ttl_during_the_session(monkeypatch):
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: "regular")
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": [],
+                             "created_at": _ago(7201)})
+    assert await warm.lookup("What tickers are hot today?") is None
+    # The same age on an EVERGREEN question is served: its answer does not go stale.
+    assert (await warm.lookup("What is a P/E ratio?"))["answer"] == "a" * 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["afterhours", "closed", "premarket"])
+async def test_lookup_serves_an_old_tape_row_when_the_tape_is_static(monkeypatch, phase):
+    """After the close the 15:05 answer IS the day's answer; refusing it would make every
+    evening tap pay a live Gemini turn for the same numbers."""
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: phase)
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": [],
+                             "created_at": _ago(5 * 3600)})
+    assert (await warm.lookup("What tickers are hot today?"))["answer"] == "a" * 200
+
+
+@pytest.mark.asyncio
+async def test_lookup_serves_a_tape_row_inside_twice_the_ttl(monkeypatch):
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: "regular")
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": [],
+                             "created_at": _ago(7000)})
+    assert (await warm.lookup("What tickers are hot today?"))["answer"] == "a" * 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age,stale", [(10, False), (899, False), (901, True), (5 * 3600, True)])
+async def test_lookup_flags_a_widget_older_than_the_quote_cadence(monkeypatch, age, stale):
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WIDGET_MAX_AGE_SECONDS", 900)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: "regular")
+    widget = {"widget_type": "stock_chart", "ticker": "NVDA", "current_price": 100.0,
+              "is_market_open": True}
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": widget, "suggestions": [],
+                             "created_at": _ago(age)})
+    out = await warm.lookup("What is a P/E ratio?")
+    assert out["widget"] == widget
+    assert out["widget_stale"] is stale
+
+
+@pytest.mark.asyncio
+async def test_lookup_treats_an_unreadable_age_as_a_stale_widget_but_a_fresh_answer(monkeypatch):
+    """No stamp = cannot prove the card is fresh → refresh it; the ANSWER keeps the
+    once-a-day behaviour (an unreadable stamp must not force every tap live)."""
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: "regular")
+    widget = {"widget_type": "stock_chart", "ticker": "NVDA"}
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": widget, "suggestions": []})
+    out = await warm.lookup("What tickers are hot today?")
+    assert out["answer"] == "a" * 200 and out["widget_stale"] is True
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": []})
+    assert (await warm.lookup("What tickers are hot today?"))["widget_stale"] is False

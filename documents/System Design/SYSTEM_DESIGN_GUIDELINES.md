@@ -587,11 +587,24 @@ One local heuristic, keyed to the server's clock where it can be: `ResearchViewM
 flips a row to failed locally once it has been RUNNING for 660 s from `processing_started_at` (the
 server's 600 s `RESEARCH_PIPELINE_TIMEOUT_SECONDS` — which runs from work START, after the agent
 semaphore — plus a margin), by which point the server has killed and refunded it. A row that has not
-started (queued) is aged from `created_at` against a much longer 1,800 s bound, because the server's
-own queue-abandon threshold is derived from the caps (~11,400 s) and a queued report is still coming.
-Until 2026-09-11 the pass aged EVERY row from `created_at` at 600 s, so a report queued for two
-minutes was shown as failed while the server was still generating it — the double-charge that the
-retry path's delete-first rule exists to prevent.
+started (queued) is aged from `created_at` against the server's own queue-abandon window: the
+client's 12,000 s is pinned **at or above** `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS` (derived
+from the caps, 11,400 s today) by `test_research_list_timeout_contract.py`, because a queued report
+is still coming and the sweep refunds it only past that window. Until 2026-09-11 the pass aged
+EVERY row from `created_at` at 600 s, so a report queued for two minutes was shown as failed while
+the server was still generating it; until 2026-09-16 the queued bound was 1,800 s, which flipped a
+healthy queued report 2.7 hours before the server would, stopped the list poll (nothing was
+`.processing` any more), and let Retry delete a report that then completed — a completed row is a
+plain, unrefundable soft-delete — and charge 20 credits again. Three things now hold that line:
+**followers** of a deduplicated same-`(ticker, persona)` run stamp `processing_started_at` the
+moment their leader holds its slot (their result arrives when the leader's does), so the only rows
+on the queued clock are leaders genuinely waiting; the list poll stays alive while any locally
+flipped card exists; and Retry asks `GET /research/reports/{id}/status` first and sends its DELETE
+with `?intent=retry`, which the server answers **409 `REPORT_ALREADY_COMPLETED`** for a finished
+report instead of forfeiting it — the client then shows the finished report. A report deleted while
+still queued no longer burns an agent run either: right after the leader acquires its slot it
+re-reads the row and gives the slot straight back (`ReportAbandonedError`) unless a follower is
+attached, and the pipeline ceiling is reported as `REPORT_TIMED_OUT` rather than as an FMP outage.
 
 The ViewModel owns the `TaskPollingManager` directly; there is no repository in between.
 
@@ -1635,7 +1648,16 @@ one answer regardless of how fast it arrived, and a free tier of shared question
 farmable. Two properties are load-bearing: rows are keyed on the **question**, never the chip
 slot, because `chat_starters_service` rebuilds its set every 15 minutes and its hot-ticker slots
 track the tape; and the warm job runs with **no user identity**, because one row serves every
-caller and `redact_signals()` is per-request.
+caller and `redact_signals()` is per-request. The tape-bound chips (`TAPE_KINDS`: the two fixed
+"hot today" asks, hot-ticker / hot-sector / hot-topic, trending) are not a once-a-day answer: the
+loop runs from 04:00 ET, when the screener still reports the previous close, so their first write
+waits for the regular session, they are re-warmed through it once older than
+`CHAT_STARTER_WARM_TAPE_TTL_SECONDS` (counted against the daily cap), a row older than twice that
+during the session is refused at read time, and a replayed card older than
+`CHAT_STARTER_WIDGET_MAX_AGE_SECONDS` is re-fetched by symbol so a warm-time price never sits
+under a green "Live" dot. The read path classifies a stored question by text
+(`is_tape_bound`, pinned against the generators by `test_chat_starters_tape_bound.py`) because
+the row carries no `kind`.
 
 ---
 

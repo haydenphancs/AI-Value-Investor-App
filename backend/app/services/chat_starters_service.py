@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -52,6 +53,56 @@ _ALL_SCOPES: Tuple[str, ...] = (_GLOBAL_SCOPE,) + _DETAIL_SCOPES
 #: How many chips the global row carries, and how many templates each detail bar gets.
 _GLOBAL_SLOTS = 8
 _DETAIL_SLOTS = 4
+
+#: The chip kinds whose ANSWER is a reading of the live tape. `chat_starter_warm_service`
+#: treats these differently from an evergreen question: it will not write their answer
+#: while the screener still reports the previous session (pre-market Monday is Friday's
+#: tape), re-warms them through the session, and refuses a stale row at read time. The
+#: two `fixed` asks belong here because "What tickers are hot today?" is answered from
+#: the same movers universe the `hot_ticker` slot is drawn from.
+TAPE_KINDS = frozenset({"fixed", "hot_ticker", "hot_sector", "hot_topic", "trending"})
+
+#: The exact texts and templates the tape-bound kinds render, in ONE place, so the read
+#: path can classify a stored question without knowing which slot produced it (the row
+#: carries no `kind`). `test_chat_starters_tape_bound.py` pins that every chip this
+#: module generates under a `TAPE_KINDS` kind classifies True, and every evergreen chip
+#: in the bundled catalogue classifies False.
+_FIXED_TAPE_TEXTS: Tuple[str, ...] = (
+    "What tickers are hot today?",
+    "What topics are hot today?",
+)
+_HOT_TICKER_TEMPLATES: Tuple[Tuple[bool, str], ...] = (
+    (True, "Why is {symbol} up {pct} today?"),
+    (False, "Why is {symbol} down {pct} today?"),
+)
+_HOT_SECTOR_TEMPLATE = "Why is {name} {direction} today?"
+_HOT_TOPIC_TEMPLATE = "What's driving {name} today?"
+# `trending` is drawn from social mentions but GATED on the symbol's move, and its answer
+# opens with that move — so it is the tape's question too.
+_TRENDING_TEMPLATE = "Why is everyone talking about {symbol}?"
+_TAPE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"^why is \S+ (up|down) \d+% today\?$"),
+    re.compile(r"^why is .+ (leading|lagging) today\?$"),
+    re.compile(r"^what's driving .+ today\?$"),
+    re.compile(r"^why is everyone talking about \S+\?$"),
+)
+
+
+def is_tape_bound(question: str) -> bool:
+    """Whether a chip's answer describes the live tape (see `TAPE_KINDS`).
+
+    Pure text classification against the templates above — no network, no clock — so the
+    warm service's READ path can apply a freshness rule to a stored row without a `kind`
+    column. Normalised the same way `question_hash` normalises (case-fold, whitespace
+    collapse) so a cosmetic difference cannot reclassify a chip.
+    """
+    text = " ".join((question or "").split()).casefold()
+    if not text:
+        return False
+    if text in {" ".join(t.split()).casefold() for t in _FIXED_TAPE_TEXTS}:
+        return True
+    return any(p.match(text) for p in _TAPE_PATTERNS)
+
 
 #: A move has to be a real move before a chip may call it hot. `_MOVERS_MIN_ABS_CHANGE_PCT`
 #: in home_dashboard_service is 0.05 — enough to keep a leaderboard row from rendering
@@ -407,10 +458,7 @@ class ChatStartersService:
 
         out: List[ChatStarterResponse] = []
         seen: set[str] = set()
-        for positive, template in (
-            (True, "Why is {symbol} up {pct} today?"),
-            (False, "Why is {symbol} down {pct} today?"),
-        ):
+        for positive, template in _HOT_TICKER_TEMPLATES:
             try:
                 rows = _movers_from_universe(
                     profile_map, change_map, positive=positive, rows=5
@@ -482,7 +530,7 @@ class ChatStartersService:
             if change is None or abs(change) < _HOT_MIN_ABS_CHANGE_PCT:
                 continue
             return ChatStarterResponse(
-                text=f"Why is everyone talking about {clean}?",
+                text=_TRENDING_TEMPLATE.format(symbol=clean),
                 kind="trending",
                 symbol=clean,
             )
@@ -505,7 +553,8 @@ class ChatStartersService:
             return None
         direction = "leading" if best_change > 0 else "lagging"
         return ChatStarterResponse(
-            text=f"Why is {best_name} {direction} today?", kind="hot_sector"
+            text=_HOT_SECTOR_TEMPLATE.format(name=best_name, direction=direction),
+            kind="hot_sector",
         )
 
     def _hot_topic_slot(self, sources: Dict[str, Any]) -> Optional[ChatStarterResponse]:
@@ -547,7 +596,7 @@ class ChatStartersService:
         if best_name is None or abs(best_change) < _HOT_MIN_GROUP_CHANGE_PCT:
             return None
         return ChatStarterResponse(
-            text=f"What's driving {best_name} today?", kind="hot_topic"
+            text=_HOT_TOPIC_TEMPLATE.format(name=best_name), kind="hot_topic"
         )
 
     # ── assembly ─────────────────────────────────────────────────────────────
@@ -591,8 +640,8 @@ class ChatStartersService:
 
         for chip in live:
             add(chip)
-        add(ChatStarterResponse(text="What tickers are hot today?", kind="fixed"))
-        add(ChatStarterResponse(text="What topics are hot today?", kind="fixed"))
+        for text in _FIXED_TAPE_TEXTS:
+            add(ChatStarterResponse(text=text, kind="fixed"))
 
         # Top up from the day's walk. Ask for the full row's worth rather than the exact
         # shortfall so cross-slot dedupe cannot leave the row short, then let `add`'s cap

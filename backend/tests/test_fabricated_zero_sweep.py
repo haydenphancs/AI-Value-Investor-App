@@ -28,11 +28,18 @@ from typing import Any, Dict, List
 
 import pytest
 
+from app.utils.market_hours import session_trading_date
+
 import app.services.home_dashboard_service as hd
 import app.services.home_service as hs
 import app.services.market_movers_service as mm
 from app.api.error_response import ErrorCode, classify_exception
 from app.integrations.fmp import FMPUnavailableException
+
+# A close-map row is a valid denominator only while it is CURRENT (`_snapshot_is_current`),
+# so the fixture must carry the live session's date — a literal went stale within a week
+# and made the "outage retried" assertion fail on the denominator's age, not the retry.
+_LATEST_SESSION = session_trading_date().isoformat()
 from app.services.market_movers_service import MarketMoversService
 
 
@@ -187,7 +194,7 @@ async def test_a_close_map_outage_is_not_cached_for_the_ttl(monkeypatch):
         if calls["n"] == 1:
             raise RuntimeError("supabase 520")
         return {"AAPL": {"symbol": "AAPL", "close": 95.0, "previous_close": 90.0,
-                         "trade_date": "2026-09-10"}}
+                         "trade_date": _LATEST_SESSION}}
 
     monkeypatch.setattr(MarketMoversService, "_select_all_closes", staticmethod(_closes))
     svc = MarketMoversService()
@@ -224,7 +231,7 @@ async def test_a_healthy_universe_is_still_memoised(monkeypatch):
     def _closes():
         calls["n"] += 1
         return {"AAPL": {"symbol": "AAPL", "close": 95.0, "previous_close": 90.0,
-                         "trade_date": "2026-09-10"}}
+                         "trade_date": _LATEST_SESSION}}
 
     monkeypatch.setattr(MarketMoversService, "_select_all_closes", staticmethod(_closes))
     svc = MarketMoversService()

@@ -41,6 +41,23 @@ from app.integrations.fmp_entitlements import (
 )
 
 
+class EmptyAfterFailure(list):
+    """An EMPTY list that remembers it is the product of a FAILED fetch.
+
+    `get_stock_news` / `get_crypto_news` degrade a non-quota failure to `[]` so the News tab
+    renders an empty feed rather than an error — but every consumer then read that `[]` as
+    "this ticker has no news", and Ask Cay AI told the user "No company news was published
+    today" about an outage. Callers that must tell the two apart check `fetch_failed`;
+    every existing `for article in …` / `if not articles` keeps working unchanged.
+    """
+
+    fetch_failed = True
+
+    def __init__(self, reason: str = ""):
+        super().__init__()
+        self.reason = reason
+
+
 class FMPException(Exception):
     """Base class for typed FMP integration errors."""
 
@@ -1194,7 +1211,7 @@ class FMPClient:
                 "Stock news request failed (symbols=%s): %s: %s",
                 params.get("symbols", "<market>"), type(e).__name__, e,
             )
-            return []
+            return EmptyAfterFailure(f"{type(e).__name__}: {e}")
 
     async def get_general_news(
         self, limit: int = 50, page: int = 0
@@ -1249,7 +1266,7 @@ class FMPClient:
                 "Crypto news request failed (symbols=%s): %s: %s",
                 params.get("symbols", "<all>"), type(e).__name__, e,
             )
-            return []
+            return EmptyAfterFailure(f"{type(e).__name__}: {e}")
 
     async def get_social_sentiment(
         self, ticker: str, max_pages: int = 10

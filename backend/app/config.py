@@ -509,6 +509,14 @@ class Settings(BaseSettings):
     # stream with no bound (the context resolver caps the same call at 4 s).
     GEMINI_TOOL_RESULT_MAX_CHARS: int = 8000
     CHAT_TOOL_TIMEOUT_SECONDS: float = 8.0
+    # Wall-clock budget for the NON-STREAMING chat door (`POST /messages`, the client's
+    # stream-failure fallback). It sends nothing until the answer is complete and iOS gives
+    # it a 60 s idle timeout, while the server's own ceilings on that path are all LARGER
+    # (90 s per Gemini call ×2, a 75 s tool, +8 s widget) — so the server could charge and
+    # persist a turn the client had already abandoned as failed. Strictly below the client's
+    # ceiling; on expiry the door answers GEMINI_UNAVAILABLE before any write and the
+    # `finally` refunds.
+    CHAT_SEND_BUDGET_SECONDS: float = 50.0
     # SSE keepalive interval on the chat stream. iOS's stream request times out after
     # 120 s of SILENCE, and two things legitimately go quiet longer than that used to be
     # possible: a synthesis round buffers its specialists until the gather completes, and
@@ -695,6 +703,18 @@ class Settings(BaseSettings):
     # `ChatStartersService._RESPONSE_TTL_SECONDS` (900) so a newly promoted chip is warmed
     # about as fast as it can appear; a shorter interval would just re-read the same set.
     CHAT_STARTER_WARM_INTERVAL_SECONDS: int = 900
+    # The tape-bound chips ("What tickers are hot today?", the hot-ticker / hot-sector /
+    # hot-topic / trending slots) are RE-WARMED through the regular session once their row
+    # is older than this, and a row older than TWICE this during the session is refused at
+    # read time. One hour: ~6 re-warms of ≤5 chips a day, inside the daily cap above (which
+    # counts them). Evergreen chips keep the once-a-day write. The first write of a
+    # tape-bound chip also waits for the regular session — at 04:05 ET the screener still
+    # reports the previous close, and that answer used to be replayed as "today" all day.
+    CHAT_STARTER_WARM_TAPE_TTL_SECONDS: int = 3600
+    # A replayed warm row's inline card (`widget`) is re-fetched by symbol when older than
+    # this, and dropped if the re-fetch fails — never a warm-time `current_price` under a
+    # green "Live" dot hours later.
+    CHAT_STARTER_WIDGET_MAX_AGE_SECONDS: int = 900
 
     # A charged chat turn earns the session ONE free follow-up, valid for this many seconds.
     #

@@ -154,6 +154,18 @@ class ErrorCode(str, Enum):
     # ── Research-flow specific ───────────────────────────────────────
     REPORT_NOT_FOUND = "REPORT_NOT_FOUND"
     REPORT_NOT_READY = "REPORT_NOT_READY"
+    # The whole agent run overran the pipeline ceiling (`ReportPipelineTimeoutError`).
+    # Its own code because the bare `TimeoutError` used to fall to the generic
+    # `"timeout" in cls` arm → FMP_UNAVAILABLE, pointing the user (and support) at the
+    # market-data provider when the run — Gemini rounds AND FMP tool calls together —
+    # simply took too long. Refunded by the same path as every other failure.
+    REPORT_TIMED_OUT = "REPORT_TIMED_OUT"
+    # A DELETE sent with retry intent hit a report that already COMPLETED. Retry on iOS
+    # is delete-then-generate, and a delete of a completed row is a plain soft-delete
+    # with no refund — so a stale "failed" card (a client clock that outran the server's
+    # queue window) turned into 40 credits for one report the user never saw. 409 so the
+    # client reloads and shows the finished report instead.
+    REPORT_ALREADY_COMPLETED = "REPORT_ALREADY_COMPLETED"
     INSUFFICIENT_CREDITS = "INSUFFICIENT_CREDITS"
     # The caller's plan does not allow tracking THIS whale — a Free account outside its one
     # free slot, or a Pro account already at its limit. Deliberately NOT INSUFFICIENT_CREDITS:
@@ -344,6 +356,13 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.REPORT_NOT_READY: (
         "The report is still generating. Try again in a few seconds."
     ),
+    ErrorCode.REPORT_TIMED_OUT: (
+        "This analysis took too long and was stopped. Your credits have been refunded — "
+        "please try again."
+    ),
+    ErrorCode.REPORT_ALREADY_COMPLETED: (
+        "This report has already finished. Open it instead of retrying."
+    ),
     ErrorCode.INSUFFICIENT_CREDITS: (
         "You don't have enough credits. Upgrade your tier or wait for the monthly reset."
     ),
@@ -428,6 +447,9 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.COINGECKO_RATE_LIMITED: "retry_later",
     ErrorCode.COINGECKO_UNAVAILABLE: "retry_later",
     ErrorCode.REPORT_NOT_READY: "poll_again",
+    ErrorCode.REPORT_TIMED_OUT: "retry_later",
+    # "refresh", not "retry": retrying is exactly the action that must not happen.
+    ErrorCode.REPORT_ALREADY_COMPLETED: "refresh",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
     ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
@@ -503,6 +525,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.REPORT_GENERATION_FAILED: 502,
     ErrorCode.REPORT_NOT_FOUND: 404,
     ErrorCode.REPORT_NOT_READY: 409,
+    ErrorCode.REPORT_TIMED_OUT: 502,
+    ErrorCode.REPORT_ALREADY_COMPLETED: 409,
     # 402 Payment Required — the standard "you're out of credits, pay/upgrade" status.
     # Not 401/429: iOS APIClient intercepts those before decoding the body (→ generic
     # "sign in" / "wait 60s"); 402 falls through to the structured-body decode so the
@@ -747,6 +771,10 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
             ErrorCode.GEMINI_UNAVAILABLE,
             _DEFAULT_STATUS[ErrorCode.GEMINI_UNAVAILABLE],
         )
+    # The pipeline ceiling (`research_service.ReportPipelineTimeoutError`). Ahead of the
+    # generic `"timeout" in cls` heuristic, which would call it an FMP outage.
+    if "reportpipelinetimeout" in cls:
+        return ErrorCode.REPORT_TIMED_OUT, _DEFAULT_STATUS[ErrorCode.REPORT_TIMED_OUT]
 
     # ── Gemini / Google generative AI errors ──────────────────────────
     if (

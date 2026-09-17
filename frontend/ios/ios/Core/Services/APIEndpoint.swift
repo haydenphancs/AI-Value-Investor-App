@@ -315,7 +315,11 @@ enum APIEndpoint: Sendable {
     case getResearchTickerReport(reportId: String)
     case getMyReports(limit: Int)
     case rateReport(reportId: String, rating: Int, feedback: String?)
-    case deleteReport(reportId: String)
+    /// `forRetry`: the delete is the first half of Retry (delete-then-generate). The backend
+    /// then REFUSES to soft-delete a report that already completed (409
+    /// `REPORT_ALREADY_COMPLETED`) instead of forfeiting it unrefunded — see
+    /// `ResearchViewModel.retryReport`.
+    case deleteReport(reportId: String, forRetry: Bool = false)
 
     // MARK: - Updates screen
     /// Filter pills for the Updates tab bar: "Market" + the user's watchlist,
@@ -634,7 +638,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/research/reports"
         case .rateReport(let reportId, _, _):
             return "/api/v1/research/reports/\(reportId)/rate"
-        case .deleteReport(let reportId):
+        case .deleteReport(let reportId, _):
             return "/api/v1/research/reports/\(reportId)"
 
         // Updates screen
@@ -809,6 +813,10 @@ enum APIEndpoint: Sendable {
 
         case .getStockNews(_, let limit):
             return ["limit": String(limit)]
+
+        case .deleteReport(_, let forRetry):
+            // Omitted on a plain delete so that request line stays byte-identical.
+            return forRetry ? ["intent": "retry"] : nil
 
         case .getUpdatesFeed(let scope, let limit, let offset):
             var q = ["scope": scope, "limit": String(limit)]

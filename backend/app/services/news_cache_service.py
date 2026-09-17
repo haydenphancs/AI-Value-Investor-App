@@ -294,12 +294,15 @@ class NewsCacheService:
                 ticker,
                 lambda: self._fetch_and_cache_raw(ticker, limit, is_crypto=is_crypto),
             )
-            return {
+            out = {
                 "articles": articles,
                 "ticker": ticker,
                 "cached": False,
                 "cache_age_seconds": 0,
             }
+            if getattr(articles, "fetch_failed", False):
+                out["fetch_failed"] = True
+            return out
         except (FMPRateLimitException, FMPAuthException):
             # Must NOT degrade to an empty feed. Doing so made an exhausted FMP
             # quota indistinguishable from "this ticker has no news" — the user
@@ -1023,6 +1026,12 @@ class NewsCacheService:
         else:
             raw_articles = await self.fmp.get_stock_news(ticker, limit=limit)
         if not raw_articles:
+            if getattr(raw_articles, "fetch_failed", False):
+                # An outage, not an empty feed: keep the marker so the caller can say
+                # "could not be checked" instead of "no news was published today".
+                logger.warning("FMP news fetch FAILED for %s (%s) — not cached", ticker,
+                               getattr(raw_articles, "reason", ""))
+                return raw_articles
             logger.info(f"No FMP news found for {ticker}")
             return []
         # Off-thread: the synchronous batch upsert would otherwise block the loop

@@ -144,15 +144,23 @@ class ResearchViewModel: ObservableObject {
     /// - A STARTED report (`processingStartedAt` set) is killed and refunded by the
     ///   server's `RESEARCH_PIPELINE_TIMEOUT_SECONDS` (600 s) counted from work START —
     ///   after the agent semaphore. 660 s from that stamp is past the kill with margin.
-    /// - A report still QUEUED (no stamp) is aged from `date` (`created_at`) against a much
-    ///   longer bound: the server's own queue-abandon threshold is derived from the caps
-    ///   (~11,400 s), and a queued report is still coming.
+    /// - A report still QUEUED (no stamp) is aged from `date` (`created_at`) against the
+    ///   server's own queue-abandon window: `RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS` is
+    ///   derived from the caps and is 11,400 s at current settings, and the sweep refunds a
+    ///   queued row only past it. This clock must be AT LEAST that (pinned by
+    ///   `test_research_list_timeout_contract.py`): at 1,800 s it flipped a healthy queued
+    ///   report to "failed" 2.7 hours before the server would, the flip STOPPED the list
+    ///   poll (nothing was `.processing` any more), the report then completed unseen, and
+    ///   Retry deleted it — a completed row is a plain soft-delete with no refund — and
+    ///   charged 20 credits again. Since followers of a deduplicated run now stamp
+    ///   `processing_started_at` when their leader holds its slot, the only rows on this
+    ///   clock are leaders genuinely waiting for an agent slot.
     ///
     /// This used to be one 600 s clock from `created_at` for every row, which flipped a
     /// report queued for two minutes to "failed" while the server was still generating it —
     /// and Retry then charged a second 20 credits (see `retryReport`).
     private let startedTimeoutSeconds: TimeInterval = 660
-    private let queuedTimeoutSeconds: TimeInterval = 1800
+    private let queuedTimeoutSeconds: TimeInterval = 12000
 
     /// Backend report IDs the user has retried out of (or otherwise
     /// dismissed). The failed card disappears from the list immediately
@@ -526,7 +534,13 @@ class ResearchViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 if Task.isCancelled { return }
                 guard let self = self else { return }
+                // A card this client flipped to "failed" on its own clock is NOT terminal on
+                // the server: it is still queued or running there, and it heals only by
+                // re-reading. The poll used to exit the moment nothing was `.processing`,
+                // which was exactly when the flipped card most needed it — the report then
+                // completed into a list nobody re-read.
                 let hasInflight = self.reports.contains { $0.status == .processing }
+                    || !self.locallyTimedOutReportIds.isEmpty
                 if !hasInflight {
                     return
                 }
@@ -819,15 +833,30 @@ class ResearchViewModel: ObservableObject {
                         await self.loadCredits()
 
                     case .failed(let appError):
+                        if let id = startedId {
+                            self.inFlightReportIds.remove(id)
+                            self.liveProgress[id] = nil
+                        }
+                        // The user deleted this card while it was generating (or it was
+                        // deleted from another device): the monitor's next poll reads
+                        // `deleted`, which the polling manager reports as a terminal failure.
+                        // That is the outcome the user asked for, not an error — it used to
+                        // pop an "Error: This analysis is no longer available" alert over the
+                        // list they had just cleaned, and log a `reportFailed`.
+                        if let id = startedId, self.dismissedReportIds.contains(id) {
+                            print("🗑️ ResearchVM: monitor for \(id) ended after the user deleted it — no alert")
+                            continue
+                        }
+                        if case .apiError(let code, _) = appError, code == "RESEARCH_DELETED" {
+                            print("🗑️ ResearchVM: report was deleted elsewhere — no alert")
+                            await self.loadReports()
+                            continue
+                        }
                         // `code` only — never the message, which can carry backend text.
                         Analytics.shared.track(.reportFailed, [
                             "ticker": .string(ticker),
                             "reason": .string(appError.analyticsCode),
                         ])
-                        if let id = startedId {
-                            self.inFlightReportIds.remove(id)
-                            self.liveProgress[id] = nil
-                        }
                         if case .timeout = appError {
                             // CLIENT-side poll timeout only — NOT a real
                             // failure. The backend keeps generating; the
@@ -843,8 +872,11 @@ class ResearchViewModel: ObservableObject {
                         } else {
                             print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
                             self.error = appError.message
-                            // Refresh so the failed card appears in the list
+                            // Refresh so the failed card appears in the list — and adopt
+                            // the server's refund, which `creditBalance` had no other way
+                            // to learn about (it refreshes on init / completion only).
                             await self.loadReports()
+                            await self.loadCredits()
                         }
                     }
                 }
@@ -1061,20 +1093,47 @@ class ResearchViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             if let backendId {
+                // A card THIS client flipped is failed only on its own clock; the server may
+                // have finished it since. Ask before deleting — a completed row would be a
+                // plain, unrefundable soft-delete followed by a second 20-credit charge.
+                if self.locallyTimedOutReportIds.contains(backendId),
+                   await self.serverSaysCompleted(backendId) {
+                    print("🔄 ResearchVM: \(backendId) completed on the server — showing it instead of retrying")
+                    self.adoptCompletedInsteadOfRetrying(backendId)
+                    return
+                }
                 do {
-                    try await self.apiClient.request(endpoint: .deleteReport(reportId: backendId))
+                    try await self.apiClient.request(
+                        endpoint: .deleteReport(reportId: backendId, forRetry: true)
+                    )
                     print("🔄 ResearchVM: released prior report \(backendId) before retrying")
                 } catch {
+                    let appError = AppError.from(error)
+                    // The server's belt for the race the status check above can lose: the
+                    // report completed between the check and the delete. Nothing was
+                    // deleted or charged; show the finished report.
+                    if case .apiError(let code, _) = appError, code == "REPORT_ALREADY_COMPLETED" {
+                        print("🔄 ResearchVM: \(backendId) already completed — retry refused by the server, adopting it")
+                        self.adoptCompletedInsteadOfRetrying(backendId)
+                        return
+                    }
                     // Surface and STOP. Charging again while the original may still be
                     // live is the exact outcome this method exists to prevent, and a
                     // silent revert is banned on a user-initiated mutation.
-                    let appError = AppError.from(error)
                     print("❌ ResearchVM: retry aborted — could not release \(backendId): \(appError.message)")
                     self.dismissedReportIds.remove(backendId)
                     self.error = "Couldn't retry that analysis just yet. Please try again in a moment."
                     await self.loadReports()   // put the card back
                     return
                 }
+                // The DELETE just refunded the original (or a server-side failure already
+                // had). `creditBalance` last read BEFORE that refund, and `generateAnalysis`
+                // gates on it — so with 10 local / 30 server the retry was refused as
+                // "Insufficient credits" AFTER the failed card had been deleted, leaving
+                // neither report. Unknown-then-reload: nil never blocks (the backend's 402
+                // is the authority), and the reload adopts the refund when it succeeds.
+                self.creditBalance = nil
+                await self.loadCredits()
             }
             // Set the target as late as possible so an await above cannot let the
             // user's own selection be overwritten by a stale one.
@@ -1088,6 +1147,36 @@ class ResearchViewModel: ObservableObject {
             // subsequent `applyDefaultPersona()`.
             self.selectPersona(persona)
             self.generateAnalysis()
+        }
+    }
+
+    /// Whether the server reports this report as finished. Conservative: any failure to
+    /// read is `false`, so the retry proceeds through the DELETE — whose retry-intent
+    /// refusal is the second, race-free line of defence.
+    private func serverSaysCompleted(_ backendId: String) async -> Bool {
+        struct Status: Decodable { let status: String }
+        do {
+            let s: Status = try await apiClient.request(
+                endpoint: .getResearchStatus(reportId: backendId),
+                responseType: Status.self
+            )
+            return s.status.lowercased() == "completed"
+        } catch {
+            print("⚠️ ResearchVM: status pre-check for \(backendId) failed — \(AppError.from(error).message)")
+            return false
+        }
+    }
+
+    /// The retry target turned out to be a finished report: un-dismiss it, drop the
+    /// local timeout flag and reload so the completed card appears where the failed one
+    /// was. Nothing was deleted and nothing was charged.
+    private func adoptCompletedInsteadOfRetrying(_ backendId: String) {
+        dismissedReportIds.remove(backendId)
+        locallyTimedOutReportIds.remove(backendId)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.loadReports()
+            await self.loadCredits()
         }
     }
 

@@ -18,10 +18,26 @@ import Foundation
 import Combine
 
 /// Failure modes of the SSE streaming path — each triggers the non-streaming fallback.
-private enum ChatStreamError: Error {
+private enum ChatStreamError: LocalizedError {
     case serverError    // server emitted an `error` frame
     case incomplete     // stream ended without a terminal `done` frame
     case malformedDone  // the `done` frame payload didn't decode
+    /// The turn may have been saved and charged, but history could not be read to confirm
+    /// it — so it was neither adopted nor regenerated. The user should reload, not resend.
+    case unconfirmed
+
+    /// `AppError.from` renders an unmapped error as `.unknown(localizedDescription)`, and a
+    /// bare enum's description is "The operation couldn't be completed. (… error 3.)".
+    var errorDescription: String? {
+        switch self {
+        case .serverError: return "Cay AI couldn't respond right now. Please try again."
+        case .incomplete, .malformedDone:
+            return "The answer was cut off. Please try again."
+        case .unconfirmed:
+            return "We couldn't confirm whether your answer was saved. "
+                + "Refresh the conversation before sending again."
+        }
+    }
 }
 
 @MainActor
@@ -53,7 +69,24 @@ class ChatViewModel: ObservableObject {
         "CHAT_DAILY_LIMIT_REACHED",   // 409 — the guest daily-turn budget
         "SYSTEM_BUSY",                // 409 — admission gate; retrying now re-fails
         "CHAT_MESSAGE_TOO_LONG",      // 400 — the message itself is the problem
+        "INVALID_INPUT",              // 400/422 — blank after normalisation, or past the hard cap
+        // The two Gemini outage codes arrive on the SSE `error` frame AFTER the stream door
+        // has already refunded the turn (`refund_once`). The non-streaming fallback would
+        // precharge again, hit the same open quota circuit, and refund again — two Gemini
+        // attempts and twice the wait, on the path EVERY user takes during an outage.
+        "GEMINI_QUOTA_EXCEEDED",
+        "GEMINI_UNAVAILABLE",
     ]
+
+    /// A failure of the TRANSPORT, not a verdict from the server: the request may have
+    /// completed server-side. Matched on the `AppError` the client would render, since that
+    /// is where `URLError.timedOut` / `.networkConnectionLost` land after `AppError.from`.
+    static func isTransportFailure(_ error: Error) -> Bool {
+        switch AppError.from(error) {
+        case .timeout, .noConnection: return true
+        default: return false
+        }
+    }
 
     static func isTerminalPreflightRefusal(_ error: Error) -> Bool {
         if case APIError.businessError(let code, _) = error {
@@ -768,6 +801,32 @@ class ChatViewModel: ObservableObject {
             print("❌ [ChatVM] Send failed after \(elapsed)s: \(error)")
             // Only surface the error on the conversation that is still active.
             guard sessionId == currentSessionId else { return }
+            // A timeout or a dropped connection says nothing about the SERVER: the door
+            // persists and charges the turn as soon as generation finishes, so the answer
+            // may already be in history. Adopt it if it is — never re-POST from here — and
+            // only report when the read PROVES the turn absent or cannot be made.
+            if Self.isTransportFailure(error) {
+                switch await fetchHistoryForReconcile(sessionId: sessionId) {
+                case .fetched(let history):
+                    guard sessionId == currentSessionId else { return }
+                    if Self.historyContainsTurn(history.messages, userMessage: message,
+                                                expectedUserMatches: max(1, messages.filter {
+                                                    $0.role == .user && $0.plainText == message
+                                                }.count)) {
+                        print("✅ [ChatVM] Send timed out but the turn was persisted — adopting history")
+                        messages = history.messages.map { $0.toRichChatMessage() }
+                        isAITyping = false
+                        refreshCreditsIfMoved(nil)
+                        return
+                    }
+                case .unavailable:
+                    guard sessionId == currentSessionId else { return }
+                    isAITyping = false
+                    reportTurnFailure(ChatStreamError.unconfirmed)
+                    return
+                }
+                guard sessionId == currentSessionId else { return }
+            }
             isAITyping = false
             // Route through AppError so backend business codes (CHAT_MESSAGE_TOO_LONG,
             // CHAT_DAILY_LIMIT_REACHED, rate limits, …) surface their SPECIFIC user_message
@@ -963,6 +1022,20 @@ class ChatViewModel: ObservableObject {
                     return
 
                 case "error":
+                    // The frame carries the backend's `{error_code, user_message}` (the
+                    // stream door emits it after `refund_once`). Decoded into the SAME
+                    // `APIError.businessError` shape a refused pre-flight produces, so the
+                    // catch below can tell a terminal outage code (report it, keep the
+                    // refund) from a recoverable one (INTERNAL_ERROR "couldn't be saved",
+                    // which reconcile exists for). It used to throw a bare
+                    // `ChatStreamError.serverError`, discarding the code and the copy.
+                    if let data = event.data.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let code = obj["error_code"] as? String, !code.isEmpty {
+                        let copy = (obj["user_message"] as? String)
+                            ?? (obj["message"] as? String) ?? ""
+                        throw APIError.businessError(code: code, message: copy)
+                    }
                     throw ChatStreamError.serverError
 
                 case "meta":
@@ -979,6 +1052,17 @@ class ChatViewModel: ObservableObject {
                        let serverMessage = obj["user_message"] as? String,
                        !serverMessage.isEmpty {
                         serverNormalizedMessage = serverMessage
+                        // Rewrite the optimistic user bubble to the server's copy, so local
+                        // and server compare like-with-like. `reconcileAfterStreamFailure`
+                        // counts LOCAL bubbles equal to the target: with the target
+                        // normalised and the bubble raw ("hold…" vs "hold..."), that count
+                        // was 0, and a zero expectation adopted the PREVIOUS turn's history
+                        // as if this one had persisted — the question vanished, unanswered.
+                        // It also matches what a history reload will show.
+                        if serverMessage != message,
+                           let idx = messages.lastIndex(where: { $0.role == .user }) {
+                            messages[idx].content = [.text(serverMessage)]
+                        }
                     }
                     continue
 
@@ -1048,14 +1132,22 @@ class ChatViewModel: ObservableObject {
         // pre-existing identical one, so a repeated message (e.g. "why?" / "continue") isn't mistaken
         // for already-answered and silently dropped.
         let target = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        let expectedUserMatches = messages.filter {
+        // Never below 1: this turn's own bubble is in `messages`, so a count of 0 means the
+        // bubble and the target were normalised differently — and `historyContainsTurn`
+        // with a zero expectation is true for ANY history ending in an assistant row.
+        let expectedUserMatches = max(1, messages.filter {
             $0.role == .user && $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == target
-        }.count
-        do {
-            let history = try await APIClient.shared.request(
-                endpoint: .getChatHistory(sessionId: sessionId),
-                responseType: ChatHistoryDTO.self
-            )
+        }.count)
+        // The GET is the ONLY oracle that the turn was not persisted — and the stream
+        // persists and charges BEFORE its `credits`/`done` frames (a follow-up-suggestions
+        // call sits in between). Regenerating on a FAILED read used to double-charge: a
+        // phone locked during that window drops the stream, the history read then hits a
+        // transport blip (or the 520 the codebase documents at five other sites), and
+        // the re-POST stored and billed the same Q+A a second time with no refund path.
+        // So: a bounded retry of the read, then a retryable error — never a re-POST on
+        // an unproven absence.
+        switch await fetchHistoryForReconcile(sessionId: sessionId) {
+        case .fetched(let history):
             guard sessionId == currentSessionId else { isAITyping = false; return }
             if Self.historyContainsTurn(history.messages, userMessage: message,
                                         expectedUserMatches: expectedUserMatches) {
@@ -1064,13 +1156,45 @@ class ChatViewModel: ObservableObject {
                 isAITyping = false
                 return
             }
-        } catch {
-            // History unavailable — fall through to a best-effort regenerate.
-            print("⚠️ [ChatVM] Reconcile history fetch failed: \(error)")
+        case .unavailable(let error):
             guard sessionId == currentSessionId else { isAITyping = false; return }
+            print("⚠️ [ChatVM] Reconcile could not read history — NOT regenerating: \(error)")
+            isAITyping = false
+            reportTurnFailure(ChatStreamError.unconfirmed)
+            return
         }
-        // Turn was not persisted — safe to regenerate via the non-streaming endpoint.
+        // Turn was PROVEN absent — safe to regenerate via the non-streaming endpoint.
         await sendMessageToSession(sessionId: sessionId, message: message)
+    }
+
+    private enum HistoryRead {
+        case fetched(ChatHistoryDTO)
+        case unavailable(Error)
+    }
+
+    /// Read the session history for a reconcile, retrying a bounded number of times with
+    /// backoff. A 404 is NOT retried (the session is gone; nothing to adopt) — everything
+    /// else (transport, 409 SYSTEM_BUSY, 5xx) is a blip worth a second look before we
+    /// tell the user we could not confirm their answer was saved.
+    private func fetchHistoryForReconcile(sessionId: String) async -> HistoryRead {
+        let delays: [UInt64] = [0, 1_000_000_000, 2_500_000_000]
+        var last: Error = ChatStreamError.unconfirmed
+        for (attempt, delay) in delays.enumerated() {
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            if Task.isCancelled || sessionId != currentSessionId { return .unavailable(last) }
+            do {
+                let history = try await APIClient.shared.request(
+                    endpoint: .getChatHistory(sessionId: sessionId),
+                    responseType: ChatHistoryDTO.self
+                )
+                return .fetched(history)
+            } catch {
+                last = error
+                if case APIError.notFound = error { return .unavailable(error) }
+                print("⚠️ [ChatVM] Reconcile history read \(attempt + 1)/\(delays.count) failed: \(error)")
+            }
+        }
+        return .unavailable(last)
     }
 
     /// True when the streamed turn was already persisted server-side, so the caller should ADOPT

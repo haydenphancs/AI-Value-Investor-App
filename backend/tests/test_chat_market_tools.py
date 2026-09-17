@@ -631,3 +631,271 @@ async def test_a_flat_industry_is_not_padded_into_the_list(monkeypatch):
                    for r in out.get("other_industries_that_moved", []))
     import json
     assert len(json.dumps(out)) < 8000, "the tool result must fit inside stream_agentic's cap"
+
+
+# ── 2026-09-16: the web-search unit is released only when the search provably never ran ──
+
+@pytest.mark.asyncio
+async def test_a_search_that_never_ran_releases_its_unit(monkeypatch):
+    """Before `CatalystNotAttempted`, every refusal came back as None and the unit was kept —
+    the `except Exception → release` branch was unreachable."""
+    from app.services.price_catalyst_service import CatalystNotAttempted
+    released = []
+
+    async def _release():
+        released.append(1)
+    calls = {"cache_only": 0, "fresh": 0}
+
+    async def _get_catalyst(ticker, change_pct, window_label, cache_only=False, **kw):
+        if cache_only:
+            calls["cache_only"] += 1
+            return None
+        calls["fresh"] += 1
+        raise CatalystNotAttempted("quota circuit open")
+
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=True))
+    monkeypatch.setattr(cmt, "_release_web_search", _release)
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        lambda: SimpleNamespace(get_catalyst=_get_catalyst))
+    out = await cmt._maybe_web_catalyst("NAVN", _explanation(tier="Extreme", kind=CauseKind.NONE), "none")
+    assert out is None
+    assert calls == {"cache_only": 1, "fresh": 1}
+    assert released == [1], "a refused search kept its unit"
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_ran_and_found_nothing_keeps_its_unit(monkeypatch):
+    """Google billed that search; a spend gate refunds only what provably was not spent."""
+    released = []
+
+    async def _release():
+        released.append(1)
+
+    async def _get_catalyst(ticker, change_pct, window_label, cache_only=False, **kw):
+        return None
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=True))
+    monkeypatch.setattr(cmt, "_release_web_search", _release)
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        lambda: SimpleNamespace(get_catalyst=_get_catalyst))
+    out = await cmt._maybe_web_catalyst("NAVN", _explanation(tier="Extreme", kind=CauseKind.NONE), "none")
+    assert out is None and released == []
+
+
+# ── 2026-09-16: the session word travels; crashes are counted; no paid search for Friday ──
+
+@pytest.mark.asyncio
+async def test_no_paid_search_for_a_prior_sessions_move(monkeypatch):
+    """Pre-market Monday `attribute_ticker_move` labels the change "on Fri". A paid "today"
+    search would cache under `X|today|…` and answer Monday's question with Friday's cause."""
+    claimed = []
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(side_effect=lambda: claimed.append(1) or True))
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    exp.session_word = "on Fri"
+    assert await cmt._maybe_web_catalyst("NAVN", exp, "none") is None
+    assert claimed == []
+
+
+@pytest.mark.asyncio
+async def test_explain_price_move_carries_the_session_and_words_the_bottom_line_with_it(monkeypatch):
+    exp = _explanation(tier="Typical", kind=CauseKind.NONE, change=-1.2)
+    exp.session_word = "on Fri"
+    exp.session_date = "2026-09-11"
+
+    class _WM:
+        async def attribute_ticker_move(self, sym):
+            return exp
+    monkeypatch.setattr("app.services.widget_movers_service.get_widget_movers_service", lambda: _WM())
+    monkeypatch.setattr(cmt, "fetch_ticker_news", AsyncMock(return_value={"news_available": True, "articles": []}))
+    monkeypatch.setattr(cmt, "_maybe_web_catalyst", AsyncMock(return_value=None))
+    out = await cmt.explain_price_move("NAVN")
+    assert out["session"] == "on Fri" and out["session_date"] == "2026-09-11"
+    assert "on Fri" in out["bottom_line"] and "today" not in out["bottom_line"].split("—")[0]
+
+
+@pytest.mark.asyncio
+async def test_an_attribution_crash_is_an_error_result_not_an_unreadable_quote(monkeypatch):
+    """The stream door counts a tool as failed only when its result carries `error`; a crash
+    upstream used to come back in the same shape as a genuinely unreadable move, so the turn
+    was charged while the identical outage on `get_market_snapshot` was refunded."""
+    class _WM:
+        async def attribute_ticker_move(self, sym):
+            raise RuntimeError("supabase 520")
+    monkeypatch.setattr("app.services.widget_movers_service.get_widget_movers_service", lambda: _WM())
+    out = await cmt.explain_price_move("NAVN")
+    assert out["move_readable"] is False and out["error"].startswith("RuntimeError")
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_move_without_a_crash_carries_no_error(monkeypatch):
+    class _WM:
+        async def attribute_ticker_move(self, sym):
+            return None
+    monkeypatch.setattr("app.services.widget_movers_service.get_widget_movers_service", lambda: _WM())
+    out = await cmt.explain_price_move("NAVN")
+    assert out["move_readable"] is False and "error" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_news_feed_crash_is_an_error_result(monkeypatch):
+    class _NC:
+        async def get_ticker_news(self, *a, **k):
+            raise RuntimeError("fmp 503")
+    monkeypatch.setattr("app.services.news_cache_service.get_news_cache_service", lambda: _NC())
+    out = await cmt.fetch_ticker_news("AAPL")
+    assert out["news_available"] is False and out["error"].startswith("RuntimeError")
+
+
+# ── Which session the snapshot describes (F7-4) ───────────────────────────────
+#
+# At 07:00 ET on a Monday the screener still reports Friday's close, so every sector,
+# industry and mover percentage is FRIDAY's move. The universe stamps that on every row
+# and the widget refuses to say "today" about it; this tool used to drop the stamp and
+# the model said "Technology is up 0.8% today" about a session that ended three days
+# earlier.
+
+
+def _snapshot_movers(*, sector_date=None, industry_date=None, universe=None):
+    class _Movers:
+        async def get_sector_performance(self):
+            row = {"sector": "Technology", "changesPercentage": 0.8, "constituents": 300}
+            if sector_date:
+                row["date"] = sector_date
+            return [row]
+
+        async def get_industry_performance(self):
+            row = {"industry": "Semiconductors", "sector": "Technology",
+                   "changesPercentage": 1.9}
+            if industry_date:
+                row["date"] = industry_date
+            return [row]
+
+        async def get_scanner_inputs(self):
+            if universe is None:
+                return ({}, {})
+            change_map = {s: r["changePercentage"] for s, r in universe.items()}
+            return (universe, change_map)
+    return _Movers()
+
+
+def _quality_row(symbol, change, session=None):
+    row = {"symbol": symbol, "companyName": symbol, "price": 100.0, "marketCap": 5e10,
+           "volume": 1e7, "averageVolume": 1e7, "changePercentage": change,
+           "exchange": "NASDAQ", "isEtf": False, "isFund": False,
+           "sector": "Technology", "industry": "Semiconductors"}
+    if session:
+        row["changeSession"] = session
+    return row
+
+
+def _stub_cards(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.news_insight_service.get_news_insight_service",
+        lambda: SimpleNamespace(get_cards=AsyncMock(return_value={})),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_prior_session_snapshot_is_worded_on_fri_not_today(monkeypatch):
+    from datetime import date
+    universe = {"NVDA": _quality_row("NVDA", 4.2, "2026-09-11"),
+                "INTC": _quality_row("INTC", -3.1, "2026-09-11")}
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="2026-09-11", industry_date="2026-09-11",
+                                 universe=universe),
+    )
+    _stub_cards(monkeypatch)
+    # Monday pre-market: the live session is the 14th, the numbers are Friday the 11th's.
+    monkeypatch.setattr("app.utils.market_hours.session_trading_date",
+                        lambda now=None: date(2026, 9, 14))
+    out = await cmt.fetch_market_snapshot()
+    assert out["as_of_session"] == {
+        "date": "2026-09-11", "word": "on Fri",
+        "note": out["as_of_session"]["note"],
+    }
+    assert "today" not in out["as_of_session"]["word"]
+    assert '"today"' in out["as_of_session"]["note"], "the note must forbid the word"
+    assert out["sectors"][0]["session_date"] == "2026-09-11"
+    assert out["leading_industries"][0]["session_date"] == "2026-09-11"
+    assert out["top_gainers"][0]["session_date"] == "2026-09-11"
+    assert out["top_losers"][0]["session_date"] == "2026-09-11"
+
+
+@pytest.mark.asyncio
+async def test_a_current_session_snapshot_says_today(monkeypatch):
+    from datetime import date
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="2026-09-14", industry_date="2026-09-14"),
+    )
+    _stub_cards(monkeypatch)
+    monkeypatch.setattr("app.utils.market_hours.session_trading_date",
+                        lambda now=None: date(2026, 9, 14))
+    out = await cmt.fetch_market_snapshot()
+    assert out["as_of_session"]["word"] == "today"
+    assert out["as_of_session"]["date"] == "2026-09-14"
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_snapshot_carries_no_session_claim(monkeypatch):
+    """Older-shape rows (no `date`, no `changeSession`) must not INVENT a session: the
+    key is absent, and no row carries a `session_date`."""
+    universe = {"NVDA": _quality_row("NVDA", 4.2)}
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(universe=universe),
+    )
+    _stub_cards(monkeypatch)
+    out = await cmt.fetch_market_snapshot()
+    assert "as_of_session" not in out
+    assert "session_date" not in out["sectors"][0]
+    assert "session_date" not in out["top_gainers"][0]
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_session_is_the_mode_not_the_newest_stamp(monkeypatch):
+    """One early premarket print that has ticked into Monday must not relabel Friday's
+    whole snapshot as today's — and the odd row keeps its own, differing, date."""
+    from datetime import date
+    universe = {"NVDA": _quality_row("NVDA", 4.2, "2026-09-11"),
+                "AMD": _quality_row("AMD", 3.0, "2026-09-11"),
+                "EARLY": _quality_row("EARLY", 2.0, "2026-09-14")}
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="2026-09-11", industry_date="2026-09-11",
+                                 universe=universe),
+    )
+    _stub_cards(monkeypatch)
+    monkeypatch.setattr("app.utils.market_hours.session_trading_date",
+                        lambda now=None: date(2026, 9, 14))
+    out = await cmt.fetch_market_snapshot()
+    assert out["as_of_session"]["date"] == "2026-09-11"
+    assert out["as_of_session"]["word"] == "on Fri"
+    by_sym = {r["symbol"]: r for r in out["top_gainers"]}
+    assert by_sym["EARLY"]["session_date"] == "2026-09-14"
+    assert by_sym["NVDA"]["session_date"] == "2026-09-11"
+
+
+@pytest.mark.asyncio
+async def test_a_garbage_session_stamp_never_crashes_the_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="not-a-date", industry_date="not-a-date"),
+    )
+    _stub_cards(monkeypatch)
+    out = await cmt.fetch_market_snapshot()
+    assert "as_of_session" not in out
+    assert out["sectors"][0]["change_percent"] == 0.8
+
+
+def test_as_of_session_words_a_prior_session_by_weekday(monkeypatch):
+    from collections import Counter
+    from datetime import date
+    monkeypatch.setattr("app.utils.market_hours.session_trading_date",
+                        lambda now=None: date(2026, 9, 16))
+    assert cmt._as_of_session(Counter({"2026-09-15": 3}))["word"] == "on Tue"
+    assert cmt._as_of_session(Counter({"2026-09-16": 3}))["word"] == "today"
+    # A stamp AHEAD of the live session (clock skew, a stale `session_trading_date`
+    # patch) is still "today", never a future weekday.
+    assert cmt._as_of_session(Counter({"2026-09-17": 3}))["word"] == "today"
+    assert cmt._as_of_session(Counter()) is None

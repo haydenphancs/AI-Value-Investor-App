@@ -94,6 +94,10 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     "chat_stream_empty": (KIND_REFUND, "Refund · no answer was returned", _REF_CHAT),
     "chat_stream_persist_failed": (KIND_REFUND, "Refund · answer wasn't saved", _REF_CHAT),
     "chat_stream_cancelled": (KIND_REFUND, "Refund · you stopped the answer", _REF_CHAT),
+    # The precharge's outcome was lost to a transport blip (a 520 on the RPC reply). The
+    # turn is refused with 409 and this compensating refund is attempted; it matches a
+    # debit only when the charge actually landed, so most of these never write a row.
+    "chat_precharge_unconfirmed": (KIND_REFUND, "Refund · Ask Cay AI", _REF_CHAT),
     # grants
     "grant": (KIND_GRANT, "Welcome credits", _REF_NONE),
     "monthly_reset": (KIND_GRANT, "Monthly credits", _REF_NONE),

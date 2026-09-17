@@ -458,6 +458,7 @@ class CreditService:
         *,
         reason: str,
         ref_id: Optional[str] = None,
+        quiet_no_match: bool = False,
     ) -> Optional[dict]:
         """Best-effort refund + ledger for a non-delivered metered action.
 
@@ -532,6 +533,14 @@ class CreditService:
                 "and the one-shot refund guard is already burned; manual correction needed. "
                 "Most likely the charge and the refund straddled a monthly reset.",
                 user_id, ref_id, amount, reason,
+            )
+        elif outcome == "no_matching_debit" and quiet_no_match:
+            # EXPECTED by the caller: a COMPENSATING refund fired after a precharge whose
+            # transport failed — "no debit" is the good outcome (the charge never committed).
+            logger.info(
+                "refund_credits: no debit to compensate for user=%s ref_id=%s (reason=%s) — "
+                "the precharge never committed",
+                user_id, ref_id, reason,
             )
         elif outcome == "no_matching_debit":
             # THE one that must page. `logger.error` is the alert: Sentry's LoggingIntegration

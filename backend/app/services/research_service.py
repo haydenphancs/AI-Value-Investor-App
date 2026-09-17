@@ -79,6 +79,54 @@ _AGENT_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _AGENT_INFLIGHT: Dict[str, "asyncio.Future"] = {}
 
 
+class _AgentRun:
+    """Per-leader bookkeeping the followers share: whether the leader holds its slot yet,
+    and how many followers are attached. Held by REFERENCE (never re-read by key) so a
+    follower finishing after its leader's `_AGENT_INFLIGHT.pop` can never touch the
+    record of a NEW leader under the same key."""
+
+    __slots__ = ("started", "followers")
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.followers = 0
+
+
+_AGENT_RUNS: Dict[str, _AgentRun] = {}
+
+
+class ReportAbandonedError(Exception):
+    """The report was deleted (or otherwise left the active statuses) while it sat queued
+    for an agent slot, and nobody else is waiting on the run.
+
+    Raised by the deep path's `before_run` hook right after the slot is acquired so the
+    slot is released immediately instead of after a full ~17-Gemini / ~20-FMP run whose
+    completion write is a guaranteed no-op. NOT a failure: the row is already terminal
+    and the DELETE already refunded it, so callers log it at info and skip the
+    mark-failed / refund / Sentry path.
+    """
+
+
+class ReportPipelineTimeoutError(TimeoutError):
+    """The whole agent run overran `RESEARCH_PIPELINE_TIMEOUT_SECONDS`.
+
+    A subclass of the builtin so every `except asyncio.TimeoutError` caller is unaffected
+    (the same reasoning as `GeminiTimeoutError`), with a MESSAGE — the bare `TimeoutError`
+    `asyncio.wait_for` raises has an empty `str()`, so the failed card said "market data
+    provider unavailable" (the generic `"timeout" in cls` arm maps to FMP_UNAVAILABLE) and
+    the Sentry line read "TimeoutError: " with nothing after it. `classify_exception` maps
+    this class to REPORT_TIMED_OUT.
+    """
+
+    def __init__(self, ticker: str, persona_key: str, seconds: float) -> None:
+        super().__init__(
+            f"report pipeline for {ticker}/{persona_key} exceeded {seconds:.0f}s ceiling"
+        )
+        self.ticker = ticker
+        self.persona_key = persona_key
+        self.seconds = seconds
+
+
 def _get_agent_semaphore() -> asyncio.Semaphore:
     """Lazily build the process-wide semaphore inside the running loop."""
     global _AGENT_SEMAPHORE
@@ -90,7 +138,8 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 
 
 async def _run_agent_deduped(
-    ticker: str, persona_key: str, run_callable, on_started=None, key_prefix: str = ""
+    ticker: str, persona_key: str, run_callable, on_started=None, key_prefix: str = "",
+    before_run=None,
 ):
     """Run the agent pipeline under the global semaphore, sharing ONE execution
     across concurrent same-(ticker, persona) callers.
@@ -103,10 +152,20 @@ async def _run_agent_deduped(
     ticker_data_cache.get_or_collect. Followers never hold a semaphore slot, so
     a 300-deep hot-ticker herd consumes exactly one unit of Gemini/FMP work.
 
-    `on_started` (async, optional) fires ONCE right after the leader acquires its
-    slot — i.e. when real agent work begins, NOT while queued — so the caller can
-    stamp processing_started_at and the reconciliation sweep can age the report
-    off work-start rather than enqueue time.
+    `on_started` (async, optional) fires right after the leader acquires its slot —
+    i.e. when real agent work begins, NOT while queued — so the caller can stamp
+    processing_started_at and the reconciliation sweep can age the report off
+    work-start rather than enqueue time. A FOLLOWER's `on_started` fires at the same
+    moment (or at attach time if the leader is already running): its result arrives
+    when the leader's does, ≤ the pipeline ceiling after that stamp, so the started
+    clock is exactly as true for it. It used to stay NULL for followers, which put
+    them on the client's 1,800 s queued clock while the server kept them for 11,400 s
+    — under queue pressure a healthy follower was shown "failed" and its Retry
+    deleted a report that then completed, unrefunded.
+
+    `before_run` (async, optional, LEADER only) fires after `on_started` and may raise
+    `ReportAbandonedError` to give the slot straight back — honoured only while no
+    follower is attached, because a follower still needs the run.
 
     `key_prefix` namespaces the dedup key. This is a CORRECTNESS requirement, not
     a nicety: the deep `/research/generate` pipeline and the shallower direct
@@ -123,23 +182,58 @@ async def _run_agent_deduped(
 
     inflight = _AGENT_INFLIGHT.get(key)
     if inflight is not None:
-        # Followers deliberately do NOT fire `on_started`. `processing_started_at` is
-        # the reconciliation sweep's STARTED clock, and a follower holds no semaphore
-        # slot of its own, so it ages on `created_at` against the long
-        # RECON_QUEUE_ABANDONED window instead. That is slower to refund after a
-        # worker death but provably never false-refunds a report that is still coming;
-        # the trade is deliberate and pinned by
-        # tests/test_processing_started_at.py::test_run_agent_deduped_followers_do_not_call_on_started.
-        shared = await asyncio.shield(inflight)
-        return copy.deepcopy(shared)
+        run = _AGENT_RUNS.get(key)
+        if run is not None:
+            run.followers += 1
+        shielded = asyncio.shield(inflight)
+        try:
+            if on_started is not None and run is not None:
+                # Stamp when the LEADER holds its slot — never while it is still queued
+                # (a follower's row must not read "started" ahead of the work), and not
+                # at all if the leader dies queued (the shared future settles first and
+                # the follower fails through the normal refund path with a NULL stamp,
+                # exactly as before).
+                waiter = asyncio.ensure_future(run.started.wait())
+                try:
+                    await asyncio.wait(
+                        {waiter, shielded}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    waiter.cancel()
+                if run.started.is_set():
+                    await on_started()
+            shared = await shielded
+            return copy.deepcopy(shared)
+        finally:
+            if run is not None:
+                run.followers = max(0, run.followers - 1)
+            if shielded.done() and not shielded.cancelled():
+                # Mark a leader failure as retrieved when this follower was cancelled
+                # before awaiting it, or asyncio logs "exception was never retrieved".
+                shielded.exception()
 
     loop = asyncio.get_running_loop()
     fut: "asyncio.Future" = loop.create_future()
+    run = _AgentRun()
     _AGENT_INFLIGHT[key] = fut
+    _AGENT_RUNS[key] = run
     try:
         async with _get_agent_semaphore():
+            run.started.set()
             if on_started is not None:
                 await on_started()
+            if before_run is not None:
+                try:
+                    await before_run()
+                except ReportAbandonedError:
+                    if run.followers:
+                        # Somebody attached while this sat queued; the run is theirs now.
+                        logger.info(
+                            "agent run %s: leader abandoned but %d follower(s) attached — "
+                            "running for them", key, run.followers,
+                        )
+                    else:
+                        raise
             result = await run_callable()
         if not fut.done():
             fut.set_result(result)
@@ -161,6 +255,7 @@ async def _run_agent_deduped(
         raise
     finally:
         _AGENT_INFLIGHT.pop(key, None)
+        _AGENT_RUNS.pop(key, None)
 
 
 class ResearchService:
@@ -177,13 +272,17 @@ class ResearchService:
         ticker: str,
         persona_key: str,
         user_id: str,
-    ):
+    ) -> bool:
         """
         Full multi-agent pipeline:
           1. Spawn ResearchAgent with persona
           2. Agent runs agentic loop (data gathering + analysis)
           3. Store full TickerReportResponse + legacy fields
           4. Decrement user credits
+
+        Returns True when the row was written 'completed' (delivered), False when the
+        result was dropped because the row had already been reconciled or deleted — the
+        caller must not render a PDF onto a row that never completed.
         """
         start = datetime.now(timezone.utc)
 
@@ -241,22 +340,40 @@ class ResearchService:
                 # collapses a concurrent same-(ticker,persona) herd to ONE run;
                 # followers get a deep copy and proceed to write their own row.
                 async def _run_agent():
-                    return await asyncio.wait_for(
-                        agent.run(
-                            ticker=ticker,
-                            progress_cb=on_progress,
-                        ),
-                        timeout=settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS,
-                    )
+                    try:
+                        return await asyncio.wait_for(
+                            agent.run(
+                                ticker=ticker,
+                                progress_cb=on_progress,
+                            ),
+                            timeout=settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as e:
+                        # Typed and worded: see `ReportPipelineTimeoutError`.
+                        raise ReportPipelineTimeoutError(
+                            ticker, persona_key, settings.RESEARCH_PIPELINE_TIMEOUT_SECONDS
+                        ) from e
 
                 async def _on_started():
                     # Stamp when this report ACTUALLY starts running (slot
                     # acquired) so the reconciliation sweep ages it off
                     # work-start, not the queue-inflated created_at.
-                    self._mark_processing_started(report_id)
+                    await asyncio.to_thread(self._mark_processing_started, report_id)
+
+                async def _before_run():
+                    # Deleted while queued? A DELETE only flips the row (and refunds);
+                    # nothing told this task. It used to hold a slot for a full run
+                    # whose completion write was a guaranteed no-op — thirty users
+                    # giving up on a deep queue cost paying users ~20 min more of it.
+                    if not await asyncio.to_thread(self._is_still_active, report_id):
+                        raise ReportAbandonedError(
+                            f"report {report_id} ({ticker}/{persona_key}) left the active "
+                            "statuses while queued"
+                        )
 
                 ticker_report_data = await _run_agent_deduped(
-                    ticker, persona_key, _run_agent, on_started=_on_started
+                    ticker, persona_key, _run_agent,
+                    on_started=_on_started, before_run=_before_run,
                 )
 
             # A DEGRADED report is a non-delivery. When Gemini is unavailable — quota
@@ -378,7 +495,7 @@ class ResearchService:
                     f"completion — skipping delivery to avoid double-resolve "
                     f"(persona={persona_key}, ticker={ticker})"
                 )
-                return
+                return False
 
             # Seed the direct-path cache so /stocks/{ticker}/report users
             # benefit from this expensive agentic run for the next 24h.
@@ -403,7 +520,13 @@ class ResearchService:
                 persona=persona,
                 persona_key=persona_key,
             )
+            return True
 
+        except ReportAbandonedError as e:
+            # Not a failure: the row is already terminal and its DELETE refunded it. No
+            # status stamp (it would be a no-op on a deleted row anyway), no ERROR log.
+            logger.info("Report %s abandoned before its run: %s", report_id, e)
+            raise
         except Exception as e:
             logger.error(f"Report generation failed: {e}", exc_info=True)
             self._update_status(
@@ -411,6 +534,33 @@ class ResearchService:
                 error_message=f"Research failed: {str(e)[:400]}"
             )
             raise
+
+    def _is_still_active(self, report_id: str) -> bool:
+        """Whether the row is still in an active status and unrefunded (sync; call via
+        `asyncio.to_thread`). FAILS OPEN: a read error answers True, because the cost of
+        a wrong "abandon" is a report the user paid for and never receives, while the
+        cost of a wrong "active" is one wasted run."""
+        try:
+            result = (
+                self.supabase.table("research_reports")
+                .select("status, is_refunded")
+                .eq("id", report_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "is_still_active read failed for %s (%s: %s) — assuming active",
+                report_id, type(e).__name__, e,
+            )
+            return True
+        rows = list(getattr(result, "data", None) or [])
+        if not rows:
+            # Hard-deleted, or a read against a stale replica. Treat as active for the
+            # same fail-open reason.
+            return True
+        row = rows[0] or {}
+        return (row.get("status") in _ACTIVE_STATUSES) and not bool(row.get("is_refunded"))
 
     # ── Report-ready push ─────────────────────────────────────────────────
 

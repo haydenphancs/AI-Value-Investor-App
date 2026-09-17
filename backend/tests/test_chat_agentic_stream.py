@@ -477,3 +477,94 @@ async def test_stream_synthesis_all_specialists_fail_falls_back_to_general():
     events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[], tool_handlers={})]
     answers = [p for k, p in events if k == "answer"]
     assert answers == ["general fallback answer"]   # the guarantee held; no empty stream
+
+
+# ── stream_synthesis: tool events, partial specialists, mid-merge death (2026-09-16) ───
+
+def _synth_svc(per_specialist, merge):
+    from app.services.chat_service import ChatService
+    """`per_specialist(sys_instruction) -> events`, `merge() -> events | raises`."""
+    class _G:
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None):
+            for ev in per_specialist(system_instruction):
+                if isinstance(ev, Exception):
+                    raise ev
+                yield ev
+
+        async def stream_text(self, prompt, system_instruction=None, model_name=None,
+                              usage_tag=None, max_output_tokens=None):
+            for ev in merge():
+                if isinstance(ev, Exception):
+                    raise ev
+                yield ev
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    return svc
+
+
+_ROUTE2 = {"specialists": ["valuation", "fundamentals"], "labels": ["Valuation", "Fundamentals"],
+           "mode": "synthesize"}
+_PREP = {"system_instruction": "sys", "prompt": "p"}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_re_yields_every_specialists_tool_events():
+    """The specialists' `tool` events used to be consumed inside `_run` (only the widget was
+    read), so the endpoint's tool counters stayed at 0 on the multi-agent path and a turn
+    whose EVERY tool failed was charged in full — single mode and the non-stream door settle
+    the identical turn as `no_tools`. Every event now reaches the endpoint."""
+    failed = {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"}, "result": {"error": "timed_out"}}
+    svc = _synth_svc(lambda sys: [("tool", failed), ("answer", "from memory")],
+                     lambda: [("answer", "merged")])
+    signals = {}
+    events = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
+    tools = [p for k, p in events if k == "tool"]
+    assert len(tools) == 2 and all(t["result"].get("error") for t in tools)
+    # No signal is set here: the endpoint derives `no_tools` from the counters it now sees.
+    assert signals == {}
+    assert "".join(p for k, p in events if k == "answer") == "merged"
+
+
+@pytest.mark.asyncio
+async def test_a_specialist_that_never_answered_settles_the_turn_as_partial():
+    """The `routing` frame promised two lenses; one raised (a refused half-open breaker trial)
+    and the merge ran over the survivor as if it were the whole promise — charged in full."""
+    def per(sys):
+        if "fundamentals" in (sys or "").lower():
+            return [RuntimeError("quota circuit open")]
+        return [("answer", "valuation view")]
+    svc = _synth_svc(per, lambda: [("answer", "merged")])
+    signals = {}
+    events = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
+    assert signals == {"degraded": "partial_specialists"}
+    assert "".join(p for k, p in events if k == "answer") == "merged"
+
+
+@pytest.mark.asyncio
+async def test_both_specialists_answering_is_not_partial():
+    svc = _synth_svc(lambda sys: [("answer", "a view")], lambda: [("answer", "merged")])
+    signals = {}
+    _ = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
+    assert signals == {}
+
+
+@pytest.mark.asyncio
+async def test_a_merge_that_dies_after_streaming_text_is_handed_to_the_fallback():
+    """Swallowing a mid-body failure handed the endpoint a truncated fragment as a complete,
+    fully charged answer. Re-raising lets the endpoint's fallback regenerate (with `reset`)."""
+    svc = _synth_svc(lambda sys: [("answer", "a view")],
+                     lambda: [("answer", "The market is"), RuntimeError("ReadTimeout")])
+    signals = {}
+    with pytest.raises(RuntimeError):
+        _ = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
+
+
+@pytest.mark.asyncio
+async def test_a_merge_that_dies_before_any_text_still_serves_the_top_specialist():
+    svc = _synth_svc(lambda sys: [("answer", "a view")], lambda: [RuntimeError("503")])
+    signals = {}
+    events = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
+    assert signals == {"degraded": "unmerged"}
+    assert [p for k, p in events if k == "answer"] == ["a view"]

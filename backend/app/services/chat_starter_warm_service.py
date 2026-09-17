@@ -33,10 +33,16 @@ import hashlib
 import logging
 import unicodedata
 import uuid
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.database import get_supabase
+from app.utils.market_hours import (
+    SESSION_AFTERHOURS,
+    SESSION_REGULAR,
+    session_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,56 @@ _MIN_ANSWER_CHARS = 80
 # whole day to finish, and the Updates sweeper is already competing for the same Gemini
 # quota and the same FMP universe cache.
 _WARM_CONCURRENCY = 2
+
+
+# ── The tape-bound chips are not a once-a-day answer ──────────────────────────
+#
+# The lifespan loop runs whenever `is_market_active()`, which starts at 04:00 ET. At
+# 04:05 on a Monday the screener still reports FRIDAY's close, so "What tickers are hot
+# today?" answered then is Friday's leaderboard — and, once stored, it was replayed
+# (and charged) as "today" until midnight. Three rules, all on the kinds in
+# `chat_starters_service.TAPE_KINDS`; evergreen chips keep the once-a-day behaviour:
+#
+#   1. The FIRST write waits for the day's numbers to be the day's: the regular session
+#      or after the close (`_tape_is_todays`). Pre-market the tape is the prior session's.
+#   2. Through the regular session the row is RE-WARMED once it is older than
+#      `CHAT_STARTER_WARM_TAPE_TTL_SECONDS`, so a 09:35 answer does not stand at 15:50.
+#      After the close the tape is static and the last regular-session write stands.
+#   3. At READ time a tape-bound row older than twice that TTL during the regular session
+#      is refused (the loop is dead or the daily cap bound): answer live, as before this
+#      table existed. The stored `widget` is separately re-fetched by the endpoint when
+#      older than `CHAT_STARTER_WIDGET_MAX_AGE_SECONDS`, so a 10:15 price is never
+#      replayed under a green "Live" dot at 15:50.
+
+
+def _tape_is_todays(now: Optional[datetime] = None) -> bool:
+    """True once the screener's changes describe TODAY's session — regular or post-close."""
+    return session_phase(now) in (SESSION_REGULAR, SESSION_AFTERHOURS)
+
+
+def _tape_ttl_seconds() -> float:
+    return float(getattr(settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600) or 3600)
+
+
+def _row_age_seconds(created_at: Any, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds since a row's `created_at`, or None when it cannot be read.
+
+    None rather than 0 or infinity: an unreadable stamp must neither force a re-warm on
+    every pass (a budget leak) nor pin a stale row for the day. The callers treat None as
+    "age unknown — keep the once-a-day behaviour".
+    """
+    if not created_at:
+        return None
+    try:
+        stamp = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(
+            str(created_at).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0.0, (now - stamp).total_seconds())
 
 
 def _today_et() -> str:
@@ -101,7 +157,7 @@ async def lookup(question: str) -> Optional[Dict[str, Any]]:
         result = (
             get_supabase()
             .table(_TABLE)
-            .select("question, answer, widget, suggestions, tokens_used")
+            .select("question, answer, widget, suggestions, tokens_used, created_at")
             .eq("question_hash", question_hash(q))
             .eq("answer_date", _today_et())
             .limit(1)
@@ -126,11 +182,41 @@ async def lookup(question: str) -> Optional[Dict[str, Any]]:
         # replay a refusal all day.
         logger.warning("chat starter warm row too short to serve (%d chars)", len(answer))
         return None
+    age = _row_age_seconds(row.get("created_at"))
+    if _stale_for_the_tape(q, age):
+        # Rule 3 above. The write side should have re-warmed this an hour ago; that it
+        # did not means the loop is dead or the cap bound, and neither is a reason to
+        # tell a user at 15:50 what was hot at 09:35.
+        logger.warning(
+            "chat starter warm row for %r is %.0fs old during the regular session — "
+            "answering live", q[:60], age,
+        )
+        return None
+    widget = row.get("widget") or None
+    widget_max_age = float(
+        getattr(settings, "CHAT_STARTER_WIDGET_MAX_AGE_SECONDS", 900) or 900
+    )
     return {
         "answer": answer,
-        "widget": row.get("widget") or None,
+        "widget": widget,
+        # The endpoint re-fetches (or drops) a stale card by symbol; a warmed
+        # `current_price` must never reach the client under a "Live" dot hours later.
+        "widget_stale": bool(widget) and (age is None or age > widget_max_age),
         "suggestions": list(row.get("suggestions") or []),
     }
+
+
+def _stale_for_the_tape(question: str, age: Optional[float]) -> bool:
+    """Rule 3: a tape-bound row older than 2× the re-warm TTL while the tape is moving."""
+    if age is None:
+        return False
+    from app.services.chat_starters_service import is_tape_bound
+
+    if not is_tape_bound(question):
+        return False
+    if session_phase() != SESSION_REGULAR:
+        return False
+    return age > 2 * _tape_ttl_seconds()
 
 
 # ── Write path (the lifespan loop's half) ────────────────────────────────────
@@ -158,11 +244,14 @@ async def warm_todays_starters() -> int:
     # sets are per-symbol templates, so warming them means (watchlist size × chips per
     # screen) answers a day rather than eight, which is a different feature with a different
     # cost. Deliberately out of scope.
-    questions = [
-        s.text for s in (getattr(starters, "global_starters", None) or [])
+    from app.services.chat_starters_service import TAPE_KINDS
+
+    chips: List[Tuple[str, str]] = [
+        (s.text, str(getattr(s, "kind", "") or "evergreen"))
+        for s in (getattr(starters, "global_starters", None) or [])
         if getattr(s, "text", "").strip()
     ]
-    if not questions:
+    if not chips:
         return 0
 
     day = _today_et()
@@ -177,19 +266,45 @@ async def warm_todays_starters() -> int:
         )
         return 0
 
-    # Forget yesterday's strikes; keep today's.
+    # Forget yesterday's strikes and re-warm counts; keep today's.
     for k in [k for k in _refusals if not k.startswith(day + ":")]:
         _refusals.pop(k, None)
-    pending = [
-        q for q in questions
-        if question_hash(q) not in already
-        and _refusals.get(_refusal_key(day, q), 0) < _MAX_WARM_REFUSALS
-    ]
+    for k in [k for k in _rewarms if k != day]:
+        _rewarms.pop(k, None)
+
+    phase = session_phase()
+    tape_ok = phase in (SESSION_REGULAR, SESSION_AFTERHOURS)
+    ttl = _tape_ttl_seconds()
+    pending: List[str] = []
+    rewarm: set = set()
+    for q, kind in chips:
+        if _refusals.get(_refusal_key(day, q), 0) >= _MAX_WARM_REFUSALS:
+            continue
+        h = question_hash(q)
+        if kind in TAPE_KINDS:
+            if not tape_ok:
+                # Rule 1: pre-market the tape is the previous session's. Not a warning —
+                # this is every pass between 04:00 and 09:30 ET.
+                logger.debug("starter warm: %r waits for today's tape (%s)", q[:60], phase)
+                continue
+            if h in already:
+                age = _row_age_seconds(already[h])
+                # Rule 2: through the regular session only; after the close the tape is
+                # static and the last regular-session write stands.
+                if phase == SESSION_REGULAR and age is not None and age > ttl:
+                    rewarm.add(h)
+                    pending.append(q)
+                continue
+            pending.append(q)
+        elif h not in already:
+            pending.append(q)
     if not pending:
         return 0
 
     cap = int(getattr(settings, "CHAT_STARTER_WARM_DAILY_CAP", 60))
-    room = cap - len(already)
+    # Re-warms replace rows rather than adding them, so they are invisible to a cap that
+    # counts rows — and the cap is a GEMINI-SPEND bound. Counted explicitly.
+    room = cap - len(already) - _rewarms.get(day, 0)
     if room <= 0:
         # Not silent: a cap that binds every day means the chips are churning faster than
         # this can follow, and the pre-warm has quietly stopped helping.
@@ -220,6 +335,8 @@ async def warm_todays_starters() -> int:
             )
         elif r:
             written += 1
+            if question_hash(q) in rewarm:
+                _rewarms[day] = _rewarms.get(day, 0) + 1
         if not (r is True):
             key = _refusal_key(day, q)
             _refusals[key] = _refusals.get(key, 0) + 1
@@ -241,20 +358,31 @@ async def warm_todays_starters() -> int:
 _refusals: Dict[str, int] = {}
 _MAX_WARM_REFUSALS = 3
 
+# Per-day count of tape-bound re-warms (rule 2), charged against the daily cap.
+_rewarms: Dict[str, int] = {}
+
 
 def _refusal_key(day: str, question: str) -> str:
     return f"{day}:{question_hash(question)}"
 
 
-def _warmed_hashes(day: str) -> set:
+def _warmed_hashes(day: str) -> Dict[str, Any]:
+    """`{question_hash: created_at}` for every row stored today.
+
+    The stamp is what rule 2 ages a tape-bound row by. A row whose stamp cannot be read
+    maps to None and keeps the once-a-day behaviour (`_row_age_seconds`).
+    """
     result = (
         get_supabase()
         .table(_TABLE)
-        .select("question_hash")
+        .select("question_hash, created_at")
         .eq("answer_date", day)
         .execute()
     )
-    return {r["question_hash"] for r in (result.data or []) if r.get("question_hash")}
+    return {
+        r["question_hash"]: r.get("created_at")
+        for r in (result.data or []) if r.get("question_hash")
+    }
 
 
 async def _warm_one(question: str, day: str) -> bool:
@@ -328,6 +456,10 @@ async def _warm_one(question: str, day: str) -> bool:
         "suggestions": suggestions,
         "tokens_used": result.get("tokens_used"),
         "model": settings.GEMINI_MODEL,
+        # Stamped here, not left to the column default: an upsert onto the existing
+        # primary key UPDATES the row and a default only fires on INSERT, so a re-warmed
+        # row would otherwise keep its first write's stamp and look stale forever.
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     def _write() -> None:

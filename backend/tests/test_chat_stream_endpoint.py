@@ -190,6 +190,10 @@ class _FakeChatService:
     def _upsert_deep_dive_cache(self, *a, **k):
         pass
 
+    async def refresh_widget(self, widget):
+        # The real one re-fetches a stored card by symbol; tests replace it per case.
+        return widget
+
     @staticmethod
     def _chat_symbol(raw):
         return str(raw or "").upper()
@@ -604,3 +608,225 @@ def test_a_warm_hit_whose_turn_fell_back_does_not_reuse_the_stored_chips(harness
     done = _parse_sse(r.text)[-1][1]["message"]
     assert done["content"].startswith("Live fallback")
     assert done["suggestions"] != ["Warm chip one?", "Warm chip two?"]
+
+
+def _warm_hit(monkeypatch, *, widget, stale):
+    import app.services.chat_starter_warm_service as warm
+
+    async def _hit(q):
+        return {"answer": "Warm answer " * 20, "suggestions": [], "widget": widget,
+                "widget_stale": stale}
+    monkeypatch.setattr(warm, "lookup", _hit)
+
+
+def _done_widgets(r):
+    done = _parse_sse(r.text)[-1][1]["message"]
+    return done.get("widgets") or ([done["widget"]] if done.get("widget") else [])
+
+
+_WARM_CARD = {"widget_type": "stock_chart", "ticker": "NVDA", "current_price": 100.0,
+              "is_market_open": True}
+
+
+def test_a_stale_warm_card_is_re_fetched_by_symbol_before_it_is_replayed(harness, monkeypatch):
+    """A starter answer warmed at 10:15 carried a 10:15 price under a green Live dot; tapped
+    at 15:50 the card must be this minute's, fetched the way a live turn fetches it."""
+    client, db, quota, _ = harness
+    _warm_hit(monkeypatch, widget=dict(_WARM_CARD), stale=True)
+    seen = []
+
+    async def _refresh(self, w):
+        seen.append(w)
+        return {**w, "current_price": 123.45}
+    monkeypatch.setattr(_FakeChatService, "refresh_widget", _refresh)
+    r = _post(client, message="What's hot today?")
+    assert r.status_code == 200, r.text
+    assert seen == [_WARM_CARD]
+    assert _done_widgets(r) == [{**_WARM_CARD, "current_price": 123.45}]
+
+
+def test_a_stale_warm_card_whose_refresh_fails_is_dropped_not_replayed(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _warm_hit(monkeypatch, widget=dict(_WARM_CARD), stale=True)
+
+    async def _refresh(self, w):
+        return None
+    monkeypatch.setattr(_FakeChatService, "refresh_widget", _refresh)
+    r = _post(client, message="What's hot today?")
+    assert r.status_code == 200, r.text
+    assert _done_widgets(r) == [], "a stale price must never be replayed as live"
+    assert quota.delivered == 1, "the answer itself is still served and charged"
+
+
+def test_a_fresh_warm_card_is_replayed_without_a_re_fetch(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _warm_hit(monkeypatch, widget=dict(_WARM_CARD), stale=False)
+
+    async def _refresh(self, w):
+        raise AssertionError("a fresh card must not be re-fetched")
+    monkeypatch.setattr(_FakeChatService, "refresh_widget", _refresh)
+    r = _post(client, message="What's hot today?")
+    assert r.status_code == 200, r.text
+    assert _done_widgets(r) == [_WARM_CARD]
+
+
+# ── 2026-09-16: transient-aware session lookup, bounded history, precharge compensation ──
+
+def _raising_db(base, table_name, exc):
+    class _Raising(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == table_name:
+                def _boom():
+                    raise exc
+                q.execute = _boom
+            return q
+    return _Raising(base.session_row)
+
+
+def _gateway_520():
+    from tests.test_supabase_transient_classifier import gateway_error
+    return gateway_error(520)
+
+
+def _pgrst(code):
+    from tests.test_supabase_transient_classifier import postgrest_error
+    return postgrest_error(code)
+
+
+@pytest.mark.parametrize("door", ["stream", "send"])
+def test_a_supabase_edge_error_on_the_session_lookup_is_a_409_not_a_404(harness, door):
+    """A Cloudflare 520 on the lookup used to read as "session not found" on both doors and
+    on the history GET — iOS's reconcile took that as "not persisted" and re-POSTed a turn
+    the server had already saved and charged."""
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_sessions", _gateway_520())
+    if door == "stream":
+        r = _post(client)
+    else:
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 409, r.text
+    assert r.json()["error_code"] == "SYSTEM_BUSY"
+    assert quota.delivered == 0 and quota.refunds == []
+
+
+@pytest.mark.parametrize("code", ["PGRST116", "23505"])
+def test_a_deterministic_lookup_failure_stays_a_404(harness, code):
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_sessions", _pgrst(code))
+    assert _post(client).status_code == 404
+
+
+def test_the_history_oracle_answers_409_on_a_transient_failure_and_reads_the_newest_rows(harness):
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_sessions", _gateway_520())
+    r = client.get(f"/api/v1/chat/sessions/{_SESSION}")
+    assert r.status_code == 409 and r.json()["error_code"] == "SYSTEM_BUSY"
+
+    # The messages read is bounded and DESC so the tail is always present.
+    class _Recording(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_messages":
+                rec = self.calls
+                def order(col, desc=False):
+                    rec.append(("chat_messages", "order", (col, desc))); return q
+                def limit(n):
+                    rec.append(("chat_messages", "limit", n)); return q
+                q.order = order
+                q.limit = limit
+                q.execute = lambda: _Result([
+                    {"id": "m2", "session_id": _SESSION, "role": "assistant", "content": "newest",
+                     "created_at": "2026-09-16T00:00:02+00:00", "rich_content": None,
+                     "citations": None, "tokens_used": None},
+                    {"id": "m1", "session_id": _SESSION, "role": "user", "content": "q",
+                     "created_at": "2026-09-16T00:00:01+00:00", "rich_content": None,
+                     "citations": None, "tokens_used": None},
+                ])
+            return q
+    rdb = _Recording({**db.session_row, "id": _SESSION, "created_at": "2026-09-16T00:00:00+00:00",
+                      "updated_at": "2026-09-16T00:00:00+00:00", "title": None, "is_saved": False,
+                      "message_count": 2})
+    app.dependency_overrides[get_supabase] = lambda: rdb
+    r = client.get(f"/api/v1/chat/sessions/{_SESSION}")
+    assert r.status_code == 200, r.text
+    assert ("chat_messages", "order", ("created_at", True)) in rdb.calls
+    assert ("chat_messages", "limit", chat_mod.CHAT_HISTORY_PAGE_ROWS) in rdb.calls
+    msgs = r.json()["messages"]
+    assert [m["content"] for m in msgs] == ["q", "newest"], "rows must come back oldest→newest"
+
+
+def test_a_degraded_deep_dive_is_never_written_to_the_cache(harness, monkeypatch):
+    """A tool-less / unmerged brief is refunded — caching it would replay it for 24 h as a
+    zero-cost hit ("cached failure ≡ real answer")."""
+    client, db, quota, _ = harness
+    _route_synthesize(monkeypatch)
+    _FakeChatService.prep_overrides = {"is_deep_dive": True, "deep_dive_context": "ctx",
+                                       "deep_dive_cached": None}
+    _FakeChatService.synthesis_signal = "unmerged"
+    writes = []
+    monkeypatch.setattr(_FakeChatService, "_upsert_deep_dive_cache",
+                        lambda self, *a, **k: writes.append(a))
+    db.session_row["stock_id"] = "SPY"
+    r = _post(client, message="Give me a market deep dive on SPY")
+    assert r.status_code == 200
+    assert quota.settled == ["chat_degraded_unmerged"], quota.settled
+    assert writes == [], "a degraded brief was cached"
+
+
+def test_an_unconfirmed_precharge_is_compensated_with_the_turn_ref(monkeypatch):
+    """`spend_credits` transport failure is not proof the debit did not commit. The per-turn
+    ref_id makes an exact compensating refund possible: `refunded` if it landed,
+    `no_matching_debit` (quiet) if it never did."""
+    from app.services.credit_service import CreditServiceUnavailable
+    calls = []
+
+    class _CS:
+        def precharge(self, *a, **k):
+            raise CreditServiceUnavailable("edge 520")
+
+        def refund_ledgered(self, user_id, amount, *, reason, ref_id=None, quiet_no_match=False):
+            calls.append((user_id, amount, reason, ref_id, quiet_no_match))
+            return {"outcome": "no_matching_debit"}
+    monkeypatch.setattr(chat_mod, "CreditService", _CS)
+    import app.services.chat_budget_service as cbs
+    monkeypatch.setattr(cbs.ChatBudgetService, "claim_free_followup", lambda self, sid: False)
+    quota, err = chat_mod._claim_chat_quota(_USER, None, session_id=_SESSION)
+    assert quota is None and err.status_code == 409
+    assert len(calls) == 1
+    uid, amount, reason, ref_id, quiet = calls[0]
+    assert uid == _USER["id"] and reason == "chat_precharge_unconfirmed" and quiet is True
+    assert ref_id.startswith(f"{_SESSION}:")
+
+
+def test_the_non_stream_door_is_bounded_and_refunds_on_the_budget(harness, monkeypatch):
+    """The non-stream door sends nothing until it is done and iOS gives it 60 s; every server
+    ceiling on that path is larger. Past `CHAT_SEND_BUDGET_SECONDS` it answers before any
+    write so the charge is handed back."""
+    import asyncio as _aio
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_SEND_BUDGET_SECONDS", 0.05)
+
+    async def _slow(self, *a, **k):
+        await _aio.sleep(1.0)
+        return {"content": "late", "citations": None, "tokens_used": 5}
+    monkeypatch.setattr(_FakeChatService, "generate_response", _slow)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code in (502, 503), r.text
+    assert r.json()["error_code"] == "GEMINI_UNAVAILABLE"
+    assert db.inserted_messages == []
+    assert quota.delivered == 0 and quota.refunds == ["chat_undelivered"]
+
+
+def test_the_non_stream_door_classifies_a_quota_outage(harness, monkeypatch):
+    from app.integrations.gemini import GeminiQuotaError
+    client, db, quota, _ = harness
+
+    async def _quota(self, *a, **k):
+        raise GeminiQuotaError("quota circuit open (resource_exhausted)")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _quota)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code != 500
+    assert r.json()["error_code"] == "GEMINI_QUOTA_EXCEEDED", r.text
+    assert quota.refunds == ["chat_undelivered"]

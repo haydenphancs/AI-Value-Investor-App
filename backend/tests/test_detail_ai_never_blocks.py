@@ -323,7 +323,10 @@ async def test_thinking_budget_is_part_of_the_gemini_cache_key(monkeypatch):
         async def generate_content(self, **kwargs):
             calls.append(kwargs)
             await asyncio.sleep(0)
+            # A COMPLETE answer: only those are cached now (an empty candidate list is
+            # the safety-block / MAX_TOKENS shape, and caching it replayed the failure).
             class _R:
+                text = "an answer"
                 candidates = []
                 usage_metadata = None
             return _R()

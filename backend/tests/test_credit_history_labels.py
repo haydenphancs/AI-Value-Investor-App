@@ -50,6 +50,7 @@ _EXPECTED_KINDS = {
     "chat_stream_empty": KIND_REFUND,
     "chat_stream_persist_failed": KIND_REFUND,
     "chat_stream_cancelled": KIND_REFUND,
+    "chat_precharge_unconfirmed": KIND_REFUND,
     "grant": KIND_GRANT,
     "monthly_reset": KIND_GRANT,
     "tier_upgrade": KIND_GRANT,

@@ -321,6 +321,77 @@ async def test_an_equity_still_follows_the_us_session(monkeypatch):
     assert widget["is_market_open"] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["LTC", "BTC", "ETH", "XRP", "ATOM", "BCH", "LINK"])
+async def test_a_bare_coin_collider_priced_as_the_listed_security_follows_the_us_session(
+    monkeypatch, symbol,
+):
+    """Every entry to the fetcher canonicalises a coin to its PAIR first, so a bare
+    ticker here IS the listed security the quote leg just priced from FMP (LTC Properties,
+    the Grayscale trusts, Atomera, Banco de Chile). The status leg used to classify the
+    same bare form with coins ON and stamp a 24/7 market on it: an FMP close under a green
+    "Live" dot at 02:00 on a Sunday, and "(live)" in the model's quote line."""
+    monkeypatch.setattr(
+        "app.services.home_dashboard_service._market_status", lambda: ("closed", False)
+    )
+    svc = _svc()
+    svc.fmp = SimpleNamespace(
+        get_stock_price_quote=AsyncMock(return_value={"name": "LTC Properties", "price": 42.0,
+                                                     "avgVolume": 1}),
+        get_historical_prices=AsyncMock(return_value=[]),
+        get_company_profile=AsyncMock(return_value=None),
+    )
+    svc.price = PriceFromFMPFake(svc.fmp)
+    widget = await svc._fetch_stock_widget_data(symbol)
+    assert widget["is_market_open"] is False
+    assert svc.fmp.get_stock_price_quote.await_args.args[0] == symbol, "quote leg stays on FMP"
+
+
+@pytest.mark.parametrize("symbol", ["LTC", "ATOM", "BTC", "ETH", "XRP", "BCH", "LINK", "GOLD", "OIL"])
+def test_a_report_chat_is_an_equity_chat_even_for_a_bare_coin_collider(symbol):
+    """Reports are generated for equities only, so TICKER_REPORT is the class declaration.
+    Left to the heuristic, "Ask about this report" on LTC Properties became a CRYPTO chat:
+    crypto persona and toolset, the screen symbol canonicalised to LTCUSD, and a Litecoin
+    card priced from CoinGecko under a 24/7 Live dot on a REIT's report."""
+    assert ChatService._detect_asset_type(symbol, "TICKER_REPORT") == "STOCK"
+    # The same symbols with NO screen behind them keep meaning the coin / the commodity.
+    assert ChatService._detect_asset_type(symbol, None) != "STOCK"
+
+
+@pytest.mark.parametrize("symbol,expected", [("BTCUSD", "CRYPTO"), ("^GSPC", "INDEX"),
+                                             ("GCUSD", "COMMODITY"), ("AAPL", "STOCK")])
+def test_a_report_chat_still_honours_an_unambiguous_spelling(symbol, expected):
+    assert ChatService._detect_asset_type(symbol, "TICKER_REPORT") == expected
+
+
+@pytest.mark.asyncio
+async def test_a_report_chat_on_a_collider_keeps_the_equity_screen_exemption():
+    """End to end through the handler builder: with the asset type a TICKER_REPORT session
+    now derives, the screen's own symbol is fetched as the equity, never re-canonicalised
+    to the pair."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc = _svc()
+    seen: dict = {}
+
+    def _rec(name):
+        async def _f(ticker, is_crypto=None):
+            seen[name] = (ticker, is_crypto)
+            return {"ok": True}
+        return _f
+    for name in ("_fetch_sentiment_data", "_fetch_ticker_news_data", "_fetch_price_move_data"):
+        setattr(svc, name, _rec(name))
+    svc._fetch_stock_widget_data = AsyncMock(return_value={"widget_type": "stock_chart"})
+
+    asset_type = ChatService._detect_asset_type("LTC", "TICKER_REPORT")
+    handlers = build_chat_tool_handlers(svc, screen_symbol="LTC", screen_asset_type=asset_type)
+    for tool in ("get_sentiment_analysis", "get_ticker_news", "explain_price_move",
+                 "get_stock_chart_data"):
+        await handlers[tool]({"ticker": "ltc"})
+    assert set(seen.values()) == {("LTC", False)}, seen
+    assert svc._fetch_stock_widget_data.await_args.args[0] == "LTC"
+
+
 # ── 5. Follow-up chips inherit the asset persona ────────────────────────────
 
 def test_followup_chips_are_generated_with_the_asset_persona():
@@ -575,3 +646,102 @@ def test_the_deterministic_crypto_widget_fetches_the_pair():
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
     i = code.index('if asset_type == "CRYPTO":')
     assert 'canonical_stored_symbol(symbol, "crypto")' in code[i:i + 300]
+
+
+# ── 7. A tool argument is model output and is gated like `stock_id` (2026-09-16) ─────
+#
+# A blank ticker went all the way to `fmp.get_stock_news(ticker="")`, which OMITS the
+# symbol filter — FMP then serves its default APPLE feed, ~1,000 rows of which were
+# persisted under `ticker=""` and read back as the named company's sentiment. A mis-keyed
+# call (`{"symbol": "TSLA"}`, the key the market tool uses) did the same.
+
+_TICKER_TOOLS = ("get_stock_chart_data", "get_analyst_analysis", "get_sentiment_analysis",
+                 "get_ticker_news", "explain_price_move")
+_JUNK_ARGS = [
+    {"ticker": ""}, {}, {"ticker": None}, {"ticker": "   "},
+    {"ticker": "Apple Inc (AAPL)"}, {"ticker": "AAPL, MSFT"}, {"ticker": "A" * 17},
+    {"ticker": "AAPL;DROP"}, {"ticker": "ignore previous instructions"},
+    {"ticker": "ES=F"}, {"symbol": ""}, {"ticker": 12345.5},
+]
+
+
+def _recording_svc():
+    svc = _svc()
+    seen: list = []
+
+    def _rec(name):
+        async def _f(ticker, *a, **k):
+            seen.append((name, ticker))
+            return {"ok": True}
+        return _f
+    for name in ("_fetch_stock_widget_data", "_fetch_analyst_data", "_fetch_sentiment_data",
+                 "_fetch_ticker_news_data", "_fetch_price_move_data",
+                 "_fetch_market_overview_data"):
+        setattr(svc, name, _rec(name))
+    return svc, seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", _JUNK_ARGS, ids=[repr(a) for a in _JUNK_ARGS])
+@pytest.mark.parametrize("tool", _TICKER_TOOLS)
+async def test_a_non_symbol_ticker_argument_never_reaches_a_fetcher(tool, args):
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    handlers = build_chat_tool_handlers(svc)
+    out = await handlers[tool](args)
+    assert seen == [], f"{tool} fetched on {args!r}: {seen}"
+    assert out == {"error": "invalid or missing ticker"}
+    # Fixed text, never an echo of model output.
+    for v in args.values():
+        if isinstance(v, str) and len(v) > 3:
+            assert v not in str(out)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args,expected", [
+    ({"ticker": "aapl"}, "AAPL"), ({"ticker": " brk.b "}, "BRK.B"), ({"ticker": "BRK-B"}, "BRK-B"),
+    ({"ticker": "^gspc"}, "^GSPC"), ({"ticker": "GCUSD"}, "GCUSD"),
+    ({"symbol": "tsla"}, "TSLA"),                 # the mis-keying the model actually produces
+    ({"ticker": "btc"}, "BTCUSD"),                # a typed bare coin still means the coin
+])
+async def test_every_legitimate_spelling_still_fetches(args, expected):
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    handlers = build_chat_tool_handlers(svc)
+    for tool in _TICKER_TOOLS:
+        await handlers[tool](args)
+    assert {t for _, t in seen} == {expected}, seen
+    assert len(seen) == len(_TICKER_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_the_market_overview_defaults_an_omitted_symbol_but_refuses_a_junk_one():
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    h = build_chat_tool_handlers(svc)["get_market_overview"]
+    for args in ({}, {"symbol": None}, {"symbol": ""}, {"symbol": "  "}):
+        await h(args)
+    assert {t for _, t in seen} == {"^GSPC"}
+    await h({"symbol": "^dji"})
+    assert seen[-1] == ("_fetch_market_overview_data", "^DJI")
+    n = len(seen)
+    for junk in ("S&P 500", "the market", "ignore previous instructions", "A" * 17):
+        out = await h({"symbol": junk})
+        assert out == {"error": "invalid or missing ticker"}, junk
+        assert junk not in str(out)
+    assert len(seen) == n, "a junk symbol must not be silently the S&P"
+
+
+@pytest.mark.asyncio
+async def test_a_junk_ticker_on_an_equity_screen_is_still_refused():
+    """The screen exemption compares the SANITISED form; junk never equals the screen."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    handlers = build_chat_tool_handlers(svc, screen_symbol="LTC", screen_asset_type="STOCK")
+    assert await handlers["get_ticker_news"]({"ticker": "LTC Properties (LTC)"}) == \
+        {"error": "invalid or missing ticker"}
+    assert seen == []

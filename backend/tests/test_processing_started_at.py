@@ -45,11 +45,64 @@ async def test_run_agent_deduped_calls_on_started_after_slot_before_run():
 
 
 @pytest.mark.asyncio
-async def test_run_agent_deduped_followers_do_not_call_on_started():
-    """Followers attach to the leader's future and must NOT fire on_started
-    (they never acquire a slot / start their own run)."""
+async def test_followers_stamp_only_once_the_leader_holds_its_slot():
+    """A follower's result arrives when the leader's does, ≤ the pipeline ceiling after
+    the leader's slot — so its started clock is exactly as true as the leader's. It used
+    to stay NULL, which put a healthy follower on the client's 1,800 s QUEUED clock while
+    the server kept it for 11,400 s: shown "failed" under queue pressure, then Retry
+    deleted a report that completed minutes later, unrefunded.
+
+    The stamp must wait for the SLOT, though: while the leader is still queued a
+    follower must not read "started" ahead of the work."""
     rs._AGENT_INFLIGHT.clear()
-    rs._AGENT_SEMAPHORE = asyncio.Semaphore(5)
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    started = {"n": 0}
+    hold = asyncio.Event()      # occupies the only slot
+    gate = asyncio.Event()      # releases the leader's run
+
+    async def _blocker():
+        await hold.wait()
+        return {"other": 1}
+
+    async def _on_started():
+        started["n"] += 1
+
+    async def _leader_run():
+        await gate.wait()
+        return {"x": 1}
+
+    async def _follower_run():  # must never run
+        raise AssertionError("follower ran its own callable")
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(
+        rs._run_agent_deduped("X", "p", _leader_run, on_started=_on_started)
+    )
+    await asyncio.sleep(0.02)
+    follower = asyncio.create_task(
+        rs._run_agent_deduped("X", "p", _follower_run, on_started=_on_started)
+    )
+    await asyncio.sleep(0.05)
+    assert started["n"] == 0, "nobody may stamp while the leader is still queued"
+
+    hold.set()                  # the slot frees; the leader acquires it
+    await asyncio.sleep(0.05)
+    assert started["n"] == 2, "leader AND follower stamp once the leader holds its slot"
+
+    gate.set()
+    out = await asyncio.gather(blocker, leader, follower)
+    assert out[1] == out[2] == {"x": 1}
+    assert started["n"] == 2
+    assert rs._AGENT_INFLIGHT == {} and rs._AGENT_RUNS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_follower_attaching_to_a_running_leader_stamps_at_attach_time():
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(2)
     started = {"n": 0}
     gate = asyncio.Event()
 
@@ -60,22 +113,152 @@ async def test_run_agent_deduped_followers_do_not_call_on_started():
         await gate.wait()
         return {"x": 1}
 
-    leader = asyncio.create_task(
-        rs._run_agent_deduped("X", "p", _leader_run, on_started=_on_started)
-    )
-    await asyncio.sleep(0.05)
-
-    async def _follower_run():  # must never run
-        raise AssertionError("follower ran its own callable")
-
-    follower = asyncio.create_task(
-        rs._run_agent_deduped("X", "p", _follower_run, on_started=_on_started)
-    )
-    await asyncio.sleep(0.05)
+    leader = asyncio.create_task(rs._run_agent_deduped("X", "p", _leader_run, on_started=_on_started))
+    await asyncio.sleep(0.02)
+    assert started["n"] == 1
+    follower = asyncio.create_task(rs._run_agent_deduped(
+        "X", "p", _leader_run, on_started=_on_started))
+    await asyncio.sleep(0.02)
+    assert started["n"] == 2, "the leader already runs, so the follower stamps now"
     gate.set()
     await asyncio.gather(leader, follower)
 
-    assert started["n"] == 1  # only the leader stamped
+
+@pytest.mark.asyncio
+async def test_a_leader_cancelled_while_queued_leaves_its_follower_unstamped():
+    """The shared future settles before the slot is ever held, so the follower fails
+    through the normal refund path with a NULL stamp — never a started row for work that
+    never started."""
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    started = {"n": 0}
+    hold = asyncio.Event()
+
+    async def _blocker():
+        await hold.wait()
+        return 1
+
+    async def _on_started():
+        started["n"] += 1
+
+    async def _run():
+        return {"x": 1}
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, on_started=_on_started))
+    await asyncio.sleep(0.02)
+    follower = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, on_started=_on_started))
+    await asyncio.sleep(0.02)
+    leader.cancel()
+    with pytest.raises(RuntimeError, match="cancelled"):
+        await follower
+    assert started["n"] == 0
+    hold.set()
+    await blocker
+    assert rs._AGENT_INFLIGHT == {} and rs._AGENT_RUNS == {}
+
+
+# ── before_run: deleted-while-queued ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_leader_with_no_followers_gives_the_slot_back_without_running():
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    ran = []
+
+    async def _before_run():
+        raise rs.ReportAbandonedError("deleted while queued")
+
+    async def _run():
+        ran.append(1)
+        return {"x": 1}
+
+    with pytest.raises(rs.ReportAbandonedError):
+        await rs._run_agent_deduped("X", "p", _run, before_run=_before_run)
+    assert ran == []
+    # The slot is free again: a second leader runs immediately.
+    assert await rs._run_agent_deduped("Y", "p", _run) == {"x": 1}
+    assert rs._AGENT_INFLIGHT == {} and rs._AGENT_RUNS == {}
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_leader_still_runs_for_an_attached_follower():
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    hold = asyncio.Event()
+    ran = []
+
+    async def _blocker():
+        await hold.wait()
+        return 1
+
+    async def _before_run():
+        raise rs.ReportAbandonedError("deleted while queued")
+
+    async def _run():
+        ran.append(1)
+        return {"x": 1}
+
+    async def _never():
+        raise AssertionError("follower ran its own callable")
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, before_run=_before_run))
+    await asyncio.sleep(0.02)
+    follower = asyncio.create_task(rs._run_agent_deduped("X", "p", _never))
+    await asyncio.sleep(0.02)
+    hold.set()
+    out = await asyncio.gather(blocker, leader, follower)
+    assert out[1] == out[2] == {"x": 1} and ran == [1]
+
+
+def test_is_still_active_fails_open_and_reads_status_and_refund(monkeypatch):
+    svc = rs.ResearchService.__new__(rs.ResearchService)
+
+    class _DB:
+        def __init__(self, rows=None, raises=None):
+            self.rows, self.raises = rows, raises
+
+        def table(self, *_a): return self
+        def select(self, *_a, **_k): return self
+        def eq(self, *_a): return self
+        def limit(self, *_a): return self
+
+        def execute(self):
+            if self.raises:
+                raise self.raises
+            return type("R", (), {"data": self.rows})()
+
+    svc.supabase = _DB([{"status": "processing", "is_refunded": False}])
+    assert svc._is_still_active("r") is True
+    svc.supabase = _DB([{"status": "deleted", "is_refunded": True}])
+    assert svc._is_still_active("r") is False
+    svc.supabase = _DB([{"status": "processing", "is_refunded": True}])
+    assert svc._is_still_active("r") is False, "the sweep refunded it — nothing to deliver"
+    svc.supabase = _DB([])
+    assert svc._is_still_active("r") is True, "no row = fail open"
+    svc.supabase = _DB(raises=RuntimeError("520"))
+    assert svc._is_still_active("r") is True, "read error = fail open"
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_ceiling_raises_a_typed_worded_timeout(monkeypatch):
+    """The bare `TimeoutError` from `wait_for` has an empty str(); the failed card said
+    "market data provider unavailable" and the Sentry line read "TimeoutError: "."""
+    from app.api.error_response import ErrorCode, error_body_from_exception
+
+    err = rs.ReportPipelineTimeoutError("AAPL", "warren_buffett", 600)
+    assert isinstance(err, TimeoutError) and isinstance(err, asyncio.TimeoutError)
+    assert "AAPL/warren_buffett" in str(err) and "600s" in str(err)
+    body = error_body_from_exception(err, ticker="AAPL", persona="warren_buffett", step="x")
+    assert body["error_code"] == ErrorCode.REPORT_TIMED_OUT.value
+    assert body["error_code"] != ErrorCode.FMP_UNAVAILABLE.value
 
 
 # ── _mark_processing_started ─────────────────────────────────────────────────

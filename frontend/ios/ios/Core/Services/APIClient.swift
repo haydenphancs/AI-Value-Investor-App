@@ -490,7 +490,7 @@ actor APIClient {
                     )
                 }
                 throw APIError.unauthorized
-            case 400, 402, 403, 409:
+            case 400, 402, 403, 409, 422, 500...599:
                 // The pre-flight refusals: CHAT_MESSAGE_TOO_LONG (400), INSUFFICIENT_CREDITS
                 // (402), AUTH_FORBIDDEN (403) and SYSTEM_BUSY (409). These reached the
                 // `default:` arm before and became
@@ -499,6 +499,11 @@ actor APIClient {
                 // the one users are actually on. They are business outcomes with a machine
                 // -readable code, exactly like the non-streaming path decodes at the bottom
                 // of `request(_:)`, so decode them the same way.
+                //
+                // 422 and 5xx joined them: the hard-cap 422 (INVALID_INPUT, "exceeds the
+                // 8000-character hard limit") and a 5xx with a typed body (GEMINI_*) are
+                // contract-shaped too, and dropping the body cost a history GET and a
+                // second POST before the non-streaming door finally surfaced the same copy.
                 if let errorResponse = try? decoder.decode(
                     APIErrorResponse.self, from: await Self.drainErrorBody(bytes)
                 ) {

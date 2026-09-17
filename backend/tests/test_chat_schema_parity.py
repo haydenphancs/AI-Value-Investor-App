@@ -250,6 +250,48 @@ def test_message_citations_are_objects_not_scalars():
         assert c.keys() <= {"index", "source", "text"}, f"unexpected citation keys: {c.keys()}"
 
 
+def test_non_object_citations_are_dropped_before_they_reach_ios():
+    """iOS decodes `[ChatCitationDTO]` all-or-nothing: one scalar element in one message's
+    citations blanked the entire history. The backend now keeps dict elements only (and the
+    DTO is a total decoder besides)."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "x",
+        "created_at": "2026-06-28T00:00:00.000000+00:00",
+        "citations": ["foo", None, 42, {"index": 1, "source": "10-K", "text": "ok"}, []],
+    }
+    dumped = _row_to_message(row).model_dump()
+    assert dumped["citations"] == [{"index": 1, "source": "10-K", "text": "ok"}]
+    row["citations"] = ["only", "junk"]
+    assert _row_to_message(row).model_dump()["citations"] is None
+    row["citations"] = "not a list"
+    assert _row_to_message(row).model_dump()["citations"] is None
+
+
+def test_the_ios_citation_dto_is_a_total_decoder():
+    """Brace-bound scan of the Swift struct: it must declare `init(from decoder:` and take
+    its container with `try?`, like `ChatSource`."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Models"
+           / "ChatConversationModels.swift").read_text(encoding="utf-8")
+    src = re.sub(r"//[^\n]*", "", src)
+    i = src.index("struct ChatCitationDTO")
+    depth, j = 0, src.index("{", i)
+    k = j
+    while k < len(src):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    block = src[j:k]
+    assert "init(from decoder: Decoder) throws" in block
+    assert "try? decoder.container(keyedBy: CodingKeys.self)" in block
+    assert "try? c.decode(Int.self, forKey: .index)" in block
+
+
 # ── Widgets (polymorphic decode) ──────────────────────────────────────────────
 
 def _stock_widget_payload() -> dict:

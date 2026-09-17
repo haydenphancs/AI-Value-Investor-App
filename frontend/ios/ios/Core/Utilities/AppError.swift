@@ -788,7 +788,16 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             // decision a reader can check, not an accident of ordering.
             if code == "DATA_INCOMPLETE"
                 || code == "REPORT_GENERATION_FAILED"
-                || code == "REPORT_NOT_READY" {
+                || code == "REPORT_NOT_READY"
+                // The run overran the pipeline ceiling and was refunded; `.retry` is right
+                // and the backend copy says so (it used to arrive as FMP_UNAVAILABLE).
+                || code == "REPORT_TIMED_OUT" {
+                return .apiError(code: code, message: message)
+            }
+            // A retry-delete hit a report that already finished. `ResearchViewModel.retryReport`
+            // matches this code and shows the finished report instead of charging again — the
+            // `.apiError` shape is what lets it pattern-match; `.retry` would be exactly wrong.
+            if code == "REPORT_ALREADY_COMPLETED" {
                 return .apiError(code: code, message: message)
             }
             return .apiError(code: code, message: message)

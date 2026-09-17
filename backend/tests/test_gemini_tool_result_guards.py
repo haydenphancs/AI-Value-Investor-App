@@ -270,3 +270,118 @@ async def test_the_research_loop_passes_its_own_budget(monkeypatch):
 
     monkeypatch.setattr(settings, "REPORT_AGENTIC_THINKING_BUDGET", -1)
     assert agentic_thinking_budget() is None, "negative restores the model default"
+
+
+# ── 2026-09-16: the retry wraps ONE model call, and a second-round function call is answered ──
+
+def _client_raising(script):
+    """Like `_client`, but a popped Exception instance is RAISED by the fake model."""
+    calls: list = []
+
+    class _Models:
+        async def generate_content(self, **kwargs):
+            calls.append(kwargs)
+            await asyncio.sleep(0)
+            item = script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model_name = "gemini-2.5-flash"
+    client._temperature = 0.7
+    client._max_tokens = 8192
+    client._response_cache = _TTLCache(max_size=8, ttl_seconds=60)
+    client._embedding_cache = _TTLCache(max_size=8, ttl_seconds=60)
+
+    class _Aio:
+        models = _Models()
+
+    class _C:
+        aio = _Aio()
+
+    client._client = _C()
+    return client, calls
+
+
+@pytest.mark.asyncio
+async def test_a_failed_follow_up_is_retried_without_re_running_the_tool_handlers(monkeypatch):
+    """The decorator used to wrap the whole method: a generic follow-up failure re-entered at
+    the top, paid the first call again and re-ran every handler — `explain_price_move`
+    claiming a second paid web-search unit. Now only the failed CALL is retried."""
+    gem._quota_circuit.reset()
+    monkeypatch.setattr(gem.asyncio, "sleep", _instant_sleep())
+    first = _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "AAPL"}))])
+    follow = _Resp([_Part(text="Here is the answer.")])
+    client, calls = _client_raising([first, RuntimeError("503 mid-flight"), follow])
+    ran = {"n": 0}
+
+    async def handler(args):
+        ran["n"] += 1
+        return {"widget_type": "stock_chart", "ticker": "AAPL"}
+
+    out = await client.generate_with_tools(prompt="p", tools=[], tool_handlers={"get_stock_chart_data": handler})
+    assert out["text"] == "Here is the answer."
+    assert ran["n"] == 1, "the tool handler ran again on the retry"
+    assert len(calls) == 3           # first, failed follow-up, retried follow-up
+    assert len(out["tool_results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_call_is_retried_before_any_handler_runs(monkeypatch):
+    gem._quota_circuit.reset()
+    monkeypatch.setattr(gem.asyncio, "sleep", _instant_sleep())
+    first = _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "AAPL"}))])
+    follow = _Resp([_Part(text="ok")])
+    client, calls = _client_raising([RuntimeError("boom"), first, follow])
+    ran = {"n": 0}
+
+    async def handler(args):
+        ran["n"] += 1
+        return {"x": 1}
+    out = await client.generate_with_tools(prompt="p", tools=[], tool_handlers={"get_stock_chart_data": handler})
+    assert out["text"] == "ok" and ran["n"] == 1 and len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_that_fails_twice_raises_without_a_third_handler_run(monkeypatch):
+    gem._quota_circuit.reset()
+    monkeypatch.setattr(gem.asyncio, "sleep", _instant_sleep())
+    first = _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "AAPL"}))])
+    client, calls = _client_raising([first, RuntimeError("a"), RuntimeError("b")])
+    ran = {"n": 0}
+
+    async def handler(args):
+        ran["n"] += 1
+        return {"x": 1}
+    with pytest.raises(RuntimeError):
+        await client.generate_with_tools(prompt="p", tools=[], tool_handlers={"get_stock_chart_data": handler})
+    assert ran["n"] == 1 and len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_second_round_function_call_is_answered_with_a_tool_less_final_round():
+    """The follow-up is made with the same config that still declares the tools, so the
+    model may ask for ANOTHER tool. `_response_text` skips function-call parts → "" → the
+    non-stream door answered GEMINI_UNAVAILABLE and refunded a turn that had real tool data.
+    One more round with no tools now produces the answer."""
+    gem._quota_circuit.reset()
+    first = _Resp([_Part(fc=_FC("get_stock_chart_data", {"ticker": "AAPL"}))])
+    second_call = _Resp([_Part(fc=_FC("get_ticker_news", {"ticker": "AAPL"}))])
+    final = _Resp([_Part(text="AAPL rose 2% on strong iPhone demand.")])
+    client, calls = _client_raising([first, second_call, final])
+
+    async def handler(args):
+        return {"widget_type": "stock_chart", "ticker": "AAPL"}
+    out = await client.generate_with_tools(prompt="p", tools=[], tool_handlers={"get_stock_chart_data": handler})
+    assert out["text"] == "AAPL rose 2% on strong iPhone demand."
+    assert len(calls) == 3
+    # The final round declares NO tools.
+    assert getattr(calls[2]["config"], "tools", None) in (None, [])
+    assert len(out["tool_results"]) == 1
+
+
+def _instant_sleep():
+    async def _s(secs):
+        return None
+    return _s

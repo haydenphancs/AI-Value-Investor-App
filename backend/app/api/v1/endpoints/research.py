@@ -17,7 +17,7 @@ Backend returns snake_case → iOS decodes via .convertFromSnakeCase decoder.
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
 from supabase import Client
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 import asyncio
 import json
 import logging
@@ -758,6 +758,13 @@ async def rate_report(
 @router.delete("/reports/{report_id}")
 async def delete_report(
     report_id: str,
+    intent: Annotated[Optional[str], Query(
+        description=(
+            "'retry' when the client is deleting in order to regenerate. A completed report "
+            "then answers 409 REPORT_ALREADY_COMPLETED instead of being soft-deleted — the "
+            "client should reload and show it."
+        ),
+    )] = None,
     user: dict = Depends(get_current_user),  # account-only: AI generation costs real money
     supabase: Client = Depends(get_supabase),
 ):
@@ -825,14 +832,53 @@ async def delete_report(
                 refunded.get("refunded", amount) if isinstance(refunded, dict) else amount,
                 report_id, user["id"],
             )
-    else:
-        # Terminal (ready), already refunded, or not ours — plain soft-delete. Unconditional
-        # so deleting a finished report keeps working exactly as before.
-        supabase.table("research_reports").update({
-            "status": "deleted"
-        }).eq("id", report_id).eq("user_id", user["id"]).execute()
+        # The CAS returns the row AFTER the update, so the prior status is not known
+        # here — only that it was one of `_REFUNDABLE_ON_DELETE`.
+        return {"message": "Report deleted successfully", "outcome": "refunded"}
 
-    return {"message": "Report deleted successfully"}
+    # Terminal (ready), already refunded, or not ours — plain soft-delete, so deleting a
+    # finished report keeps working exactly as before. EXCEPT under retry intent: iOS's
+    # Retry is delete-then-generate, and its local "failed" verdict can be stale (a
+    # client clock that outran the server's queue window, a report that completed
+    # after the card flipped). Deleting a COMPLETED row here is unrefundable by
+    # construction, and the generate that follows charges again — 40 credits for one
+    # report the user never saw. Refused with a code the client turns into a reload.
+    status_before: Optional[str] = None
+    try:
+        peek = (
+            supabase.table("research_reports")
+            .select("status")
+            .eq("id", report_id)
+            .eq("user_id", user["id"])
+            .limit(1)
+            .execute()
+        )
+        peek_rows = list(getattr(peek, "data", None) or [])
+        status_before = (peek_rows[0] or {}).get("status") if peek_rows else None
+    except Exception as e:  # noqa: BLE001 — the peek is advisory; the delete below still runs
+        logger.warning(
+            "delete_report: status peek failed for report=%s (%s: %s)",
+            report_id, type(e).__name__, e,
+        )
+    if (intent or "").strip().lower() == "retry" and status_before == "completed":
+        logger.info(
+            "delete_report: refusing retry-delete of COMPLETED report=%s user=%s",
+            report_id, user["id"],
+        )
+        return make_error_response(
+            ErrorCode.REPORT_ALREADY_COMPLETED,
+            message=f"report {report_id} is completed; a retry-delete would forfeit it",
+            details={"report_id": report_id, "status": "completed"},
+        )
+    supabase.table("research_reports").update({
+        "status": "deleted"
+    }).eq("id", report_id).eq("user_id", user["id"]).execute()
+    logger.info(
+        "delete_report: soft-deleted report=%s user=%s status_before=%s intent=%s",
+        report_id, user["id"], status_before, intent,
+    )
+    return {"message": "Report deleted successfully", "outcome": "soft_deleted",
+            "status_before": status_before}
 
 
 # ── List Personas ────────────────────────────────────────────────────────────
@@ -1048,16 +1094,28 @@ async def _run_research_task(
     single refund site — every failure path lands here.
     """
     try:
-        from app.services.research_service import ResearchService
+        from app.services.research_service import ReportAbandonedError, ResearchService
 
         service = ResearchService()
-        await service.generate_report(report_id, ticker, persona_key, user_id)
+        delivered = await service.generate_report(report_id, ticker, persona_key, user_id)
 
         # Eagerly render the detailed-analysis PDF now that the report is
         # 'completed'. Isolated + best-effort: _generate_report_pdf swallows
         # all its own errors, so a PDF failure never reaches the outer except
         # below (which would wrongly mark the report failed + refund credits).
-        await _generate_report_pdf(report_id, user_id)
+        # Only for a DELIVERED row: a result dropped because the row was already
+        # reconciled or deleted used to get `pdf_status` stamped onto it anyway.
+        if delivered:
+            await _generate_report_pdf(report_id, user_id)
+        else:
+            logger.info(
+                "Research task for %s (%s/%s) produced no delivery — skipping the PDF",
+                report_id, ticker, persona_key,
+            )
+    except ReportAbandonedError as e:
+        # The row was deleted while queued; the DELETE already refunded it. Nothing to
+        # mark, nothing to refund, nothing for Sentry — the service logged it at info.
+        logger.info("Research task for %s abandoned: %s", report_id, e)
     except Exception as e:
         # Include the exception type so future debugging shows e.g.
         # "KeyError: profile" instead of just "profile" — the type is

@@ -505,6 +505,31 @@ def _iter_parts(response: Any) -> List[Any]:
     return []
 
 
+def _cacheable_answer(result: Dict[str, Any]) -> bool:
+    """Only a COMPLETE answer is worth an hour in the response cache.
+
+    An empty text (a safety block, or MAX_TOKENS spent inside the thinking budget) or a
+    non-STOP finish is a failure shape, and the cache key is fully deterministic for a chat
+    prompt — so a failed turn (not persisted, refunded) was replayed as the same failure on
+    every retry for `GEMINI_CACHE_TTL`.
+    """
+    text = result.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return False
+    finish = str(result.get("finish_reason") or "").upper()
+    return finish in ("", "STOP", "FINISH_REASON_STOP", "UNSPECIFIED", "FINISH_REASON_UNSPECIFIED")
+
+
+def _has_function_call(response: Any) -> bool:
+    """Whether the model's turn contains a function-call part (a request for another tool round)."""
+    try:
+        candidate = (response.candidates or [None])[0]
+        parts = (candidate.content.parts if candidate and candidate.content else None) or []
+    except Exception:
+        return False
+    return any(getattr(p, "function_call", None) and p.function_call.name for p in parts)
+
+
 def _response_text(response: Any) -> str:
     """Safe `.text` — the SDK property raises ValueError when the candidate has
     no text Part (function-call-only / finish-only). Falls back to walking parts.
@@ -758,7 +783,12 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
         return {"error": f"unknown tool: {name}"}
     timeout = float(_TOOL_TIMEOUTS.get(name) or getattr(settings, "CHAT_TOOL_TIMEOUT_SECONDS", 8.0) or 8.0)
     try:
-        return await asyncio.wait_for(handler(args), timeout=timeout)
+        # SHIELDED: the ceiling abandons THIS caller's wait, it must not cancel the work.
+        # A market tool is usually the LEADER of a shared in-flight build (`get_index_detail`,
+        # `price:universe`), and `wait_for`'s cancellation reached the leader, whose
+        # CancelledError arm settled the shared future with an error for every joiner —
+        # one chat turn's 8 s ceiling failed the index screen and the widget batch.
+        return await asyncio.wait_for(asyncio.shield(handler(args)), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning("Gemini tool %s timed out after %.1fs (args=%s)", name, timeout, args)
         return {"error": "timed_out", "tool": name, "timeout_seconds": timeout}
@@ -885,7 +915,8 @@ class GeminiClient:
                 "tokens_used": usage["total"],
                 "finish_reason": _response_finish(response),
             }
-            self._response_cache.set(key, result)
+            if _cacheable_answer(result):
+                self._response_cache.set(key, result)
             return result
         except Exception as e:
             # A transient overload/quota is retried + WARNING-logged by
@@ -1131,7 +1162,8 @@ class GeminiClient:
                 "tokens_used": usage["total"],
                 "finish_reason": _response_finish(response),
             }
-            self._response_cache.set(key, result)
+            if _cacheable_answer(result):
+                self._response_cache.set(key, result)
             return result
         except Exception as e:
             if not is_transient_gemini_error(e):
@@ -1286,6 +1318,19 @@ class GeminiClient:
         }
 
     @async_retry(max_attempts=2, delay=2.0)
+    async def _generate_content_retried(self, *, model: str, contents: Any, config: Any, what: str):
+        """ONE model call under the retry policy.
+
+        `generate_with_tools` used to carry the decorator on the WHOLE method, so a generic
+        failure of the follow-up call re-entered at the top: the first call was paid again
+        and every tool handler re-ran — `explain_price_move` claiming a second paid web-search
+        unit. The orchestration below is undecorated; each model call retries on its own.
+        """
+        return await _call_with_timeout(
+            self._client.aio.models.generate_content(model=model, contents=contents, config=config),
+            what=what,
+        )
+
     async def generate_with_tools(
         self,
         prompt: str,
@@ -1316,11 +1361,8 @@ class GeminiClient:
             max_output_tokens=max_output_tokens,
         )
         try:
-            response = await _call_with_timeout(
-                self._client.aio.models.generate_content(
-                    model=model, contents=prompt, config=config,
-                ),
-                what="generate_with_tools",
+            response = await self._generate_content_retried(
+                model=model, contents=prompt, config=config, what="generate_with_tools",
             )
 
             tool_results: List[Dict[str, Any]] = []
@@ -1356,24 +1398,48 @@ class GeminiClient:
 
                 # Feed the results back. Append the model's turn VERBATIM (candidate.content) so any
                 # thought_signature is preserved, then ONE user turn with a response per call.
-                follow_up = await _call_with_timeout(
-                    self._client.aio.models.generate_content(
-                        model=model,
-                        contents=[
-                            types.Content(role="user", parts=[types.Part(text=prompt)]),
-                            candidate.content,
-                            types.Content(role="user", parts=response_parts),
-                        ],
-                        config=config,
-                    ),
+                history = [
+                    types.Content(role="user", parts=[types.Part(text=prompt)]),
+                    candidate.content,
+                    types.Content(role="user", parts=response_parts),
+                ]
+                follow_up = await self._generate_content_retried(
+                    model=model, contents=history, config=config,
                     what="generate_with_tools tool follow-up",
                 )
                 _log_gemini_usage(_response_usage(response), call_site="generate_with_tools", model=model)
                 _log_gemini_usage(
                     _response_usage(follow_up), call_site="generate_with_tools:follow_up", model=model,
                 )
+                text = _response_text(follow_up)
+                if not text and _has_function_call(follow_up):
+                    # This door is single-round, but the follow-up was made with the SAME
+                    # config that still declares the tools, so the model may answer with a
+                    # SECOND function call (chart first, then news for the ticker it found).
+                    # `_response_text` skips function-call parts → "" → the endpoint answered
+                    # GEMINI_UNAVAILABLE and refunded a turn that had real tool data in hand.
+                    # Mirror stream_agentic's final round: ask once more with NO tools.
+                    final = await self._generate_content_retried(
+                        model=model,
+                        contents=history + [follow_up.candidates[0].content, types.Content(
+                            role="user", parts=[types.Part(text=(
+                                "Answer the user's question now using the tool results you already "
+                                "have. Do not call any more tools."
+                            ))],
+                        )],
+                        config=self._config(
+                            system_instruction=system_instruction, tools=None,
+                            max_output_tokens=max_output_tokens,
+                        ),
+                        what="generate_with_tools final answer",
+                    )
+                    _log_gemini_usage(
+                        _response_usage(final), call_site="generate_with_tools:final", model=model,
+                    )
+                    follow_up = final
+                    text = _response_text(follow_up)
                 return {
-                    "text": _response_text(follow_up),
+                    "text": text,
                     "model": self.model_name,
                     "tokens_used": _response_tokens(follow_up),
                     "finish_reason": _response_finish(follow_up),

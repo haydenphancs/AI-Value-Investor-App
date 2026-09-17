@@ -48,6 +48,7 @@ import asyncio
 import logging
 import math
 import uuid
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
@@ -206,8 +207,19 @@ async def fetch_ticker_news(ticker: str, is_crypto: bool = False) -> Dict[str, A
         )
         # An explicit failure, NOT an empty list. "No news today" is a claim, and making
         # it out of a failed upstream call is the same lie `_MarketContext` guards against
-        # with its `*_available` flags.
+        # with its `*_available` flags. `error` is what the doors COUNT: without it a turn
+        # whose only tool hit this outage was charged while the identical outage on
+        # `get_market_snapshot` was refunded.
         return {"ticker": sym, "news_available": False,
+                "error": f"{type(e).__name__}: {e}"[:200],
+                "note": "The news feed could not be reached; do not say there is no news."}
+
+    if (payload or {}).get("fetch_failed"):
+        # The feed answered `[]` because the upstream call FAILED (a 503 after retries, a
+        # licence refusal) — the same shape as "no news", and the model used to say "No
+        # company news was published today" about an outage.
+        return {"ticker": sym, "news_available": False,
+                "error": "news feed unavailable (upstream fetch failed)",
                 "note": "The news feed could not be reached; do not say there is no news."}
 
     articles: List[Dict[str, Any]] = []
@@ -267,6 +279,8 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
     )
     sectors, industries, scanner, cards = results
     out: Dict[str, Any] = {}
+    # Which SESSION every percentage below describes — see `_stamp_session`.
+    session_dates: Counter = Counter()
 
     if isinstance(sectors, BaseException):
         logger.warning("chat tool: sector performance unavailable: %s: %s",
@@ -282,8 +296,10 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
                 logger.warning("chat tool: dropping sector %r with unusable change",
                                r.get("sector"))
                 continue
-            rows.append({"sector": r.get("sector"), "change_percent": pct,
-                         "companies": r.get("constituents")})
+            row = {"sector": r.get("sector"), "change_percent": pct,
+                   "companies": r.get("constituents")}
+            _stamp_session(row, r.get("date"), session_dates)
+            rows.append(row)
         if rows:
             out["sectors"] = rows
 
@@ -297,8 +313,10 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
                 pct = _num(r.get("changesPercentage"))
                 if pct is None:
                     continue
-                out_rows.append({"industry": r.get("industry"), "sector": r.get("sector"),
-                                 "change_percent": pct})
+                row = {"industry": r.get("industry"), "sector": r.get("sector"),
+                       "change_percent": pct}
+                _stamp_session(row, r.get("date"), session_dates)
+                out_rows.append(row)
             return out_rows
         # Sorted % descending by `_group_performance`, so the two ends ARE the story.
         leading = _rows(industries[:_INDUSTRY_EDGE])
@@ -323,7 +341,9 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
             pct = _num(r.get("changesPercentage"))
             if not name or name in shown or pct is None or abs(pct) < _INDUSTRY_MIN_MOVE_PCT:
                 continue
-            rest.append({"industry": name, "change_percent": pct})
+            row = {"industry": name, "change_percent": pct}
+            _stamp_session(row, r.get("date"), session_dates)
+            rest.append(row)
             if len(rest) >= _INDUSTRY_REST_CAP:
                 break
         if rest:
@@ -333,7 +353,7 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
         logger.warning("chat tool: universe unavailable: %s: %s",
                        type(scanner).__name__, scanner)
     else:
-        out.update(_hot_tickers(scanner))
+        out.update(_hot_tickers(scanner, session_dates))
 
     if isinstance(cards, BaseException):
         logger.warning("chat tool: market insight card unavailable: %s: %s",
@@ -345,10 +365,71 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
 
     if not out:
         return {"error": "No market data could be read right now."}
+    as_of = _as_of_session(session_dates)
+    if as_of:
+        out["as_of_session"] = as_of
     return out
 
 
-def _hot_tickers(scanner_inputs: Any) -> Dict[str, Any]:
+def _stamp_session(row: Dict[str, Any], stamp: Any, tally: Counter) -> None:
+    """Record which session a row's percentage describes, on the row AND in the tally.
+
+    Every number in this snapshot is a CLOSE-TO-CLOSE change, and at 07:00 ET on a
+    Monday the screener still reports Friday's close — so every one of them is FRIDAY's
+    move. The universe stamps each constituent (`changeSession`) and the group rows carry
+    the mode (`date`), exactly so `widget_movers_service` can refuse to say "today" about
+    them; this tool dropped the stamp and handed the model bare percentages, and the
+    model — told nothing else — said "Technology is up 0.8% today" on a Monday morning
+    about Friday's session. `session_date` per row plus the snapshot-level
+    `as_of_session` give it the same word the widget uses.
+    """
+    if not stamp:
+        return
+    stamp = str(stamp)
+    row["session_date"] = stamp
+    tally[stamp] += 1
+
+
+def _as_of_session(tally: Counter) -> Optional[Dict[str, Any]]:
+    """The snapshot's session, worded the way `widget_movers_service._session_of` words it.
+
+    The MODE of the row stamps, not the newest: one thinly-traded group lagging a session
+    behind must not relabel the whole snapshot, and one that has already ticked into a
+    new session (a single early premarket print) must not either. Compared against the
+    live session so the word is "today" whenever the stamped session is the current one
+    and "on Fri" (the weekday) when the numbers are older than the session the clock is
+    in.
+    """
+    if not tally:
+        return None
+    from datetime import date as _date
+    from app.utils.market_hours import session_trading_date
+
+    stamp = tally.most_common(1)[0][0]
+    try:
+        stamped = _date.fromisoformat(stamp[:10])
+    except (TypeError, ValueError):
+        logger.warning("chat tool: unparseable session stamp %r on snapshot rows", stamp)
+        return None
+    live = session_trading_date()
+    if stamped >= live:
+        word = "today"
+    else:
+        word = f"on {stamped.strftime('%a')}"
+    return {
+        "date": stamped.isoformat(),
+        "word": word,
+        "note": (
+            "Every percentage in this snapshot is a close-to-close change for this "
+            "session; describe it with this word, not \"today\", and treat a row whose "
+            "session_date differs as describing that other session."
+            if word != "today" else
+            "Every percentage in this snapshot is this session's close-to-close change."
+        ),
+    }
+
+
+def _hot_tickers(scanner_inputs: Any, session_dates: Optional[Counter] = None) -> Dict[str, Any]:
     """Today's biggest movers, through Home's ranker rather than a re-derived sort.
 
     That ranker already carries the quality gate, joins class-share symbols whose profile
@@ -385,8 +466,13 @@ def _hot_tickers(scanner_inputs: Any) -> Dict[str, Any]:
             pct = _num(getattr(r, "change_percent", None))
             if pct is None:
                 continue
-            picked.append({"symbol": sym, "name": getattr(r, "name", None),
-                           "change_percent": pct})
+            row = {"symbol": sym, "name": getattr(r, "name", None), "change_percent": pct}
+            # The ranker returns rank/symbol/price/change only; the universe row it was
+            # ranked from carries WHICH session that change belongs to.
+            src = profile_map.get(sym) or profile_map.get(getattr(r, "symbol", "") or "") or {}
+            _stamp_session(row, src.get("changeSession"),
+                           session_dates if session_dates is not None else Counter())
+            picked.append(row)
         if picked:
             out[key] = picked
     return out
@@ -438,7 +524,17 @@ async def explain_price_move(ticker: str, is_crypto: bool = False) -> Dict[str, 
             "chat tool explain_price_move: attribution failed for %s (%s: %s)",
             sym, type(e).__name__, e,
         )
-        exp = None
+        # A CRASH upstream, not an unreadable quote: carry `error` so the turn's tool
+        # accounting counts it (see `fetch_ticker_news`).
+        return {
+            "ticker": sym,
+            "move_readable": False,
+            "error": f"{type(e).__name__}: {e}"[:200],
+            "note": (
+                "Today's move for this symbol could not be read. Say so plainly rather "
+                "than describing it as unchanged."
+            ),
+        }
 
     if exp is None:
         # `attribute_ticker_move` returns None only when the move is UNREADABLE. Saying
@@ -453,11 +549,16 @@ async def explain_price_move(ticker: str, is_crypto: bool = False) -> Dict[str, 
         }
 
     a = exp.attribution
+    session_word = getattr(exp, "session_word", None) or "today"
     out: Dict[str, Any] = {
         "ticker": sym,
         "company_name": exp.company_name,
         "move_readable": True,
         "change_percent": _num(exp.change_percent),
+        # WHICH session the numbers describe. Pre-market Monday the change is Friday's;
+        # the model must say "on Fri", never "today".
+        "session": session_word,
+        "session_date": getattr(exp, "session_date", None),
         # How abnormal this is FOR THIS TICKER — the single most useful framing the model
         # is missing today, and the reason a 3% day is routine for one name and historic
         # for another.
@@ -517,7 +618,9 @@ def _bottom_line(exp: Any, news: Dict[str, Any]) -> str:
     """
     from app.services.widget_movers_service import deterministic_reason
 
-    move = deterministic_reason(exp.change_percent, exp.z)
+    move = deterministic_reason(
+        exp.change_percent, exp.z, session_word=getattr(exp, "session_word", None) or "today",
+    )
     if not news.get("news_available"):
         # A failed read is NOT "no news". Asserting a negative nobody checked is the lie the
         # `*_available` flags exist to prevent.
@@ -612,6 +715,13 @@ async def _maybe_web_catalyst(
         # An ordinary day for this ticker. There is usually no catalyst to find, and
         # searching for one invites the model to manufacture significance.
         return None
+    if (getattr(exp, "session_word", None) or "today") != "today":
+        # Pre-market the numbers are the PRIOR session's. A paid "today" search for
+        # Friday's move would cache under `X|today|…` and answer Monday's question with
+        # Friday's cause; the deterministic tiers already carry the right session word.
+        logger.info("chat tool: grounded catalyst for %s skipped — move is %s, not today",
+                    sym, exp.session_word)
+        return None
     change = exp.change_percent
     if change is None or change == 0:
         # Guard against paying to explain a phantom +0.0% — a live defect in the Updates
@@ -658,10 +768,12 @@ async def _maybe_web_catalyst(
         asyncio.get_running_loop().create_task(_release_web_search())
         raise
     except Exception as e:  # noqa: BLE001
-        # `get_catalyst` handles Gemini failures INTERNALLY (it returns None with a
-        # `gemini_error` status); a raise here is the cache / DB layer around the call, i.e.
-        # the search most likely never ran.
-        logger.warning("chat tool: grounded catalyst failed for %s (%s: %s)",
+        # A raise means the search did not run: `CatalystNotAttempted` (the quota breaker's
+        # fail-fast, a 429 the ladder gave up on, the kill switch) or the cache / DB layer
+        # around the call. `get_catalyst` returns None only for "searched, nothing usable".
+        # Before `CatalystNotAttempted` existed, every refusal came back as None and the
+        # unit was kept — this branch was unreachable.
+        logger.warning("chat tool: grounded catalyst not run for %s (%s: %s) — unit released",
                        sym, type(e).__name__, e)
         await _release_web_search()
         return None

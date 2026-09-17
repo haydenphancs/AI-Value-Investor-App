@@ -455,6 +455,79 @@ def test_the_sse_reader_decodes_payment_and_admission_refusals():
     )
     # The code, not the status, is the contract — the body has to actually be read.
     assert "APIErrorResponse.self" in body
+    # 2026-09-16: the hard-cap 422 (INVALID_INPUT) and a typed 5xx are contract-shaped too;
+    # dropping their bodies cost a history GET and a second POST before the non-streaming
+    # door surfaced the same copy. Both must sit on the DECODING arm, not on `default:`.
+    decoded_arm = re.search(r"\bcase\b[^\n]*\b422\b(?!\d)[^\n]*\n", body)
+    assert decoded_arm, "the SSE reader no longer decodes a 422 body"
+    assert re.search(r"\bcase\b[^\n]*\b500\.\.\.599\b", body), "the SSE reader no longer decodes 5xx bodies"
+    tail = body[body.index("case 400"):]
+    assert "APIErrorResponse.self" in tail[:tail.index("case 404")]
+
+
+def test_the_sse_error_frame_is_decoded_into_a_business_error():
+    """The stream door emits `error {error_code, user_message}` AFTER it has refunded the
+    turn. The arm used to throw a bare `ChatStreamError.serverError`, so the catch could not
+    tell an outage (terminal, already refunded) from a persist failure (reconcile), and
+    re-POSTed GEMINI_QUOTA_EXCEEDED through the non-streaming door: a second precharge, a
+    second hit on the open circuit, twice the wait, and the backend's copy lost."""
+    body = _decl_body(_code(_CHAT_VM), "private func streamMessageToSession(")
+    arm = body[body.index('case "error":'):body.index('case "meta":')]
+    assert '"error_code"' in arm and "APIError.businessError(code:" in arm, arm
+    assert '"user_message"' in arm
+    # The literal is kept for the page-parity test, and the bare throw stays as the
+    # fallback for a frame with no code.
+    assert "ChatStreamError.serverError" in arm
+
+
+def test_the_meta_frame_rewrites_the_optimistic_bubble_and_the_reconcile_clamps():
+    """The reconcile counts LOCAL user bubbles equal to the server-normalised target. With
+    the bubble raw ("hold…") and the target NFKC'd ("hold..."), that count was 0 — and a
+    zero expectation adopted the PREVIOUS turn's history as if this one had persisted: the
+    question vanished, unanswered, no banner, no retry."""
+    vm = _code(_CHAT_VM)
+    body = _decl_body(vm, "private func streamMessageToSession(")
+    arm = body[body.index('case "meta":'):body.index('case "credits":')]
+    assert "messages[idx].content = [.text(serverMessage)]" in arm, arm
+    assert "lastIndex(where: { $0.role == .user })" in arm
+    rec = _decl_body(vm, "private func reconcileAfterStreamFailure(")
+    assert "let expectedUserMatches = max(1, messages.filter {" in rec, rec
+
+
+def test_a_failed_history_read_never_regenerates_the_turn():
+    """The stream persists and charges BEFORE `credits`/`done` (a suggestions call sits in
+    between). The reconcile's history GET is the only oracle that the turn is absent, and
+    it used to regenerate on ANY read failure — a phone locked in that window plus one
+    transport blip stored and billed the same Q+A twice with no refund path."""
+    vm = _code(_CHAT_VM)
+    body = _decl_body(vm, "private func reconcileAfterStreamFailure(")
+    assert "fetchHistoryForReconcile(sessionId: sessionId)" in body
+    unavailable = body[body.index("case .unavailable"):]
+    regen = unavailable.index("sendMessageToSession(")
+    arm = unavailable[:regen]
+    assert "return" in arm and "reportTurnFailure(ChatStreamError.unconfirmed)" in arm, arm
+    # The retry helper is bounded and does not retry a 404 (nothing to adopt).
+    helper = _decl_body(vm, "private func fetchHistoryForReconcile(")
+    assert "for (attempt, delay) in delays.enumerated()" in helper
+    assert "if case APIError.notFound = error { return .unavailable(error) }" in helper
+
+
+def test_the_non_stream_door_adopts_a_persisted_answer_instead_of_reporting_a_timeout():
+    """`.sendChatMessage` has a 60 s inter-byte timeout and the server persists + charges
+    the moment generation ends; a timeout or a dropped connection therefore says nothing
+    about whether the answer exists. The catch used to report a red "timed out" banner
+    and leave the answer invisible until the conversation was reloaded — and the user's
+    next tap sent (and paid for) the same question again."""
+    vm = _code(_CHAT_VM)
+    body = _decl_body(vm, "private func sendMessageToSession(")
+    catch = body[body.index("} catch {"):]
+    assert "isTransportFailure(error)" in catch
+    assert "fetchHistoryForReconcile(sessionId: sessionId)" in catch
+    assert "historyContainsTurn(" in catch
+    assert "sendMessageToSession(" not in catch, "the non-stream catch must never re-POST"
+    assert "ChatStreamError.unconfirmed" in catch
+    tf = _decl_body(vm, "static func isTransportFailure(")
+    assert "case .timeout, .noConnection: return true" in tf
 
 
 def test_chat_does_not_re_post_a_turn_the_server_refused_before_generating():
@@ -479,8 +552,16 @@ def test_chat_does_not_re_post_a_turn_the_server_refused_before_generating():
 def test_insufficient_credits_is_classified_as_terminal():
     """The set is matched on backend ErrorCode values, so it must actually contain them."""
     body = _decl_body(_code(_CHAT_VM), "private static let terminalPreflightCodes", open_ch="[")
-    for code in ("INSUFFICIENT_CREDITS", "SYSTEM_BUSY", "CHAT_DAILY_LIMIT_REACHED"):
+    for code in ("INSUFFICIENT_CREDITS", "SYSTEM_BUSY", "CHAT_DAILY_LIMIT_REACHED",
+                 # 2026-09-16: the message itself is the problem (blank / over the hard cap)
+                 "INVALID_INPUT",
+                 # and the two outage codes the `error` frame carries after `refund_once` —
+                 # re-POSTing them precharges again into the same open circuit.
+                 "GEMINI_QUOTA_EXCEEDED", "GEMINI_UNAVAILABLE"):
         assert code in body, f"{code} is no longer treated as a terminal pre-flight refusal"
+    # INTERNAL_ERROR must stay recoverable: the "couldn't be saved" frame fires after a turn
+    # the server may have delivered, and reconcile is exactly what adopts it.
+    assert "INTERNAL_ERROR" not in body
 
 
 def test_a_failed_chat_turn_reaches_the_global_error_host():

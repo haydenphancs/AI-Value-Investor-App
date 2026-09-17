@@ -9,11 +9,15 @@ becomes an inline widget; analyst / sentiment results only inform the model's an
 Handlers take an svc argument (a ChatService) rather than importing it, to avoid a circular import.
 """
 
+import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from google.genai import types
 
 from app.services._analyst_common import analyst_section_available
+from app.services.chat_security import sanitize_symbol
+
+logger = logging.getLogger(__name__)
 
 
 def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
@@ -196,6 +200,10 @@ TOOL_CAPABILITIES: Dict[str, str] = {
     ),
 }
 
+# What a ticker tool answers when the model's argument is not a symbol. Fixed text —
+# never an echo of the argument, which is model output.
+_INVALID_TICKER = {"error": "invalid or missing ticker"}
+
 # Tools that take no arguments / a symbol rather than a ticker.
 _NO_ARG_TOOLS = frozenset({_MARKET_TOOL})
 _SYMBOL_ARG_TOOLS = frozenset({"get_market_overview"})
@@ -284,6 +292,15 @@ def capability_block(allowed: frozenset) -> str:
                 "call get_market_snapshot; it covers every sector by name, so you can answer "
                 "sector questions and must not say you only handle individual stocks. "
             )
+        # The tools stamp WHICH session their percentages describe (`session` on a move,
+        # `as_of_session.word` on the snapshot). Pre-market Monday every number is
+        # Friday's close-to-close move; a model told nothing else says "today".
+        text += (
+            "The tools tell you WHICH SESSION a change belongs to (`session`, "
+            "`as_of_session.word`, `session_date`): use that word — 'on Fri', not 'today' "
+            "— whenever it is not 'today', because pre-market the numbers are still the "
+            "previous session's. "
+        )
     text += (
         "NEVER END A 'WHY' QUESTION WITH 'I DON'T HAVE THAT INFORMATION'. Every such "
         "question gets one of exactly three answers: (a) the actual cause, when a tool "
@@ -351,39 +368,83 @@ def build_chat_tool_handlers(
     # sentiment and price-move fetchers each re-derive `is_crypto` from the TICKER with
     # bare coins included, so "LTC" would still route to the crypto branch — the exemption
     # has to travel with the call as an explicit `is_crypto=False`.
+    #
+    # ⚠️ THE ARGUMENT IS MODEL OUTPUT, and it used to reach every fetcher unchecked. A
+    # blank ticker went all the way to `fmp.get_stock_news(ticker="")`, which OMITS the
+    # symbol filter — FMP then serves its default APPLE feed, ~1,000 rows of which were
+    # persisted under `ticker=""` and read back as the named company's sentiment. A
+    # mis-keyed call (`{"symbol": "TSLA"}`, the key the market tool uses) did the same.
+    # `sanitize_symbol` is the closed-vocabulary gate `stock_id` already goes through;
+    # it accepts every legitimate spelling (AAPL, BRK.B, BRK-B, ^GSPC, BTC, BTCUSD,
+    # GCUSD) and returns None for '', 'Apple Inc (AAPL)', 'AAPL, MSFT' and anything
+    # over 16 chars. A None here is answered with `_INVALID_TICKER` BEFORE any fetch —
+    # the same `{"error": …}` shape `_run_tool_handler` counts as a failed tool, so a
+    # turn whose only tool was mis-called settles as degraded rather than charged for
+    # Apple's sentiment. `symbol` is accepted as a fallback key for the ticker tools
+    # because that is the mis-keying the model actually produces.
     def _resolve(args: Dict[str, Any]) -> tuple:
-        raw = str(args.get("ticker") or "").strip().upper()
+        raw = sanitize_symbol(args.get("ticker") or args.get("symbol"))
+        if raw is None:
+            return None, False
         if screen_is_equity and raw == screen:
             return raw, True
         canon = getattr(svc, "_chat_symbol", None)
         return (canon(raw) if callable(canon) else raw), False
 
-    def _sym(args: Dict[str, Any]) -> str:
-        return _resolve(args)[0]
+    def _invalid(args: Dict[str, Any]) -> Dict[str, Any]:
+        logger.warning(
+            "chat tool: refusing a non-symbol ticker argument (keys=%s, len=%d)",
+            sorted(args) if isinstance(args, dict) else type(args).__name__,
+            len(str((args or {}).get("ticker") or (args or {}).get("symbol") or ""))
+            if isinstance(args, dict) else 0,
+        )
+        return dict(_INVALID_TICKER)
 
     async def _stock(args: Dict[str, Any]) -> Dict[str, Any]:
-        return await svc._fetch_stock_widget_data(_sym(args))
+        sym, _ = _resolve(args)
+        if sym is None:
+            return _invalid(args)
+        return await svc._fetch_stock_widget_data(sym)
 
     async def _analyst(args: Dict[str, Any]) -> Dict[str, Any]:
-        return await svc._fetch_analyst_data(_sym(args))
+        sym, _ = _resolve(args)
+        if sym is None:
+            return _invalid(args)
+        return await svc._fetch_analyst_data(sym)
 
     async def _sentiment(args: Dict[str, Any]) -> Dict[str, Any]:
         sym, on_equity = _resolve(args)
+        if sym is None:
+            return _invalid(args)
         if on_equity:
             return await svc._fetch_sentiment_data(sym, is_crypto=False)
         return await svc._fetch_sentiment_data(sym)
 
     async def _market(args: Dict[str, Any]) -> Dict[str, Any]:
-        return await svc._fetch_market_overview_data((args.get("symbol") or "^GSPC").upper())
+        # An OMITTED symbol takes the declared default; a PRESENT but non-symbol one
+        # ("S&P 500", "the market") is an error rather than silently the S&P — the
+        # model may have meant the Dow.
+        raw = (args or {}).get("symbol")
+        if raw is None or not str(raw).strip():
+            symbol = "^GSPC"
+        else:
+            symbol = sanitize_symbol(raw)
+            if symbol is None:
+                return _invalid({"symbol": raw})
+        return await svc._fetch_market_overview_data(symbol)
 
     async def _news(args: Dict[str, Any]) -> Dict[str, Any]:
         sym, on_equity = _resolve(args)
+        if sym is None:
+            return _invalid(args)
         if on_equity:
             return await svc._fetch_ticker_news_data(sym, is_crypto=False)
         return await svc._fetch_ticker_news_data(sym)
 
     async def _why(args: Dict[str, Any]) -> Dict[str, Any]:
         sym, on_equity = _resolve(args)
+        if sym is None:
+            return _invalid(args)
         if on_equity:
             return await svc._fetch_price_move_data(sym, is_crypto=False)
         return await svc._fetch_price_move_data(sym)

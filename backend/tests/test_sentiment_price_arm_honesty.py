@@ -126,3 +126,23 @@ def test_the_result_is_always_an_int_because_the_wire_field_is_not_optional():
         dict(has_social=False, has_news=True, price_score=42),
     ):
         assert isinstance(S._combine_scores(80, 30, **kwargs), int)
+
+
+# ── A blank ticker is refused at the door (2026-09-16) ───────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ticker", ["", "   ", None])
+async def test_a_blank_ticker_never_reaches_the_news_fetch(monkeypatch, ticker):
+    """`_fetch_news("")` reaches `fmp.get_stock_news` with no `symbols` filter, and FMP
+    answers THAT with its default Apple feed — ~1,000 Apple rows persisted under
+    `ticker=""` and read back as some other company's mood."""
+    svc = S.__new__(S)
+    touched = []
+
+    async def _boom(*a, **k):
+        touched.append(a)
+        return []
+    monkeypatch.setattr(S, "_get_articles", _boom)
+    with pytest.raises(ValueError):
+        await svc.get_sentiment(ticker)
+    assert touched == []

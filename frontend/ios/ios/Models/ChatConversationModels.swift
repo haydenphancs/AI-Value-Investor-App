@@ -870,6 +870,28 @@ struct ChatCitationDTO: Codable, Sendable {
     let index: Int?
     let source: String?
     let text: String?
+
+    init(index: Int?, source: String?, text: String?) {
+        self.index = index
+        self.source = source
+        self.text = text
+    }
+
+    private enum CodingKeys: String, CodingKey { case index, source, text }
+
+    /// Total (never-throwing) decode, for the same reason as `ChatSource`: `citations` is
+    /// an optional ARRAY on `ChatMessageDTO`, and array decoding is all-or-nothing — one
+    /// non-object element (a legacy row, a hand-edited JSONB) in one message's citations
+    /// used to blank the entire history decode. The synthesized decoder also rejected a
+    /// numeric-string `index`; every field is optional, so a bad one is simply nil.
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.index = nil; self.source = nil; self.text = nil; return
+        }
+        self.index = try? c.decode(Int.self, forKey: .index)
+        self.source = try? c.decode(String.self, forKey: .source)
+        self.text = try? c.decode(String.self, forKey: .text)
+    }
 }
 
 /// Matches backend ``ChatSessionListResponse``.

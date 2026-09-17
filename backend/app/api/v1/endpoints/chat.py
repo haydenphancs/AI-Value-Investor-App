@@ -9,7 +9,7 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import uuid
 
@@ -25,7 +25,8 @@ from app.dependencies import (
     ChatRateLimit,
     chat_identity_key,
 )
-from app.api.error_response import make_error_response, ErrorCode
+from app.api.error_response import make_error_body, make_error_response, ErrorCode
+from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.chat_security import (
     validate_message,
     sanitize_context,
@@ -413,11 +414,24 @@ def _claim_chat_quota(user: dict, x_guest_id, *, session_id: Optional[str], req=
             user["id"], settings.CHAT_CREDIT_COST, reason="chat_charge", ref_id=turn_ref
         )
     except CreditServiceUnavailable:
+        # A transport failure is NOT proof the debit did not commit — a Cloudflare 520 is
+        # "the edge could not parse what the origin said". Chat has no reconciliation row
+        # for a sweep to find later, so compensate NOW with the per-turn ref_id: `refunded`
+        # if the debit landed, `no_matching_debit` (quiet) if it never did. If the refund
+        # transport is down too, the POSSIBLE LOST CHARGE line above carries the ref.
+        try:
+            CreditService().refund_ledgered(
+                user["id"], settings.CHAT_CREDIT_COST,
+                reason="chat_precharge_unconfirmed", ref_id=turn_ref, quiet_no_match=True,
+            )
+        except Exception as e:  # pragma: no cover - refund_ledgered never raises
+            logger.error("chat precharge compensation failed for ref_id=%s: %s: %s",
+                         turn_ref, type(e).__name__, e)
         return None, make_error_response(
             ErrorCode.SYSTEM_BUSY,
             status_code=409,
             message="spend_credits RPC unavailable (transient)",
-            details={"user_id": user["id"], "step": "chat_credit_charge"},
+            details={"user_id": user["id"], "step": "chat_credit_charge", "turn_ref": turn_ref},
         )
     if remaining is None:
         return None, make_error_response(
@@ -679,6 +693,37 @@ def _reader_lens_for(user: dict) -> Optional[str]:
         return None
 
 
+# Rows `GET /chat/sessions/{id}` returns: the newest N. Well above any real conversation;
+# the point is that the number is DELIBERATE and the tail is always present (see the read).
+CHAT_HISTORY_PAGE_ROWS = 400
+
+
+def _session_lookup_failed(e: Exception) -> HTTPException:
+    """The exception a session lookup raises when `.single()` did not return a row.
+
+    PGRST116 (zero rows) and anything deterministic stay a 404 exactly as before. A
+    TRANSIENT Supabase failure — a Cloudflare 520/525 edge page, a connect timeout — used to
+    become the same 404 at all five lookup sites, so a datastore blip read as "session not
+    found": iOS's stream-failure reconcile (`GET /chat/sessions/{id}` is its persistence
+    oracle) took that as "not persisted" and re-POSTed a turn the server had already saved
+    and charged. 409 `SYSTEM_BUSY`, not 503: the iOS SSE client decodes bodies only for
+    400/402/403/409, `SYSTEM_BUSY` is in its terminal set (no reconcile, no re-POST), and it
+    is the code `_claim_chat_quota` already answers a transient RPC failure with.
+    """
+    if is_transient_supabase_error(e):
+        logger.warning("chat_sessions lookup transient (%s: %s)", type(e).__name__, e)
+        return HTTPException(
+            status_code=409,
+            detail=make_error_body(
+                ErrorCode.SYSTEM_BUSY,
+                message="chat_sessions lookup unavailable (transient)",
+                user_message="Cay AI can't reach this conversation right now. Please try again in a moment.",
+                details={"step": "chat_session_lookup"},
+            ),
+        )
+    return HTTPException(status_code=404, detail="Chat session not found")
+
+
 def _effective_context(req_context: Optional[str], session_row: dict) -> Optional[str]:
     """The on-screen grounding snapshot to feed the LLM this turn.
 
@@ -816,6 +861,17 @@ def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict]
     return merged
 
 
+def _object_citations(raw: Any) -> Optional[list]:
+    """Keep only the dict elements of a stored `citations` list (None when nothing is left)."""
+    if not isinstance(raw, list):
+        return None
+    kept = [c for c in raw if isinstance(c, dict)]
+    if len(kept) != len(raw):
+        logger.warning("chat history: dropped %d non-object citation(s) from a stored row",
+                       len(raw) - len(kept))
+    return kept or None
+
+
 def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessageResponse:
     """Map a Supabase chat_messages row to the response schema.
 
@@ -856,7 +912,11 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
         widget=stored_widget,
         widgets=stored_widgets,
         rich_content=row.get("rich_content"),
-        citations=row.get("citations"),
+        # Objects only. The schema is `List[Any]` (a scalar would pass), and iOS decodes
+        # each element as `ChatCitationDTO` — array decoding is all-or-nothing, so one
+        # non-object element in one message used to blank the whole history. The DTO is
+        # now a total decoder too; this is the belt.
+        citations=_object_citations(row.get("citations")),
         tokens_used=row.get("tokens_used"),
         sources=sources,
         suggestions=suggestions,
@@ -1029,8 +1089,8 @@ async def send_chat_message(
             .single()
             .execute()
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    except Exception as e:
+        raise _session_lookup_failed(e)
 
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
@@ -1069,20 +1129,38 @@ async def send_chat_message(
         # when it does (see _reader_lens_for_async).
         reader_lens = await _reader_lens_for_async(user)
 
-        ai_result = await chat_service.generate_response(
-            session_id=session_id,
-            user_message=msg,
-            session_type=session.data.get("session_type", "NORMAL"),
-            stock_id=session.data.get("stock_id"),
-            context=effective_context,
-            context_type=ctx_type,
-            reference_id=ref_id,
-            context_is_replayed=context_is_replayed,
-            reader_lens=reader_lens,
-            # Owner-scoped grounding: lets TICKER_REPORT read THIS user's frozen
-            # report row instead of only the close-aligned shared cache.
-            user_id=user["id"],
-        )
+        try:
+            ai_result = await asyncio.wait_for(
+                chat_service.generate_response(
+                    session_id=session_id,
+                    user_message=msg,
+                    session_type=session.data.get("session_type", "NORMAL"),
+                    stock_id=session.data.get("stock_id"),
+                    context=effective_context,
+                    context_type=ctx_type,
+                    reference_id=ref_id,
+                    context_is_replayed=context_is_replayed,
+                    reader_lens=reader_lens,
+                    # Owner-scoped grounding: lets TICKER_REPORT read THIS user's frozen
+                    # report row instead of only the close-aligned shared cache.
+                    user_id=user["id"],
+                ),
+                timeout=settings.CHAT_SEND_BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Past the client's ceiling nobody is listening: iOS has already reported the
+            # turn failed. Answer BEFORE any write so `delivered` stays False and the
+            # `finally` refunds — a charged, persisted answer the user never saw is the
+            # worst outcome this door has.
+            logger.warning(
+                "Non-stream chat turn exceeded CHAT_SEND_BUDGET_SECONDS=%.0f for session=%s",
+                settings.CHAT_SEND_BUDGET_SECONDS, session_id,
+            )
+            return make_error_response(
+                ErrorCode.GEMINI_UNAVAILABLE,
+                message="chat generation exceeded the non-streaming budget",
+                details={"session_id": session_id, "step": "chat_send_budget"},
+            )
 
         # Output enforcement (OWASP LLM02/LLM07): redact high-confidence provider /
         # secret / internal-schema leaks, log any advice-boundary drift, then apply the
@@ -1215,6 +1293,19 @@ async def send_chat_message(
         return _row_to_message(assistant_row)
 
     except Exception as e:
+        # Classified like the stream door, so the code the SERVER knows reaches the user:
+        # a quota outage used to be a bare 500 "Failed to generate response" here, and
+        # iOS rendered its generic "technical difficulties" copy for what is a known,
+        # retry-later condition with its own user_message.
+        from app.integrations.gemini import _is_quota_error, is_transient_gemini_error
+        if is_transient_gemini_error(e):
+            code = ErrorCode.GEMINI_QUOTA_EXCEEDED if _is_quota_error(e) else ErrorCode.GEMINI_UNAVAILABLE
+            logger.warning("Chat response failed (%s: %s) — %s", type(e).__name__, e, code.value)
+            return make_error_response(
+                code,
+                message=f"{type(e).__name__}: {e}"[:300],
+                details={"session_id": session_id, "step": "chat_generate"},
+            )
         logger.error(f"Chat response failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate response")
     finally:
@@ -1241,8 +1332,14 @@ async def stream_chat_message(
     Frames: ``meta`` → ``token``* → ``done``, or ``reset`` (discard partial
     tokens) before a fallback ``done``, or ``error``. Nothing is persisted until
     a COMPLETE answer exists (streamed, or via the server-side full-generation
-    fallback), so a dropped stream leaves no half-message and the iOS client can
-    safely retry via the non-streaming endpoint without duplicating the turn.
+    fallback), so a dropped stream leaves no half-message.
+
+    ⚠️ Persistence and the charge happen BEFORE the suggestions call, ``credits`` and
+    ``done`` — so a drop in that window leaves a saved, charged turn the client never
+    acknowledged. The iOS reconcile (``GET /chat/sessions/{id}``) is the oracle that tells
+    "saved" from "lost" before any retry; it must never regenerate on a failed GET (the
+    transient-aware 409 above exists so that GET can say "unavailable" rather than "not
+    found").
     """
     # Input hygiene BEFORE constructing the stream, so an oversize/empty message is a
     # normal JSON error (like the 404s below), not a mid-stream SSE frame.
@@ -1266,8 +1363,8 @@ async def stream_chat_message(
             .single()
             .execute()
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    except Exception as e:
+        raise _session_lookup_failed(e)
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
@@ -1514,6 +1611,11 @@ async def stream_chat_message(
                 )
                 replayed_warm = True
                 w = warmed.get("widget")
+                if w and warmed.get("widget_stale"):
+                    # The card was rendered at warm time. Re-fetched by symbol so the
+                    # price and the Live/Closed dot are this minute's; dropped if that
+                    # fails — never a stale price replayed as live.
+                    w = await chat_service.refresh_widget(w)
                 if w and widget_key(w) not in seen_widgets:
                     seen_widgets.add(widget_key(w))
                     widgets.append(w)
@@ -1616,10 +1718,14 @@ async def stream_chat_message(
                 and prep.get("deep_dive_context")
                 and stock_id
                 and len(content) > 100
+                # A DEGRADED brief (no specialists, unmerged, every tool failed) is refunded
+                # below — caching it would replay it for 24 h as a zero-cost "hit".
+                and not stream_signals.get("degraded")
             ):
                 await asyncio.to_thread(
                     chat_service._upsert_deep_dive_cache,
                     stock_id, prep["deep_dive_context"], content, user_message,
+                    prep.get("asset_type") or "",
                 )
 
         except Exception as e:
@@ -1982,19 +2088,38 @@ async def get_chat_history(
             .single()
             .execute()
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    except Exception as e:
+        raise _session_lookup_failed(e)
 
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
-    messages = (
-        supabase.table("chat_messages")
-        .select("*")
-        .eq("session_id", session_id)
-        .order("created_at", desc=False)
-        .execute()
-    )
+    # The NEWEST rows, explicitly bounded. An unbounded ascending select was clamped by
+    # PostgREST to its first ~1,000 rows, so a session past that returned its OLDEST turns
+    # forever — and iOS's persistence oracle (`historyContainsTurn` looks at the tail) judged a
+    # saved-and-charged turn absent and re-POSTed it. Read desc, reverse in Python.
+    try:
+        messages = (
+            supabase.table("chat_messages")
+            .select("*")
+            .eq("session_id", session_id)
+            .order("created_at", desc=True)
+            .limit(CHAT_HISTORY_PAGE_ROWS)
+            .execute()
+        )
+    except Exception as e:
+        if is_transient_supabase_error(e):
+            raise HTTPException(
+                status_code=409,
+                detail=make_error_body(
+                    ErrorCode.SYSTEM_BUSY,
+                    message="chat_messages read unavailable (transient)",
+                    user_message="Cay AI can't reach this conversation right now. Please try again in a moment.",
+                    details={"step": "chat_history_read"},
+                ),
+            )
+        raise
+    rows = list(reversed(messages.data or []))
 
     # Pair each assistant row with the question it answered, so the replay strip is
     # INTENT-AWARE: a stored "should I buy AAPL?" answer keeps its disclaimer while a
@@ -2003,7 +2128,7 @@ async def get_chat_history(
     # user row" is exact rather than a guess.
     replayed: List[ChatMessageResponse] = []
     last_question = ""
-    for row in (messages.data or []):
+    for row in rows:
         if row.get("role") == "user":
             last_question = row.get("content") or ""
             replayed.append(_row_to_message(row))
@@ -2046,8 +2171,8 @@ async def update_chat_session(
             .single()
             .execute()
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    except Exception as e:
+        raise _session_lookup_failed(e)
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
@@ -2098,8 +2223,8 @@ async def delete_chat_session(
             .single()
             .execute()
         )
-    except Exception:
-        raise HTTPException(status_code=404, detail="Chat session not found")
+    except Exception as e:
+        raise _session_lookup_failed(e)
     if not session.data:
         raise HTTPException(status_code=404, detail="Chat session not found")
 

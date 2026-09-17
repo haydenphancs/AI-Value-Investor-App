@@ -34,7 +34,11 @@ class _FakeModels:
         self._calls.append(kwargs)
         await asyncio.sleep(0)
 
+        # A COMPLETE answer (valid JSON, since `generate_json` parses it): only those are
+        # cached now — an empty candidate list is the safety-block / MAX_TOKENS shape, and
+        # caching it replayed the failure for the whole TTL.
         class _R:
+            text = '{"ok": true}'
             candidates = []
             usage_metadata = None
 

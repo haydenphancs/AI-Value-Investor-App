@@ -525,7 +525,7 @@ async def test_sweep_does_not_retry_a_non_transient_lookup_failure():
 # free account (50/month) that is 40% of the allocation.
 
 
-def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None):
+def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None, intent=None):
     import asyncio
     from app.api.v1.endpoints import research as research_ep
 
@@ -540,7 +540,7 @@ def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None):
     research_ep.CreditService = _Credits
     try:
         return asyncio.run(research_ep.delete_report(
-            report_id, {"id": user_id}, FakeSupabase(rows)
+            report_id, intent=intent, user={"id": user_id}, supabase=FakeSupabase(rows)
         )), calls
     finally:
         research_ep.CreditService = original
@@ -598,6 +598,67 @@ def test_a_user_cannot_delete_or_refund_another_users_report():
     _, calls = _delete(rows, user_id="attacker")
     assert rows[0]["status"] == "processing", "another user's report was mutated"
     assert calls == [], "an attacker triggered a refund against someone else's row"
+
+
+# ── Retry intent must not forfeit a completed report (2026-09-16) ─────────────────────
+#
+# iOS's Retry is delete-then-generate, and its local "failed" verdict can be stale: a
+# client clock that outran the server's queue window, a report that completed after the
+# card flipped. Deleting a COMPLETED row is unrefundable by construction, and the generate
+# that follows charges again — 40 credits for one report the user never saw.
+
+
+def test_a_retry_delete_of_a_completed_report_is_refused_and_leaves_the_row_alone():
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "completed",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, intent="retry")
+    assert rows[0]["status"] == "completed", "the finished report was forfeited"
+    assert calls == []
+    import json
+    body = json.loads(resp.body)
+    assert resp.status_code == 409
+    assert body["error_code"] == "REPORT_ALREADY_COMPLETED"
+    assert body["action"] == "refresh"
+    assert body["details"]["report_id"] == "rep-1"
+
+
+@pytest.mark.parametrize("status", ["processing", "pending", "failed"])
+def test_a_retry_delete_of_an_in_flight_report_still_refunds(status):
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": status,
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, intent="retry")
+    assert rows[0]["status"] == "deleted" and rows[0]["is_refunded"] is True
+    assert len(calls) == 1 and calls[0]["amount"] == 20
+    assert resp == {"message": "Report deleted successfully", "outcome": "refunded"}
+
+
+def test_a_plain_delete_of_a_completed_report_still_soft_deletes_it():
+    """No intent = the user chose Delete on a finished report; that must keep working."""
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "completed",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows)
+    assert rows[0]["status"] == "deleted" and calls == []
+    assert resp == {"message": "Report deleted successfully", "outcome": "soft_deleted",
+                    "status_before": "completed"}
+
+
+@pytest.mark.parametrize("intent", ["", "RETRY ", "cleanup", None])
+def test_only_the_retry_intent_refuses(intent):
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "completed",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    _delete(rows, intent=intent)
+    expected = "completed" if (intent or "").strip().lower() == "retry" else "deleted"
+    assert rows[0]["status"] == expected, intent
+
+
+def test_a_retry_delete_of_someone_elses_completed_report_reveals_nothing():
+    """The peek is scoped to the caller; another user's completed row reads as absent,
+    and the plain soft-delete (also scoped) mutates nothing."""
+    rows = [{"id": "rep-1", "user_id": "victim", "status": "completed",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, user_id="attacker", intent="retry")
+    assert rows[0]["status"] == "completed"
+    assert resp["outcome"] == "soft_deleted" and resp["status_before"] is None
 
 
 # ── The commit-then-error double refund ───────────────────────────────────────────────

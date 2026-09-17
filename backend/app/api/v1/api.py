@@ -27,6 +27,7 @@ from app.api.v1.endpoints import (
     updates,
     widget,
     analytics,
+    marketing_internal,
 )
 
 api_router = APIRouter()
@@ -71,3 +72,9 @@ api_router.include_router(learn.router, prefix="/learn", tags=["Learn"])
 # First-party product analytics ingest (POST /events). Bounded + rate-limited;
 # see app/api/v1/endpoints/analytics.py for why it always returns 200.
 api_router.include_router(analytics.router, tags=["Analytics"])
+# Marketing-engine worker API (design doc §12). Its ONLY caller is the media worker cron
+# service, gated at router level by a shared secret (`X-Marketing-Worker-Token`); iOS never
+# calls it, and it takes none of the iOS auth dependencies on purpose.
+api_router.include_router(
+    marketing_internal.router, prefix="/internal/marketing", tags=["Marketing (internal)"]
+)

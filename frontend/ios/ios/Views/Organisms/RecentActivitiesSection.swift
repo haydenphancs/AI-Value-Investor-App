@@ -12,6 +12,10 @@ struct RecentActivitiesSection: View {
     // MARK: - Properties
 
     let data: RecentActivitiesData
+    /// Congress is Pro/Max: when true the server withheld the Congress rows and the tab
+    /// shows the locked stub. Defaulted so `sampleData` previews and older call sites
+    /// keep compiling; the live host passes `holdersData.isCongressLocked`.
+    var isCongressLocked: Bool = false
 
     // MARK: - Constants
 
@@ -29,14 +33,18 @@ struct RecentActivitiesSection: View {
     @State private var selectedFilter: InsiderActivityFilterOption = .all
     @State private var congressSort: RecentActivitiesSortOption = .byValue
     @State private var showInfoSheet: Bool = false
+    @State private var showPaywall: Bool = false
     @State private var institutionsExpanded: Bool = false
     @State private var insidersExpanded: Bool = false
     @State private var congressExpanded: Bool = false
+    @Environment(\.appState) private var appState
 
     /// `initialTab` defaults to Insiders — the previous hardcoded value — so the only
-    /// behaviour that changes is a deep link that names a section.
-    init(data: RecentActivitiesData, initialTab: RecentActivitiesTab? = nil) {
+    /// behaviour that changes is a deep link that names a section. A congress-trade push
+    /// preselects `.congress`; on Free that lands on the locked stub, not an empty list.
+    init(data: RecentActivitiesData, initialTab: RecentActivitiesTab? = nil, isCongressLocked: Bool = false) {
         self.data = data
+        self.isCongressLocked = isCongressLocked
         self._selectedTab = State(initialValue: initialTab ?? .insiders)
     }
 
@@ -65,7 +73,8 @@ struct RecentActivitiesSection: View {
             // Tab selector (Insiders / Institutions / Congress)
             RecentActivitiesTabSelector(
                 selectedTab: $selectedTab,
-                disabledTabs: []
+                disabledTabs: [],
+                lockedTabs: isCongressLocked ? [.congress] : []
             )
 
             // Content based on selected tab
@@ -78,7 +87,13 @@ struct RecentActivitiesSection: View {
                 case .institutions:
                     institutionsContent
                 case .congress:
-                    congressContent
+                    if isCongressLocked {
+                        LockedSectionCard(title: "Congress", message: SmartMoneySection.congressLockedMessage, nested: true) {
+                            showPaywall = true
+                        }
+                    } else {
+                        congressContent
+                    }
                 }
             }
             .id(selectedTab)
@@ -90,6 +105,12 @@ struct RecentActivitiesSection: View {
         )
         .sheet(isPresented: $showInfoSheet) {
             RecentActivitiesInfoSheet()
+        }
+        // Same plan gate as the Smart Money card above; `.environment(\.appState, appState)`
+        // is REQUIRED for the sheet to highlight the caller's real plan.
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(context: .congressHolders)
+                .environment(\.appState, appState)
         }
     }
 

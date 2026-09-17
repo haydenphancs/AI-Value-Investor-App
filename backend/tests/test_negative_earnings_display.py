@@ -350,6 +350,9 @@ class _RatiosFMP:
     async def get_balance_sheet(self, t, period=None, limit=None):
         return [{"totalDebt": 0, "cashAndCashEquivalents": 0}]
 
+    async def get_dcf(self, t):
+        return {}   # no DCF model — the Valuation Meter simply has no DCF row
+
 
 def _ev_metric(snapshot):
     return next(m.value for m in snapshot.metrics if m.name.startswith("EV/EBITDA"))

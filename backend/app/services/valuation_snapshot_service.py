@@ -15,14 +15,19 @@ Matches the iOS SnapshotItemDTO struct.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client
-from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
+from app.schemas.stock_overview import (
+    DcfEstimateResponse,
+    SnapshotItemResponse,
+    SnapshotMetricResponse,
+)
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
 
@@ -59,7 +64,9 @@ _CACHE_TTL = 300  # 5 minutes
 # 3 (2026-08-26): EV/EBITDA reads `enterpriseValueMultipleTTM` — the key `/stable`
 #     actually populates — instead of falling through to a current-EV ÷ ANNUAL-EBITDA
 #     reconstruction. Changes the number on every cached ticker (AAPL 32.19 → 27.59).
-_SNAPSHOT_PAYLOAD_VERSION = 3
+# 4 (2026-09-17): carries FMP's discounted-cash-flow value (`dcf`) for the Analysis tab's
+#     Valuation Meter. Cached rows without it would render the meter with no DCF row.
+_SNAPSHOT_PAYLOAD_VERSION = 4
 _VERSION_KEY = "_schema_v"
 
 
@@ -303,12 +310,25 @@ class ValuationSnapshotService:
 
         try:
             logger.info(f"Valuation snapshot cache MISS for {ticker} — computing")
-            result = await self._compute(ticker)
+            result, degraded = await self._compute_with_status(ticker)
 
-            # Persist to Supabase in background thread
-            asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_supabase_cache, ticker, result,
-            )
+            # NEVER persist a degraded build. A single 429 on one of the seven slots is
+            # folded into `{}` by `return_exceptions=True` and the meter still renders —
+            # without its DCF row, or with blank multiples — so a transient blip written to
+            # the 24h tier would be served as "no model" to every user for a day. The
+            # 5-minute in-memory tier absorbs the retry storm. Mirrors profit_power /
+            # signal_of_confidence. A permanent 402 (`FMPNotEntitledException`) is NOT
+            # degradation — that slice will not come back on retry.
+            if degraded:
+                logger.warning(
+                    "Valuation snapshot NOT persisted for %s (degraded slices: %s) — "
+                    "will rebuild after the in-memory TTL", ticker, ", ".join(degraded),
+                )
+            else:
+                # Persist to Supabase in background thread
+                asyncio.get_running_loop().run_in_executor(
+                    None, self._upsert_supabase_cache, ticker, result,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():
@@ -393,8 +413,18 @@ class ValuationSnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
+        """`_compute_with_status` without the degradation flag (tests and the overview's
+        fallback card call this directly)."""
+        snapshot, _degraded = await self._compute_with_status(ticker)
+        return snapshot
+
+    async def _compute_with_status(self, ticker: str) -> Tuple[SnapshotItemResponse, List[str]]:
         """Fetch TTM ratios + same fallback data as Financials tab and score
         against sector benchmarks.
+
+        Returns ``(snapshot, degraded)`` where ``degraded`` names every upstream slice
+        that RAISED (a permanent `FMPNotEntitledException` excluded) — `get_valuation_snapshot`
+        refuses to write such a build to the 24h tier.
 
         Switched from `period=annual` to TTM (`ratios-ttm` / `key-metrics-ttm`)
         in 2026-05 — the annual endpoints anchor to the last fiscal year-end,
@@ -415,6 +445,9 @@ class ValuationSnapshotService:
             self.fmp.get_cash_flow_statement(ticker, period="annual", limit=1),
             self.fmp.get_income_statement(ticker, period="annual", limit=1),
             self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
+            # FMP's DCF (entitled). `{}` when there is no model — the Valuation Meter then
+            # simply has no DCF row; it must never fall back to "fair value = price".
+            self.fmp.get_dcf(ticker),
             return_exceptions=True,
         )
 
@@ -425,12 +458,26 @@ class ValuationSnapshotService:
                 return raw
             return {}
 
+        degraded: List[str] = []
+        _slot_names = ("profile", "ratios_ttm", "key_metrics_ttm", "cash_flow", "income", "balance_sheet", "dcf")
+        for name, raw in zip(_slot_names, results):
+            if isinstance(raw, Exception) and not isinstance(raw, FMPNotEntitledException):
+                degraded.append(name)
+
         profile = _parse_first(results[0]) if not isinstance(results[0], Exception) else {}
         fr = _parse_first(results[1]) if not isinstance(results[1], Exception) else {}
         km = _parse_first(results[2]) if not isinstance(results[2], Exception) else {}
         cf = _parse_first(results[3]) if not isinstance(results[3], Exception) else {}
         inc = _parse_first(results[4]) if not isinstance(results[4], Exception) else {}
         bs = _parse_first(results[5]) if not isinstance(results[5], Exception) else {}
+        if isinstance(results[6], Exception):
+            logger.warning(
+                "[valuation-dcf-unavailable] %s: %s: %s — the Valuation Meter renders "
+                "without its DCF row", ticker, type(results[6]).__name__, results[6],
+            )
+            dcf_row: Dict[str, Any] = {}
+        else:
+            dcf_row = _parse_first(results[6])
 
         # Get sector for benchmark comparison
         raw_sector = profile.get("sector", "")
@@ -453,10 +500,40 @@ class ValuationSnapshotService:
                 logger.warning(f"Sector benchmark lookup failed for {ticker}: {e}")
 
 
-        return build_price_snapshot(
+        snapshot = build_price_snapshot(
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
             bench=cur_bench, ticker=ticker,
         )
+        snapshot.dcf = dcf_estimate_from_row(dcf_row)
+        return snapshot, degraded
+
+
+def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:
+    """`DcfEstimateResponse` from FMP's `{symbol, date, dcf, "Stock Price"}` row.
+
+    * finite `dcf` > 0 → `status="ok"` with the value (rounded to cents) and its date;
+    * finite `dcf` ≤ 0 → `status="negative_cash_flow"`, NO value — the model has nothing
+      to say about a loss-maker (PLUG reads −13.54), and a negative "fair value" printed
+      beside a price would be a fabricated verdict;
+    * missing / non-finite / non-numeric → ``None`` (no row at all).
+    The GAP against price is deliberately not computed here: the snapshot is cached for
+    24h while the header price is live, so iOS derives it at render time.
+    """
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("dcf")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    as_of = str(row.get("date") or "")[:10] or None
+    if value <= 0:
+        return DcfEstimateResponse(status="negative_cash_flow", value=None, as_of=as_of)
+    return DcfEstimateResponse(status="ok", value=round(value, 2), as_of=as_of)
 
 
 

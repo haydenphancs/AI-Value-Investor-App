@@ -266,9 +266,26 @@ class ErrorCode(str, Enum):
     # password in that flow, and the old fallback told those users to check one.
     AUTH_PROVIDER_FAILED = "AUTH_PROVIDER_FAILED"
 
+    # ── Marketing engine — WORKER-FACING ONLY (design doc §12) ─────────────────
+    # Emitted by /api/v1/internal/marketing/*, whose only caller is the media worker
+    # (marketing/main.py). iOS never reaches those routes, so these three have NO
+    # AppError branch on purpose — /list-error-codes will list them as unmapped; that is
+    # correct, not drift. They exist so a ledger failure is legible in the worker's log and
+    # in Sentry instead of arriving mislabelled as REPORT_GENERATION_FAILED (the classifier's
+    # generic default).
+    MARKETING_NOT_FOUND = "MARKETING_NOT_FOUND"          # run/asset id unknown — a worker bug
+    MARKETING_ASSET_MISSING = "MARKETING_ASSET_MISSING"  # worker said uploaded; bucket says no
+    MARKETING_LEDGER_ERROR = "MARKETING_LEDGER_ERROR"    # Supabase/Storage write or read failed
+
 
 # Default user-facing copy per code. Endpoints can override per-call.
 _USER_MESSAGES: Dict[ErrorCode, str] = {
+    # Marketing worker API — no human reads these; the strings are for the worker's log.
+    ErrorCode.MARKETING_NOT_FOUND: "Marketing run or asset not found.",
+    ErrorCode.MARKETING_ASSET_MISSING: (
+        "The uploaded object could not be found in the media bucket; re-upload it."
+    ),
+    ErrorCode.MARKETING_LEDGER_ERROR: "The marketing ledger could not be updated; retry.",
     ErrorCode.EMAIL_NOT_CONFIRMED: (
         "Please confirm your email address first. Check your inbox for the "
         "confirmation link \u2014 including your spam folder."
@@ -612,6 +629,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # for a dead session.
     ErrorCode.AUTH_CREDENTIALS_INVALID: 401,
     ErrorCode.AUTH_PROVIDER_FAILED: 401,
+    # Marketing worker API. 404/409 are terminal for the worker's current stage (it records
+    # the run as failed and the next hourly tick resumes); 503 is what its client retries.
+    ErrorCode.MARKETING_NOT_FOUND: 404,
+    ErrorCode.MARKETING_ASSET_MISSING: 409,
+    ErrorCode.MARKETING_LEDGER_ERROR: 503,
 }
 
 
@@ -736,6 +758,17 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # ── Profile-not-found from collector / service ────────────────────
     if isinstance(exc, ValueError) and "profile" in msg:
         return ErrorCode.TICKER_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.TICKER_NOT_FOUND]
+
+    # ── Marketing ledger (app/services/marketing/run_service) ──────────────────────
+    # Matched by NAME ahead of every heuristic below: these are our own classes, their
+    # messages mention buckets and paths, and the generic tail would call them
+    # REPORT_GENERATION_FAILED. Order matters — the specific subclasses first.
+    if "marketingassetmissinginstorage" in cls:
+        return ErrorCode.MARKETING_ASSET_MISSING, _DEFAULT_STATUS[ErrorCode.MARKETING_ASSET_MISSING]
+    if "marketingrunnotfound" in cls or "marketingassetnotfound" in cls:
+        return ErrorCode.MARKETING_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.MARKETING_NOT_FOUND]
+    if "marketingrunerror" in cls:
+        return ErrorCode.MARKETING_LEDGER_ERROR, _DEFAULT_STATUS[ErrorCode.MARKETING_LEDGER_ERROR]
 
     # ── Watchlist datastore unreadable (tracking_service) ─────────────
     # Checked BEFORE the generic heuristics below: a PostgREST read timeout

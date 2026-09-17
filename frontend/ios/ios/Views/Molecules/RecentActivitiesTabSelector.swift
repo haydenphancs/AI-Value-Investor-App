@@ -11,10 +11,18 @@ import SwiftUI
 struct RecentActivitiesTabSelector: View {
     @Binding var selectedTab: RecentActivitiesTab
     let disabledTabs: Set<RecentActivitiesTab>
+    /// Tabs whose rows the server withheld for this plan (Congress on Free). Stays
+    /// selectable so the locked stub is discoverable; mirrors `SmartMoneyTabSelector`.
+    let lockedTabs: Set<RecentActivitiesTab>
 
-    init(selectedTab: Binding<RecentActivitiesTab>, disabledTabs: Set<RecentActivitiesTab> = []) {
+    init(
+        selectedTab: Binding<RecentActivitiesTab>,
+        disabledTabs: Set<RecentActivitiesTab> = [],
+        lockedTabs: Set<RecentActivitiesTab> = []
+    ) {
         self._selectedTab = selectedTab
         self.disabledTabs = disabledTabs
+        self.lockedTabs = lockedTabs
     }
 
     var body: some View {
@@ -27,8 +35,14 @@ struct RecentActivitiesTabSelector: View {
                         selectedTab = tab
                     }
                 } label: {
-                    Text(tab.rawValue)
-                        .font(AppTypography.bodyEmphasis)
+                    HStack(spacing: AppSpacing.xxs) {
+                        Text(tab.rawValue)
+                            .font(AppTypography.bodyEmphasis)
+                        if lockedTabs.contains(tab) {
+                            Image(systemName: "lock.fill")
+                                .font(AppTypography.caption)
+                        }
+                    }
                         .foregroundColor(tabForegroundColor(for: tab, isDisabled: isDisabled))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)
@@ -47,6 +61,7 @@ struct RecentActivitiesTabSelector: View {
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(lockedTabs.contains(tab) ? "\(tab.rawValue), locked" : tab.rawValue)
                 .disabled(isDisabled)
             }
         }

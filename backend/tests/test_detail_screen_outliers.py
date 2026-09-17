@@ -799,47 +799,34 @@ def test_ios_hides_the_analyst_section_before_it_checks_coverage():
 
     avail = body.find("!ratingsData.sectionAvailable")
     cover = body.find("!ratingsData.hasCoverage")
-    est = body.find("ratingsData.estimatesAvailable")
+    meter = body.find("ValuationMeterSection(")
     assert avail != -1, "the view no longer hides the section for an unlicensed source"
     assert cover != -1, "the genuine no-coverage state was removed — it is still correct when FMP has no data"
 
-    # Street estimates are a DIFFERENT, licensed dataset (FMP package 8). They must be
-    # checked FIRST: the two branches below are about the unlicensed ratings pair, and
-    # falling into either of them would hide forward revenue/EPS we actually have.
-    assert est != -1, (
-        "the Street-estimates branch is gone — `analyst-estimates` is entitled, so the "
-        "Analysis tab would render nothing while holding real forward consensus data"
+    # The Valuation Meter (multiples vs sector + FMP's DCF, both entitled) holds the slot
+    # the Street Estimates card had until 2026-09-17; estimates now sit under Earnings on
+    # the Financials tab (see test_analyst_estimates.py). It must render FIRST: the two
+    # branches below are about the unlicensed ratings pair, and falling into either of
+    # them would hide a valuation we actually have.
+    assert meter != -1, "the Valuation Meter is gone from the Analysis tab"
+    assert meter < avail, (
+        "sectionAvailable is checked before the Valuation Meter, so an unlicensed RATINGS "
+        "source hides the licensed valuation card with it"
     )
-    assert est < avail, (
-        "sectionAvailable is checked before the estimates branch, so an unlicensed RATINGS "
-        "source hides the licensed ESTIMATES card with it"
+    # And the meter must never be wired to `sectionAvailable`: that flag guards the
+    # zero-default consensus/target, and reusing it would re-render a HOLD at $0.00.
+    meter_branch = body[meter - 200:avail]
+    assert "sectionAvailable" not in meter_branch, (
+        "the Valuation Meter branch reads sectionAvailable — that flag belongs to the "
+        "ratings half"
     )
-    # And the estimates branch must never be wired to `sectionAvailable`: that flag guards
-    # the zero-default consensus/target, and reusing it would re-render a HOLD at $0.00.
-    est_branch = body[est - 200:avail]
-    assert "sectionAvailable" not in est_branch, (
-        "the estimates branch reads sectionAvailable — that flag belongs to the ratings "
-        "half and gating estimates on it puts a fabricated $0.00 target back on screen"
+    assert "ratingsData.estimatesAvailable" not in body, (
+        "Street Estimates is back on the Analysis tab — it moved to Financials under Earnings"
     )
     assert avail < cover, (
         "hasCoverage is checked BEFORE sectionAvailable, so an unlicensed source falls into "
-        "the no-coverage card and the app states that no analyst covers Apple"
+        "the no-coverage card and tells the user nobody covers Apple"
     )
-
-
-# ── MUTATION_LOG — the two analyst-section guards above ──────────────────────────────
-#
-# Hand-run 2026-09-07 (testing.md §3 rule 3). Each applied, the file run, then reverted.
-#
-#  1. iOS branch order swapped so `hasCoverage` is tested first — the exact shape of the bug,
-#     and the most likely accidental reintroduction, since both branches read correct alone.
-#       -> test_ios_hides_the_analyst_section_before_it_checks_coverage FAILED  ✅
-#  2. The `sectionAvailable` branch deleted outright.  -> same test FAILED  ✅
-#  3. `section_available = True` hardcoded instead of derived from the entitlement manifest.
-#       -> test_an_unlicensed_analyst_source_hides_the_card... FAILED  ✅
-#     This is the mutation that matters most: hardcoding LOOKS harmless and would leave the
-#     card permanently dark even after the package is repurchased.
-#  4. The flag computed but not passed to the response.  -> same test FAILED  ✅
 
 
 def test_a_degraded_fundamentals_bundle_is_not_pinned_for_24h():
@@ -3017,10 +3004,24 @@ def test_cost_bar_is_driven_by_the_same_items_as_the_legend():
     assert "!$0.isCredit" in body, "a credit is being drawn as a cost"
 
 
+def test_legend_column_header_flips_to_loss_with_the_row_beneath_it():
+    """PLUG (TestFlight, build 1.0 (8)): the right column was headed "Costs & Profit" over
+    a "Net Loss -1.6B" row. The heading now derives from the same sign as that row."""
+    code = _swift_code(_IOS / _REV_MODELS)
+    body = _func_body(code, "var costsColumnTitle: String")
+    import re as _re
+    assert _re.search(r'isProfit\s*\?\s*"Costs & Profit"\s*:\s*"Costs & Loss"', body), body
+    assert "costsExceedRevenue" not in body, "the residual can disagree in sign with the row"
+    legend = _swift_code(_IOS / "Views" / "Molecules" / "RevenueBreakdownLegendView.swift")
+    assert 'Text("Costs & Profit")' not in legend, "the literal is back"
+    assert "Text(data.costsColumnTitle)" in legend
+
+
 def test_revenue_composition_scan_is_not_vacuous():
     """Mutation-tested by hand on 2026-08-25: each asserted token was removed from its
     declaration, the matching test was watched to FAIL, and the file restored."""
     code = _swift_code(_IOS / _REV_MODELS)
+    assert len(_func_body(code, "var costsColumnTitle: String")) < len(code) / 4
     # Comment stripping is load-bearing here — the file explains the old expression.
     raw = (_IOS / _REV_MODELS).read_text()
     assert "totalRevenue - totalCosts" in raw, \

@@ -59,9 +59,17 @@ from app.services.health_check_service import get_health_check_service
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.services.signal_of_confidence_service import get_signal_of_confidence_service
 from app.schemas.holders import HoldersResponse
-from app.services.holders_service import get_holders_service
+from app.services.holders_service import (
+    _institutional_pct_plausible,
+    get_holders_service,
+)
 from app.config import settings
-from app.dependencies import get_current_user, get_current_user_id, StandardRateLimit
+from app.dependencies import (
+    get_current_user,
+    get_current_user_id,
+    get_watchlist_identity,
+    StandardRateLimit,
+)
 from app.services.ticker_data_cache import warm_ticker_collection
 from app.services.price_service import price_source
 
@@ -591,16 +599,13 @@ async def get_stock_details(ticker: str):
             if free_float is not None:
                 response["percent_insiders"] = round(100 - float(free_float), 4)
 
-        # Institutional ownership % from ownership summary
-        if isinstance(inst_summary, list) and inst_summary:
-            inst = inst_summary[0] if isinstance(inst_summary[0], dict) else {}
-            own_pct = inst.get("ownershipPercent")
-            if own_pct is not None:
-                response["percent_institutional"] = float(own_pct)
-        elif isinstance(inst_summary, dict) and inst_summary:
-            own_pct = inst_summary.get("ownershipPercent")
-            if own_pct is not None:
-                response["percent_institutional"] = float(own_pct)
+        # Institutional ownership % from ownership summary — OMITTED (iOS renders "--")
+        # when the 13F roll-up is implausible beside the insider block, the same gate the
+        # Holders tab applies, so "% Held Inst." can never read 100.0% one tab away from
+        # a corrected breakdown.
+        own_val = _plausible_percent_institutional(inst_summary, response.get("percent_insiders"), ticker)
+        if own_val is not None:
+            response["percent_institutional"] = own_val
 
         # Short % of Float from the short-interest integration
         if isinstance(short_data, dict) and short_data.get("short_percent_of_float") is not None:
@@ -1233,20 +1238,58 @@ async def get_signal_of_confidence(ticker: str):
         )
 
 
+def _plausible_percent_institutional(
+    inst_summary: Any, percent_insiders: Any, ticker: str = ""
+) -> Optional[float]:
+    """The detail card's "% Held Inst.", or None when the 13F roll-up is implausible.
+
+    Accepts the summary as FMP returns it (a one-row list) or already unwrapped (a dict).
+    None (omitted from the payload → iOS renders "--") is the honest answer for an
+    aggregate above 100% beside a near-zero insider block — the same gate the Holders tab
+    applies, so the two tabs can never disagree by "100.0%".
+    """
+    inst_row: Dict[str, Any] = {}
+    if isinstance(inst_summary, list) and inst_summary:
+        inst_row = inst_summary[0] if isinstance(inst_summary[0], dict) else {}
+    elif isinstance(inst_summary, dict):
+        inst_row = inst_summary
+    own_pct = inst_row.get("ownershipPercent") if inst_row else None
+    if own_pct is None:
+        return None
+    try:
+        own_val = float(own_pct)
+    except (TypeError, ValueError):
+        own_val = float("nan")
+    insiders_val = float(percent_insiders) if isinstance(percent_insiders, (int, float)) else 0.0
+    if _institutional_pct_plausible(own_val, insiders_val):
+        return own_val
+    logger.warning(
+        "[holders-inst-implausible] %s: percent_institutional=%r omitted (insiders=%.2f%%)",
+        ticker, own_pct, insiders_val,
+    )
+    return None
+
+
 # ── Holders endpoint ─────────────────────────────────────────────
 
 @router.get("/{ticker}/holders", response_model=HoldersResponse)
-async def get_holders(ticker: str):
+async def get_holders(ticker: str, user: dict = Depends(get_watchlist_identity)):
     """
     Get shareholder breakdown, smart money flow, and recent activities.
 
     Returns ownership distribution (insiders/institutions/public),
     top 10 owners, recent institutional and insider trading activity —
     the iOS "Holders" tab.
+
+    The Congress segment (Smart Money picker + the Congress rows of Recent
+    Activities) is Pro/Max: a Free caller receives it EMPTY with
+    ``congress_locked=true`` — the same floor `/signals/{kind}/{ticker}` and the
+    whale profile apply to the same congressional rows. `get_watchlist_identity`
+    composes with the router-level sign-in guard; there is no guest branch.
     """
     try:
         service = get_holders_service()
-        return await service.get_holders(ticker)
+        return await service.get_holders_for_tier(ticker, tier=user.get("tier"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -1341,8 +1384,15 @@ async def get_chart_events(ticker: str):
             "earnings_dates": earnings_dates,
             "dividend_dates": [],  # Kept for backward compatibility
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Chart events failed for {ticker}: {e}", exc_info=True)
+        # Same contract as the sibling `/chart` handler: a typed upstream failure
+        # (rate limit, entitlement, timeout) maps to its ErrorCode instead of a
+        # bare 502 the client can only render as "Try again".
+        if (resp := upstream_error_response(e, ticker=ticker, step="chart-events")) is not None:
+            return resp
         raise HTTPException(
             status_code=502,
             detail=f"Chart events service unavailable for {ticker}",

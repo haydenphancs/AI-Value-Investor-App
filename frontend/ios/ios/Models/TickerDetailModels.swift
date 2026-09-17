@@ -413,12 +413,80 @@ struct SnapshotItem: Identifiable {
     let rating: SnapshotRatingLevel
     let metrics: [SnapshotMetric]
     let fullReportAvailable: Bool
+    /// Only the valuation (`.price`) snapshot carries a DCF; see `DcfEstimate`.
+    var dcf: DcfEstimate? = nil
 
-    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true) {
+    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil) {
         self.category = category
         self.rating = rating
         self.metrics = metrics
         self.fullReportAvailable = fullReportAvailable
+        self.dcf = dcf
+    }
+}
+
+// MARK: - DCF estimate (Valuation Meter)
+
+/// FMP's discounted-cash-flow value: an INTRINSIC-VALUE estimate as of `asOf` — the
+/// present value of projected free cash flow at a generic cost of capital — never a
+/// price forecast. It is a mechanical single-stage model on trailing cash flow, so it
+/// reads far below price on fast growers (AAPL −59%, TER −87% on 2026-09-17); the card
+/// labels it as a model value and adds a caveat past `caveatThresholdPercent`.
+///
+/// The gap is computed HERE against the live header price, never on the wire: the
+/// snapshot is cached for 24h server-side while the price is live.
+struct DcfEstimate: Equatable {
+    enum Status: String {
+        case ok
+        case negativeCashFlow = "negative_cash_flow"
+        case unavailable
+    }
+
+    let status: Status
+    let value: Double?
+    let asOf: String?
+
+    /// Beyond this absolute gap the row explains WHY the model disagrees so much.
+    static let caveatThresholdPercent: Double = 50.0
+
+    init(status: Status, value: Double?, asOf: String?) {
+        self.status = status
+        self.value = value
+        self.asOf = asOf
+    }
+
+    init?(dto: DcfEstimateDTO) {
+        // An unrecognised status (a future backend) is NO row, not a blank one — the
+        // section would otherwise draw an orphan divider for it.
+        guard let status = Status(rawValue: dto.status), status != .unavailable else { return nil }
+        // A value that is not a positive finite number is not a value.
+        let value = dto.value.flatMap { ($0.isFinite && $0 > 0) ? $0 : nil }
+        if status == .ok && value == nil { return nil }
+        self.init(status: status, value: value, asOf: dto.asOf)
+    }
+
+    /// Percent gap of the model value versus `price` (positive = model above price).
+    /// `nil` unless both are positive finite numbers — never a fabricated 0%.
+    func gapPercent(versus price: Double?) -> Double? {
+        guard let value, let price, price.isFinite, price > 0, value.isFinite else { return nil }
+        return (value - price) / price * 100
+    }
+
+    var formattedValue: String? {
+        value.map { String(format: "$%.2f", $0) }
+    }
+
+    /// "59% below price" / "6% above price" / "in line with price".
+    func formattedGap(versus price: Double?) -> String? {
+        guard let gap = gapPercent(versus: price) else { return nil }
+        let magnitude = Int(abs(gap).rounded())
+        if magnitude == 0 { return "in line with price" }
+        return "\(magnitude)% \(gap < 0 ? "below" : "above") price"
+    }
+
+    func needsCaveat(versus price: Double?) -> Bool {
+        guard let gap = gapPercent(versus: price) else { return false }
+        return abs(gap) > Self.caveatThresholdPercent
     }
 }
 
@@ -1483,6 +1551,14 @@ struct SentimentAnalysisData {
         let total = bullish + neutral + bearish
         if total == 0 { return "N/A" }
 
+        // An exact tie has no lean. A 2/2/2 split used to fall through `>=` below and
+        // print "33% Positive" (TestFlight, build 1.0 (8)). Integer compare, checked
+        // AFTER the zero guard so 0/0/0 stays "N/A", and before the Mixed band so a
+        // 0/5/0 or 2/1/2 split reads as balanced rather than as a 40% lean.
+        if bullish == bearish {
+            return "Balanced"
+        }
+
         let bullishRatio = Double(bullish) / Double(total)
         let bearishRatio = Double(bearish) / Double(total)
 
@@ -1490,7 +1566,7 @@ struct SentimentAnalysisData {
         if bullishRatio < 0.30 && bearishRatio < 0.30 {
             return "Mixed"
         }
-        if bullishRatio >= bearishRatio {
+        if bullishRatio > bearishRatio {
             return "\(Int(round(bullishRatio * 100)))% Positive"
         } else {
             return "\(Int(round(bearishRatio * 100)))% Negative"

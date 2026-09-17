@@ -308,7 +308,10 @@ async def test_crypto_does_not_shadow_same_ticker_stock(monkeypatch):
     assert any(r.symbol == "STX" and r.type == "crypto" for r in results), (
         "the exact-symbol coin must also be present now"
     )
-    assert {r.type for r in results if r.symbol == "STX"} == {"stock", "crypto"}, (
+    # Count-exact, not a set: a set equality would pass with two crypto rows and one stock
+    # row, and two rows of one type for one symbol is exactly what collides on iOS
+    # (`StockSearchResult.id` is symbol + type — tests/test_ios_search_result_identity.py).
+    assert sorted(r.type for r in results if r.symbol == "STX") == ["crypto", "stock"], (
         "exactly one of each — no duplicates from the merge"
     )
 

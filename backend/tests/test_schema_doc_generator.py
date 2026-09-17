@@ -672,7 +672,11 @@ def test_every_public_table_is_curated():
 # Empty, and that is the healthy steady state — both former entries (157
 # `market_close_snapshot`, 159 `corporate_action_cache`) are APPLIED and now appear in the
 # snapshot, so the real column-drift check below covers them again.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+_PENDING_MIGRATION_TABLES: set[str] = {
+    # 170 (marketing engine, design doc §12) — written 2026-09-17, applied by hand later.
+    "public.marketing_runs", "public.marketing_assets", "public.marketing_posts",
+    "public.podcast_episodes",
+}
 # 2026-09-11: 161 `chat_starters` and 162 `chat_starter_answers` were applied and re-dumped,
 # so both left the list (the guard below went red the moment the snapshot carried them,
 # exactly as designed). Migration 168 DROPS eight tables; that is the reverse case and

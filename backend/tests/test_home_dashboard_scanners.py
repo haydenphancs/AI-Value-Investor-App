@@ -443,7 +443,7 @@ class _FakeFMP:
         return {"floatShares": 40_000_000}
 
     # sparkline path
-    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None, extended=False):
         await asyncio.sleep(0)
         return [
             {"date": "2026-06-26 10:00:00", "close": 100.0},

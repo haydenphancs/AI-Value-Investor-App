@@ -863,7 +863,7 @@ class _FakeIntradayFMP:
         self.rows = rows
         self.calls = 0
 
-    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None, extended=False):
         self.calls += 1
         return self.rows
 

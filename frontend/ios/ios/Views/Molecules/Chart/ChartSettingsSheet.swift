@@ -94,7 +94,7 @@ struct ChartSettingsSheet: View {
                             .font(AppTypography.headingSmall)
                             .foregroundColor(AppColors.textPrimary)
 
-                        ForEach(TechnicalIndicatorType.allCases.filter({ !$0.isOverlay })) { indicator in
+                        ForEach(assetContext.allowedSubCharts) { indicator in
                             Toggle(isOn: indicatorBinding(for: indicator)) {
                                 HStack(spacing: AppSpacing.sm) {
                                     Circle()
@@ -126,8 +126,9 @@ struct ChartSettingsSheet: View {
                         .tint(AppColors.primaryBlue)
                     }
 
-                    // Earnings Dates — only for stocks and ETFs
-                    if assetContext == .stock || assetContext == .etf {
+                    // Earnings Dates — stocks only. An ETF has no earnings feed and its
+                    // screen passes no `chartEventDates`, so the toggle was inert there.
+                    if assetContext == .stock {
                         Divider()
 
                         Toggle(isOn: $chartSettings.showEarningsDates) {

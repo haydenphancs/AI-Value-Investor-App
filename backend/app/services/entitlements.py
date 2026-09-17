@@ -75,8 +75,11 @@ UPDATES_TICKER_LIMITS = {
 # What is gated is the TICKER, not the card. All three rows stay on screen with their
 # icon, title, description and aggregate stat ("3 members buying"); only the symbol is
 # withheld, and the drill-down leaders with it. That keeps the same 5.1.1(v) posture as
-# the Updates limit above — the screen still demonstrates what it does, and the
-# underlying holder data remains free on every ticker's own Holders tab.
+# the Updates limit above — the screen still demonstrates what it does. On a ticker's own
+# Holders tab the Insider and Institutions data stay free; the CONGRESS segment (and the
+# Congress rows in Recent Activities) take the same paid floor — see
+# `CONGRESS_HOLDERS_UNLOCKED_TIERS` below. Until 2026-09-17 that tab served every
+# congressional trade free while `/signals/{kind}/{ticker}` withheld the same rows.
 SIGNALS_UNLOCKED_TIERS = frozenset({TIER_PRO, TIER_MAX})
 
 # ── Whales: how many investors an account may TRACK ──────────────────────────────────
@@ -110,6 +113,14 @@ FREE_TIER_WHALE_NAME = "Bill Gates"
 # PAID:       Current Picks (holdings + behaviour summary), Recent Trades (trade groups and
 #             their drill-down), and the AI Sentiment Summary — the position-level detail.
 WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
+# ── Holders tab: the Congress segment is paid ────────────────────────────────────────
+#
+# Product decision (2026-09-17): "Congress is for the paid plan only (Pro and Max)".
+# Deliberately the SAME frozenset as signals and whale detail, so the three paid
+# surfaces that show congressional trades cannot drift apart. Insider and Institutions
+# on the same card stay free on every tier.
+CONGRESS_HOLDERS_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
 # ── Wiser (Learn): read free, listen with Pro — EXCEPT the Investor Journey ──────────
 #
@@ -225,6 +236,20 @@ def required_tier_for_whales(tier: Optional[str]) -> Optional[str]:
     walking one rung would upsell Max to a Pro user who is not locked out of anything.
     """
     return None if whale_detail_unlocked(tier) else TIER_PRO
+
+
+def congress_holders_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see the Congress segment of a ticker's Holders tab?
+
+    False for Free, for guests (identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface.
+    """
+    return normalize_tier(tier) in CONGRESS_HOLDERS_UNLOCKED_TIERS
+
+
+def required_tier_for_congress_holders(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks the Congress segment, or None if already unlocked."""
+    return None if congress_holders_unlocked(tier) else TIER_PRO
 
 
 def learn_audio_unlocked(tier: Optional[str]) -> bool:

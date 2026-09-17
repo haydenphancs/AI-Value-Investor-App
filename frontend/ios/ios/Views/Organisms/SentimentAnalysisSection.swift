@@ -37,8 +37,10 @@ struct SentimentAnalysisSection: View {
             SentimentMetricsRow(sentimentData: sentimentData, selectedTimeframe: selectedTimeframe)
                 .padding(.top, AppSpacing.md)
 
-            // Disclaimer
+            // Disclaimer — full width so a wrap stays centred under the meter, like the
+            // Technical card (it only looked fine because its copy fits one line).
             AnalysisDisclaimerText()
+                .frame(maxWidth: .infinity)
         }
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)

@@ -11,6 +11,10 @@ import SwiftUI
 
 struct SmartMoneyTabSelector: View {
     @Binding var selectedTab: SmartMoneyTab
+    /// Tabs whose data the server withheld for this plan (Congress on Free). The tab
+    /// stays selectable so the locked stub — and its upgrade path — is discoverable;
+    /// only the glyph and the accessibility label change.
+    var lockedTabs: Set<SmartMoneyTab> = []
 
     // Segmented control — matches RecentActivitiesTabSelector exactly: equal-width
     // tabs in a rounded `cardBackgroundNested` container, the selected tab filled
@@ -27,8 +31,14 @@ struct SmartMoneyTabSelector: View {
                 Button {
                     selectedTab = tab
                 } label: {
-                    Text(tab.rawValue)
-                        .font(AppTypography.bodyEmphasis)
+                    HStack(spacing: AppSpacing.xxs) {
+                        Text(tab.rawValue)
+                            .font(AppTypography.bodyEmphasis)
+                        if lockedTabs.contains(tab) {
+                            Image(systemName: "lock.fill")
+                                .font(AppTypography.caption)
+                        }
+                    }
                         .foregroundColor(selectedTab == tab ? AppColors.textPrimary : AppColors.textMuted)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, AppSpacing.sm)
@@ -38,6 +48,7 @@ struct SmartMoneyTabSelector: View {
                         .cornerRadius(AppCornerRadius.medium)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(lockedTabs.contains(tab) ? "\(tab.rawValue), locked" : tab.rawValue)
             }
         }
         .padding(AppSpacing.xs)

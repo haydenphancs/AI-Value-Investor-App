@@ -246,60 +246,67 @@ def test_ios_renders_an_em_dash_not_a_zero_for_a_missing_forecast():
 
 # ── Repurchasing the package must RESTORE, never delete ─────────────────────────────────
 
-def test_the_estimates_card_does_not_suppress_the_ratings_card():
-    """🔴 It did — and that inverted the convention the whole rebuild rests on.
-
-    `fmp_entitlements` advertises buying a package back as "one line … nothing else
-    changes", and `analyst.py` as "flips back to True on its own". But the estimates card
-    was the FIRST arm of an `if/else if` chain and was not conditioned on
-    `sectionAvailable`, so in the post-repurchase state — `sectionAvailable`, `hasCoverage`
-    and `estimatesAvailable` all true, i.e. every covered large cap — the chain
-    short-circuited there and `AnalystRatingsSection` became unreachable. Repurchasing
-    would have DELETED consensus, the price-target range, the momentum chart, the rating
-    distribution and the "More" entry point.
-
-    The two are different datasets and both belong on the tab, so the estimates card is now
-    an additive sibling rendered above the chain rather than a branch inside it.
-
-    Brace-bounded to `body` and comment-stripped — the prose above names every symbol.
-    """
+def _analysis_and_financials_bodies():
+    """Brace-bounded, comment-stripped `body` of the two tab content views."""
     import re
     from pathlib import Path
 
-    view = (
-        Path(__file__).resolve().parents[2]
-        / "frontend/ios/ios/Views/Organisms/TickerAnalysisContent.swift"
-    ).read_text()
-    code = "\n".join(
-        "" if l.strip().startswith("//") else re.sub(r"\s//.*$", "", l)
-        for l in view.splitlines()
+    def body_of(rel):
+        view = (Path(__file__).resolve().parents[2] / rel).read_text()
+        code = "\n".join(
+            "" if l.strip().startswith("//") else re.sub(r"\s//.*$", "", l)
+            for l in view.splitlines()
+        )
+        start = code.index("var body: some View")
+        depth = 0
+        for i in range(code.index("{", start), len(code)):
+            if code[i] == "{":
+                depth += 1
+            elif code[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return code[code.index("{", start):i + 1]
+        raise AssertionError(f"could not bound body in {rel}")
+
+    return (
+        body_of("frontend/ios/ios/Views/Organisms/TickerAnalysisContent.swift"),
+        body_of("frontend/ios/ios/Views/Organisms/TickerFinancialsContent.swift"),
     )
-    start = code.index("var body: some View")
-    depth, body = 0, None
-    for i in range(code.index("{", start), len(code)):
-        if code[i] == "{":
-            depth += 1
-        elif code[i] == "}":
-            depth -= 1
-            if depth == 0:
-                body = code[code.index("{", start):i + 1]
-                break
-    assert body, "could not bound TickerAnalysisContent.body"
 
-    est = body.find("ratingsData.estimatesAvailable")
-    ratings = body.find("AnalystRatingsSection(")
-    assert est != -1 and ratings != -1
 
-    # The estimates block must NOT be an `else if` — that is what made it exclusive.
-    est_line_start = body.rfind("\n", 0, est)
-    est_stmt = body[est_line_start: est]
-    preceding = body[max(0, est_line_start - 120): est_line_start]
+def test_the_estimates_card_lives_under_earnings_and_never_suppresses_the_ratings_chain():
+    """Street Estimates moved from the Analysis tab to the Financials tab under Earnings
+    (TestFlight E9, 2026-09-17); the Analysis slot now holds the Valuation Meter.
+
+    Two invariants carried over from the original pin:
+    * the estimates card is an ADDITIVE SIBLING, never an `else if` arm — as one it made
+      the two datasets mutually exclusive, so repurchasing the analyst package would have
+      DELETED the ratings chain;
+    * it never reads `sectionAvailable`, which guards the zero-default consensus.
+    """
+    analysis, financials = _analysis_and_financials_bodies()
+
+    # Analysis tab: no estimates card, the Valuation Meter in its slot, the ratings chain intact.
+    assert "AnalystForecastsSection(" not in analysis
+    assert "ratingsData.estimatesAvailable" not in analysis
+    meter = analysis.find("ValuationMeterSection(")
+    ratings = analysis.find("AnalystRatingsSection(")
+    assert meter != -1 and ratings != -1 and meter < ratings
+    assert analysis.find("!ratingsData.sectionAvailable") < analysis.find("!ratingsData.hasCoverage")
+
+    # Financials tab: the estimates card sits after Earnings, additive, estimates-gated only.
+    est = financials.find("ratingsData.estimatesAvailable")
+    forecasts = financials.find("AnalystForecastsSection(")
+    earnings = financials.find("EarningsSectionCard(")
+    assert est != -1 and forecasts != -1 and earnings != -1
+    assert earnings < est < forecasts
+    est_line_start = financials.rfind("\n", 0, est)
+    est_stmt = financials[est_line_start: est]
+    preceding = financials[max(0, est_line_start - 120): est_line_start]
     assert "else if" not in preceding.split("\n")[-1] and "else if" not in est_stmt, (
-        "the estimates card is still an `else if` arm, so it suppresses the ratings chain "
-        "whenever it renders — repurchasing the analyst package would delete the ratings card"
+        "the estimates card is an `else if` arm again — mutually exclusive with the card above it"
     )
-    # ...and the ratings section must still be reachable in the same body.
-    assert ratings > est, "AnalystRatingsSection must remain in the body below the estimates card"
+    assert "sectionAvailable" not in financials[est - 200: forecasts]
 
 
 def test_analyst_counts_stay_separate_through_the_boundary():

@@ -136,8 +136,8 @@ struct SentimentInfoSheet: View {
 
                 metricExplanationRow(
                     icon: "newspaper.fill",
-                    title: "News Articles",
-                    description: "Counts recent news coverage. More articles often signal significant events like earnings, acquisitions, or analyst updates."
+                    title: "News Sentiment",
+                    description: "The share of recent articles that read positive or negative. \"Balanced\" means equal bullish and bearish coverage; \"Mixed\" means neither side reaches 30%. More articles often signal significant events like earnings, acquisitions, or analyst updates."
                 )
             }
         }

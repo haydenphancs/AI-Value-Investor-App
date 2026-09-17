@@ -170,14 +170,29 @@ struct SnapshotMetricDTO: Decodable {
     let value: String
 }
 
+/// FMP's discounted-cash-flow value, carried on the valuation ("Price") snapshot only.
+/// Optional end to end: the other four snapshots never carry it and a backend predating
+/// it still decodes. `value` is absent for `negative_cash_flow`.
+struct DcfEstimateDTO: Decodable {
+    let status: String
+    let value: Double?
+    let asOf: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status, value
+        case asOf = "as_of"
+    }
+}
+
 struct SnapshotItemDTO: Decodable {
     let category: String
     let rating: Int
     let metrics: [SnapshotMetricDTO]
     let fullReportAvailable: Bool
+    let dcf: DcfEstimateDTO?
 
     enum CodingKeys: String, CodingKey {
-        case category, rating, metrics
+        case category, rating, metrics, dcf
         case fullReportAvailable = "full_report_available"
     }
 }
@@ -285,7 +300,8 @@ extension StockOverviewResponseDTO {
                 category: category,
                 rating: rating,
                 metrics: metrics,
-                fullReportAvailable: dto.fullReportAvailable
+                fullReportAvailable: dto.fullReportAvailable,
+                dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) }
             )
         }
 

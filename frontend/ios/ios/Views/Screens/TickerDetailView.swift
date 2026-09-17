@@ -298,6 +298,13 @@ struct TickerDetailView: View {
                 }
             }
         }
+        // A plan change (purchase, restore, background profile refresh) must reach the
+        // Holders tab: the Congress segment is server-redacted for Free and the DTO is
+        // cached client-side for 24h. Keyed on `entitlementGeneration`, never `user.tier`
+        // — `user.tier` hydrates from its `.free` default on every session restore.
+        .onChange(of: appState.entitlementGeneration) {
+            Task { await viewModel.refreshHoldersAfterEntitlementChange() }
+        }
         .onChange(of: viewModel.pendingTickerNavigation) { oldValue, newValue in
             if let ticker = newValue {
                 selectedSearchResult = SearchSelection(symbol: ticker, type: "stock")
@@ -352,6 +359,8 @@ struct TickerDetailView: View {
                 analystRatingsData: viewModel.analystRatingsData,
                 sentimentAnalysisData: viewModel.sentimentAnalysisData,
                 technicalAnalysisData: viewModel.technicalAnalysisData,
+                valuationSnapshot: viewModel.valuationSnapshot,
+                currentPrice: viewModel.tickerData?.currentPrice,
                 isAnalystLoaded: viewModel.isAnalystLoaded,
                 isSentimentLoaded: viewModel.isSentimentLoaded,
                 isTechnicalLoaded: viewModel.isTechnicalLoaded,
@@ -366,6 +375,11 @@ struct TickerDetailView: View {
                     showTechnicalAnalysisDetail = true
                 }
             )
+            // Prefetch the indicator readings (RSI, MACD, Stoch, MA levels) so the
+            // Analysis-tab Cay AI chips are grounded on numbers, not only signal words.
+            // Cached in the repository; a no-op once loaded (`fetchTechnicalAnalysisDetail`
+            // guards on its own state).
+            .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
         case .financials:
             TickerFinancialsContent(
                 earningsData: viewModel.earningsData,
@@ -374,6 +388,7 @@ struct TickerDetailView: View {
                 signalOfConfidenceData: viewModel.signalOfConfidenceData,
                 revenueBreakdownData: viewModel.revenueBreakdownData,
                 healthCheckData: viewModel.healthCheckData,
+                analystRatingsData: viewModel.analystRatingsData,
                 isLoaded: viewModel.isFinancialsLoaded,
                 onEarningsDetailTap: viewModel.handleEarningsDetail,
                 onGrowthDetailTap: viewModel.handleGrowthDetail,

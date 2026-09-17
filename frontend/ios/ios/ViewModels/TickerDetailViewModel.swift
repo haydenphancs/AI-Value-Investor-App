@@ -610,6 +610,16 @@ class TickerDetailViewModel: ObservableObject {
         await fetchHolders(tickerSymbol, forceRefresh: true)
     }
 
+    /// Re-fetch holders after the plan changed, keeping the current card on screen.
+    ///
+    /// The repository caches `HoldersResponseDTO` for `CacheTTL.fundamental` (24h), so a
+    /// Free user who upgrades from the Congress stub would otherwise keep the REDACTED
+    /// payload until pull-to-refresh. Unlike `reloadHolders()` this does not flip
+    /// `isHoldersLoaded`, so the tab does not flash its placeholder mid-purchase.
+    func refreshHoldersAfterEntitlementChange() async {
+        await fetchHolders(tickerSymbol, forceRefresh: true)
+    }
+
     private func fetchHolders(_ ticker: String, forceRefresh: Bool = false) async {
         do {
             let dto = try await stockRepository.getHolders(
@@ -1552,6 +1562,12 @@ class TickerDetailViewModel: ObservableObject {
         tickerData?.chartPricePoints ?? []
     }
 
+    /// The Overview's valuation ("Price") snapshot, re-used by the Analysis tab's
+    /// Valuation Meter so both tabs show ONE rating. nil until the overview lands.
+    var valuationSnapshot: SnapshotItem? {
+        tickerData?.snapshots.first { $0.category == .price }
+    }
+
     /// Whether `aiSuggestions` is falling through to the generic default set.
     ///
     /// The four tab-specific sets below are hand-written for what that tab shows and are
@@ -1576,10 +1592,16 @@ class TickerDetailViewModel: ObservableObject {
                 TickerAISuggestion(text: "Is revenue growing?")
             ]
         case .analysis:
+            // Every chip must be answerable from data the STOCK chat actually holds:
+            // the sentiment tool, the technical readings in `analysisContext`, and the
+            // key-stats / valuation lines in the base context. The old set asked for
+            // grades, price targets and upgrades — endpoints outside the FMP licence —
+            // so three of four chips invited a question Cay AI is told to refuse
+            // (TestFlight, build 1.0 (8)).
             return [
-                TickerAISuggestion(text: "What do analysts say?"),
-                TickerAISuggestion(text: "What's the price target?"),
-                TickerAISuggestion(text: "Any recent upgrades?"),
+                TickerAISuggestion(text: "What's the market mood?"),
+                TickerAISuggestion(text: "Is it overbought or oversold?"),
+                TickerAISuggestion(text: "Is it fairly valued?"),
                 TickerAISuggestion(text: "Technical outlook?")
             ]
         case .news:
@@ -1661,7 +1683,8 @@ class TickerDetailViewModel: ObservableObject {
         return parts.isEmpty ? nil : parts.joined(separator: ". ")
     }
 
-    /// Analysis tab context — analyst ratings, price targets, technicals
+    /// Analysis tab context — technicals (with the indicator readings when loaded) and
+    /// analyst ratings only while licensed.
     private var analysisContext: String? {
         var parts: [String] = []
 
@@ -1673,7 +1696,64 @@ class TickerDetailViewModel: ObservableObject {
         }
 
         if let ta = technicalAnalysisData {
-            parts.append("Technical: Daily \(ta.dailySignal.signal.rawValue), Weekly \(ta.weeklySignal.signal.rawValue), Overall \(ta.overallSignal.rawValue)")
+            parts.append("Technical: Daily \(ta.dailySignal.signal.rawValue) (\(ta.dailySignal.matchingIndicators) of \(ta.dailySignal.totalIndicators) indicators), Weekly \(ta.weeklySignal.signal.rawValue), Overall \(ta.overallSignal.rawValue)")
+        }
+
+        // The indicator READINGS — RSI(14), MACD, Stochastic, the moving-average levels —
+        // so "Is it overbought or oversold?" is answered from numbers, not from a signal
+        // word. Prefetched when the Analysis tab appears; a null value is omitted rather
+        // than grounded as 0.
+        if let detail = technicalAnalysisDetailData {
+            let readings = detail.oscillators.compactMap { osc -> String? in
+                guard let v = osc.value else { return nil }
+                return "\(osc.name) \(String(format: "%.2f", v)) (\(osc.signal.rawValue))"
+            }
+            if !readings.isEmpty {
+                parts.append("Daily oscillators: " + readings.joined(separator: ", "))
+            }
+            let mas = detail.movingAverages.compactMap { ma -> String? in
+                guard let v = ma.value else { return nil }
+                return "\(ma.name) \(String(format: "%.2f", v)) (\(ma.signal.rawValue))"
+            }
+            if !mas.isEmpty {
+                parts.append("Daily moving averages: " + mas.joined(separator: ", "))
+            }
+        }
+
+        // Valuation — the multiples-vs-sector rating the Valuation Meter shows and, when
+        // FMP has a model, the DCF value with its gap to the live price, labelled as a
+        // model so "Is it fairly valued?" is answered with the same caveats the card shows.
+        if let snapshot = valuationSnapshot {
+            // Only measured values: an unavailable rating (0) and "—" / "N/A" multiples
+            // would otherwise ground the model on placeholder glyphs.
+            let multiples = snapshot.metrics
+                .filter { !["—", "N/A", "--", ""].contains($0.value) }
+                .map { "\($0.name): \($0.value)" }
+            if snapshot.rating != .unavailable || !multiples.isEmpty {
+                var line = snapshot.rating != .unavailable
+                    ? "Valuation vs sector peers: \(ValuationMeter.label(for: snapshot.rating))"
+                    : "Valuation vs sector peers: rating unavailable"
+                if !multiples.isEmpty {
+                    line += " (" + multiples.joined(separator: "; ") + ")"
+                }
+                parts.append(line)
+            }
+            if let dcf = snapshot.dcf {
+                switch dcf.status {
+                case .ok:
+                    var dcfLine = "DCF model value (FMP discounted cash flow, an intrinsic-value estimate — not a price target)"
+                    if let v = dcf.formattedValue { dcfLine += ": \(v)" }
+                    if let gap = dcf.formattedGap(versus: tickerData?.currentPrice) { dcfLine += ", \(gap)" }
+                    if dcf.needsCaveat(versus: tickerData?.currentPrice) {
+                        dcfLine += " — the model extrapolates past free cash flow, so fast growers trade far above it"
+                    }
+                    parts.append(dcfLine)
+                case .negativeCashFlow:
+                    parts.append("DCF model value: none — negative free cash flow")
+                case .unavailable:
+                    break
+                }
+            }
         }
 
         return parts.isEmpty ? nil : parts.joined(separator: ". ")
@@ -1834,7 +1914,11 @@ class TickerDetailViewModel: ObservableObject {
         parts.append(flowLine("Insider", data.insiderData.summary))
         // `hedgeFundsData` = FMP 13F institutional ownership; UI label "Institutions".
         parts.append(flowLine("Institutional", data.hedgeFundsData.summary))
-        parts.append(flowLine("Congress", data.congressData.summary))
+        // Congress is Pro/Max: on Free the server withheld the series, and narrating the
+        // zeroed summary would tell Cay AI "$0 (Neutral)" as if it were measured.
+        if !data.isCongressLocked {
+            parts.append(flowLine("Congress", data.congressData.summary))
+        }
 
         return parts.joined(separator: ". ")
     }

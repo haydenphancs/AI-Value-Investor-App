@@ -290,7 +290,7 @@ class _FakeFMP:
         await asyncio.sleep(0)  # force a real await so dedup has a window
         return {"price": 101.0, "changesPercentage": 1.23, "previousClose": 100.0}
 
-    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+    async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None, extended=False):
         self.intraday_calls += 1
         self.intraday_extended_hours[ticker] = None  # set by fetch_chart_data caller
         await asyncio.sleep(0)

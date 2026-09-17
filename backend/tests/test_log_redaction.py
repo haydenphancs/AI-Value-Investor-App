@@ -240,3 +240,41 @@ def test_logging_filter_leaves_clean_records_untouched():
     f.filter(rec)
     assert rec.getMessage() == "cache hit for ticker=AAPL"
     assert rec.args == ("AAPL",), "args must not be flattened when nothing changed"
+
+
+# ── request headers ──────────────────────────────────────────────────────────
+
+
+def test_scrub_sentry_event_redacts_credential_request_headers():
+    """sentry-sdk only masks Authorization/Cookie/X-Api-Key/X-Forwarded-For/X-Real-IP. The
+    marketing worker's shared secret and the admin token travel in custom headers, so a
+    request-scoped `logger.error` used to store them in the clear."""
+    from app.log_redaction import scrub_sentry_event
+
+    event = {
+        "request": {
+            "url": "https://api.example/api/v1/internal/marketing/runs/claim",
+            "headers": {
+                "X-Marketing-Worker-Token": "s3cret-worker-token",
+                "x-admin-token": "adm1n",
+                "Authorization": "Bearer abc",
+                "apikey": "sb_secret_xyz",
+                "X-Widget-Token": "w1dget",
+                "Content-Type": "application/json",
+                "User-Agent": "caydex-marketing-worker",
+            },
+        }
+    }
+    out = scrub_sentry_event(event)
+    h = out["request"]["headers"]
+    for k in ("X-Marketing-Worker-Token", "x-admin-token", "Authorization", "apikey", "X-Widget-Token"):
+        assert h[k] == "[redacted]", k
+    assert h["Content-Type"] == "application/json" and h["User-Agent"] == "caydex-marketing-worker"
+
+
+def test_scrub_sentry_event_tolerates_events_without_request_headers():
+    from app.log_redaction import scrub_sentry_event
+
+    assert scrub_sentry_event({"message": "x"})["message"] == "x"
+    assert scrub_sentry_event({"request": {"headers": None}})["request"]["headers"] is None
+    assert scrub_sentry_event({"request": "not a dict"})["request"] == "not a dict"

@@ -32,7 +32,8 @@ struct TickerHoldersContent: View {
             // Recent Activities Section
             RecentActivitiesSection(
                 data: holdersData.recentActivities,
-                initialTab: initialActivitiesTab
+                initialTab: initialActivitiesTab,
+                isCongressLocked: holdersData.isCongressLocked
             )
 
             // Bottom spacing for AI bar

@@ -30,6 +30,25 @@ class SnapshotMetricResponse(BaseModel):
     score: Optional[int] = None
 
 
+class DcfEstimateResponse(BaseModel):
+    """FMP's discounted-cash-flow value for the Analysis tab's Valuation Meter.
+
+    An INTRINSIC-VALUE estimate as of `as_of` — the present value of FMP's projected
+    free cash flows at a generic cost of capital — never a price forecast. It is a
+    mechanical single-stage model on trailing cash flow, so it reads far below price on
+    fast growers (AAPL 135.83 vs 332.41, TER 43.73 vs 341.15 on 2026-09-17); iOS shows it
+    as a labelled model value with a caveat past ±50%, and computes the gap against the
+    LIVE header price (the snapshot is cached 24h, so no gap is sent on the wire).
+
+    `status`: "ok" (value present), "negative_cash_flow" (FMP's model is ≤ 0 — a
+    loss-maker like PLUG; no value is sent and iOS explains why). A missing model is
+    simply an absent `dcf` on the snapshot.
+    """
+    status: str = "ok"
+    value: Optional[float] = None
+    as_of: Optional[str] = None
+
+
 class SnapshotItemResponse(BaseModel):
     category: str          # "Profitability", "Growth", "Price", "Financial Health", "Insiders & Ownership"
     rating: int            # 0 = unavailable, 1-5 mapping to Swift SnapshotRatingLevel
@@ -39,6 +58,9 @@ class SnapshotItemResponse(BaseModel):
     # 0-10 factor so the card's industry-relative score drives the final per-persona
     # score. Optional/back-compat: None on legacy cached snapshots; iOS ignores it.
     weighted_score: Optional[float] = None
+    # Only the "Price" (valuation) snapshot fills this; Optional on the wire and in Swift
+    # (shipped builds and the other four snapshot categories never carry it).
+    dcf: Optional[DcfEstimateResponse] = None
 
 
 class SectorIndustryResponse(BaseModel):

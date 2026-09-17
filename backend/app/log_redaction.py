@@ -94,9 +94,35 @@ def scrub_sentry_event(event: dict, _hint: Any = None) -> dict:
                     b["message"] = redact_secrets(b["message"])
 
         _scrub_request_body(event)
+        _scrub_request_headers(event)
     except Exception:
         pass
     return event
+
+
+# Request headers that carry a credential. sentry-sdk's own SENSITIVE_HEADERS list covers
+# Authorization / Cookie / X-Api-Key / X-Forwarded-For / X-Real-IP and nothing else, so a
+# custom header — the marketing worker's shared secret, the admin token, the widget token if
+# it ever travels as a header — would be stored in the clear on every request-scoped
+# `logger.error`. Exact names first, then a substring pass for anything token-shaped.
+_CREDENTIAL_HEADERS = {
+    "x-marketing-worker-token", "x-admin-token", "authorization", "apikey", "x-api-key",
+    "x-guest-id", "cookie", "set-cookie",
+}
+_CREDENTIAL_HEADER_FRAGMENTS = ("token", "secret", "apikey", "api-key", "api_key", "password")
+
+
+def _scrub_request_headers(event: dict) -> None:
+    req = event.get("request")
+    if not isinstance(req, dict):
+        return
+    headers = req.get("headers")
+    if not isinstance(headers, dict):
+        return
+    for key in list(headers):
+        k = str(key).lower()
+        if k in _CREDENTIAL_HEADERS or any(f in k for f in _CREDENTIAL_HEADER_FRAGMENTS):
+            headers[key] = "[redacted]"
 
 
 # Body keys that must never reach Sentry in the clear. Matched case-insensitively against

@@ -45,7 +45,18 @@ from app.schemas.stock_overview import (
     StockOverviewResponse,
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
-from app.utils.market_hours import market_status_fields
+from app.utils.market_hours import (
+    SESSION_AFTERHOURS,
+    SESSION_CLOSED,
+    SESSION_PREMARKET,
+    SESSION_REGULAR,
+    market_status_fields,
+    previous_trading_day,
+    session_phase,
+    session_trading_date,
+)
+from app.integrations.fmp_entitlements import is_blocked_symbol
+from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
 
@@ -270,10 +281,101 @@ def _parse_historical(hist_raw) -> List[Dict]:
         historical = hist_raw.get("historical", [])
     elif isinstance(hist_raw, list):
         historical = hist_raw
+    # A malformed payload (`{"historical": "..."}`, or rows that are not dicts) used to
+    # raise here — `.sort` on a str, `.get` on a str — and 502 the whole overview.
+    if not isinstance(historical, list):
+        return []
+    historical = [p for p in historical if isinstance(p, dict)]
     # `date` may be an explicit JSON null (not just absent); `or ""` avoids a
     # None<str TypeError when sorting a malformed FMP row.
     historical.sort(key=lambda p: p.get("date") or "")
     return historical
+
+
+# ── Session Open / Day High / Day Low ─────────────────────────────
+#
+# `/stable/quote` is outside the licence, and the profile-backed quote row that replaced
+# it (`PriceService._shape`) carries no `open` / `dayHigh` / `dayLow` — so the three Key
+# Statistics rows read "—" for every stock, all day (TestFlight, build 1.0 (8): AAPL at
+# 20:09, after the close). Both entitled sources are used here:
+#   * the EOD row for the session (`historical-price-eod/full`; probed 2026-09-16 22:17
+#     ET: today's row is present after the close with open/high/low/close/volume), and
+#   * the session's own 5-minute bars (regular hours only) while it is live.
+# Which session: the one `price` / `previousClose` already describe — today during the
+# regular session and after hours, the LAST COMPLETED session in pre-market and while
+# closed (a Saturday reads Friday's range beside Friday's close). A T-1 row must never be
+# printed under today's labels: `chat_service._day_range` documents that gate too.
+
+_OHL_LOOKBACK_DAYS = 7
+
+
+def _ohl_fields(
+    open_: Any, high: Any, low: Any, *, ticker: str = "", source: str = ""
+) -> Dict[str, float]:
+    """The quote keys `_build_key_statistics` reads, from raw values — only the ones that
+    survive: finite, positive, and mutually consistent. ABSENT when unknown, never 0.0 —
+    the index screen once rendered `Open 0.00` as a fact from exactly that default."""
+    o, h, l = _finite(open_), _finite(high), _finite(low)
+    o = o if (o is not None and o > 0) else None
+    h = h if (h is not None and h > 0) else None
+    l = l if (l is not None and l > 0) else None
+    if h is not None and l is not None and l > h:
+        logger.info("[ohl-inconsistent] %s %s: low %.4f > high %.4f — range dropped",
+                    ticker, source, l, h)
+        h = l = None
+    if o is not None and h is not None and l is not None and not (l <= o <= h):
+        logger.info("[ohl-inconsistent] %s %s: open %.4f outside [%.4f, %.4f] — open dropped",
+                    ticker, source, o, l, h)
+        o = None
+    out: Dict[str, float] = {}
+    if o is not None:
+        out["open"] = o
+    if h is not None:
+        out["dayHigh"] = h
+    if l is not None:
+        out["dayLow"] = l
+    return out
+
+
+def _session_ohl_from_eod(rows: Any, session_iso: str, *, ticker: str = "") -> Dict[str, float]:
+    """Open/high/low from the EOD row dated exactly ``session_iso``, else ``{}``."""
+    hist = _parse_historical(rows) if isinstance(rows, (list, dict)) else []
+    last = hist[-1] if hist else None
+    if not isinstance(last, dict):
+        return {}
+    if str(last.get("date") or "")[:10] != session_iso:
+        return {}
+    return _ohl_fields(last.get("open"), last.get("high"), last.get("low"),
+                       ticker=ticker, source="eod")
+
+
+def _session_ohl_from_bars(bars: Any, session_iso: str, *, ticker: str = "") -> Dict[str, float]:
+    """Open/high/low of ``session_iso``'s REGULAR-HOURS bars, else ``{}``.
+
+    Regular hours only: with Extended Hours on, the bars in hand start at 04:00 ET and
+    the 04:00 print is not the session's Open. Daily rows (no time of day) are ignored —
+    they are the EOD source's job."""
+    from app.services.chart_helper import _filter_regular_hours
+
+    if not isinstance(bars, list):
+        return {}
+    same_day = [
+        b for b in bars
+        if isinstance(b, dict)
+        and len(str(b.get("date") or "")) > 10
+        and str(b.get("date"))[:10] == session_iso
+    ]
+    regular = sorted(_filter_regular_hours(same_day), key=lambda b: b.get("date") or "")
+    if not regular:
+        return {}
+    highs = [v for v in (_finite(b.get("high")) for b in regular) if v is not None and v > 0]
+    lows = [v for v in (_finite(b.get("low")) for b in regular) if v is not None and v > 0]
+    return _ohl_fields(
+        regular[0].get("open"),
+        max(highs) if highs else None,
+        min(lows) if lows else None,
+        ticker=ticker, source="bars",
+    )
 
 
 def _extract_chart_data(prices: List[Dict], chart_range: str) -> List[Dict]:
@@ -355,7 +457,13 @@ class StockOverviewService:
         from app.services.health_snapshot_service import get_health_snapshot_service
         from app.services.ownership_snapshot_service import get_ownership_snapshot_service
         fund_task = self._get_fundamentals(ticker)
-        vol_task = self._get_volatile(ticker, chart_range, interval, extended_hours)
+        # A Task (not a bare coroutine) so the session-range fetch below can await the
+        # SAME volatile result — reusing the 1D/1W bars already in hand — while the
+        # gather still runs everything concurrently.
+        vol_task = asyncio.ensure_future(
+            self._get_volatile(ticker, chart_range, interval, extended_hours)
+        )
+        ohl_task = self._get_session_ohl(ticker, volatile=vol_task)
         sector_perf_task = get_market_movers_service().get_sector_performance()
         industry_perf_task = get_market_movers_service().get_industry_performance()
         prof_task = get_profitability_snapshot_service().get_profitability_snapshot(ticker)
@@ -363,8 +471,8 @@ class StockOverviewService:
         val_task = get_valuation_snapshot_service().get_valuation_snapshot(ticker)
         health_task = get_health_snapshot_service().get_health_snapshot(ticker)
         ownership_task = get_ownership_snapshot_service().get_ownership_snapshot(ticker)
-        fundamentals, volatile, live_sector_perf, live_industry_perf, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot = await asyncio.gather(
-            fund_task, vol_task, sector_perf_task, industry_perf_task, prof_task, growth_task, val_task, health_task, ownership_task, return_exceptions=True,
+        fundamentals, volatile, live_sector_perf, live_industry_perf, prof_snapshot, growth_snapshot, val_snapshot, health_snapshot, ownership_snapshot, session_ohl = await asyncio.gather(
+            fund_task, vol_task, sector_perf_task, industry_perf_task, prof_task, growth_task, val_task, health_task, ownership_task, ohl_task, return_exceptions=True,
         )
         # `fundamentals` and `volatile` are load-bearing (dict-mutated + price
         # source below). With return_exceptions=True a failed FMP fan-out returns
@@ -378,6 +486,11 @@ class StockOverviewService:
         if isinstance(volatile, Exception):
             logger.error(f"Volatile (quote/chart) fetch failed for {ticker}: {type(volatile).__name__}: {volatile}")
             raise volatile
+        # Session Open / Day High / Day Low, merged into a NEW dict: `price_service`
+        # caches the quote row by reference and ~20 call sites share it. `_get_session_ohl`
+        # never raises, but `return_exceptions=True` makes the isinstance check free.
+        if isinstance(session_ohl, dict) and session_ohl and isinstance(volatile.get("quote"), dict):
+            volatile = {**volatile, "quote": {**volatile["quote"], **session_ohl}}
         # Override cached sector/industry perf with fresh data
         if not isinstance(live_sector_perf, Exception) and isinstance(live_sector_perf, list) and live_sector_perf:
             fundamentals["sector_perf"] = live_sector_perf
@@ -839,6 +952,78 @@ class StockOverviewService:
             chart_data = None  # Will be sliced from fundamental stock_historical (full path)
 
         return {"quote": quote, "chart_data": chart_data}
+
+    # ── Session Open / Day High / Day Low ─────────────────────────
+
+    async def _get_session_ohl(
+        self,
+        ticker: str,
+        volatile: Optional["asyncio.Future"] = None,
+        chart_data: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, float]:
+        """`{open, dayHigh, dayLow}` for the session the header price describes, else ``{}``.
+
+        Never raises — the overview re-raises a failed volatile gather, and three
+        stat rows are not worth the screen. Sources, in order:
+          1. the intraday bars the overview already fetched (``volatile`` / ``chart_data``)
+             when the session is live — no extra call;
+          2. the session's EOD row (``historical-price-eod/full``, ≤7-day window, date-gated);
+          3. one single-day 5-minute fetch while the session is live and FMP has not yet
+             written the EOD row.
+        A legitimate ``{}`` (pre-open, no bars yet) is cached like a hit; a failure is not.
+        """
+        sym = (ticker or "").upper()
+        if not sym or is_blocked_symbol(sym) or uses_coingecko_price(sym):
+            return {}
+        key = f"stock_ohl:{sym}"
+        hit = _cache_get(key, ttl=_VOLATILE_TTL)
+        if hit is not None:
+            return hit
+
+        try:
+            phase = session_phase()
+            session = session_trading_date()
+            # `session_trading_date()` flips to today at 04:00 ET (pre-market), but the
+            # numbers on screen still describe the LAST COMPLETED session until 09:30.
+            target = previous_trading_day(session) if phase == SESSION_PREMARKET else session
+            target_iso = target.isoformat()
+            # The bars in hand (and the single-day rescue below) describe TODAY's
+            # session; pre-market and a weekend describe an earlier one. `target ==
+            # session` is that test — not the phase, which reads `closed` on a half-day
+            # afternoon and after 20:00 while the session's own bars still exist.
+            describes_todays_session = target == session
+
+            bars = chart_data
+            if bars is None and volatile is not None:
+                try:
+                    vol = await volatile
+                    bars = vol.get("chart_data") if isinstance(vol, dict) else None
+                except Exception:
+                    bars = None   # the overview reports that failure itself
+
+            result: Dict[str, float] = {}
+            if describes_todays_session and bars:
+                result = _session_ohl_from_bars(bars, target_iso, ticker=sym)
+            if not result:
+                frm = (target - timedelta(days=_OHL_LOOKBACK_DAYS)).isoformat()
+                rows = await self.fmp.get_historical_prices(sym, frm, target_iso)
+                result = _session_ohl_from_eod(rows, target_iso, ticker=sym)
+            # The single-day rescue applies whenever the numbers on screen describe
+            # TODAY's session and FMP has not written its EOD row yet — not only while
+            # the phase is live: on a half-day afternoon `session_phase()` is already
+            # `closed` while `session_trading_date()` is today, and the same gap exists
+            # after 20:00 until the row lands.
+            if not result and describes_todays_session:
+                fresh = await self.fmp.get_intraday_prices(
+                    sym, interval="5min", from_date=target_iso, to_date=target_iso
+                )
+                result = _session_ohl_from_bars(fresh, target_iso, ticker=sym)
+            _cache_set(key, result)
+            return result
+        except Exception as e:
+            logger.warning("[ohl-unavailable] %s: %s: %s — Open / Day High / Day Low read "
+                           "as unknown for this request", sym, type(e).__name__, e)
+            return {}
 
     # ── Build full response from both data sources ────────────────
 

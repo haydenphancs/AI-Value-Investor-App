@@ -610,12 +610,17 @@ def test_every_type_drawn_in_a_diagram_is_declared(sym: str) -> None:
     )
 
 
+# The sub-packages a diagram may draw a module from. `agents/` is the research pipeline;
+# `marketing/` is the web-side half of the marketing engine (§12, 2026-09-17).
+_SERVICE_SUBPACKAGES = ("", "agents", "marketing")
+
+
 @pytest.mark.parametrize("mod", sorted(set(_DIAGRAM_MODULE_RE.findall(_doc_text()))))
 def test_every_backend_module_drawn_in_a_diagram_exists(mod: str) -> None:
     services = _BACKEND / "app" / "services"
-    assert (services / f"{mod}.py").exists() or (services / "agents" / f"{mod}.py").exists(), (
+    assert any((services / sub / f"{mod}.py").exists() for sub in _SERVICE_SUBPACKAGES), (
         f"SYSTEM_DESIGN_GUIDELINES.md draws `{mod}` as a backend module; there is no "
-        f"app/services/{mod}.py or app/services/agents/{mod}.py"
+        f"app/services/{{,agents/,marketing/}}{mod}.py"
     )
 
 

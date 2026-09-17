@@ -107,3 +107,41 @@ def test_the_not_tracked_copy_still_exists_for_a_measured_zero():
     src = _strip(row.read_text(encoding="utf-8"))
     assert "Not tracked on Reddit" in src
 
+
+
+# ── News Sentiment tile: a tie has no lean (TestFlight E6, build 1.0 (8)) ────
+#
+# A 2/2/2 split used to fall through `bullishRatio >= bearishRatio` and print
+# "33% Positive". The tie is now an INTEGER comparison checked after the zero guard
+# (0/0/0 stays "N/A") and before the Mixed band; dominance is strict.
+
+def _news_label_body() -> str:
+    src = _strip(_MODELS.read_text(encoding="utf-8"))
+    struct = _block(src, r"struct SentimentAnalysisData\s*")
+    body = _block(struct, r"func formattedNewsArticles\(for timeframe: SentimentTimeframe\)")
+    assert len(body) < len(struct) / 4, "scan is not bounded to the label function"
+    return body
+
+
+def test_news_label_breaks_a_tie_on_integer_counts_before_dominance():
+    body = _news_label_body()
+    assert "bullish == bearish" in body
+    assert '"Balanced"' in body
+    assert body.index("bullish == bearish") < body.index("% Positive")
+    assert "bullishRatio >= bearishRatio" not in body, "a tie must not resolve to Positive"
+    assert "bullishRatio > bearishRatio" in body
+
+
+def test_news_label_keeps_na_for_zero_articles_ahead_of_the_tie():
+    body = _news_label_body()
+    assert 'if total == 0 { return "N/A" }' in body
+    assert body.index('"N/A"') < body.index("bullish == bearish"), "0/0/0 would read Balanced"
+
+
+def test_the_tie_word_is_explained_in_the_info_sheet_and_crypto_shares_the_reader():
+    sheet = _strip((_IOS / "Views" / "Molecules" / "SentimentInfoSheet.swift").read_text(encoding="utf-8"))
+    assert "Balanced" in sheet and "equal bullish and bearish" in sheet
+    crypto_vm = _strip((_IOS / "ViewModels" / "CryptoDetailViewModel.swift").read_text(encoding="utf-8"))
+    assert "sentimentAnalysisData = dto.toDisplayModel()" in crypto_vm, "crypto no longer maps into the shared model"
+    row = _strip((_IOS / "Views" / "Molecules" / "SentimentMetricsRow.swift").read_text(encoding="utf-8"))
+    assert "formattedNewsArticles(for:" in row, "the tile no longer reads the shared label"

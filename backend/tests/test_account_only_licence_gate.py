@@ -50,6 +50,9 @@ _PATH_SAMPLE = {
     "ticker": "AAPL", "symbol": "AAPL", "slug": "x", "content_type": "book_core",
     "report_id": "00000000-0000-0000-0000-000000000000", "session_id": "s",
     "whale_id": "w", "group_id": "g", "alert_id": "a", "portfolio_id": "p", "kind": "k",
+    # marketing worker API (design doc §12) — gated by X-Marketing-Worker-Token, never open
+    "run_id": "00000000-0000-0000-0000-000000000000",
+    "asset_id": "00000000-0000-0000-0000-000000000000",
 }
 
 # ── THE ALLOW-LIST ───────────────────────────────────────────────────────────────────
@@ -90,6 +93,8 @@ _MUST_BE_401_PREFIXES = (
     "/api/v1/whales", "/api/v1/watchlist", "/api/v1/tracking", "/api/v1/portfolios",
     "/api/v1/learn", "/api/v1/chat", "/api/v1/research", "/api/v1/users",
     "/api/v1/alerts",
+    # the marketing worker API: no credential → 401 AUTH_REQUIRED, never 403 (auth.md §2)
+    "/api/v1/internal",
 )
 
 

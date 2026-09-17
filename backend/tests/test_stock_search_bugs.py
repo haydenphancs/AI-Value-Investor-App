@@ -157,6 +157,55 @@ async def test_major_coins_survive_a_ticker_collision(monkeypatch, coin, equity_
     )
 
 
+def _ios_search_result_id(row) -> str:
+    """Python re-implementation of `StockSearchResult.id` (StockRepository.swift):
+    `"\\(ticker)_\\(type ?? "stock")"` — `ticker` decodes from `symbol`; ONLY a nil type
+    defaults. The Swift side is pinned by tests/test_ios_search_result_identity.py; keep
+    the two in step."""
+    return f"{row.symbol}_{row.type if row.type is not None else 'stock'}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coin,equity_name,equity_exchange_full,expected_equity_type", [
+    ("BTC", "Grayscale Bitcoin Mini Trust", "NYSE American", "etf"),
+    ("ETH", "Grayscale Ethereum Mini Trust", "NYSE American", "etf"),
+    ("SOL", "Emeren Group Ltd", "NYSE", "stock"),
+])
+async def test_a_ticker_collision_is_two_rows_the_ios_identity_can_tell_apart(
+    monkeypatch, coin, equity_name, equity_exchange_full, expected_equity_type
+):
+    """The twin rows the carve-out above produces must be exactly two, with DIFFERENT
+    types — because that type is what the iOS `Identifiable` id is built from.
+
+    THE BUG (2026-09-17, reproduced on the simulator): `StockSearchResult.id` was the bare
+    ticker, so the coin and the ETF were ONE `ForEach` child. SwiftUI drew the ETF row as
+    an empty slot and routed the tap on "BTC · Bitcoin · CRYPTO" to the ETF screen. The
+    fix is on the iOS side (id = symbol + type); this test pins the backend half of the
+    contract: a second stock-side path that ever emitted two rows of the SAME type for one
+    symbol would collide again, and nothing else would notice.
+    """
+    class _Stub:
+        async def search_stocks(self, q, limit):
+            return [_row(coin, equity_name, "AMEX", equity_exchange_full)]
+
+    monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: _Stub())
+    out = await stocks_module.search_stocks(q=coin, limit=10)
+
+    twins = [r for r in out if r.symbol == coin]
+    assert [r.type for r in twins] == ["crypto", expected_equity_type], twins
+    assert len({(r.symbol, r.type) for r in out}) == len(out), (
+        "(symbol, type) must be unique across the whole response — keyed on the RAW symbol, "
+        "which is what the iOS id reads (the handler's stock dedup is case-exact too)"
+    )
+    ids = [_ios_search_result_id(r) for r in out]
+    assert len(ids) == len(set(ids)), (
+        f"iOS Identifiable ids collide: {ids} — SwiftUI renders duplicate ForEach ids as an "
+        "empty row and routes the tap to the wrong twin (BTC → ETF screen)"
+    )
+    # The bug's shape, so this is not vacuous: the OLD bare-symbol identity DID collide.
+    assert len({r.symbol for r in out}) < len(out)
+
+
 @pytest.mark.asyncio
 async def test_non_exact_crypto_is_still_dropped_when_an_equity_owns_the_ticker(monkeypatch):
     """The carve-out is EXACT-match only — the original shadowing guard still holds.

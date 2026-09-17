@@ -179,8 +179,20 @@ check(TradingDayHelper.window(for: .stock) == .regular, "stock → 09:30-16:00")
 check(TradingDayHelper.window(for: .etf) == .regular, "etf → 09:30-16:00")
 check(TradingDayHelper.window(for: .index) == .regular, "index → 09:30-16:00")
 check(TradingDayHelper.window(for: .crypto) == .roundTheClock, "crypto → 00:00-24:00")
-check(TradingDayHelper.window(for: .commodity) == .roundTheClock, "commodity → 00:00-24:00")
+check(TradingDayHelper.window(for: .commodity) == .regular, "commodity → 09:30-16:00 (Phase 4: ETF-backed)")
 check(TradingDayHelper.SessionWindow.regular.length == 390, "regular session is 390 minutes")
+
+// Extended Hours (TestFlight E1): the toggle widens the equity bell to 04:00-20:00,
+// and only the bell — a 24/7 asset is never re-windowed by it.
+check(TradingDayHelper.SessionWindow.extended.openMinute == 240
+      && TradingDayHelper.SessionWindow.extended.closeMinute == 1200, "extended is 04:00-20:00")
+check(TradingDayHelper.SessionWindow.extended.length == 960, "extended session is 960 minutes")
+check(TradingDayHelper.window(for: .stock, extendedHours: true) == .extended, "stock + ext → 04:00-20:00")
+check(TradingDayHelper.window(for: .stock, extendedHours: false) == .regular, "stock w/o ext → bell")
+check(TradingDayHelper.window(for: .crypto, extendedHours: true) == .roundTheClock,
+      "a 24/7 asset is never re-windowed by the toggle")
+check(TradingDayHelper.window(for: .etf, extendedHours: true) == .extended,
+      "the overload is per-window, not per-asset; the ETF gate lives in supportsExtendedHours")
 
 func pts(_ times: [String]) -> [StockPricePoint] {
     times.map { StockPricePoint(date: "2026-08-13 \($0):00", close: 100) }
@@ -225,6 +237,19 @@ check(dayLabels != bellLabels, "the 24h axis is captioned differently from the e
 check(Set(dayLabels).count == 3, "24h axis wraps: first and last labels coincide, interior spans the day")
 check(Set(bellLabels).count == 4, "equity axis labels are all distinct")
 check(TradingDayHelper.sessionTimeLabels(count: 1).isEmpty, "a single label is meaningless → []")
+
+print("TradingDayHelper — extended window fractions and labels")
+let ext = TradingDayHelper.timeFractions(for: pts(["04:00", "09:30", "13:00", "16:00", "19:55"]), window: .extended)
+check(near(ext[0], 0), "04:00 is the extended session start")
+check(near(ext[1], CGFloat(330.0 / 960.0)), "09:30 sits at 34.375% of the extended axis")
+check(near(ext[2], CGFloat(540.0 / 960.0)), "13:00 (a half-day close) sits at 56.25% — the window is fixed")
+check(near(ext[3], CGFloat(720.0 / 960.0)), "16:00 sits at 75% of the extended axis")
+check(near(ext[4], CGFloat(955.0 / 960.0)), "19:55 is the last extended bar")
+check(TradingDayHelper.timeFractions(for: pts(["03:55"]), window: .extended) == [0],
+      "a bar before 04:00 still clamps to the left edge")
+let extLabels = TradingDayHelper.sessionTimeLabels(count: 4, window: .extended)
+check(extLabels.count == 4 && Set(extLabels).count == 4, "extended axis emits 4 distinct labels")
+check(extLabels != bellLabels, "the extended axis is captioned differently from the bell")
 
 print(failures == 0 ? "\nAll sparkline-geometry assertions hold." : "\n\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)

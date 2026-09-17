@@ -12,6 +12,10 @@ struct ShareholderBreakdownBar: View {
     let insidersPercent: Double
     let institutionsPercent: Double
     let publicOtherPercent: Double
+    /// The institutional figure is unknown (0.0 placeholder). The bar then normalises
+    /// by 100 instead of the segment sum — otherwise a lone 0.1% insider slice would
+    /// stretch into a full orange bar — and fills the remainder with a muted tint.
+    var institutionsUnknown: Bool = false
 
     // Configuration
     private let barHeight: CGFloat = 14
@@ -40,6 +44,14 @@ struct ShareholderBreakdownBar: View {
                         .fill(HoldersColors.publicOther)
                         .frame(width: segmentWidth(for: publicOtherPercent, totalWidth: geometry.size.width))
                 }
+
+                // Unknown remainder: muted, so the bar reads "not measured" rather than
+                // drawing the insider slice as if it were the whole float.
+                if institutionsUnknown {
+                    Rectangle()
+                        .fill(HoldersColors.publicOther.opacity(0.35))
+                        .frame(maxWidth: .infinity)
+                }
             }
             .frame(height: barHeight)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
@@ -48,9 +60,11 @@ struct ShareholderBreakdownBar: View {
     }
 
     private func segmentWidth(for percent: Double, totalWidth: CGFloat) -> CGFloat {
-        let total = insidersPercent + institutionsPercent + publicOtherPercent
+        let total = institutionsUnknown
+            ? 100.0
+            : insidersPercent + institutionsPercent + publicOtherPercent
         guard total > 0 else { return 0 }
-        return (percent / total) * totalWidth
+        return (min(percent, total) / total) * totalWidth
     }
 }
 

@@ -723,6 +723,7 @@ class FMPClient:
         interval: str = "5min",
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        extended: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Get intraday price data at the specified interval.
@@ -732,6 +733,13 @@ class FMPClient:
             interval: One of "1min", "5min", "15min", "30min", "1hour", "4hour"
             from_date: Start date YYYY-MM-DD
             to_date: End date YYYY-MM-DD
+            extended: Ask FMP for the pre-market (04:00) and after-hours (to 20:00 ET)
+                bars as well. ⚠️ `/stable/historical-chart/{interval}` returns the
+                REGULAR session only unless this is sent — probed 2026-09-16 on
+                AAPL/NVDA/GLD/SPY: 78 bars 09:30–15:55 without it, 192 bars
+                04:00–19:55 with `extended=true`. Before this parameter existed the
+                Extended Hours toggle on the stock chart merely skipped a filter over
+                data that never contained those bars, so it was inert.
 
         Returns:
             List of price dicts with datetime stamps (e.g. "2025-03-07 10:30:00")
@@ -741,6 +749,8 @@ class FMPClient:
             params["from"] = from_date
         if to_date:
             params["to"] = to_date
+        if extended:
+            params["extended"] = "true"
 
         data = await self._make_request(
             f"historical-chart/{interval}", params=params
@@ -1739,17 +1749,17 @@ class FMPClient:
 
         Returns ownershipPercent (total), investorsHolding count,
         totalInvested, and position change data.
+
+        The quarter is the newest one whose 13F filing DEADLINE has passed
+        (`latest_filed_13f_quarter`, the same rule `get_institutional_holder` uses). It
+        used to be picked by calendar month, so for ~45 days after each quarter-end the
+        aggregate was a half-filed roll-up — amendments and late filers double-count,
+        which is how AAPL read "Institutions 100.0%" on 2026-09-03 (its real figure is
+        ~66%). Rate-limit / outage errors are RE-RAISED rather than folded into `{}`:
+        the holders build marks this slice `critical`, and a `{}` cannot be told apart
+        from "FMP has no summary", so a one-second blip pinned zeros for 24h.
         """
-        now = datetime.now(timezone.utc)
-        month = now.month
-        if month <= 3:
-            year, quarter = now.year - 1, 4
-        elif month <= 6:
-            year, quarter = now.year, 1
-        elif month <= 9:
-            year, quarter = now.year, 2
-        else:
-            year, quarter = now.year, 3
+        year, quarter = latest_filed_13f_quarter()
 
         try:
             data = await self._make_request(
@@ -1763,6 +1773,8 @@ class FMPClient:
             if isinstance(data, list) and data:
                 return data[0]
             return data if isinstance(data, dict) else {}
+        except (FMPRateLimitException, FMPUnavailableException):
+            raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (403, 404):
                 logger.warning(
@@ -1832,7 +1844,7 @@ class FMPClient:
         return valid
 
     async def get_institutional_ownership_for_quarter(
-        self, ticker: str, year: int, quarter: int
+        self, ticker: str, year: int, quarter: int, *, strict: bool = False
     ) -> Optional[Dict[str, Any]]:
         """Fetch a single quarter's institutional ownership summary."""
         try:
@@ -1847,6 +1859,18 @@ class FMPClient:
             if isinstance(data, list) and data:
                 return data[0]
             return data if isinstance(data, dict) else None
+        except (FMPRateLimitException, FMPUnavailableException):
+            # `strict` callers (the Holders plausibility rescue) need to tell a transient
+            # failure apart from "FMP has no row", because they decide whether the build
+            # may be pinned in a 24h cache. The default keeps folding to None: the
+            # 8-quarter history gather and the hedge-fund flow builder await this without
+            # `return_exceptions` and must not 500 the tab on one 429.
+            if strict:
+                raise
+            logger.warning(
+                f"Institutional ownership fetch failed for {ticker} {year}Q{quarter} (transient)"
+            )
+            return None
         except Exception as e:
             logger.warning(
                 f"Institutional ownership fetch failed for "

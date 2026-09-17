@@ -820,6 +820,56 @@ class Settings(BaseSettings):
     SENTRY_DSN: Optional[str] = None
     SENTRY_TRACES_SAMPLE_RATE: float = 0.0   # 0 = errors only (no perf tracing); cheap
 
+    # ── Marketing engine (SYSTEM_DESIGN_GUIDELINES §12) ────────────────────────────
+    # Two processes share these tables and nothing else: the MEDIA WORKER (a Railway cron
+    # service built from marketing/Dockerfile, entrypoint `python -m marketing.main`, holding
+    # NO Supabase key) and the PUBLISHER loop in this process's lifespan. Every flag below is
+    # read by the web process; the worker reads its own MARKETING_* environment directly
+    # because it never imports app.config (it has no SUPABASE_URL to satisfy this class).
+    #
+    # Fail-CLOSED defaults: nothing runs, nothing publishes, and every run is a dry run until
+    # each switch is flipped deliberately in the Railway environment.
+    #
+    # MARKETING_ENABLED gates the PUBLISHER loop in this process. The worker is a separate
+    # Railway service: it is "off" when it is not deployed, or when its token is unset here
+    # (every worker call then answers 403). The two switches are independent on purpose —
+    # the worker can rehearse (dry-run rows, no publishing) with the publisher still off.
+    MARKETING_ENABLED: bool = False
+    # Dry run: the publisher logs what it WOULD send and touches no external API. The worker
+    # sends the same flag on its run row so a dry-run day is visible in marketing_runs.
+    MARKETING_DRY_RUN: bool = True
+    # New marketing_posts rows are born `pending_review` and need an admin approve; True makes
+    # them `approved` at birth. Keep False for the first weeks (§12 human gate).
+    MARKETING_AUTO_PUBLISH: bool = False
+    # Shared secret for the internal worker API (`X-Marketing-Worker-Token`). Unset = every
+    # worker call answers 403, so a forgotten variable is loud on the first cron tick.
+    MARKETING_WORKER_TOKEN: Optional[str] = None
+    # A run whose row has not been TOUCHED (started_at / updated_at — every stage checkpoint
+    # bumps it) for longer than this is considered abandoned (the cron container was killed
+    # mid-stage) and may be re-claimed by the next tick.
+    # ⚠️ INVARIANT: strictly LESS than the worker's cron period (marketing/railway.toml fires
+    # hourly). At exactly 3600 the next tick lands at started_at + 3600 ± boot jitter, so a
+    # killed run was re-claimed only when the tick happened to be a few seconds late. 2700
+    # leaves a 15-minute margin; Railway already skips a tick whose predecessor is still
+    # running, so a genuinely alive run never needs the window to protect it from the cron.
+    MARKETING_RUN_STALE_SECONDS: int = 2700
+    # A deterministically failing day must not re-run on every hourly tick until midnight
+    # (each attempt re-uploads artefacts and, in later phases, spends Gemini/TTS time). After
+    # this many attempts the claim answers `attempts_exhausted` and the day needs a human.
+    MARKETING_MAX_RUN_ATTEMPTS: int = 6
+    # Publisher cadence. It is an interval loop like notification_dispatch, not a daily claim:
+    # posts become `approved` at arbitrary times (an admin tap) and Upload-Post jobs finish
+    # asynchronously, so it must wake often enough to publish and to reconcile.
+    MARKETING_PUBLISHER_INTERVAL_SECONDS: int = 600
+    # Hard cap on any rendered clip. 90 s is Facebook Reels' maximum; 75 leaves headroom for
+    # the burned-in disclaimer card.
+    MARKETING_MAX_VIDEO_SECONDS: int = 75
+    # Storage bucket for every published artefact. PUBLIC by design (migration 170): Meta and
+    # Upload-Post fetch the MP4 by URL, and podcast enclosures must be stable unsigned URLs.
+    MARKETING_MEDIA_BUCKET: str = "marketing-media"
+    # Signed-upload URLs minted for the worker expire server-side (Supabase default 2 h); the
+    # worker uploads within seconds of minting, so a stale URL means a stuck stage, not a leak.
+
     # Disclaimer
     LEGAL_DISCLAIMER: str = (
         "For educational purposes only. Not financial advice. "

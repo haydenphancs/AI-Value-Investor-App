@@ -17,12 +17,31 @@ struct ShareholderBreakdown: Identifiable {
     let insidersPercent: Double
     let institutionsPercent: Double
     let publicOtherPercent: Double
+    /// True when the server could not establish a plausible institutional figure; the
+    /// two percentages are then 0.0 placeholders, rendered "—" rather than as facts.
+    var institutionsUnknown: Bool = false
 
     /// Top 10 institutional holders data (legacy)
     let topHolders: [InstitutionalHolder]
 
     /// Top 10 owners data (institutions and insiders)
     let top10Owners: Top10OwnersData
+
+    init(
+        insidersPercent: Double,
+        institutionsPercent: Double,
+        publicOtherPercent: Double,
+        institutionsUnknown: Bool = false,
+        topHolders: [InstitutionalHolder],
+        top10Owners: Top10OwnersData
+    ) {
+        self.insidersPercent = insidersPercent
+        self.institutionsPercent = institutionsPercent
+        self.publicOtherPercent = publicOtherPercent
+        self.institutionsUnknown = institutionsUnknown
+        self.topHolders = topHolders
+        self.top10Owners = top10Owners
+    }
 
     // Computed property for validation
     var totalPercent: Double {
@@ -35,11 +54,11 @@ struct ShareholderBreakdown: Identifiable {
     }
 
     var formattedInstitutions: String {
-        String(format: "%.1f%%", institutionsPercent)
+        institutionsUnknown ? "—" : String(format: "%.1f%%", institutionsPercent)
     }
 
     var formattedPublicOther: String {
-        String(format: "%.1f%%", publicOtherPercent)
+        institutionsUnknown ? "—" : String(format: "%.1f%%", publicOtherPercent)
     }
 }
 
@@ -304,6 +323,11 @@ struct HoldersData {
     let hedgeFundsData: SmartMoneyData
     let congressData: SmartMoneyData
     let recentActivities: RecentActivitiesData
+    /// Congress is Pro/Max: when true the server has withheld `congressData` and the
+    /// Congress rows of `recentActivities`, and the card shows the locked stub instead
+    /// of an empty chart. Defaulted `var`s keep the memberwise init used by `sampleData`.
+    var isCongressLocked: Bool = false
+    var congressTierRequired: String? = nil
 
     func smartMoneyData(for tab: SmartMoneyTab) -> SmartMoneyData {
         switch tab {

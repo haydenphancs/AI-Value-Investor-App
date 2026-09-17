@@ -14,6 +14,10 @@ struct TickerFinancialsContent: View {
     let signalOfConfidenceData: SignalOfConfidenceSectionData?
     let revenueBreakdownData: RevenueBreakdownData?
     let healthCheckData: HealthCheckSectionData?
+    /// Street Estimates (forward revenue / EPS consensus) — forward FUNDAMENTALS, so it
+    /// belongs beside Earnings. Moved here from the Analysis tab on 2026-09-17
+    /// (TestFlight E9). Defaulted nil so existing call sites and previews compile.
+    var analystRatingsData: AnalystRatingsData? = nil
     /// False while the Financials fetches are still in flight. Without it, a
     /// loading tab and a tab whose backend returned nothing render identically
     /// (six missing cards), so the user can't tell which they're looking at.
@@ -35,6 +39,16 @@ struct TickerFinancialsContent: View {
                         onEarningsDetailTap?()
                     }
                 )
+            }
+
+            // Street Estimates — forward revenue / EPS consensus, under the earnings it
+            // extends. Deliberately does NOT read `sectionAvailable`: that flag guards the
+            // zero-default consensus and price target on the analyst chain, and reusing it
+            // here would hide licensed estimates behind an unlicensed package.
+            if let ratingsData = analystRatingsData,
+               ratingsData.estimatesAvailable,
+               !ratingsData.forwardEstimates.isEmpty {
+                AnalystForecastsSection(ratingsData: ratingsData)
             }
 
             // Growth Section

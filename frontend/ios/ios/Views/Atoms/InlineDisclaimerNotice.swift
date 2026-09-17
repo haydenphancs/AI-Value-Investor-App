@@ -42,27 +42,37 @@ struct InlineDisclaimerNotice: View {
         self.linkLabel = linkLabel
     }
 
+    /// Prose and link as ONE `Text`, so the link is the last word of the paragraph.
+    ///
+    /// They used to be two `HStack` siblings. Once the prose wrapped, its lines centred
+    /// inside their own column while "Details" sat beside them, vertically centred between
+    /// the two lines — the Technical Meter's footer read as a left-leaning block with a
+    /// detached link (TestFlight, build 1.0 (8)). Concatenation keeps the single tap target:
+    /// the whole `Text` is the Button's label. A plain space, not a non-breaking one, so a
+    /// long prose can still wrap before "Details" on narrow widths.
+    private var label: Text {
+        let prose = Text(text).font(AppTypography.caption)
+        let link = Text(linkLabel).font(AppTypography.captionEmphasis).underline()
+        switch (text.isEmpty, linkLabel.isEmpty) {
+        case (false, false): return prose + Text(" ") + link
+        case (false, true):  return prose
+        case (true, false):  return link
+        case (true, true):   return Text("")
+        }
+    }
+
     var body: some View {
         Button {
             showDisclaimers = true
         } label: {
             // No leading info glyph: the underlined `linkLabel` is already the tap affordance, and
             // the icon only added visual weight to a line that wants to stay quiet. Removed here
-            // rather than per-call-site so all 14 notices stay identical.
-            HStack(spacing: AppSpacing.xxs) {
-                if !text.isEmpty {
-                    Text(text)
-                        .font(AppTypography.caption)
-                }
-                if !linkLabel.isEmpty {
-                    Text(linkLabel)
-                        .font(AppTypography.captionEmphasis)
-                        .underline()
-                }
-            }
-            .foregroundColor(AppColors.textMuted)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
+            // rather than per-call-site so every notice (5 direct + 12 via
+            // `AnalysisDisclaimerText`) stays identical.
+            label
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .buttonStyle(.plain)
         // Link-only (empty `text`) would otherwise announce as ". Tap for full

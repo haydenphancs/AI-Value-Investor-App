@@ -106,13 +106,39 @@ struct TickerChartView: View {
     /// fixed by choosing the WINDOW per asset class instead of opting them out.
     private var usesIntradayTimeMapping: Bool { selectedRange == .oneDay }
 
-    /// The session `visiblePoints` is measured against: 09:30–16:00 ET for
-    /// equities/ETFs/indices, the whole calendar day for crypto and commodity
-    /// futures. Mirrors the backend's `asset_class.trades_extended_hours`, which
-    /// picks the same window for the card sparkline — they must agree, or the
-    /// same ticker's row and chart stop at different places.
+    /// True when the bars in hand actually include pre/after-hours prints.
+    ///
+    /// Measured on the FULL fetched series, not the viewport slice: a pinch-zoom
+    /// that excludes the pre-market bars must not flip the window mid-gesture and
+    /// re-caption the axis. The window is chosen from the DATA as well as the flag,
+    /// so a screen whose backend fetched the regular session only can never draw
+    /// 09:30–16:00 bars on a 04:00–20:00 axis — the mirror image of the old
+    /// GLD-on-a-24-hour-axis defect.
+    private var hasExtendedBars: Bool {
+        pricePoints.contains { $0.isExtendedHours }
+    }
+
+    /// The session `visiblePoints` is measured against: the 09:30–16:00 ET bell for
+    /// equities/ETFs/indices, 04:00–20:00 when the series in hand carries pre/after-hours
+    /// bars, the whole calendar day for crypto.
+    ///
+    /// Driven by the DATA, not by the toggle: the toggle drives the FETCH (the view model
+    /// refetches on `$showExtendedHours`), and the bars that arrive decide the axis. Reading
+    /// the toggle here too would re-window the still-extended series to the bell for the
+    /// duration of the refetch — the pre-market bars would pile on the left edge for a
+    /// moment, the exact defect this fix removes. The Home/watchlist card sparkline is
+    /// always measured on the bell (backend `intraday_span`), so card and chart agree only
+    /// with the toggle OFF — with it ON the chart is deliberately wider.
     private var sessionWindow: TradingDayHelper.SessionWindow {
-        TradingDayHelper.window(for: assetContext)
+        let wantsExtended = assetContext.supportsExtendedHours
+            && usesIntradayTimeMapping
+            && hasExtendedBars
+        return TradingDayHelper.window(for: assetContext, extendedHours: wantsExtended)
+    }
+
+    /// Shading, boundary dashes and the EXT badge follow the same rule as the window.
+    private var drawsExtendedHours: Bool {
+        assetContext.supportsExtendedHours && hasExtendedBars
     }
 
     /// Per-point time fractions for the 1D chart, or nil for index mapping.
@@ -173,7 +199,7 @@ struct TickerChartView: View {
                             .foregroundColor(AppColors.textMuted)
                     }
 
-                    if chartSettings.showExtendedHours && assetContext.supportsExtendedHours && point.isExtendedHours {
+                    if drawsExtendedHours && point.isExtendedHours {
                         Text("EXT")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(AppColors.textMuted)
@@ -201,7 +227,7 @@ struct TickerChartView: View {
                     chartType: assetContext.allowedChartTypes.contains(chartSettings.chartType)
                         ? chartSettings.chartType : .line,
                     overlays: chartSettings.activeOverlays,
-                    showExtendedHours: chartSettings.showExtendedHours && assetContext.supportsExtendedHours,
+                    showExtendedHours: drawsExtendedHours,
                     lookbackCloses: overlayLookbackCloses,
                     chartEventDates: chartSettings.showEarningsDates ? chartEventDates : nil,
                     useIntradayTimeMapping: usesIntradayTimeMapping,
@@ -232,8 +258,12 @@ struct TickerChartView: View {
             }
 
             // Sub-charts (Volume, RSI, MACD, Stoch)
-            // Pass full data for indicator warm-up, visible slice for rendering
-            ForEach(chartSettings.activeSubCharts) { indicator in
+            // Pass full data for indicator warm-up, visible slice for rendering.
+            // Filtered by what this asset class can draw honestly (Stoch needs
+            // high/low, which CoinGecko rows lack) — the same coercion idiom as
+            // `allowedChartTypes` above, so a stale enabled set never draws a
+            // close-only oscillator under a "Stoch(14,3,3)" label.
+            ForEach(chartSettings.activeSubCharts.filter { assetContext.allowedSubCharts.contains($0) }) { indicator in
                 SubChartCanvas(
                     indicator: indicator,
                     pricePoints: visiblePoints,

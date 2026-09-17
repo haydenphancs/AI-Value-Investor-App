@@ -30,9 +30,9 @@ struct RevenueBreakdownLegendView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Costs & Profit Column
+            // Costs & Profit / Loss column — the heading follows the sign of net income
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text("Costs & Profit")
+                Text(data.costsColumnTitle)
                     .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                     .padding(.bottom, AppSpacing.xs)

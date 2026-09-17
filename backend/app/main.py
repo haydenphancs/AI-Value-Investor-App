@@ -404,6 +404,13 @@ async def lifespan(app: FastAPI):
         # cadence would leave a freshly promoted chip cold for most of its life.
         _spawn(_run_starter_warm_loop(), "starter_warm")
 
+        # Marketing-engine publisher (design doc §12). The web process is the ONLY holder of
+        # the social-posting secrets; the media worker is a separate cron service that never
+        # gets them. Interval loop, gated per cycle on MARKETING_ENABLED (default False), so
+        # it costs one sleeping task until the engine is deliberately switched on.
+        from app.services.marketing.publisher_service import run_marketing_publisher_loop
+        _spawn(run_marketing_publisher_loop(), "marketing_publisher")
+
     # Outside the else: this family is opt-in-able locally (see `run_notification_jobs`).
     if run_notification_jobs:
         # Quiet-hours flush. Runs 24/7 — NOT gated on market hours, because a quiet

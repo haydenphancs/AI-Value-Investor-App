@@ -640,4 +640,4 @@ def test_the_status_change_bumps_the_cache_payload_version():
 
     This is the case a key-presence probe cannot see, and the reason the version exists.
     """
-    assert sos._PAYLOAD_VERSION >= 3
+    assert sos._PAYLOAD_VERSION >= 4

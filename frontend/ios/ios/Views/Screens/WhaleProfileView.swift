@@ -31,35 +31,11 @@ struct WhaleProfileView: View {
                 .font(AppTypography.headingSmall)
                 .foregroundColor(AppColors.textPrimary)
 
-            Button {
+            // The card body is the shared `LockedSectionCard` molecule (also used by the
+            // Holders tab's Congress segment) so every paid section locks the same way.
+            LockedSectionCard(title: title, message: message) {
                 showPaywall = true
-            } label: {
-                VStack(spacing: AppSpacing.sm) {
-                    // A TEXT-role token — this glyph must clear 4.5:1 in both appearances.
-                    // A *Graphic token would fail the launch contrast audit.
-                    Image(systemName: "lock.fill")
-                        .font(AppTypography.iconMedium)
-                        .foregroundColor(AppColors.primaryBlue)
-
-                    Text(message)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("Upgrade to unlock")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.primaryBlue)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.xl)
-                .padding(.horizontal, AppSpacing.lg)
-                .cardSurface(cornerRadius: AppCornerRadius.large)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(title), locked")
-            .accessibilityHint("Shows upgrade options")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

@@ -858,6 +858,14 @@ final class StockRepository: StockRepositoryProtocol {
         cache.removeAll()
     }
 
+    /// Session-end reset, called from `AppState.discardDataForEndedSession()` (auth.md §7).
+    /// Named separately from `clearCache()` so the funnel's guard can pin the call site: the
+    /// holders payload is tier-shaped (`congress_locked`), so an entry cached under one
+    /// account must not outlive that account's session.
+    func clearForEndedSession() {
+        clearCache()
+    }
+
     /// Drop every cached entry belonging to `symbol`, so the next fetch really goes to
     /// the network.
     ///
@@ -893,7 +901,21 @@ final class StockRepository: StockRepositoryProtocol {
 // MARK: - Stock Models (DTO)
 
 struct StockSearchResult: Codable, Identifiable {
-    var id: String { ticker }
+    /// Symbol AND asset type — the same composite `SearchSelection.id` uses.
+    ///
+    /// `/stocks/search` deliberately returns TWO rows for one symbol when a coin in the
+    /// crypto map is also a real US listing: "BTC" is Bitcoin AND the Grayscale Bitcoin
+    /// Mini Trust ETF, "ETH" its Ethereum twin, "SOL" an NYSE equity. With the bare ticker
+    /// as the identity those two rows were one `ForEach` child — SwiftUI's documented
+    /// "undefined results": the ETF row drew as an empty slot and tapping the row labelled
+    /// "BTC · Bitcoin · CRYPTO" opened the ETF screen (reproduced 2026-09-17 in
+    /// `TickerLiveSearchSheet`; `AddAssetSheet` iterates the same array). The Home
+    /// `SearchView` was never affected because it re-wraps rows with a UUID.
+    ///
+    /// Byte-equal to `SearchSelection.id` on purpose: the selection a row builds is
+    /// `SearchSelection(symbol: ticker, type: type ?? "stock")`, so the two identities
+    /// agree. Pinned by `tests/test_ios_search_result_identity.py`.
+    var id: String { "\(ticker)_\(type ?? "stock")" }
     let ticker: String
     let companyName: String
     let exchange: String?
@@ -2521,6 +2543,11 @@ struct HoldersResponseDTO: Codable {
     let hedgeFundsData: SmartMoneyDataDTO
     let congressData: SmartMoneyDataDTO
     let recentActivities: RecentActivitiesDTO
+    // Congress is Pro/Max (2026-09-17). Optional so a backend predating the pair still
+    // decodes; absent → unlocked, because enforcement is SERVER-side (a Free caller
+    // receives `congress_data` empty) and the flag only drives the locked stub.
+    let congressLocked: Bool?
+    let congressTierRequired: String?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -2529,6 +2556,8 @@ struct HoldersResponseDTO: Codable {
         case hedgeFundsData = "hedge_funds_data"
         case congressData = "congress_data"
         case recentActivities = "recent_activities"
+        case congressLocked = "congress_locked"
+        case congressTierRequired = "congress_tier_required"
     }
 
     func toDisplayModel() -> HoldersData {
@@ -2537,7 +2566,9 @@ struct HoldersResponseDTO: Codable {
             insiderData: insiderData.toDisplayModel(),
             hedgeFundsData: hedgeFundsData.toDisplayModel(),
             congressData: congressData.toDisplayModel(),
-            recentActivities: recentActivities.toDisplayModel()
+            recentActivities: recentActivities.toDisplayModel(),
+            isCongressLocked: congressLocked ?? false,
+            congressTierRequired: congressTierRequired
         )
     }
 }
@@ -2548,6 +2579,11 @@ struct ShareholderBreakdownDTO: Codable {
     let publicOtherPercent: Double
     let topHolders: [InstitutionalHolderDTO]
     let top10Owners: Top10OwnersDTO
+    // `pe_known`-style companion flag: an implausible 13F aggregate (AAPL read
+    // "Institutions 100.0% / Public 0.0%") is UNKNOWN. The two floats above stay
+    // non-Optional (shipped builds decode a plain Double) and carry 0.0 placeholders
+    // when this is true. Optional so a backend predating the flag still decodes.
+    let institutionsUnknown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case insidersPercent = "insiders_percent"
@@ -2555,6 +2591,7 @@ struct ShareholderBreakdownDTO: Codable {
         case publicOtherPercent = "public_other_percent"
         case topHolders = "top_holders"
         case top10Owners = "top_10_owners"
+        case institutionsUnknown = "institutions_unknown"
     }
 
     func toDisplayModel() -> ShareholderBreakdown {
@@ -2562,6 +2599,7 @@ struct ShareholderBreakdownDTO: Codable {
             insidersPercent: insidersPercent,
             institutionsPercent: institutionsPercent,
             publicOtherPercent: publicOtherPercent,
+            institutionsUnknown: institutionsUnknown ?? false,
             topHolders: topHolders.map { $0.toDisplayModel() },
             top10Owners: top10Owners.toDisplayModel()
         )

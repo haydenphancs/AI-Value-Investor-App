@@ -36,6 +36,17 @@ logger = logging.getLogger(__name__)
 _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
+#: Stamped into `snapshot_cache.response_json` (same idiom as `valuation_snapshot_service`).
+#: A row without the current value is refused on read and recomputed, so a change in how
+#: a stored value is COMPUTED reaches users on the next read rather than 24h later.
+#:
+#: 1 → pre-versioning rows (no key; they never match — the intent).
+#: 2 → the Institutional Ownership metric honours the Holders tab's plausibility gate
+#:     (`institutions_unknown` → "—", and the rating no longer scores an unknown as
+#:     "<10%"). Rows written before this can still carry AAPL's laundered "100.0%".
+_SNAPSHOT_PAYLOAD_VERSION = 2
+_VERSION_KEY = "_schema_v"
+
 
 def _cache_get(key: str) -> Optional[Any]:
     entry = _cache.get(key)
@@ -232,7 +243,16 @@ class OwnershipSnapshotService:
                 logger.info(f"Ownership snapshot Supabase STALE (age={age}) for {ticker}")
                 return None
 
-            json_data = entry["response_json"]
+            json_data = dict(entry["response_json"] or {})
+            version = json_data.pop(_VERSION_KEY, 1)
+            if version != _SNAPSHOT_PAYLOAD_VERSION:
+                # Written before the institutional-percent plausibility gate; this row
+                # can still carry AAPL's laundered "100.0%" for a day after the fix.
+                logger.info(
+                    "Ownership snapshot payload v%s != v%s for %s — rebuilding",
+                    version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
+                )
+                return None
             return SnapshotItemResponse(**json_data)
 
         except Exception as e:
@@ -245,7 +265,10 @@ class OwnershipSnapshotService:
                 {
                     "ticker": ticker,
                     "category": "Insiders & Ownership",
-                    "response_json": result.model_dump(),
+                    "response_json": {
+                        **result.model_dump(),
+                        _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
+                    },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,category",
@@ -261,11 +284,14 @@ class OwnershipSnapshotService:
 
         holders = await get_holders_service().get_holders(ticker)
 
-        # Extract shareholder breakdown
+        # Extract shareholder breakdown. An UNKNOWN institutional figure (implausible
+        # 13F aggregate, no plausible fallback) arrives as 0.0 + `institutions_unknown`;
+        # `_fmt_pct(0)` already renders "—", and the rating must not score it as "<10%".
         breakdown = holders.shareholder_breakdown
-        inst_pct = breakdown.institutions_percent
+        institutions_unknown = bool(getattr(breakdown, "institutions_unknown", False))
+        inst_pct = None if institutions_unknown else breakdown.institutions_percent
         insider_pct = breakdown.insiders_percent
-        public_pct = breakdown.public_other_percent
+        public_pct = None if institutions_unknown else breakdown.public_other_percent
 
         # Extract smart money flow summaries
         insider_summary = holders.insider_data.summary
@@ -335,7 +361,7 @@ class OwnershipSnapshotService:
     def _compute_rating(
         self,
         insider_pct: float,
-        inst_pct: float,
+        inst_pct: Optional[float],
         insider_flow: float,
         insider_positive: bool,
         inst_flow: float,
@@ -365,8 +391,11 @@ class OwnershipSnapshotService:
             s_insider_own = 2  # too concentrated
 
         # 2. Institutional Ownership score (15%)
-        #    40-80% healthy, <20% low confidence, >90% crowded
-        if inst_pct < 10:
+        #    40-80% healthy, <20% low confidence, >90% crowded. None = the figure is
+        #    UNKNOWN (implausible 13F aggregate): neutral, not "<10%".
+        if inst_pct is None:
+            s_inst_own = 3
+        elif inst_pct < 10:
             s_inst_own = 1
         elif inst_pct < 20:
             s_inst_own = 2

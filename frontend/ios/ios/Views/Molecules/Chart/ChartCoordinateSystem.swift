@@ -130,12 +130,21 @@ enum TradingDayHelper {
         /// Crypto: the whole calendar day. (Commodity futures used to share it; since
         /// Phase 4 a commodity screen is an equity-hours ETF or a once-a-day FRED print.)
         static let roundTheClock = SessionWindow(openMinute: 0, closeMinute: 24 * 60)
+        /// US equities with pre-market and after-hours: 04:00 – 20:00 ET (960 min).
+        ///
+        /// Selected only by `window(for:extendedHours:)`, never by `window(for:)`, and
+        /// only when the series in hand actually carries such bars. FMP serves them
+        /// on request (`extended=true`) — the Extended Hours toggle used to leave the
+        /// chart on the 390-minute bell, so the 04:00–09:29 prints piled up on the
+        /// left edge under the `max(0, …)` clamp (TestFlight, build 1.0 (8)).
+        static let extended = SessionWindow(openMinute: 4 * 60, closeMinute: 20 * 60)
     }
 
-    /// The session an asset class trades in. Mirrors the backend's
-    /// `asset_class.trades_extended_hours`, which picks the window the card
-    /// sparkline is measured against — the two must agree or the same ticker's
-    /// card and chart stop at different places.
+    /// The session an asset class trades in with Extended Hours OFF. Agrees with the
+    /// backend card sparkline (`chart_helper.intraday_span`, which always measures
+    /// equities on the bell), so a ticker's card and its chart stop at the same place.
+    /// With the toggle ON the detail chart deliberately spans 04:00–20:00 while the
+    /// card stays on the bell — see `window(for:extendedHours:)`.
     static func window(for context: ChartAssetContext) -> SessionWindow {
         switch context {
         case .crypto:
@@ -146,6 +155,16 @@ enum TradingDayHelper {
             // filled two-thirds of the width with the "now" cursor in the wrong place.
             return .regular
         }
+    }
+
+    /// The window for a chart whose bars were fetched with the extended-hours flag.
+    ///
+    /// Only ever WIDENS the regular equity bell to 04:00–20:00. A round-the-clock
+    /// asset keeps its own window (crypto is already 00:00–24:00), so this can never
+    /// narrow or re-window anything the `window(for:)` switch decided.
+    static func window(for context: ChartAssetContext, extendedHours: Bool) -> SessionWindow {
+        let base = window(for: context)
+        return (extendedHours && base == .regular) ? .extended : base
     }
 
     // Regular session: 9:30 AM - 4:00 PM ET  (570 - 960 minutes from midnight)

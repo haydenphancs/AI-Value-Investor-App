@@ -1,0 +1,37 @@
+# marketing/railway.toml — config-as-code for the marketing MEDIA WORKER service.
+#
+# This is a SECOND Railway service on the same repo. In the Railway dashboard, point the new
+# service at this repo with Root Directory `/backend` (the Docker build context — the image
+# COPYs `marketing/`) and set its Config File to `/backend/marketing/railway.toml` (config
+# files are absolute repo paths and do NOT follow the root directory). The main web service
+# keeps `backend/railway.toml` untouched.
+#
+# Environment the service needs (and nothing else — in particular NO Supabase SECRET key;
+# the optional publishable key is the only Supabase value allowed here):
+#   MARKETING_API_BASE_URL   the web service's URL (private networking works:
+#                            http://<web-service>.railway.internal:<PORT>)
+#   MARKETING_WORKER_TOKEN   same value as the web service's MARKETING_WORKER_TOKEN
+#   MARKETING_RUN_HOUR_ET    e.g. 16 — the ET hour from which a tick may start today's run
+#   MARKETING_DRY_RUN        true until Phase 7 flips it
+#   SUPABASE_PUBLISHABLE_KEY optional (designed to be client-exposed), sent on the signed-upload PUT
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "marketing/Dockerfile"
+# Only redeploy this service when the worker's own inputs change. Patterns are gitignore-style
+# and operate from the REPO root even with a Root Directory set (Railway docs: "for a root
+# directory of /app, /app/**.js would be used") — so they carry the /backend/ prefix.
+watchPatterns = ["/backend/marketing/**"]
+
+[deploy]
+# Hourly, on the quarter hour, UTC. Railway cron is UTC-only with no DST handling; the ET
+# decision ("is it after MARKETING_RUN_HOUR_ET yet?") is made by the job itself on every
+# tick, and a tick before the window exits in under a second. Hourly rather than daily so a
+# tick Railway skipped (previous run still alive) or a container killed mid-stage is retried
+# on the first tick after MARKETING_RUN_STALE_SECONDS (2700 s < the hourly period, on purpose)
+# — Railway cron does no compute-first and no retry of its own. A tick before the window
+# resumes yesterday's run if it was left unfinished, and never creates one.
+cronSchedule = "15 * * * *"
+startCommand = "python -m marketing.main"
+# Deliberately NO healthcheckPath: nothing listens. A healthcheck here would fail every deploy.
+restartPolicyType = "never"

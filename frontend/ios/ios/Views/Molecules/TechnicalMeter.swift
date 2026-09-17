@@ -117,8 +117,23 @@ struct TechnicalMeter: View {
 }
 
 // MARK: - Technical Gauge (Semi-circle style with 5 zones)
+//
+// A thin wrapper over `MeterGauge` so the Valuation Meter (Analysis tab, 2026-09-17) can
+// share the exact same arc, zones, needle and sweep animation with a different centre label.
 struct TechnicalGauge: View {
     let signal: TechnicalSignal
+    let gaugeValue: Double
+
+    var body: some View {
+        MeterGauge(label: signal.rawValue, labelColor: signal.color, gaugeValue: gaugeValue)
+    }
+}
+
+/// The five-zone semicircular meter (red → green) with an animated needle and a centre
+/// label. Generic over the label so one drawing serves the Technical and Valuation meters.
+struct MeterGauge: View {
+    let label: String
+    let labelColor: Color
     let gaugeValue: Double
 
     @State private var animatedValue: Double = 0.5  // Start at center (neutral)
@@ -152,10 +167,10 @@ struct TechnicalGauge: View {
 
             // Center display
             VStack(spacing: 2) {
-                Text(signal.rawValue)
+                Text(label)
                     .font(AppTypography.titleCompact)
                     .fontWeight(.bold)
-                    .foregroundColor(signal.color)
+                    .foregroundColor(labelColor)
                     .contentTransition(.numericText())
             }
             .offset(y: 20)

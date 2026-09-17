@@ -388,3 +388,18 @@ backend/data/money_moves_audio_gemini_bak/
 # defeats the purge — its own success check (git log -S'buffett_zubenelgenubi' must be
 # empty) can never pass while it is tracked. Kept locally, never committed.
 documents/legal/GIT_HISTORY_PURGE_RUNBOOK.md
+
+# TestFlight feedback pulled by backend/scripts/pull_testflight_feedback.py: raw tester
+# screenshots, crash logs and tester EMAILS. Local triage material, never committed.
+backend/.testflight/
+
+# Marketing media worker (backend/marketing/): the CODE is tracked — Railway builds the worker
+# service from git — but everything it generates or downloads is not. Rendered clips/cards,
+# the per-run scratch dir, and model weights (baked into the image at build, never committed).
+backend/marketing/out/
+backend/marketing/.cache/
+backend/marketing/models/
+backend/marketing/**/*.mp4
+backend/marketing/**/*.m4a
+backend/marketing/**/*.mp3
+backend/marketing/**/*.wav

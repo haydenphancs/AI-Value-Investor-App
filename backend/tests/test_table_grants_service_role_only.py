@@ -111,6 +111,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
         "guest_report_budget", "price_catalyst_audit", "updates_insight_state",
         "agent_personas",
     ),
+    # 170: the marketing engine (SYSTEM_DESIGN_GUIDELINES §12). iOS never reads these; the
+    # media worker reaches them only through the token-gated internal API.
+    "170": ("marketing_runs", "marketing_assets", "marketing_posts", "podcast_episodes"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

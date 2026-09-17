@@ -129,6 +129,20 @@ struct CryptoDetailView: View {
                             previousClose: cryptoData.chartPreviousClose
                         )
                         .padding(.top, AppSpacing.lg)
+
+                        // The 2Y pill replaces 5Y/ALL on crypto because CoinGecko Basic
+                        // serves 730 days and 401s past it (`CRYPTO_HISTORY_YEARS`).
+                        // Say so where the user is looking, rather than leaving the
+                        // shorter horizon to be discovered ("we have crypto for only
+                        // 2 years" — TestFlight, build 1.0 (8)).
+                        if viewModel.selectedChartRange == .twoYears {
+                            Text("History limited to 2 years")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, AppSpacing.xs)
+                                .accessibilityLabel("Crypto price history is limited to 2 years")
+                        }
                     } else if let errorMessage = viewModel.errorMessage {
                         // The ViewModel has been writing this message all along and
                         // nothing rendered it: on failure the screen fell through to

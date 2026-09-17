@@ -49,6 +49,15 @@ class ShareholderBreakdownSchema(BaseModel):
     insiders_percent: float = Field(0.0)
     institutions_percent: float = Field(0.0)
     public_other_percent: float = Field(0.0)
+    # An implausible 13F aggregate (>100%, or >100% beside a near-zero insider block —
+    # AAPL read 100.0% / Public 0.0% on 2026-09-03) is UNKNOWN, not clamped. The floats
+    # above stay non-Optional because shipped builds decode a plain Double; this is the
+    # `pe_known` companion-flag pattern: `institutions_unknown=True` ⇒ the two floats are
+    # 0.0 placeholders and iOS renders "—". `institutions_source` names which rung of
+    # the fallback chain produced the figure (summary / recomputed / last_quarter /
+    # top_holders_sum / unknown) so a wrong number can be traced from the payload.
+    institutions_unknown: bool = False
+    institutions_source: Optional[str] = None
     top_holders: List[InstitutionalHolderSchema] = []
     top_10_owners: Top10OwnersSchema = Top10OwnersSchema()
 
@@ -224,3 +233,10 @@ class HoldersResponse(BaseModel):
     hedge_funds_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Institutions")
     congress_data: SmartMoneyDataSchema = SmartMoneyDataSchema(tab="Congress")
     recent_activities: RecentActivitiesSchema = RecentActivitiesSchema()
+    # Congress is Pro/Max (2026-09-17). For a Free caller the service substitutes EMPTY
+    # but well-formed `congress_data` / `congress_activities` (the iOS DTO requires them
+    # non-Optional, so they can never be null on the wire) and raises this pair so the
+    # client renders the locked stub rather than "No congress activity data available".
+    # Scoped names, not a bare `is_locked`: only one segment is withheld.
+    congress_locked: bool = False
+    congress_tier_required: Optional[str] = None

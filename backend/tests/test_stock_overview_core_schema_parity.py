@@ -252,7 +252,7 @@ async def test_get_overview_core_fetches_intraday_chart_on_1d():
     _cache.clear()
 
     class _IntradayFMP(_FakeFMP):
-        async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None):
+        async def get_intraday_prices(self, ticker, interval="5min", from_date=None, to_date=None, extended=False):
             self.calls.append("get_intraday_prices")
             return [
                 {"date": "2026-01-02 09:30:00", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 10},

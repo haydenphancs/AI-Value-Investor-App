@@ -1141,6 +1141,15 @@ final class AppState {
         // on the HOME SCREEN — the previous account's holdings and their biggest mover,
         // readable without unlocking into the app at all.
         WidgetRefreshService.shared.clearForEndedSession()
+        // The detail-screen repository is a process-lifetime singleton whose keys carry a
+        // ticker and no user id (`holders_TER`), and since 2026-09-17 one of its payloads is
+        // TIER-SHAPED: `/holders` withholds the Congress segment for a Free caller and stamps
+        // `congress_locked`. A 24 h entry cached under a Pro session would therefore serve
+        // that account's unlocked Congress rows to the Free account that signs in next on
+        // this phone (and the reverse hands a paying user the locked stub). Same bug class as
+        // the stores above, same funnel. `entitlementGeneration` covers an in-session tier
+        // change; this covers the session boundary.
+        StockRepository.shared.clearForEndedSession()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access

@@ -11,6 +11,12 @@ struct TickerAnalysisContent: View {
     let analystRatingsData: AnalystRatingsData?
     let sentimentAnalysisData: SentimentAnalysisData?
     let technicalAnalysisData: TechnicalAnalysisData?
+    /// The Overview's valuation ("Price") snapshot — multiples vs sector plus FMP's DCF —
+    /// rendered here as the Valuation Meter. Defaulted nil: `CryptoDetailView` shares
+    /// this view and has no equity valuation.
+    var valuationSnapshot: SnapshotItem? = nil
+    /// Live header price for the DCF gap; nil renders the model value without a gap.
+    var currentPrice: Double? = nil
     var fearGreedData: CryptoFearGreedData? = nil
     let isAnalystLoaded: Bool
     var isFearGreedLoaded: Bool = true
@@ -26,28 +32,17 @@ struct TickerAnalysisContent: View {
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
-            // Street estimates — an ADDITIVE SIBLING, not a branch in the chain below.
-            //
-            // ⚠️ This used to be the first arm of that `if/else if` chain, which made the
-            // two datasets mutually exclusive and inverted the convention the whole
-            // entitlement rebuild rests on. `fmp_entitlements` advertises repurchasing a
-            // package as "one line … nothing else changes", and `analyst.py` as "flips back
-            // to True on its own" — but in the post-repurchase state (sectionAvailable,
-            // hasCoverage and estimatesAvailable all true, which is every covered large cap)
-            // the chain short-circuited here and `AnalystRatingsSection` became UNREACHABLE.
-            // Buying the package back would have deleted consensus, the price-target range,
-            // the momentum chart, the distribution and the "More" entry point.
-            //
-            // They are different data — forward fundamentals vs ratings — and both belong on
-            // the tab. Rendered above the chain because it is the licensed half today.
+            // Valuation Meter — an ADDITIVE SIBLING above the analyst chain, in the slot the
+            // Street Estimates card held until 2026-09-17 (TestFlight E9: the developer did
+            // not want forward consensus on this tab; it now sits under Earnings on the
+            // Financials tab). Multiples vs sector are entitled and already computed for the
+            // Overview's Valuation card; FMP's DCF rides on the same snapshot.
             //
             // Deliberately does NOT read `sectionAvailable`: that flag guards the zero-default
             // consensus and price target, and reusing it here would put a HOLD at $0.00 back
             // on screen for a client that cannot update.
-            if let ratingsData = analystRatingsData,
-               ratingsData.estimatesAvailable,
-               !ratingsData.forwardEstimates.isEmpty {
-                AnalystForecastsSection(ratingsData: ratingsData)
+            if let snapshot = valuationSnapshot {
+                ValuationMeterSection(snapshot: snapshot, currentPrice: currentPrice)
             }
 
             // Fear & Greed Index (crypto) OR Analyst Ratings (stocks)

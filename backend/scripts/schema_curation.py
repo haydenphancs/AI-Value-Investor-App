@@ -89,6 +89,10 @@ DOMAINS: tuple[Domain, ...] = (
     Domain("rag", "RAG · pgvector", "#0891b2",
            "Embedded text for grounded, cited answers. Three chunk tables, all `vector(1536)` "
            "with an HNSW index, searched through STABLE SQL functions."),
+    Domain("marketing", "Marketing Engine", "#ea580c",
+           "The zero-touch content pipeline (design doc §12): a run per ET day, its artefacts in "
+           "the PUBLIC `marketing-media` bucket, a publish ledger per platform, and the podcast "
+           "feed's episodes. Nothing FMP-licensed may enter these tables — class A/C content only."),
     Domain("ops", "Analytics, Budgets & Job State", "#78716c",
            "Cross-instance coordination and cost control: who claims a job, how many "
            "generations are left today, and first-party product analytics."),
@@ -379,6 +383,29 @@ CURATION: dict[str, TableDoc] = {
     "public.push_send_log": T("notifications", key=("user_id", "dedup_key", "sent_at")),
     "public.price_alerts": T("notifications",
         key=("user_id", "ticker", "kind", "threshold", "armed", "last_price", "repeat_mode")),
+
+    # ------------------------------------------------------------ marketing (170)
+    "public.marketing_runs": T("marketing",
+        key=("run_date", "status", "stage", "content_class", "source_ref", "attempts", "timings"),
+        note="Migration 170. The media worker (a Railway cron service holding NO Supabase key) "
+             "claims the day by INSERTing this row through the internal API and checkpoints "
+             "`stage` so a skipped or killed cron slot resumes on the next hourly tick."),
+    "public.marketing_assets": T("marketing",
+        key=("run_id", "kind", "storage_path", "sha256", "status", "duration_seconds"),
+        note="Two-phase upload: pending_upload while the worker holds a signed upload URL, ready "
+             "once the API has HEAD-verified the object. Paths are content-addressed and immutable."),
+    "public.marketing_posts": T("marketing",
+        key=("run_id", "platform", "format", "status", "idempotency_key", "external_url",
+             "cost_micros"),
+        note="pending_review → approved (admin / MARKETING_AUTO_PUBLISH) → queued (claimed by the "
+             "publisher loop before the first external call) → published | failed. "
+             "idempotency_key is the key presented to the outlet, so a restart cannot double-post; "
+             "cost_micros is micro-dollars (X bills $0.015 per post)."),
+    "public.podcast_episodes": T("marketing",
+        key=("guid", "title", "mp3_path", "duration_seconds", "published_at"),
+        note="Apple/Spotify have no upload API: they poll GET /podcast/feed.xml, which is rendered "
+             "from this table. guid never changes; mp3_path is immutable (Spotify re-fetches only "
+             "on a path change)."),
 
     # ------------------------------------------------------------ market-cache
     "public.stock_fundamentals_cache": T("market-cache",

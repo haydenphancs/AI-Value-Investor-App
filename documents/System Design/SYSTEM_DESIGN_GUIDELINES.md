@@ -50,6 +50,7 @@ change one of those facts in the code, that test tells you this document needs a
 9c. [Personalized Explanations — Pedagogy, Never Analysis](#9c-personalized-explanations--pedagogy-never-analysis)
 10. [Known gaps and accepted trade-offs](#10-known-gaps-and-accepted-trade-offs)
 11. [Notification System](#11-notification-system-implemented-2026-08-08)
+12. [Marketing Content Engine](#12-marketing-content-engine-foundations-2026-09-17)
 - [Appendix A: Where things live](#appendix-a-where-things-live)
 - [Appendix B: Decision Log](#appendix-b-decision-log)
 
@@ -64,7 +65,7 @@ Build a "Bloomberg Terminal for Novice Investors" - a system that makes professi
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Backend Pattern | Layered: API → Service → Integration | Services own aggregation, caching and business decisions. The absolute "endpoints never import integrations; integrations never cache" was never true — 9 of 22 endpoint modules import from `integrations/` and six integrations keep a process-local cache — so the rule is stated as it is actually enforced, in `.claude/rules/backend-python.md` § Layering, with the two integrations that still own a Supabase cache of their own recorded as debt in §10. By review, not by DI — there is no container and no inversion |
+| Backend Pattern | Layered: API → Service → Integration | Services own aggregation, caching and business decisions. The absolute "endpoints never import integrations; integrations never cache" was never true — 9 of 23 endpoint modules import from `integrations/` and six integrations keep a process-local cache — so the rule is stated as it is actually enforced, in `.claude/rules/backend-python.md` § Layering, with the two integrations that still own a Supabase cache of their own recorded as debt in §10. By review, not by DI — there is no container and no inversion |
 | iOS Pattern | MVVM + one repository | SwiftUI native, reactive state. No protocol layer, no DI container — see §3.2 |
 | AI Orchestration | Supervised `asyncio` tasks + polling | Long-running work without blocking the request. **Not** a task queue — see §5.3 for what that costs and what compensates |
 | State Management | Centralized App State | Consistent UX across screens |
@@ -250,7 +251,7 @@ out here.
 
 A service owns caching, `_inflight` dedup, multi-source aggregation and business decisions.
 The layering rule as actually enforced is `.claude/rules/backend-python.md` § Layering: an endpoint may
-hold an integration client only for a pass-through call (9 of 22 import from `integrations/` — seven hold a
+hold an integration client only for a pass-through call (9 of 23 import from `integrations/` — seven hold a
 client, `stocks.py` three of them, and `chat.py` imports only two Gemini error predicates); an integration
 may keep a process-local TTL cache for a slow upstream (`apewisdom`, `census`, `alternative_me`,
 `finra_short_interest`, `fred`, and `gemini`'s response/embedding `_TTLCache`) but the Supabase tier belongs
@@ -693,10 +694,10 @@ The shipped shape, in one line:
 
 Built by `app/api/error_response.py::make_error_body` / `make_error_response` / `auth_error`, with
 `classify_exception` and `error_response_from_exception` mapping a typed service/integration
-exception onto an `ErrorCode` and its HTTP status. 10 of the 22 endpoint modules call
-`error_response_from_exception` (35 call sites); the rest raise typed `HTTPException`s built by
+exception onto an `ErrorCode` and its HTTP status. 11 of the 23 endpoint modules call
+`error_response_from_exception` (40 call sites); the rest raise typed `HTTPException`s built by
 `make_error_response` / `auth_error`, are always-200 analytics, or — in roughly 100 sites across 13 of
-the 22 modules (`stocks.py` 29, `chat.py` 13, `admin.py` 11, `auth.py` 10, `portfolios.py` 10,
+the 23 modules (`stocks.py` 29, `chat.py` 13, `admin.py` 11, `auth.py` 10, `portfolios.py` 10,
 `billing.py` 6, `watchlist.py` 6, `crypto.py` 4, `etfs.py` 4, `research.py` 2, `commodities.py`,
 `indices.py`, `widget.py` 1 each) — still raise a plain-string `HTTPException`, which `main.py`'s handler
 deliberately leaves as `{"detail": …}` (§10).
@@ -1808,12 +1809,13 @@ What follows is the set with no other home.
 | Request correlation is partial | The middleware stack is exactly **five** entries — CORS, GZip, `_security_headers`, `cap_json_body`, `add_process_time`. (`_security_headers` was added 2026-09-12: the privacy, terms and support pages and the AASA file are real browser-reachable responses on this host and carried no `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` or HSTS. The same block documents why `allow_credentials` is now dropped whenever `ALLOWED_ORIGINS` is its `["*"]` default — Starlette answers that spec-illegal pair by echoing the caller's Origin back as trusted, verified live against production.) The last sets `request.state.request_id` and emits `X-Request-ID`, but the id is a millisecond timestamp (collides under concurrency), is read nowhere else, is absent from log records, and is not forwarded upstream | Enough to correlate a client report with one response; not enough to trace a request through the logs. Fixing it is a small, well-bounded change. |
 | Report status is polled while chat streams | SSE ships for chat; report status is a 3s poll with a 300s client deadline | Not an oversight. Per §5.4 the client deadline is deliberately *not* a failure — the server keeps generating and a list poll reconciles — which a stream would complicate rather than simplify. |
 | Four sibling artefacts are stale | `caydex-report-architecture.svg` and `caydex-100-users-dataflow.svg` predate the 2026-07-30 unification that put the direct report path behind the same concurrency guards as the deep path (§5); `caydex-system-design.html` and `caydex-system-design-structure.html` are 2026-07-04 snapshots of the whole app. `caydex-report-system-design.html` and `caydex-ask-cay-ai-system-design.html` were brought current on 2026-09-11 (the latter is pinned by `tests/test_ask_cay_ai_design_page_parity.py`). | Re-export the SVGs when that diagram is next touched; the two July HTML pages are superseded by this document and the Atlas. |
-| ~100 bare-string `HTTPException`s | 98 `raise HTTPException(detail="…")` sites across 13 of the 22 endpoint modules (`stocks.py` 29, `chat.py` 13, `admin.py` 11, `auth.py` 10, `portfolios.py` 10, `billing.py` 6, `watchlist.py` 6, `crypto.py` 4, `etfs.py` 4, `research.py` 2, `commodities.py` / `indices.py` / `widget.py` 1 each) sit outside the `{error_code, …}` contract — the "~100" that `main.py`'s `HTTPException` handler docstring and `.claude/rules/auth.md` §3 describe | iOS renders them through `APIError`'s per-status fallback; converting them is mechanical but not small. |
+| ~100 bare-string `HTTPException`s | 98 `raise HTTPException(detail="…")` sites across 13 of the 23 endpoint modules (`stocks.py` 29, `chat.py` 13, `admin.py` 11, `auth.py` 10, `portfolios.py` 10, `billing.py` 6, `watchlist.py` 6, `crypto.py` 4, `etfs.py` 4, `research.py` 2, `commodities.py` / `indices.py` / `widget.py` 1 each) sit outside the `{error_code, …}` contract — the "~100" that `main.py`'s `HTTPException` handler docstring and `.claude/rules/auth.md` §3 describe | iOS renders them through `APIError`'s per-status fallback; converting them is mechanical but not small. |
 | Two integrations own a Supabase cache | `integrations/finra_short_interest.py` (`short_interest_cache`, 3 d) and `integrations/coingecko.py` (`crypto_coin_id_cache`, permanent) write Tier 2 from inside `integrations/` | Contradicts § Layering (§3.3); moving them into a service is mechanical. Do not add a third. |
 | Every paged Supabase read orders on a unique column, and a capped read must not advance a cursor | `app/utils/postgrest_paging.py::fetch_all_rows` clamps `page_size` to the server cap and `tests/test_postgrest_paging_order_key.py` fails the build on a non-unique `order_by`. The 2026-09-13 pass found five more single-page reads AFTER the paging sweep (`portfolio_items`, the two watchlist seed reads, the Tracking feed's watchlist, both push bulk counts, the whale phase, the profile-match tier read) — PostgREST clamps every answer to ~1,000 rows and `.order` makes the loss deterministic, so a >1,000-item user's next whole-list `PUT /tickers` DELETED the rows the client never saw. | A capped read on a non-chronological key cannot know what it missed, so `smart_money_sender` holds its cursor when every page filled and re-evaluates next run (the dedup claim makes that harmless). |
 | A `*_known` flag must reach every asset class that shares the shape | `change_known` shipped on the index header only (2026-09-11); crypto, commodity and ETF still did `change = … or 0`, so a CoinGecko `price_change_24h: null`, a FRED series with one observation or an ETF profile row without a change rendered a green `+$0.00 (+0.00%)` with the dashed baseline on the live price. All four classes now carry it on core, detail and quote (`test_change_known_across_asset_classes.py`), and the chat market card carries `pe_known` for the same reason. | The flag is `is not None`, never truthiness: an explicit 0.0 move is a KNOWN flat day. |
 | The report's fair value was the current price | FMP's stable profile endpoint carries no `dcf` (the v3 field the collector read), so every report since the FMP rebuild persisted `fair_value_estimate == current_price` and the PDF hero printed "Margin of Safety +0.0% Fairly Valued" beside a bear case saying "no margin of safety" (a live AAPL report on 2026-09-12). The DCF now comes from the entitled `discounted-cash-flow` path; when FMP has no model the value is NULL end to end and the PDF prints "—". | Rows persisted before the fix are immutable, so `pdf_report_service.build_context` treats an estimate equal to the frozen price to the cent as no estimate. |
 | `monitorResearch(reportId:)` is dead | `TaskPollingManager` exposes it; nothing calls it | Recovery is the 5 s reports-list poll (§5.4). Delete or wire. |
+| The marketing engine is foundations only | §12 ships the ledger (migration 170), the worker/publisher split, the internal API and a worker that proves the upload path and then closes its run as `skipped`. No content is selected, written, voiced, rendered or published yet; `PUBLISHERS` in `app/services/marketing/publisher_service.py` is an empty registry and the worker's `MEDIA_STAGES` list (`marketing/main.py`) is empty | Deliberate sequencing (Phases 2-7 of the approved plan). Every switch defaults OFF / dry-run, so the shipped half is inert until each is flipped. The tables are not yet in `database/schema_snapshot.sql`; after applying 170 and re-dumping, remove them from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py` and add them to `_CURATED_TABLES` in `tests/test_system_design_doc_parity.py` in the same change. |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -1942,6 +1944,116 @@ individually opt-out-able in-app, and frequency is capped per category.
 
 ---
 
+## 12. Marketing Content Engine (FOUNDATIONS 2026-09-17)
+
+A zero-touch pipeline that turns Caydex-owned material into short vertical videos, text posts,
+a podcast feed and a blog, and publishes them on a schedule. Researched and planned 2026-09-16
+(62-agent verified feasibility study; the plan is the authority for Phases 2-8). What has
+SHIPPED is the foundation: the ledger, the process split, the worker API and the switches.
+
+### 12.1 The content is gated by licence and regulation, not by tooling
+
+Two facts decided the design before any tool was chosen, and both are enforced upstream of
+every renderer:
+
+- **The FMP Order Form is authenticated-display only** (§9.1, auth.md §1a). Exhibit A §3
+  *Public External Display* was declined in writing, Agreement §1 makes "display and
+  redistribution of any Data outside of Licensee Properties" a Non-Permitted Use, and ToS
+  §10.4 forbids even naming FMP as a source without consent. Both whale 13F rows and
+  congressional trades are FMP-relayed (`whale_service.py`, `signals_service.py`). So no FMP
+  number, no FMP-relayed filing and no product footage showing live prices may reach a
+  public post.
+- **EU MAR Art. 2(4) reaches a US brand feed.** For an instrument admitted to or traded on an
+  EU venue (large US names trade on Tradegate/gettex), a public opinion on its present or
+  future value or price is an investment recommendation with per-post disclosure duties, and
+  ESMA's own guidance says a "not investment advice" line does not change that. UK FSMA s.21
+  is the same shape. Ticker-specific scores, "cheaper than sector" labels and fair values
+  therefore stay inside the authenticated app. (Scope is instrument-based; per-ticker
+  confirmation is via ESMA FIRDS.)
+
+Hence the **content classes** on `marketing_runs.content_class`: **A** — educational and
+general, built from the Learn corpus and Caydex's own writing, illustrative data clearly
+labelled, no named-ticker value opinion (the default and the only class Phase 2 produces);
+**C** — reportorial public filings fetched directly from SEC EDGAR, deterministically
+templated, no valuation adjective (Phase 8). There is deliberately no class B in the CHECK
+constraint. Congressional PTRs carry a statutory commercial-use bar (5 U.S.C. §13107(c)) and
+are a counsel question before any code.
+
+### 12.2 Two processes, one ledger, least privilege
+
+```
+Railway CRON service "marketing-media"             FastAPI web service (this lifespan)
+  backend/marketing/ — Dockerfile, railway.toml,     app/services/marketing/ — the ledger
+  main.py; ffmpeg, fonts; Phase 3 adds Kokoro +       (run_service) and the publisher loop
+  torch-cpu, weights BAKED in                         (publisher_service, _spawn'd, an interval
+  hourly cron; exits in <1 s before                   loop like notification_dispatch, gated per
+  MARKETING_RUN_HOUR_ET                               cycle on MARKETING_ENABLED, default False)
+                                                      reads marketing_posts `approved` →
+  holds NO Supabase key, NO social secrets            claim_post (approved → queued, atomic) →
+  talks ONLY to /api/v1/internal/marketing/*          platform adapter → published | failed
+  media bytes go by Storage signed-upload URL         holds the social secrets; the ONLY caller
+                                                      of any platform API
+```
+
+- **The worker holds no Supabase key.** Its image carries torch/spaCy-class transitive
+  dependencies; a compromise there must not become a database breach or a brand hijack. It
+  reaches the four tables of migration 170 only through `app/api/v1/endpoints/marketing_internal.py`,
+  gated at ROUTER level by `X-Marketing-Worker-Token` (401 `AUTH_REQUIRED` without the header,
+  403 `AUTH_FORBIDDEN` on mismatch or when the server has no secret — fail closed), and uploads
+  each artefact through a signed-upload URL the API mints per object. A scoped Postgres role
+  behind a custom JWT was the first design and was not pursued: with the legacy HS256 secret
+  revoked (Appendix B, 2026-08-15) the backend holds no key that can sign a PostgREST JWT, and
+  verifying a scoped-role design against Supabase's current signing-key model was out of
+  scope for Phase 1. Note the boundary is exact: the worker cannot post anything itself; with
+  `MARKETING_AUTO_PUBLISH` on, what it RECORDS is published after the server-side content
+  checks that Phases 2 and 7 add — until those land, keep the switch off.
+- **Nothing under `backend/marketing/` imports `app.*`.** `app.config.Settings` requires the
+  Supabase variables the worker deliberately lacks, and importing `app.main` would start every
+  lifespan loop a second time. The two halves are two directories on purpose:
+  `app/services/marketing/` (web side, may import anything) and `backend/marketing/` (worker
+  side, the deployable). `tests/test_marketing_worker.py` scans every file of the latter.
+- **The claim is a UNIQUE row, never a clock.** `marketing_runs.run_date` is unique; the INSERT
+  is the claim (147's lesson). The cron is hourly so a slot Railway skipped (previous run
+  still alive) or a container killed mid-stage is retried on the first tick after
+  `MARKETING_RUN_STALE_SECONDS` (2700 s — deliberately below the hourly period, or the retry
+  would depend on boot jitter). Railway cron is UTC-only, has no DST handling, no
+  compute-first and no retry, so the ET hour gate and the resume-from-`stage` logic live in
+  the job; a tick before the window resumes yesterday's unfinished run and never creates one.
+  Liveness is the later of `started_at` and `updated_at` (every checkpoint bumps it). A stale
+  row is re-claimed with a compare-and-swap on the observed `attempts` value (which the
+  re-claim increments — conditioning on `status` alone was a no-op), capped at
+  `MARKETING_MAX_RUN_ATTEMPTS`; a per-process claim nonce lets a worker recognise its own
+  claim when the response was lost.
+- **Publishing is claim-before-send**, the `PushDispatchService.claim_send` discipline (§11.1):
+  dry-run is decided BEFORE the claim (a rehearsal touches no row), `approved → queued` is one
+  conditional UPDATE, `idempotency_key` (`<run_date>:<platform>:<format>`) is the key the
+  Phase-5 adapters present to the outlet, and a ledger failure AFTER the outlet accepted the
+  post leaves the row `queued` for reconciliation — never `failed`, which a retry would
+  double-post. A run's own `dry_run` flag rides on every post it records, so a rehearsal can
+  never be auto-approved by a different service's switch.
+- **Every switch defaults closed**: `MARKETING_ENABLED=False`, `MARKETING_DRY_RUN=True`,
+  `MARKETING_AUTO_PUBLISH=False`, `MARKETING_WORKER_TOKEN` unset → 403.
+
+### 12.3 Storage
+
+`marketing-media` is a PUBLIC bucket on purpose (migration 170, mirroring 136/137): Meta and
+Upload-Post fetch the MP4 by URL, and podcast enclosures must be stable unsigned URLs —
+Spotify re-fetches an enclosure only when its path changes. Paths are content-addressed
+(`<run_date>/<kind>-<sha256[:16]>.<ext>`), immutable, and an asset is `ready` only after the
+API has HEAD-verified the object (`complete_asset`), never on the worker's word.
+
+### 12.4 Tool decisions (why, briefly — the plan carries the evidence)
+
+| Blueprint item | Decision |
+|---|---|
+| Creatomate / Remotion / MoviePy | ffmpeg + libass (already in the image) + Pillow cards. Bookworm's ffmpeg is built with libass/x264; the `loop=` filter, not `-loop 1` (33 s vs 0.09 s decode per clip). Remotion needs Node + headless Chrome and a paid licence above three people. |
+| ElevenLabs / MMS_FA | Kokoro-82M (Apache-2.0, CPU, native word timestamps). The existing aligner `MMS_FA` is CC-BY-NC 4.0 and must not appear on the marketing path; `WAV2VEC2_ASR_BASE_960H` (MIT) if an aligner is ever needed. |
+| Postiz on Railway for X | Direct X API v2 (pay-per-use, own-account OAuth 1.0a token). Postiz needs a Temporal stack since v2.12 and removes no platform gate. |
+| Upload-Post | Yes, for TikTok/YouTube/IG/FB/LinkedIn/Threads — the only sub-$50 route to public TikTok (audited client). Thin `httpx` integration; the official SDK is sync `requests`. |
+| n8n / Substack / Spotify upload | No: Python orchestrator; static blog; self-hosted RSS on an owned domain. |
+
+---
+
 ## Appendix A: Where things live
 
 ### iOS
@@ -1965,14 +2077,15 @@ backend/
 │   │   ├── error_response.py     # the {error_code, message, user_message, action, details} contract
 │   │   └── v1/
 │   │       ├── api.py            # router registration
-│   │       └── endpoints/        # 22 modules; HTTP surface only
+│   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
 │   ├── integrations/             # 11 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
-│   │   └── agents/               # the multi-agent research pipeline
-│   │       └── book_voice_prompt.py   # per-book method voice for Learn BOOK chats
+│   │   ├── agents/               # the multi-agent research pipeline
+│   │   │   └── book_voice_prompt.py   # per-book method voice for Learn BOOK chats
+│   │   └── marketing/            # WEB-side half of the marketing engine: ledger + publisher loop (§12)
 │   ├── templates/                # PDF (WeasyPrint)
 │   ├── utils/
 │   ├── config.py                 # NOT app/core/config.py
@@ -1983,6 +2096,11 @@ backend/
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase
+├── marketing/                    # the marketing MEDIA WORKER — a SECOND Railway service (cron), §12
+│   ├── Dockerfile                #   its image; the web service keeps backend/Dockerfile
+│   ├── railway.toml              #   its config-as-code; the web service keeps backend/railway.toml
+│   ├── main.py                   #   entrypoint (`python -m marketing.main`) — nothing here imports app.*
+│   └── assets/fonts/             #   vendored OFL fonts for the caption burn
 ├── scripts/
 ├── tests/                        # FLAT — ~470 test_*.py + one tests/services/ subdir
 └── conftest.py                   # rootdir; forces SENTRY_DSN="" and blocks outbound sockets
@@ -2019,7 +2137,11 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-09-08 | The live-price WebSocket is REMOVED; price refresh is REST polling only | Streaming is excluded from the FMP Order Form (ToS §2.10 monitor-and-terminate), and the socket was already inert — FMP answered `{"event":"subscribe","status":401}` and went silent, while `_fmp_reader` discarded the reply with no log at any level and `ping_interval=20` held the upstream socket open. No entitlement guard existed on that path, so `GCUSD`/`BTCUSD` still opened an FMP socket. Zero functional cost: every consumer already had a REST fallback, which is now the only path and runs unconditionally | Keep the socket behind an entitlement guard; buy a streaming package |
 | 2026-09-08 | Index, commodity and macro surfaces are served by ENTITLED PROXIES, and every label names the instrument it prices | FMP's Index and Commodity packages are not on the Order Form, so `^GSPC`/`GCUSD`/`^VIX` all 402 — Market Pulse showed 0 of 6 tiles, index detail shipped `$0.00` under a live badge, and the AI report's macro module emitted 0 of 6 deterministic factors while printing "Benign macro backdrop". Index screens now use SPY/ONEQ/DIA (ONEQ not QQQ: QQQ is the Nasdaq-100, TE 4.55% vs 1.28%); commodities went 14 → 6 (energy from FRED spot, metals from physically-backed funds; the other eight had only delisted or futures-based proxies, which drift +11 to +202pp from the thing they are named after); macro reads FRED + entitled ETFs plus SPY realized volatility in place of the Cboe-copyrighted VIX. Relabelling is the load-bearing half: a fund's price under a commodity's name is fabricated data | Buy the Indexes + Commodities packages; keep the screens on futures-based ETF proxies |
 | 2026-09-10 | Chat starter questions rotate daily from a server pool, composed into ONE globally-cached impersonal payload | The empty chat state shipped five hardcoded chips naming two tickers picked a year earlier, and a TestFlight tester asked for questions that change with the day. The day's selection is a pure function of (pool, ET date) in `daily_rotation.py`, so there is no schedule table to drift and every instance agrees without coordination. The response is cached ONCE for all callers, which is what excludes App-Exclusive Signals: their tickers are Pro-gated and `redact_signals()` masks them per request, so a shared body carrying one would show a Free user what the paywall hides. Every live slot degrades to an evergreen question and the bundled catalogue is the floor, so the route has no `ErrorCode` | A per-user payload (rejected: cross-user leak through the shared cache); client-only rotation (rejected: cannot answer "what is hot today", and a reword needs an App Store release) |
+| 2026-08-15 | Supabase legacy JWT-based API keys DISABLED and the legacy HS256 signing key rotated then REVOKED; the backend authenticates with an `sb_secret_…` key and verifies ES256 session tokens via JWKS | A `service_role` JWT had been committed to public history; rotating the JWT secret would have logged everyone out, and disabling JWT API keys alone left Storage open (it verifies the signature, not the key setting) | Rotate the JWT secret in place; keep the legacy key and purge history only |
 | 2026-08-27 | Report thinking budget capped at 0, both stages, separately configurable | Measured −66% cost/report; the failure mode is a clipped sentence, not a wrong number. The two post-assembly syntheses stay UNCAPPED | Model default (uncapped); a single shared setting |
+| 2026-09-16 | Marketing engine content is gated by the FMP licence and EU MAR BEFORE any tool choice: class A (educational, Caydex-owned) ships first, class C (EDGAR-direct filings) later, no class B in public | Public External Display was declined in writing and both 13F and congressional rows are FMP-relayed; MAR treats a named-ticker value opinion as a recommendation regardless of disclaimers | Buy Exhibit A §3 first; post FMP-derived "data of the day" content (the blueprint's own examples) |
+| 2026-09-17 | Marketing media worker is a SEPARATE Railway cron service holding no Supabase key; it reaches the ledger only through a token-gated internal API and Storage signed-upload URLs | Least privilege for an ML-heavy image; a scoped-role JWT cannot be minted (legacy JWT keys disabled, signing key revoked) | Same image as the web app with a different start command; worker with service_role; a scoped Postgres role behind a custom JWT |
+| 2026-09-17 | ffmpeg + libass + Pillow for video; Kokoro-82M for voice; Upload-Post for the audited platforms; direct X API; no Postiz, no n8n, no Remotion, no MMS_FA on the marketing path | Measured render cost ≈ $0.002/clip; Kokoro emits word timestamps natively; MMS_FA is CC-BY-NC; Postiz needs Temporal and removes no gate | Creatomate/JSON2Video; ElevenLabs; Postiz self-host; n8n |
 
 ---
 

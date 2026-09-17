@@ -38,6 +38,11 @@ from app.services._whale_common import (
     SPLIT_SUPPRESS,
 )
 from app.utils.period_labels import latest_filed_13f_quarter
+from app.services.entitlements import (
+    TIER_PRO,
+    congress_holders_unlocked,
+    required_tier_for_congress_holders,
+)
 from app.schemas.holders import (
     CongressActivitiesDataSchema,
     CongressActivitySchema,
@@ -192,6 +197,106 @@ _classify_insider_transaction = classify_insider_transaction
 
 _SUPABASE_CACHE_TTL_HOURS = 24
 
+#: Stamped into `holders_cache.response_json`; a row without the current value is
+#: refused on read and rebuilt. Bump when the way a stored value is COMPUTED changes,
+#: or the 24h tier keeps serving the old formula — exactly how AAPL's laundered
+#: "Institutions 100.0%" row would have outlived its fix by a day.
+#:
+#: 1 → pre-versioning rows have no key and never match (the intent). Introduced with
+#:     the institutional-percent plausibility gate (TestFlight E5, 2026-09-17).
+_HOLDERS_PAYLOAD_VERSION = 1
+_VERSION_KEY = "payload_version"
+
+#: Below this insider block, `institutions + insiders > 100` is physically impossible
+#: (nobody double-counts a 0.1% insider stake); at or above it the overlap is REAL — at a
+#: controlled company the >10% insider block is itself a 13F filer (PLCE: freeFloat 34.96
+#: with ownershipPercent 78.35), which the breakdown deliberately reports unclamped.
+_INST_OVERLAP_INSIDER_FLOOR = 5.0
+
+
+def _institutional_pct_plausible(pct: Optional[float], insiders_pct: float) -> bool:
+    """Could ``pct`` be a real institutional-ownership percentage beside ``insiders_pct``?
+
+    A physical bound, not a magic ceiling: FMP's 13F roll-up runs to 95–105% on small
+    caps through amended-filing over-counting, and a fixed 99 would blank those. What
+    cannot be true is >100%, or a total above 100% when the insider block is too small
+    to be the double-counted party. That is exactly the AAPL shape (0.1 + 100.0).
+    """
+    if pct is None or not math.isfinite(pct) or pct <= 0.0 or pct > 100.0:
+        return False
+    if insiders_pct < _INST_OVERLAP_INSIDER_FLOOR and pct + insiders_pct > 100.0:
+        return False
+    return True
+
+
+def _resolve_institutional_pct(
+    inst_summary: Dict[str, Any],
+    insiders_pct: float,
+    outstanding_shares: float,
+    inst_holders: List[Dict[str, Any]],
+    prior_summary: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[float], str]:
+    """``(institutional %, source)`` down a numeric-first fallback chain, or ``(None,
+    "unknown")`` when nothing plausible survives.
+
+    Order: the summary's own ``ownershipPercent`` → recompute from the 13F share count
+    over shares outstanding (rescues a stale denominator; NOT inflated share counts) →
+    ``lastOwnershipPercent`` on the same row, else the prior settled quarter (fetched only
+    when the gate trips) → the top-holder sum (a lower bound; partial by construction).
+    Every candidate passes the same plausibility gate.
+    """
+    def ok(v: Optional[float]) -> bool:
+        return _institutional_pct_plausible(v, insiders_pct)
+
+    def num(rec: Any, key: str) -> Optional[float]:
+        if not isinstance(rec, dict) or rec.get(key) is None:
+            return None
+        v = _safe_float(rec, key, float("nan"))
+        return v if math.isfinite(v) else None
+
+    raw = num(inst_summary, "ownershipPercent")
+    if ok(raw):
+        return raw, "summary"
+
+    shares_13f = num(inst_summary, "numberOf13Fshares")
+    if shares_13f is not None and outstanding_shares and outstanding_shares > 0:
+        recomputed = shares_13f / outstanding_shares * 100.0
+        if ok(recomputed):
+            return recomputed, "recomputed"
+
+    last = num(inst_summary, "lastOwnershipPercent")
+    if ok(last):
+        return last, "last_quarter"
+    prior = num(prior_summary, "ownershipPercent")
+    if ok(prior):
+        return prior, "last_quarter"
+
+    if inst_holders:
+        total = 0.0
+        for h in inst_holders:
+            if not isinstance(h, dict):
+                continue
+            v = num(h, "ownership")
+            if v is None:
+                v = num(h, "percentOfSharesHeld")
+            if v is not None and v > 0:
+                total += v
+        if ok(total):
+            return total, "top_holders_sum"
+
+    return None, "unknown"
+
+
+def _insiders_pct_from_profile(profile: Dict[str, Any]) -> float:
+    """Insider %: ``100 − freeFloat`` from shares-float, else the profile's own figure."""
+    free_float = _safe_float(profile, "freeFloat", 0.0)
+    if free_float > 0:
+        return max(0.0, min(100.0, 100.0 - free_float))
+    insiders_pct = _safe_float(profile, "insidersPercentage", 0.0)
+    if 0 < insiders_pct < 1.0:
+        insiders_pct *= 100.0
+    return max(0.0, min(100.0, insiders_pct))
+
 # The most recent N quarters are NOT settled: 13F filings arrive over the ~45
 # days after quarter-end and keep getting amended for months. A row cached
 # early (few filers reported) can be wildly wrong, so we never trust the
@@ -208,6 +313,27 @@ _HFQ_SHARES_FLOOR = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 # ── Service class ─────────────────────────────────────────────────
 
+def redact_congress(resp: HoldersResponse, tier_required: str) -> HoldersResponse:
+    """A COPY of ``resp`` with the Congress segment withheld and the lock pair raised.
+
+    Never mutates: every exit of `get_holders` returns the SAME cached instance (in-memory
+    tier, in-flight join, Supabase tier), so an in-place edit would blank Congress for
+    the next paying caller until the row rebuilt. The substitutes are empty but
+    well-formed — `SmartMoneyDataSchema(tab="Congress")` serialises `tab`, `price_data`,
+    `flow_data`, `summary` and `CongressActivitiesDataSchema()` its `summary` /
+    `activities`, which is exactly what the shipped iOS DTOs require non-Optional.
+    Sending ``null`` for either would crash decode on build 1.0 (8).
+    """
+    return resp.model_copy(update={
+        "congress_data": SmartMoneyDataSchema(tab="Congress"),
+        "recent_activities": resp.recent_activities.model_copy(update={
+            "congress_activities": CongressActivitiesDataSchema(),
+        }),
+        "congress_locked": True,
+        "congress_tier_required": tier_required,
+    })
+
+
 class HoldersService:
     """Builds the HoldersData payload for a given ticker."""
 
@@ -216,6 +342,22 @@ class HoldersService:
         self.supabase = get_supabase()
 
     # ── Public API ────────────────────────────────────────────────
+
+    async def get_holders_for_tier(
+        self, ticker: str, tier: Optional[str]
+    ) -> HoldersResponse:
+        """The holders payload as ONE caller on ONE plan may see it.
+
+        `get_holders` stays ungated: it is also what the ticker-report collector and the
+        ownership snapshot read, and neither carries a tier (a ``None`` tier folds to
+        Free in `normalize_tier`, which would strip Congress from every 20-credit report).
+        The route calls this instead, so the gate sits at one exit above every cache
+        layer — the same split `whale_service` uses for its paid sections.
+        """
+        resp = await self.get_holders(ticker)
+        if congress_holders_unlocked(tier):
+            return resp
+        return redact_congress(resp, required_tier_for_congress_holders(tier) or TIER_PRO)
 
     async def get_holders(self, ticker: str) -> HoldersResponse:
         ticker = _validate_ticker(ticker)
@@ -336,6 +478,14 @@ class HoldersService:
 
             response_json = entry.get("response_json")
             if response_json:
+                response_json = dict(response_json)
+                version = response_json.pop(_VERSION_KEY, None)
+                if version != _HOLDERS_PAYLOAD_VERSION:
+                    logger.info(
+                        "Holders Supabase cache STALE for %s (payload_version=%s, want %s)",
+                        ticker, version, _HOLDERS_PAYLOAD_VERSION,
+                    )
+                    return None
                 result = HoldersResponse(**response_json)
                 # Validate hedge fund flow data — reject one-sided cached data
                 if self._has_one_sided_hedge_fund_data(result):
@@ -385,7 +535,7 @@ class HoldersService:
             self.supabase.table("holders_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {**result.model_dump(), _VERSION_KEY: _HOLDERS_PAYLOAD_VERSION},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker",
@@ -530,10 +680,30 @@ class HoldersService:
         senate_for_ticker = self._dedup_congress_trades(senate_disclosure, senate_from_latest)
         house_for_ticker = self._dedup_congress_trades(house_disclosure, house_from_latest)
 
-        # Build each section
+        # Build each section. The prior settled quarter's summary is fetched ONLY when
+        # the current aggregate fails the plausibility gate (zero steady-state cost) —
+        # it is the third rung of `_resolve_institutional_pct`'s fallback chain.
+        prior_summary: Optional[Dict[str, Any]] = None
+        if not _institutional_pct_plausible(
+            _safe_float(inst_ownership_summary or {}, "ownershipPercent", float("nan")),
+            _insiders_pct_from_profile(company_profile),
+        ):
+            prior_year, prior_quarter = (data_year, data_quarter - 1) if data_quarter > 1 else (data_year - 1, 4)
+            try:
+                prior_summary = await self.fmp.get_institutional_ownership_for_quarter(
+                    ticker, prior_year, prior_quarter, strict=True
+                )
+            except Exception as e:
+                # A transient failure on the rescue rung leaves the figure at a lower
+                # bound (top-holder sum) or unknown. That is honest to SERVE but not to
+                # PIN for 24h — a 5-minute rebuild may recover the real number.
+                logger.warning("[holders-inst-fallback] %s: prior-quarter summary %dQ%d failed: %s: %s "
+                               "— build not persisted", ticker, prior_year, prior_quarter, type(e).__name__, e)
+                degraded.append("Inst prior-quarter summary")
+                prior_summary = None
         breakdown = self._build_shareholder_breakdown(
             company_profile, institutional_holders, insider_roster, current_price,
-            inst_ownership_summary,
+            inst_ownership_summary, prior_summary=prior_summary, ticker=ticker,
         )
         # Split ratio for the 13F data quarter. A split multiplies the share count
         # mechanically, so `changeInSharesNumber` / `numberOf13FsharesChange` report the
@@ -636,57 +806,63 @@ class HoldersService:
         insider_roster: List[Dict[str, Any]],
         current_price: float,
         inst_summary: Optional[Dict[str, Any]] = None,
+        prior_summary: Optional[Dict[str, Any]] = None,
+        ticker: str = "",
     ) -> ShareholderBreakdownSchema:
         # ── Derive ownership percentages ──────────────────────────
         # Insiders: from shares-float endpoint (freeFloat %)
-        free_float = _safe_float(profile, "freeFloat", 0.0)
+        insiders_pct = _insiders_pct_from_profile(profile)
 
-        if free_float > 0:
-            insiders_pct = max(0.0, 100.0 - free_float)
-        else:
-            insiders_pct = _safe_float(profile, "insidersPercentage", 0.0)
-            if 0 < insiders_pct < 1.0:
-                insiders_pct *= 100.0
-
-        # Institutional %: use real total from positions-summary endpoint
+        # Institutional %: the positions-summary aggregate, gated for plausibility and
+        # walked down a numeric fallback chain. It used to be taken verbatim and clamped
+        # with `min(100, …)`, which laundered an implausible 13F roll-up into a confident
+        # "Institutions 100.0% / Public/Other 0.0%" (AAPL, 2026-09-03 — its real figure
+        # is ~66%). Unknown is now UNKNOWN: 0.0 placeholders + `institutions_unknown`,
+        # never `100 − insiders` for Public (that would fabricate the third number too).
         inst_summary = inst_summary or {}
-        real_inst_pct = _safe_float(inst_summary, "ownershipPercent", 0.0)
-
-        if real_inst_pct > 0:
-            institutions_pct = real_inst_pct
-        elif inst_holders:
-            # Fallback: sum top holders (partial — less accurate)
-            institutions_pct = sum(
-                _safe_float(h, "ownership",
-                    _safe_float(h, "percentOfSharesHeld", 0.0))
-                for h in inst_holders
+        outstanding_shares = _safe_float(profile, "outstandingShares", 0.0)
+        institutions_val, institutions_source = _resolve_institutional_pct(
+            inst_summary, insiders_pct, outstanding_shares, inst_holders, prior_summary,
+        )
+        raw_pct = inst_summary.get("ownershipPercent")
+        institutions_unknown = institutions_val is None
+        if institutions_unknown:
+            institutions_pct = 0.0
+            public_other_pct = 0.0
+            logger.warning(
+                "[holders-inst-implausible] %s: ownershipPercent=%r rejected and no "
+                "plausible fallback (insiders=%.2f%%) — institutions read as unknown",
+                ticker or "?", raw_pct, insiders_pct,
             )
         else:
-            institutions_pct = 0.0
-
-        # Clamp and compute public/other.
-        #
-        # Do NOT clamp institutions to `100 - insiders`. Insider % (derived from
-        # shares-float `freeFloat`) and institutional % (13F
-        # `ownershipPercent`) come from DIFFERENT filings and legitimately
-        # OVERLAP: at a controlled company the >10% insider block is itself a
-        # 13F filer, so the same shares are counted by both. The old clamp
-        # silently rewrote the real figure — PLCE Q1'26 (freeFloat 34.96,
-        # ownershipPercent 78.35) rendered "Institutions 35.0%" here while the
-        # Overview tab of the SAME screen showed "% Held Inst. 78.35%", a 43pp
-        # contradiction one tab apart, plus a fabricated "Public/Other 0.0%".
-        # Report both source figures honestly; the iOS stacked bar normalizes by
-        # their sum (ShareholderBreakdownBar.segmentWidth), so an overlapping
-        # total > 100 still renders correctly.
-        insiders_pct = max(0.0, min(100.0, insiders_pct))
-        institutions_pct = max(0.0, min(100.0, institutions_pct))
-        if insiders_pct + institutions_pct > 100.0:
-            logger.info(
-                "Shareholder breakdown overlap: insiders=%.2f%% + institutions=%.2f%% "
-                "> 100%% (insider block is also a 13F filer); public/other floored at 0",
-                insiders_pct, institutions_pct,
-            )
-        public_other_pct = max(0.0, 100.0 - insiders_pct - institutions_pct)
+            institutions_pct = institutions_val
+            if institutions_source != "summary":
+                logger.warning(
+                    "[holders-inst-fallback] %s: ownershipPercent=%r rejected "
+                    "(insiders=%.2f%%) → %.2f%% via %s",
+                    ticker or "?", raw_pct, insiders_pct, institutions_pct, institutions_source,
+                )
+            # Do NOT clamp institutions to `100 - insiders`. Insider % (derived from
+            # shares-float `freeFloat`) and institutional % (13F `ownershipPercent`)
+            # come from DIFFERENT filings and legitimately OVERLAP: at a controlled
+            # company the >10% insider block is itself a 13F filer, so the same shares
+            # are counted by both. The old clamp silently rewrote the real figure — PLCE
+            # Q1'26 (freeFloat 34.96, ownershipPercent 78.35) rendered "Institutions
+            # 35.0%" here while the Overview tab of the SAME screen showed "% Held Inst.
+            # 78.35%", a 43pp contradiction one tab apart, plus a fabricated "Public/
+            # Other 0.0%". Report both source figures honestly; the iOS stacked bar
+            # normalizes by their sum (ShareholderBreakdownBar.segmentWidth), so an
+            # overlapping total > 100 still renders correctly. (The plausibility gate
+            # above rejects only the case where the insider block is too small to be
+            # the double-counted party.)
+            institutions_pct = max(0.0, min(100.0, institutions_pct))
+            if insiders_pct + institutions_pct > 100.0:
+                logger.info(
+                    "Shareholder breakdown overlap: insiders=%.2f%% + institutions=%.2f%% "
+                    "> 100%% (insider block is also a 13F filer); public/other floored at 0",
+                    insiders_pct, institutions_pct,
+                )
+            public_other_pct = max(0.0, 100.0 - insiders_pct - institutions_pct)
 
         # Build top holders (legacy list)
         top_holders = self._build_top_holders(inst_holders[:10])
@@ -708,6 +884,8 @@ class HoldersService:
             insiders_percent=round(insiders_pct, 1),
             institutions_percent=round(institutions_pct, 1),
             public_other_percent=round(public_other_pct, 1),
+            institutions_unknown=institutions_unknown,
+            institutions_source=institutions_source,
             top_holders=top_holders,
             top_10_owners=Top10OwnersSchema(
                 institutions=top_10_institutions,

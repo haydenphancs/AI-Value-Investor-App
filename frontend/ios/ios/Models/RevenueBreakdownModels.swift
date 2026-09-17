@@ -199,6 +199,14 @@ struct RevenueBreakdownData {
         isProfit ? "Net Profit" : "Net Loss"
     }
 
+    /// The legend's right-column heading follows the sign like the row beneath it: a
+    /// loss-maker's costs column was headed "Costs & Profit" over a "Net Loss -1.6B" row
+    /// (PLUG, TestFlight build 1.0 (8)). Keyed on `isProfit` — the REPORTED net income —
+    /// not on `costsExceedRevenue`, whose segment-sum residual can disagree in sign.
+    var costsColumnTitle: String {
+        isProfit ? "Costs & Profit" : "Costs & Loss"
+    }
+
     var netProfitColor: Color {
         isProfit ? AppColors.gain : AppColors.loss
     }

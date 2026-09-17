@@ -468,6 +468,9 @@ enum PaywallContext: String, Sendable, CaseIterable {
     case whaleFollowLimit = "whale_follow_limit"
     case whaleDetail = "whale_detail"
     case learnAudio = "learn_audio"
+    /// The Congress segment of a ticker's Holders tab (Pro/Max, 2026-09-17). Same paid
+    /// floor and the same `signals` feature row as the Congress signal on Home.
+    case congressHolders = "congress_holders"
 
     var headline: String {
         switch self {
@@ -478,6 +481,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleFollowLimit: return "Track more investors"
         case .whaleDetail:      return "See what they're actually holding"
         case .learnAudio:       return "Listen instead of reading"
+        case .congressHolders:  return "See what Congress is trading"
         }
     }
 
@@ -500,6 +504,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
             return "Current Picks, Recent Trades and the AI sentiment summary on any investor."
         case .learnAudio:
             return "Narration and read-along for Money Moves and the book library. Investor Journey narration is already free on every plan."
+        case .congressHolders:
+            return "Insider and institutional flow stay free on every ticker. A plan adds congressional trades and the members behind them."
         }
     }
 
@@ -513,6 +519,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleFollowLimit:      return "whale_tracking"
         case .whaleDetail:           return "whale_detail"
         case .learnAudio:            return "learn_audio"
+        case .congressHolders:       return "signals"
         }
     }
 
@@ -525,6 +532,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleFollowLimit: return "person.2.fill"
         case .whaleDetail:      return "chart.pie.fill"
         case .learnAudio:       return "headphones"
+        case .congressHolders:  return "building.columns.fill"
         }
     }
 
@@ -532,7 +540,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         switch self {
         case .general, .moreCredits: return AppColors.alertOrange
         case .updatesTickers:        return AppColors.primaryBlue
-        case .signals:               return AppColors.accentCyan
+        case .signals, .congressHolders: return AppColors.accentCyan
         case .whaleFollowLimit, .whaleDetail: return AppColors.alertPurple
         case .learnAudio:            return AppColors.gain
         }

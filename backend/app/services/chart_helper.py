@@ -42,6 +42,12 @@ FULL_SPAN: Tuple[float, float] = (0.0, 1.0)
 # regular 09:30–16:00 bell; crypto and the continuously-quoted commodity futures
 # run the whole calendar day, and FMP stamps their bars 00:00–23:55 ET (verified
 # live: BTCUSD and GCUSD both start at 00:00 while ^GSPC starts at 09:30).
+#
+# `extended_hours=True` here means ROUND THE CLOCK (crypto). The equity
+# pre/after-hours session (04:00–20:00 ET) is a user preference on the detail
+# chart only — iOS `TradingDayHelper.SessionWindow.extended` — and is never
+# expressed with this bool: card sparklines always sit on the bell, so card and
+# chart agree with the toggle OFF and the chart is deliberately wider with it ON.
 _REGULAR_OPEN_MINUTE = 9 * 60 + 30    # 09:30
 _REGULAR_CLOSE_MINUTE = 16 * 60       # 16:00
 _EARLY_CLOSE_MINUTE = 13 * 60         # 13:00 — NYSE/NASDAQ half-days
@@ -483,16 +489,24 @@ async def fetch_chart_data(
             pass
 
     if resolved_interval in INTRADAY_INTERVALS:
-        raw = await fmp.get_intraday_prices(
-            symbol,
-            interval=resolved_interval,
-            from_date=from_date,
-            to_date=to_date,
-        )
+        # `extended` MUST reach the FMP call: the endpoint serves the regular session
+        # only unless asked (see `FMPClient.get_intraday_prices`). Skipping the
+        # regular-hours filter below is not enough on its own — that was the whole
+        # defect behind the inert Extended Hours toggle (TestFlight, build 1.0 (8)).
+        intraday_kwargs: Dict[str, Any] = {
+            "interval": resolved_interval,
+            "from_date": from_date,
+            "to_date": to_date,
+        }
+        if extended_hours:
+            intraday_kwargs["extended"] = True
+        raw = await fmp.get_intraday_prices(symbol, **intraday_kwargs)
         if isinstance(raw, list):
             raw.sort(key=lambda p: p.get("date") or "")
             prices = _normalize_prices(raw)
             if not extended_hours:
+                # Belt and braces: FMP should already have omitted these, but a
+                # pre/after-hours bar that slips through would clamp to the chart edge.
                 prices = _filter_regular_hours(prices)
             return prices
         return []

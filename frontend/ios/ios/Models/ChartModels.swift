@@ -118,8 +118,26 @@ enum ChartAssetContext {
     case index
     case commodity
 
+    /// Only the stock screen fetches pre/after-hours bars (`extended_hours=` on
+    /// /overview, /overview/core and /chart). The ETF, index and commodity backends
+    /// fetch the regular session only and crypto trades round the clock, so the
+    /// Extended Hours toggle would be inert there — it used to be shown anyway.
     var supportsExtendedHours: Bool {
-        self != .crypto
+        self == .stock
+    }
+
+    /// Sub-panes this asset class can draw honestly.
+    ///
+    /// Stoch(14,3,3) needs high/low; CoinGecko rows carry close + volume only, so on
+    /// crypto it degraded to a close-only oscillator under the Stoch label. Same
+    /// reasoning as `allowedChartTypes`, which already hides candles there.
+    var allowedSubCharts: [TechnicalIndicatorType] {
+        switch self {
+        case .crypto:
+            return TechnicalIndicatorType.allCases.filter { !$0.isOverlay && $0 != .stochastic }
+        case .stock, .etf, .index, .commodity:
+            return TechnicalIndicatorType.allCases.filter { !$0.isOverlay }
+        }
     }
 
     /// The time-range pills this asset's screen may offer.
@@ -187,6 +205,7 @@ enum ChartAssetContext {
 
 class ChartSettings: ObservableObject {
     private static let chartTypeKey = "caydex_preferred_chart_type"
+    private static let showExtendedHoursKey = "caydex_show_extended_hours"
 
     @Published var chartType: ChartType {
         didSet {
@@ -195,7 +214,15 @@ class ChartSettings: ObservableObject {
     }
     @Published var selectedInterval: ChartInterval = .fiveMin
     @Published var enabledIndicators: Set<TechnicalIndicatorType> = []
-    @Published var showExtendedHours: Bool = true
+    /// Extended Hours is OPT-IN (product decision, 2026-09-17). It defaulted to `true`
+    /// while it was inert; now that it works, a default of `true` would make every 1D
+    /// stock chart span 16 hours with the regular session squeezed into ~40% of the
+    /// width. Persisted like `chartType` so a user's choice survives relaunch.
+    @Published var showExtendedHours: Bool = false {
+        didSet {
+            UserDefaults.standard.set(showExtendedHours, forKey: Self.showExtendedHoursKey)
+        }
+    }
     @Published var showEarningsDates: Bool = false
 
     init() {
@@ -206,6 +233,8 @@ class ChartSettings: ObservableObject {
         } else {
             self.chartType = .line
         }
+        // `bool(forKey:)` is false for an absent key, which is exactly the default.
+        self.showExtendedHours = UserDefaults.standard.bool(forKey: Self.showExtendedHoursKey)
     }
 
     var activeOverlays: [TechnicalIndicatorType] {

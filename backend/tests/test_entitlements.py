@@ -163,3 +163,23 @@ def test_the_input_list_is_not_mutated():
     original = ["DIF", "BDU", "BDX"]
     ent.select_visible_tickers(original, 1)
     assert original == ["DIF", "BDU", "BDX"]
+
+
+# ── Holders tab: the Congress segment is paid (2026-09-17) ───────────────────
+
+def test_congress_holders_shares_the_paid_floor():
+    """Same frozenset OBJECT as signals/whale detail so the three surfaces that show
+    congressional trades cannot drift into different plans."""
+    assert ent.CONGRESS_HOLDERS_UNLOCKED_TIERS is ent.SIGNALS_UNLOCKED_TIERS
+
+
+@pytest.mark.parametrize("tier", ["free", "FREE", "", None, "enterprise", 0, [], {}])
+def test_unknown_tiers_lock_congress(tier):
+    assert ent.congress_holders_unlocked(tier) is False
+    assert ent.required_tier_for_congress_holders(tier) == ent.TIER_PRO
+
+
+@pytest.mark.parametrize("tier", ["pro", "premium", " Pro ", "PREMIUM"])
+def test_paid_tiers_unlock_congress(tier):
+    assert ent.congress_holders_unlocked(tier) is True
+    assert ent.required_tier_for_congress_holders(tier) is None

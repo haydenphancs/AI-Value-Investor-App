@@ -29,7 +29,8 @@ struct ShareholderBreakdownSection: View {
             ShareholderBreakdownBar(
                 insidersPercent: breakdownData.insidersPercent,
                 institutionsPercent: breakdownData.institutionsPercent,
-                publicOtherPercent: breakdownData.publicOtherPercent
+                publicOtherPercent: breakdownData.publicOtherPercent,
+                institutionsUnknown: breakdownData.institutionsUnknown
             )
             .padding(.vertical, AppSpacing.sm)
 

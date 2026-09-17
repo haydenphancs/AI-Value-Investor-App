@@ -222,3 +222,127 @@ def test_sub_dollar_series_survives_rounding_at_its_own_precision():
     assert len(set(rounded)) == len(set(closes))   # no collapsing
     # The old behaviour, pinned so the regression is unmistakable.
     assert len({round(c, 2) for c in closes}) == 1
+
+
+# ── Extended hours reach the FMP call (TestFlight E1, build 1.0 (8)) ────────
+#
+# `/stable/historical-chart/{interval}` serves the REGULAR session only unless
+# `extended=true` is sent (probed 2026-09-16: 78 bars 09:30–15:55 without it,
+# 192 bars 04:00–19:55 with it). The Extended Hours toggle used to skip the
+# regular-hours filter over data that never contained pre/after-hours bars, so
+# it was inert. These drive the REAL `fetch_chart_data`, not the leaf, because a
+# mutation that stops forwarding the flag stays green under a leaf-only test.
+
+import pytest
+
+
+class _RecordingFMP:
+    """Records the kwargs `fetch_chart_data` passes and serves a fixed session."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def get_intraday_prices(self, ticker, **kwargs):
+        self.calls.append((ticker, dict(kwargs)))
+        return [
+            {"date": "2026-09-11 19:55:00", "open": 1, "high": 1, "low": 1, "close": 5.0, "volume": 1},
+            {"date": "2026-09-11 16:00:00", "open": 1, "high": 1, "low": 1, "close": 4.0, "volume": 1},
+            {"date": "2026-09-11 15:55:00", "open": 1, "high": 1, "low": 1, "close": 3.0, "volume": 1},
+            {"date": "2026-09-11 09:30:00", "open": 1, "high": 1, "low": 1, "close": 2.0, "volume": 1},
+            {"date": "2026-09-11 04:00:00", "open": 1, "high": 1, "low": 1, "close": 1.0, "volume": 1},
+        ]
+
+    async def get_historical_prices(self, *a, **kw):
+        raise AssertionError("an intraday range reached the EOD endpoint")
+
+
+@pytest.mark.asyncio
+async def test_extended_hours_true_requests_extended_bars_from_fmp():
+    fake = _RecordingFMP()
+    prices = await chart_helper.fetch_chart_data(fake, "NVDA", "1D", None, extended_hours=True)
+
+    assert len(fake.calls) == 1
+    ticker, kwargs = fake.calls[0]
+    assert ticker == "NVDA"
+    assert kwargs.get("extended") is True, "the flag must reach FMP, not just the filter"
+    assert kwargs.get("interval") == "5min"
+    # Every bar survives, oldest first — the 04:00 and 19:55 prints are the point.
+    assert [p["date"][11:16] for p in prices] == ["04:00", "09:30", "15:55", "16:00", "19:55"]
+
+
+@pytest.mark.asyncio
+async def test_extended_hours_false_does_not_ask_fmp_and_keeps_the_bell_only():
+    fake = _RecordingFMP()
+    prices = await chart_helper.fetch_chart_data(fake, "NVDA", "1D", None, extended_hours=False)
+
+    _, kwargs = fake.calls[0]
+    assert not kwargs.get("extended"), "a regular-session chart must not request extended bars"
+    # The belt-and-braces filter still drops anything outside 09:30 <= t < 16:00.
+    assert [p["date"][11:16] for p in prices] == ["09:30", "15:55"]
+
+
+def test_fmp_client_sends_extended_true_only_when_asked():
+    """The integration adds `extended=true` to the query iff the flag is set."""
+    import asyncio
+    from app.integrations.fmp import FMPClient
+
+    seen = []
+
+    async def fake_request(self, endpoint, params=None, **kw):
+        seen.append((endpoint, dict(params or {})))
+        return []
+
+    client = FMPClient.__new__(FMPClient)
+    original = FMPClient._make_request
+    FMPClient._make_request = fake_request
+    try:
+        asyncio.run(client.get_intraday_prices("AAPL", "5min", "2026-09-16", "2026-09-16", extended=True))
+        asyncio.run(client.get_intraday_prices("AAPL", "5min", "2026-09-16", "2026-09-16"))
+    finally:
+        FMPClient._make_request = original
+
+    assert seen[0][0] == "historical-chart/5min"
+    assert seen[0][1].get("extended") == "true"
+    assert "extended" not in seen[1][1]
+
+
+# ── the two production callers forward the flag (testing the wiring, not the leaf) ──
+
+@pytest.mark.asyncio
+async def test_the_overview_volatile_fetch_forwards_extended_hours_to_fmp():
+    from app.services.stock_overview_service import StockOverviewService
+    from tests._price_fakes import PriceFromFMPFake
+
+    fake = _RecordingFMP()
+    svc = StockOverviewService.__new__(StockOverviewService)
+    svc.fmp = fake
+    svc.price = PriceFromFMPFake(fake)
+    await svc._get_volatile("NVDA", "1D", None, True)
+    assert fake.calls and fake.calls[0][1].get("extended") is True
+    fake.calls.clear()
+    await svc._get_volatile("NVDA", "1D", None, False)
+    assert fake.calls and not fake.calls[0][1].get("extended")
+
+
+def test_the_chart_route_forwards_extended_hours_to_fmp(monkeypatch):
+    import logging
+    from fastapi.testclient import TestClient
+    from app.api.v1.endpoints import stocks
+    from app.dependencies import get_current_user_id
+    from app.main import app
+
+    fake = _RecordingFMP()
+    monkeypatch.setattr(stocks, "get_fmp_client", lambda: fake)
+    app.dependency_overrides[get_current_user_id] = lambda: "u-1"
+    logging.disable(logging.CRITICAL)
+    try:
+        client = TestClient(app)
+        r = client.get("/api/v1/stocks/NVDA/chart?range=1D&extended_hours=true")
+        assert r.status_code == 200, r.text
+        assert fake.calls[-1][1].get("extended") is True
+        r = client.get("/api/v1/stocks/NVDA/chart?range=1D")
+        assert r.status_code == 200, r.text
+        assert not fake.calls[-1][1].get("extended")
+    finally:
+        logging.disable(logging.NOTSET)
+        app.dependency_overrides.pop(get_current_user_id, None)

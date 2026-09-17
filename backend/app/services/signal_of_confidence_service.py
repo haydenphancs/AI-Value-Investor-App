@@ -50,7 +50,20 @@ logger = logging.getLogger(__name__)
 #:     40% dividend cut still read "Fair"), `_ABOUT_AVERAGE` sends a payer yielding its own
 #:     history to Fair rather than green, and `dividend_growth_pct` drops a partial first
 #:     paying year (GOOGL read +38.3% for a 0.20 -> 0.21 quarterly raise).
-_PAYLOAD_VERSION = 3
+#: 4 → dividend bars require the cash-flow OUTFLOW sign, use the preferred-inclusive
+#:     `netDividendsPaid` only for a known payer, and are ZEROED when the per-share
+#:     record (`ratios.dividendPerShare` + profile `lastDividend`) says the company pays
+#:     no common dividend. PLUG — never a common payer, diluting 946M → 1.39B shares —
+#:     charted a 1.75% annualised yield in Q2'26 from a mis-tagged `commonDividendsPaid`
+#:     of -$16.5M (TestFlight, build 1.0 (8)). The card was already gated; the bars were
+#:     not, so one screen said "no dividend" and "1.75%" at once.
+_PAYLOAD_VERSION = 4
+
+#: An ex-dividend date derived from the price series within this many days counts as
+#: "currently paying" when neither the per-share record nor the profile is available.
+#: Wide enough to span an annual payer's gap; the derived dates are the LAST rung, so a
+#: spurious one cannot override an authoritative zero record.
+_EX_DIVIDEND_RECENCY_DAYS = 400
 
 #: Half-open ratio band treated as "about its own average", and therefore Fair rather
 #: than the green "High". See `_build_dividend_info` for why it is narrow.
@@ -235,7 +248,7 @@ class SignalOfConfidenceService:
 
         try:
             logger.info(f"Signal of confidence cache MISS for {ticker} — fetching from FMP")
-            result, next_earnings = await self._build_signal_of_confidence(ticker)
+            result, next_earnings, degraded_slices = await self._build_signal_of_confidence(ticker)
 
             # NEVER persist a degraded build. A single FMP 429 on the quarterly income
             # call is turned into `[]` by `return_exceptions=True`, `_build_data_points`
@@ -245,12 +258,18 @@ class SignalOfConfidenceService:
             # FABRICATED "returns nothing to shareholders" verdict for a day, for every
             # user, and it is frozen into the 20-credit report. The 5-minute in-memory
             # tier still absorbs the retry storm. Mirrors profit_power_service's gate.
-            soc_degraded = not getattr(result, "data_points", None)
+            #
+            # The same holds one layer down: a failed `ratios` or `profile` call leaves
+            # the payer verdict without its per-share record, and a build that ran without
+            # it must not be pinned for a day either (the record is what keeps PLUG's
+            # mis-tagged dividend line off the chart).
+            soc_degraded = not getattr(result, "data_points", None) or bool(degraded_slices)
             if soc_degraded:
                 logger.warning(
-                    "Signal of confidence NOT persisted for %s (degraded: no data "
-                    "points survived the build) — will rebuild after the in-memory TTL",
+                    "Signal of confidence NOT persisted for %s (degraded: %s) — will "
+                    "rebuild after the in-memory TTL",
                     ticker,
+                    ", ".join(degraded_slices) if degraded_slices else "no data points survived the build",
                 )
             else:
                 # Persist to Supabase in background
@@ -381,8 +400,14 @@ class SignalOfConfidenceService:
 
     async def _build_signal_of_confidence(
         self, ticker: str
-    ) -> Tuple[SignalOfConfidenceResponse, Optional[str]]:
-        """Fetch FMP data, compute per-quarter shareholder yield, build response."""
+    ) -> Tuple[SignalOfConfidenceResponse, Optional[str], List[str]]:
+        """Fetch FMP data, compute per-quarter shareholder yield, build response.
+
+        Returns ``(response, next_earnings_date, degraded)`` — ``degraded`` names the
+        upstream slices that RAISED and were substituted with an empty default; the
+        caller refuses to persist such a build (see `get_signal_of_confidence`).
+        """
+        degraded: List[str] = []
 
         # Phase 1: parallel FMP fetch (6 calls). historical-market-cap covers
         # ~6y so every displayed quarter can be valued at ITS OWN period end.
@@ -398,6 +423,7 @@ class SignalOfConfidenceService:
             ec_raw,
             hist_mcap_raw,
             ex_dividend_dates,
+            profile_raw,
         ) = await asyncio.gather(
             self.fmp.get_cash_flow_statement(ticker, period="quarter", limit=20),
             self.fmp.get_income_statement(ticker, period="quarter", limit=20),
@@ -419,6 +445,11 @@ class SignalOfConfidenceService:
             corporate_actions_source(self).get_ex_dividend_dates(
                 ticker, *window_for_range(None, mcap_to)
             ),
+            # `/stable/profile` carries `lastDividend` (the TTM per-share total, see
+            # `etf_service`), the one live per-share signal a company that INITIATED a
+            # dividend this fiscal year has before `ratios` (completed FYs only) catches
+            # up. The quote row above is profile-backed but `_shape` does not forward it.
+            self.fmp.get_company_profile(ticker),
             return_exceptions=True,
         )
 
@@ -426,19 +457,23 @@ class SignalOfConfidenceService:
         if isinstance(quarterly_cashflow, Exception):
             logger.error(f"Quarterly cash flow fetch failed for {ticker}: {quarterly_cashflow}")
             quarterly_cashflow = []
+            degraded.append("cash_flow")
         if isinstance(quarterly_income, Exception):
             logger.error(f"Quarterly income fetch failed for {ticker}: {quarterly_income}")
             quarterly_income = []
+            degraded.append("income")
         if isinstance(quote_data, Exception):
             logger.warning(f"Quote fetch failed for {ticker}: {quote_data}")
             quote_data = {}
         if isinstance(annual_ratios, Exception):
             logger.warning(
                 "Annual ratios fetch failed for %s (%s: %s) — the dividend amounts and "
-                "growth are omitted; the yield and status still resolve from cash flow",
+                "growth are omitted and the payer verdict runs without its per-share "
+                "record; this build is served from memory only, not persisted",
                 ticker, type(annual_ratios).__name__, annual_ratios,
             )
             annual_ratios = []
+            degraded.append("annual_ratios")
         if isinstance(ec_raw, Exception):
             logger.warning(f"Earnings calendar fetch failed for {ticker}: {ec_raw}")
             ec_raw = []
@@ -455,6 +490,18 @@ class SignalOfConfidenceService:
                 f"— per-quarter yields fall back to the current market cap"
             )
             hist_mcap_raw = []
+        if isinstance(profile_raw, Exception):
+            logger.warning(
+                "[soc-profile-unavailable] %s: %s: %s — the payer verdict falls back to "
+                "the per-share record alone (an initiator may read as a non-payer for "
+                "one refresh); this build is served from memory only, not persisted",
+                ticker, type(profile_raw).__name__, profile_raw,
+            )
+            profile_raw = {}
+            degraded.append("profile")
+        if isinstance(profile_raw, list):
+            profile_raw = profile_raw[0] if profile_raw and isinstance(profile_raw[0], dict) else {}
+        profile = profile_raw if isinstance(profile_raw, dict) else {}
 
         # Normalize quote_data — FMP returns list for quote endpoint
         if isinstance(quote_data, list):
@@ -473,12 +520,19 @@ class SignalOfConfidenceService:
         current_market_cap = _safe_float(quote_data, "marketCap")
         mcap_by_date = _build_market_cap_lookup(hist_mcap_raw)
 
+        # ONE payer verdict, shared by the bars and the card below, so the two can never
+        # disagree again (the card said "no dividend" while the bars charted 1.75%).
+        pays_common_dividend = self._pays_common_dividend(
+            annual_ratios, profile, ex_dividend_dates
+        )
+
         data_points = self._build_data_points(
             quarterly_cashflow,
             quarterly_income,
             current_market_cap,
             mcap_by_date,
             ticker,
+            pays_common_dividend=pays_common_dividend,
         )
 
         # Phase 3: build trailing-12-month summary
@@ -493,6 +547,7 @@ class SignalOfConfidenceService:
             data_points=data_points,
             annual_ratios=annual_ratios,
             ex_dividend_dates=ex_dividend_dates,
+            pays_common_dividend=pays_common_dividend,
         )
 
         # Phase 5: extract next earnings date for cache invalidation
@@ -505,7 +560,7 @@ class SignalOfConfidenceService:
             dividend_info=dividend_info,
         )
 
-        return response, next_earnings
+        return response, next_earnings, degraded
 
     # ── Per-quarter data points ───────────────────────────────────
 
@@ -516,6 +571,7 @@ class SignalOfConfidenceService:
         current_market_cap: Optional[float],
         mcap_by_date: Optional[Dict[str, float]] = None,
         ticker: str = "",
+        pays_common_dividend: Optional[bool] = None,
     ) -> List[SignalOfConfidenceDataPointSchema]:
         """Build per-quarter data points from FMP data.
 
@@ -524,8 +580,17 @@ class SignalOfConfidenceService:
         quarter by the current cap understated the yields of any stock that has
         since re-rated. Falls back to the current cap (with a warning) only when
         the historical series has no value near the period end.
+
+        ``pays_common_dividend`` is the shared per-share verdict from
+        `_pays_common_dividend`: ``False`` zeroes every dividend bar regardless of the
+        cash-flow line (the line is not the same question — PLUG's carried -$16.5M in
+        Q2'26 with the outflow sign and everything, for a company that has never paid
+        a common dividend), ``True`` additionally unlocks the preferred-inclusive
+        `netDividendsPaid` fallback, ``None`` (record unavailable) trusts the sign-gated
+        cash-flow line as before.
         """
         mcap_by_date = mcap_by_date or {}
+        missing_line_for_payer = 0
 
         # Build lookup dict by date
         cf_by_date: Dict[str, Dict[str, Any]] = {}
@@ -570,13 +635,41 @@ class SignalOfConfidenceService:
             # Cash flow data for this quarter
             cf_rec = cf_by_date.get(date, {})
 
-            # Dividend amount: abs(commonDividendsPaid) in millions
-            # FMP stable API uses commonDividendsPaid; fall back to dividendsPaid
+            # Dividend amount in millions. `commonDividendsPaid` is the /stable field;
+            # legacy `dividendsPaid` only when that KEY is absent (a present 0 is a real
+            # zero); `netDividendsPaid` — common PLUS preferred — only for a known payer,
+            # because on a non-payer it charts preferred coupons as a common dividend.
             dividends_paid_raw = _safe_float(cf_rec, "commonDividendsPaid")
-            if dividends_paid_raw is None:
+            common_absent = cf_rec.get("commonDividendsPaid") is None
+            if dividends_paid_raw is None and common_absent:
                 dividends_paid_raw = _safe_float(cf_rec, "dividendsPaid")
-            if dividends_paid_raw is None:
+            if (
+                dividends_paid_raw is None
+                and pays_common_dividend is True
+                and common_absent
+                and cf_rec.get("dividendsPaid") is None
+            ):
                 dividends_paid_raw = _safe_float(cf_rec, "netDividendsPaid")
+
+            # Outflow sign, mirroring the buyback gate below: a positive value is not a
+            # dividend (a reclass, a refund, a sign error), and neither is any value
+            # at all when the per-share record says the company pays no common dividend.
+            if pays_common_dividend is False:
+                dividends_paid_raw = None
+            elif dividends_paid_raw is not None and dividends_paid_raw >= 0:
+                if dividends_paid_raw > 0:
+                    logger.info(
+                        "[soc-dividend-sign] %s %s: dividend line %.0f is not an outflow "
+                        "— charted as 0",
+                        ticker or "?", date, dividends_paid_raw,
+                    )
+                dividends_paid_raw = None
+            if dividends_paid_raw is None and pays_common_dividend is True and cf_rec:
+                # A known payer whose row carries no usable line. Keep the point (the
+                # shares line must stay continuous) and say so, rather than dropping the
+                # quarter silently — a 0.00% bar here is a data gap, not a measurement.
+                missing_line_for_payer += 1
+
             if dividends_paid_raw is not None:
                 dividend_amount = round(abs(dividends_paid_raw) / 1_000_000, 2)
             else:
@@ -629,8 +722,76 @@ class SignalOfConfidenceService:
                 "cap and are not point-in-time",
                 ticker or "?", fell_back_to_current, len(results),
             )
+        if missing_line_for_payer:
+            logger.warning(
+                "[soc-dividend-missing] %s: %d/%d quarters of a known payer carry no "
+                "dividend outflow on the cash-flow row — charted as 0.00%%, which is a "
+                "gap, not a measurement",
+                ticker or "?", missing_line_for_payer, len(results),
+            )
 
         return results
+
+    # ── Payer verdict ─────────────────────────────────────────────
+
+    @staticmethod
+    def _pays_common_dividend(
+        annual_ratios: Any,
+        profile: Optional[Dict[str, Any]] = None,
+        ex_dividend_dates: Optional[List[str]] = None,
+        today: Optional[datetime] = None,
+    ) -> Optional[bool]:
+        """Does this company pay a COMMON dividend — the one verdict both the bars and
+        the card use, so they cannot disagree.
+
+        The cash-flow ``commonDividendsPaid`` line is NOT the answer: FMP tags preferred
+        coupons and one-off distributions onto it with the outflow sign intact (PLUG
+        Q2'26: -$16.5M; TSLA: a single 0.01% quarter). The per-share record is:
+
+        * ``True``  — any completed fiscal year with ``dividendPerShare > 0`` (`ratios`,
+          period=annual), OR the profile's ``lastDividend`` (the TTM per-share total) is
+          positive. The profile is what rescues a company that initiated its dividend
+          THIS fiscal year, before `ratios` has a completed year to show.
+        * ``False`` — the per-share record is present and reads zero in every year, and
+          the profile agrees (``lastDividend`` is 0 or absent).
+        * ``None``  — no record: `ratios` failed, is empty, or the rows exist but the
+          ``dividendPerShare`` key is gone (the /stable drift class — a truthiness test on
+          the payload here would zero every payer in the market). As a last rung, an
+          ex-dividend date derived from the price series within
+          `_EX_DIVIDEND_RECENCY_DAYS` reads as ``True``; it is deliberately below the
+          record so a spurious derived date cannot override an authoritative zero.
+        """
+        by_year = SignalOfConfidenceService._annual_dividend_map(annual_ratios)
+        # Profile `lastDividend`, with the same two-key read `etf_service` uses. A present
+        # 0 means "pays none" and must not fall through to `lastDiv` — `0 or x` would.
+        last_div = None
+        if isinstance(profile, dict):
+            raw = profile.get("lastDividend")
+            if raw is None:
+                raw = profile.get("lastDiv")
+            last_div = _safe_float({"v": raw}, "v")
+
+        if any(v > 0 for v in by_year.values()) or (last_div is not None and last_div > 0):
+            return True
+        if by_year and all(v == 0 for v in by_year.values()):
+            return False
+        if last_div is not None and last_div == 0:
+            # No usable per-share year (the `ratios` call failed, is empty, or lost its
+            # key) but the profile says zero. The profile is FMP's own TTM per-share
+            # statement and is trusted ALONE for the True verdict above, so it is trusted
+            # alone for False too — otherwise a single 429 on `ratios` sent PLUG back to
+            # the cash-flow line and its 1.75% bar.
+            return False
+
+        now = today or datetime.now(timezone.utc)
+        for d in ex_dividend_dates or []:
+            try:
+                dt = datetime.strptime(str(d)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if 0 <= (now - dt).days <= _EX_DIVIDEND_RECENCY_DAYS:
+                return True
+        return None
 
     # ── Trailing-12-month summary ─────────────────────────────────
 
@@ -836,6 +997,7 @@ class SignalOfConfidenceService:
         data_points: Optional[List] = None,
         annual_ratios: Optional[List[Dict[str, Any]]] = None,
         ex_dividend_dates: Optional[List[str]] = None,
+        pays_common_dividend: Optional[bool] = None,
     ) -> Optional[DividendInfoSchema]:
         """Build DividendInfo for a company that actually pays a dividend.
 
@@ -853,9 +1015,14 @@ class SignalOfConfidenceService:
         inventing one.
         """
         annual = self._build_annual_dividends(annual_ratios)
-        if annual:
+        # The verdict is computed ONCE in `_build_signal_of_confidence` and shared with
+        # `_build_data_points`; callers that skip the builder (tests, older call sites)
+        # get the same answer derived here from the record alone.
+        if pays_common_dividend is None:
+            pays_common_dividend = self._pays_common_dividend(annual_ratios)
+        if pays_common_dividend is True:
             pays_dividend = True
-        elif annual_ratios:
+        elif pays_common_dividend is False:
             # We HAVE the authoritative per-share record and it says the company has never
             # paid. Trust it over the cash-flow yield, which is not the same question: it
             # is `dividendsPaid / market cap`, and that line picks up preferred and

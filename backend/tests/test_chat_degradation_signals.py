@@ -194,12 +194,32 @@ async def test_every_tool_call_failing_marks_the_turn_degraded(monkeypatch):
     class _Gem:
         async def generate_with_tools(self, **kw):
             return {"text": "answer from memory", "tokens_used": 40, "tool_results": [],
-                    "tool_errors": [{"name": "get_stock_chart_data", "error": "FMP rate limit"}]}
+                    "tool_errors": [{"name": "get_stock_chart_data", "error": "FMP rate limit",
+                                     "upstream": True}]}
 
     svc.gemini = _Gem()
     _stub_generate_response_collaborators(svc, monkeypatch)
     out = await svc.generate_response("sess", "how is AAPL doing?", stock_id="AAPL")
     assert out["degraded"] == "no_tools"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["invalid or missing ticker", "No quote data found for QQQQQ"])
+async def test_a_tool_error_the_model_shaped_does_not_degrade_the_non_stream_turn(monkeypatch, error):
+    """Same farm as the stream door: a decoy bad ticker in every message made the only tool
+    'fail' and the turn free. Only an `upstream` error counts."""
+    svc = _svc()
+
+    class _Gem:
+        async def generate_with_tools(self, **kw):
+            return {"text": "A P/E ratio is price over earnings.", "tokens_used": 40,
+                    "tool_results": [],
+                    "tool_errors": [{"name": "get_stock_chart_data", "error": error, "upstream": False}]}
+
+    svc.gemini = _Gem()
+    _stub_generate_response_collaborators(svc, monkeypatch)
+    out = await svc.generate_response("sess", "explain P/E and chart QQQQQ", stock_id="AAPL")
+    assert not out.get("degraded"), out.get("degraded")
 
 
 @pytest.mark.asyncio
@@ -325,11 +345,15 @@ async def test_a_resolver_that_appends_keeps_the_replayed_label(monkeypatch):
     client = "GCUSD · $2,410 · +0.4%"
     monkeypatch.setattr(res, "get_chat_context_resolver", lambda: SimpleNamespace(
         resolve=AsyncMock(return_value=client + "\n\nGold: a monetary metal…")))
-    ctx, server_grounded, replayed = await svc._resolve_grounding(
+    ctx, server_grounded, replayed, cache_safe = await svc._resolve_grounding(
         "COMMODITY", "GCUSD", client, None, True)
     assert server_grounded is True and replayed is True
-    # A resolver that REBUILT the block (ETF/CRYPTO/INDEX) is live.
+    # …and an APPENDED block still carries the caller's own text, so a deep-dive brief
+    # built on it must never enter the shared 24 h cache: `cache_safe` is the write bar,
+    # `server_grounded` is not (the premise the 2026-09-16 write gate got wrong).
+    assert cache_safe is False
+    # A resolver that REBUILT the block (ETF/CRYPTO/INDEX) is live — and cache-safe.
     monkeypatch.setattr(res, "get_chat_context_resolver", lambda: SimpleNamespace(
         resolve=AsyncMock(return_value="SPY · live block")))
-    ctx, server_grounded, replayed = await svc._resolve_grounding("ETF", "SPY", client, None, True)
-    assert server_grounded is True and replayed is False
+    ctx, server_grounded, replayed, cache_safe = await svc._resolve_grounding("ETF", "SPY", client, None, True)
+    assert server_grounded is True and replayed is False and cache_safe is True

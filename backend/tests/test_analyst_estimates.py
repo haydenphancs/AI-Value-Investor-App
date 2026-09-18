@@ -274,39 +274,39 @@ def _analysis_and_financials_bodies():
     )
 
 
-def test_the_estimates_card_lives_under_earnings_and_never_suppresses_the_ratings_chain():
-    """Street Estimates moved from the Analysis tab to the Financials tab under Earnings
-    (TestFlight E9, 2026-09-17); the Analysis slot now holds the Valuation Meter.
+def test_the_estimates_card_is_gone_from_both_tabs_and_the_ratings_chain_is_intact():
+    """The Street Estimates card no longer renders anywhere (developer decision,
+    2026-09-17): it left the Analysis tab for the Valuation Meter, sat under Earnings on
+    Financials for a day, and was then removed outright. The estimates still arrive on
+    `AnalystRatingsData` (Cay AI grounding) — they are simply not a card.
 
-    Two invariants carried over from the original pin:
-    * the estimates card is an ADDITIVE SIBLING, never an `else if` arm — as one it made
-      the two datasets mutually exclusive, so repurchasing the analyst package would have
-      DELETED the ratings chain;
-    * it never reads `sectionAvailable`, which guards the zero-default consensus.
+    The invariant that survives from the original pin: removing the card must not touch
+    the ratings chain on Analysis (`sectionAvailable` before `hasCoverage`, meter first).
     """
+    from pathlib import Path
+
     analysis, financials = _analysis_and_financials_bodies()
 
-    # Analysis tab: no estimates card, the Valuation Meter in its slot, the ratings chain intact.
-    assert "AnalystForecastsSection(" not in analysis
-    assert "ratingsData.estimatesAvailable" not in analysis
+    for name, body in (("Analysis", analysis), ("Financials", financials)):
+        assert "AnalystForecastsSection(" not in body, f"the Street Estimates card is back on {name}"
+        assert "ratingsData.estimatesAvailable" not in body, f"{name} gates on estimates again"
+        assert "forwardEstimates" not in body, f"{name} renders forward estimates again"
+
+    # The organism itself is deleted — a stray file would silently come back as a card.
+    organisms = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Views" / "Organisms"
+    assert not (organisms / "AnalystForecastsSection.swift").exists()
+
+    # Analysis tab: the Valuation Meter in the old slot, the ratings chain intact.
     meter = analysis.find("ValuationMeterSection(")
     ratings = analysis.find("AnalystRatingsSection(")
     assert meter != -1 and ratings != -1 and meter < ratings
     assert analysis.find("!ratingsData.sectionAvailable") < analysis.find("!ratingsData.hasCoverage")
 
-    # Financials tab: the estimates card sits after Earnings, additive, estimates-gated only.
-    est = financials.find("ratingsData.estimatesAvailable")
-    forecasts = financials.find("AnalystForecastsSection(")
-    earnings = financials.find("EarningsSectionCard(")
-    assert est != -1 and forecasts != -1 and earnings != -1
-    assert earnings < est < forecasts
-    est_line_start = financials.rfind("\n", 0, est)
-    est_stmt = financials[est_line_start: est]
-    preceding = financials[max(0, est_line_start - 120): est_line_start]
-    assert "else if" not in preceding.split("\n")[-1] and "else if" not in est_stmt, (
-        "the estimates card is an `else if` arm again — mutually exclusive with the card above it"
-    )
-    assert "sectionAvailable" not in financials[est - 200: forecasts]
+    # Financials no longer takes the ratings model at all.
+    financials_src = (Path(__file__).resolve().parents[2]
+                      / "frontend" / "ios" / "ios" / "Views" / "Organisms" / "TickerFinancialsContent.swift").read_text()
+    assert "analystRatingsData" not in financials_src
+    assert "EarningsSectionCard(" in financials  # anti-vacuity: the tab still renders
 
 
 def test_analyst_counts_stay_separate_through_the_boundary():

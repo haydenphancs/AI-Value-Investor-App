@@ -131,3 +131,109 @@ async def test_refresh_scope_news_still_sends_an_equity_scope_verbatim(monkeypat
     svc.fmp = _FMP()
     await svc.refresh_scope_news("AAPL", limit=5)
     assert asked.get("stock") == "AAPL"
+
+
+# ── the COLD read path — what the chat tool and a cold News tab actually hit ─────────
+#
+# `refresh_scope_news` (above) routed a commodity through its proxies, but the cold
+# `get_ticker_news("GCUSD")` path still asked `news/stock?symbols=GCUSD`, which FMP
+# answers `[]`. The chat tool then reported `article_count: 0` with no error, the turn
+# was CHARGED, and the model — told never to end a "why" question with "I don't know" —
+# said no gold news was published today while the screen's News tab was full.
+
+
+def _cold_service(monkeypatch, fmp):
+    from app.services import news_cache_service as NCS
+
+    svc = NCS.NewsCacheService.__new__(NCS.NewsCacheService)
+    svc.fmp = fmp
+    svc._inflight = {}
+    monkeypatch.setattr(svc, "_get_cached", lambda ticker, limit, offset=0: [])
+    written: dict = {}
+
+    def _build(cache_key, raw, limit, fallback, label, ingest_only=False):
+        written["key"] = cache_key
+        written["fallback"] = fallback
+        return [{"headline": a.get("title"), "ticker": cache_key} for a in raw]
+
+    monkeypatch.setattr(svc, "_build_and_cache_rows", _build)
+    return svc, written
+
+
+@pytest.mark.asyncio
+async def test_a_cold_commodity_read_asks_the_proxies_and_caches_under_the_commodity_key(monkeypatch):
+    asked: dict = {}
+
+    class _FMP:
+        async def get_stock_news(self, symbols, limit=50, from_date=None):
+            asked["stock"] = symbols
+            return [{"title": "Gold climbs as yields slip", "symbol": "GLD"}]
+
+        async def get_crypto_news(self, symbol, limit=50):
+            asked["crypto"] = symbol
+            return []
+
+    svc, written = _cold_service(monkeypatch, _FMP())
+    out = await svc.get_ticker_news("GCUSD", limit=5, is_crypto=False)
+
+    assert asked.get("stock") == "GLD,IAU,GOLD,NEM,AEM", (
+        f"cold read asked {asked.get('stock')!r}; news/stock?symbols=GCUSD returns nothing"
+    )
+    assert "crypto" not in asked
+    # One row set for the sweeper, the cold read and the chat tool: keyed on the code.
+    assert written["key"] == "GCUSD" and written["fallback"] == "GCUSD"
+    assert out["articles"] and out["articles"][0]["headline"] == "Gold climbs as yields slip"
+    assert not out.get("fetch_failed")
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_commodity_reads_as_unavailable_not_as_no_news(monkeypatch):
+    """Coffee / copper have no proxy entry. The stock feed would answer `[]` for `KCUSD`
+    and the chat tool would assert "no news today" on a charged turn; a code with no
+    feed must settle as a FAILED fetch so the turn degrades instead."""
+    class _FMP:
+        async def get_stock_news(self, symbols, limit=50, from_date=None):
+            raise AssertionError(f"must not ask the stock feed for {symbols!r}")
+
+        async def get_crypto_news(self, symbol, limit=50):
+            raise AssertionError("must not ask the crypto feed")
+
+    svc, written = _cold_service(monkeypatch, _FMP())
+    out = await svc.get_ticker_news("KCUSD", limit=5, is_crypto=False)
+    assert out["fetch_failed"] is True and out["articles"] == []
+    assert "key" not in written, "nothing may be cached for a code with no feed"
+
+
+@pytest.mark.asyncio
+async def test_the_chat_tool_settles_a_withdrawn_commodity_as_degraded(monkeypatch):
+    """End to end through the chat tool: `news_available: False` + `error`, which is
+    what the doors count as a failed tool — never `news_available: True, article_count: 0`."""
+    from app.services import chat_market_tools as cmt
+
+    class _FMP:
+        async def get_stock_news(self, symbols, limit=50, from_date=None):
+            raise AssertionError("must not ask the stock feed")
+
+        async def get_crypto_news(self, symbol, limit=50):
+            raise AssertionError("must not ask the crypto feed")
+
+    svc, _ = _cold_service(monkeypatch, _FMP())
+    monkeypatch.setattr("app.services.news_cache_service.get_news_cache_service", lambda: svc)
+    out = await cmt.fetch_ticker_news("HGUSD", is_crypto=False)
+    assert out["news_available"] is False and out.get("error")
+    assert "article_count" not in out
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_ticker_still_takes_the_stock_feed_verbatim_on_a_cold_read(monkeypatch):
+    asked: dict = {}
+
+    class _FMP:
+        async def get_stock_news(self, symbols, limit=50, from_date=None):
+            asked["stock"] = symbols
+            return []
+
+    svc, _ = _cold_service(monkeypatch, _FMP())
+    out = await svc.get_ticker_news("CL", limit=5, is_crypto=False)   # Colgate, not crude
+    assert asked.get("stock") == "CL"
+    assert not out.get("fetch_failed")

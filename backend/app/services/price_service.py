@@ -538,6 +538,33 @@ class PriceService:
         _cache_set(key, quote)
         return quote
 
+    async def get_quote_strict(self, symbol: str) -> Dict[str, Any]:
+        """`get_quote`, but an UPSTREAM failure raises instead of reading as "no quote".
+
+        `get_quote` folds a failed profile read into `{}` for callers that want a
+        best-effort price. The chat card is not one of them: its `{}` became
+        `{"error": "No quote data found"}`, indistinguishable from an unknown symbol —
+        and the two must settle differently (an outage refunds the turn; a symbol the
+        provider does not cover is the model's own miss and stays charged).
+        """
+        sym = (symbol or "").strip().upper()
+        if not sym or uses_coingecko_price(sym) or is_blocked_symbol(sym):
+            return await self.get_quote(symbol)
+        key = f"quote:{sym}"
+        hit = _cache_get(key, _QUOTE_TTL)
+        if hit is not None:
+            return hit
+        rows = await get_fmp_client().get_company_profile(sym)   # raises on an outage
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list) or not rows:
+            return {}
+        quote = self._from_profile(rows[0])
+        if quote is None:
+            return {}
+        _cache_set(key, quote)
+        return quote
+
     # ── batch ─────────────────────────────────────────────────────────────────────
 
     async def get_quotes(self, symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:

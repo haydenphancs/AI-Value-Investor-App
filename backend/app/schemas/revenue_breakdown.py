@@ -54,3 +54,12 @@ class RevenueBreakdownResponse(BaseModel):
     #: i.e. interest, non-operating items, minority interest and discontinued ops.
     #: Legitimately NEGATIVE when non-operating income exceeds those costs (MSFT: -10.6B).
     other_expense: Optional[float] = None
+    #: POSITIVE magnitude of the intersegment sales the segments include and consolidation
+    #: removes: `sum(revenue_sources) - reported_revenue` whenever the stack is gross
+    #: (INTC FY2025: 70.5B of segments, 52.9B of revenue → 17.7B). The segments are sent
+    #: AS REPORTED — never rescaled — and iOS draws this as the first waterfall step down
+    #: from the gross stack to reported revenue, with a negative line in the legend so the
+    #: revenue column adds to 100%. None when the segments already sum to revenue (or
+    #: under-cover it, which the "Unallocated" segment closes instead). Optional so a
+    #: shipped build keeps decoding.
+    intersegment_eliminations: Optional[float] = None

@@ -374,3 +374,20 @@ def test_one_stale_industry_does_not_disarm_attribution_for_the_others():
     )
     # ...and the genuinely stale one is still refused.
     assert c.industry_for("BA") == ("Aerospace & Defense", None)
+
+
+# ── "today" is a calendar word, not a session word (2026-09-17) ──────────────
+
+def test_session_word_is_on_fri_on_a_saturday():
+    """The live session on a Saturday is Friday and every stamp is Friday: the DATE the
+    detectors gate on is unchanged, but the WORD must not be "today" — the model said
+    "down 4% today" all weekend and the catalyst gate re-bought a search for it."""
+    from datetime import date
+    from app.services.widget_movers_service import WidgetMoversService
+    fri, sat = date(2026, 9, 11), date(2026, 9, 12)
+    d, iso, word = WidgetMoversService._session_of([], fri, sat)
+    assert (d, iso, word) == (fri, "2026-09-11", "on Fri")
+    d, iso, word = WidgetMoversService._session_of([], fri, fri)
+    assert (d, iso, word) == (fri, "2026-09-11", "today")
+    # No calendar day supplied (legacy callers / tests) keeps the old behaviour.
+    assert WidgetMoversService._session_of([], fri)[2] == "today"

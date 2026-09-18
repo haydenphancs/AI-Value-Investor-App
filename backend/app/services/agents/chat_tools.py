@@ -49,9 +49,17 @@ def _ticker_tool(name: str, description: str) -> types.FunctionDeclaration:
 # it comes back empty and the answer has to talk around a hole it created itself. Removing a
 # tool is the point of this table; adding one is the easy half.
 #
-# `get_stock_chart_data` is kept for ETF / CRYPTO / COMMODITY on purpose — all three are quoted
-# by FMP's `/stable/quote` and the resulting card is honest for them (`pe_ratio` and
-# `market_cap` are Optional on `StockChartWidget`, and iOS renders P/E only when present).
+# `get_stock_chart_data` is kept for ETF / CRYPTO on purpose — an ETF is quoted through the
+# profile path and a coin through CoinGecko, and the resulting card is honest for them
+# (`pe_ratio` and `market_cap` are Optional on `StockChartWidget`, and iOS renders P/E only
+# when present). COMMODITY does NOT get it: every FMP commodity code (`GCUSD`, `CLUSD`, …)
+# sits in `BLOCKED_COMMODITY_SYMBOLS`, so `PriceService.get_quote` answers `{}` before any
+# I/O and the handler returns an error dict — the model was declared a tool that could
+# never succeed. It called it (the screen symbol is exempt from canonicalisation, so the
+# code reached the fetcher unchanged), the failed step rendered in the thinking card, and
+# `tool_calls_failed == tool_calls_seen` settled a fully-answered turn as `no_tools`: a
+# refund on every commodity price question. The client context already carries the
+# commodity's price, so the model loses nothing by not having the tool.
 # Granted to EVERY asset class, including `NORMAL` (the global chat with no screen behind
 # it). It is the answer to "what's hot today", "why is <sector> lagging" and "how is the
 # market doing" — and until it existed there was no sector path outside an index screen, so
@@ -89,9 +97,10 @@ _TOOLS_BY_ASSET_TYPE: Dict[str, frozenset] = {
     # market-overview aggregate, which is the tool built for exactly this case — plus the
     # breadth snapshot, which is what "why is the market down" actually needs.
     "INDEX": frozenset({"get_market_overview", _MARKET_TOOL}),
-    # A futures contract has neither analyst coverage nor ticker sentiment. It does have
-    # news, and the macro backdrop is most of any commodity answer.
-    "COMMODITY": frozenset({"get_stock_chart_data", "get_ticker_news", _MARKET_TOOL}),
+    # A futures contract has neither analyst coverage nor ticker sentiment, and its quote
+    # is outside the FMP licence (see the `get_stock_chart_data` note above), so no card
+    # tool either. It does have news, and the macro backdrop is most of any commodity answer.
+    "COMMODITY": frozenset({"get_ticker_news", _MARKET_TOOL}),
 }
 
 
@@ -331,6 +340,17 @@ def capability_block(allowed: frozenset) -> str:
     return text
 
 
+def _is_profiled_index(symbol: str) -> bool:
+    """True only for an index `index_service` has a profile for (`^GSPC`, `^IXIC`, `^DJI`).
+
+    Lazy import: this module is imported by the Gemini declaration path and must not pull
+    the index service (and its Supabase client) in at module load.
+    """
+    from app.services.index_service import _INDEX_PROFILES
+
+    return symbol in _INDEX_PROFILES
+
+
 def build_chat_tool_handlers(
     svc: Any,
     screen_symbol: Optional[str] = None,
@@ -420,16 +440,32 @@ def build_chat_tool_handlers(
             return await svc._fetch_sentiment_data(sym, is_crypto=False)
         return await svc._fetch_sentiment_data(sym)
 
+    screen_is_index = (
+        bool(screen) and (screen_asset_type or "").strip().upper() == "INDEX"
+        and screen.startswith("^")
+    )
+
     async def _market(args: Dict[str, Any]) -> Dict[str, Any]:
-        # An OMITTED symbol takes the declared default; a PRESENT but non-symbol one
-        # ("S&P 500", "the market") is an error rather than silently the S&P — the
-        # model may have meant the Dow.
+        # An OMITTED symbol takes the screen's own index on an INDEX screen, else the
+        # declared default; a PRESENT but non-symbol one ("S&P 500", "the market") is an
+        # error rather than silently the S&P — the model may have meant the Dow.
+        #
+        # Only a PROFILED index is accepted. `sanitize_symbol` checks shape, so "AAPL"
+        # passed — and on the ^GSPC screen ("how does the market compare with Apple?")
+        # the model's only per-symbol tool ran the FULL index pipeline for AAPL: its
+        # profile quote, its entire daily history in pages, a Gemini story generation,
+        # and `index_cache` / `index_macro_forecast_cache` rows persisted under 'AAPL'.
+        # The result was the S&P's global valuation with no symbol on it, narrated as
+        # Apple's on a charged turn — repeatable per turn for any symbol the model invents.
+        # `ticker` is read as the mis-keyed fallback, mirroring `_resolve`.
         raw = (args or {}).get("symbol")
         if raw is None or not str(raw).strip():
-            symbol = "^GSPC"
+            raw = (args or {}).get("ticker")
+        if raw is None or not str(raw).strip():
+            symbol = screen if screen_is_index else "^GSPC"
         else:
             symbol = sanitize_symbol(raw)
-            if symbol is None:
+            if symbol is None or not _is_profiled_index(symbol):
                 return _invalid({"symbol": raw})
         return await svc._fetch_market_overview_data(symbol)
 

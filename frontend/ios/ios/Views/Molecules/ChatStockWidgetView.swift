@@ -71,9 +71,11 @@ struct ChatStockWidgetView: View {
                 .padding(.horizontal, AppSpacing.sm)
                 .padding(.vertical, AppSpacing.xxs)
                 .background(
-                    widget.isPositive
-                        ? AppColors.bullish.opacity(0.2)
-                        : AppColors.bearish.opacity(0.2)
+                    !widget.hasKnownChange
+                        ? AppColors.textMuted.opacity(0.2)
+                        : widget.isPositive
+                            ? AppColors.bullish.opacity(0.2)
+                            : AppColors.bearish.opacity(0.2)
                 )
                 .cornerRadius(AppCornerRadius.small)
 
@@ -135,8 +137,12 @@ struct ChatStockWidgetView: View {
                 .foregroundColor(AppColors.textPrimary)
 
             HStack(spacing: AppSpacing.xxs) {
-                Image(systemName: widget.isPositive ? "arrow.up.right" : "arrow.down.right")
-                    .font(.system(size: 12, weight: .bold))
+                // An unknown change is a dash in neutral ink — never a green "+0.00" with an
+                // up arrow, which is a flat day the quote never claimed.
+                if widget.hasKnownChange {
+                    Image(systemName: widget.isPositive ? "arrow.up.right" : "arrow.down.right")
+                        .font(.system(size: 12, weight: .bold))
+                }
 
                 Text(widget.formattedAbsChange)
                     .font(AppTypography.bodyEmphasis)
@@ -144,7 +150,10 @@ struct ChatStockWidgetView: View {
                 Text("(\(widget.formattedChange))")
                     .font(AppTypography.bodySmall)
             }
-            .foregroundColor(widget.isPositive ? AppColors.bullish : AppColors.bearish)
+            .foregroundColor(
+                !widget.hasKnownChange ? AppColors.textMuted
+                    : widget.isPositive ? AppColors.bullish : AppColors.bearish
+            )
 
             Spacer()
         }

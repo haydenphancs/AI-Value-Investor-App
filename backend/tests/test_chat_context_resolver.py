@@ -452,13 +452,25 @@ async def test_resolve_times_out_on_slow_recompute_and_degrades(resolver, monkey
 
     monkeypatch.setattr(ccr, "_RESOLVE_TIMEOUT_SECONDS", 0.05)
 
+    state = {"cancelled": False, "done": False}
+
     class _SlowSvc:
         async def get_etf_detail(self, symbol):
-            await _a.sleep(1.0)
-            raise AssertionError("should have been cancelled by the timeout")
+            try:
+                await _a.sleep(0.2)
+                state["done"] = True
+                return None
+            except _a.CancelledError:
+                state["cancelled"] = True
+                raise
 
     monkeypatch.setattr(es, "get_etf_service", lambda: _SlowSvc())
     assert await resolver.resolve("ETF", "SPY", "fallback ctx") == "fallback ctx"
+    # The ceiling abandons the chat's WAIT — it must not cancel the shared detail build
+    # (the resolver is usually its `_inflight` leader; a cancelled leader failed every
+    # joiner: the screen itself, the widget batch). 2026-09-17: shielded.
+    await _a.sleep(0.3)
+    assert state["done"] is True and state["cancelled"] is False, state
 
 
 # ── CRYPTO ──────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@ Database Connection - Supabase Only
 No SQLAlchemy. Uses Supabase Python client for all DB operations.
 """
 
-from typing import Optional
+import asyncio
+from typing import Any, Callable, Optional
 import httpx
 from supabase import create_client, Client
 import logging
@@ -222,6 +223,53 @@ def get_admin_client() -> Client:
     if _admin_client is None:
         _admin_client = _new_isolated_client("ADMIN")
     return _reset_to_service_role(_admin_client)
+
+
+# One lock per event loop. GoTrue verbs used to run ON the loop precisely because the loop
+# serialised them: supabase-py's auth-state listener rewrites the process-wide client's
+# shared `Authorization` header on every sign-in, so two sign-ins interleaving in threads
+# would be the cross-user demotion `get_auth_client` documents. The lock keeps that
+# serialisation while the verb itself runs in a worker thread — so a flood of wrong-password
+# logins (a bcrypt round trip each, ~0.4-0.9 s) queues LOGINS behind each other instead of
+# stalling every chat stream, report poll and credit read in the process.
+_GOTRUE_LOCK: Optional[asyncio.Lock] = None
+_GOTRUE_LOCK_LOOP: Any = None
+
+
+def _gotrue_lock() -> asyncio.Lock:
+    global _GOTRUE_LOCK, _GOTRUE_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _GOTRUE_LOCK is None or _GOTRUE_LOCK_LOOP is not loop:
+        _GOTRUE_LOCK, _GOTRUE_LOCK_LOOP = asyncio.Lock(), loop
+    return _GOTRUE_LOCK
+
+
+async def run_gotrue(verb: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a synchronous GoTrue verb OFF the event loop, serialised process-wide.
+
+    `verb` is the BOUND method on the resolved client — written at the call site as
+    `_auth_of(auth_client, supabase).auth.sign_in_with_password` or
+    `resolve_admin_client(...).auth.admin.update_user_by_id` — so the source-scan guards in
+    tests/test_supabase_client_isolation.py keep seeing the resolver they grep for.
+
+    The service-role header is re-asserted INSIDE the lock, right before the verb: the reset
+    `get_auth_client` performs at dependency resolution is not enough once the verb no longer
+    runs in the same loop turn, because a sign-in that completed in between rewrote the
+    shared dict. Best-effort on the owner's internals, like `_reset_to_service_role`; a test
+    fake without them is simply run.
+    """
+    async with _gotrue_lock():
+        owner = getattr(verb, "__self__", None)
+        try:
+            headers = getattr(owner, "_headers", None)
+            if isinstance(headers, dict):
+                headers["Authorization"] = f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}"
+            if getattr(owner, "_in_memory_session", None) is not None:
+                owner._in_memory_session = None
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("run_gotrue: could not reset the auth client to service_role "
+                           "(%s: %s)", type(e).__name__, e)
+        return await asyncio.to_thread(verb, *args, **kwargs)
 
 
 def resolve_admin_client(*candidates) -> Client:

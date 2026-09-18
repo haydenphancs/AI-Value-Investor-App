@@ -216,10 +216,16 @@ class AnalyticsBatchRequest(BaseModel):
         # Truncate, don't raise — same reason as `event` above.
         return v[:MAX_SESSION_ID_CHARS] if v else None
 
-    @field_validator("events")
+    @field_validator("events", mode="before")
     @classmethod
-    def _bounded_batch(cls, v: List[AnalyticsEvent]) -> List[AnalyticsEvent]:
-        return v[:MAX_EVENTS_PER_BATCH]
+    def _bounded_batch(cls, v):
+        # BEFORE mode, on the raw list: the after-mode slice ran only once every item had
+        # been validated, so an unauthenticated 40 MB batch of 200k events cost the single
+        # worker ~1 s of per-item validation on the loop before the cap threw 199,950 of
+        # them away. Measured: 1.02 s → 0.1 ms. A non-list still fails type validation.
+        if isinstance(v, list):
+            return v[:MAX_EVENTS_PER_BATCH]
+        return v
 
 
 class AnalyticsBatchResponse(BaseModel):

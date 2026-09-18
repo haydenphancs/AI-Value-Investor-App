@@ -273,8 +273,37 @@ async def test_identity_only_limiter_refuses_too():
     """The subclass OVERRIDES `__call__` (to resolve identity without a DB read), so a
     gutted override would be invisible to the base-class test above."""
     checker = IdentityOnlyRateLimitChecker("t-identity-only", 1, 60)
-    seen = await _drive(lambda: checker(user={"id": "u1"}, x_guest_id=None), 2)
+    req = _request_from("203.0.113.9")
+    seen = await _drive(lambda: checker(request=req, user={"id": "u1"}, x_guest_id=None), 2)
     assert seen == ["ok", (429, "60")]
+
+
+def _request_from(ip: str):
+    """A Request-shaped object carrying the edge-appended forwarded address."""
+    from types import SimpleNamespace
+    return SimpleNamespace(headers={"x-forwarded-for": f"198.51.100.1, {ip}"})
+
+
+@pytest.mark.asyncio
+async def test_identity_only_limiter_also_bounds_the_source_address():
+    """The identity bucket is keyed on the client-chosen `X-Guest-Id`: rotating that header
+    per request minted a fresh bucket every time and `POST /events` — which has no
+    credential — was unbounded from one address. A second, wider ceiling keys on the one
+    value a caller cannot forge (`trusted_client_ip`), and it counts identity-rotating
+    requests together."""
+    checker = IdentityOnlyRateLimitChecker("t-identity-ip", 1, 60)
+    checker.ip_multiplier = 3     # 1 per identity, 3 per address
+    req = _request_from("203.0.113.10")
+    seen = []
+    for i in range(5):
+        seen.extend(await _drive(
+            lambda i=i: checker(request=req, user={"id": f"guest-{i}", "is_guest": True},
+                                x_guest_id=f"install-{i}"), 1))
+    assert seen == ["ok", "ok", "ok", (429, "60"), (429, "60")], seen
+    # Another address is untouched.
+    other = _request_from("203.0.113.11")
+    assert await _drive(lambda: checker(request=other, user={"id": "guest-x", "is_guest": True},
+                                        x_guest_id="install-x"), 1) == ["ok"]
 
 
 @pytest.mark.asyncio

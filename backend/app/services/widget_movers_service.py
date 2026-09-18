@@ -847,6 +847,16 @@ def _iso_now() -> str:
 # ── Service ───────────────────────────────────────────────────────────
 
 
+def _et_calendar_day() -> date:
+    """The ET calendar date right now — what "today" means to the person reading."""
+    from app.utils.market_hours import ET
+    return datetime.now(ET).date()
+
+
+class QuoteSourceUnavailable(Exception):
+    """The quote SOURCE failed for a one-symbol attribution (not: this symbol has no row)."""
+
+
 class WidgetMoversService:
     """Two-tier cache + in-flight dedup, per CLAUDE.md invariant #4.
 
@@ -896,7 +906,10 @@ class WidgetMoversService:
 
         Returns None when the move is unreadable — an unusable quote is not a flat day, and
         the caller must be able to tell those apart. `CauseKind.NONE` is a real answer and
-        is returned normally.
+        is returned normally. Raises `QuoteSourceUnavailable` when the QUOTE SOURCE failed
+        (as opposed to this one symbol having no usable row): the batch always carries the
+        SPY/QQQ/DIA band, so a batch with no index row at all is an outage, not a miss —
+        and an outage is the caller's UPSTREAM failure (refundable), a miss is not.
         """
         sym = (ticker or "").upper().strip()
         if not sym:
@@ -907,8 +920,16 @@ class WidgetMoversService:
             logger.warning(
                 "attribution: rank/read failed for %s (%s: %s)", sym, type(e).__name__, e
             )
-            return None
+            raise QuoteSourceUnavailable(f"{type(e).__name__}: {e}") from e
         if not ranked:
+            if not index_rows:
+                # `price_service.get_quotes` folds a universe failure into `{}`, so the
+                # only trace of an outage is that even the index band came back empty.
+                logger.warning(
+                    "attribution: quote source returned nothing for %s AND the index band "
+                    "— treating as an outage, not an unreadable symbol", sym,
+                )
+                raise QuoteSourceUnavailable("quote source returned no rows (index band empty)")
             # `rank_movers` drops a row whose change is missing or non-finite.
             return None
         m = ranked[0]
@@ -919,7 +940,9 @@ class WidgetMoversService:
         # ET Monday that is MONDAY, while the screener is still reporting Friday's close,
         # so the news and earnings detectors were queried for a day the move did not happen
         # on and returned the confident negative "no company news today".
-        today, today_iso, session_word = self._session_of([m], session_trading_date())
+        today, today_iso, session_word = self._session_of(
+            [m], session_trading_date(), _et_calendar_day(),
+        )
         # A 24/7 asset's move is always its own rolling 24 hours — the same per-row
         # override `_build_mover` applies on the widget path.
         if _is_round_the_clock(sym):
@@ -1449,9 +1472,18 @@ class WidgetMoversService:
 
     @staticmethod
     def _session_of(
-        ranked: Sequence[RankedMover], live_session: date
+        ranked: Sequence[RankedMover], live_session: date, calendar_day: Optional[date] = None,
     ) -> Tuple[date, str, str]:
         """The session the ranked changes describe: (date, iso, wording).
+
+        `calendar_day` is the ET calendar date the words are spoken on. The WORD is
+        "today" only when the stamped session IS that day: on a Saturday the live session
+        is Friday and every stamp is Friday, and `stamped >= live_session` alone worded
+        Friday's move "today" — the model said "TSLA is down 4% today" all weekend, and
+        the tier-3 catalyst gate (which keys on the word) bought a fresh web search for a
+        session that had ended the day before. The returned DATE is unchanged: every
+        detector is gated on the session, not on the wording. Clock-injected, like
+        `live_session` — callers pass the day; this function never reads the wall clock.
 
         Batch quotes carry `changeSession` (stamped by `price_service` with the same
         derivation the movers universe uses). At 07:30 ET Monday the screener still
@@ -1476,7 +1508,10 @@ class WidgetMoversService:
         # now applies the 24/7 word per row.
         stamped = newest_session(ranked) or live_session
         if stamped >= live_session:
-            return live_session, live_session.isoformat(), "today"
+            if calendar_day is None or live_session == calendar_day:
+                return live_session, live_session.isoformat(), "today"
+            # A weekend / holiday: the freshest session is real, but it is not today.
+            return live_session, live_session.isoformat(), f"on {live_session.strftime('%a')}"
         return stamped, stamped.isoformat(), f"on {stamped.strftime('%a')}"
 
     def _payload(
@@ -1498,7 +1533,7 @@ class WidgetMoversService:
         # went dark AND the tile still asserted "No company news today." A confident
         # negative produced by asking about the wrong day.
         live_session = session_trading_date()
-        today, today_iso, session_word = self._session_of(ranked, live_session)
+        today, today_iso, session_word = self._session_of(ranked, live_session, _et_calendar_day())
 
         head: Optional[WidgetMoverResponse] = None
         runners: List[WidgetMoverResponse] = []

@@ -490,6 +490,40 @@ def test_settle_no_cost_is_idempotent_with_refund_once(monkeypatch):
     assert credit.refund_ledgered.call_count == 1
 
 
+@pytest.mark.parametrize("outcome", [None, {"outcome": "no_matching_debit"},
+                                     {"outcome": "capped_to_zero", "refunded": 0},
+                                     {"outcome": "no_credits_row"}])
+def test_the_chip_says_refunded_only_when_the_ledger_proved_it(monkeypatch, outcome):
+    """`_refunded` used to be set BEFORE `refund_ledgered` ran, so a transport fault or a
+    no-op outcome (a REFUND LEAK) still rendered '1 credit refunded' and a `credits` frame
+    claiming the money was back."""
+    credit = _patch_credit(monkeypatch)
+    credit.refund_ledgered.return_value = outcome
+    _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_cache_hit")
+    assert quota.outcome == "charged"
+    assert quota.cost_payload() is None
+    assert "refund" not in (quota.cost_frame().get("label") or "").lower()
+    # …and the same rule on the never-arrived path.
+    quota2, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-2")
+    quota2.refund_once("chat_undelivered")
+    assert quota2.outcome == "charged"
+
+
+def test_a_proven_refund_still_reports_refunded(monkeypatch):
+    credit = _patch_credit(monkeypatch)
+    credit.refund_ledgered.return_value = {"outcome": "refunded", "refunded": 1, "spendable": 79}
+    _patch_followup(monkeypatch, claim_returns=False)
+    quota, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-1")
+    quota.settle_no_cost("chat_cache_hit")
+    assert quota.outcome == "refunded" and quota.cost_frame()["balance"] == 79
+    quota2, _ = chat._claim_chat_quota(AUTHED, None, session_id="sess-2")
+    credit.refund_ledgered.return_value = {"outcome": "already_refunded", "refunded": 0, "spendable": 79}
+    quota2.refund_once("chat_undelivered")
+    assert quota2.outcome == "refunded", "already_refunded means the money IS back"
+
+
 def test_guest_settle_no_cost_touches_no_rpc(monkeypatch):
     """A guest's delivered no-cost turn keeps its daily turn (the turn WAS delivered; the
     daily budget meters answers, not Gemini cost) and touches neither credit RPC."""

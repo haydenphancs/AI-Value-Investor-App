@@ -88,6 +88,54 @@ def test_the_wire_model_decodes_the_day_range_flag():
     )
 
 
+# ── The card's day change has a neutral state too (2026-09-17) ───────────────
+#
+# `PriceService._shape` emits change=None for "unknown — 0.0 would be a fabricated flat
+# day", but the card's `or 0` wire coercion turned that into a green "+$0.00 (+0.00%)" with
+# an up arrow, and the LIVE QUOTE line told the model "($+0.00, +0.00%)".
+
+
+def test_the_wire_model_decodes_the_change_flag_and_every_reader_is_neutral():
+    body = _braced(_stripped(_MODELS), "struct StockChartWidgetData")
+    assert 'case changeKnown = "change_known"' in body
+    assert "let changeKnown: Bool?" in body, "Optional — an older server sends nothing"
+    assert "var hasKnownChange: Bool { changeKnown != false }" in body
+    for prop in ("formattedChange", "formattedAbsChange"):
+        block = body[body.index(f"var {prop}"):]
+        block = block[:block.index("}\n", block.index("{"))]
+        assert "hasKnownChange" in block and "—" in block, f"{prop} formats a placeholder as a number"
+    series = body[body.index("var isSeriesPositive"):]
+    assert "hasKnownChange ? isPositive : true" in series[:400]
+
+
+def test_the_card_view_paints_no_direction_for_an_unknown_change():
+    import re
+    from pathlib import Path
+    view = (Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Views" / "Molecules"
+            / "ChatStockWidgetView.swift").read_text(encoding="utf-8")
+    view = re.sub(r"//[^\n]*", "", view)
+    price = view[view.index("private var priceSection"):]
+    price = price[:price.index("private var chartSection")]
+    assert "if widget.hasKnownChange {" in price, "the arrow must be gated"
+    assert "!widget.hasKnownChange ? AppColors.textMuted" in price, "the ink must be neutral"
+    header = view[:view.index("private var priceSection")]
+    assert "!widget.hasKnownChange" in header, "the ticker badge tint must be neutral too"
+
+
+def test_the_backend_flags_an_unknown_change_and_the_prompt_says_so():
+    from app.services.chat_service import ChatService
+    known = ChatService._build_stock_widget("AAPL", {"price": 200.0, "change": 1.5, "changePercentage": 0.75},
+                                            [], 1, True)
+    assert known["change_known"] is True and known["change_percent"] == 0.75
+    unknown = ChatService._build_stock_widget("BTCUSD", {"price": 64000.0, "change": None,
+                                                         "changePercentage": None}, [], 1, True)
+    assert unknown["change_known"] is False and unknown["change"] == 0 and unknown["change_percent"] == 0
+    line = ChatService._widget_grounding_line(unknown)
+    assert "(day change unknown)" in line and "+0.00" not in line
+    zero = ChatService._build_stock_widget("X", {"price": 10.0, "change": 0.0, "changePercentage": 0.0}, [], 1, True)
+    assert zero["change_known"] is True, "an explicit flat day is a real number"
+
+
 # ── The thinking-card labels ─────────────────────────────────────────────────
 
 _LABELLED_TOOLS = (

@@ -147,6 +147,123 @@ _SEGMENT_META_KEYS = {"date", "symbol", "reportedCurrency", "cik", "fillingDate"
 # Minimum percentage of total revenue for a segment to keep its own name
 _OTHER_THRESHOLD_PCT = 5.0
 
+# ── Reconciling the segments to REPORTED revenue (2026-09-17) ────────────────────
+# FMP's product segmentation is a mix HINT, not the revenue. Surveyed live across 22 large
+# caps: INTC's four segments sum to 134% of revenue (Intel Foundry's $17.7B of sales to
+# Intel's own product groups, with an explicit "Intersegment Eliminations" row we used to
+# DROP as "negative"); AMD 111% ("Gaming" listed inside "Client and Gaming"); CAT 172%
+# (a "Reportable Subsegments" total line); while KO covers 78%, BA 46% and Ford 7% (only
+# "Ford Credit"). The card stacked whatever it was given, so INTC's revenue bar towered
+# over its costs in a loss year and Ford's shrank to a sliver. The income statement's
+# `revenue` is the authority; the stack is reconciled to it with an EXPLICIT item.
+_RECONCILE_TOLERANCE = 0.03      # ±3%: ordinary FMP rounding (LMT −0.9%, XOM −2.1%) is left alone
+_MIN_SEGMENT_COVERAGE = 0.50     # below this the "breakdown" is one segment of many — not a breakdown
+_UNALLOCATED_NAME = "Unallocated"
+_ELIMINATION_RE = re.compile(r"eliminat|intersegment|inter-segment|reconcil|corporate (?:items|adjust)", re.I)
+# "Total …" and the CAT "Reportable Subsegments" line by prefix; "Consolidated" only when
+# it names a total (a segment can be "Consolidated Edison Company of New York"); a bare
+# "Revenue(s)" / "Net revenue" only as an EXACT name — "Revenue from Services" is a segment.
+_TOTAL_LIKE_RE = re.compile(
+    r"^total\b|^reportable subsegments?$|^segment totals?$|^consolidated (?:revenues?|total|net)\b|^(?:net )?revenues?$",
+    re.I,
+)
+# The cache row carries the reconciled stack. Rows written before reconciliation existed
+# hold the gross / thin stacks and must rebuild rather than serve for up to 24 h.
+_RB_PAYLOAD_VERSION = 2
+_VERSION_KEY = "payload_version"
+
+
+def _explicit_eliminations(record: Dict[str, Any]) -> float:
+    """Magnitude of the NEGATIVE rows FMP labels as eliminations / reconciling items.
+
+    `_extract_segments` drops every negative row (a negative segment is not revenue); this
+    reads the same record for the one negative that carries meaning — INTC FY2025
+    "Intersegment Eliminations": −17,683,000,000 — so the builder can cross-check the gap
+    it derives. Other negatives (CAT's "Power & Energy": −5.06B, a mangled feed row) are
+    not eliminations and stay ignored. Returns 0.0 when there is none.
+    """
+    segment_dict = record.get("data")
+    if not isinstance(segment_dict, dict):
+        segment_dict = {k: v for k, v in record.items() if k not in _SEGMENT_META_KEYS}
+    total = 0.0
+    for key, val in segment_dict.items():
+        try:
+            amount = float(val)
+        except (ValueError, TypeError):
+            continue
+        # Whatever the sign: a feed that books the row as +17.68B means the same thing.
+        if math.isfinite(amount) and amount != 0 and _ELIMINATION_RE.search(str(key)):
+            total += abs(amount)
+    return total
+
+
+def _reconcile_segments(
+    sources: List[RevenueSourceSchema],
+    reported_revenue: Optional[float],
+    explicit_eliminations: float = 0.0,
+    ticker: str = "",
+) -> Tuple[List[RevenueSourceSchema], Optional[float], str]:
+    """Fit the segment stack to reported revenue. Returns (sources, eliminations, outcome).
+
+    outcome ∈ {"exact", "gross", "subline", "unallocated", "thin", "unreconciled"}:
+      * within ±3% → untouched ("exact");
+      * sum ABOVE revenue → first try dropping a segment whose name is a sub-line of another
+        ("Gaming" inside "Client and Gaming" — AMD lands exactly on revenue once it goes);
+        otherwise the stack is gross of intersegment sales and the excess is returned as
+        `eliminations` (a positive magnitude) for iOS to draw as the first waterfall step
+        ("gross"). The segments themselves stay AS REPORTED — INTC's CCG really did sell
+        $32.2B — and the eliminations line is what makes the legend add to 100%;
+      * sum BELOW revenue but covering ≥ 50% → an explicit "Unallocated" segment closes
+        the gap ("unallocated"). Below 50% the feed listed one segment of many (Ford:
+        "Ford Credit" 7%), which is not a breakdown: return [] so the caller falls back to
+        the single Total Revenue bar ("thin");
+      * no usable reported revenue → nothing to reconcile against ("unreconciled").
+    Never changes a reported segment's value.
+    """
+    if not sources:
+        return sources, None, "unreconciled"
+    if reported_revenue is None or not math.isfinite(reported_revenue) or reported_revenue <= 0:
+        return sources, None, "unreconciled"
+
+    pos_sum = sum(s.value for s in sources)
+    if pos_sum <= 0:
+        return sources, None, "unreconciled"
+    ratio = pos_sum / reported_revenue
+    if abs(ratio - 1.0) <= _RECONCILE_TOLERANCE:
+        return sources, None, "exact"
+
+    if ratio > 1.0:
+        # Sub-line double count: keep the drop only if it actually reconciles.
+        names = [s.name.strip().lower() for s in sources]
+        for i, s in enumerate(sources):
+            if any(j != i and names[i] and names[i] in names[j] for j in range(len(sources))):
+                trial = [t for j, t in enumerate(sources) if j != i]
+                trial_sum = sum(t.value for t in trial)
+                if trial_sum > 0 and abs(trial_sum / reported_revenue - 1.0) <= _RECONCILE_TOLERANCE:
+                    logger.info("[revenue-seg-subline] %s: dropped %r (%.3g) — a sub-line of a "
+                                "listed segment; the rest reconcile to revenue",
+                                ticker, s.name, s.value)
+                    return trial, None, "subline"
+        eliminations = pos_sum - reported_revenue
+        if explicit_eliminations > 0 and abs(explicit_eliminations - eliminations) > 0.05 * eliminations:
+            logger.warning("[revenue-seg-eliminations-mismatch] %s: FMP eliminations row %.4g vs "
+                           "derived gap %.4g — using the derived gap so the card reconciles",
+                           ticker, explicit_eliminations, eliminations)
+        else:
+            logger.info("[revenue-seg-gross] %s: segments %.4g vs revenue %.4g — %.4g of "
+                        "intersegment sales eliminated", ticker, pos_sum, reported_revenue, eliminations)
+        return sources, eliminations, "gross"
+
+    # ratio < 1
+    if ratio < _MIN_SEGMENT_COVERAGE:
+        logger.warning("[revenue-seg-thin] %s: segments cover %.0f%% of revenue — not a "
+                       "breakdown; falling back to Total Revenue", ticker, ratio * 100)
+        return [], None, "thin"
+    gap = reported_revenue - pos_sum
+    logger.info("[revenue-seg-unallocated] %s: segments cover %.0f%% of revenue — %.4g unallocated",
+                ticker, ratio * 100, gap)
+    return sources + [RevenueSourceSchema(name=_UNALLOCATED_NAME, value=gap)], None, "unallocated"
+
 
 def _extract_segments(record: Dict[str, Any]) -> List[RevenueSourceSchema]:
     """
@@ -179,9 +296,19 @@ def _extract_segments(record: Dict[str, Any]) -> List[RevenueSourceSchema]:
         if not math.isfinite(amount):
             continue  # NaN/Inf segment -> REQUIRED RevenueSourceSchema.value -> 500
         if amount <= 0:
-            continue  # skip zero/negative segments
+            continue  # skip zero/negative segments (eliminations are read separately)
+        # An eliminations / reconciling row is never revenue, even when the feed signs it
+        # POSITIVE — stacked, it would double the very amount it is meant to remove.
+        if _ELIMINATION_RE.search(str(key)):
+            logger.info("[revenue-seg-elimination-row] dropped %r (%.3g) from the stack", key, amount)
+            continue
         # Skip values that look like years (e.g. 2024, 2025) — not revenue
         if 1900 <= amount <= 2100:
+            continue
+        # A TOTAL line beside its components (CAT: "Reportable Subsegments" 73.95B next to
+        # Construction / Resource / ...) is not a segment — stacking it doubles the bar.
+        if _TOTAL_LIKE_RE.search(str(key).strip()):
+            logger.info("[revenue-seg-total-row] dropped %r (%.3g): a total, not a segment", key, amount)
             continue
         segments.append((key, amount))
 
@@ -336,8 +463,14 @@ class RevenueBreakdownService:
                     logger.info(f"Supabase cache STALE (past earnings {next_earnings}) for {ticker}")
                     return None
 
-            # Deserialize
+            # Deserialize — refusing a row written before the stack was reconciled to
+            # reported revenue (it holds INTC's gross 70.5B stack / Ford's 7% sliver).
             json_data = entry["response_json"]
+            if not isinstance(json_data, dict) or json_data.get(_VERSION_KEY) != _RB_PAYLOAD_VERSION:
+                logger.info("Supabase cache STALE (%s=%s, want %s) for %s", _VERSION_KEY,
+                            (json_data or {}).get(_VERSION_KEY) if isinstance(json_data, dict) else None,
+                            _RB_PAYLOAD_VERSION, ticker)
+                return None
             return RevenueBreakdownResponse(**json_data)
 
         except Exception as e:
@@ -357,7 +490,7 @@ class RevenueBreakdownService:
             self.supabase.table("revenue_breakdown_cache").upsert(
                 {
                     "ticker": ticker,
-                    "response_json": result.model_dump(),
+                    "response_json": {**result.model_dump(), _VERSION_KEY: _RB_PAYLOAD_VERSION},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                     "next_earnings_date": next_earnings,
                 },
@@ -422,6 +555,8 @@ class RevenueBreakdownService:
 
         revenue_sources: List[RevenueSourceSchema] = []
         income: Dict[str, Any] = {}
+        intersegment_eliminations: Optional[float] = None
+        thin_segmentation = False
         for seg_rec in sorted_seg:
             seg_year = _record_year(seg_rec)
             matched_income = income_by_year.get(seg_year) if seg_year else None
@@ -430,11 +565,25 @@ class RevenueBreakdownService:
             sources = _extract_segments(seg_rec)
             if not sources:
                 continue
+            # Reconcile to THIS year's reported revenue (see _reconcile_segments). A thin
+            # feed returns [] here and the Total Revenue fallback below takes over — the
+            # income record is still this year's, so the costs stay paired correctly.
+            sources, intersegment_eliminations, outcome = _reconcile_segments(
+                sources, _safe_float_opt(matched_income, "revenue"),
+                _explicit_eliminations(seg_rec), ticker=ticker,
+            )
+            if outcome == "thin":
+                # Keep walking: an older year with real coverage beats a single bar. If
+                # every year is thin, the newest paired income still labels the fallback.
+                thin_segmentation = True
+                if not income:
+                    income = matched_income
+                continue
             revenue_sources = sources
             income = matched_income
             break
 
-        if not revenue_sources and sorted_seg:
+        if not revenue_sources and sorted_seg and not thin_segmentation:
             logger.warning(
                 "revenue_breakdown %s: segmentation years %s have no matching income "
                 "statement (income years %s) — falling back to income-only Total Revenue "
@@ -506,6 +655,7 @@ class RevenueBreakdownService:
             net_income=net_income,
             reported_revenue=reported_revenue,
             other_expense=other_expense,
+            intersegment_eliminations=intersegment_eliminations,
         )
 
         return response, next_earnings

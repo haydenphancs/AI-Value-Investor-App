@@ -101,7 +101,7 @@ struct ProfitPowerChartView: View {
                         chartArea(contentWidth: contentWidth)
                             .frame(height: chartHeight)
 
-                        xAxisLabels
+                        xAxisLabels(plotWidth: contentWidth)
                             .padding(.top, AppSpacing.sm)
                     }
                     .frame(width: contentWidth)
@@ -157,11 +157,14 @@ struct ProfitPowerChartView: View {
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
         .chartYScale(domain: marginDomain)
-        // The categorical band scale carries Swift Charts' default plot inset,
-        // while the manual xAxisLabels row below divides the same width flush —
-        // without this the edge labels sat beside their marks. Matches
-        // GrowthChartView / ProfitabilityChartView.
-        .chartXScale(range: .plotDimension(padding: edgeLabelPad(for: contentWidth)))
+        // A NUMERIC index axis (0…N-1) with a fixed edge pad, exactly like
+        // GrowthChartView / ProfitabilityChartView — and the label row below positions
+        // each label at `xCenter(index)`, the SAME pixel this scale gives the mark.
+        // This used to be a categorical `period` axis over a flush-divided HStack of
+        // labels; Swift Charts' band placement and the HStack columns are different
+        // geometries, so every dot sat about half a column LEFT of its year / quarter
+        // (TestFlight, INTC Profit Power, 2026-09-17).
+        .chartXScale(domain: xDomain(), range: .plotDimension(padding: edgeLabelPad))
         .chartPlotStyle { plotArea in
             plotArea
                 .background(Color.clear)
@@ -179,11 +182,35 @@ struct ProfitPowerChartView: View {
         }
     }
 
-    /// Half a column — the inset that lines the categorical band centres up
-    /// with the flush-divided label row.
-    private func edgeLabelPad(for contentWidth: CGFloat) -> CGFloat {
-        guard dataPoints.count > 0, contentWidth.isFinite, contentWidth > 0 else { return 0 }
-        return contentWidth / CGFloat(dataPoints.count) / 2
+    /// Room reserved at each plot edge for the widest centred edge label ("Q1 '25").
+    /// In POINTS — label width is font-fixed, not a fraction of the chart.
+    private let edgeLabelPad: CGFloat = 24
+
+    /// Plain index domain 0…N-1; the edge spacing comes from `.plotDimension(padding:)`.
+    private func xDomain() -> ClosedRange<Double> {
+        let n = dataPoints.count
+        guard n > 1 else { return -0.5 ... 0.5 }          // lone point: centred
+        return 0.0 ... Double(n - 1)
+    }
+
+    /// Pixel centre of column `index` — mirrors the chart's scale so the label row and
+    /// the tap mapping agree with the marks to the pixel.
+    private func xCenter(_ index: Int, plotWidth: CGFloat) -> CGFloat {
+        let n = dataPoints.count
+        guard n > 1 else { return plotWidth / 2 }
+        let usable = Swift.max(plotWidth - 2 * edgeLabelPad, 1)
+        return edgeLabelPad + CGFloat(index) / CGFloat(n - 1) * usable
+    }
+
+    /// Inverse of `xCenter`: the column whose centre is nearest to `x`.
+    private func nearestIndex(atX x: CGFloat, plotWidth: CGFloat) -> Int? {
+        let n = dataPoints.count
+        guard n > 0, x.isFinite, plotWidth.isFinite, plotWidth > 0 else { return nil }
+        guard n > 1 else { return 0 }
+        let usable = Swift.max(plotWidth - 2 * edgeLabelPad, 1)
+        let raw = ((x - edgeLabelPad) / usable * CGFloat(n - 1)).rounded()
+        guard raw.isFinite else { return nil }
+        return Int(Swift.min(Swift.max(raw, 0), CGFloat(n - 1)))
     }
 
     // MARK: - Line Marks
@@ -193,10 +220,10 @@ struct ProfitPowerChartView: View {
 
     @ChartContentBuilder
     private func marginLineMark(for type: ProfitMarginType) -> some ChartContent {
-        ForEach(dataPoints) { dataPoint in
+        ForEach(Array(dataPoints.enumerated()), id: \.element.id) { index, dataPoint in
             if let value = dataPoint.margin(for: type) {
                 LineMark(
-                    x: .value("Period", dataPoint.period),
+                    x: .value("i", Double(index)),
                     y: .value("Margin", value),
                     series: .value("Series", type.rawValue)
                 )
@@ -208,10 +235,10 @@ struct ProfitPowerChartView: View {
 
     @ChartContentBuilder
     private func marginPointMark(for type: ProfitMarginType) -> some ChartContent {
-        ForEach(dataPoints) { dataPoint in
+        ForEach(Array(dataPoints.enumerated()), id: \.element.id) { index, dataPoint in
             if let value = dataPoint.margin(for: type) {
                 PointMark(
-                    x: .value("Period", dataPoint.period),
+                    x: .value("i", Double(index)),
                     y: .value("Margin", value)
                 )
                 .foregroundStyle(type.color)
@@ -222,10 +249,10 @@ struct ProfitPowerChartView: View {
 
     @ChartContentBuilder
     private var sectorAverageLineMark: some ChartContent {
-        ForEach(dataPoints) { dataPoint in
+        ForEach(Array(dataPoints.enumerated()), id: \.element.id) { index, dataPoint in
             if let value = dataPoint.sectorAverageNetMargin {
                 LineMark(
-                    x: .value("Period", dataPoint.period),
+                    x: .value("i", Double(index)),
                     y: .value("Sector", value),
                     series: .value("Series", "SectorAverage")
                 )
@@ -237,10 +264,10 @@ struct ProfitPowerChartView: View {
 
     @ChartContentBuilder
     private var sectorAveragePointMark: some ChartContent {
-        ForEach(dataPoints) { dataPoint in
+        ForEach(Array(dataPoints.enumerated()), id: \.element.id) { index, dataPoint in
             if let value = dataPoint.sectorAverageNetMargin {
                 PointMark(
-                    x: .value("Period", dataPoint.period),
+                    x: .value("i", Double(index)),
                     y: .value("Sector", value)
                 )
                 .foregroundStyle(AppColors.profitSectorAverage)
@@ -293,30 +320,30 @@ struct ProfitPowerChartView: View {
 
     // MARK: - X-Axis Labels
 
-    private var xAxisLabels: some View {
-        HStack(spacing: 0) {
-            ForEach(dataPoints) { dataPoint in
+    // Each label sits at the SAME column centre (`xCenter`) the chart's marks use —
+    // not in a flush-divided HStack, whose columns never matched the plot's scale.
+    private func xAxisLabels(plotWidth: CGFloat) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(dataPoints.enumerated()), id: \.element.id) { index, dataPoint in
                 Text(dataPoint.period)
                     .font(.system(size: 11))
                     .foregroundColor(AppColors.textMuted)
-                    .frame(maxWidth: .infinity)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .fixedSize()
+                    .position(x: xCenter(index, plotWidth: plotWidth), y: xAxisHeight / 2)
             }
         }
-        .frame(height: xAxisHeight)
+        .frame(width: plotWidth, height: xAxisHeight, alignment: .leading)
     }
 
     // MARK: - Selection Helper
 
     private func updateSelection(at location: CGPoint, chartWidth: CGFloat) {
-        // The bounds check used to happen AFTER `Int(location.x / pointWidth)`.
-        // A GeometryReader reporting width 0 mid-transition makes that quotient
-        // infinite (or NaN with an empty series), and `Int(.infinity)` TRAPS.
-        // ChartDomain.columnIndex validates before converting.
-        guard let index = ChartDomain.columnIndex(
-            atX: location.x, width: chartWidth, count: dataPoints.count
-        ) else { return }
+        // Nearest column CENTRE under the index scale (with its edge pad) — the flush
+        // `ChartDomain.columnIndex` split the width into equal columns, which is not
+        // where the marks are. Validates before converting: a GeometryReader reporting
+        // width 0 mid-transition would otherwise make `Int(.infinity)` trap.
+        guard let index = nearestIndex(atX: location.x, plotWidth: chartWidth) else { return }
         selectedDataPoint = dataPoints[index]
     }
 }

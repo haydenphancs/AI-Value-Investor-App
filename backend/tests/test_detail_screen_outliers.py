@@ -804,8 +804,8 @@ def test_ios_hides_the_analyst_section_before_it_checks_coverage():
     assert cover != -1, "the genuine no-coverage state was removed — it is still correct when FMP has no data"
 
     # The Valuation Meter (multiples vs sector + FMP's DCF, both entitled) holds the slot
-    # the Street Estimates card had until 2026-09-17; estimates now sit under Earnings on
-    # the Financials tab (see test_analyst_estimates.py). It must render FIRST: the two
+    # the Street Estimates card had until 2026-09-17; that card is now gone from every tab
+    # (see test_analyst_estimates.py). It must render FIRST: the two
     # branches below are about the unlicensed ratings pair, and falling into either of
     # them would hide a valuation we actually have.
     assert meter != -1, "the Valuation Meter is gone from the Analysis tab"
@@ -821,7 +821,7 @@ def test_ios_hides_the_analyst_section_before_it_checks_coverage():
         "ratings half"
     )
     assert "ratingsData.estimatesAvailable" not in body, (
-        "Street Estimates is back on the Analysis tab — it moved to Financials under Earnings"
+        "Street Estimates is back on the Analysis tab — the card was removed on 2026-09-17"
     )
     assert avail < cover, (
         "hasCoverage is checked BEFORE sectionAvailable, so an unlicensed source falls into "
@@ -1249,11 +1249,12 @@ def test_a_client_grounded_deep_dive_is_answered_but_never_cached():
     import inspect
     from app.services.chat_service import ChatService
     src = inspect.getsource(ChatService.prepare_stream_generation)
-    assert '"deep_dive_context": context if (is_deep_dive and server_grounded) else None' in src
+    assert 'is_deep_dive and self._deep_dive_cacheable(' in src
     src2 = inspect.getsource(ChatService.generate_response)
     i = src2.index("self._upsert_deep_dive_cache")
     gate = src2[src2.rindex("if (", 0, i):i]
-    assert "_server_grounded" in gate and "not degraded" in gate
+    assert "self._deep_dive_cacheable(" in gate and "not degraded" in gate
+    # The behavioural pins live in tests/test_chat_deep_dive_cache_gate.py.
 
 
 def test_streamed_reasoning_passes_output_enforcement():
@@ -3000,8 +3001,13 @@ def test_cost_bar_is_driven_by_the_same_items_as_the_legend():
     chart while the legend still printed it — one number, three readings."""
     chart = _swift_code(_IOS / "Views" / "Molecules" / "RevenueBreakdownChartView.swift")
     body = _func_body(chart, "private func costWaterfallBar(")
-    assert "data.costItems" in body, "the bar hardcodes its segments again"
+    # `waterfallItems` since 2026-09-17: the legend's `costItems` plus, for a gross segment
+    # stack, the intersegment-eliminations bridge step in front of them. Same items as the
+    # legend, in the same order — pinned by tests/test_ios_revenue_reconciliation.py.
+    assert "data.waterfallItems" in body, "the bar hardcodes its segments again"
     assert "!$0.isCredit" in body, "a credit is being drawn as a cost"
+    models = _swift_code(_IOS / _REV_MODELS)
+    assert "+ costItems" in _func_body(models, "var waterfallItems: [CostItem]")
 
 
 def test_legend_column_header_flips_to_loss_with_the_row_beneath_it():
@@ -3024,8 +3030,8 @@ def test_revenue_composition_scan_is_not_vacuous():
     assert len(_func_body(code, "var costsColumnTitle: String")) < len(code) / 4
     # Comment stripping is load-bearing here — the file explains the old expression.
     raw = (_IOS / _REV_MODELS).read_text()
-    assert "totalRevenue - totalCosts" in raw, \
-        "the rationale comment naming the old residual is gone; this control is moot"
+    assert "netRevenue - totalCosts" in raw, \
+        "the fallback residual expression is gone from the file; this control is moot"
     # ...and the brace-bounding must really bound.
     assert len(_func_body(code, "var netProfit: Double")) < len(code) / 4
     # A body that genuinely lacks a token must not report it.

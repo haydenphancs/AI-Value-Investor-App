@@ -175,11 +175,31 @@ actor TaskPollingManager {
                         // Wait before polling
                         try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
 
-                        // Check status
-                        let status = try await apiClient.request(
-                            endpoint: .getResearchStatus(reportId: reportId),
-                            responseType: ResearchStatusResponse.self
-                        )
+                        // Check status. ONE transient miss must not end the monitor as a
+                        // research failure: the phone unlocking mid-request (-1005), a
+                        // Railway deploy's few seconds of 502s, a rate-limit — each used to
+                        // surface "check your internet connection" as the ANALYSIS failing,
+                        // log `reportFailed`, and free a concurrency slot the server still
+                        // held, while the card kept advancing through the 5 s list poll. The
+                        // loop is already bounded by `maxPollDuration` (→ `.timeout`, which
+                        // the VM treats as "the server continues"), so a miss just skips a
+                        // tick. Terminal failures (gone, signed out, a contract drift) still end it.
+                        let status: ResearchStatusResponse
+                        do {
+                            status = try await apiClient.request(
+                                endpoint: .getResearchStatus(reportId: reportId),
+                                responseType: ResearchStatusResponse.self
+                            )
+                        } catch {
+                            let appError = AppError.from(error)
+                            if Self.isTransientPollFailure(appError) {
+                                print("⏳ [TaskPolling] status poll for \(reportId) missed a tick (\(appError.analyticsCode)) — retrying")
+                                continue
+                            }
+                            continuation.yield(.failed(appError))
+                            continuation.finish()
+                            return
+                        }
 
                         if status.isProcessing {
                             continuation.yield(.progress(
@@ -187,11 +207,24 @@ actor TaskPollingManager {
                                 step: status.currentStep ?? "Processing..."
                             ))
                         } else if status.isCompleted {
-                            // Fetch full report
-                            let report = try await apiClient.request(
-                                endpoint: .getResearchReport(reportId: reportId),
-                                responseType: ResearchReportDetail.self
-                            )
+                            // Fetch full report. Same tolerance: the next poll answers
+                            // `completed` again and this fetch is retried.
+                            let report: ResearchReportDetail
+                            do {
+                                report = try await apiClient.request(
+                                    endpoint: .getResearchReport(reportId: reportId),
+                                    responseType: ResearchReportDetail.self
+                                )
+                            } catch {
+                                let appError = AppError.from(error)
+                                if Self.isTransientPollFailure(appError) {
+                                    print("⏳ [TaskPolling] detail fetch for \(reportId) missed (\(appError.analyticsCode)) — retrying next tick")
+                                    continue
+                                }
+                                continuation.yield(.failed(appError))
+                                continuation.finish()
+                                return
+                            }
                             continuation.yield(.completed(report))
                             continuation.finish()
                             return
@@ -230,10 +263,22 @@ actor TaskPollingManager {
                     }
 
                     do {
-                        let status = try await apiClient.request(
-                            endpoint: .getResearchStatus(reportId: reportId),
-                            responseType: ResearchStatusResponse.self
-                        )
+                        // Same per-tick tolerance as `generateAndMonitorResearch` — see there.
+                        let status: ResearchStatusResponse
+                        do {
+                            status = try await apiClient.request(
+                                endpoint: .getResearchStatus(reportId: reportId),
+                                responseType: ResearchStatusResponse.self
+                            )
+                        } catch {
+                            let appError = AppError.from(error)
+                            if Self.isTransientPollFailure(appError) {
+                                print("⏳ [TaskPolling] status poll for \(reportId) missed a tick (\(appError.analyticsCode)) — retrying")
+                                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                                continue
+                            }
+                            throw appError
+                        }
 
                         if status.isProcessing {
                             continuation.yield(.progress(
@@ -241,10 +286,21 @@ actor TaskPollingManager {
                                 step: status.currentStep ?? "Processing..."
                             ))
                         } else if status.isCompleted {
-                            let report = try await apiClient.request(
-                                endpoint: .getResearchReport(reportId: reportId),
-                                responseType: ResearchReportDetail.self
-                            )
+                            let report: ResearchReportDetail
+                            do {
+                                report = try await apiClient.request(
+                                    endpoint: .getResearchReport(reportId: reportId),
+                                    responseType: ResearchReportDetail.self
+                                )
+                            } catch {
+                                let appError = AppError.from(error)
+                                if Self.isTransientPollFailure(appError) {
+                                    print("⏳ [TaskPolling] detail fetch for \(reportId) missed (\(appError.analyticsCode)) — retrying next tick")
+                                    try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+                                    continue
+                                }
+                                throw appError
+                            }
                             continuation.yield(.completed(report))
                             continuation.finish()
                             return
@@ -272,6 +328,31 @@ actor TaskPollingManager {
     }
 
     // MARK: - Failure Mapping
+
+    /// A poll miss the NEXT tick can heal. Everything here is either a transport blip, an
+    /// upstream hiccup, or the `.restoring` window (`.signInRequired` while a credential is
+    /// being re-validated — it heals on re-arm). Terminal by exclusion: the report is gone
+    /// (`.notFound`, `RESEARCH_DELETED`), the session is over (`.tokenExpired`,
+    /// `.sessionEnded`), the DTO drifted (see the `.unknown` arm), or the task was cancelled.
+    nonisolated static func isTransientPollFailure(_ error: AppError) -> Bool {
+        switch error {
+        case .noConnection, .timeout, .serverError, .rateLimited, .authUnavailable,
+             .signInRequired:
+            return true
+        case .unknown(let message):
+            // `APIError.decodingError` maps to `.unknown("Failed to process server response")`
+            // (AppError.mapAPIError). A drift fails identically every tick, so retrying it
+            // only delays the same alert; any other `.unknown` is an unclassified transport
+            // error and gets the next tick.
+            return message != Self.decodeFailureMessage
+        default:
+            return false
+        }
+    }
+
+    /// The exact text `AppError.mapAPIError` gives a `.decodingError`; pinned by the
+    /// source-scan test so the two cannot drift apart silently.
+    nonisolated static let decodeFailureMessage = "Failed to process server response"
 
     /// Turn a failed `/status` poll into the same typed `AppError` the rest of the app
     /// uses, preserving the backend's `error_code` so the UI can offer the action that

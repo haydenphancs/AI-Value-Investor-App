@@ -37,7 +37,9 @@ from app.services.chat_security import (
 )
 from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
-from app.services.credit_service import CreditService, CreditServiceUnavailable
+from app.services.credit_service import CreditService, CreditServiceUnavailable, refund_did_not_happen
+from app.integrations.gemini import GeminiTimeoutError
+import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.services.chat_intent import is_trade_intent
 from app.schemas.chat_starters import ChatStartersResponse
@@ -254,8 +256,8 @@ class _ChatQuota:
             # cannot mint a second one.
             get_chat_budget_service().grant_free_followup(self._session_id)
             return
-        self._refunded = True
         if self._is_guest:
+            self._refunded = True
             _refund_chat_turn(self._user, self._x_guest_id)
         else:
             payload = CreditService().refund_ledgered(
@@ -264,6 +266,12 @@ class _ChatQuota:
                 reason=reason,
                 ref_id=self._ref_id,
             )
+            # The chip says "refunded" ONLY when the ledger proved it. `refund_ledgered`
+            # answers None on a transport fault and a no-op outcome (`no_matching_debit`,
+            # `capped_to_zero`, `no_credits_row`) when nothing moved — `refund_did_not_happen`
+            # is the one classifier every report site uses. The flag used to be set BEFORE
+            # the call, so a REFUND LEAK rendered as "1 credit refunded".
+            self._refunded = not refund_did_not_happen(payload)
             # `None` is strictly a transport fault, never a business outcome — leave the
             # balance as-is so the client refreshes rather than being shown a wrong number.
             if isinstance(payload, dict) and isinstance(payload.get("spendable"), int):
@@ -287,13 +295,14 @@ class _ChatQuota:
         self._refund_reason = reason
         if self._free or self._is_guest:
             return
-        self._refunded = True
         payload = CreditService().refund_ledgered(
             self._user["id"],
             settings.CHAT_CREDIT_COST,
             reason=reason,
             ref_id=self._ref_id,
         )
+        # Same rule as `refund_once`: the flag reflects what the ledger did, not what we asked.
+        self._refunded = not refund_did_not_happen(payload)
         if isinstance(payload, dict) and isinstance(payload.get("spendable"), int):
             self._balance_after = payload["spendable"]
 
@@ -782,9 +791,21 @@ def _keepalive_seconds() -> float:
     return float(getattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 15.0) or 15.0)
 
 
-async def _with_keepalive(agen):
+def _stream_budget_seconds() -> float:
+    return float(getattr(settings, "CHAT_STREAM_BUDGET_SECONDS", 150.0) or 150.0)
+
+
+async def _with_keepalive(agen, deadline: Optional[float] = None):
     """Re-yield `agen`'s events, interleaving ``("keepalive", None)`` whenever
-    `CHAT_STREAM_KEEPALIVE_SECONDS` pass with nothing to send.
+    `CHAT_STREAM_KEEPALIVE_SECONDS` pass with nothing to send — until `deadline`
+    (a `time.monotonic()` instant), past which the wait is abandoned with a
+    `GeminiTimeoutError` so the caller's transient-error handling settles the turn.
+
+    The keepalives reset iOS's 120 s idle timeout indefinitely, so without a deadline
+    the only bound on a streamed turn was the SUM of every inner ceiling — up to four
+    tool rounds of sequential 8–75 s tools plus 90 s reads — and a stalled turn held the
+    user, the worker and the credit for many minutes. The non-streaming door has had
+    `CHAT_SEND_BUDGET_SECONDS` since 2026-09-16; this is its twin.
 
     Why: the synthesis path buffers its specialists and yields NOTHING until the gather
     completes, and a single tool may legitimately run for `_TOOL_TIMEOUTS` (75 s for a
@@ -796,8 +817,18 @@ async def _with_keepalive(agen):
     pending = asyncio.ensure_future(it.__anext__())
     try:
         while True:
-            done, _ = await asyncio.wait({pending}, timeout=_keepalive_seconds())
+            wait_for = _keepalive_seconds()
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise GeminiTimeoutError(
+                        f"streamed turn exceeded CHAT_STREAM_BUDGET_SECONDS={_stream_budget_seconds():.0f}"
+                    )
+                wait_for = min(wait_for, remaining)
+            done, _ = await asyncio.wait({pending}, timeout=wait_for)
             if not done:
+                if deadline is not None and _time.monotonic() >= deadline:
+                    continue   # the top of the loop raises with the remaining ≤ 0
                 yield "keepalive", None
                 continue
             try:
@@ -1195,6 +1226,29 @@ async def send_chat_message(
         # Build the widget payload (if Gemini triggered the stock tool)
         widget_payload = ai_result.get("widget")
 
+        # A plain JSON route is NEVER cancelled on a client disconnect (Starlette only
+        # watches for `http.disconnect` on streaming responses), so a turn the client
+        # abandoned — phone locked, Wi-Fi lost, or its own 60 s ceiling — used to be
+        # persisted and charged for nobody. Ask BEFORE the write, never after: `delivered`
+        # must stay False so the `finally` refunds. Best-effort: the probe answers False
+        # when it cannot tell, and then the turn simply proceeds as it always did.
+        try:
+            gone = await req.is_disconnected()
+        except Exception as e:  # noqa: BLE001 — a probe failure must not fail the turn
+            logger.warning("Chat (send) disconnect probe failed (%s: %s)", type(e).__name__, e)
+            gone = False
+        if gone:
+            logger.warning(
+                "Chat (send) client gone before persist for session=%s — not saving, refunding",
+                session_id,
+            )
+            return make_error_response(
+                ErrorCode.GEMINI_UNAVAILABLE,
+                message="client disconnected before the answer was persisted",
+                user_message="Cay AI couldn't respond right now. Please try again.",
+                details={"step": "chat_send_disconnected"},
+            )
+
         # Explicit created_at keeps user-before-assistant ordering: a single multi-row insert would
         # otherwise stamp both rows with the same now() default, and get_chat_history orders by
         # created_at asc — the assistant could sort ahead of the question.
@@ -1309,10 +1363,11 @@ async def send_chat_message(
         logger.error(f"Chat response failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate response")
     finally:
-        # Any non-delivery — generation/persist error, or a client-disconnect
-        # CancelledError (a BaseException the except above misses) — hands the turn's
-        # quota back exactly once (credit for authed, daily turn for guest) so an outage
-        # never burns a paid turn.
+        # Any non-delivery — generation/persist error, the budget, the disconnect probe
+        # above — hands the turn's quota back exactly once (credit for authed, daily turn
+        # for guest) so an outage never burns a paid turn. (No CancelledError arrives on
+        # this door: Starlette cancels only STREAMING responses on a client disconnect,
+        # which is why the explicit `is_disconnected()` probe before the persist exists.)
         if not delivered:
             quota.refund_once("chat_undelivered")
 
@@ -1650,7 +1705,9 @@ async def stream_chat_message(
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
                 )
 
-            async for kind, payload in _with_keepalive(answer_stream):
+            async for kind, payload in _with_keepalive(
+                answer_stream, deadline=started + _stream_budget_seconds()
+            ):
                 if kind == "keepalive":
                     # An SSE comment line: every client ignores it, and it keeps the
                     # connection off iOS's 120 s idle timeout while a synthesis round
@@ -1673,7 +1730,13 @@ async def stream_chat_message(
                     _res = payload.get("result")
                     _err = _res.get("error") if isinstance(_res, dict) else None
                     tool_calls_seen += 1
-                    if _err:
+                    # Only an UPSTREAM failure (timeout, FMP/CoinGecko/Supabase error —
+                    # tagged `upstream` at the source) counts toward the refund. A result
+                    # the MODEL shaped — an invalid ticker, a symbol the provider does
+                    # not cover — is answered ("not covered") and stays charged: counted,
+                    # a decoy `get_stock_chart_data("QQQQQ")` in every message made every
+                    # turn free, at 15/min, with the balance never moving.
+                    if _err and isinstance(_res, dict) and _res.get("upstream"):
                         tool_calls_failed += 1
                     yield _sse("tool_step", {
                         "name": payload.get("name"), "args": payload.get("args"),
@@ -1688,6 +1751,17 @@ async def stream_chat_message(
                     if payload is not None and widget_key(payload) not in seen_widgets:
                         seen_widgets.add(widget_key(payload))
                         widgets.append(payload)
+                elif kind == "finish":
+                    # The model CUT the answer (MAX_TOKENS / SAFETY / RECITATION) after
+                    # real text had streamed. It used to end cleanly: charged in full, and
+                    # for a deep dive cached for every user for 24 h with its last sentence
+                    # missing. Marked degraded → refunded, never cached.
+                    if payload and not stream_signals.get("degraded"):
+                        logger.warning(
+                            "Chat stream: answer cut by finish_reason=%s for session %s — "
+                            "settling as degraded", payload, session_id,
+                        )
+                        stream_signals["degraded"] = "truncated"
 
             content = "".join(answer_parts)
             reasoning_text = "".join(reasoning_parts)
@@ -1752,10 +1826,25 @@ async def stream_chat_message(
                     user_id=user["id"],
                 ))
                 # The fallback is one awaited call with tools inside it — nothing reaches
-                # the client until it returns, so heartbeat it the same way as the pump.
+                # the client until it returns, so heartbeat it the same way as the pump —
+                # under the SAME turn deadline: a pump that spent the budget must not be
+                # followed by a fallback that spends it again.
+                _fallback_deadline = max(
+                    _time.monotonic() + 5.0,
+                    min(started + _stream_budget_seconds(),
+                        _time.monotonic() + settings.CHAT_SEND_BUDGET_SECONDS),
+                )
                 try:
                     while True:
-                        _done, _ = await asyncio.wait({_fallback_task}, timeout=_keepalive_seconds())
+                        _remaining = _fallback_deadline - _time.monotonic()
+                        if _remaining <= 0:
+                            raise GeminiTimeoutError(
+                                "stream fallback exceeded the turn budget "
+                                f"(CHAT_STREAM_BUDGET_SECONDS={_stream_budget_seconds():.0f})"
+                            )
+                        _done, _ = await asyncio.wait(
+                            {_fallback_task}, timeout=min(_keepalive_seconds(), _remaining)
+                        )
                         if _done:
                             break
                         yield ": keepalive\n\n"

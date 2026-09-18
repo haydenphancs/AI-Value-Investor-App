@@ -281,7 +281,8 @@ struct AIChatScreen: View {
                 // Show suggestion chips ONLY on a truly empty chat — hide them the instant a
                 // conversation is seeded (messages non-empty) or the AI is replying, even before
                 // the session id lands. Mirrors the conversation-area gate above.
-                suggestions: (viewModel.messages.isEmpty && !viewModel.isAITyping) ? suggestions.map(\.text) : [],
+                suggestions: (viewModel.messages.isEmpty && !viewModel.isAITyping && !viewModel.isLoadingSession)
+                    ? suggestions.map(\.text) : [],
                 // The global chat is the one surface that drifts; the detail bars leave
                 // `marquee` at its default and stay still.
                 marquee: true,
@@ -291,8 +292,9 @@ struct AIChatScreen: View {
                     }
                 },
                 onSend: handleSend,
-                // Grey out / block send while a reply is in flight (matches the ViewModel guard).
-                isBusy: viewModel.isAITyping
+                // Grey out / block send while a reply is in flight OR a history row is still
+                // loading (matches the ViewModel guard — see `sendMessage`).
+                isBusy: viewModel.isAITyping || viewModel.isLoadingSession
             )
         }
     }

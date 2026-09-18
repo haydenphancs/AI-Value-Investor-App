@@ -529,9 +529,21 @@ class ResearchService:
             raise
         except Exception as e:
             logger.error(f"Report generation failed: {e}", exc_info=True)
+            # The STRUCTURED, REDACTED blob — the same shape `_run_research_task`'s
+            # terminal CAS writes — not `str(e)`. Two things were wrong with the raw
+            # string: (1) an FMP httpx error carries `…&apikey=<key>` in its URL and
+            # `_make_request` re-raises the original for any status it does not type, so
+            # this write put the production key in `research_reports.error_message`, and
+            # the 3 s `/status` poll served it to the phone until the CAS overwrote it;
+            # (2) a Gemini failure named the vendor ("stage_a_GeminiQuotaError") on the
+            # user's screen in the same window. `error_body_from_exception` redacts
+            # BEFORE truncating and yields a `user_message` the splitter serves instead.
+            from app.api.error_response import error_body_from_exception
             self._update_status(
                 report_id, "failed", 0,
-                error_message=f"Research failed: {str(e)[:400]}"
+                error_message=json.dumps(error_body_from_exception(
+                    e, ticker=ticker, persona=persona_key, step="generate_report",
+                )),
             )
             raise
 
@@ -675,7 +687,11 @@ class ResearchService:
         if current_step:
             update["current_step"] = current_step
         if error_message:
-            update["error_message"] = error_message
+            # Choke point: every writer of this column passes here, and the column is
+            # served verbatim by `/status`. Redaction at the log boundary does not
+            # cover the database, so it is applied to the persisted text itself.
+            from app.log_redaction import redact_secrets
+            update["error_message"] = redact_secrets(error_message)
         try:
             self.supabase.table("research_reports").update(update).eq(
                 "id", report_id

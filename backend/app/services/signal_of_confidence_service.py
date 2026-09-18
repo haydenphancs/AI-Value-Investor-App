@@ -57,7 +57,20 @@ logger = logging.getLogger(__name__)
 #:     charted a 1.75% annualised yield in Q2'26 from a mis-tagged `commonDividendsPaid`
 #:     of -$16.5M (TestFlight, build 1.0 (8)). The card was already gated; the bars were
 #:     not, so one screen said "no dividend" and "1.75%" at once.
-_PAYLOAD_VERSION = 4
+#: 5 → the payer verdict is CURRENT, not historical: the most recent fiscal year's
+#:     `dividendPerShare` (or the profile's TTM `lastDividend`) decides, so a company that
+#:     STOPPED paying is treated like one that never started. INTC paid through FY2024
+#:     and suspended in Q3 2024; "any year in the window" still called it a payer and let a
+#:     −14.3B Q2'26 cash-flow line FMP tags `commonDividendsPaid` chart as an 8.79%
+#:     dividend with status "Very High" beside "Dividend / Share (FY2025) $0.00". The bars
+#:     are now zeroed; the card keeps the history (−100% over 5y) because the suspension
+#:     is the story.
+#: 6 → the bar gate is PER FISCAL YEAR (`dividend_by_year`): a quarter in a year whose
+#:     per-share record is positive keeps its real bar, so INTC's last FY2024 dividend
+#:     still charts and the 5-year average is a number, not "—". Bumped past 5 because
+#:     rows stamped 5 were written (locally, into the shared cache table) by the
+#:     intermediate build that zeroed every quarter.
+_PAYLOAD_VERSION = 6
 
 #: An ex-dividend date derived from the price series within this many days counts as
 #: "currently paying" when neither the per-share record nor the profile is available.
@@ -533,6 +546,7 @@ class SignalOfConfidenceService:
             mcap_by_date,
             ticker,
             pays_common_dividend=pays_common_dividend,
+            dividend_by_year=self._annual_dividend_map(annual_ratios),
         )
 
         # Phase 3: build trailing-12-month summary
@@ -572,6 +586,7 @@ class SignalOfConfidenceService:
         mcap_by_date: Optional[Dict[str, float]] = None,
         ticker: str = "",
         pays_common_dividend: Optional[bool] = None,
+        dividend_by_year: Optional[Dict[str, float]] = None,
     ) -> List[SignalOfConfidenceDataPointSchema]:
         """Build per-quarter data points from FMP data.
 
@@ -588,9 +603,18 @@ class SignalOfConfidenceService:
         a common dividend), ``True`` additionally unlocks the preferred-inclusive
         `netDividendsPaid` fallback, ``None`` (record unavailable) trusts the sign-gated
         cash-flow line as before.
+
+        ``dividend_by_year`` (``{fiscal_year: dividendPerShare}``, the same record the
+        verdict is read from) makes the gate PER FISCAL YEAR: a quarter in a year that
+        shows a positive per-share dividend is a payer's quarter whatever the current
+        verdict, and a quarter in a year that shows zero is not. A company that STOPPED
+        (INTC: paid through FY2024, FY2025 = 0) keeps its real FY2024 bars and loses only
+        the fabricated ones; a quarter in a year the record does not cover (the FY in
+        progress) falls back to the overall verdict.
         """
         mcap_by_date = mcap_by_date or {}
         missing_line_for_payer = 0
+        dividend_by_year = dividend_by_year or {}
 
         # Build lookup dict by date
         cf_by_date: Dict[str, Dict[str, Any]] = {}
@@ -635,6 +659,14 @@ class SignalOfConfidenceService:
             # Cash flow data for this quarter
             cf_rec = cf_by_date.get(date, {})
 
+            # The verdict for THIS quarter: its fiscal year's per-share record when the
+            # record covers it, else the overall (current) verdict.
+            fy = str(rec.get("fiscalYear") or rec.get("calendarYear") or date[:4])
+            if fy in dividend_by_year:
+                quarter_pays: Optional[bool] = dividend_by_year[fy] > 0
+            else:
+                quarter_pays = pays_common_dividend
+
             # Dividend amount in millions. `commonDividendsPaid` is the /stable field;
             # legacy `dividendsPaid` only when that KEY is absent (a present 0 is a real
             # zero); `netDividendsPaid` — common PLUS preferred — only for a known payer,
@@ -645,7 +677,7 @@ class SignalOfConfidenceService:
                 dividends_paid_raw = _safe_float(cf_rec, "dividendsPaid")
             if (
                 dividends_paid_raw is None
-                and pays_common_dividend is True
+                and quarter_pays is True
                 and common_absent
                 and cf_rec.get("dividendsPaid") is None
             ):
@@ -653,8 +685,9 @@ class SignalOfConfidenceService:
 
             # Outflow sign, mirroring the buyback gate below: a positive value is not a
             # dividend (a reclass, a refund, a sign error), and neither is any value
-            # at all when the per-share record says the company pays no common dividend.
-            if pays_common_dividend is False:
+            # at all when the per-share record says the company pays no common dividend
+            # in this quarter's fiscal year.
+            if quarter_pays is False:
                 dividends_paid_raw = None
             elif dividends_paid_raw is not None and dividends_paid_raw >= 0:
                 if dividends_paid_raw > 0:
@@ -664,7 +697,7 @@ class SignalOfConfidenceService:
                         ticker or "?", date, dividends_paid_raw,
                     )
                 dividends_paid_raw = None
-            if dividends_paid_raw is None and pays_common_dividend is True and cf_rec:
+            if dividends_paid_raw is None and quarter_pays is True and cf_rec:
                 # A known payer whose row carries no usable line. Keep the point (the
                 # shares line must stay continuous) and say so, rather than dropping the
                 # quarter silently — a 0.00% bar here is a data gap, not a measurement.
@@ -748,12 +781,18 @@ class SignalOfConfidenceService:
         coupons and one-off distributions onto it with the outflow sign intact (PLUG
         Q2'26: -$16.5M; TSLA: a single 0.01% quarter). The per-share record is:
 
-        * ``True``  — any completed fiscal year with ``dividendPerShare > 0`` (`ratios`,
-          period=annual), OR the profile's ``lastDividend`` (the TTM per-share total) is
-          positive. The profile is what rescues a company that initiated its dividend
-          THIS fiscal year, before `ratios` has a completed year to show.
-        * ``False`` — the per-share record is present and reads zero in every year, and
-          the profile agrees (``lastDividend`` is 0 or absent).
+        * ``True``  — the MOST RECENT completed fiscal year has ``dividendPerShare > 0``
+          (`ratios`, period=annual), OR the profile's ``lastDividend`` (the TTM per-share
+          total) is positive. The profile is what rescues a company that initiated its
+          dividend THIS fiscal year, before `ratios` has a completed year to show — and a
+          payer whose latest `ratios` row is a zero stub.
+        * ``False`` — the most recent per-share year reads ZERO: a company that never
+          paid (PLUG) or one that STOPPED. This used to be "any year in the window", which
+          made INTC a payer on the strength of FY2020-24 (1.33 → 0.37/share, suspended
+          Q3 2024) and let a −14.3B Q2'26 cash-flow line FMP tags ``commonDividendsPaid``
+          chart as an 8.79% dividend against a FY2025 DPS of 0 and a profile
+          ``lastDividend`` of 0. Older positive years are history, not a current dividend.
+          Also ``False`` with no usable per-share year when the profile says zero.
         * ``None``  — no record: `ratios` failed, is empty, or the rows exist but the
           ``dividendPerShare`` key is gone (the /stable drift class — a truthiness test on
           the payload here would zero every payer in the market). As a last rung, an
@@ -771,9 +810,10 @@ class SignalOfConfidenceService:
                 raw = profile.get("lastDiv")
             last_div = _safe_float({"v": raw}, "v")
 
-        if any(v > 0 for v in by_year.values()) or (last_div is not None and last_div > 0):
+        latest_dps = by_year[max(by_year)] if by_year else None   # keys are "YYYY"
+        if (latest_dps is not None and latest_dps > 0) or (last_div is not None and last_div > 0):
             return True
-        if by_year and all(v == 0 for v in by_year.values()):
+        if latest_dps is not None and latest_dps == 0:
             return False
         if last_div is not None and last_div == 0:
             # No usable per-share year (the `ratios` call failed, is empty, or lost its
@@ -1023,13 +1063,19 @@ class SignalOfConfidenceService:
         if pays_common_dividend is True:
             pays_dividend = True
         elif pays_common_dividend is False:
-            # We HAVE the authoritative per-share record and it says the company has never
-            # paid. Trust it over the cash-flow yield, which is not the same question: it
-            # is `dividendsPaid / market cap`, and that line picks up preferred and
+            # We HAVE the authoritative per-share record and it says the company does not
+            # pay NOW. Trust it over the cash-flow yield, which is not the same question:
+            # it is `dividendsPaid / market cap`, and that line picks up preferred and
             # one-off distributions. Measured — TSLA, which has never paid a common
             # dividend, shows a 0.01% trailing yield from a single quarter and used to
             # render a whole dividend card of em dashes on the strength of it.
-            pays_dividend = False
+            #
+            # Two different "no": a company that has NEVER paid gets no card; a company
+            # that STOPPED (INTC: 1.46 → 0.74 → 0.37 → 0 across FY2022-25) keeps it, because
+            # the suspension IS the story — "Dividend / Share $0.00, −100% over 5y". The
+            # bars are zeroed either way (`_build_data_points`); only the card's history
+            # survives. Pinned by tests/test_annual_dividends.py::test_a_suspended_payer_keeps_its_card.
+            pays_dividend = any(a.per_share > 0 for a in annual)
         else:
             # No series at all (the `ratios` fetch failed). Fall back to the yield rather
             # than hiding a real payer's card because one upstream call went down.

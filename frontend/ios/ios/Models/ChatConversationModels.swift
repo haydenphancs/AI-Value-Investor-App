@@ -200,13 +200,19 @@ struct RichChatMessage: Identifiable {
     var suggestions: [String]?
     /// What this turn cost, when it cost less than usual. nil → render no chip.
     var credit: ChatTurnCostDTO?
+    /// The backend row id (`chat_messages.id`) when this message came from the server —
+    /// a history load or a `done` frame. nil for the optimistic user bubble and the live
+    /// streaming bubble. The stream-failure reconcile keys on it: "is the last assistant
+    /// row on the server one we have NOT seen" is exact regardless of how many rows the
+    /// server's history page holds, where a count of matching user texts was not.
+    var serverId: String?
 
     /// `id` defaults to a fresh UUID (existing call sites unaffected). A caller
     /// can pass a stable id so a streaming message can be replaced in place each
     /// token without ForEach re-inserting the row.
     init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date,
          thinking: ChatThinking? = nil, sources: [ChatSource]? = nil, suggestions: [String]? = nil,
-         credit: ChatTurnCostDTO? = nil) {
+         credit: ChatTurnCostDTO? = nil, serverId: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -215,6 +221,7 @@ struct RichChatMessage: Identifiable {
         self.sources = sources
         self.suggestions = suggestions
         self.credit = credit
+        self.serverId = serverId
     }
 
     var formattedTime: String {
@@ -261,6 +268,10 @@ struct StockChartWidgetData: Codable, Identifiable {
     /// `> 0` test in `hasDayRange` is what actually decides, and this flag makes the server's
     /// intent explicit alongside it.
     let dayRangeKnown: Bool?
+    /// `false` ⇒ `change`/`changePercent` are 0.0 placeholders — the quote carried no change
+    /// (a CoinGecko `null` 24 h move, a single FRED observation). Optional for the same
+    /// reason as `dayRangeKnown`; nil reads as known, matching servers that predate it.
+    let changeKnown: Bool?
     /// nil = unknown; true = US session open → the card shows a green "Live" dot, else "Closed".
     let isMarketOpen: Bool?
     let historicalData: [HistoricalDataPointDTO]
@@ -281,11 +292,17 @@ struct StockChartWidgetData: Codable, Identifiable {
         case yearHigh = "year_high"
         case yearLow = "year_low"
         case dayRangeKnown = "day_range_known"
+        case changeKnown = "change_known"
         case isMarketOpen = "is_market_open"
         case historicalData = "historical_data"
     }
 
     // Computed helpers for the UI
+
+    /// Whether the day change is a real number. `changeKnown == false` is the server saying
+    /// the 0.0 is a placeholder; every reader below (sign, colour, arrow, text) is neutral then.
+    var hasKnownChange: Bool { changeKnown != false }
+
     var isPositive: Bool { changePercent >= 0 }
 
     var formattedPrice: String {
@@ -293,11 +310,13 @@ struct StockChartWidgetData: Codable, Identifiable {
     }
 
     var formattedChange: String {
+        guard hasKnownChange else { return "—" }
         let sign = changePercent >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", changePercent))%"
     }
 
     var formattedAbsChange: String {
+        guard hasKnownChange else { return "—" }
         let sign = change >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", change))"
     }
@@ -359,7 +378,10 @@ struct StockChartWidgetData: Codable, Identifiable {
     /// range printed under the chart is what scopes the line.
     var isSeriesPositive: Bool {
         let closes = chartCloses
-        guard let first = closes.first, let last = closes.last, first > 0 else { return isPositive }
+        // With no series to read, fall back to the day change only when it is REAL.
+        guard let first = closes.first, let last = closes.last, first > 0 else {
+            return hasKnownChange ? isPositive : true
+        }
         return last >= first
     }
 
@@ -861,7 +883,8 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         // ChatSource decode above) so it renders as nothing rather than a blank chip.
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
                                thinking: thinking, sources: sources?.filter { !$0.label.isEmpty },
-                               suggestions: suggestions, credit: credit)
+                               suggestions: suggestions, credit: credit,
+                               serverId: id.isEmpty ? nil : id)
     }
 }
 

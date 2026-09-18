@@ -258,12 +258,43 @@ def test_an_already_refunded_charge_does_NOT_page_anyone(service, caplog):
 
 def test_a_partial_refund_does_not_claim_the_full_amount(service, caplog):
     """The LEAST() caps can move less than requested; the old log printed the REQUESTED amount
-    and read as a clean refund."""
+    and read as a clean refund. Worse, it stayed `outcome: refunded`, which every report site
+    reads as SETTLED: a 1-of-20 refund across a monthly reset told the phone "your 20 credits
+    have been returned" and paged nobody. A partial refund is a leak: ERROR + `partial`."""
+    from app.services.credit_service import refund_did_not_happen
+
     _stub_rpc(service, {"outcome": "refunded", "refunded": 5, "spendable": 105})
     with caplog.at_level(logging.DEBUG):
-        service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
-    joined = " ".join(r.getMessage() for r in caplog.records)
-    assert "PARTIAL REFUND" in joined, f"a 5-of-20 refund was not flagged partial: {joined!r}"
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors and "REFUND LEAK" in errors[0] and "PARTIAL REFUND" in errors[0], (
+        f"a 5-of-20 refund was not flagged as a leak: {errors!r}"
+    )
+    assert "15" in errors[0], "the leak line must say how much the user is still owed"
+    assert result["outcome"] == "partial" and result["requested"] == 20 and result["refunded"] == 5
+    assert refund_did_not_happen(result) is True, (
+        "a partial refund must read as NOT settled at every report site"
+    )
+
+
+def test_a_zero_refund_with_no_ref_id_is_still_only_a_warning(service, caplog):
+    """The RPC's deliberate `NOT v_searched` shape: nothing to match, so 'owed' is unprovable.
+    Escalating it would page on every legacy no-ref_id caller."""
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 0, "spendable": 105})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund")
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("PARTIAL REFUND" in r.getMessage() for r in caplog.records)
+    assert result["outcome"] == "refunded"
+
+
+def test_a_full_refund_is_not_flagged_partial(service, caplog):
+    """Control: `refunded == amount` stays a clean INFO settlement."""
+    _stub_rpc(service, {"outcome": "refunded", "refunded": 20, "spendable": 105})
+    with caplog.at_level(logging.DEBUG):
+        result = service.refund_ledgered("u", 20, reason="report_refund", ref_id="AAPL")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert result["outcome"] == "refunded"
 
 
 def test_the_pre_142_integer_contract_still_works(service):

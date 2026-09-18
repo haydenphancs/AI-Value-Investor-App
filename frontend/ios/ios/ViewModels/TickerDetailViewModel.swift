@@ -1804,11 +1804,17 @@ class TickerDetailViewModel: ObservableObject {
         // Revenue mix — the Financials tab renders "How TICKER Makes Money" and
         // its first AI suggestion chip is "Break down the revenue", but this
         // context never included the data to answer that.
-        if let rb = revenueBreakdownData, rb.totalRevenue > 0 {
-            let mix = rb.revenueSources
+        // Same denominator as the card's legend (`revenueBasis` = reported revenue), and the
+        // eliminations line when the stack is gross — otherwise Cay AI would tell an INTC
+        // reader "Client Computing 46%" while the card beside it says 61%.
+        if let rb = revenueBreakdownData, rb.revenueBasis > 0 {
+            var lines = rb.revenueSources
                 .prefix(6)
-                .map { "\($0.name) \(String(format: "%.0f", $0.percentage(of: rb.totalRevenue)))%" }
-                .joined(separator: ", ")
+                .map { "\($0.name) \(String(format: "%.0f", $0.percentage(of: rb.revenueBasis)))%" }
+            if let elim = rb.eliminationsLegendItem {
+                lines.append("\(elim.name) \(String(format: "%.0f", elim.percentage(of: rb.revenueBasis)))% (segments sell to each other; revenue is net of this)")
+            }
+            let mix = lines.joined(separator: ", ")
             if !mix.isEmpty {
                 parts.append("Revenue mix (FY\(rb.fiscalYear)): \(mix)")
             }

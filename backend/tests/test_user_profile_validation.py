@@ -129,18 +129,20 @@ def test_signup_and_patch_share_one_bound():
 
 def test_the_body_cap_middleware_covers_the_profile_route():
     """The Pydantic bound is the real guard; this is the cheap outer one that rejects an
-    oversized body before it is parsed at all."""
+    oversized body before it is parsed at all. The cap is GLOBAL now (every POST / PUT /
+    PATCH — see tests/test_body_cap_is_global.py); the suffix tuple documents the routes
+    whose Pydantic bound alone was not enough, and the middleware must not have quietly
+    gone back to consulting it."""
+    import inspect
+    import app.main as main_mod
     from app.main import _BODY_CAPPED_PATH_SUFFIXES
 
-    assert "/api/v1/users/me".endswith(_BODY_CAPPED_PATH_SUFFIXES), (
-        f"PATCH /users/me is not body-capped; suffixes are {_BODY_CAPPED_PATH_SUFFIXES}"
+    for path in ("/api/v1/users/me", "/api/v1/users/me/settings", "/api/v1/users/me/avatar",
+                 "/api/v1/auth/login", "/api/v1/events"):
+        assert path.endswith(_BODY_CAPPED_PATH_SUFFIXES), path
+    src = inspect.getsource(main_mod.cap_json_body)
+    assert "_BODY_CAPPED_PATH_SUFFIXES" not in src, (
+        "cap_json_body is scoped to a suffix list again — the unauthenticated JSON routes "
+        "(auth, events) would be uncapped"
     )
-    # The pre-existing entry must survive — this list is easy to overwrite rather than extend.
-    assert "/api/v1/users/me/settings".endswith(_BODY_CAPPED_PATH_SUFFIXES)
-
-    # The avatar route needs its OWN entry: `endswith` does not walk up a path, so
-    # "/api/v1/users/me/avatar".endswith("/users/me") is False and it would inherit no cap
-    # at all — on the one route in the app that carries hundreds of KB.
-    assert "/api/v1/users/me/avatar".endswith(_BODY_CAPPED_PATH_SUFFIXES), (
-        f"the avatar upload is not body-capped; suffixes are {_BODY_CAPPED_PATH_SUFFIXES}"
-    )
+    assert 'request.method in ("PUT", "POST", "PATCH")' in src

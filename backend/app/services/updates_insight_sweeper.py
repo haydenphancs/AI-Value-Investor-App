@@ -682,6 +682,9 @@ class InsightSweeper:
         try:
             grounded = await get_price_catalyst_service().get_catalyst(
                 scope, cp, "today",
+                # `price_service._shape` carries the listed name; it keeps the
+                # grounded search on the security rather than a same-ticker coin.
+                company_name=(quote or {}).get("name"),
             )
         except Exception as e:
             logger.warning(

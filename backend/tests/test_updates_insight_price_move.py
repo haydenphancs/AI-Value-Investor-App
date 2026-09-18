@@ -46,8 +46,9 @@ class _StubCatalyst:
         self.result = result
         self.calls = 0
 
-    async def get_catalyst(self, ticker, change_pct, window_label):
+    async def get_catalyst(self, ticker, change_pct, window_label, *, company_name=None):
         self.calls += 1
+        self.company_name = company_name
         return self.result
 
 
@@ -262,3 +263,18 @@ def test_store_writes_null_sources_when_none():
     svc = _insight_service()
     assert svc._store("AAPL", _CARD, "iid", "reason", 3, True, None, False, None)
     assert svc.supabase.rows[-1]["sources"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_sweeper_hands_the_listed_name_to_the_grounded_search(stub):
+    """A starred LTC Properties (REIT) on an Extreme day: the paid search must be aimed at
+    the security, not at the coin that shares its ticker. `price_service._shape` carries
+    the name on the quote row; a row without one still searches (bare ticker)."""
+    s = _sweeper()
+    pm = await s._maybe_price_move(
+        "LTC", _dec(TIER_EXTREME), NOW,
+        {"changePercentage": -8.2, "name": "LTC Properties, Inc."},
+    )
+    assert pm is not None and stub.company_name == "LTC Properties, Inc."
+    await s._maybe_price_move("LTC", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.2})
+    assert stub.company_name is None

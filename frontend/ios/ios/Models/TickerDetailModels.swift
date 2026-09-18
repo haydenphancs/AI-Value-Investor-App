@@ -1405,32 +1405,6 @@ struct AnalystEstimatePeriod: Identifiable {
 }
 
 extension AnalystRatingsData {
-    /// Preview fixture for `AnalystForecastsSection`. Numbers are AAPL's real measured
-    /// estimates, including the genuine thinning of coverage in the out-years (29 analysts
-    /// on FY2027, 8 on FY2029) so the preview shows the case the card has to handle.
-    static let sampleWithEstimates: AnalystRatingsData = {
-        var d = AnalystRatingsData.sampleData
-        d.estimatesAvailable = true
-        d.estimates = [
-            AnalystEstimatePeriod(
-                fiscalPeriod: "FY2026", date: "2026-09-27", isForward: true,
-                revenue: AnalystEstimateRange(low: 464e9, avg: 477.4e9, high: 490e9),
-                eps: AnalystEstimateRange(low: 8.4, avg: 8.83, high: 9.2),
-                revenueAnalysts: 27, epsAnalysts: 27),
-            AnalystEstimatePeriod(
-                fiscalPeriod: "FY2027", date: "2027-09-27", isForward: true,
-                revenue: AnalystEstimateRange(low: 500e9, avg: 521.4e9, high: 545e9),
-                eps: AnalystEstimateRange(low: 9.0, avg: 9.57, high: 10.2),
-                revenueAnalysts: 29, epsAnalysts: 29),
-            AnalystEstimatePeriod(
-                fiscalPeriod: "FY2029", date: "2029-09-27", isForward: true,
-                revenue: AnalystEstimateRange(low: nil, avg: nil, high: nil),
-                eps: AnalystEstimateRange(low: 11.5, avg: 12.34, high: 13.1),
-                revenueAnalysts: 12, epsAnalysts: 8),
-        ]
-        return d
-    }()
-
     static let sampleData = AnalystRatingsData(
         totalAnalysts: 40,
         updatedDate: Calendar.current.date(from: DateComponents(year: 2026, month: 1, day: 5))!,

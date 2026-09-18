@@ -156,7 +156,9 @@ async def verify_purchase(
     # once against `credit_purchases (environment, transaction_id)`. Both return the same
     # summary shape, and every error arm below serves both.
     try:
-        result = get_iap_service().apply_verified_transaction(user_id, payload)
+        result = await asyncio.to_thread(
+            get_iap_service().apply_verified_transaction, user_id, payload,
+        )
     except PurchaseRevoked as e:
         # Apple refunded or cancelled this purchase. TERMINAL and finishable — distinct from
         # the UnknownProduct arm below, which stays unfinished on purpose so a missing
@@ -426,7 +428,9 @@ async def app_store_notifications(
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     try:
-        outcome, _user_id = get_iap_service().apply_notification(notification, transaction)
+        outcome, _user_id = await asyncio.to_thread(
+            get_iap_service().apply_notification, notification, transaction,
+        )
     except IAPError:
         # Transient (DB) failure — let Apple retry.
         raise HTTPException(status_code=503, detail="Could not apply notification")

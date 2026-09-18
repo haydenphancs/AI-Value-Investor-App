@@ -82,6 +82,33 @@ async def test_the_catalyst_is_always_asked_for_todays_window(monkeypatch):
     assert set(seen) == {"today"}, f"window label drifted to {seen}"
 
 
+@pytest.mark.asyncio
+async def test_the_web_catalyst_forwards_the_listed_name_on_both_reads(monkeypatch):
+    """LTC Properties (NYSE: LTC) on a σ-Extreme day with no dated cause: the paid search
+    used to be "LTC moved -8.0% over today" — Litecoin's headlines, narrated as the REIT's
+    cause with citations and cached for every reader. The explanation already knows the
+    listed name; it must travel on the cache read AND the fresh search."""
+    seen: list = []
+
+    async def _get_catalyst(ticker, change_pct, window_label, *, cache_only=False,
+                            company_name=None, **kw):
+        seen.append((cache_only, company_name))
+        if cache_only:
+            return None
+        return {"tag": "Dividend Cut", "reason": "LTC Properties cut its dividend.",
+                "sources": [{"publisher": "reuters", "title": "LTC cuts dividend"}]}
+
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "app.services.price_catalyst_service.get_price_catalyst_service",
+        lambda: SimpleNamespace(get_catalyst=_get_catalyst),
+    )
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    out = await cmt._maybe_web_catalyst("NAVN", exp, "none")
+    assert out is not None and out["catalyst"] == "Dividend Cut"
+    assert seen == [(True, "Navan, Inc."), (False, "Navan, Inc.")], seen
+
+
 # ── The escalation gates. Each one is money. ─────────────────────────────────
 
 @pytest.mark.asyncio
@@ -831,9 +858,30 @@ async def test_a_current_session_snapshot_says_today(monkeypatch):
     _stub_cards(monkeypatch)
     monkeypatch.setattr("app.utils.market_hours.session_trading_date",
                         lambda now=None: date(2026, 9, 14))
+    monkeypatch.setattr("app.services.widget_movers_service._et_calendar_day",
+                        lambda: date(2026, 9, 14))
     out = await cmt.fetch_market_snapshot()
     assert out["as_of_session"]["word"] == "today"
     assert out["as_of_session"]["date"] == "2026-09-14"
+
+
+@pytest.mark.asyncio
+async def test_a_saturday_snapshot_of_fridays_session_is_worded_on_fri(monkeypatch):
+    from datetime import date
+    """On a weekend the LIVE session is Friday and every stamp is Friday — but it is not
+    today. The model said "Technology is up 0.8% today" all weekend."""
+    monkeypatch.setattr(
+        "app.services.market_movers_service.get_market_movers_service",
+        lambda: _snapshot_movers(sector_date="2026-09-11", industry_date="2026-09-11"),
+    )
+    _stub_cards(monkeypatch)
+    monkeypatch.setattr("app.utils.market_hours.session_trading_date",
+                        lambda now=None: date(2026, 9, 11))          # Friday
+    monkeypatch.setattr("app.services.widget_movers_service._et_calendar_day",
+                        lambda: date(2026, 9, 12))                   # Saturday
+    out = await cmt.fetch_market_snapshot()
+    assert out["as_of_session"] == {"date": "2026-09-11", "word": "on Fri",
+                                    "note": out["as_of_session"]["note"]}
 
 
 @pytest.mark.asyncio
@@ -893,9 +941,70 @@ def test_as_of_session_words_a_prior_session_by_weekday(monkeypatch):
     from datetime import date
     monkeypatch.setattr("app.utils.market_hours.session_trading_date",
                         lambda now=None: date(2026, 9, 16))
+    monkeypatch.setattr("app.services.widget_movers_service._et_calendar_day",
+                        lambda: date(2026, 9, 16))
     assert cmt._as_of_session(Counter({"2026-09-15": 3}))["word"] == "on Tue"
     assert cmt._as_of_session(Counter({"2026-09-16": 3}))["word"] == "today"
     # A stamp AHEAD of the live session (clock skew, a stale `session_trading_date`
     # patch) is still "today", never a future weekday.
     assert cmt._as_of_session(Counter({"2026-09-17": 3}))["word"] == "today"
     assert cmt._as_of_session(Counter()) is None
+
+
+# ── A quote-source OUTAGE is an upstream failure; an unquotable symbol is not (2026-09-17) ──
+#
+# `price_service.get_quotes` folds a universe failure into `{}`, so `attribute_ticker_move`
+# saw the same `ranked == []` for "FMP is down" and "this symbol has no usable row" — and
+# `explain_price_move` answered both as `move_readable: False` with no `error`, so an
+# outage on the only tool was charged in full while the identical outage on
+# `get_ticker_news` was refunded. The discriminator is the index band that rides on every
+# batch: no SPY/QQQ/DIA row at all means the SOURCE failed.
+
+
+def _movers_with_quotes(monkeypatch, quotes_result):
+    from app.services import widget_movers_service as wm
+    svc = wm.WidgetMoversService()
+    if isinstance(quotes_result, BaseException):
+        async def _quotes(self, symbols):
+            raise quotes_result
+    else:
+        async def _quotes(self, symbols):
+            return dict(quotes_result)
+    monkeypatch.setattr(wm.WidgetMoversService, "_quotes", _quotes)
+    monkeypatch.setattr("app.services.volatility_cache_service.get_volatility_cache_service",
+                        lambda: SimpleNamespace(get_sigmas_bulk=AsyncMock(return_value={})))
+    monkeypatch.setattr("app.services.news_insight_service.get_news_insight_service",
+                        lambda: SimpleNamespace(get_cards=AsyncMock(return_value={})))
+    monkeypatch.setattr(cmt, "_maybe_web_catalyst", AsyncMock(return_value=None))
+    monkeypatch.setattr("app.services.widget_movers_service.get_widget_movers_service", lambda: svc)
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_a_quote_source_that_raises_is_an_upstream_error(monkeypatch):
+    _movers_with_quotes(monkeypatch, RuntimeError("fmp 503"))
+    out = await cmt.explain_price_move("NVDA")
+    assert out["move_readable"] is False
+    assert out["upstream"] is True and "QuoteSourceUnavailable" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_batch_with_no_index_band_is_an_outage(monkeypatch):
+    """`get_quotes` swallowed the failure into `{}`: the band is the tell."""
+    _movers_with_quotes(monkeypatch, {})
+    out = await cmt.explain_price_move("NVDA")
+    assert out["move_readable"] is False
+    assert out.get("upstream") is True and "index band empty" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_missing_from_a_healthy_batch_is_unreadable_but_not_an_error(monkeypatch):
+    """The band came back, the symbol did not: the model's miss (or a delisted name) —
+    answered as unreadable and CHARGED, exactly as before."""
+    from app.services.widget_movers_service import _INDEX_SYMBOLS
+    band = {s: {"symbol": s, "price": 500.0, "changePercentage": 0.4, "changeSession": "2026-09-16"}
+            for s, _ in _INDEX_SYMBOLS}
+    _movers_with_quotes(monkeypatch, band)
+    out = await cmt.explain_price_move("ZZZZ")
+    assert out["move_readable"] is False
+    assert "error" not in out and "upstream" not in out

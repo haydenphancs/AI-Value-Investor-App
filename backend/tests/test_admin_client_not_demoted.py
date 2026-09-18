@@ -309,18 +309,23 @@ async def test_change_password_runs_admin_on_the_undemoted_client():
 
 
 @pytest.mark.asyncio
-async def test_change_password_would_fail_on_the_demoted_client():
-    """The mutation half. Without it the test above passes on a handler that merely ACCEPTS an
-    `admin_client` parameter and still uses the wrong one."""
+async def test_change_password_heals_even_a_demoted_client_inside_the_gotrue_lock():
+    """This used to be the mutation half — "the demoted client FAILS" — and it pinned the
+    wrong-client hazard by reproducing it. Since 2026-09-17 every GoTrue verb runs through
+    `database.run_gotrue`, which re-asserts service_role on the verb's owner INSIDE the
+    process-wide lock, right before the call: the header a sign-in rewrote a moment earlier
+    can no longer ride into the admin verb, even on one shared client. The wrong-client
+    hazard itself is pinned at the source by
+    tests/test_supabase_client_isolation.py::test_admin_calls_only_ever_run_on_the_admin_client
+    and by `..._runs_admin_on_the_undemoted_client` above (the admin fake's log).
+
+    Remove the reset from `run_gotrue` and this fails with 503 AUTH_UNAVAILABLE."""
     demoted = _AliasedSupabase()
-    with pytest.raises(HTTPException) as exc:
-        await _change_password(demoted, demoted)
-    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
-    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
-    # sentence. Asserted on the CODE rather than the status — the identifier is the
-    # contract, the number is incidental.
-    assert exc.value.detail["error_code"] == "AUTH_UNAVAILABLE"
-    assert exc.value.status_code == 503
+    result = await _change_password(demoted, demoted)
+    assert result.user_id == _USER_ID
+    assert ("admin.update_user_by_id", _USER_ID, ["password"]) in demoted.log
+    # The verb ran under service_role — the reset happened after the sign-in demoted it.
+    assert demoted.headers["Authorization"] == _SERVICE
 
 
 @pytest.mark.asyncio
@@ -335,14 +340,36 @@ async def test_reset_password_runs_admin_on_the_undemoted_client():
 
 
 @pytest.mark.asyncio
-async def test_reset_password_would_fail_on_the_demoted_client():
+async def test_reset_password_heals_even_a_demoted_client_inside_the_gotrue_lock():
+    """Same as the change-password twin: `verify_otp` demotes, `run_gotrue` re-asserts
+    service_role before `admin.update_user_by_id` runs."""
     demoted = _AliasedSupabase()
+    await _reset_password(demoted, demoted)
+    assert ("admin.update_user_by_id", _USER_ID, ["password"]) in demoted.log
+    assert demoted.headers["Authorization"] == _SERVICE
+
+
+@pytest.mark.asyncio
+async def test_a_still_demoted_admin_call_is_a_503_not_a_bare_500():
+    """The error-shape half the two tests above used to carry: when the admin verb DOES run
+    under a user JWT (here: a fake whose reset hook is inert), the refusal is 503
+    AUTH_UNAVAILABLE — iOS's 5xx arm falls back to `.serverError`, whose copy is hardcoded,
+    so a bare-string 500 threw away the specific sentence."""
+    demoted = _AliasedSupabase()
+
+    class _StuckHeaders(dict):
+        # `run_gotrue` writes the service key back; this dict refuses to take it.
+        def __setitem__(self, k, v):
+            if k == "Authorization" and v != _USER_JWT and self.get(k) == _USER_JWT:
+                return
+            super().__setitem__(k, v)
+
+    stuck = _StuckHeaders(demoted.headers)
+    demoted.headers = stuck
+    demoted.auth._headers = stuck
+    demoted.auth.admin._headers = stuck
     with pytest.raises(HTTPException) as exc:
-        await _reset_password(demoted, demoted)
-    # 503 AUTH_UNAVAILABLE, not a bare-string 500: iOS's 5xx arm falls back to
-    # `.serverError`, whose copy is hardcoded, so a string detail threw away the specific
-    # sentence. Asserted on the CODE rather than the status — the identifier is the
-    # contract, the number is incidental.
+        await _change_password(demoted, demoted)
     assert exc.value.detail["error_code"] == "AUTH_UNAVAILABLE"
     assert exc.value.status_code == 503
 

@@ -1687,7 +1687,7 @@ it carries the controls that combination demands:
 | Guard | Why |
 |---|---|
 | `ProfileRateLimit` (20/min, identity-only) | `user_id` is a uuid5 of the client-chosen `X-Guest-Id`; rotating it mints a fresh identity, and orphan guest rows are unreachable from both account deletion and `claim-guest-data`. Identity-ONLY so a `public.users` blip cannot 503 a first-run onboarding save. |
-| `_BODY_CAPPED_PATH_SUFFIXES` | The body is materialised and `json.loads`'d **before** Pydantic's per-field `max_length` can fire. |
+| `cap_json_body` (global 1 MiB cap on every write; chunked writes refused with 411) | The body is materialised and `json.loads`'d **before** Pydantic's per-field `max_length` can fire. The cap used to be scoped to four `/users/me*` suffixes (`_BODY_CAPPED_PATH_SUFFIXES`, kept as documentation), which left every unauthenticated JSON route — `POST /auth/login`, `POST /events` — open to multi-megabyte bodies parsed on the loop before the limiter ran. |
 | Empty-body short-circuit | `PUT {}` used to INSERT a phantom row reporting `has_profile: true, is_empty: true`, which was the enabling condition for guest-claim destroying real answers. A consent-only write is deliberately NOT empty. |
 | Unknown-column degradation | `answered_fields` did not exist before 134, and migrations here are applied by hand. PostgREST rejects a payload naming an unknown column, which would have failed the ENTIRE write — so the service drops that one key and retries rather than losing the reader's answers over bookkeeping. |
 

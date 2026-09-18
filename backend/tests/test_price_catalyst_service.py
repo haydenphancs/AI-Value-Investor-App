@@ -204,6 +204,44 @@ async def test_a_quota_refusal_raises_not_attempted_and_stops_the_chain():
     assert pcs._inflight == {}
 
 
+class _Raw429Gemini(_FakeGemini):
+    """What the retry ladder actually re-raises when it gives up on a 429: the SDK's own
+    exception, NOT `GeminiQuotaError` (pinned by test_gemini_quota_retry.py)."""
+    async def generate_grounded_research(self, prompt, model_name=None, max_output_tokens=8192):
+        self.calls += 1
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded for gemini-2.5-flash")
+
+
+@pytest.mark.asyncio
+async def test_a_raw_429_from_the_ladder_is_not_attempted_either(monkeypatch):
+    """Only the breaker's `GeminiQuotaError` was mapped; the ladder's re-raised 429 fell
+    into the generic arm, slept through every attempt of every model (18 calls) and
+    returned None — the web-search unit stayed claimed."""
+    fake = _Raw429Gemini()
+    with pytest.raises(pcs.CatalystNotAttempted):
+        await _svc(fake).get_catalyst("AAPL", 9.0, "today")
+    assert fake.calls == 1
+    assert pcs._inflight == {}
+
+
+class _503Gemini(_FakeGemini):
+    async def generate_grounded_research(self, prompt, model_name=None, max_output_tokens=8192):
+        self.calls += 1
+        raise RuntimeError("503 UNAVAILABLE: the model is overloaded")
+
+
+@pytest.mark.asyncio
+async def test_a_503_still_walks_the_chain_and_answers_none(monkeypatch):
+    """Negative control: an overload is NOT a quota refusal — the chain keeps walking
+    (that is the point of the ladder) and the result is 'searched, nothing found'."""
+    async def _no_sleep(*a, **k):
+        return None
+    monkeypatch.setattr(pcs.asyncio, "sleep", _no_sleep)
+    fake = _503Gemini()
+    assert await _svc(fake).get_catalyst("AAPL", 9.0, "today") is None
+    assert fake.calls == len(pcs._MODEL_CHAIN) * pcs._RETRIES_PER_MODEL
+
+
 @pytest.mark.asyncio
 async def test_a_joiner_of_a_refused_search_gets_the_same_signal():
     import asyncio as _aio
@@ -275,3 +313,65 @@ def test_a_today_row_never_expires_past_the_et_day():
          um.patch.object(pcs, "datetime", um.MagicMock(now=lambda tz=None: now, fromisoformat=datetime.fromisoformat)):
         pcs.PriceCatalystService()._write_cache("AAPL", {"tag": "x", "reason": "y"}, "m", "today", -3.0)
     assert captured["expires_at"] == exp.isoformat()
+
+
+# ── The grounded question names the SECURITY, not just its ticker ──────────────
+#
+# "LTC moved -8.0% over today" greps the web for Litecoin, and the REIT's −8% day was
+# handed to the model as the coin's cause with citations — then served for 24 h to every
+# reader of the shared (ticker, window, direction) cache. The listed name in front of the
+# ticker aims the search; the cache key is deliberately unchanged.
+
+
+class _PromptCapture(_FakeGemini):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.prompts: list = []
+
+    async def generate_grounded_research(self, prompt, model_name=None, max_output_tokens=8192):
+        self.prompts.append(prompt)
+        return await super().generate_grounded_research(prompt, model_name, max_output_tokens)
+
+
+@pytest.mark.asyncio
+async def test_the_grounded_prompt_carries_the_listed_name_when_given():
+    fake = _PromptCapture(text=_fence("Dividend Cut", "LTC Properties cut its dividend."))
+    await _svc(fake).get_catalyst("LTC", -8.0, "today", company_name="LTC Properties, Inc.")
+    assert fake.prompts, "no grounded call was made"
+    head = fake.prompts[0].splitlines()[0]
+    assert "LTC Properties, Inc. (LTC), a listed security, moved -8.0% over today" in head, head
+
+
+@pytest.mark.asyncio
+async def test_the_grounded_prompt_falls_back_to_the_bare_ticker_without_a_name():
+    fake = _PromptCapture(text=_fence("Sector Selloff", "REITs fell on rates."))
+    await _svc(fake).get_catalyst("LTC", -8.0, "today")
+    head = fake.prompts[0].splitlines()[0]
+    assert "LTC moved -8.0% over today" in head and "listed security" not in head, head
+
+
+@pytest.mark.asyncio
+async def test_a_blank_or_ticker_equal_name_does_not_double_the_ticker():
+    for name in ("", "   ", None, "ltc"):
+        fake = _PromptCapture(text=_fence("Sector Selloff", "REITs fell on rates."))
+        pcs._mem_cache.clear(); pcs._inflight.clear()
+        await _svc(fake).get_catalyst("LTC", -8.0, "today", company_name=name)
+        head = fake.prompts[0].splitlines()[0]
+        assert head.startswith("You are a financial research analyst. LTC moved"), (name, head)
+
+
+@pytest.mark.asyncio
+async def test_the_name_is_not_part_of_the_cache_identity():
+    """The chat tool, the sweeper and the report collector must keep sharing one paid row
+    per (ticker, window, direction) — a caller without the name reads the named one's row."""
+    fake = _PromptCapture(text=_fence("Dividend Cut", "LTC Properties cut its dividend."))
+    svc = _svc(fake)
+    first = await svc.get_catalyst("LTC", -8.0, "today", company_name="LTC Properties, Inc.")
+    second = await svc.get_catalyst("LTC", -8.0, "today")
+    assert first == second and fake.calls == 1
+
+
+def test_the_prompt_subject_is_bounded_and_whitespace_folded():
+    """A 5,000-char "name" from a hostile profile row must not become a 5,000-char search."""
+    subj = pcs._prompt_subject("LTC", "LTC   Properties,\n Inc. " + "x" * 5000)
+    assert len(subj) < 120 and "LTC Properties, Inc." in subj and "\n" not in subj

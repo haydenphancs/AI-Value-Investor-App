@@ -21,6 +21,7 @@ from app.database import get_supabase
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.apewisdom import get_all_mentions
 from app.integrations.fmp import (
+    EmptyAfterFailure,
     FMPAuthException,
     FMPRateLimitException,
     get_fmp_client,
@@ -127,6 +128,20 @@ def _commodity_news_proxies(scope: str) -> str:
     if detect_asset_class(s) != "commodity":
         return ""
     return COMMODITY_NEWS_TICKERS.get(_root(s), "")
+
+
+def _is_withdrawn_commodity(scope: str) -> bool:
+    """True for a commodity-shaped code whose root has NO proxy entry (`KCUSD`, `HGUSD`).
+
+    `_commodity_news_proxies` returns "" for these, which is indistinguishable from "not a
+    commodity" — and the ordinary stock feed then answers `[]` for a code that never had a
+    feed. The two must settle differently: a withdrawn commodity is "unavailable", not
+    "no news".
+    """
+    from app.services.asset_class import detect_asset_class
+
+    s = (scope or "").strip().upper()
+    return bool(s) and detect_asset_class(s) == "commodity"
 
 
 def _sanitize_published_at(value: Any) -> Optional[str]:
@@ -1023,6 +1038,22 @@ class NewsCacheService:
         """Fetch from FMP, cache raw in Supabase (no AI enrichment)."""
         if is_crypto:
             raw_articles = await self.fmp.get_crypto_news(ticker, limit=limit)
+        elif (_proxies := _commodity_news_proxies(ticker)):
+            # A COMMODITY code (`GCUSD`). `news/stock?symbols=GCUSD` returns `[]` — FMP has
+            # no commodity news feed — and this cold path took it at face value: the chat
+            # tool `get_ticker_news("GCUSD")` came back `article_count: 0` with no error,
+            # the turn was CHARGED, and the model told the user no gold news was published
+            # today while the screen's own News tab (proxy-fed) was full. Same proxy map
+            # and the same `ticker=GCUSD` cache key `refresh_scope_news` already writes,
+            # so the cold read, the sweeper and the chat tool agree on one row set.
+            raw_articles = await self.fmp.get_stock_news(_proxies, limit=limit)
+        elif _is_withdrawn_commodity(ticker):
+            # A commodity whose proxies were withdrawn (coffee, copper, …): there is no
+            # feed to ask. Report it as a FAILED fetch, not an empty one, so the chat
+            # tool settles the turn degraded instead of asserting "no news today".
+            logger.info("No news proxies for withdrawn commodity %s — reporting unavailable",
+                        ticker)
+            return EmptyAfterFailure(f"no news proxies for commodity {ticker}")
         else:
             raw_articles = await self.fmp.get_stock_news(ticker, limit=limit)
         if not raw_articles:

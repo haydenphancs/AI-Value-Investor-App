@@ -337,6 +337,15 @@ class ResearchViewModel: ObservableObject {
         creditBalance = nil
         lastLoadedAt = nil
         error = nil
+        // The previous account's in-flight bookkeeping must not gate or poll for the next
+        // one: a non-empty `locallyTimedOutReportIds` keeps the 5 s list poll alive against
+        // an account that never owned those ids, and `inFlightReportIds` would hold the
+        // Generate button at the concurrency cap for reports the new account cannot see.
+        stopReportsPolling()
+        locallyTimedOutReportIds = []
+        dismissedReportIds = []
+        inFlightReportIds = []
+        liveProgress = [:]
         // The analyst is per-ACCOUNT, so it must not survive a sign-out or an account switch
         // either. `SettingsSyncManager.clearLocalForEndedSession()` removes the stored key on
         // sign-out and the next account's `hydrate()` writes its own, so re-deriving here is
@@ -407,13 +416,22 @@ class ResearchViewModel: ObservableObject {
     /// against `self.reports` in-place after every load attempt. Mock
     /// reports without a `backendId` are skipped — the timeout only applies
     /// to real backend-tracked generations.
-    private func applyClientSideTimeoutPass() {
+    ///
+    /// `serverTruth` says whether `reports` was JUST rebuilt from the server. Only then may a
+    /// terminal row clear its flag: after a FAILED list GET the in-memory rows still carry
+    /// this client's own flip (`withClientTimeout()` renders `.failed`), and reading that as
+    /// "the server says failed" removed the id — so the next tick saw nothing in flight, the
+    /// poll exited, and the report completed (or was swept and refunded) into a list nobody
+    /// re-read. The card stayed "failed" with no Refunded chip until a manual refresh.
+    private func applyClientSideTimeoutPass(serverTruth: Bool) {
         let now = Date()
         reports = reports.map { report in
             guard let backendId = report.backendId else { return report }
             // Backend gave us a terminal status — trust it, clear any prior flag.
             if report.status == .ready || report.status == .failed {
-                locallyTimedOutReportIds.remove(backendId)
+                if serverTruth {
+                    locallyTimedOutReportIds.remove(backendId)
+                }
                 return report
             }
             // Still .processing — age out against the clock the server actually uses.
@@ -459,10 +477,19 @@ class ResearchViewModel: ObservableObject {
                 responseType: [BackendReportListItem].self
             )
             print("✅ ResearchVM: Loaded \(backendReports.count) reports from backend")
+            // DRAIN the local-timeout set to ids the server still lists — against the RAW
+            // list, before the dismissed filter, so a retry's pre-check still sees a row it
+            // has dismissed but not yet deleted. The list endpoint hides deleted rows, so an
+            // id retired by Retry, by a bulk delete, or by a delete on another device never
+            // came back through the pass and its flag never cleared: `startReportsPolling`
+            // read the non-empty set as "something in flight" and issued the list GET every
+            // 5 s for the rest of the process (~720/h), reminting every row's UUID each time.
+            // The pass below re-inserts any row that is still genuinely stuck.
+            locallyTimedOutReportIds.formIntersection(Set(backendReports.map(\.id)))
             self.reports = backendReports
                 .filter { !dismissedReportIds.contains($0.id) }
                 .map { AnalysisReport.from($0) }
-            applyClientSideTimeoutPass()
+            applyClientSideTimeoutPass(serverTruth: true)
             sortReports()
             applyLiveProgress()   // keep the in-flight row at the live stream %
         } catch {
@@ -470,6 +497,9 @@ class ResearchViewModel: ObservableObject {
             // list was empty, which showed invented analyses — with tickers, scores and fair
             // values — as if they were the user's own. A failed load is not a set of reports.
             let appError = AppError.from(error)
+            // A cancelled tick (tab switch mid-load) is nobody's failure: no sync-failed
+            // analytics, and never a blank "cancelled" alert over the list.
+            guard !appError.isCancellation else { return }
             Analytics.shared.track(.backgroundSyncFailed, [
                 "op": .string("load_reports"),
                 "code": .string(appError.analyticsCode),
@@ -478,8 +508,9 @@ class ResearchViewModel: ObservableObject {
                 self.error = appError.message
             } else {
                 // Network blip with rows already on screen — keep them but still age out the
-                // stale ones, and don't overwrite what the user is looking at.
-                applyClientSideTimeoutPass()
+                // stale ones, and don't overwrite what the user is looking at. NOT server
+                // truth: a row this client flipped must keep its flag through the outage.
+                applyClientSideTimeoutPass(serverTruth: false)
                 sortReports()
             }
         }
@@ -850,6 +881,15 @@ class ResearchViewModel: ObservableObject {
                         if case .apiError(let code, _) = appError, code == "RESEARCH_DELETED" {
                             print("🗑️ ResearchVM: report was deleted elsewhere — no alert")
                             await self.loadReports()
+                            // That delete refunded the charge on the other device; this
+                            // one's balance was read before it.
+                            await self.loadCredits()
+                            continue
+                        }
+                        // The monitor was cancelled (account switch, app teardown): nobody
+                        // is waiting on it, and the report itself is not failed.
+                        if appError.isCancellation {
+                            print("🛑 ResearchVM: monitor for \(ticker) cancelled — no alert")
                             continue
                         }
                         // `code` only — never the message, which can carry backend text.
@@ -1017,32 +1057,75 @@ class ResearchViewModel: ObservableObject {
             inFlightReportIds.remove(id)
             liveProgress[id] = nil
         }
+        // Which of these did THIS client flip to "failed" on its own clock? Read before
+        // the fan-out: a flipped card is failed only locally — the server may have finished
+        // it — so its DELETE carries the retry intent, which the backend refuses with
+        // `REPORT_ALREADY_COMPLETED` on a finished row instead of soft-deleting it
+        // unrefunded. A deliberate delete of a card the SERVER marked completed stays a
+        // plain delete. (Bulk-deleting a "failed, not refunded" card that had actually
+        // completed forfeited 20 credits for a report the user never saw.)
+        let clientFlipped = locallyTimedOutReportIds.intersection(ids)
         exitSelectionMode()
 
-        // Parallel fan-out. Return (rid, success) — a Sendable tuple, so no
-        // `any Error` crosses the task boundary.
+        // Parallel fan-out. A Sendable tri-state, so no `any Error` crosses the boundary.
+        enum Outcome: Sendable { case deleted, failed, completedInstead }
         var failedIds: [String] = []
-        await withTaskGroup(of: (String, Bool).self) { group in
+        var keptIds: [String] = []
+        await withTaskGroup(of: (String, Outcome).self) { group in
             for rid in ids {
+                let forRetry = clientFlipped.contains(rid)
                 group.addTask { [apiClient] in
                     do {
-                        try await apiClient.request(endpoint: .deleteReport(reportId: rid))
-                        return (rid, true)
+                        try await apiClient.request(
+                            endpoint: .deleteReport(reportId: rid, forRetry: forRetry)
+                        )
+                        return (rid, .deleted)
                     } catch {
-                        return (rid, false)
+                        if case .apiError(let code, _) = AppError.from(error),
+                           code == "REPORT_ALREADY_COMPLETED" {
+                            return (rid, .completedInstead)
+                        }
+                        return (rid, .failed)
                     }
                 }
             }
-            for await (rid, ok) in group where !ok {
-                failedIds.append(rid)
-                dismissedReportIds.remove(rid)   // allow the failed row to come back
+            for await (rid, outcome) in group {
+                switch outcome {
+                case .deleted:
+                    // The list endpoint hides deleted rows, so nothing would ever clear
+                    // this flag — and a non-empty set keeps the 5 s poll alive forever.
+                    locallyTimedOutReportIds.remove(rid)
+                case .failed:
+                    failedIds.append(rid)
+                    dismissedReportIds.remove(rid)   // allow the failed row to come back
+                case .completedInstead:
+                    // The server finished it: nothing was deleted or charged. Show it.
+                    keptIds.append(rid)
+                    dismissedReportIds.remove(rid)
+                    locallyTimedOutReportIds.remove(rid)
+                }
             }
         }
 
+        // Every in-flight DELETE refunded server-side, and `creditBalance` was read BEFORE
+        // that. `generateAnalysis` gates on the local number, so deleting a generating card
+        // left the Generate button refusing ("Insufficient credits") work the server would
+        // accept until the next completion or a pull-to-refresh — and read as "deleting it
+        // lost the 20 credits". Unknown-then-reload, as `retryReport` does: nil never blocks.
+        creditBalance = nil
+        await loadCredits()
+
+        if !failedIds.isEmpty || !keptIds.isEmpty {
+            await loadReports()   // reconcile: rows that failed to delete (or finished) reappear
+        }
         if !failedIds.isEmpty {
-            await loadReports()   // reconcile: rows that failed to delete reappear
             let n = failedIds.count
             self.error = "Couldn't delete \(n) report\(n == 1 ? "" : "s"). Please try again."
+        } else if !keptIds.isEmpty {
+            let n = keptIds.count
+            self.error = n == 1
+                ? "That analysis had actually finished — it was kept, not deleted."
+                : "\(n) analyses had actually finished — they were kept, not deleted."
         }
     }
 
@@ -1107,6 +1190,11 @@ class ResearchViewModel: ObservableObject {
                         endpoint: .deleteReport(reportId: backendId, forRetry: true)
                     )
                     print("🔄 ResearchVM: released prior report \(backendId) before retrying")
+                    // Deleted rows never come back through the list, so the flag would
+                    // otherwise outlive the card and keep the 5 s poll running for good.
+                    // AFTER the delete, not before: the `contains` check above is what
+                    // gates the completed pre-check.
+                    self.locallyTimedOutReportIds.remove(backendId)
                 } catch {
                     let appError = AppError.from(error)
                     // The server's belt for the race the status check above can lose: the

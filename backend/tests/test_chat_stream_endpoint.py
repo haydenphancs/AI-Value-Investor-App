@@ -465,7 +465,7 @@ def test_every_tool_failing_on_a_streamed_turn_is_settled_no_cost(harness):
     _FakeChatService.events = [
         ("thought", "Checking the chart."),
         ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
-                  "result": {"error": "timed_out", "tool": "get_stock_chart_data"}}),
+                  "result": {"error": "timed_out", "tool": "get_stock_chart_data", "upstream": True}}),
         ("answer", "Apple is doing fine, from memory."),
     ]
     r = _post(client)
@@ -474,6 +474,50 @@ def test_every_tool_failing_on_a_streamed_turn_is_settled_no_cost(harness):
     step = [d for e, d in frames if e == "tool_step"][0]
     assert step["name"] == "get_stock_chart_data" and step["error"] == "timed_out"
     assert quota.settled == ["chat_degraded_no_tools"]
+
+
+@pytest.mark.parametrize("result", [
+    {"error": "invalid or missing ticker"},                       # _INVALID_TICKER
+    {"error": "No quote data found for QQQQQ"},                   # a symbol FMP does not cover
+    {"error": "unknown tool: get_secret_data"},                   # a hallucinated tool
+], ids=["invalid-ticker", "unknown-symbol", "unknown-tool"])
+def test_a_tool_error_the_model_shaped_stays_charged(harness, result):
+    """The `no_tools` refund was farmable: 'Explain P/E, and pull the chart for QQQQQ' made
+    the model call a tool that answered `{error}`, every tool 'failed', the turn was
+    refunded — and the P/E answer was delivered. At 15/min that is unlimited free Gemini
+    with the balance never moving. Only an UPSTREAM failure (tagged at the source) refunds."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "QQQQQ"}, "result": result}),
+        ("answer", "A P/E ratio is price over earnings. I could not chart QQQQQ."),
+    ]
+    r = _post(client, message="Explain what a P/E ratio is, and pull the chart for QQQQQ")
+    assert r.status_code == 200, r.text
+    assert quota.settled == [] and quota.delivered == 1, quota.settled
+    step = [d for e, d in _parse_sse(r.text) if e == "tool_step"][0]
+    assert step["error"] == result["error"], "the frame still shows the model its miss"
+
+
+def test_a_cut_answer_is_settled_as_degraded_and_never_cached(harness, monkeypatch):
+    """MAX_TOKENS / SAFETY after real text used to end cleanly: charged in full and, for a
+    deep dive, cached for every user for 24 h with its last sentence missing."""
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"is_deep_dive": True, "deep_dive_context": "ctx",
+                                       "deep_dive_cached": None}
+    writes = []
+    monkeypatch.setattr(_FakeChatService, "_upsert_deep_dive_cache",
+                        lambda self, *a, **k: writes.append(a))
+    _FakeChatService.events = [
+        ("answer", "SPY is up 1.2% today because the Fed will likely **"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    db.session_row["stock_id"] = "SPY"
+    r = _post(client, message="Give me a deep dive on SPY")
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_degraded_truncated"]
+    assert writes == [], "a cut brief must never enter the shared cache"
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"].startswith("SPY is up 1.2%")
 
 
 def test_a_partial_tool_failure_on_a_streamed_turn_stays_charged(harness):
@@ -830,3 +874,132 @@ def test_the_non_stream_door_classifies_a_quota_outage(harness, monkeypatch):
     assert r.status_code != 500
     assert r.json()["error_code"] == "GEMINI_QUOTA_EXCEEDED", r.text
     assert quota.refunds == ["chat_undelivered"]
+
+
+def test_the_non_stream_door_does_not_persist_a_turn_whose_client_is_gone(harness, monkeypatch):
+    """A plain JSON route is never cancelled on a client disconnect (Starlette watches
+    `http.disconnect` on streaming responses only), so a turn the client abandoned — phone
+    locked, its own 60 s ceiling — was persisted and charged for nobody. The probe runs
+    BEFORE the write so `delivered` stays False and the `finally` refunds."""
+    from starlette.requests import Request
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "A fine answer. " * 5, "tokens_used": 30}
+
+    async def _gone(self):
+        return True
+    monkeypatch.setattr(Request, "is_disconnected", _gone)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code in (502, 503), r.text
+    body = r.json()
+    assert body["error_code"] == "GEMINI_UNAVAILABLE" and body["details"]["step"] == "chat_send_disconnected"
+    assert db.inserted_messages == [], "nothing may be persisted for a client that left"
+    assert quota.delivered == 0 and quota.refunds == ["chat_undelivered"]
+
+
+def test_a_failing_disconnect_probe_lets_the_turn_proceed(harness, monkeypatch):
+    from starlette.requests import Request
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "A fine answer. " * 5, "tokens_used": 30}
+
+    async def _boom(self):
+        raise RuntimeError("probe broke")
+    monkeypatch.setattr(Request, "is_disconnected", _boom)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert quota.delivered == 1
+
+
+# ── Session OWNERSHIP on every session-scoped route ─────────────────────────────
+#
+# The permissive `_Query` above answers the `chat_sessions` lookup with the fixture row for
+# ANY filter, so deleting `.eq("user_id", user["id"])` from a door left the whole file green.
+# In production a signed-in account that learns another user's session UUID could then POST
+# a turn INTO the victim's transcript (the attacker pays, so the ledger shows nothing), read
+# their history, or delete it. This fake honours the recorded filters, so the guard is real.
+
+
+class _OwnedQuery(_Query):
+    """A `chat_sessions` lookup that applies EVERY `.eq()` it was given."""
+
+    def __init__(self, db, table):
+        super().__init__(db, table)
+        self.filters: List[tuple] = []
+
+    def eq(self, col, val):
+        self.filters.append((col, val))
+        return self
+
+    def delete(self):
+        self.op = "delete"
+        return self
+
+    def execute(self):
+        if self.table == "chat_sessions" and self.op == "select":
+            self.db.calls.append((self.table, "select", tuple(self.filters)))
+            row = self.db.session_row
+            if all(row.get(c) == v for c, v in self.filters):
+                return _Result(dict(row))
+            return _Result(None)
+        return super().execute()
+
+
+class _OwnedDB(_FakeDB):
+    def table(self, name: str):
+        return _OwnedQuery(self, name)
+
+
+_ATTACKER = {**_USER, "id": "33333333-3333-3333-3333-333333333333"}
+
+
+def _owned_db(db: _FakeDB) -> _OwnedDB:
+    # `created_at` so the GET door's `_row_to_session` can render the owner's row.
+    out = _OwnedDB({**db.session_row, "created_at": "2026-09-17T00:00:00+00:00"})
+    out.calls, out.inserted_messages = db.calls, db.inserted_messages
+    return out
+
+
+@pytest.mark.parametrize("door", ["stream", "send", "get", "delete"])
+def test_another_users_session_is_a_404_on_every_door(harness, door):
+    client, db, quota, _ = harness
+    owned = _owned_db(db)
+    app.dependency_overrides[get_supabase] = lambda: owned
+    app.dependency_overrides[get_chat_identity] = lambda: _ATTACKER
+
+    if door == "stream":
+        r = _post(client)
+    elif door == "send":
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    elif door == "get":
+        r = client.get(f"/api/v1/chat/sessions/{_SESSION}")
+    else:
+        r = client.delete(f"/api/v1/chat/sessions/{_SESSION}")
+
+    assert r.status_code == 404, r.text
+    # Nothing of the victim's was touched, and the attacker was not charged for the attempt.
+    assert db.inserted_messages == []
+    assert quota.delivered == 0 and quota.refunds == []
+    assert _FakeChatService.instances == []
+    assert not [c for c in db.calls if c[0] == "chat_sessions" and c[1] in ("update", "delete")]
+    assert not [c for c in db.calls if c[0] == "chat_messages" and c[1] == "delete"]
+    # Tripwire against a vacuous pass: the lookup CARRIED the caller's id as a filter — a
+    # refactor that answered None for an unrelated reason would otherwise keep this green.
+    lookups = [c for c in db.calls if c[0] == "chat_sessions" and c[1] == "select"]
+    assert lookups and ("user_id", _ATTACKER["id"]) in lookups[0][2], lookups
+
+
+@pytest.mark.parametrize("door", ["stream", "send", "get", "delete"])
+def test_the_owner_still_passes_the_filtered_lookup(harness, door):
+    """Control: the honouring fake is not simply refusing everyone."""
+    client, db, quota, _ = harness
+    owned = _owned_db(db)
+    app.dependency_overrides[get_supabase] = lambda: owned
+    if door == "stream":
+        r = _post(client)
+    elif door == "send":
+        _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    elif door == "get":
+        r = client.get(f"/api/v1/chat/sessions/{_SESSION}")
+    else:
+        r = client.delete(f"/api/v1/chat/sessions/{_SESSION}")
+    assert r.status_code == 200, (door, r.status_code, r.text[:300])

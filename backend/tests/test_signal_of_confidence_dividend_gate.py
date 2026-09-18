@@ -44,6 +44,10 @@ def _points(cf: dict, pays=None, inc=None, mcap=None):
 
 ALL_ZERO_RATIOS = [{"date": f"{y}-12-31", "dividendPerShare": 0} for y in (2021, 2022, 2023, 2024, 2025)]
 PAYER_RATIOS = [{"date": "2024-09-28", "dividendPerShare": 0.98}, {"date": "2025-09-27", "dividendPerShare": 1.01}]
+# INTC's live record (2026-09-17): paid through FY2024, suspended Q3 2024, FY2025 = 0.
+SUSPENDED_RATIOS = [{"date": f"{y}-12-3{d}", "dividendPerShare": v} for y, d, v in
+                    (("2021", "1", 1.39), ("2022", "1", 1.46), ("2023", "0", 0.74), ("2024", "8", 0.37), ("2025", "7", 0))]
+INITIATED_RATIOS = [{"date": "2024-12-31", "dividendPerShare": 0}, {"date": "2025-12-31", "dividendPerShare": 0.4}]
 
 
 # ── the bars ─────────────────────────────────────────────────────────────────
@@ -147,6 +151,13 @@ def test_empty_inputs_produce_no_points():
     ([], None, ["garbage"], None),
     (None, None, None, None),
     ("not a list", {"lastDividend": "abc"}, None, None),
+    # ── a former payer is not a current payer (INTC, 2026-09-17) ──
+    (SUSPENDED_RATIOS, {"lastDividend": 0}, None, False),           # the record AND the profile say stopped
+    (SUSPENDED_RATIOS, None, None, False),                           # the record alone is enough (as for all-zero)
+    (SUSPENDED_RATIOS, {"lastDividend": 0}, ["2026-05-08"], False),  # a derived date never overrides it
+    (SUSPENDED_RATIOS, {"lastDividend": 0.5}, None, True),           # …but a positive TTM profile rescues a stub year
+    (list(reversed(SUSPENDED_RATIOS)), None, None, False),           # row order is irrelevant — latest YEAR decides
+    (INITIATED_RATIOS, None, None, True),                            # a zero year followed by a paying year
 ])
 def test_pays_common_dividend_helper(ratios, profile, exdiv, expected):
     today = datetime(2026, 9, 17, tzinfo=timezone.utc)
@@ -225,6 +236,57 @@ AAPL_CF = [
     _cf("2026-03-31", commonDividendsPaid=-3.7e9, commonStockRepurchased=-2.5e10),
     _cf("2026-06-30", commonDividendsPaid=-3.8e9, commonStockRepurchased=-2.1e10),
 ]
+
+
+INTC_CF = [
+    _cf("2026-03-31", commonDividendsPaid=0, netDividendsPaid=0, commonStockRepurchased=0),
+    # FMP's live Q2'26 row (2026-09-17): a −14.3B "common dividend" on a company whose
+    # FY2025 dividendPerShare is 0 and whose profile lastDividend is 0.
+    _cf("2026-06-30", commonDividendsPaid=-14_339_000_000, netDividendsPaid=-14_339_000_000,
+        preferredDividendsPaid=0, commonStockRepurchased=-617_000_000),
+]
+
+
+def test_the_gate_is_per_fiscal_year_so_a_suspended_payer_keeps_its_real_quarters():
+    """INTC's last dividends were FY2024 (0.37/share); FY2025 reads 0. The window of eight
+    quarters straddles both: FY2024 quarters keep their bars, FY2025-26 are zeroed, and the
+    5-year average is a number again instead of "—"."""
+    svc = _svc()
+    by_year = S._annual_dividend_map(SUSPENDED_RATIOS)
+    inc = [_inc("2024-09-28", "Q3", "2024"), _inc("2024-12-28", "Q4", "2024"),
+           _inc("2025-03-29", "Q1", "2025"), _inc("2026-06-27", "Q2", "2026")]
+    cf = [_cf("2024-09-28", commonDividendsPaid=-540_000_000), _cf("2024-12-28", commonDividendsPaid=-530_000_000),
+          _cf("2025-03-29", commonDividendsPaid=-900_000_000),   # a stray line in a zero year
+          _cf("2026-06-27", commonDividendsPaid=-14_339_000_000)]
+    mcap = {d: 100e9 for d in ("2024-09-28", "2024-12-28", "2025-03-29", "2026-06-27")}
+    pts = svc._build_data_points(cf, inc, 100e9, mcap, "INTC",
+                                 pays_common_dividend=False, dividend_by_year=by_year)
+    by_label = {p.period: p for p in pts}
+    assert by_label["Q3 '24"].dividend_amount == 540.0 and by_label["Q4 '24"].dividend_amount == 530.0
+    assert by_label["Q1 '25"].dividend_amount == 0.0, "FY2025 shows DPS 0 — the line is not a dividend"
+    assert by_label["Q2 '26"].dividend_amount == 0.0, "FY2026 is not in the record — the current verdict (no) applies"
+    # and without the record the overall verdict zeroes everything (the previous behaviour)
+    flat = svc._build_data_points(cf, inc, 100e9, mcap, "INTC", pays_common_dividend=False)
+    assert all(p.dividend_amount == 0.0 for p in flat)
+
+
+@pytest.mark.asyncio
+async def test_a_suspended_payer_gets_zero_bars_but_keeps_its_history_card():
+    """INTC, the live shape. The old "any year in the window" verdict made it a payer on
+    FY2020-24 and charted the −14.3B line as an 8.79% dividend with status "Very High"."""
+    intc = _wire(_FMP(cashflow=INTC_CF, ratios=SUSPENDED_RATIOS, profile=[{"lastDividend": 0}]))
+    resp, _, degraded = await intc._build_signal_of_confidence("INTC")
+    assert degraded == []
+    assert resp.data_points
+    assert all(p.dividend_yield == 0.0 and p.dividend_amount == 0.0 for p in resp.data_points), (
+        "a −14.3B cash-flow line is not a common dividend when the per-share record says 0"
+    )
+    assert resp.summary.dividend_yield == 0.0
+    assert any(p.buyback_amount > 0 for p in resp.data_points), "the real 617M buyback still charts"
+    # the card survives — the suspension is the story
+    assert resp.dividend_info is not None
+    assert resp.dividend_info.dividend_growth_pct == -100.0
+    assert resp.dividend_info.annual_dividends[-1].per_share == 0.0
 
 
 @pytest.mark.asyncio

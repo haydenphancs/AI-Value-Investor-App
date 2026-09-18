@@ -81,7 +81,8 @@ async def test_a_raising_handler_becomes_an_error_result_not_an_exception():
         raise FMPRateLimitException("FMP rate limit hit on /quote")
 
     out = await _run_tool_handler("get_stock_chart_data", boom, {"ticker": "AAPL"})
-    assert out["error"].startswith("FMP rate limit") and out["tool"] == "get_stock_chart_data"
+    assert "FMP rate limit" in out["error"] and out["tool"] == "get_stock_chart_data"
+    assert out["upstream"] is True, "a raising handler is OUR failure — refundable"
 
 
 @pytest.mark.asyncio
@@ -94,7 +95,8 @@ async def test_a_slow_handler_times_out_with_an_explicit_marker(monkeypatch):
         return {"never": True}
 
     out = await _run_tool_handler("get_ticker_news", slow, {"ticker": "AAPL"})
-    assert out == {"error": "timed_out", "tool": "get_ticker_news", "timeout_seconds": 0.05}
+    assert out == {"error": "timed_out", "tool": "get_ticker_news", "timeout_seconds": 0.05,
+                   "upstream": True}
 
 
 @pytest.mark.asyncio
@@ -203,7 +205,7 @@ async def test_a_tool_that_raises_a_rate_limit_is_not_retried_and_does_not_touch
     assert gem._quota_circuit._consecutive == 0, "an FMP failure is not a Gemini quota error"
     # The model still received one function_response per call, carrying the error.
     sent = calls[1]["contents"][-1].parts[0].function_response.response["result"]
-    assert sent["error"].startswith("FMP rate limit")
+    assert "FMP rate limit" in sent["error"]
     assert out["tool_results"] == [], "an error result is not a widget payload"
 
 

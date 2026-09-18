@@ -66,8 +66,10 @@ _EXPECTED = {
     # An index has no per-symbol news feed, but market breadth is most of any index answer.
     "INDEX":     {"get_market_overview"} | _MARKET,
     # A futures contract has no per-ticker "why did it move" attribution (no industry, no
-    # earnings, no σ row), so it gets news and the macro backdrop but not the ladder.
-    "COMMODITY": {"get_stock_chart_data", "get_ticker_news"} | _MARKET,
+    # earnings, no σ row), so it gets news and the macro backdrop but not the ladder — and
+    # no chart tool: every FMP commodity code is licence-blocked at `PriceService.get_quote`,
+    # so the tool could only ever fail (and refund a fully-answered turn as `no_tools`).
+    "COMMODITY": {"get_ticker_news"} | _MARKET,
 }
 
 
@@ -219,9 +221,9 @@ async def test_equity_sentiment_is_not_marked_as_crypto(monkeypatch):
 # ── 3. Every quoted asset gets an inline card ───────────────────────────────
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("asset_type", ["STOCK", "ETF", "CRYPTO", "COMMODITY"])
+@pytest.mark.parametrize("asset_type", ["STOCK", "ETF", "CRYPTO"])
 async def test_quoted_assets_all_get_a_chart_card(asset_type):
-    """ETF / CRYPTO / COMMODITY used to fall through to `return None`, so a stock chat and an
+    """ETF / CRYPTO used to fall through to `return None`, so a stock chat and an
     index chat each rendered a card and a Bitcoin chat rendered nothing at all."""
     svc = _svc()
     svc._fetch_stock_widget_data = AsyncMock(
@@ -229,6 +231,42 @@ async def test_quoted_assets_all_get_a_chart_card(asset_type):
     )
     got = await svc._deterministic_widget(asset_type, "X", None)
     assert got is not None and got["widget_type"] == "stock_chart"
+
+
+@pytest.mark.asyncio
+async def test_a_commodity_chat_never_attempts_the_doomed_chart_card():
+    """COMMODITY was in the quoted set, but every FMP commodity code is licence-blocked
+    at `PriceService.get_quote` (returns `{}` before any I/O), so the deterministic card
+    fetch could only ever fail — one wasted fetch per commodity turn. The set must not
+    reach the fetcher for it at all."""
+    svc = _svc()
+    svc._fetch_stock_widget_data = AsyncMock(
+        return_value={"widget_type": "stock_chart", "ticker": "GCUSD"}
+    )
+    assert await svc._deterministic_widget("COMMODITY", "GCUSD", None) is None
+    svc._fetch_stock_widget_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["GCUSD", "CLUSD", "SIUSD", "NGUSD"])
+async def test_the_real_price_service_refuses_a_commodity_code_before_any_io(symbol):
+    """The regression the permissive `PriceFromFMPFake` masked: with the REAL
+    `PriceService` (no network — the licence block answers first) the chart fetcher
+    returns the error dict for a commodity code. This is why the tool is not granted to
+    COMMODITY chats: a declared tool that fails on every call settled the turn as
+    `no_tools` and refunded a fully-answered question."""
+    from app.services.price_service import PriceService
+    svc = _svc()
+    svc.price = PriceService()
+    svc.fmp = SimpleNamespace(
+        get_historical_prices=AsyncMock(side_effect=AssertionError("must not be reached")),
+        get_company_profile=AsyncMock(side_effect=AssertionError("must not be reached")),
+    )
+    got = await svc._fetch_stock_widget_data(symbol)
+    assert "error" in got and got.get("widget_type") is None, got
+    # And the grant table agrees, so the model is never offered a tool that cannot succeed.
+    from app.services.agents.chat_tools import tools_for_asset_type
+    assert "get_stock_chart_data" not in tools_for_asset_type("COMMODITY")
 
 
 @pytest.mark.asyncio
@@ -288,7 +326,13 @@ async def test_a_commodity_card_follows_the_commodity_screens_verdict(monkeypatc
     """GCUSD is served by GLD (NYSE Arca) and CLUSD by a FRED daily settlement — neither
     trades while Wall Street sleeps, so the card must say so. The verdict comes from
     `commodity_service._commodity_market_status`, the same function the detail screen's
-    badge reads, so the two can never disagree."""
+    badge reads, so the two can never disagree.
+
+    ⚠️ Reaches the session leg only through the permissive `PriceFromFMPFake`: the REAL
+    `PriceService` refuses every commodity code before this point (see
+    `test_the_real_price_service_refuses_a_commodity_code_before_any_io`), so no
+    production commodity turn renders this card today. The arm is kept — and pinned
+    here — so a lifted licence block cannot stamp the EQUITY clock on a commodity."""
     monkeypatch.setattr(
         "app.services.commodity_service._commodity_market_status", lambda sym="": "Market Closed"
     )
@@ -502,7 +546,10 @@ def test_a_non_symbol_shaped_subject_is_still_dropped():
 async def test_a_fred_backed_commodity_card_is_never_open_during_the_equity_session(monkeypatch):
     """11:00 ET on a weekday: the equity session is OPEN, but crude is an EIA settlement
     published days behind — the detail badge says "Market Closed" and so must the card.
-    Before this the card asked the EQUITY clock and said "Open" for the same minute."""
+    Before this the card asked the EQUITY clock and said "Open" for the same minute.
+
+    Same caveat as the test above: reachable only through the permissive fake; kept as
+    the pin on the dormant arm."""
     monkeypatch.setattr(
         "app.services.home_dashboard_service._market_status", lambda: ("open", True)
     )
@@ -733,6 +780,58 @@ async def test_the_market_overview_defaults_an_omitted_symbol_but_refuses_a_junk
         assert out == {"error": "invalid or missing ticker"}, junk
         assert junk not in str(out)
     assert len(seen) == n, "a junk symbol must not be silently the S&P"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["AAPL", "SPY", "BTCUSD", "GCUSD", "^FAKE", "^VIX"])
+async def test_the_market_overview_refuses_a_symbol_shaped_non_index(symbol):
+    """`sanitize_symbol` checks SHAPE, so "AAPL" passed — and on the ^GSPC screen ("how
+    does the market compare with Apple?") the model's only per-symbol tool ran the full
+    index pipeline for AAPL: paged history, a Gemini story, `index_cache` rows persisted
+    under 'AAPL', and the S&P's global valuation narrated as Apple's on a charged turn.
+    Only a PROFILED index (^GSPC / ^IXIC / ^DJI) may reach the fetcher."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    h = build_chat_tool_handlers(svc, screen_symbol="^GSPC", screen_asset_type="INDEX")
+    out = await h["get_market_overview"]({"symbol": symbol})
+    assert out == {"error": "invalid or missing ticker"}, symbol
+    assert seen == [], f"{symbol} reached the index pipeline"
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_overview_symbol_defaults_to_the_index_on_screen():
+    """On the Nasdaq screen an omitted symbol means the Nasdaq, not the S&P — and the
+    mis-keyed `ticker` form is honoured the way `_resolve` honours it."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers
+
+    svc, seen = _recording_svc()
+    h = build_chat_tool_handlers(svc, screen_symbol="^IXIC", screen_asset_type="INDEX")
+    await h["get_market_overview"]({})
+    await h["get_market_overview"]({"symbol": ""})
+    await h["get_market_overview"]({"ticker": "^dji"})
+    assert [t for _, t in seen] == ["^IXIC", "^IXIC", "^DJI"]
+    # A non-index screen (or none) keeps the declared default.
+    svc2, seen2 = _recording_svc()
+    h2 = build_chat_tool_handlers(svc2, screen_symbol="AAPL", screen_asset_type="STOCK")
+    await h2["get_market_overview"]({})
+    assert [t for _, t in seen2] == ["^GSPC"]
+
+
+@pytest.mark.asyncio
+async def test_the_overview_fetcher_itself_refuses_a_non_index_symbol(monkeypatch):
+    """Belt behind the handler: the index pipeline is the most expensive fetch chat can
+    trigger and `get_index_detail` accepts any string."""
+    from unittest.mock import MagicMock
+    from app.services import index_service as ixs
+
+    svc = _svc()
+    fake = MagicMock(get_index_detail=AsyncMock(return_value=MagicMock()))
+    # Function-scoped import inside the fetcher resolves from the SOURCE module.
+    monkeypatch.setattr(ixs, "get_index_service", lambda: fake)
+    out = await svc._fetch_market_overview_data("AAPL")
+    assert "error" in out and out.get("widget_type") is None
+    fake.get_index_detail.assert_not_awaited()
 
 
 @pytest.mark.asyncio

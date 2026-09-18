@@ -42,8 +42,9 @@ class CreditServiceUnavailable(Exception):
 # the same way `revoke_purchased_credits` reports `reclaimed: 0`.
 #
 # Since 2026-09-10 this tuple is DOCUMENTATION and log classification only. The predicate
-# below no longer reads it — see REFUND_SETTLED_OUTCOMES for why.
-REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero")
+# below no longer reads it — see REFUND_SETTLED_OUTCOMES for why. `partial` is minted by
+# `refund_ledgered` itself (not the RPC) when `0 < refunded < amount`.
+REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero", "partial")
 
 # Outcomes after which the user is NOT owed anything: the refund moved (whatever the caps let
 # it move), it had already moved, or there was never a charge to reverse. THIS is the set the
@@ -585,13 +586,31 @@ class CreditService:
                 "the refund moved; the one-shot guard is already burned; manual check needed",
                 outcome, sorted(payload.keys()), user_id, ref_id, amount, reason,
             )
-        elif isinstance(refunded, int) and refunded < amount:
-            # The LEAST() caps can move less than requested. Previously this logged the full
-            # amount and looked like a clean refund.
+        elif isinstance(refunded, int) and 0 < refunded < amount:
+            # The LEAST() caps can move less than requested — the reachable case is a charge
+            # and a refund that straddle a monthly reset with a SMALL new-period `used`
+            # (charged 20 at 23:50, one chat turn after midnight, the sweep refunds 1). The
+            # user is OWED the remainder and the one-shot guard is already burned, so this is
+            # a leak, not a footnote: it used to log a WARNING and answer `outcome: refunded`,
+            # which every report site read as settled — the phone was told "your 20 credits
+            # have been returned" and nothing paged. Re-labelled `partial` so the allow-list
+            # predicate flips all three sites to their leak branch with no further edits.
+            logger.error(
+                "REFUND LEAK: PARTIAL REFUND — refund_credits moved %s of %s credits for "
+                "user=%s ref_id=%s reason=%s; the user is OWED %s credits and the one-shot "
+                "refund guard is already burned; manual credit correction needed. Most likely "
+                "the charge and the refund straddled a monthly reset.",
+                refunded, amount, user_id, ref_id, reason, amount - refunded,
+            )
+            return {**payload, "outcome": "partial", "requested": amount}
+        elif isinstance(refunded, int) and refunded == 0 and amount > 0:
+            # `outcome: refunded` with nothing moved is the RPC's deliberate no-`ref_id`
+            # shape (`NOT v_searched`): with no debit to match, "owed" is unprovable and
+            # escalating it would page on every legacy caller. WARNING, not ERROR.
             logger.warning(
-                "PARTIAL REFUND: refund_credits moved %s of %s credits for user=%s "
-                "ref_id=%s reason=%s — the pools could not absorb the rest",
-                refunded, amount, user_id, ref_id, reason,
+                "PARTIAL REFUND: refund_credits moved 0 of %s credits for user=%s "
+                "ref_id=%s reason=%s — the pools could not absorb any of it",
+                amount, user_id, ref_id, reason,
             )
         else:
             logger.info(

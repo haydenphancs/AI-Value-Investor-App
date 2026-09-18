@@ -445,6 +445,13 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return appError
         }
 
+        // A structured-concurrency cancellation (`Task.sleep` in a cancelled poll loop) is
+        // the same non-event as the URLError form below; without this it read as
+        // `.unknown("The operation couldn't be completed. (Swift.CancellationError …)")`.
+        if error is CancellationError {
+            return .cancelled
+        }
+
         // URLSession errors
         if let urlError = error as? URLError {
             switch urlError.code {

@@ -133,6 +133,19 @@ def _price(v: Any) -> Optional[str]:
     return f"{v:,.2f}"
 
 
+def _as_of_et() -> str:
+    """"as of 9:36 AM ET, Sep 14" — so a brief written from this block dates itself.
+
+    `_DEEP_DIVE_STYLE` tells the model to give its as-of date; without a stamp in the data
+    it had nothing to quote, and a cached brief replayed hours later read as current.
+    """
+    from datetime import datetime
+    from app.utils.market_hours import ET
+    now = datetime.now(ET)
+    return f"as of {now.strftime('%-I:%M %p')} ET, {now.strftime('%b %-d')}"
+
+
+
 def _flatten_for_grounding(
     payload: Any, max_chars: int, str_cap: int = _STR_CAP, skip_top: Tuple[str, ...] = (),
     priority_top: Tuple[str, ...] = (),
@@ -251,8 +264,13 @@ class ChatContextResolver:
             coro = handler(self, reference_id, client_context)
 
         try:
+            # SHIELDED, like `_run_tool_handler` and `_deterministic_widget`: the ceiling
+            # abandons THIS caller's wait, it must not cancel the work. The handler is
+            # usually the LEADER of a shared detail build (`get_index_detail` / `get_etf_detail`
+            # / `get_crypto_detail` `_inflight`), and a cancelled leader handed every
+            # joiner — the screen itself, the widget batch — "fetch was cancelled".
             block = await asyncio.wait_for(
-                coro,
+                asyncio.shield(coro),
                 timeout=_RESOLVE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -454,9 +472,16 @@ class ChatContextResolver:
         if not detail:
             return None
         px = _price(detail.current_price)
+        if px is None:
+            # A DEGRADED build (the quote failed; the service refuses to cache it and
+            # the screen shows $0.00). Grounding on it hands the model a zeroed payload
+            # and — with the deep-dive cache keyed without the block — would pin that
+            # brief for every user for 24 h. No grounding beats wrong grounding.
+            logger.warning("chat grounding: ETF %s build has no usable price — not grounding", symbol)
+            return None
         chg = detail.price_change_percent
-        price_str = (f" Price ${px} ({chg:+.2f}%)."
-                     if px and isinstance(chg, (int, float)) and math.isfinite(chg) else "")
+        price_str = (f" Price ${px} ({chg:+.2f}%) {_as_of_et()}."
+                     if isinstance(chg, (int, float)) and math.isfinite(chg) else "")
         lead = f"The user is viewing the ETF detail screen for {detail.name} ({detail.symbol})." + price_str
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
@@ -477,9 +502,12 @@ class ChatContextResolver:
         if not detail:
             return None
         px = _price(detail.current_price)
+        if px is None:
+            logger.warning("chat grounding: crypto %s build has no usable price — not grounding", symbol)
+            return None
         chg = detail.price_change_percent
-        price_str = (f" Price ${px} ({chg:+.2f}%)."
-                     if px and isinstance(chg, (int, float)) and math.isfinite(chg) else "")
+        price_str = (f" Price ${px} ({chg:+.2f}%) {_as_of_et()}."
+                     if isinstance(chg, (int, float)) and math.isfinite(chg) else "")
         lead = f"The user is viewing the crypto detail screen for {detail.name} ({detail.symbol})." + price_str
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
@@ -502,9 +530,12 @@ class ChatContextResolver:
         name = (getattr(detail, "index_name", "") or "").strip()
         lead = f"The user is viewing the market/index detail screen for {name or symbol}."
         px = _price(getattr(detail, "current_price", None))
+        if px is None:
+            logger.warning("chat grounding: index %s build has no usable level — not grounding", symbol)
+            return None
         chg = getattr(detail, "price_change_percent", None)
-        if px and isinstance(chg, (int, float)) and math.isfinite(chg):
-            lead += f" Level {px} ({chg:+.2f}%)."
+        if isinstance(chg, (int, float)) and math.isfinite(chg):
+            lead += f" Level {px} ({chg:+.2f}%) {_as_of_et()}."
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
             skip_top=("symbol", "index_name", "current_price", "price_change_percent"),

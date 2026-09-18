@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from app.config import settings
 from app.database import get_supabase
-from app.integrations.gemini import get_gemini_client
+from app.integrations.gemini import _is_quota_error, get_gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ _RETRY_BASE_SECONDS = 2.0
 _GROUNDED_JSON_FENCE_RE = re.compile(r"```json\s*(.+?)\s*```", re.DOTALL)
 _NO_CATALYST_LABELS = {"no clear catalyst", "none", "n/a", "no catalyst", "unclear"}
 
-_PROMPT = """You are a financial research analyst. {ticker} moved {change_pct:+.1f}% over {window}.
+_PROMPT = """You are a financial research analyst. {subject} moved {change_pct:+.1f}% over {window}.
 
 Using CURRENT web sources, identify the SINGLE most important reason for THIS specific move. Prefer company-specific drivers (earnings, guidance, M&A, FDA/regulatory action, a major contract/customer, a capital raise, an executive change, a product launch, a short-seller report) over generic commentary.
 
@@ -76,6 +76,22 @@ Respond with ONLY a ```json code block:
 }}
 ```
 If there is NO clear company-specific catalyst (the move is broad-market or sector-wide), set "catalyst_tag" to "No Clear Catalyst" and say so in "reason". Cite real, current sources."""
+
+
+def _prompt_subject(ticker: str, company_name: Optional[str]) -> str:
+    """What the grounded search is told to look up.
+
+    The bare ticker alone is ambiguous for the equity/coin colliders: "LTC moved -8.0%
+    over today" greps the web for Litecoin, and the REIT's −8% day (LTC Properties) was
+    handed to the model with citations as the coin's cause — then served for 24 h to
+    every reader of the shared cache. With the listed name in front of it the search
+    targets the security: "LTC Properties, Inc. (LTC), a listed security, moved …".
+    The cache key stays on the ticker; only the question changes.
+    """
+    name = " ".join(str(company_name or "").split())[:80]
+    if not name or name.upper() == ticker.upper():
+        return ticker
+    return f"{name} ({ticker}), a listed security,"
 
 
 # ── In-memory tier ─────────────────────────────────────────────────────
@@ -170,9 +186,15 @@ class PriceCatalystService:
         force_refresh: bool = False,
         cache_only: bool = False,
         run_id: Optional[str] = None,
+        company_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Return {tag, reason, sources} for a big move, or None on hard
         failure (caller then keeps the deterministic FMP catalyst fallback).
+
+        ``company_name`` is the listed name to put in front of the ticker in the
+        grounded question (see `_prompt_subject`); it is NOT part of the cache key,
+        so the chat tool, the Updates sweeper and the report collector keep sharing
+        one row per (ticker, window, direction).
 
         A "no clear catalyst" outcome is NOT a failure — it returns
         {tag: None, reason: <broad-market explanation>, sources: []} so the
@@ -232,7 +254,9 @@ class PriceCatalystService:
                     future.set_result(None)
                 raise CatalystNotAttempted("PRICE_CATALYST_AI_ENABLED is off")
 
-            result = await self._do_grounded(focal, change_pct, window_label)
+            result = await self._do_grounded(
+                focal, change_pct, window_label, company_name=company_name,
+            )
             await asyncio.to_thread(
                 self._write_audit, this_run_id, focal, change_pct, window_label,
                 status=result["status"], tag=result.get("tag"),
@@ -306,6 +330,17 @@ class PriceCatalystService:
                     )
                     raise CatalystNotAttempted(str(exc)) from exc
                 except Exception as exc:  # 503/UNAVAILABLE, transient errors
+                    if _is_quota_error(exc):
+                        # A raw 429 the retry ladder gave up on re-raises the SDK's own
+                        # exception, not `GeminiQuotaError` — so it landed here and walked
+                        # the whole chain (18 calls, ~75 s of sleeps) against a quota that
+                        # is shared by every model, then returned None: the caller's
+                        # web-search unit stayed claimed and the release branch was dead.
+                        logger.warning(
+                            "price_catalyst: grounded search quota-refused (model=%s attempt=%d): "
+                            "%s — not attempted", model, attempt, exc,
+                        )
+                        raise CatalystNotAttempted(str(exc)[:200]) from exc
                     last = attempt == _RETRIES_PER_MODEL - 1
                     logger.warning(
                         "price_catalyst: grounded call failed (model=%s attempt=%d): %s",
@@ -318,9 +353,10 @@ class PriceCatalystService:
 
     async def _do_grounded(
         self, ticker: str, change_pct: float, window_label: str,
+        *, company_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         prompt = _PROMPT.format(
-            ticker=ticker, change_pct=change_pct,
+            subject=_prompt_subject(ticker, company_name), change_pct=change_pct,
             window=(window_label or "the recent window").lower(),
         )
         resp = await self._grounded_with_fallback(prompt)

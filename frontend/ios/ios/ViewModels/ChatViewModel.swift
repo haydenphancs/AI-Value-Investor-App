@@ -440,7 +440,8 @@ class ChatViewModel: ObservableObject {
 
                 // Step 2: Send the first message (streams when enabled; context
                 // type/ref are read from instance state).
-                await respond(sessionId: session.id, message: firstMessage)
+                await respond(sessionId: session.id, message: firstMessage,
+                              userMessageId: userMessage.id)
 
             } catch {
                 print("❌ [ChatVM] Failed to start conversation: \(error)")
@@ -484,7 +485,13 @@ class ChatViewModel: ObservableObject {
         // (b) re-entering startNewConversation mid-seed, which would double-create a session and wipe
         // the seeded first message. The UI also greys the send button while busy; this is the
         // load-bearing guard.
-        guard !isAITyping else { return }
+        //
+        // `isLoadingSession` too: a send while a history row is still loading appended the
+        // optimistic bubble, the load then REPLACED `messages` with the fetched history
+        // (bubble gone), and this turn's `meta` frame rewrote the last user bubble it could
+        // find — the PREVIOUS question, now showing the new text above the old answer, with
+        // the new question absent. The load's catch resets the flag, so the gate releases.
+        guard !isAITyping, !isLoadingSession else { return }
 
         guard let sessionId = currentSessionId else {
             // No session yet — start a new conversation.
@@ -517,7 +524,7 @@ class ChatViewModel: ObservableObject {
 
         respondTask?.cancel()
         respondTask = Task {
-            await respond(sessionId: sessionId, message: text)
+            await respond(sessionId: sessionId, message: text, userMessageId: userMessage.id)
         }
     }
 
@@ -806,13 +813,12 @@ class ChatViewModel: ObservableObject {
             // may already be in history. Adopt it if it is — never re-POST from here — and
             // only report when the read PROVES the turn absent or cannot be made.
             if Self.isTransportFailure(error) {
+                let known = knownAssistantServerIds()
                 switch await fetchHistoryForReconcile(sessionId: sessionId) {
                 case .fetched(let history):
                     guard sessionId == currentSessionId else { return }
                     if Self.historyContainsTurn(history.messages, userMessage: message,
-                                                expectedUserMatches: max(1, messages.filter {
-                                                    $0.role == .user && $0.plainText == message
-                                                }.count)) {
+                                                knownAssistantServerIds: known) {
                         print("✅ [ChatVM] Send timed out but the turn was persisted — adopting history")
                         messages = history.messages.map { $0.toRichChatMessage() }
                         isAITyping = false
@@ -851,9 +857,14 @@ class ChatViewModel: ObservableObject {
 
     /// Route a send to the streaming or non-streaming path. Streaming falls back
     /// to the non-streaming endpoint automatically on any error.
-    private func respond(sessionId: String, message: String) async {
+    ///
+    /// `userMessageId` is the optimistic bubble THIS turn appended, so the `meta` frame can
+    /// rewrite that bubble by identity rather than "the last user row" — which, after a
+    /// history load or a reconcile replaced `messages`, was a different question.
+    private func respond(sessionId: String, message: String, userMessageId: UUID? = nil) async {
         if Self.streamingEnabled {
-            await streamMessageToSession(sessionId: sessionId, message: message)
+            await streamMessageToSession(sessionId: sessionId, message: message,
+                                         userMessageId: userMessageId)
         } else {
             await sendMessageToSession(sessionId: sessionId, message: message)
         }
@@ -864,7 +875,8 @@ class ChatViewModel: ObservableObject {
     /// partial live message is removed and we fall back to the non-streaming
     /// endpoint, which regenerates + persists the turn (the stream persists nothing
     /// on failure, so there's no duplication).
-    private func streamMessageToSession(sessionId: String, message: String) async {
+    private func streamMessageToSession(sessionId: String, message: String,
+                                        userMessageId: UUID? = nil) async {
         let liveTimestamp = Date()
         var liveId: UUID?
         /// The server's NORMALIZED copy of this turn's user message, from the `meta`
@@ -1010,7 +1022,8 @@ class ChatViewModel: ObservableObject {
                             thinking: base.thinking, sources: base.sources, suggestions: base.suggestions,
                             // Prefer the live frame: the `done` message carries the PERSISTED
                             // copy, which deliberately omits `balance`.
-                            credit: turnCost ?? base.credit
+                            credit: turnCost ?? base.credit,
+                            serverId: base.serverId
                         )
                     } else {
                         messages.append(base)
@@ -1059,9 +1072,21 @@ class ChatViewModel: ObservableObject {
                         // was 0, and a zero expectation adopted the PREVIOUS turn's history
                         // as if this one had persisted — the question vanished, unanswered.
                         // It also matches what a history reload will show.
-                        if serverMessage != message,
-                           let idx = messages.lastIndex(where: { $0.role == .user }) {
-                            messages[idx].content = [.text(serverMessage)]
+                        //
+                        // By IDENTITY, never "the last user row": with `messages` replaced
+                        // underneath this turn (a history load that raced the send), the
+                        // last user row was the PREVIOUS question, and it took this turn's
+                        // text. A bubble that is no longer on screen is simply not rewritten.
+                        if serverMessage != message {
+                            let idx: Int?
+                            if let userMessageId {
+                                idx = messages.firstIndex(where: { $0.id == userMessageId })
+                            } else {
+                                idx = messages.lastIndex(where: { $0.role == .user })
+                            }
+                            if let idx {
+                                messages[idx].content = [.text(serverMessage)]
+                            }
                         }
                     }
                     continue
@@ -1105,14 +1130,26 @@ class ChatViewModel: ObservableObject {
                 return
             }
 
-            print("⚠️ [ChatVM] Stream failed (\(error)); falling back to non-streaming")
+            print("⚠️ [ChatVM] Stream failed (\(error)); reconciling with the server")
             // Show the thinking indicator again while we reconcile / regenerate.
             isAITyping = true
             // Prefer the server's normalized copy when the meta frame arrived; fall back
-            // to the raw text when the stream failed before it (nothing was persisted
-            // then either, so a raw comparison is safe).
+            // to the raw text when the stream failed before it.
+            //
+            // WHICH failures may regenerate: only an explicit SERVER VERDICT — the
+            // `error` frame, decoded into `APIError.businessError`, which the server
+            // emits after it has settled the turn (refunded, nothing persisted, or
+            // "couldn't be saved"). A transport failure or a stream that simply ended
+            // says nothing: the server generator is cancelled only when the TCP path
+            // actually closes, and a phone whose radio dropped is silent to the origin
+            // behind the edge — the turn is still being generated, persisted and
+            // charged. One "not there yet" read used to be taken as "will never be
+            // there", and the re-POST stored and billed the same question twice.
+            let serverVerdict: Bool
+            if case APIError.businessError = error { serverVerdict = true } else { serverVerdict = false }
             await reconcileAfterStreamFailure(
-                sessionId: sessionId, message: serverNormalizedMessage ?? message
+                sessionId: sessionId, message: serverNormalizedMessage ?? message,
+                mayRegenerate: serverVerdict
             )
         }
     }
@@ -1123,21 +1160,19 @@ class ChatViewModel: ObservableObject {
     /// the turn twice (visible as a duplicated Q+A on the next history reload). So:
     /// reload history; if the turn is already there, adopt it; only regenerate when
     /// it is genuinely absent (the common early-failure case).
-    private func reconcileAfterStreamFailure(sessionId: String, message: String) async {
-        // How many user messages with THIS exact text should exist server-side IF the stream
-        // persisted this turn. Local `messages` still holds the optimistic user bubble for this send
-        // (the catch removed only the assistant bubble) and mirrors the server for every prior turn,
-        // so this count already includes the message we're reconciling. Requiring the server to hold
-        // at LEAST this many — not merely one — distinguishes a freshly-persisted turn from a
-        // pre-existing identical one, so a repeated message (e.g. "why?" / "continue") isn't mistaken
-        // for already-answered and silently dropped.
+    private func reconcileAfterStreamFailure(
+        sessionId: String, message: String, mayRegenerate: Bool = true
+    ) async {
+        // The oracle is IDENTITY, not a count: the assistant rows we already hold carry
+        // their server ids, so "the server's last row is an assistant we have not seen,
+        // answering a user row with this text" proves the turn persisted — exactly,
+        // however many rows the server's history page holds. A count of matching user
+        // texts broke in two ways: the server page is the newest 400 rows while the
+        // local list is the whole conversation (a long session made a saved, charged
+        // turn "absent" → re-POST), and a stale bubble from an earlier failed send
+        // inflated the expectation the same way.
+        let known = knownAssistantServerIds()
         let target = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Never below 1: this turn's own bubble is in `messages`, so a count of 0 means the
-        // bubble and the target were normalised differently — and `historyContainsTurn`
-        // with a zero expectation is true for ANY history ending in an assistant row.
-        let expectedUserMatches = max(1, messages.filter {
-            $0.role == .user && $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == target
-        }.count)
         // The GET is the ONLY oracle that the turn was not persisted — and the stream
         // persists and charges BEFORE its `credits`/`done` frames (a follow-up-suggestions
         // call sits in between). Regenerating on a FAILED read used to double-charge: a
@@ -1146,25 +1181,47 @@ class ChatViewModel: ObservableObject {
         // the re-POST stored and billed the same Q+A a second time with no refund path.
         // So: a bounded retry of the read, then a retryable error — never a re-POST on
         // an unproven absence.
-        switch await fetchHistoryForReconcile(sessionId: sessionId) {
-        case .fetched(let history):
-            guard sessionId == currentSessionId else { isAITyping = false; return }
-            if Self.historyContainsTurn(history.messages, userMessage: message,
-                                        expectedUserMatches: expectedUserMatches) {
-                // The stream DID persist this turn — adopt server state, don't re-send.
-                messages = history.messages.map { $0.toRichChatMessage() }
+        // A transport failure gets a WAIT, not a verdict: the server may still be
+        // generating. Poll history with backoff for about the server's own turn budget,
+        // adopt the moment the turn lands, and otherwise say we could not confirm.
+        let delays: [UInt64] = mayRegenerate ? [0] : [0, 2, 5, 10, 15, 15]
+        for (i, delaySeconds) in delays.enumerated() {
+            if delaySeconds > 0 { try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000) }
+            guard sessionId == currentSessionId, !Task.isCancelled else { isAITyping = false; return }
+            switch await fetchHistoryForReconcile(sessionId: sessionId) {
+            case .fetched(let history):
+                guard sessionId == currentSessionId else { isAITyping = false; return }
+                if Self.historyContainsTurn(history.messages, userMessage: target,
+                                            knownAssistantServerIds: known) {
+                    // The stream DID persist this turn — adopt server state, don't re-send.
+                    messages = history.messages.map { $0.toRichChatMessage() }
+                    isAITyping = false
+                    return
+                }
+                if i == delays.count - 1 { break }
+            case .unavailable(let error):
+                guard sessionId == currentSessionId else { isAITyping = false; return }
+                print("⚠️ [ChatVM] Reconcile could not read history — NOT regenerating: \(error)")
                 isAITyping = false
+                reportTurnFailure(ChatStreamError.unconfirmed)
                 return
             }
-        case .unavailable(let error):
-            guard sessionId == currentSessionId else { isAITyping = false; return }
-            print("⚠️ [ChatVM] Reconcile could not read history — NOT regenerating: \(error)")
+        }
+        guard mayRegenerate else {
+            print("⚠️ [ChatVM] Turn not confirmed after polling — NOT regenerating")
             isAITyping = false
             reportTurnFailure(ChatStreamError.unconfirmed)
             return
         }
-        // Turn was PROVEN absent — safe to regenerate via the non-streaming endpoint.
+        // The server itself said the turn was not saved and refunded it — safe to
+        // regenerate via the non-streaming endpoint.
         await sendMessageToSession(sessionId: sessionId, message: message)
+    }
+
+    /// Server ids of every assistant row currently on screen — what the reconcile's
+    /// identity oracle compares against. The live streaming bubble has none.
+    private func knownAssistantServerIds() -> Set<String> {
+        Set(messages.compactMap { $0.role == .assistant ? $0.serverId : nil })
     }
 
     private enum HistoryRead {
@@ -1198,20 +1255,36 @@ class ChatViewModel: ObservableObject {
     }
 
     /// True when the streamed turn was already persisted server-side, so the caller should ADOPT
-    /// server state instead of regenerating (which would duplicate the turn). Requires BOTH a
-    /// trailing assistant message AND at least `expectedUserMatches` user messages equal to the sent
-    /// text. The count guard is what makes a REPEATED message safe: presence alone would match an
-    /// earlier identical turn and silently drop the new one. The backend persists user+assistant
-    /// atomically, so a persisted turn bumps the matching-user count by exactly one.
-    private static func historyContainsTurn(
-        _ messages: [ChatMessageDTO], userMessage: String, expectedUserMatches: Int
+    /// server state instead of regenerating (which would duplicate the turn). The backend
+    /// persists user+assistant atomically and the history page always holds the tail, so
+    /// the proof is exact: the last row is an assistant row we have NOT seen before, and
+    /// the row before it is the user's message with this text. A repeated message
+    /// ("why?" / "continue") is safe by construction — the new answer's id is new.
+    static func historyContainsTurn(
+        _ messages: [ChatMessageDTO], userMessage: String, knownAssistantServerIds: Set<String>
     ) -> Bool {
-        guard messages.last?.role == "assistant" else { return false }
-        let target = userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        let matchCount = messages.filter {
-            $0.role == "user" && $0.content.trimmingCharacters(in: .whitespacesAndNewlines) == target
-        }.count
-        return matchCount >= expectedUserMatches
+        guard messages.count >= 2, let last = messages.last, last.role == "assistant" else { return false }
+        guard !last.id.isEmpty, !knownAssistantServerIds.contains(last.id) else { return false }
+        let question = messages[messages.count - 2]
+        guard question.role == "user" else { return false }
+        return Self.reconcileKey(question.content) == Self.reconcileKey(userMessage)
+    }
+
+    /// Both sides of the reconcile comparison, folded the way the backend persists text:
+    /// `normalize_text` is NFKC + zero-width/bidi/control stripping + whitespace collapse.
+    /// The non-streaming door has no `meta` frame to hand us the server's copy, so a raw
+    /// "hold…" (iOS auto-ellipsis) never matched the persisted "hold..." and a saved,
+    /// charged turn was reported as failed.
+    static func reconcileKey(_ text: String) -> String {
+        let folded = text.precomposedStringWithCompatibilityMapping
+        let scalars = folded.unicodeScalars.filter { scalar in
+            switch scalar.value {
+            case 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064, 0xFEFF: return false
+            default: return !(scalar.properties.generalCategory == .control)
+            }
+        }
+        let cleaned = String(String.UnicodeScalarView(scalars))
+        return cleaned.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
     }
 
     // MARK: - Streaming helpers (thinking card + line-by-line reveal)

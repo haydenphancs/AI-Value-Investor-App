@@ -391,8 +391,24 @@ async def test_oauth_rejects_an_unknown_provider_at_the_schema():
 
 @pytest.mark.asyncio
 async def test_oauth_persists_a_first_time_display_name():
-    """Apple returns the name only on the FIRST authorization — miss it and it's gone."""
-    sb = FakeSupabase(row={"id": _USER_ID, "display_name": None})
+    """Apple returns the name only on the FIRST authorization — miss it and it's gone.
+
+    ⚠️ The row is NEVER null here in production: the signup trigger pre-fills the email's
+    local part. This fixture used to model a NULL row, which made the test pass while the
+    real path (a relay local part already sitting in the column) returned without writing.
+    Hide My Email is the realistic shape."""
+    sb = FakeSupabase(row={"id": _USER_ID, "email": "xk3n8d2q@privaterelay.appleid.com",
+                           "display_name": "xk3n8d2q"})
+    await auth_ep.oauth_sign_in(
+        OAuthSignInRequest(provider="apple", id_token="x" * 40, display_name="Ada L"),
+        _FakeRequest(), sb,
+    )
+    assert ("update", "users", ["display_name"]) in sb.log
+
+
+@pytest.mark.asyncio
+async def test_oauth_still_persists_when_the_row_is_genuinely_null():
+    sb = FakeSupabase(row={"id": _USER_ID, "email": _EMAIL, "display_name": None})
     await auth_ep.oauth_sign_in(
         OAuthSignInRequest(provider="apple", id_token="x" * 40, display_name="Ada L"),
         _FakeRequest(), sb,
@@ -403,7 +419,7 @@ async def test_oauth_persists_a_first_time_display_name():
 @pytest.mark.asyncio
 async def test_oauth_never_overwrites_an_existing_display_name():
     """The user may have renamed themselves deliberately since signing up."""
-    sb = FakeSupabase(row={"id": _USER_ID, "display_name": "Chosen Name"})
+    sb = FakeSupabase(row={"id": _USER_ID, "email": _EMAIL, "display_name": "Chosen Name"})
     await auth_ep.oauth_sign_in(
         OAuthSignInRequest(provider="apple", id_token="x" * 40, display_name="Apple Name"),
         _FakeRequest(), sb,

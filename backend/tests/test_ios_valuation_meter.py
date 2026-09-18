@@ -127,15 +127,19 @@ def test_the_section_carries_a_full_width_fair_value_disclaimer():
 
 # ── placement ────────────────────────────────────────────────────────────────
 
-def test_street_estimates_render_under_earnings_and_the_detail_view_passes_both():
+def test_street_estimates_are_gone_and_the_detail_view_wires_the_meter():
+    """The Street Estimates card was removed outright on 2026-09-17 (it never lived on
+    Financials for more than a day). The meter still gets the snapshot AND the live price
+    from the detail view — the gap is computed client-side, never shipped."""
     fin = _decl(_code(_FINANCIALS), "var body: some View")
-    assert fin.index("EarningsSectionCard(") < fin.index("AnalystForecastsSection(")
+    assert "AnalystForecastsSection(" not in fin and "forwardEstimates" not in fin
+    assert "EarningsSectionCard(" in fin  # anti-vacuity
     view = _code(_DETAIL_VIEW)
     analysis = view[view.index("case .analysis:"): view.index("case .financials:")]
     assert "valuationSnapshot: viewModel.valuationSnapshot" in analysis
     assert "currentPrice: viewModel.tickerData?.currentPrice" in analysis
     financials = view[view.index("case .financials:"): view.index("case .holders:")]
-    assert "analystRatingsData: viewModel.analystRatingsData" in financials
+    assert "analystRatingsData" not in financials, "Financials takes the ratings model again"
 
 
 def test_the_ai_context_grounds_the_valuation_chip_with_the_same_caveats():

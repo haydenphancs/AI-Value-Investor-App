@@ -210,15 +210,16 @@ async def fetch_ticker_news(ticker: str, is_crypto: bool = False) -> Dict[str, A
         # with its `*_available` flags. `error` is what the doors COUNT: without it a turn
         # whose only tool hit this outage was charged while the identical outage on
         # `get_market_snapshot` was refunded.
-        return {"ticker": sym, "news_available": False,
-                "error": f"{type(e).__name__}: {e}"[:200],
+        from app.log_redaction import redact_secrets
+        return {"ticker": sym, "news_available": False, "upstream": True,
+                "error": redact_secrets(f"{type(e).__name__}: {e}")[:200],
                 "note": "The news feed could not be reached; do not say there is no news."}
 
     if (payload or {}).get("fetch_failed"):
         # The feed answered `[]` because the upstream call FAILED (a 503 after retries, a
         # licence refusal) — the same shape as "no news", and the model used to say "No
         # company news was published today" about an outage.
-        return {"ticker": sym, "news_available": False,
+        return {"ticker": sym, "news_available": False, "upstream": True,
                 "error": "news feed unavailable (upstream fetch failed)",
                 "note": "The news feed could not be reached; do not say there is no news."}
 
@@ -364,7 +365,7 @@ async def fetch_market_snapshot() -> Dict[str, Any]:
             out["market_story"] = _card_digest(card)
 
     if not out:
-        return {"error": "No market data could be read right now."}
+        return {"error": "No market data could be read right now.", "upstream": True}
     as_of = _as_of_session(session_dates)
     if as_of:
         out["as_of_session"] = as_of
@@ -412,10 +413,14 @@ def _as_of_session(tally: Counter) -> Optional[Dict[str, Any]]:
         logger.warning("chat tool: unparseable session stamp %r on snapshot rows", stamp)
         return None
     live = session_trading_date()
-    if stamped >= live:
+    from app.services.widget_movers_service import _et_calendar_day
+    if stamped >= live and live == _et_calendar_day():
         word = "today"
     else:
-        word = f"on {stamped.strftime('%a')}"
+        # Older than the live session, OR the live session is not today's calendar day
+        # (a weekend, a holiday): "on Fri", never "today", for the same reason
+        # `widget_movers_service._session_of` words it that way.
+        word = f"on {max(stamped, live).strftime('%a') if stamped >= live else stamped.strftime('%a')}"
     return {
         "date": stamped.isoformat(),
         "word": word,
@@ -526,10 +531,12 @@ async def explain_price_move(ticker: str, is_crypto: bool = False) -> Dict[str, 
         )
         # A CRASH upstream, not an unreadable quote: carry `error` so the turn's tool
         # accounting counts it (see `fetch_ticker_news`).
+        from app.log_redaction import redact_secrets
         return {
             "ticker": sym,
             "move_readable": False,
-            "error": f"{type(e).__name__}: {e}"[:200],
+            "error": redact_secrets(f"{type(e).__name__}: {e}")[:200],
+            "upstream": True,
             "note": (
                 "Today's move for this symbol could not be read. Say so plainly rather "
                 "than describing it as unchanged."
@@ -735,7 +742,8 @@ async def _maybe_web_catalyst(
         # ⚠️ `"today"` — see this module's header. It is both the cache key shared with
         # the Updates sweeper and the guard against answering a daily question with a
         # multi-day window's narrative.
-        cached = await svc.get_catalyst(sym, change, "today", cache_only=True)
+        cached = await svc.get_catalyst(sym, change, "today", cache_only=True,
+                                        company_name=getattr(exp, "company_name", None))
     except Exception as e:  # noqa: BLE001
         logger.warning("chat tool: catalyst cache read failed for %s (%s: %s)",
                        sym, type(e).__name__, e)
@@ -759,7 +767,10 @@ async def _maybe_web_catalyst(
         return None
 
     try:
-        fresh = await svc.get_catalyst(sym, change, "today")
+        # The listed name rides along so the web search targets the security, not the
+        # coin that shares its ticker (LTC Properties vs Litecoin) — see `_prompt_subject`.
+        fresh = await svc.get_catalyst(sym, change, "today",
+                                       company_name=getattr(exp, "company_name", None))
     except asyncio.CancelledError:
         # The tool runner's timeout cancelled us mid-search. Whether Google billed the
         # search is unknowable from here; the unit is refunded in a detached task (awaiting

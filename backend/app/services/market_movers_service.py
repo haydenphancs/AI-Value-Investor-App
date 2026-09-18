@@ -224,7 +224,13 @@ class MarketMoversService:
             # about which session a change belongs to.
             change_session: Optional[str] = None
             if change_pct is not None:
-                change_session = PriceService._change_session(prev, snap)
+                # WITH the live price — the one thing that tells the live session from
+                # the stored close's. Without it every row carried `trade_date` all day:
+                # from the open until the ~20:00 ET close ingest the change was today's
+                # move stamped with YESTERDAY's session, so the snapshot told the model
+                # to say "on Wed" about Thursday's live tape and the widget's industry
+                # attribution (which refuses a stamp older than the batch's) blanked.
+                change_session = PriceService._change_session(prev, snap, price)
             # change_pct stays None when there is no usable previous close. Callers must
             # skip those rather than treat them as 0.0% — a fabricated flat day on a real
             # company is worse than an absent row.

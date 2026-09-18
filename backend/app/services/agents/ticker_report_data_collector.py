@@ -543,6 +543,7 @@ class TickerReportDataCollector:
                 out.ticker,
                 float(pa.get("change_pct") or 0.0),
                 pa.get("window_label") or "",
+                company_name=(out.profile or {}).get("companyName"),
             )
         except Exception as exc:
             logger.warning(

@@ -131,6 +131,12 @@ struct RevenueBreakdownData {
     let reportedRevenue: Double?
     /// Interest, non-operating items, minority interest, discontinued ops.
     let otherExpense: Double?
+    /// Intersegment sales inside the segment stack, eliminated in consolidation — a POSITIVE
+    /// magnitude. INTC FY2025: Client 32.2B + Foundry 17.8B + Data Center 16.9B + Other
+    /// 3.6B = 70.5B of segments against 52.9B of revenue, because Intel Foundry's sales to
+    /// Intel's own product groups count in both. The segments stay as Intel reported them;
+    /// this is the bridge from their sum down to revenue. nil ⇒ the stack IS the revenue.
+    let intersegmentEliminations: Double?
 
     init(tickerSymbol: String,
          fiscalYear: String,
@@ -140,7 +146,8 @@ struct RevenueBreakdownData {
          tax: Double,
          reportedNetIncome: Double? = nil,
          reportedRevenue: Double? = nil,
-         otherExpense: Double? = nil) {
+         otherExpense: Double? = nil,
+         intersegmentEliminations: Double? = nil) {
         self.tickerSymbol = tickerSymbol
         self.fiscalYear = fiscalYear
         self.revenueSources = revenueSources
@@ -150,13 +157,32 @@ struct RevenueBreakdownData {
         self.reportedNetIncome = reportedNetIncome
         self.reportedRevenue = reportedRevenue
         self.otherExpense = otherExpense
+        self.intersegmentEliminations = intersegmentEliminations
     }
 
     // MARK: - Computed Properties
 
-    /// Sum of the revenue SEGMENTS — the height of the revenue bar.
+    /// Sum of the revenue SEGMENTS — the height of the revenue bar. GROSS of intersegment
+    /// sales when `intersegmentEliminations` is set: the stack then tops out above revenue
+    /// (INTC 133%) and the eliminations step brings the waterfall down to `netRevenue`.
     var totalRevenue: Double {
         revenueSources.reduce(0) { $0 + $1.value }
+    }
+
+    /// The stack net of eliminations — what consolidation actually books as revenue, and
+    /// the level the cost waterfall measures against. Equals `totalRevenue` for every
+    /// company whose segments already sum to revenue.
+    var netRevenue: Double {
+        totalRevenue - (intersegmentEliminations ?? 0)
+    }
+
+    /// The legend line that makes the revenue column add to 100%: a NEGATIVE item beside
+    /// the segments, in the same muted grey the chart draws the step in. nil unless gross.
+    var eliminationsLegendItem: RevenueSource? {
+        guard let intersegmentEliminations, intersegmentEliminations > 0 else { return nil }
+        return RevenueSource(name: "Intersegment eliminations",
+                             value: -intersegmentEliminations,
+                             color: AppColors.growthSectorGray)
     }
 
     /// Denominator for every percentage on the card.
@@ -188,7 +214,7 @@ struct RevenueBreakdownData {
     /// always was, but never worse — and never a fabricated zero.
     var netProfit: Double {
         if let reportedNetIncome { return reportedNetIncome }
-        return totalRevenue - totalCosts
+        return netRevenue - totalCosts
     }
 
     var isProfit: Bool {
@@ -226,6 +252,23 @@ struct RevenueBreakdownData {
             ? CostItem(name: creditLabel, value: -value, color: AppColors.gain,
                        chartColor: AppColors.gainGraphic, isCredit: true)
             : CostItem(name: label, value: value, color: color, chartColor: chartColor)
+    }
+
+    /// The eliminations as the FIRST step of the waterfall: from the gross segment stack
+    /// down to reported revenue, before Cost of Sales. Muted, because it is a
+    /// consolidation entry, not a cost — which is also why it is NOT in `costItems` (the
+    /// legend's cost column) but beside the segments via `eliminationsLegendItem`.
+    var eliminationsWaterfallStep: CostItem? {
+        guard let intersegmentEliminations, intersegmentEliminations > 0 else { return nil }
+        return CostItem(name: "Intersegment eliminations",
+                        value: intersegmentEliminations,
+                        color: AppColors.growthSectorGray,
+                        chartColor: AppColors.growthSectorGray.opacity(0.55))
+    }
+
+    /// What the cost column DRAWS: the eliminations bridge (when gross) then the costs.
+    var waterfallItems: [CostItem] {
+        (eliminationsWaterfallStep.map { [$0] } ?? []) + costItems
     }
 
     // Cost items for display
@@ -294,20 +337,21 @@ struct RevenueBreakdownData {
         max(totalRevenue, totalCosts) * 1.1
     }
 
-    /// Whether costs exceed revenue (company is loss-making)
+    /// Whether costs exceed revenue (company is loss-making) — against NET revenue: a gross
+    /// stack would otherwise call INTC's loss year profitable.
     var costsExceedRevenue: Bool {
-        totalCosts > totalRevenue
+        totalCosts > netRevenue
     }
 
     /// Revenue as percentage of chart max (for break-even line positioning)
     var revenuePercentageOfMax: Double {
         guard chartMaxValue > 0 else { return 0 }
-        return totalRevenue / chartMaxValue
+        return netRevenue / chartMaxValue
     }
 
     /// Calculate cumulative position for waterfall chart
     func waterfallPosition(for index: Int) -> (start: Double, end: Double) {
-        var currentPosition = totalRevenue
+        var currentPosition = netRevenue
 
         for i in 0..<index {
             currentPosition -= costItems[i].value

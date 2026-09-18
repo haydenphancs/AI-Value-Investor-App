@@ -282,3 +282,30 @@ async def test_missing_created_at_everywhere_does_not_crash():
     assert "EARLIER CONVERSATION (summary):" in out
     # No parseable watermark → nothing worth caching, so no write.
     assert db.writes == []
+
+
+# ── the stale-summary fallback carries the lagging turns too (2026-09-17) ────
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_falls_back_to_the_stale_summary_AND_the_lagging_turns():
+    """The F6-5 fix carried the messages past the watermark verbatim — but only on the
+    reuse branch. When the refresh was due and the flash-lite call raised, the code fell
+    back to the STALE summary with the bare last-6 window, so the uncovered older turns
+    were in neither the summary nor the window: the exact gap, on the path where
+    grounding matters most."""
+    from app.config import settings
+    history = _msgs(20)
+    older = history[:-ChatService._RECENT_TURNS]
+    behind = settings.CHAT_SUMMARY_REFRESH_AFTER_MESSAGES
+    upto = ChatService._parse_ts(older[-(behind + 1)]["created_at"])
+    g = _Gemini(raises=True)
+    db = _Supabase(row=_row(summary="- cached goals", upto=upto))
+    block = await _svc(g, db)._condense_history(history, session_id="s1")
+    assert g.calls == 1, "the refresh was attempted"
+    assert "- cached goals" in block, "the stale summary is kept"
+    lagging = older[-behind:]
+    for m in lagging:
+        assert m["content"] in block, f"{m['content']} is in neither the summary nor the window"
+    # …and it still precedes the verbatim recent window.
+    assert block.index(lagging[0]["content"]) < block.index(history[-1]["content"])
+    assert db.writes == [], "nothing new was stored"

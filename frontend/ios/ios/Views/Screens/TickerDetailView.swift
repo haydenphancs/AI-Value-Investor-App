@@ -388,7 +388,6 @@ struct TickerDetailView: View {
                 signalOfConfidenceData: viewModel.signalOfConfidenceData,
                 revenueBreakdownData: viewModel.revenueBreakdownData,
                 healthCheckData: viewModel.healthCheckData,
-                analystRatingsData: viewModel.analystRatingsData,
                 isLoaded: viewModel.isFinancialsLoaded,
                 onEarningsDetailTap: viewModel.handleEarningsDetail,
                 onGrowthDetailTap: viewModel.handleGrowthDetail,

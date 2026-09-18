@@ -91,11 +91,22 @@ class _Query:
                 return False
         return True
 
+    # Optional fault injection (set on the FakeSupabase): `raise_on(op, set_values)` returns
+    # an exception to raise for this statement, or None. `commit_before_raise` applies the
+    # UPDATE first and raises afterwards — the "commit, then the reply is lost" shape.
+    raise_on = None
+    commit_before_raise = False
+
     def execute(self):
         matched = [r for r in self._store if self._match(r)]
+        exc = self.raise_on(self._op, self._set) if self.raise_on else None
+        if exc is not None and not (self._op == "update" and self.commit_before_raise):
+            raise exc
         if self._op == "update":
             for r in matched:
                 r.update(self._set)
+            if exc is not None:
+                raise exc
             return _Result([dict(r) for r in matched])
         if self._limit is not None:
             matched = matched[: self._limit]
@@ -103,11 +114,16 @@ class _Query:
 
 
 class FakeSupabase:
-    def __init__(self, rows):
+    def __init__(self, rows, raise_on=None, commit_before_raise=False):
         self._store = rows
+        self._raise_on = raise_on
+        self._commit_before_raise = commit_before_raise
 
     def table(self, _name):
-        return _Query(self._store)
+        q = _Query(self._store)
+        q.raise_on = self._raise_on
+        q.commit_before_raise = self._commit_before_raise
+        return q
 
 
 class FakeCreditService:
@@ -525,7 +541,8 @@ async def test_sweep_does_not_retry_a_non_transient_lookup_failure():
 # free account (50/month) that is 40% of the allocation.
 
 
-def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None, intent=None):
+def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None, intent=None,
+            raise_on=None, commit_before_raise=False, refund_outcome=999):
     import asyncio
     from app.api.v1.endpoints import research as research_ep
 
@@ -534,13 +551,14 @@ def _delete(rows, report_id="rep-1", user_id="user-1", refunds=None, intent=None
     class _Credits:
         def refund_ledgered(self, uid, amount, *, reason, ref_id):
             calls.append({"user_id": uid, "amount": amount, "reason": reason, "ref_id": ref_id})
-            return 999
+            return refund_outcome
 
     original = research_ep.CreditService
     research_ep.CreditService = _Credits
     try:
         return asyncio.run(research_ep.delete_report(
-            report_id, intent=intent, user={"id": user_id}, supabase=FakeSupabase(rows)
+            report_id, intent=intent, user={"id": user_id},
+            supabase=FakeSupabase(rows, raise_on=raise_on, commit_before_raise=commit_before_raise),
         )), calls
     finally:
         research_ep.CreditService = original
@@ -554,6 +572,25 @@ def test_deleting_an_in_flight_report_refunds_it():
     assert rows[0]["status"] == "deleted"
     assert rows[0]["is_refunded"] is True, "the refund must be CLAIMED, or the sweep could double it"
     assert len(calls) == 1 and calls[0]["amount"] == 20
+
+
+@pytest.mark.parametrize("outcome", [
+    {"outcome": "partial", "refunded": 1, "requested": 20},
+    {"outcome": "no_matching_debit", "refunded": 0},
+    None,
+])
+def test_a_delete_whose_refund_leaked_says_so_in_its_response(outcome, caplog):
+    """`{"outcome": "refunded"}` used to be returned after BOTH branches, so a leaked
+    refund told the client the money was back while the server logged REFUND LEAK."""
+    import logging
+
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    with caplog.at_level(logging.ERROR):
+        resp, calls = _delete(rows, refund_outcome=outcome)
+    assert len(calls) == 1
+    assert resp["outcome"] == "refund_failed", resp
+    assert any("REFUND LEAK" in r.getMessage() for r in caplog.records)
 
 
 def test_the_delete_refund_uses_the_ticker_the_charge_used():
@@ -651,6 +688,98 @@ def test_only_the_retry_intent_refuses(intent):
     assert rows[0]["status"] == expected, intent
 
 
+# ── A raised refund CAS must never forfeit a charged row (2026-09-17) ─────────────────
+#
+# The CAS `except` used to set `claimed = None` and FALL THROUGH to the unconditional
+# soft-delete. A transient 520 on that one UPDATE (a shape prod hits) soft-deleted a
+# processing row with `is_refunded=False`: 'deleted' is outside every claimable set, so
+# the 20 credits were unreachable forever, silently — and Retry then charged 20 more.
+
+
+def _cas_raiser(exc):
+    """Raise `exc` for the refund CAS only (the UPDATE whose SET carries is_refunded)."""
+    return lambda op, values: exc if (op == "update" and values and "is_refunded" in values) else None
+
+
+def _body(resp):
+    import json
+    return json.loads(resp.body)
+
+
+@pytest.mark.parametrize("intent", [None, "retry"])
+def test_a_raising_refund_cas_leaves_the_row_untouched_and_answers_busy(intent):
+    from tests.test_supabase_transient_classifier import gateway_error
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, intent=intent, raise_on=_cas_raiser(gateway_error(520)))
+    assert rows[0]["status"] == "processing" and rows[0]["is_refunded"] is False, \
+        "a charged in-flight row was forfeited"
+    assert calls == []
+    assert resp.status_code == 409 and _body(resp)["error_code"] == "SYSTEM_BUSY"
+    assert _body(resp)["details"]["step"] == "delete_claim"
+
+
+def test_a_cas_that_committed_but_lost_its_reply_still_refunds():
+    """The re-read sees deleted+is_refunded → this call's UPDATE landed → refund now."""
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "processing",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    resp, calls = _delete(rows, raise_on=_cas_raiser(RuntimeError("reply lost")),
+                          commit_before_raise=True)
+    assert rows[0]["status"] == "deleted" and rows[0]["is_refunded"] is True
+    assert len(calls) == 1 and calls[0]["amount"] == 20 and calls[0]["ref_id"] == "AAPL"
+    assert resp == {"message": "Report deleted successfully", "outcome": "refunded"}
+
+
+def test_a_raising_peek_refuses_to_delete_rather_than_guessing():
+    """Without the peek the soft-delete cannot tell a finished report from a charged one,
+    and under retry intent the peek is the refusal's only evidence — fail closed."""
+    from tests.test_supabase_transient_classifier import gateway_error
+    for intent in (None, "retry"):
+        rows = [{"id": "rep-1", "user_id": "user-1", "status": "completed",
+                 "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+        resp, calls = _delete(rows, intent=intent,
+                              raise_on=lambda op, values: gateway_error(520) if op == "select" else None)
+        assert rows[0]["status"] == "completed", intent
+        assert calls == []
+        assert resp.status_code == 409 and _body(resp)["details"]["step"] == "delete_peek"
+
+
+def test_a_charged_claimable_row_the_cas_missed_is_not_soft_deleted():
+    """The CAS matched nothing yet the peek reads processing/unrefunded/charged (a status
+    flip between the two statements): soft-deleting would strand the charge."""
+    rows = [{"id": "rep-1", "user_id": "user-1", "status": "pending",
+             "is_refunded": False, "credits_charged": 20, "ticker": "AAPL"}]
+    # Make the CAS miss: it filters on status IN _REFUNDABLE_ON_DELETE — model the race by
+    # having the CAS see a non-claimable status and the peek see a claimable one.
+    class _Flip(FakeSupabase):
+        def __init__(self, rows):
+            super().__init__(rows); self.n = 0
+        def table(self, name):
+            q = super().table(name)
+            orig = q.execute
+            def _exec():
+                self.n += 1
+                if self.n == 1:               # the CAS: pretend the row was 'completed' for it
+                    return type("R", (), {"data": []})()
+                return orig()
+            q.execute = _exec
+            return q
+    import asyncio
+    from app.api.v1.endpoints import research as research_ep
+    calls = []
+    class _Credits:
+        def refund_ledgered(self, *a, **k):
+            calls.append(1); return 999
+    original = research_ep.CreditService
+    research_ep.CreditService = _Credits
+    try:
+        resp = asyncio.run(research_ep.delete_report("rep-1", intent=None, user={"id": "user-1"}, supabase=_Flip(rows)))
+    finally:
+        research_ep.CreditService = original
+    assert rows[0]["status"] == "pending" and calls == []
+    assert resp.status_code == 409 and _body(resp)["details"]["step"] == "delete_claim_race"
+
+
 def test_a_retry_delete_of_someone_elses_completed_report_reveals_nothing():
     """The peek is scoped to the caller; another user's completed row reads as absent,
     and the plain soft-delete (also scoped) mutates nothing."""
@@ -742,6 +871,27 @@ async def test_a_no_op_refund_is_logged_with_the_report_id(caplog, pushes):
     # push is stubbed rather than dying on a blocked socket.
     assert pushes and "credits" not in pushes[0]["body"].lower(), (
         f"a leaked refund still promised the credits back: {pushes!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_partial_reconciled_refund_is_a_leak_and_promises_nothing(caplog, pushes):
+    """Charged 20 at 23:50 ET, one chat turn after midnight resets `used` to 1, the sweep
+    claims the row at 00:15 and the RPC moves 1 of 20. `refund_ledgered` now answers
+    `outcome: partial`; this site must page and must NOT tell the user their credits are back."""
+    import logging
+
+    FakeCreditService.outcome = {
+        "outcome": "partial", "refunded": 1, "requested": 20, "spendable": 140}
+    sb = FakeSupabase([_row(credits_charged=20)])
+    with caplog.at_level(logging.ERROR):
+        await recon.claim_and_mark_failed("r1", _BLOB, supabase=sb)
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR
+              and r.name.startswith("app.services.research_reconciliation")]
+    assert errors and "REFUND LEAK" in errors[0].getMessage() and "r1" in errors[0].getMessage()
+    assert pushes and "credits have been returned" not in pushes[0]["body"], (
+        f"a 1-of-20 refund still promised the credits back: {pushes!r}"
     )
 
 

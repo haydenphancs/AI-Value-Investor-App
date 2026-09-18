@@ -27,6 +27,17 @@ struct RevenueBreakdownLegendView: View {
                         percentage: source.formattedPercentage(of: data.revenueBasis)
                     )
                 }
+                // The negative line that makes a gross stack add to 100%: INTC's segments
+                // are 61 + 34 + 32 + 7 = 134% of revenue until the eliminations take 33%
+                // back. Same grey as the waterfall step it explains.
+                if let eliminations = data.eliminationsLegendItem {
+                    RevenueBreakdownLegendItem(
+                        color: eliminations.color,
+                        name: eliminations.name,
+                        value: eliminations.formattedValue,
+                        percentage: eliminations.formattedPercentage(of: data.revenueBasis)
+                    )
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 

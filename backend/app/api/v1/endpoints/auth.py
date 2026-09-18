@@ -11,6 +11,7 @@ from typing import Optional
 
 from app.database import (
     get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
+    run_gotrue,
 )
 from app.dependencies import get_current_user_id
 from app.core.security import (
@@ -144,10 +145,10 @@ async def sign_in(
         retry_after="60",
     )
     try:
-        auth_response = _auth_of(auth_client, supabase).auth.sign_in_with_password({
-            "email": request.email,
-            "password": request.password,
-        })
+        auth_response = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.sign_in_with_password,
+            {"email": request.email, "password": request.password},
+        )
 
         user = auth_response.user
         if not user:
@@ -276,13 +277,16 @@ async def sign_up(
         retry_after="60",
     )
     try:
-        auth_response = _auth_of(auth_client, supabase).auth.sign_up({
-            "email": request.email,
-            "password": request.password,
-            "options": {
-                "data": {"display_name": request.display_name}
+        auth_response = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.sign_up,
+            {
+                "email": request.email,
+                "password": request.password,
+                "options": {
+                    "data": {"display_name": request.display_name}
+                },
             },
-        })
+        )
 
         user = auth_response.user
         if not user:
@@ -455,7 +459,10 @@ async def resend_confirmation(
     )
 
     try:
-        _auth_of(auth_client, supabase).auth.resend({"type": "signup", "email": email_key})
+        await run_gotrue(
+            _auth_of(auth_client, supabase).auth.resend,
+            {"type": "signup", "email": email_key},
+        )
         logger.info("Confirmation email resend requested")
     except Exception as e:
         # Unknown address, already-confirmed address, and provider errors must all look
@@ -656,9 +663,18 @@ def _ensure_display_name(supabase: Client, user_id: str, display_name: Optional[
         return
     try:
         row = (
-            supabase.table("users").select("display_name").eq("id", user_id).single().execute()
+            supabase.table("users").select("display_name, email")
+            .eq("id", user_id).single().execute()
         )
-        if (row.data or {}).get("display_name"):
+        data = row.data or {}
+        current = (data.get("display_name") or "").strip()
+        # The signup trigger never leaves this NULL: it pre-fills the email's local part
+        # (`split_part(NEW.email, '@', 1)`), so on an Apple sign-in with Hide My Email the
+        # row already read "xk3n8d2q" and the name Apple sent ONCE was thrown away —
+        # Profile, Settings and every greeting showed the relay local part forever. A
+        # placeholder equal to the row's own email local part is "unset", not "chosen".
+        local_part = (data.get("email") or "").split("@")[0].strip()
+        if current and current.casefold() != local_part.casefold():
             return
         supabase.table("users").update(
             {"display_name": display_name.strip()}
@@ -694,7 +710,9 @@ async def oauth_sign_in(
         credentials["nonce"] = request.nonce
 
     try:
-        result = _auth_of(auth_client, supabase).auth.sign_in_with_id_token(credentials)
+        result = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.sign_in_with_id_token, credentials,
+        )
     except Exception as e:
         # Includes a bad signature, a wrong audience, an expired token, and a nonce
         # mismatch. Deliberately not echoed to the client.
@@ -852,7 +870,9 @@ async def forgot_password(
     )
 
     try:
-        _auth_of(auth_client, supabase).auth.reset_password_for_email(email_key)
+        await run_gotrue(
+            _auth_of(auth_client, supabase).auth.reset_password_for_email, email_key,
+        )
         logger.info("Password reset requested for a registered-or-not address")
     except Exception as e:
         # Never surface this. A provider error and an unknown address must be
@@ -894,11 +914,10 @@ async def reset_password(
 
     # 1. Verify the OTP. This is what proves control of the mailbox.
     try:
-        verified = _auth_of(auth_client, supabase).auth.verify_otp({
-            "email": email_key,
-            "token": request.code,
-            "type": "recovery",
-        })
+        verified = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.verify_otp,
+            {"email": email_key, "token": request.code, "type": "recovery"},
+        )
     except Exception as e:
         logger.info("Password reset OTP verification failed (%s)", type(e).__name__)
         raise HTTPException(
@@ -922,7 +941,10 @@ async def reset_password(
     #    allowed", so every reset 500'd. Admin is still right over the verify_otp session: it
     #    keeps this independent of SDK session state.
     try:
-        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        await run_gotrue(
+            resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id,
+            user_id, {"password": request.new_password},
+        )
     except Exception as e:
         logger.error(
             "Password update failed after a VERIFIED reset code for user=%s: %s: %s",
@@ -1048,10 +1070,10 @@ async def change_password(
 
     # Verify the current password.
     try:
-        _auth_of(auth_client, supabase).auth.sign_in_with_password({
-            "email": email,
-            "password": request.current_password,
-        })
+        await run_gotrue(
+            _auth_of(auth_client, supabase).auth.sign_in_with_password,
+            {"email": email, "password": request.current_password},
+        )
     except Exception as e:
         # CLASSIFY, exactly as /login does. This block used to map EVERY exception to
         # "Your current password is incorrect." — so a GoTrue 429 (which this endpoint's own
@@ -1092,7 +1114,10 @@ async def change_password(
     # Running admin there made every single change-password call fail with GoTrue's "User not
     # allowed", which no classifier below matches, so it surfaced as a bare 500.
     try:
-        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(user_id, {"password": request.new_password})
+        await run_gotrue(
+            resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id,
+            user_id, {"password": request.new_password},
+        )
     except Exception as e:
         # Same split as the re-authentication block above: THEIRS vs OURS.
         #
@@ -1226,11 +1251,10 @@ async def set_password(
 
     # Verify the OTP. This is what proves control of the mailbox.
     try:
-        verified = _auth_of(auth_client, supabase).auth.verify_otp({
-            "email": email,
-            "token": request.code,
-            "type": "recovery",
-        })
+        verified = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.verify_otp,
+            {"email": email, "token": request.code, "type": "recovery"},
+        )
     except Exception as e:
         logger.info(
             "set-password: OTP verification failed for user=%s (%s)", user_id, type(e).__name__
@@ -1261,8 +1285,9 @@ async def set_password(
     # "User not allowed", which matches no classifier and surfaces as a bare 500. That is the
     # exact defect that made change-password and reset-password fail 100% of the time.
     try:
-        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id(
-            user_id, {"password": request.new_password}
+        await run_gotrue(
+            resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id,
+            user_id, {"password": request.new_password},
         )
     except Exception as e:
         if _is_password_rejected(e):

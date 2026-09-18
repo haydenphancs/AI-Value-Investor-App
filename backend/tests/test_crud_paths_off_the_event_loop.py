@@ -487,7 +487,11 @@ def test_no_async_handler_calls_a_blocking_sync_helper_directly():
 #: STORAGE calls in `users.py`, so reverting the account-deletion purge back onto the loop
 #: was invisible — the exemption silently covered a defect it was never meant to.
 _BLOCKING_BY_DESIGN = {
-    "api/v1/endpoints/auth.py": {"auth"},     # shared GoTrue singleton — see the note above
+    # `auth.py` LEFT this list on 2026-09-17: every GoTrue verb there now runs through
+    # `database.run_gotrue`, which keeps the serialisation the loop used to provide (a
+    # process-wide asyncio.Lock, service_role re-asserted INSIDE it) while the verb itself
+    # runs in a worker thread. A flood of wrong-password logins now queues LOGINS, not the
+    # whole process. Re-adding the entry re-opens that stall.
     "api/v1/endpoints/users.py": {"auth"},    # auth.admin.delete_user on the same client
 }
 

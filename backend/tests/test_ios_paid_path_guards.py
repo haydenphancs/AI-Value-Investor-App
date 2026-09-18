@@ -56,20 +56,47 @@ def _src(path: Path) -> str:
 # fails every time, so that report charges on EVERY open.
 
 
+def _path_a_catch() -> str:
+    """The comment-stripped, brace-bound body of Path A's `catch` inside `_fetchReport`."""
+    body = _decl_body(_code(_REPORT_VM), "private func _fetchReport(")
+    return _decl_body(body, "} catch {")
+
+
 def test_path_a_failure_does_not_fall_through_to_the_billable_path_unconditionally():
-    src = _src(_REPORT_VM)
-    assert "reportIsGenuinelyUnavailable" in src, (
-        "TickerReportViewModel must classify Path A failures before falling through to the "
-        "BILLABLE live fetch — an unqualified `catch` re-buys a report the user already owns"
+    """⚠️ This guard used to be vacuous. It asserted the classifier's NAME appeared somewhere
+    after `_fetchReport` and before `getTickerReport` — which the REFRESH-only gate
+    (`if !allowPaidGeneration { … }`) satisfies on its own. Reverting the NORMAL-load gate to
+    the original C2 shape (fall through unconditionally when paid generation is allowed) left
+    every test in this file green while a drifted DTO charged 20 credits on every open.
+
+    So: comment-stripped, bound to the catch, and the normal-load gate is located AFTER the
+    refresh gate and required to be `if <classifier> { … } else { …return… }`."""
+    catch = _path_a_catch()
+    assert catch.count("Self.reportIsGenuinelyUnavailable(error)") >= 2, (
+        "Path A's catch must classify the failure on BOTH the refresh path and the normal "
+        "load — one consult is the refresh-only gate, which does nothing for a plain open"
     )
 
-    # The classifier must be consulted inside _fetchReport, not merely defined.
-    body = src[src.index("private func _fetchReport"):]
-    guard_at = body.index("reportIsGenuinelyUnavailable")
-    fallthrough_at = body.index("getTickerReport")
-    assert guard_at < fallthrough_at, (
-        "the classification must happen BEFORE the billable Path B call"
+    # Skip past the refresh gate; the normal-load gate is what bills or refuses to.
+    refresh = _decl_body(catch, "if !allowPaidGeneration")
+    tail = catch[catch.index(refresh) + len(refresh):]
+    m = re.search(r"if\s+Self\.reportIsGenuinelyUnavailable\(error\)\s*\{", tail)
+    assert m, "the NORMAL-load gate is missing: an unqualified catch re-buys an owned report"
+    # `_decl_body` returns from the `{`, so offset from the brace, not from the match.
+    then_block = _decl_body(tail[m.start():], "if")
+    after = tail[tail.index("{", m.start()) + len(then_block):]
+    assert re.match(r"\s*else\s*\{", after), (
+        "the normal-load gate has no else-arm — a transport/decode failure must be REFUSED, "
+        "not silently allowed to reach the billable Path B"
     )
+    else_block = _decl_body(after, "else")
+    assert re.search(r"\breturn\b", else_block), (
+        "the refusal arm must `return`: showing an error and then continuing into "
+        "`getTickerReport` still bills"
+    )
+    # And all of that happens before the billable call.
+    body = _decl_body(_code(_REPORT_VM), "private func _fetchReport(")
+    assert body.index("} catch {") < body.index(".getTickerReport(")
 
 
 def test_only_genuinely_absent_reports_justify_a_paid_regeneration():
@@ -489,9 +516,47 @@ def test_the_meta_frame_rewrites_the_optimistic_bubble_and_the_reconcile_clamps(
     body = _decl_body(vm, "private func streamMessageToSession(")
     arm = body[body.index('case "meta":'):body.index('case "credits":')]
     assert "messages[idx].content = [.text(serverMessage)]" in arm, arm
-    assert "lastIndex(where: { $0.role == .user })" in arm
+    # By IDENTITY first: with `messages` replaced underneath the turn (a history load that
+    # raced the send), "the last user row" was the PREVIOUS question and took this turn's
+    # text. The role-based fallback is only for a caller that passed no id.
+    assert "messages.firstIndex(where: { $0.id == userMessageId })" in arm, arm
+    assert arm.index("firstIndex(where: { $0.id == userMessageId })") < \
+        arm.index("lastIndex(where: { $0.role == .user })")
+    # Both senders thread their optimistic bubble's id through.
+    send = _decl_body(vm, "func sendMessage(_ text: String)")
+    assert "userMessageId: userMessage.id" in send, "sendMessage must pass its bubble id"
+    seed = _decl_body(vm, "func startNewConversation(")
+    assert "userMessageId: userMessage.id" in seed, "the seed must pass its bubble id"
     rec = _decl_body(vm, "private func reconcileAfterStreamFailure(")
-    assert "let expectedUserMatches = max(1, messages.filter {" in rec, rec
+    # 2026-09-17: the count oracle is gone — the reconcile keys on server ids (see
+    # test_the_reconcile_oracle_is_identity_based_and_never_regenerates_on_a_transport_failure).
+    assert "knownAssistantServerIds()" in rec, rec
+
+
+def test_the_reconcile_oracle_is_identity_based_and_never_regenerates_on_a_transport_failure():
+    """Two defects shared the count oracle: the server's history page is the newest 400
+    rows while the local list is the whole conversation (a saved, charged turn read as
+    "absent" → re-POST), and ONE "not there yet" read after a transport drop was taken as
+    "will never be there" while the origin — silent to a phone whose radio dropped — was
+    still generating, persisting and charging the turn."""
+    vm = _code(_CHAT_VM)
+    oracle = _decl_body(vm, "static func historyContainsTurn(")
+    assert "knownAssistantServerIds.contains(last.id)" in oracle
+    assert "messages[messages.count - 2]" in oracle and 'question.role == "user"' in oracle
+    assert "reconcileKey(" in oracle, "both sides must be folded like the backend's normalize_text"
+    assert "expectedUserMatches" not in vm, "the count oracle must be gone everywhere"
+    rec = _decl_body(vm, "private func reconcileAfterStreamFailure(")
+    assert "mayRegenerate" in rec
+    assert "[0, 2, 5, 10, 15, 15]" in rec, "a transport failure gets a bounded WAIT, not a verdict"
+    tail = rec[rec.index("guard mayRegenerate else"):]
+    assert "reportTurnFailure(ChatStreamError.unconfirmed)" in tail[:tail.index("sendMessageToSession(")]
+    stream = _decl_body(vm, "private func streamMessageToSession(")
+    catch = stream[stream.index("} catch {"):]
+    assert "if case APIError.businessError = error { serverVerdict = true }" in catch
+    assert "mayRegenerate: serverVerdict" in catch
+    models = _code(_REPO / "frontend" / "ios" / "ios" / "Models" / "ChatConversationModels.swift")
+    assert "var serverId: String?" in models
+    assert "serverId: id.isEmpty ? nil : id" in models, "toRichChatMessage must carry the server id"
 
 
 def test_a_failed_history_read_never_regenerates_the_turn():
@@ -619,3 +684,26 @@ def test_the_chat_balance_is_refreshed_only_when_credits_actually_moved():
         "the refresh no longer gates on whether the turn moved credits — a free follow-up "
         "will spend a request on the answer path for no reason"
     )
+
+
+def test_a_send_cannot_race_a_history_load():
+    """Slow network: tap a history row, type while the spinner shows, send. The load then
+    replaced `messages` (optimistic bubble gone) and this turn's `meta` frame rewrote the
+    PREVIOUS question. Belt: the ViewModel refuses the send while a load is in flight;
+    braces: the screen greys the bar and hides the chips for the same window."""
+    vm = _code(_CHAT_VM)
+    send = _decl_body(vm, "func sendMessage(_ text: String)")
+    assert re.search(r"guard\s+!isAITyping\s*,\s*!isLoadingSession\s+else\s*\{\s*return\s*\}", send), (
+        "sendMessage must guard on isLoadingSession as well as isAITyping"
+    )
+    # The load's catch releases the gate, or a failed load would strand the send bar.
+    load = _decl_body(vm, "func loadConversation(sessionId: String)")
+    catch = load[load.index("} catch {"):]
+    assert "isLoadingSession = false" in catch
+    screen = _code(_CHAT_SCREEN)
+    assert re.search(r"isBusy:\s*viewModel\.isAITyping\s*\|\|\s*viewModel\.isLoadingSession", screen), (
+        "the chat bar must read busy while a history row is loading"
+    )
+    chips = screen[screen.index("suggestions: (viewModel.messages.isEmpty"):]
+    chips = chips[:chips.index("suggestions.map")]
+    assert "!viewModel.isLoadingSession" in chips, "chips must hide while a history row loads"

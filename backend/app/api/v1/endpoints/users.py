@@ -232,7 +232,7 @@ async def get_user_credits(
     # skips the guest sentinel). Best-effort: a transient RPC blip falls through to the raw read.
     if user["id"] != GUEST_USER_ID:
         try:
-            CreditService().ensure_period(user["id"])
+            await asyncio.to_thread(CreditService().ensure_period, user["id"])
         except CreditServiceUnavailable:
             logger.warning(
                 "ensure_period unavailable for user=%s — serving raw balance", user["id"]
@@ -307,7 +307,7 @@ async def get_my_subscription(
     """Current user's subscription entitlement. Falls back to the tier on the
     users row (mirrored by receipt-validation webhooks), else Free, when no
     `subscriptions` row exists yet. Auth-only — guests have no subscription."""
-    sub = SubscriptionService().get_user_subscription(user["id"])
+    sub = await asyncio.to_thread(SubscriptionService().get_user_subscription, user["id"])
     if not sub:
         tier = user.get("tier", "free")
         return SubscriptionResponse(
@@ -337,7 +337,7 @@ async def get_my_settings(
     cases must not look alike. See the ErrorCode's comment.
     """
     try:
-        prefs = UserSettingsService().get_settings(user["id"])
+        prefs = await asyncio.to_thread(UserSettingsService().get_settings, user["id"])
     except PreferencesUnreadable as e:
         return make_error_response(
             ErrorCode.SETTINGS_UNAVAILABLE,
@@ -353,7 +353,9 @@ async def update_my_settings(
 ):
     """Full-blob replace of the current user's synced preferences."""
     try:
-        prefs = UserSettingsService().upsert_settings(user["id"], request.preferences)
+        prefs = await asyncio.to_thread(
+            UserSettingsService().upsert_settings, user["id"], request.preferences,
+        )
     except PreferencesTooLarge as e:
         return make_error_response(
             ErrorCode.INVALID_INPUT,
@@ -428,7 +430,9 @@ async def get_my_investor_profile(
     distinction `/me/settings` draws for the same reason.
     """
     try:
-        profile = get_user_investor_profile_service().get_profile(user["id"])
+        profile = await asyncio.to_thread(
+            get_user_investor_profile_service().get_profile, user["id"],
+        )
     except ProfileUnreadable as e:
         return make_error_response(ErrorCode.SETTINGS_UNAVAILABLE, message=str(e))
     return _profile_response(profile, user)
@@ -470,11 +474,13 @@ async def update_my_investor_profile(
     # timestamp is the thing being recorded, and a reader may grant before stating anything.
     if not payload and consent is None:
         return _profile_response(
-            get_user_investor_profile_service().get_profile(user["id"]), user
+            await asyncio.to_thread(get_user_investor_profile_service().get_profile, user["id"]),
+            user,
         )
 
     try:
-        profile = get_user_investor_profile_service().upsert_profile(
+        profile = await asyncio.to_thread(
+            get_user_investor_profile_service().upsert_profile,
             user["id"], payload, consent=consent,
         )
     except ProfileUnreadable as e:
@@ -489,7 +495,8 @@ async def register_device(
 ):
     """Register (or re-bind) an APNs device token for push notifications.
     Auth-only: a push token is only useful attached to a real user."""
-    ok = UserSettingsService().register_device(
+    ok = await asyncio.to_thread(
+        UserSettingsService().register_device,
         user_id=user["id"],
         token=request.token,
         platform=request.platform,
@@ -513,7 +520,9 @@ async def unregister_device(
     Auth-only and scoped to the caller, so a token that has already re-bound to another account
     cannot be detached by a stale client.
     """
-    ok = UserSettingsService().unregister_device(user_id=user["id"], token=request.token)
+    ok = await asyncio.to_thread(
+        UserSettingsService().unregister_device, user_id=user["id"], token=request.token,
+    )
     # `registered` reports the token's state AFTER the call, reusing the same response model:
     # a successful detach leaves it unregistered (False); a failure leaves it registered (True).
     return DeviceRegisterResponse(registered=not ok)

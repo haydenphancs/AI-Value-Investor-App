@@ -584,8 +584,17 @@ def test_revenue_breakdown_composition_omitted_rather_than_faked():
 
 def test_revenue_breakdown_reported_revenue_is_not_the_segment_sum():
     """The denominator fix. Segments need not add up to revenue — LMT's sum to 43B in this
-    fixture against 75.06B reported — so percentages must divide by the reported figure."""
+    fixture against 75.06B reported — so percentages must divide by the reported figure.
+
+    Since 2026-09-17 the stack is also RECONCILED to that figure: a 57%-coverage feed gets
+    an explicit "Unallocated" segment for the gap, so the bar reaches reported revenue
+    while the real segments keep their reported values (see
+    tests/test_revenue_breakdown_reconciliation.py)."""
     r = _build_rev(_seg(), [_lmt_income()])
-    segment_sum = sum(s.value for s in r.revenue_sources)
     assert r.reported_revenue == 75_057e6
-    assert segment_sum != r.reported_revenue
+    real = [s for s in r.revenue_sources if s.name != "Unallocated"]
+    filler = [s for s in r.revenue_sources if s.name == "Unallocated"]
+    assert sum(s.value for s in real) != r.reported_revenue, "the fixture is meant to under-cover"
+    assert len(filler) == 1 and filler[0].value == pytest.approx(r.reported_revenue - sum(s.value for s in real))
+    assert sum(s.value for s in r.revenue_sources) == pytest.approx(r.reported_revenue)
+    assert r.intersegment_eliminations is None

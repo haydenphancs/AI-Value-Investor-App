@@ -1752,53 +1752,74 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # anything rejects it. This rejects on Content-Length, before the body is read.
 _MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
 
-# Deliberately NOT applied globally: chat streams SSE and the report path proxies a
-# PDF through this same stack, so a blanket body cap would be a new failure mode on
-# routes that legitimately stream. Scoped to the JSON write routes that take a
-# client-authored document.
-# `/users/me` joins the list because `PATCH /users/me` writes `display_name` into a bare `text`
-# column that `get_current_user` re-reads (via `select("*")`) on EVERY authenticated request.
-# The Pydantic bound is the real guard; this is the cheap outer one that rejects the body before
-# it is parsed at all.
-# `/me/investor-profile` joined these because it is the one guest-writable, unauthenticated
-# JSON write in the app: the body is materialised and json.loads'd BEFORE Pydantic's
-# per-field `max_length` can fire, so without a cap a caller could post 50 MB and burn
-# ~150 MB of RSS per in-flight request with no credential at all.
-# ⚠️ Matched with `str.endswith`, so a SUB-ROUTE does not inherit its parent's cap:
-# "/api/v1/users/me/avatar".endswith("/users/me") is False. The avatar route needs its own
-# entry, and it is the one route in the app that carries a payload measured in hundreds of KB.
+# Applied to EVERY write (POST / PUT / PATCH). This used to be scoped to four `/users/me*`
+# suffixes on the premise that "chat streams SSE and the report path proxies a PDF" — but
+# those are RESPONSE streams; a cap on the request Content-Length never touches them. The
+# scoping left every UNAUTHENTICATED JSON route open: `POST /auth/login` took a 300 MB
+# password, buffered it, `json.loads`'d it on the single worker's loop, and forwarded it
+# to GoTrue synchronously before the per-IP limiter ever ran; `POST /events` took a 40 MB
+# batch of 200k events and validated every one before the 50-cap sliced it. No legitimate
+# JSON write in the app approaches 1 MiB — the avatar (base64 JPEG in JSON, the largest)
+# is bounded at 384 KiB by `AVATAR_MAX_BYTES`, and there are no multipart uploads.
+#
+# Kept as documentation of the routes whose Pydantic bound alone was NOT enough (the body
+# is materialised and parsed before any per-field `max_length` fires); the middleware no
+# longer consults it.
 _BODY_CAPPED_PATH_SUFFIXES = (
     "/me/settings",
     "/users/me",
     "/me/investor-profile",
     "/me/avatar",
+    "/auth/login",
+    "/auth/register",
+    "/events",
 )
+
+
+def _write_body_verdict(headers) -> tuple:
+    """(declared_length, reject_reason) for a write's request headers.
+
+    A Content-Length check alone is bypassed by `Transfer-Encoding: chunked` — the cap
+    read a missing header as 0 and let a chunked 40 MB body through on every route. A
+    BaseHTTPMiddleware cannot wrap the downstream `receive`, so chunked WRITES are refused
+    outright (411): every client this API has sets `httpBody` as `Data` / `json=` and
+    therefore always sends a Content-Length; a streaming client is not expected.
+    """
+    te = (headers.get("transfer-encoding") or "").lower()
+    if "chunked" in te:
+        return 0, "chunked"
+    raw_length = headers.get("content-length")
+    try:
+        declared = int(raw_length) if raw_length is not None else 0
+    except ValueError:
+        declared = 0
+    if declared > _MAX_JSON_BODY_BYTES:
+        return declared, "oversized"
+    return declared, None
 
 
 @app.middleware("http")
 async def cap_json_body(request: Request, call_next):
-    if request.method in ("PUT", "POST", "PATCH") and request.url.path.endswith(
-        _BODY_CAPPED_PATH_SUFFIXES
-    ):
-        raw_length = request.headers.get("content-length")
-        try:
-            declared = int(raw_length) if raw_length is not None else 0
-        except ValueError:
-            declared = 0
-        if declared > _MAX_JSON_BODY_BYTES:
+    if request.method in ("PUT", "POST", "PATCH"):
+        declared, reason = _write_body_verdict(request.headers)
+        if reason is not None:
             # Local import, matching the other handlers in this file (app.api.error_response
             # imports from app.*, so a module-level import here would be circular).
             from app.api.error_response import ErrorCode, make_error_body
 
             logger.warning(
-                "rejected oversized body on %s: %s bytes (cap %s)",
-                request.url.path, declared, _MAX_JSON_BODY_BYTES,
+                "rejected %s body on %s: %s bytes (cap %s)",
+                reason, request.url.path, declared, _MAX_JSON_BODY_BYTES,
             )
             capped = JSONResponse(
-                status_code=413,
+                status_code=411 if reason == "chunked" else 413,
                 content=make_error_body(
                     ErrorCode.INVALID_INPUT,
-                    message=f"request body exceeds {_MAX_JSON_BODY_BYTES} bytes",
+                    message=(
+                        "chunked request bodies are not accepted; send Content-Length"
+                        if reason == "chunked"
+                        else f"request body exceeds {_MAX_JSON_BODY_BYTES} bytes"
+                    ),
                     # Route-NEUTRAL. This cap now guards four routes, and the old copy
                     # ("Your settings couldn't be saved") told a user who had just picked a
                     # profile picture that their settings had failed — naming a screen they

@@ -33,7 +33,7 @@ import hashlib
 import logging
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
@@ -183,7 +183,7 @@ async def lookup(question: str) -> Optional[Dict[str, Any]]:
         logger.warning("chat starter warm row too short to serve (%d chars)", len(answer))
         return None
     age = _row_age_seconds(row.get("created_at"))
-    if _stale_for_the_tape(q, age):
+    if _stale_for_the_tape(q, age, row.get("created_at")):
         # Rule 3 above. The write side should have re-warmed this an hour ago; that it
         # did not means the loop is dead or the cap bound, and neither is a reason to
         # tell a user at 15:50 what was hot at 09:35.
@@ -206,17 +206,42 @@ async def lookup(question: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _stale_for_the_tape(question: str, age: Optional[float]) -> bool:
-    """Rule 3: a tape-bound row older than 2× the re-warm TTL while the tape is moving."""
+def _stale_for_the_tape(question: str, age: Optional[float], created_at: Any = None) -> bool:
+    """Rule 3: a tape-bound row that predates the tape it claims to describe.
+
+    Inside the regular session: older than 2× the re-warm TTL (the loop should have
+    replaced it an hour ago). Outside it: written more than 2× TTL BEFORE the last
+    completed close — i.e. before the final re-warm window of that session — so a
+    09:35 row is refused at 16:01 as firmly as at 15:59. The rule used to switch OFF
+    at the close, and the same row rule 3 refused at 15:59 was served as "hot today"
+    at 16:01 and all evening.
+    """
     if age is None:
         return False
     from app.services.chat_starters_service import is_tape_bound
 
     if not is_tape_bound(question):
         return False
-    if session_phase() != SESSION_REGULAR:
+    slack = 2 * _tape_ttl_seconds()
+    if session_phase() == SESSION_REGULAR:
+        return age > slack
+    from app.utils.market_hours import last_completed_close
+    written = _parse_stamp(created_at)
+    if written is None:
         return False
-    return age > 2 * _tape_ttl_seconds()
+    return written < last_completed_close() - timedelta(seconds=slack)
+
+
+def _parse_stamp(created_at: Any) -> Optional[datetime]:
+    if not created_at:
+        return None
+    try:
+        stamp = created_at if isinstance(created_at, datetime) else datetime.fromisoformat(
+            str(created_at).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
 # ── Write path (the lifespan loop's half) ────────────────────────────────────
@@ -337,6 +362,11 @@ async def warm_todays_starters() -> int:
             written += 1
             if question_hash(q) in rewarm:
                 _rewarms[day] = _rewarms.get(day, 0) + 1
+        if not (r is True) and question_hash(q) in rewarm:
+            # A failed RE-warm leaves the earlier row standing; parking the chip would
+            # freeze that row for the day, which is the staleness rule 2 exists to fix.
+            logger.warning("starter warm: re-warm of %r failed — will retry next pass", q[:60])
+            continue
         if not (r is True):
             key = _refusal_key(day, q)
             _refusals[key] = _refusals.get(key, 0) + 1

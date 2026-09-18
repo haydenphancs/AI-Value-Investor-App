@@ -1249,7 +1249,9 @@ struct AnalystAnalysisDTO: Codable {
     // ── Street estimates ────────────────────────────────────────────────────────────
     // A SEPARATE, entitled dataset (FMP package 8) behind its OWN flag. Every field is
     // Optional: an older backend never sends them, and the card must not fail to decode.
-    // These deliberately do not affect `sectionAvailable` — see AnalystForecastsSection.
+    // These deliberately do not affect `sectionAvailable` (that flag guards the zero-default
+    // consensus / price target). Decoded and carried on `AnalystRatingsData` for Cay AI's
+    // grounding lines; no card renders them since 2026-09-17.
     let estimatesAvailable: Bool?
     let estimatesHaveCoverage: Bool?
     let estimates: [AnalystEstimatePeriodDTO]?
@@ -2281,6 +2283,11 @@ struct RevenueBreakdownDTO: Codable {
     /// Interest, non-operating items, minority interest, discontinued ops — the plug that
     /// closes the waterfall. Legitimately negative when non-operating income exceeds them.
     let otherExpense: Double?
+    /// POSITIVE magnitude of intersegment sales the segments include and consolidation
+    /// removes (INTC FY2025: 70.5B of segments vs 52.9B of revenue → 17.7B). The segments
+    /// arrive AS REPORTED; the chart draws this as the first waterfall step down from the
+    /// gross stack. nil ⇒ the stack already sums to revenue, or an older backend.
+    let intersegmentEliminations: Double?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -2292,6 +2299,7 @@ struct RevenueBreakdownDTO: Codable {
         case netIncome = "net_income"
         case reportedRevenue = "reported_revenue"
         case otherExpense = "other_expense"
+        case intersegmentEliminations = "intersegment_eliminations"
     }
 
     func toDisplayModel() -> RevenueBreakdownData {
@@ -2313,9 +2321,10 @@ struct RevenueBreakdownDTO: Codable {
         // segment was coloured identically to "Other".
 
         var sources = revenueSources.enumerated().map { index, source in
-            // If segment is "Other", always use gray; otherwise use palette
+            // "Other" and the backend's "Unallocated" (revenue the segmentation feed did
+            // not cover) are always gray; real segments take the palette in order.
             let color: Color
-            if source.name == "Other" {
+            if source.name == "Other" || source.name == "Unallocated" {
                 color = AppColors.growthSectorGray
             } else {
                 color = colorPalette[index % colorPalette.count]
@@ -2328,7 +2337,9 @@ struct RevenueBreakdownDTO: Codable {
         // this the revenue bar would come up visibly short of 100% and the two columns would
         // stop agreeing. Fold the unallocated remainder into "Other" (merging with an
         // existing "Other" rather than drawing two identically-coloured grey segments).
-        if let reportedRevenue, reportedRevenue > 0 {
+        // Skipped when the backend flagged the stack as GROSS: there the segments exceed
+        // revenue on purpose and the eliminations step, not a filler slice, reconciles them.
+        if intersegmentEliminations == nil, let reportedRevenue, reportedRevenue > 0 {
             let segmentSum = sources.reduce(0) { $0 + $1.value }
             let remainder = reportedRevenue - segmentSum
             // 0.5% floor: below that it is rounding noise and a sliver nobody can read.
@@ -2354,7 +2365,8 @@ struct RevenueBreakdownDTO: Codable {
             tax: tax,
             reportedNetIncome: netIncome,
             reportedRevenue: reportedRevenue,
-            otherExpense: otherExpense
+            otherExpense: otherExpense,
+            intersegmentEliminations: intersegmentEliminations
         )
     }
 }

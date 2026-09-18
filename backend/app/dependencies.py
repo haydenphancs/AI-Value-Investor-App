@@ -19,6 +19,7 @@ from app.core.security import (
     decode_token,
     decode_widget_token,
     rate_limiter,
+    trusted_client_ip,
     verify_supabase_token,
 )
 from app.api.error_response import ErrorCode, auth_error
@@ -826,13 +827,33 @@ class IdentityOnlyRateLimitChecker(IdentityRateLimitChecker):
     ran. Analytics uses this variant; the data endpoints keep the strict one.
     """
 
+    #: Anti-rotation ceiling per source address. The identity bucket is keyed on the
+    #: client-chosen `X-Guest-Id`, so a caller who rotates that header per request mints a
+    #: fresh bucket every time and the per-identity limit never fires — `POST /events` has
+    #: no credential to fall back on. Keyed on `trusted_client_ip` (the one value a caller
+    #: cannot forge), set far above the identity figure so a shared network (office, campus,
+    #: CGNAT) is never throttled in normal use — the same reasoning as
+    #: `CHAT_DAILY_TURN_LIMIT_PER_IP`. Non-protected pool: this is fair-use bounding, not
+    #: the credential-guessing tier.
+    ip_multiplier: int = 20
+
     async def __call__(  # type: ignore[override]
         self,
+        request: Request,
         user: dict = Depends(get_identity_only_user),
         x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id"),
     ) -> None:
         key = f"{self.bucket}:{identity_key(user, x_guest_id)}"
         if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many requests. Please slow down.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+        ip_key = f"{self.bucket}:ip:{trusted_client_ip(request)}"
+        if not rate_limiter.is_allowed(
+            ip_key, self.max_requests * self.ip_multiplier, self.window_seconds,
+        ):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many requests. Please slow down.",

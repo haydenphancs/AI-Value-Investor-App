@@ -13,6 +13,15 @@ from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
 # users toward predictable substitutions without adding real entropy.
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128  # bcrypt truncates past 72 bytes; cap well below any DoS range
+# Ceiling on a password PRESENTED for verification (sign-in, current-password on change).
+# Generous — legacy accounts predate PASSWORD_MAX_LENGTH and must keep signing in — but
+# bounded: an unbounded field was JSON-encoded and forwarded to GoTrue synchronously ON
+# the event loop (`_BLOCKING_BY_DESIGN`), so a 2 MB "password" from an unauthenticated
+# caller stalled every other request for the whole upstream round trip.
+SIGN_IN_SECRET_MAX_LENGTH = 1024
+# Provider / session tokens: an Apple id_token is ~1 KiB, a Supabase JWT ~1 KiB, a refresh
+# token a few dozen bytes. 8 KiB leaves room for any claim set without admitting a payload.
+TOKEN_MAX_LENGTH = 8192
 
 
 #: Human-readable statement of the rule, used by the API error AND mirrored on the iOS sign-up
@@ -46,7 +55,10 @@ def _validate_password_strength(value: str) -> str:
     ⚠️ Applies ONLY to endpoints that SET a password (sign-up, reset, change). `SignInRequest`
     has no such validator and must never grow one: existing accounts predate this rule, and
     enforcing it at sign-in would lock out every user whose password does not satisfy it —
-    turning a hardening change into an outage.
+    turning a hardening change into an outage. A LENGTH ceiling does apply at sign-in
+    (`SIGN_IN_SECRET_MAX_LENGTH`), which is a different thing: it is far above anything
+    GoTrue/bcrypt can distinguish (72 bytes), so it cannot lock anyone out, and it turns a
+    multi-megabyte "password" into a 422 with no upstream call.
     """
     if len(value) < PASSWORD_MIN_LENGTH:
         raise ValueError(
@@ -78,7 +90,7 @@ def _validate_password_strength(value: str) -> str:
 
 class SignInRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH)
 
 
 class SignUpRequest(BaseModel):
@@ -128,7 +140,7 @@ class ResetPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     """Change the password of an already signed-in user."""
 
-    current_password: str
+    current_password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH)
     new_password: str
 
     @field_validator("new_password")
@@ -232,13 +244,14 @@ class OAuthSignInRequest(BaseModel):
     """
 
     provider: str = Field(pattern="^(apple|google)$")
-    id_token: str = Field(min_length=16)
+    id_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH)
     # Apple's flow binds a nonce to the token to prevent replay. Required for Apple when the
     # client generated one; Supabase verifies the pairing.
     nonce: Optional[str] = None
     # Apple only returns the display name on the FIRST authorization, so the client passes
-    # it through for us to persist. Never used as an identity claim.
-    display_name: Optional[str] = None
+    # it through for us to persist. Never used as an identity claim. Same bound as the
+    # column's other writers: `get_current_user` re-reads this row on every request.
+    display_name: Optional[str] = Field(default=None, max_length=DISPLAY_NAME_MAX_LENGTH)
 
 
 class SessionExchangeRequest(BaseModel):
@@ -248,11 +261,11 @@ class SessionExchangeRequest(BaseModel):
     provider round-trip ends with Supabase's own JWT rather than a provider id_token.
     """
 
-    supabase_access_token: str = Field(min_length=16)
+    supabase_access_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH)
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH)
 
 
 class TokenResponse(BaseModel):

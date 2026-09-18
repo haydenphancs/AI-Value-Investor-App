@@ -117,6 +117,12 @@ class StockChartWidget(BaseModel):
     # Order Form — and render it as "$0.00" beside a live price. Defaults False so an
     # unmigrated writer cannot re-assert a fabricated range by omission.
     day_range_known: bool = False
+    # False ⇒ `change` / `change_percent` are 0.0 PLACEHOLDERS: the quote source answered
+    # with no change (a CoinGecko `null` 24 h change, a FRED single observation, a profile
+    # row without one). Same shape as `day_range_known` and for the same reason — the two
+    # floats are non-Optional `Double` on the wire in shipped builds. Defaults True so a
+    # writer that does not know the flag keeps the legacy "the numbers are real" reading.
+    change_known: bool = True
     volume: int
     avg_volume: int
     market_cap: Optional[float] = None

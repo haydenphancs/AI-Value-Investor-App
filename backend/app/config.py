@@ -517,6 +517,13 @@ class Settings(BaseSettings):
     # ceiling; on expiry the door answers GEMINI_UNAVAILABLE before any write and the
     # `finally` refunds.
     CHAT_SEND_BUDGET_SECONDS: float = 50.0
+    # The streamed door's twin: one wall-clock budget for the WHOLE turn (pump + fallback),
+    # enforced inside the keepalive loop. Keepalives reset iOS's 120 s idle timeout
+    # indefinitely, so without it the only bound was the sum of every inner ceiling — up to
+    # four tool rounds of sequential 8–75 s tools plus 90 s reads — and a stalled turn held
+    # the user, the single worker and the credit for many minutes. Past it the turn settles
+    # like any transient Gemini failure (refund, GEMINI_UNAVAILABLE), never a bare 500.
+    CHAT_STREAM_BUDGET_SECONDS: float = 150.0
     # SSE keepalive interval on the chat stream. iOS's stream request times out after
     # 120 s of SILENCE, and two things legitimately go quiet longer than that used to be
     # possible: a synthesis round buffers its specialists until the gather completes, and

@@ -300,6 +300,18 @@ async def _call_with_timeout(coro, *, what: str = "Gemini call"):
     return result
 
 
+class _CacheHit:
+    """A decorated body's way of saying "this came from the cache, not from upstream".
+
+    `async_retry` unwraps it and does NOT record a breaker success — a hit proves nothing
+    about the quota.
+    """
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
 def async_retry(max_attempts: int = 3, delay: float = 1.0):
     """
     Decorator for retrying async functions on failure.
@@ -354,6 +366,12 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
                     is_trial = _quota_circuit.half_open
                 try:
                     result = await func(*args, **kwargs)
+                    if isinstance(result, _CacheHit):
+                        # Served from the response cache: NO upstream call happened, so
+                        # it proves nothing about the quota. Booking it as a success used
+                        # to close a half-open breaker from a cache hit and readmit every
+                        # parallel caller to a still-exhausted quota.
+                        return result.value
                     _quota_circuit.record_success()
                     return result
                 except Exception as e:
@@ -505,6 +523,19 @@ def _iter_parts(response: Any) -> List[Any]:
     return []
 
 
+_CLEAN_FINISH = ("", "STOP", "FINISH_REASON_STOP", "UNSPECIFIED", "FINISH_REASON_UNSPECIFIED")
+
+
+def _is_clean_finish(reason: Optional[str]) -> bool:
+    """Whether a finish reason means the model finished on its own terms.
+
+    Anything else (MAX_TOKENS, SAFETY, RECITATION, OTHER, …) is a CUT — the caller must
+    not treat the text as complete: not charge it in full, not cache it, not settle it
+    as delivered. One definition, shared by the response cache and the stream markers.
+    """
+    return str(reason or "").upper() in _CLEAN_FINISH
+
+
 def _cacheable_answer(result: Dict[str, Any]) -> bool:
     """Only a COMPLETE answer is worth an hour in the response cache.
 
@@ -516,8 +547,7 @@ def _cacheable_answer(result: Dict[str, Any]) -> bool:
     text = result.get("text")
     if not isinstance(text, str) or not text.strip():
         return False
-    finish = str(result.get("finish_reason") or "").upper()
-    return finish in ("", "STOP", "FINISH_REASON_STOP", "UNSPECIFIED", "FINISH_REASON_UNSPECIFIED")
+    return _is_clean_finish(result.get("finish_reason"))
 
 
 def _has_function_call(response: Any) -> bool:
@@ -791,10 +821,14 @@ async def _run_tool_handler(name: str, handler: Optional[Callable], args: Dict[s
         return await asyncio.wait_for(asyncio.shield(handler(args)), timeout=timeout)
     except asyncio.TimeoutError:
         logger.warning("Gemini tool %s timed out after %.1fs (args=%s)", name, timeout, args)
-        return {"error": "timed_out", "tool": name, "timeout_seconds": timeout}
+        # `upstream`: OUR side failed to answer, so the turn's refund gate counts it. A
+        # handler that returns `{"error": …}` for the model's own bad argument does not.
+        return {"error": "timed_out", "tool": name, "timeout_seconds": timeout, "upstream": True}
     except Exception as e:  # noqa: BLE001 — a tool failure must not become a Gemini failure
         logger.warning("Gemini tool %s failed: %s: %s", name, type(e).__name__, e)
-        return {"error": str(e), "tool": name}
+        from app.log_redaction import redact_secrets
+        return {"error": redact_secrets(f"{type(e).__name__}: {e}")[:200], "tool": name,
+                "upstream": True}
 
 
 class GeminiClient:
@@ -890,7 +924,7 @@ class GeminiClient:
         cached = self._response_cache.get(key)
         if cached is not None:
             logger.debug("Gemini generate_text cache HIT")
-            return cached
+            return _CacheHit(cached)   # unwrapped by `async_retry`; never a breaker success
 
         try:
             response = await _call_with_timeout(
@@ -965,8 +999,11 @@ class GeminiClient:
                 contents=prompt,
                 config=config,
             )
+            finish: Optional[str] = None
+            answered = False
             async for chunk in stream:
                 usage.observe(chunk)
+                finish = _response_finish(chunk) or finish
                 for part in _iter_parts(chunk):
                     # part.text raises on non-text parts (finish-only) — treat as empty.
                     try:
@@ -975,7 +1012,13 @@ class GeminiClient:
                         text = ""
                     if not text:
                         continue
-                    yield ("thought" if getattr(part, "thought", False) else "answer"), text
+                    is_thought = bool(getattr(part, "thought", False))
+                    answered = answered or not is_thought
+                    yield ("thought" if is_thought else "answer"), text
+            if answered and not _is_clean_finish(finish):
+                # The answer was CUT after real text streamed. Callers must not settle it
+                # as complete (the empty-answer cut still surfaces as "empty stream result").
+                yield "finish", str(finish)
             _quota_circuit.record_success()
         except Exception as e:
             if _is_quota_error(e):
@@ -1136,7 +1179,7 @@ class GeminiClient:
         cached = self._response_cache.get(key)
         if cached is not None:
             logger.debug("Gemini generate_json cache HIT")
-            return cached
+            return _CacheHit(cached)
 
         try:
             response = await _call_with_timeout(
@@ -1188,7 +1231,7 @@ class GeminiClient:
         cached = self._embedding_cache.get(key)
         if cached is not None:
             logger.debug("Embedding cache HIT")
-            return cached
+            return _CacheHit(cached)
 
         try:
             result = await _call_with_timeout(
@@ -1388,7 +1431,8 @@ class GeminiClient:
                         logger.info(f"Gemini invoked tool '{fc.name}' with args: {args}")
                     handler_result = await _run_tool_handler(fc.name, handler, args)
                     if isinstance(handler_result, dict) and handler_result.get("error"):
-                        tool_errors.append({"name": fc.name, "error": handler_result["error"]})
+                        tool_errors.append({"name": fc.name, "error": handler_result["error"],
+                                            "upstream": bool(handler_result.get("upstream"))})
                     elif handler is not None:
                         tool_results.append(handler_result)
                     response_parts.append(types.Part.from_function_response(
@@ -1542,12 +1586,19 @@ class GeminiClient:
 
         message: Any = prompt
         usage = _StreamUsage()
+        # Whether any ANSWER text (not thought) has streamed, and the last finish reason
+        # seen — a non-STOP finish after answer text is a CUT the caller must not settle
+        # as complete (yielded as a `("finish", reason)` event).
+        answered = False
+        finish: Optional[str] = None
         try:
             for _round in range(max_rounds):
                 fcalls: List[Any] = []
+                finish = None
                 stream = await chat.send_message_stream(message)
                 async for chunk in stream:
                     usage.observe(chunk)
+                    finish = _response_finish(chunk) or finish
                     for part in _iter_parts(chunk):
                         fc = getattr(part, "function_call", None)
                         if fc and fc.name:
@@ -1558,11 +1609,15 @@ class GeminiClient:
                         except (ValueError, AttributeError):
                             text = ""
                         if text:
-                            yield ("thought" if getattr(part, "thought", False) else "answer"), text
+                            is_thought = bool(getattr(part, "thought", False))
+                            answered = answered or not is_thought
+                            yield ("thought" if is_thought else "answer"), text
                 # Round boundary: per-chunk counts are cumulative WITHIN a round but
                 # additive ACROSS rounds, so fold before the next send_message_stream.
                 usage.commit_round()
                 if not fcalls:
+                    if answered and not _is_clean_finish(finish):
+                        yield "finish", str(finish)
                     _quota_circuit.record_success()
                     return
                 # Run the requested tools, emit a "tool" event each, feed responses back next round.
@@ -1580,8 +1635,10 @@ class GeminiClient:
             # max_rounds exhausted while still calling tools — one final answer round (tools ignored)
             # so the user always gets a reply.
             final_stream = await chat.send_message_stream(message)
+            finish = None
             async for chunk in final_stream:
                 usage.observe(chunk)
+                finish = _response_finish(chunk) or finish
                 for part in _iter_parts(chunk):
                     if getattr(part, "function_call", None):
                         continue
@@ -1590,7 +1647,11 @@ class GeminiClient:
                     except (ValueError, AttributeError):
                         text = ""
                     if text:
-                        yield ("thought" if getattr(part, "thought", False) else "answer"), text
+                        is_thought = bool(getattr(part, "thought", False))
+                        answered = answered or not is_thought
+                        yield ("thought" if is_thought else "answer"), text
+            if answered and not _is_clean_finish(finish):
+                yield "finish", str(finish)
             _quota_circuit.record_success()
         except Exception as e:
             if _is_quota_error(e):

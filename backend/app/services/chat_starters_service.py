@@ -71,21 +71,45 @@ _FIXED_TAPE_TEXTS: Tuple[str, ...] = (
     "What tickers are hot today?",
     "What topics are hot today?",
 )
+#: `{when}` is the session word — "today" while the tape IS today's, "on Fri" when the
+#: row still carries the previous session (pre-market Monday, every weekend, a holiday).
+#: The chip used to hard-code "today", so from Friday's close until Monday's open it
+#: asked "Why is BBNX up 15% today?" about a move that happened on Friday.
 _HOT_TICKER_TEMPLATES: Tuple[Tuple[bool, str], ...] = (
-    (True, "Why is {symbol} up {pct} today?"),
-    (False, "Why is {symbol} down {pct} today?"),
+    (True, "Why is {symbol} up {pct} {when}?"),
+    (False, "Why is {symbol} down {pct} {when}?"),
 )
-_HOT_SECTOR_TEMPLATE = "Why is {name} {direction} today?"
-_HOT_TOPIC_TEMPLATE = "What's driving {name} today?"
+_HOT_SECTOR_TEMPLATE = "Why is {name} {direction} {when}?"
+_HOT_TOPIC_TEMPLATE = "What's driving {name} {when}?"
 # `trending` is drawn from social mentions but GATED on the symbol's move, and its answer
 # opens with that move — so it is the tape's question too.
 _TRENDING_TEMPLATE = "Why is everyone talking about {symbol}?"
+_WHEN = r"(today|on (mon|tue|wed|thu|fri|sat|sun))"
 _TAPE_PATTERNS: Tuple[re.Pattern, ...] = (
-    re.compile(r"^why is \S+ (up|down) \d+% today\?$"),
-    re.compile(r"^why is .+ (leading|lagging) today\?$"),
-    re.compile(r"^what's driving .+ today\?$"),
+    re.compile(r"^why is \S+ (up|down) \d+% " + _WHEN + r"\?$"),
+    re.compile(r"^why is .+ (leading|lagging) " + _WHEN + r"\?$"),
+    re.compile(r"^what's driving .+ " + _WHEN + r"\?$"),
     re.compile(r"^why is everyone talking about \S+\?$"),
 )
+
+
+def _session_word(stamp: Any) -> str:
+    """The word for the session a row's change belongs to, against the ET calendar day.
+
+    `stamp` is the universe row's `changeSession` (or a group's `date`), stamped by
+    `PriceService._change_session`. Missing/unparseable → "today" (older shapes).
+    """
+    from datetime import date, datetime
+    from app.utils.market_hours import ET
+    if not stamp:
+        return "today"
+    try:
+        stamped = date.fromisoformat(str(stamp)[:10])
+    except (TypeError, ValueError):
+        return "today"
+    if stamped >= datetime.now(ET).date():
+        return "today"
+    return f"on {stamped.strftime('%a')}"
 
 
 def is_tape_bound(question: str) -> bool:
@@ -174,6 +198,23 @@ def _has_waiters(fut: asyncio.Future) -> bool:
         return bool(getattr(fut, "_callbacks", None))
     except Exception:  # noqa: BLE001
         return True
+
+
+
+def _is_equity_coin_collider(symbol: str) -> bool:
+    """True for a listed ticker chat would answer as a COIN (LTC, BCH, ATOM, BTC, …).
+
+    These chips are impersonal — there is no screen behind the global chat, so a tapped
+    "Why is LTC down 12% today?" reaches the stream door with no `stock_id`, and chat's
+    bare-coin rule (`_chat_symbol`) canonicalises "LTC" to Litecoin. The warm loop's
+    answer and every user's tap then explained the coin's move beside a Litecoin card
+    at ~$100, for a question the product itself authored about a REIT that fell 12% —
+    cached and served all day. Skipping the collision set costs at most three thinly
+    traded names from an 8-chip row; the loop falls through to the next mover.
+    """
+    from app.services.asset_class import _BARE_CRYPTO_SYMBOLS
+
+    return symbol in _BARE_CRYPTO_SYMBOLS
 
 
 class ChatStartersService:
@@ -476,10 +517,14 @@ class ChatStartersService:
                     continue
                 if abs(change) < _HOT_MIN_ABS_CHANGE_PCT:
                     continue
+                if _is_equity_coin_collider(symbol):
+                    continue
                 seen.add(symbol)
+                stamp = (profile_map.get(symbol) or {}).get("changeSession")
                 out.append(
                     ChatStarterResponse(
-                        text=template.format(symbol=symbol, pct=f"{abs(change):.0f}%"),
+                        text=template.format(symbol=symbol, pct=f"{abs(change):.0f}%",
+                                             when=_session_word(stamp)),
                         kind="hot_ticker",
                         symbol=symbol,
                     )
@@ -529,6 +574,8 @@ class ChatStartersService:
             change = _finite(change_map.get(_canonical_symbol(clean)))
             if change is None or abs(change) < _HOT_MIN_ABS_CHANGE_PCT:
                 continue
+            if _is_equity_coin_collider(clean):
+                continue
             return ChatStarterResponse(
                 text=_TRENDING_TEMPLATE.format(symbol=clean),
                 kind="trending",
@@ -539,7 +586,7 @@ class ChatStartersService:
     def _hot_sector_slot(self, sources: Dict[str, Any]) -> Optional[ChatStarterResponse]:
         """The sector with the largest absolute move today, in either direction."""
         sectors = sources.get("sectors") or []
-        best_name, best_change = None, 0.0
+        best_name, best_change, best_stamp = None, 0.0, None
         for row in sectors:
             if not isinstance(row, dict):
                 continue
@@ -548,12 +595,13 @@ class ChatStartersService:
             if not name or change is None:
                 continue
             if abs(change) > abs(best_change):
-                best_name, best_change = name, change
+                best_name, best_change, best_stamp = name, change, row.get("date")
         if best_name is None or abs(best_change) < _HOT_MIN_GROUP_CHANGE_PCT:
             return None
         direction = "leading" if best_change > 0 else "lagging"
         return ChatStarterResponse(
-            text=_HOT_SECTOR_TEMPLATE.format(name=best_name, direction=direction),
+            text=_HOT_SECTOR_TEMPLATE.format(name=best_name, direction=direction,
+                                             when=_session_word(best_stamp)),
             kind="hot_sector",
         )
 
@@ -572,11 +620,11 @@ class ChatStartersService:
         if not themes or not inputs:
             return None
         try:
-            _profile_map, change_map = inputs
+            profile_map, change_map = inputs
         except (TypeError, ValueError):
             return None
 
-        best_name, best_change = None, 0.0
+        best_name, best_change, best_tickers = None, 0.0, []
         for row in themes:
             if not isinstance(row, dict):
                 continue
@@ -592,11 +640,20 @@ class ChatStartersService:
                 continue
             mean = sum(changes) / len(changes)
             if abs(mean) > abs(best_change):
-                best_name, best_change = category, mean
+                best_name, best_change, best_tickers = category, mean, tickers
         if best_name is None or abs(best_change) < _HOT_MIN_GROUP_CHANGE_PCT:
             return None
+        # The basket's session: the mode of its members' stamps.
+        from collections import Counter as _Counter
+        stamps = _Counter(
+            (profile_map.get(str(t).strip().upper()) or {}).get("changeSession")
+            for t in best_tickers
+        )
+        stamps.pop(None, None)
+        stamp = stamps.most_common(1)[0][0] if stamps else None
         return ChatStarterResponse(
-            text=_HOT_TOPIC_TEMPLATE.format(name=best_name), kind="hot_topic"
+            text=_HOT_TOPIC_TEMPLATE.format(name=best_name, when=_session_word(stamp)),
+            kind="hot_topic",
         )
 
     # ── assembly ─────────────────────────────────────────────────────────────

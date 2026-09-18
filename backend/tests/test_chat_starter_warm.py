@@ -610,9 +610,48 @@ async def test_lookup_serves_an_old_tape_row_when_the_tape_is_static(monkeypatch
     monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
     monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
     monkeypatch.setattr(warm, "session_phase", lambda now=None: phase)
+    close = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)          # 16:00 ET
+    monkeypatch.setattr("app.utils.market_hours.last_completed_close", lambda now=None: close)
+    # Written 15:05 ET — inside the last re-warm window before the close: served all evening.
     _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": [],
-                             "created_at": _ago(5 * 3600)})
+                             "created_at": (close - timedelta(minutes=55)).isoformat()})
     assert (await warm.lookup("What tickers are hot today?"))["answer"] == "a" * 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["afterhours", "closed"])
+async def test_lookup_refuses_a_tape_row_that_predates_the_last_session_after_the_close(monkeypatch, phase):
+    """Rule 3 used to switch OFF at the close: the 09:35 row refused at 15:59 (loop dead,
+    cap bound) was served as "hot today" at 16:01 and until midnight."""
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WARM_TAPE_TTL_SECONDS", 3600)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: phase)
+    close = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.utils.market_hours.last_completed_close", lambda now=None: close)
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": None, "suggestions": [],
+                             "created_at": (close - timedelta(hours=6, minutes=25)).isoformat()})
+    assert await warm.lookup("What tickers are hot today?") is None
+    # An EVERGREEN row of the same age is still served.
+    assert (await warm.lookup("What is a P/E ratio?"))["answer"] == "a" * 200
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rewarm_does_not_park_the_chip(monkeypatch):
+    """Three failed RE-warms used to park the chip for the day while the OLD row stood —
+    freezing the staleness rule 2 exists to fix."""
+    calls = []
+    hot = "What tickers are hot today?"
+    _wire(monkeypatch, _chips((hot, "fixed")),
+          already={warm.question_hash(hot): _ago(7200)}, phase="regular", calls=calls)
+
+    async def _fail(q, day):
+        calls.append(q)
+        return False
+    monkeypatch.setattr(warm, "_warm_one", _fail)
+    for _ in range(5):
+        await warm.warm_todays_starters()
+    assert len(calls) == 5, "every pass retried the re-warm; nothing was parked"
+    assert warm._refusals == {}
 
 
 @pytest.mark.asyncio

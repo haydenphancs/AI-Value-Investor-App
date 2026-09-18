@@ -23,6 +23,7 @@ import json
 import logging
 import uuid
 
+from app.log_redaction import redact_secrets
 from app.api.error_response import (
     ErrorCode,
     error_body_from_exception,
@@ -434,16 +435,18 @@ def _split_structured_error(
     if not raw:
         return None, None
     if not isinstance(raw, str):
-        return None, str(raw)
+        return None, redact_secrets(raw)
     stripped = raw.strip()
+    # A plain-string row is served VERBATIM to the phone. Every writer redacts now, but
+    # rows written before that did not, and this is the last hop before the client.
     if not stripped.startswith("{"):
-        return None, raw
+        return None, redact_secrets(raw)
     try:
         parsed = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
-        return None, raw
+        return None, redact_secrets(raw)
     if not isinstance(parsed, dict):
-        return None, raw
+        return None, redact_secrets(raw)
     code = parsed.get("error_code")
     msg = (
         parsed.get("user_message")
@@ -452,7 +455,7 @@ def _split_structured_error(
     )
     return (
         code if isinstance(code, str) else None,
-        msg if isinstance(msg, str) else raw,
+        redact_secrets(msg if isinstance(msg, str) else raw),
     )
 
 
@@ -801,11 +804,20 @@ async def delete_report(
             .execute()
         )
     except Exception as e:
+        # NEVER fall through to the plain soft-delete from here. A raised CAS proves
+        # nothing about the row — the UPDATE may have committed (a 520 on the reply) or
+        # not run at all — and the soft-delete below would write `status='deleted'`
+        # WITHOUT the refund: 'deleted' is outside every claimable set, so those 20
+        # credits were unreachable forever, and iOS's Retry then charged 20 more.
+        # One re-read decides: committed → issue the refund now (the RPC answers
+        # `already_refunded` if an earlier winner reversed it, so this cannot double-pay);
+        # anything else → 409 SYSTEM_BUSY with the row untouched, which both iOS paths
+        # already turn into "put the card back, try again" and never a regenerate.
         logger.error(
-            "delete_report: refund claim failed for report=%s user=%s: %s: %s",
+            "delete_report: refund claim RAISED for report=%s user=%s: %s: %s",
             report_id, user["id"], type(e).__name__, e,
         )
-        claimed = None
+        return _settle_raised_delete_claim(supabase, user, report_id)
 
     row = (getattr(claimed, "data", None) or [None])[0]
     if row:
@@ -833,8 +845,10 @@ async def delete_report(
                 report_id, user["id"],
             )
         # The CAS returns the row AFTER the update, so the prior status is not known
-        # here — only that it was one of `_REFUNDABLE_ON_DELETE`.
-        return {"message": "Report deleted successfully", "outcome": "refunded"}
+        # here — only that it was one of `_REFUNDABLE_ON_DELETE`. The outcome is the
+        # REAL one: this used to say "refunded" after the leak branch too.
+        return {"message": "Report deleted successfully",
+                "outcome": "refund_failed" if refund_did_not_happen(refunded) else "refunded"}
 
     # Terminal (ready), already refunded, or not ours — plain soft-delete, so deleting a
     # finished report keeps working exactly as before. EXCEPT under retry intent: iOS's
@@ -844,21 +858,49 @@ async def delete_report(
     # construction, and the generate that follows charges again — 40 credits for one
     # report the user never saw. Refused with a code the client turns into a reload.
     status_before: Optional[str] = None
+    peek_row: dict = {}
     try:
         peek = (
             supabase.table("research_reports")
-            .select("status")
+            .select("status, is_refunded, credits_charged")
             .eq("id", report_id)
             .eq("user_id", user["id"])
             .limit(1)
             .execute()
         )
         peek_rows = list(getattr(peek, "data", None) or [])
-        status_before = (peek_rows[0] or {}).get("status") if peek_rows else None
-    except Exception as e:  # noqa: BLE001 — the peek is advisory; the delete below still runs
+        peek_row = dict(peek_rows[0] or {}) if peek_rows else {}
+        status_before = peek_row.get("status")
+    except Exception as e:  # noqa: BLE001
+        # The peek is NOT advisory any more: without it the soft-delete below cannot
+        # tell a finished report from a charged one whose CAS lost a race, and under
+        # retry intent it is the refusal's only evidence. Fail closed and retryable.
         logger.warning(
-            "delete_report: status peek failed for report=%s (%s: %s)",
+            "delete_report: status peek failed for report=%s (%s: %s) — refusing to delete",
             report_id, type(e).__name__, e,
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            message=f"report {report_id}: status peek failed ({type(e).__name__})",
+            details={"report_id": report_id, "step": "delete_peek"},
+        )
+    if (
+        status_before in _REFUNDABLE_ON_DELETE
+        and not bool(peek_row.get("is_refunded"))
+        and int(peek_row.get("credits_charged") or 0) > 0
+    ):
+        # The CAS ran and matched nothing, yet the row reads as a charged, unrefunded,
+        # claimable report — a status flip between the two statements. Soft-deleting it
+        # would strand the charge; let the client retry and win the CAS next time.
+        logger.error(
+            "delete_report: CAS matched nothing but report=%s user=%s still reads %s/"
+            "unrefunded/charged — refusing the plain soft-delete", report_id, user["id"],
+            status_before,
+        )
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            message=f"report {report_id} is still {status_before} and charged; retry the delete",
+            details={"report_id": report_id, "step": "delete_claim_race"},
         )
     if (intent or "").strip().lower() == "retry" and status_before == "completed":
         logger.info(
@@ -879,6 +921,59 @@ async def delete_report(
     )
     return {"message": "Report deleted successfully", "outcome": "soft_deleted",
             "status_before": status_before}
+
+
+def _settle_raised_delete_claim(supabase: Client, user: dict, report_id: str):
+    """What a DELETE answers when its refund compare-and-set RAISED.
+
+    One re-read of the row. `deleted` + `is_refunded=True` means the UPDATE committed and
+    only the reply was lost — the refund that write promised is issued now (a REFUND LEAK
+    line if that fails, so it is never silent). Any other state — still in flight, the
+    read itself failing — is answered 409 SYSTEM_BUSY with the row untouched: the CAS is
+    convergent, so the client's retry either wins it or finds the row already terminal.
+    """
+    try:
+        again = (
+            supabase.table("research_reports")
+            .select("status, is_refunded, credits_charged, ticker")
+            .eq("id", report_id)
+            .eq("user_id", user["id"])
+            .limit(1)
+            .execute()
+        )
+        rows = list(getattr(again, "data", None) or [])
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "delete_report: re-read after a raised claim failed for report=%s user=%s: %s: %s",
+            report_id, user["id"], type(e).__name__, e,
+        )
+        rows = []
+    row = dict(rows[0] or {}) if rows else {}
+    if row.get("status") == "deleted" and bool(row.get("is_refunded")):
+        amount = int(row.get("credits_charged") or 0)
+        ticker = (row.get("ticker") or "").upper() or None
+        refunded = CreditService().refund_ledgered(
+            user["id"], amount, reason="report_refund_deleted", ref_id=ticker,
+        )
+        if refund_did_not_happen(refunded):
+            logger.error(
+                "REFUND LEAK: user=%s deleted in-flight report=%s (%s) charged %s credits; "
+                "the claim committed but its reply was lost and the refund did not happen "
+                "(outcome=%s) — manual credit correction needed",
+                user["id"], report_id, ticker, amount, _outcome_name(refunded),
+            )
+        else:
+            logger.warning(
+                "delete_report: claim for report=%s committed despite a raised reply — "
+                "refunded %s credits on re-read (user %s)", report_id, amount, user["id"],
+            )
+        return {"message": "Report deleted successfully",
+                "outcome": "refund_failed" if refund_did_not_happen(refunded) else "refunded"}
+    return make_error_response(
+        ErrorCode.SYSTEM_BUSY,
+        message=f"report {report_id}: refund claim failed transiently; nothing was deleted",
+        details={"report_id": report_id, "step": "delete_claim"},
+    )
 
 
 # ── List Personas ────────────────────────────────────────────────────────────

@@ -327,3 +327,57 @@ async def test_a_retrier_admitted_while_closed_is_refused_after_others_trip_the_
     with pytest.raises(gemini.GeminiQuotaError):
         await flaky()
     assert calls["n"] == 1, "the second attempt must be refused, not fired"
+
+
+# ── A response-cache HIT is not a trial success (2026-09-17) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_cache_hit_on_the_half_open_trial_does_not_close_the_breaker(monkeypatch):
+    """The decorator booked ANY return from the body as a success — including a
+    `_response_cache` hit that never touched upstream — so a cached prompt arriving
+    first after the cooldown "proved" the quota was back and readmitted every parallel
+    caller to a still-exhausted quota."""
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 3)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30.0)
+    clock = _install_clock(monkeypatch, start=1000.0)
+    _reset_breaker()
+    cb = gemini._quota_circuit
+
+    calls = []
+
+    @gemini.async_retry(max_attempts=2, delay=0.0)
+    async def cached_call():
+        calls.append(1)
+        return gemini._CacheHit({"text": "from cache"})
+
+    @gemini.async_retry(max_attempts=2, delay=0.0)
+    async def live_call():
+        calls.append(2)
+        return {"text": "from upstream"}
+
+    for _ in range(3):
+        cb.record_quota_error()
+    clock.advance(30.0)
+    assert await cached_call() == {"text": "from cache"}, "the hit is unwrapped for the caller"
+    assert cb._opened_at == 1000.0 and cb._consecutive == 3, "a hit proves nothing — still open for cause"
+    # A real upstream success on a later trial DOES close it.
+    clock.advance(30.0)
+    assert await live_call() == {"text": "from upstream"}
+    assert cb._opened_at == 0.0 and cb._consecutive == 0
+
+
+@pytest.mark.asyncio
+async def test_generate_text_returns_a_plain_dict_on_a_cache_hit():
+    """The sentinel must never leak to callers."""
+    client = gemini.GeminiClient.__new__(gemini.GeminiClient)
+    client.model_name = "gemini-2.5-flash"
+    client._temperature = 0.7
+    client._max_tokens = 8192
+    client._response_cache = gemini._TTLCache(max_size=16, ttl_seconds=3600)
+    client._embedding_cache = gemini._TTLCache(max_size=16, ttl_seconds=3600)
+    key = gemini._cache_key("same prompt", "", "", "", "")
+    client._response_cache.set(key, {"text": "cached answer", "tokens_used": 1})
+    _reset_breaker()
+    out = await client.generate_text(prompt="same prompt")
+    assert out == {"text": "cached answer", "tokens_used": 1}

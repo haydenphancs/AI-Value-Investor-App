@@ -57,7 +57,11 @@ logger = logging.getLogger(__name__)
 
 # Asset classes that carry a single live quote, so the `stock_chart` card is meaningful for
 # them. INDEX is deliberately absent — it has no single quote and gets `market_overview`.
-_QUOTED_WIDGET_ASSET_TYPES = frozenset({"STOCK", "ETF", "CRYPTO", "COMMODITY"})
+# COMMODITY is absent too: every FMP commodity code is in `BLOCKED_COMMODITY_SYMBOLS`, so
+# `PriceService.get_quote` answers `{}` for it and the deterministic card could never
+# render — it only cost a doomed fetch per commodity turn. The screen's own price reaches
+# the model through the resolver's context instead.
+_QUOTED_WIDGET_ASSET_TYPES = frozenset({"STOCK", "ETF", "CRYPTO"})
 
 
 def _chat_output_cap(is_deep_dive: bool) -> int:
@@ -121,6 +125,19 @@ def _day_range(
     return {"day_high": 0.0, "day_low": 0.0, "day_range_known": False}
 
 
+def _upstream_error(e: BaseException) -> Dict[str, Any]:
+    """The tool-result shape for a fetcher that FAILED upstream (FMP, CoinGecko, Supabase).
+
+    `upstream: True` is what the two doors count toward a `no_tools` refund. A tool result
+    the MODEL shaped — an invalid ticker, a symbol the provider does not cover — carries
+    `error` without it and stays charged: those errors are answered ("not covered") and,
+    counted, they let a decoy `get_stock_chart_data("QQQQQ")` make every turn free.
+    The text is redacted: an httpx error's message carries the request URL, apikey and all.
+    """
+    from app.log_redaction import redact_secrets
+    return {"error": redact_secrets(f"{type(e).__name__}: {e}")[:200], "upstream": True}
+
+
 class ChatService:
     def __init__(self):
         self.supabase = get_supabase()
@@ -134,9 +151,14 @@ class ChatService:
     ):
         """Resolve the screen's grounding block and decide what it IS.
 
-        Returns ``(context, server_grounded, context_is_replayed)``. The resolver returns
-        the client's own string when it passes through, times out or fails; anything ELSE
-        is a block it just built from the live services. The "replayed snapshot — may be
+        Returns ``(context, server_grounded, context_is_replayed, cache_safe)``. The
+        resolver returns the client's own string when it passes through, times out or
+        fails; anything ELSE is a block it just built from the live services.
+        ``cache_safe`` is True only when the block contains NONE of the client text — the
+        resolver REPLACED it — which is the bar for writing a brief built on it into the
+        shared 24 h deep-dive cache. `server_grounded` is NOT that bar: COMMODITY appends
+        the bundled profile to the caller's own string, so it reads server-grounded while
+        carrying attacker-authored figures verbatim. The "replayed snapshot — may be
         out of date" framing is only true of the pass-through case: the endpoint computes
         `context_is_replayed` from the REQUEST shape (no client context, a persisted one on
         the row), which told the model a fresh ETF/CRYPTO/INDEX block was stale on every
@@ -154,7 +176,7 @@ class ChatService:
         replaced = server_grounded and not (client_context and client_context in (context or ""))
         if replaced:
             context_is_replayed = False
-        return context, server_grounded, context_is_replayed
+        return context, server_grounded, context_is_replayed, bool(replaced)
 
     @staticmethod
     def _snapshot_summary_has_data(summary: Optional[str]) -> bool:
@@ -188,7 +210,7 @@ class ChatService:
         legacy) or none on a miss.
         """
         # Screen-aware grounding (never raises; degrades to client context/None).
-        context, _server_grounded, context_is_replayed = await self._resolve_grounding(
+        context, _server_grounded, context_is_replayed, cache_safe = await self._resolve_grounding(
             context_type, reference_id, context, user_id, context_is_replayed,
         )
 
@@ -325,7 +347,7 @@ class ChatService:
         else:
             # The round succeeded, but if EVERY tool the model called came back as an error
             # (an FMP rate limit, a timeout) the answer has none of its live data either.
-            errs = response.get("tool_errors") or []
+            errs = [e for e in (response.get("tool_errors") or []) if e.get("upstream")]
             if errs and not response.get("tool_results"):
                 logger.warning(
                     "Every tool call failed on the non-streaming turn (%s) — marking degraded",
@@ -342,7 +364,12 @@ class ChatService:
         # back): with the key now stable for 24 h, that would be served to every user.
         if (
             is_deep_dive and context and stock_id and len(ai_text) > 100
-            and not degraded and _server_grounded
+            and not degraded
+            and self._deep_dive_cacheable(
+                cache_safe=cache_safe, history=history, reader_lens=reader_lens,
+                stock_id=stock_id, asset_type=asset_type, context_type=context_type,
+                reference_id=reference_id,
+            )
         ):
             await asyncio.to_thread(
                 self._upsert_deep_dive_cache, stock_id, context, ai_text, user_message,
@@ -393,11 +420,14 @@ class ChatService:
         Returns ``{prompt, system_instruction, citations, widget}``.
         """
         # Screen-aware grounding (never raises).
-        context, server_grounded, context_is_replayed = await self._resolve_grounding(
+        context, server_grounded, context_is_replayed, cache_safe = await self._resolve_grounding(
             context_type, reference_id, context, user_id, context_is_replayed,
         )
 
-        history = self._get_recent_messages(session_id, limit=20)
+        # Off the loop, like the non-streaming door: a sync postgrest call on the single
+        # Railway worker stalls every other in-flight request for a Supabase RTT — and
+        # this is the door every real user takes.
+        history = await asyncio.to_thread(self._get_recent_messages, session_id, 20)
 
         # RAG context + conversation memory — independent, run concurrently (same as generate_response).
         (chunks, citations), conversation_block = await asyncio.gather(
@@ -490,11 +520,71 @@ class ChatService:
             # write the answer back after a successful stream.
             "is_deep_dive": is_deep_dive,
             "deep_dive_cached": cached_report,
-            # The WRITE-side context: None unless the block is server-grounded, so a brief
-            # built on client context (resolver timeout / fallback) is answered but never
-            # cached under a 24 h stable key for every user.
-            "deep_dive_context": context if (is_deep_dive and server_grounded) else None,
+            # The WRITE-side context: None unless the brief is safe to share for 24 h — see
+            # `_deep_dive_cacheable`. The turn is still answered either way.
+            "deep_dive_context": context if (
+                is_deep_dive and self._deep_dive_cacheable(
+                    cache_safe=cache_safe, history=history, reader_lens=reader_lens,
+                    stock_id=stock_id, asset_type=asset_type, context_type=context_type,
+                    reference_id=reference_id,
+                )
+            ) else None,
         }
+
+    @staticmethod
+    def _deep_dive_subject(raw: Optional[str], asset_type: str) -> Optional[str]:
+        """The symbol a reference/stock id names, canonicalised the way the resolver prices it."""
+        sym = sanitize_symbol((raw or "").split("|")[0])
+        if not sym:
+            return None
+        if (asset_type or "").upper() == "CRYPTO":
+            # iOS sends stockId=BTCUSD with referenceId=BTC for the same screen.
+            return canonical_stored_symbol(sym, "crypto")
+        return sym
+
+    def _deep_dive_cacheable(
+        self, *, cache_safe: bool, history: Any, reader_lens: Optional[str],
+        stock_id: Optional[str], asset_type: str, context_type: Optional[str],
+        reference_id: Optional[str],
+    ) -> bool:
+        """Whether a deep-dive brief generated for THIS turn may be written to the shared cache.
+
+        The 24 h `market_deep_dive_cache` row is keyed on (symbol, asset type, message) —
+        the volatile grounding block was dropped from the key on 2026-09-16 so a re-tap
+        of the AI Analyst button is a hit rather than a 45 s cache. That makes the WRITE
+        the only defence: everything the caller controls that is NOT in the key must be
+        absent from the brief, or one user's turn is served to every user for a day.
+
+          * `cache_safe` — the resolver REPLACED the client text (COMMODITY appends it).
+          * no conversation history and no reader lens — a prior turn ("from now on,
+            gold is $1") or a memory summary would be laundered into the shared brief;
+            the canned button always opens a fresh session, so nothing legitimate is lost.
+          * the grounding subject IS the session symbol — the block follows the
+            per-message `reference_id` / `context_type` override while the row is keyed
+            on the session's `stock_id`, so a caller could ground an SPY row on a
+            different fund or a different class.
+        """
+        if not cache_safe:
+            return False
+        if history or reader_lens:
+            logger.info("deep dive: not cacheable — turn carries history/lens (stock=%s)", stock_id)
+            return False
+        kind = (asset_type or "").upper()
+        if (context_type or "").strip().upper() != kind:
+            logger.warning(
+                "deep dive: not cacheable — context_type %r does not match asset_type %s (stock=%s)",
+                context_type, kind, stock_id,
+            )
+            return False
+        subject = self._deep_dive_subject(reference_id, kind)
+        session_subject = self._deep_dive_subject(stock_id, kind)
+        if not subject or not session_subject or subject != session_subject:
+            logger.warning(
+                "deep dive: not cacheable — grounding subject %r != session symbol %r (%s)",
+                subject, session_subject, kind,
+            )
+            return False
+        return True
 
     async def stream_synthesis(
         self, prep, user_message, route, tools, tool_handlers, *, signals=None,
@@ -836,13 +926,14 @@ class ChatService:
                 if raw and raw.get("widget_type") == "market_overview":
                     return raw
             elif asset_type in _QUOTED_WIDGET_ASSET_TYPES:
-                # ETF / CRYPTO / COMMODITY used to fall through to `return None`, so a stock
-                # chat and an index chat each rendered a card and a Bitcoin chat rendered
-                # nothing at all. All three are quoted by FMP `/stable/quote`, and the card
-                # degrades honestly for them: `pe_ratio` / `market_cap` are Optional on
+                # ETF / CRYPTO used to fall through to `return None`, so a stock chat and an
+                # index chat each rendered a card and a Bitcoin chat rendered nothing at
+                # all. Both are quoted (profile path / CoinGecko), and the card degrades
+                # honestly for them: `pe_ratio` / `market_cap` are Optional on
                 # `StockChartWidget` and iOS renders P/E only when it is present. The model
                 # could ALREADY produce this exact card for a coin via `get_stock_chart_data`,
-                # so the path is proven — it just wasn't deterministic.
+                # so the path is proven — it just wasn't deterministic. COMMODITY is not in
+                # the set: its quote is licence-blocked, see `_QUOTED_WIDGET_ASSET_TYPES`.
                 raw = await asyncio.wait_for(
                     asyncio.shield(self._fetch_stock_widget_data(symbol)), timeout=timeout,
                 )
@@ -910,9 +1001,9 @@ class ChatService:
 
         Only the ``stock_chart`` widget carries a single live quote; INDEX
         (market_overview) is already grounded by the resolver's INDEX branch and
-        has no single quote, so it's intentionally skipped. Since ETF / CRYPTO /
-        COMMODITY now render a ``stock_chart`` too, they pick this grounding up for
-        free — their prose quotes the same numbers as their card. Never raises; returns
+        has no single quote, so it's intentionally skipped. Since ETF / CRYPTO now
+        render a ``stock_chart`` too, they pick this grounding up for free — their
+        prose quotes the same numbers as their card. Never raises; returns
         None when there's no finite, non-zero price — ``_build_stock_widget``
         coerces a null price to 0, and we must not assert the stock costs $0.
         """
@@ -941,7 +1032,11 @@ class ChatService:
         ticker = str(widget.get("ticker") or "").strip()
         parts = [f"{ticker} ${_usd(price)}".strip()]
         chg, chg_pct = _fin(widget.get("change")), _fin(widget.get("change_percent"))
-        if chg is not None and chg_pct is not None:
+        if widget.get("change_known") is False:
+            # The card's 0.00 is a placeholder; telling the model "($+0.00, +0.00%)" made it
+            # narrate a flat day the quote never claimed.
+            parts.append("(day change unknown)")
+        elif chg is not None and chg_pct is not None:
             parts.append(f"({_usd(chg, signed=True)}, {chg_pct:+.2f}%)")
         hi, lo = _fin(widget.get("day_high")), _fin(widget.get("day_low"))
         if hi and lo:
@@ -982,7 +1077,12 @@ class ChatService:
         return them as a dict matching ``StockChartWidget``.
         """
         try:
-            quote = await price_source(self).get_quote(ticker)
+            src = price_source(self)
+            # Strict: an FMP outage RAISES (→ the upstream arm below, refundable) instead
+            # of reading as "no quote data" (the model's own miss, charged). A double
+            # without the strict method keeps the legacy contract.
+            strict = getattr(src, "get_quote_strict", None)
+            quote = await (strict(ticker) if callable(strict) else src.get_quote(ticker))
             if not quote:
                 return {"error": f"No quote data found for {ticker}"}
 
@@ -1063,7 +1163,10 @@ class ChatService:
             elif asset_class == "commodity":
                 # The commodity screen's own verdict, so the card and the screen agree:
                 # a metal is an ETF (equity hours); WTI / Henry Hub are a FRED daily
-                # settlement published days behind, which is never "live".
+                # settlement published days behind, which is never "live". No production
+                # caller reaches this arm today — every FMP commodity code is licence-
+                # blocked and the quote leg above returns the error dict first; it stays
+                # so a lifted block cannot stamp the equity clock on a commodity.
                 from app.services.commodity_service import _commodity_market_status
                 is_market_open = _commodity_market_status(ticker) == "Market Open"
             else:
@@ -1079,7 +1182,7 @@ class ChatService:
                 "FMP stock widget fetch failed for %s (%s: %s)",
                 ticker, type(e).__name__, e, exc_info=True,
             )
-            return {"error": str(e)}
+            return _upstream_error(e)
 
     # FMP fields arrive as present-but-null for halted / thinly-traded / pre-market / newly-listed
     # tickers. `dict.get(k, 0)` only substitutes on an ABSENT key, so int(None) — or a None fed into
@@ -1153,22 +1256,31 @@ class ChatService:
         the REQUIRED numeric fields (`or 0`) so a null price/change/volume degrades to 0 instead of
         raising a Pydantic ValidationError that drops the entire card; the genuinely-optional fields
         (market_cap / pe / year hi-lo) stay None when absent."""
+        pct_raw = (
+            quote.get("changePercentage")
+            if quote.get("changePercentage") is not None
+            else quote.get("changesPercentage")
+        )
+        # `PriceService._shape` deliberately emits change=None for "unknown — 0.0 would be
+        # a fabricated flat day"; the `or 0` below is a WIRE coercion (iOS declares the two
+        # floats non-Optional), not a claim. The flag carries the truth.
+        change_known = (
+            _finite_or_none(quote.get("change")) is not None
+            or _finite_or_none(pct_raw) is not None
+        )
         widget = StockChartWidget(
             ticker=ticker,
             company_name=quote.get("name") or ticker,
             current_price=quote.get("price") or 0,
             change=quote.get("change") or 0,
+            change_known=change_known,
             # FMP `/stable` renamed this to the SINGULAR `changePercentage`; the plural is the
             # dead `/api/v3` spelling. Reading only the plural meant `or 0` fired on every
             # equity, so the card printed "+0.00%" — and because iOS colours on
             # `changePercent >= 0`, it painted GREEN next to a negative dollar change. Two
             # contradictory numbers on an AI-authored, credit-charged card.
             # Singular first, plural retained: some non-equity quotes still carry it.
-            change_percent=(
-                quote.get("changePercentage")
-                if quote.get("changePercentage") is not None
-                else quote.get("changesPercentage")
-            ) or 0,
+            change_percent=pct_raw or 0,
             **_day_range(quote, historical_data),
             # NOT `int(quote.get("volume") or 0)`: a NaN survives `or 0` (NaN is truthy) and
             # `int(nan)` raises ValueError inside the caller's try → the entire card disappears.
@@ -1226,7 +1338,7 @@ class ChatService:
             return {"available": True, **analysis.model_dump()}
         except Exception as e:
             logger.error(f"Analyst data fetch failed for {ticker}: {e}")
-            return {"error": str(e)}
+            return _upstream_error(e)
 
     # ── Sentiment data fetching for the sentiment tool ───────────
 
@@ -1264,7 +1376,7 @@ class ChatService:
             return analysis.model_dump()
         except Exception as e:
             logger.error(f"Sentiment data fetch failed for {ticker}: {e}")
-            return {"error": str(e)}
+            return _upstream_error(e)
 
     async def _fetch_market_overview_data(self, symbol: str) -> Dict[str, Any]:
         """
@@ -1275,6 +1387,12 @@ class ChatService:
             from app.services.index_service import get_index_service
             from app.schemas.chat import MarketOverviewWidget, MarketOverviewSector, MarketOverviewMacroItem
 
+            # Second gate behind the tool handler's profiled-index check: the index
+            # pipeline is the most expensive fetch chat can trigger (paged history + a
+            # Gemini story + two persisted cache rows), and it accepts any string.
+            if not str(symbol or "").startswith("^"):
+                return {"error": f"{symbol} is not an index; get_market_overview covers "
+                                 f"^GSPC, ^IXIC and ^DJI only"}
             service = get_index_service()
             # Fetch the full index detail (will use Supabase cache if available)
             detail = await service.get_index_detail(symbol)
@@ -1313,7 +1431,7 @@ class ChatService:
             return widget.model_dump()
         except Exception as e:
             logger.error(f"Market overview fetch failed for {symbol}: {e}")
-            return {"error": str(e)}
+            return _upstream_error(e)
 
     # ── Market awareness (see `services/chat_market_tools.py` for the why) ────────
     #
@@ -1789,10 +1907,23 @@ class ChatService:
             if age > timedelta(hours=self._DEEP_DIVE_TTL_HOURS):
                 return None
             logger.info(f"Deep dive cache HIT for {symbol} (age={age})")
-            return entry["report_markdown"]
+            # The brief quotes the price/level it was written against, and the card
+            # beside it is fetched fresh — so a replay must SAY when it was written, or
+            # a 09:36 "up 1.2% at $510" reads as this minute's under a $504 card.
+            return self._as_of_banner(cached_at) + entry["report_markdown"]
         except Exception as e:
             logger.warning(f"Deep dive cache check failed: {e}")
             return None
+
+    @staticmethod
+    def _as_of_banner(written_at: datetime) -> str:
+        """One italic line dating a replayed brief, in ET like every other stamp the app shows."""
+        from app.utils.market_hours import ET
+        local = written_at.astimezone(ET)
+        return (
+            f"_Brief written {local.strftime('%a %b %-d, %-I:%M %p')} ET — its figures are as "
+            "of then; the card shows the live price._\n\n"
+        )
 
     def _upsert_deep_dive_cache(
         self, symbol: str, context: str, report: str, user_message: str, asset_type: str = ""
@@ -2214,23 +2345,21 @@ class ChatService:
         )
         cached_summary, cached_upto = await asyncio.to_thread(self._load_cached_summary, session_id)
         summary = ""
+        # The messages past the cached watermark are in NEITHER the summary NOR the recent
+        # window — each turn pushes two out of `recent`, so on every other turn of a long
+        # chat the two messages just before the verbatim window were invisible to the
+        # model. Computed ONCE, up front: both the reuse branch and the "summariser failed,
+        # fall back to the stale summary" branch below carry them verbatim.
+        lagging: List[Dict[str, Any]] = []
         if cached_summary and cached_upto is not None:
             # A message with an unparseable timestamp counts as uncovered: we cannot
             # prove the cached summary includes it, so err toward regenerating.
-            uncovered = sum(
-                1 for m in older
+            lagging = [
+                m for m in older
                 if (ts := self._parse_ts(m.get("created_at"))) is None or ts > cached_upto
-            )
-            if uncovered < settings.CHAT_SUMMARY_REFRESH_AFTER_MESSAGES:
+            ]
+            if len(lagging) < settings.CHAT_SUMMARY_REFRESH_AFTER_MESSAGES:
                 summary = cached_summary
-                # The messages past the watermark are in NEITHER the summary NOR the recent
-                # window — each turn pushes two out of `recent`, so on every other turn of a
-                # long chat the two messages just before the verbatim window were invisible
-                # to the model. Carry them verbatim until the summary catches up.
-                lagging = [
-                    m for m in older
-                    if (ts := self._parse_ts(m.get("created_at"))) is None or ts > cached_upto
-                ]
                 if lagging:
                     recent = lagging + recent
 
@@ -2268,14 +2397,18 @@ class ChatService:
                         self._store_cached_summary, session_id, summary, newest_older
                     )
             except Exception as e:
-                logger.warning("History condense failed (%s: %s) — recent turns only", type(e).__name__, e)
-                # A STALE summary beats no summary. `cached_summary` is already loaded and
-                # is at most a few messages behind; discarding it dropped the reader's
-                # goals, tickers and numbers from the prompt entirely — on precisely the
-                # turns where the model is already degraded, which is when grounding
-                # matters most. This is also strictly worse than the pre-migration-130
-                # behaviour it was meant to preserve.
+                logger.warning("History condense failed (%s: %s) — stale summary + lagging turns",
+                               type(e).__name__, e)
+                # A STALE summary beats no summary. `cached_summary` is already loaded;
+                # discarding it dropped the reader's goals, tickers and numbers from the
+                # prompt entirely — on precisely the turns where the model is already
+                # degraded, which is when grounding matters most. On THIS branch the
+                # stale summary is ≥ CHAT_SUMMARY_REFRESH_AFTER_MESSAGES messages behind,
+                # so the lagging turns are carried verbatim exactly as the reuse branch
+                # does — they used to be in neither the summary nor the window.
                 summary = summary or cached_summary or ""
+                if summary == cached_summary and lagging:
+                    recent = lagging + recent
         if summary:
             return (
                 f"EARLIER CONVERSATION (summary):\n{summary}\n\n"

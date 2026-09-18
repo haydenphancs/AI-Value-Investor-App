@@ -26,8 +26,14 @@ struct RevenueBreakdownChartView: View {
         if data.isProfit {
             return 0
         } else {
-            // Loss: bottom extends to show net loss (negative)
-            return data.netProfit * 1.2 // netProfit is negative, so this goes below 0
+            // Loss: bottom extends below the LOWER of the reported net loss and where the
+            // drawn waterfall actually lands. The waterfall skips credit lines (income is
+            // not a cost), so with a credit it ends BELOW net income — INTC FY2025 lands at
+            // −1.55B against a −0.27B loss — and a floor set from net income alone let the
+            // bar bleed out of the frame.
+            let drawnCosts = data.waterfallItems.filter { !$0.isCredit }.reduce(0) { $0 + $1.value }
+            let waterfallBottom = data.totalRevenue - drawnCosts
+            return min(data.netProfit, waterfallBottom, 0) * 1.2
         }
     }
 
@@ -45,13 +51,16 @@ struct RevenueBreakdownChartView: View {
         }
     }
 
-    // Grid values for Y-axis — aligned to totalRevenue so 100% matches bar top
+    // Grid values for Y-axis — aligned to NET revenue so 100% is the revenue the company
+    // books (profit branch; the loss branch ladders the whole range in quarters). A gross
+    // stack (INTC) rises past 100% to 133%; the eliminations step brings the waterfall
+    // back down to it.
     private var gridValues: [Double] {
         if data.isProfit {
             // `chartTopValue` already floors at 1 when there is no revenue, so
-            // derive the ladder from it: using a zero `totalRevenue` directly
+            // derive the ladder from it: using a zero `netRevenue` directly
             // stacked all five grid lines (and their labels) on one pixel.
-            let rev = data.totalRevenue > 0 ? data.totalRevenue : chartTopValue
+            let rev = data.netRevenue > 0 ? data.netRevenue : chartTopValue
             return [0, rev * 0.25, rev * 0.5, rev * 0.75, rev]
         } else {
             let step = chartRange / 4
@@ -72,7 +81,7 @@ struct RevenueBreakdownChartView: View {
     // percentages that had nothing to do with the lines they were placed on.
     // With no revenue there is no meaningful percentage — show a dash.
     private var percentageLabels: [String] {
-        guard data.totalRevenue > 0 else {
+        guard data.netRevenue > 0 else {
             return gridValues.map { _ in "—" }
         }
 
@@ -80,7 +89,7 @@ struct RevenueBreakdownChartView: View {
             return ["0%", "25%", "50%", "75%", "100%"]
         } else {
             return gridValues.map { value in
-                let pct = (value / data.totalRevenue) * 100
+                let pct = (value / data.netRevenue) * 100
                 // `Int()` traps on non-finite / out-of-Int-range input.
                 guard pct.isFinite else { return "—" }
                 return "\(Int(min(max(pct, -9_999), 9_999)))%"
@@ -269,7 +278,10 @@ struct RevenueBreakdownChartView: View {
         //   • a CREDIT is excluded — it is income, not a cost, so it has no business in a
         //     cost bar. The `max(h, 0)` clamp above used to be the only thing hiding it,
         //     which silently made the drawn bar disagree with the totals.
-        let costSegments = data.costItems.filter { !$0.isCredit }
+        // `waterfallItems`, not `costItems`: a gross stack gets the eliminations bridge as
+        // its first step, so the waterfall starts at the segment total and the costs are
+        // measured from reported revenue — the level the 100% grid line marks.
+        let costSegments = data.waterfallItems.filter { !$0.isCredit }
 
         // Top of cost bar aligns with top of revenue bar
         let rawRevenueTopY = CGFloat(chartTopValue - data.totalRevenue) * pixelsPerUnit

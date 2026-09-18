@@ -173,6 +173,30 @@ async def test_a_coin_ticker_that_is_also_a_real_company_never_becomes_a_trendin
 
 
 @pytest.mark.asyncio
+async def test_a_moving_equity_that_shares_a_coin_ticker_never_becomes_a_chip(monkeypatch):
+    """LTC Properties (REIT) is the #1 loser at −12%. The chip would read "Why is LTC down
+    12% today?" — and the global chat has no screen behind it, so `_chat_symbol` answers
+    it as LITECOIN beside a Litecoin card, for a question the product itself authored.
+    Both the hot-ticker slot and the trending slot must fall through to the next name."""
+    _install(
+        monkeypatch,
+        universe={
+            "LTC": _profile("LTC", "LTC Properties", sector="Real Estate"),
+            "ATOM": _profile("ATOM", "Atomera", sector="Technology"),
+            "KO": _profile("KO", "Coca-Cola"),
+        },
+        changes={"LTC": -12.0, "ATOM": 30.0, "KO": -4.1},
+        mentions={"LTC": {"rank": 1, "mentions": 9000}},
+    )
+    resp = await mod.ChatStartersService().get_starters()
+    texts = _texts(resp)
+    assert not any(c.symbol in ("LTC", "ATOM") for c in resp.global_starters), texts
+    assert not any("LTC" in t or "ATOM" in t for t in texts), texts
+    # The row is not thinned by the skip: the loop fell through to the next mover.
+    assert any(c.kind == "hot_ticker" and c.symbol == "KO" for c in resp.global_starters), texts
+
+
+@pytest.mark.asyncio
 async def test_a_genuinely_moving_buzz_name_does_become_a_trending_chip(monkeypatch):
     """The control for the test above — without it, that one passes vacuously.
 

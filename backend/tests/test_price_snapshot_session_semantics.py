@@ -242,12 +242,21 @@ async def test_the_movers_service_and_the_batch_path_stamp_identically(monkeypat
         staticmethod(lambda: {"AAPL": {"symbol": "AAPL", "close": 100.0, "previous_close": 105.0,
                                        "trade_date": "2026-09-11"}}),
     )
-    monkeypatch.setattr(PriceService, "_change_session", classmethod(lambda cls, p, s: "SENTINEL"))
+    seen = {}
+
+    def _sentinel(cls, p, s, price=None):
+        seen["args"] = (p, price)
+        return "SENTINEL"
+    monkeypatch.setattr(PriceService, "_change_session", classmethod(_sentinel))
     universe = await mm.MarketMoversService().get_universe()
     assert universe["AAPL"]["changeSession"] == "SENTINEL", (
         "market_movers derives the session stamp on its own instead of through "
         "PriceService._change_session"
     )
+    # …and hands it the LIVE PRICE, without which the stamp is the stored close's session
+    # all day (the 2026-09-16 regression: `_change_session` grew a `price` argument, the
+    # batch path passed it, the universe did not).
+    assert seen["args"][1] == universe["AAPL"]["price"] and seen["args"][1] is not None
     mm._cache.clear()
 
 
@@ -341,3 +350,33 @@ def test_a_few_stale_illiquid_rows_are_an_info_line_not_a_warning(caplog):
     assert len(info) == 1 and "2 of 200" in info[0] and "CCZ" in info[0]
     PriceService._report_stale_snapshots({}, 200)                       # nothing stale: silent
     assert len([r for r in caplog.records if "stale" in r.getMessage().lower()]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_price,expected", [
+    (103.0, "2026-09-14"),   # moved off the stored close → the LIVE session
+    (100.0, "2026-09-11"),   # still AT the stored close → the session that close ended
+])
+async def test_the_universe_stamps_the_live_session_once_the_price_has_moved(monkeypatch, live_price, expected):
+    """Behavioural twin of the sentinel test above. With `price` dropped from the call the
+    universe carried `trade_date` all day — Thursday's live tape stamped Wednesday, so the
+    chat snapshot said "on Wed" and the widget's industry attribution blanked."""
+    from app.services import market_movers_service as mm
+    mm._cache.clear()
+    monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 14))
+
+    class _PS:
+        async def _get_universe(self):
+            return {"AAPL": {"symbol": "AAPL", "companyName": "Apple", "price": live_price,
+                             "marketCap": 3e12, "volume": 1e6, "avgVolume": 5e5,
+                             "sector": "Technology", "industry": "Consumer Electronics",
+                             "exchangeShortName": "NASDAQ", "isEtf": False, "isFund": False}}
+
+    monkeypatch.setattr(mm, "price_source", lambda owner=None: _PS())
+    monkeypatch.setattr(
+        mm.MarketMoversService, "_select_all_closes",
+        staticmethod(lambda: {"AAPL": {"symbol": "AAPL", "close": 100.0, "previous_close": 105.0,
+                                       "trade_date": "2026-09-11"}}),
+    )
+    universe = await mm.MarketMoversService().get_universe()
+    assert universe["AAPL"]["changeSession"] == expected

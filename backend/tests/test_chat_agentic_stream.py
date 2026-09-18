@@ -198,6 +198,56 @@ def _tool_names(asset_type=None):
     }
 
 
+def _finish_chunk(reason, *parts):
+    """A terminal chunk: the candidate carries `finish_reason` (only the last chunk does)."""
+    return SimpleNamespace(candidates=[SimpleNamespace(
+        content=SimpleNamespace(parts=list(parts)), finish_reason=SimpleNamespace(name=reason))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["MAX_TOKENS", "SAFETY", "RECITATION"])
+async def test_a_stream_cut_after_answer_text_yields_a_finish_marker(reason):
+    """The model CUT the answer after real text. It used to end cleanly — charged in full
+    and, for a deep dive, cached for every user for 24 h with its last sentence missing."""
+    chat = _FakeChat(rounds=[[_chunk(_FakePart(text="The Fed will likely **")),
+                              _finish_chunk(reason)]])
+    events = [ev async for ev in _client(chat).stream_agentic("prompt", tools=[_TOOL], tool_handlers={})]
+    assert events == [("answer", "The Fed will likely **"), ("finish", reason)]
+
+
+@pytest.mark.asyncio
+async def test_a_clean_stop_yields_no_finish_marker():
+    chat = _FakeChat(rounds=[[_chunk(_FakePart(text="Done.")), _finish_chunk("STOP")]])
+    events = [ev async for ev in _client(chat).stream_agentic("prompt", tools=[_TOOL], tool_handlers={})]
+    assert events == [("answer", "Done.")]
+
+
+@pytest.mark.asyncio
+async def test_a_cut_inside_thinking_only_is_still_an_empty_answer_not_a_marker():
+    """No answer text streamed: the endpoint's "empty stream result" → fallback path must
+    keep owning this case (a marker with nothing to keep would be a refund for nothing)."""
+    chat = _FakeChat(rounds=[[_chunk(_FakePart(text="thinking…", thought=True)),
+                              _finish_chunk("MAX_TOKENS")]])
+    events = [ev async for ev in _client(chat).stream_agentic("prompt", tools=[_TOOL], tool_handlers={})]
+    assert events == [("thought", "thinking…")]
+
+
+@pytest.mark.asyncio
+async def test_a_cut_on_the_final_round_after_tools_is_marked_too():
+    fc = _FakeFC("get_x", {"ticker": "AAPL"})
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(function_call=fc))],
+        [_chunk(_FakePart(text="Apple is up because"), ), _finish_chunk("MAX_TOKENS")],
+    ])
+
+    async def handler(args):
+        return {"ok": True}
+    events = [ev async for ev in _client(chat).stream_agentic(
+        "prompt", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=1)]
+    kinds = [k for k, _ in events]
+    assert kinds == ["tool", "answer", "finish"], events
+
+
 def test_declarations_default_to_the_full_equity_set(monkeypatch):
     """No asset type = no screen context, so any stock may come up. Also the safe default:
     an unrecognised value must never silently strip a tool.

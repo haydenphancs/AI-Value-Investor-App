@@ -89,9 +89,16 @@ def test_the_whale_read_is_paged_on_the_unique_id_past_the_clamp():
 
 
 @pytest.mark.asyncio
-async def test_a_capped_whale_read_does_not_advance_the_cursor(monkeypatch):
-    """Pages are by id, not by time: the rows beyond the cap are not "the newest", so a
-    cursor advanced to the max stamp read would skip them forever. Hold it instead."""
+async def test_a_capped_whale_read_advances_to_just_below_the_last_stamp(monkeypatch):
+    """The read is ordered by `created_at` first (then `id`), so a capped page set is the
+    OLDEST rows since the cursor — and rows beyond the cap may share the LAST stamp read
+    (`created_at` is per-transaction, so one bulk upsert stamps up to 600 rows alike).
+
+    This test used to pin the opposite: "hold the cursor". Holding it PARKED the cursor
+    forever — every run re-read the same oldest cap, nothing past it was ever reached and
+    the 'remainder next run' the comment promised never happened (F17-2). Advancing to the
+    highest stamp strictly BELOW the last one re-reads only the boundary tie group (the
+    dedup claim makes that harmless) and never skips a row."""
     start = datetime(2026, 11, 14, 2, 0, tzinfo=timezone.utc)
     since = start - timedelta(hours=1)
     full = _rows(sm.WHALE_PHASE_MAX_PAGES * PAGE_SIZE, start)
@@ -99,7 +106,9 @@ async def test_a_capped_whale_read_does_not_advance_the_cursor(monkeypatch):
     monkeypatch.setattr(sm, "_recent_whale_rows", lambda raw, cutoff_date: [])
     monkeypatch.setattr(sm, "get_supabase", lambda: SimpleNamespace(table=lambda name: None))
     sent, cursor = await sm._run_whale_phase(now=start + timedelta(hours=6), cursor=since)
-    assert cursor == since
+    stamps = sorted({datetime.fromisoformat(r["created_at"]) for r in full})
+    assert cursor == stamps[-2], "resume just below the last stamp read, not at it"
+    assert since < cursor < stamps[-1]
 
 
 @pytest.mark.asyncio

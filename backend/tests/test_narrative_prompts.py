@@ -81,21 +81,34 @@ def test_optional_modules_skip_their_job_rather_than_prompting_on_nothing():
 
 # ── caps vs asks ──────────────────────────────────────────────────────────────
 
-_ASK = re.compile(r"total under (\d+) words")
+# Both spellings the prompts use: "total under N words" and the bare "under N words".
+# The guard used to match only the first and silently `continue`d past 9 of 18 jobs
+# (F12-9) — a cap lowered under one of those asks went unnoticed.
+_ASK = re.compile(r"(?:total )?under (\d+) words")
+# Jobs whose prompt states its length in sentences only. A numeric ask added to one of
+# these is picked up automatically; a job NOT listed here with no parsable ask is a
+# failure, never a skip.
+_NO_ASK_ALLOWED = {"hidden_market_signals_insight"}
 
 
 def test_every_word_cap_leaves_headroom_over_its_prompts_ask():
     """`_post_process` hard-cuts at `word_cap` and appends '…'. If the prompt asks for
     'under N words' and the cap is < N, a compliant answer is clipped mid-sentence."""
     short = []
+    checked = 0
     for job in np_.build_narrative_jobs(PERSONA, "EVIDENCE", _report(3)):
         m = _ASK.search(job.prompt)
+        assert m or job.label in _NO_ASK_ALLOWED, (
+            f"{job.label} has no parsable length ask — add one, or list it in _NO_ASK_ALLOWED"
+        )
         if not m:
             continue
+        checked += 1
         ask = int(m.group(1))
         if job.word_cap < ask:
             short.append((job.label, job.word_cap, ask))
     assert not short, f"word_cap below the prompt's own ask: {short}"
+    assert checked >= 15, f"only {checked} jobs carried a parsable ask — regex drift?"
 
 
 def test_post_process_caps_words_and_marks_the_cut():

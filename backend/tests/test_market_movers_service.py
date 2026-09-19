@@ -396,3 +396,81 @@ def test_the_session_follows_the_denominator_the_picker_chose(price, close, prev
     picked = PriceService._pick_denominator(price, {"close": close, "previous_close": prev})
 
     assert (picked == close) is expect_live, why
+
+
+# ── F17-5: the universe stamps the LIVE session once the price moves off the close ──────
+#
+# `PriceService._change_session` grew a `price` argument (7f0b1fd3); the batch path passed
+# it and the universe did not, so from the open until the ~20:00 ET close ingest every
+# universe row carried YESTERDAY's `trade_date`: `widget_movers_service.industry_for`
+# refused the stamp (older than the batch's) and the Home widget lost its industry line
+# and sector breadth all session, while Cay AI narrated Tuesday's live tape "on Mon".
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price, expect, why", [
+    (130.0, "2026-09-15", "Tue 14:00 ET, NVDA +6% off Monday's close: the LIVE session"),
+    (122.6, "2026-09-14", "premarket: still printing Monday's close, so Monday's move"),
+    (122.6000000001, "2026-09-14", "float noise around the close is not a move"),
+    (0.01, "2026-09-15", "an extreme move is still the live session"),
+])
+async def test_the_universe_stamps_the_live_session_when_the_price_has_moved(
+        monkeypatch, price, expect, why):
+    import app.services.price_service as ps
+    from datetime import date
+
+    monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 15))
+    snap = {"close": 122.6, "previous_close": 120.0, "trade_date": "2026-09-14"}
+    _wire(monkeypatch, [_screener("NVDA", price)], {"NVDA": snap})
+    row = (await MarketMoversService().get_universe())["NVDA"]
+    assert row["changeSession"] == expect, why
+    # …and it is the SAME stamp the widget's batch path derives for the same inputs.
+    batch = ps.PriceService._from_screener(
+        {"symbol": "NVDA", "companyName": "NVIDIA", "price": price, "marketCap": 3e12}, snap)
+    assert batch["changeSession"] == row["changeSession"], (
+        "the universe and the batch path disagree about which session a change belongs to"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_group_mode_follows_the_live_stamp_intraday(monkeypatch):
+    """The sector row's `date` is the mode of its members' stamps, so the whole-session
+    'Mon' stamp reached the widget's breadth filter and the chat snapshot's wording."""
+    import app.services.price_service as ps
+    from datetime import date
+
+    monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 15))
+    rows = [_screener(f"S{i}", 101.0 + i, sector="Technology") for i in range(6)]
+    closes = {f"S{i}": {"close": 100.0, "previous_close": 99.0, "trade_date": "2026-09-14"}
+              for i in range(6)}
+    _wire(monkeypatch, rows, closes)
+    sectors = await MarketMoversService().get_sector_performance()
+    assert sectors and sectors[0]["date"] == "2026-09-15"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snap", [
+    None,
+    {"close": None, "previous_close": 120.0, "trade_date": "2026-09-14"},
+    {"close": float("nan"), "previous_close": 120.0, "trade_date": "2026-09-14"},
+    {"close": 0.0, "previous_close": 0.0, "trade_date": "2026-09-14"},
+])
+async def test_no_usable_close_means_no_change_and_no_stamp(monkeypatch, snap):
+    closes = {"NVDA": snap} if snap is not None else {}
+    _wire(monkeypatch, [_screener("NVDA", 130.0)], closes)
+    row = (await MarketMoversService().get_universe())["NVDA"]
+    assert row["changePercentage"] is None and row["changeSession"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_without_a_trade_date_has_no_prior_session_to_name(monkeypatch):
+    """Flat price, no `trade_date`: the change is a prior session's, but which one is
+    unknown — None, never today's date."""
+    import app.services.price_service as ps
+    from datetime import date
+
+    monkeypatch.setattr(ps, "session_trading_date", lambda now=None: date(2026, 9, 15))
+    _wire(monkeypatch, [_screener("NVDA", 100.0)], {"NVDA": {"close": 100.0, "previous_close": 90.0}})
+    row = (await MarketMoversService().get_universe())["NVDA"]
+    assert row["changePercentage"] == pytest.approx(100 / 90 * 100 - 100)
+    assert row["changeSession"] is None

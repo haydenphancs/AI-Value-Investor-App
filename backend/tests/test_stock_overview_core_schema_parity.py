@@ -40,6 +40,9 @@ _CORE_KEYS = {
     "current_price",
     "price_change",
     "price_change_percent",
+    # `change_known` (F19-6, 2026-09-17): the equity screen was the fifth asset class
+    # and the only one without the flag. Optional on the iOS DTO (`Bool?`, `?? true`).
+    "change_known",
     "market_status",
     "chart_data",
 }

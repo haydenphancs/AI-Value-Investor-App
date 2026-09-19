@@ -248,10 +248,16 @@ def _supabase_cache_get_stale(ticker: str) -> Optional[Dict[str, Any]]:
         if row.data:
             data = row.data[0].get("response_json")
             if data and isinstance(data, dict):
-                logger.info(f"Short interest using STALE Supabase data for {ticker}")
+                # No "using STALE" log here: this is a PRE-read, taken before the live
+                # fetch is attempted, and the row is usually never served. Logged at the
+                # point of use in `get_short_interest` instead — on prod the line fired for
+                # AI/FUBO/CVNA immediately before successful FINRA prints.
                 return data
         return None
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Short interest STALE Supabase read failed for %s: %s: %s", ticker, type(e).__name__, e
+        )
         return None
 
 
@@ -305,10 +311,51 @@ async def _get_finra_client() -> httpx.AsyncClient:
     return _finra_http_client
 
 
+# Single-flight for the token refresh. A cold process serving Home's Skeptical Money scan
+# (or ten Overview requests at once) fired ten simultaneous credential POSTs; if the
+# identity provider throttled the burst, all ten tickers skipped FINRA in the same instant,
+# paid the Nasdaq timeout each, and landed on stale prints. One in-flight Task that every
+# concurrent caller awaits (invariant #4's `_inflight` shape, Task-based so it settles
+# itself); a `finally` clears it. Followers SHARE a failure too — retrying serially N times
+# against a throttling IdP is exactly what the burst was.
+_finra_token_inflight: Optional["asyncio.Task[Optional[str]]"] = None
+
+
 async def _fetch_finra_token() -> Optional[str]:
-    """Get or refresh FINRA OAuth access token using client credentials."""
+    """Get or refresh FINRA OAuth access token using client credentials (single-flight)."""
+    global _finra_token_inflight
+
+    if _finra_access_token and time.time() < _finra_token_expiry:
+        return _finra_access_token
+
+    leader = _finra_token_inflight
+    if leader is not None and not leader.done():
+        # A joiner that is itself cancelled must not cancel the shared refresh.
+        return await asyncio.shield(leader)
+
+    task = asyncio.create_task(_fetch_finra_token_once())
+    _finra_token_inflight = task
+    # The slot is released by the TASK, not by this awaiter: the shield keeps the POST
+    # running when the leader's caller is cancelled, and a `finally` here would have
+    # nulled the slot at that moment — the next arrival then started a second POST
+    # beside the orphan (W2 security-2, refuted on consequence; closed anyway).
+    task.add_done_callback(_release_finra_token_slot)
+    return await asyncio.shield(task)
+
+
+def _release_finra_token_slot(task: "asyncio.Task[Optional[str]]") -> None:
+    global _finra_token_inflight
+    if _finra_token_inflight is task:
+        _finra_token_inflight = None
+
+
+async def _fetch_finra_token_once() -> Optional[str]:
+    """The refresh itself — one credential POST. Never raises; None on any failure."""
     global _finra_access_token, _finra_token_expiry
 
+    # Re-check under the flight: a follower that arrived after the leader stored the token
+    # would otherwise never see it here (it awaits the leader's Task instead), and a leader
+    # that raced a previous flight's completion must not POST again.
     if _finra_access_token and time.time() < _finra_token_expiry:
         return _finra_access_token
 
@@ -716,12 +763,7 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
         await asyncio.to_thread(_supabase_cache_set, ticker, result)
         return result
 
-    # Fall back to stale cache data
-    if stale:
-        _mem_cache_set(mem_key, stale)
-        return stale
-
-    # NOTHING anywhere. Memoise BRIEFLY — in memory only, never in Supabase (a persisted
+    # Nothing live. Memoise BRIEFLY — in memory only, never in Supabase (a persisted
     # empty would outlive the outage that caused it). Without this, `/stocks/{t}/overview`
     # re-ran the full FINRA attempt plus, until the timeout fix above, a 15 s Nasdaq wait
     # on EVERY 120 s cache miss, forever, for any ticker neither source covers — the single
@@ -736,6 +778,23 @@ async def get_short_interest(ticker: str) -> Dict[str, Any]:
     # minutes after the upstream recovered. `_NO_DATA` exists to tell these apart; this is
     # where that distinction has to be spent.
     ttl = _EMPTY_TTL_SECONDS if answered_empty else _FAILURE_TTL_SECONDS
+
+    # Fall back to stale cache data — under the SAME short memo, not the 3-day one. The
+    # stale row is served because it beats N/A, but it is still the product of a failed (or
+    # 204'd) fetch, and `_mem_cache_set` stamped it as if it were a fresh print: one FINRA
+    # 5xx on a 48-day-old row (BIGC, prod) pinned that print for 72 h while FINRA recovered
+    # seconds later — the 60 s failure memo never applied because the memo was the stale
+    # VALUE, not `{}`. Back-dating it lets the next request after the cooldown retry FINRA.
+    if stale:
+        logger.info(
+            "Short interest using STALE Supabase data for %s (settlement_date=%s, %s; "
+            "re-attempt in %ds)",
+            ticker, stale.get("settlement_date"),
+            "FINRA answered no rows" if answered_empty else "live fetch failed", ttl,
+        )
+        _cache[mem_key] = (time.time() - (_CACHE_TTL - ttl), stale)
+        return stale
+
     _cache[mem_key] = (time.time() - (_CACHE_TTL - ttl), {})
     return {}
 

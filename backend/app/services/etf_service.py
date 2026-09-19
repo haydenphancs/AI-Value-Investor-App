@@ -38,7 +38,8 @@ from app.schemas.etf import (
     PerformancePeriodResponse,
     RelatedTickerResponse,
 )
-from app.utils.market_hours import market_status_fields, to_utc_instant
+from app.utils.market_hours import ET, market_status_fields, to_utc_instant
+from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.corporate_actions_service import corporate_actions_source
 from app.services.price_service import price_source
 
@@ -102,8 +103,11 @@ _SP_HIST_CACHE_TTL = 43_200
 _QUOTE_TTL = 45             # live price + the quote-derived key-stat rows
 _RELATED_TTL = 60           # sibling ETF quotes — same data class, less prominent
 _INTRADAY_CHART_TTL = 60    # 1D/1W bars; the only genuinely per-range fetch
-_HISTORY_TTL = 43_200       # 12h — daily EOD bars only change at the close
-_DERIVED_TTL = 43_200       # 12h — performance periods + benchmark, both from history
+# 12h is the CEILING; both are also cut at the next settled close (`_cache_get_settled`).
+# "Daily EOD bars only change at the close" was the premise and it is false for the LAST
+# row — see `_settled_bars` below.
+_HISTORY_TTL = 43_200       # 12h — daily EOD bars, close-cycle aligned
+_DERIVED_TTL = 43_200       # 12h — performance periods + benchmark + sma_50, same
 _FUNDAMENTALS_TTL = 43_200  # 12h — profile, etf-info, holdings, sectors, dividends
 
 # Hard cap on live entries — see stock_overview_service for rationale. Eviction
@@ -129,6 +133,61 @@ def _cache_set(key: str, value: Any, ttl: Optional[float] = None) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Settled-close alignment for everything derived from the daily history ─────
+#
+# Twin of the block in `index_service` (same defect, same shape — the two services are
+# structurally identical here and drifted apart before). The premise behind the 12h
+# history / derived / Tier-2 TTLs — "daily EOD bars only change at the close" — is FALSE
+# for the last row: FMP `historical-price-eod/full` includes the CURRENT session's
+# partial bar. Live (2026-09-16, ~21:35 ET, after the close): SPY's 1Y chart ended on
+# `{2026-09-16, close 759.07, volume 5.9M}` against a 754.05 header — a ~10-minute
+# snapshot the first viewer after 09:30 had persisted as "today" for 12h. Every return
+# in `performance_periods`, the benchmark and `sma_50` were off by the same intraday
+# move for as long. GLD/SLV/PPLT/PALL commodity screens are ETF-backed and share it.
+#
+#   1. `_settled_bars` drops rows dated after the current close cycle's date
+#      (`current_close_cycle_start`, weekday 18:00 ET) before anything is sliced,
+#      aggregated, derived or persisted — 18:00 rather than the 16:00 bell so FMP has
+#      finalised the bar.
+#   2. `_cache_get_settled` / `_tier2_is_fresh` make an entry from the previous cycle a
+#      MISS whatever the rolling TTL says; otherwise the fix trades a wrong bar for a
+#      MISSING one (a 17:59 pull stays 12h-fresh with the settled bar absent, and a
+#      Tier-2 chart rebuilt from it at 18:30 pins the gap for a further 12h).
+
+
+def _settled_cutoff_date(now: Optional[datetime] = None) -> str:
+    """ISO date of the most recent SETTLED session — the last row a daily chart may show."""
+    return current_close_cycle_start(now).astimezone(ET).date().isoformat()
+
+
+def _settled_bars(historical: List[Dict], now: Optional[datetime] = None) -> List[Dict]:
+    """The daily rows whose session has settled: everything dated after the current close
+    cycle's date is the in-progress bar (or a stray future-dated row) and is dropped.
+
+    Total for any list input: non-dict rows are dropped, a row without a date is kept
+    (it cannot be placed in time, and every consumer already tolerates it). `now` is
+    injectable for tests.
+    """
+    cutoff = _settled_cutoff_date(now)
+    return [
+        r for r in (historical or [])
+        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
+    ]
+
+
+def _cache_get_settled(key: str) -> Optional[Any]:
+    """`_cache_get`, plus a MISS when the entry predates the current close cycle.
+
+    For the history and derived keys only: their content changes exactly once per
+    settled close, so an entry from the previous cycle is stale however young it is.
+    """
+    entry = _cache.get(key)
+    if entry is not None and entry[0] < current_close_cycle_start().timestamp():
+        _cache.pop(key, None)
+        return None
+    return _cache_get(key)
 
 
 # ── Background AI refresh: task ownership + per-symbol dedup ─────────
@@ -523,9 +582,7 @@ class ETFService:
             cached_at = datetime.fromisoformat(
                 (entry.get("cached_at") or "").replace("Z", "+00:00")
             )
-            if datetime.now(timezone.utc) - cached_at > timedelta(
-                hours=ETFService._TIER2_TTL_HOURS
-            ):
+            if not ETFService._tier2_is_fresh(category, cached_at):
                 return None
             return entry.get("response_json")
         except Exception as e:
@@ -534,6 +591,22 @@ class ETFService:
                 symbol, category, type(e).__name__, e,
             )
             return None
+
+    @staticmethod
+    def _tier2_is_fresh(
+        category: str, cached_at: datetime, now: Optional[datetime] = None
+    ) -> bool:
+        """Rolling 12h for the slow sections; close-cycle aligned for the daily ones.
+
+        `derived` and every persisted `chart:*` row (only non-intraday charts persist)
+        are pure functions of the settled daily history, so a row written before the
+        current close cycle began describes the PREVIOUS session's bars — stale at any
+        age, and fresh for up to ~72h over a weekend. See `_settled_bars`.
+        """
+        now = now or datetime.now(timezone.utc)
+        if category == "derived" or category.startswith("chart:"):
+            return cached_at >= current_close_cycle_start(now)
+        return now - cached_at <= timedelta(hours=ETFService._TIER2_TTL_HOURS)
 
     @staticmethod
     def _tier2_put(symbol: str, category: str, payload: Any) -> None:
@@ -682,7 +755,12 @@ class ETFService:
         is slower than the FMP call it would replace.
         """
         key = f"etf:hist:{symbol}"
-        cached = _cache_get(key)
+        # Close-cycle aligned: the list is served RAW (its last row may be today's
+        # in-progress bar, which the price-recovery fallback in `_build_etf_detail`
+        # legitimately wants), but a list pulled in the previous cycle is a miss so the
+        # settled bar lands as soon as the cycle turns. Consumers that persist or derive
+        # from it go through `_settled_bars`.
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
         # Per-section dedup, separate from the detail-level one. Two callers inside a
@@ -744,7 +822,7 @@ class ETFService:
         stale can hide in here.
         """
         key = f"etf:derived:{symbol}"
-        cached = _cache_get(key)
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
 
@@ -766,6 +844,11 @@ class ETFService:
             historical, spy_hist = await asyncio.gather(
                 self._get_history(symbol), self._get_spy_history()
             )
+        # Settled bars only: the in-progress session would otherwise be the end anchor
+        # of every performance period, the benchmark's last point and the newest term
+        # of `sma_50`, persisted 12h.
+        historical = _settled_bars(historical)
+        spy_hist = _settled_bars(spy_hist)
         perf = self._build_performance_periods(historical, spy_hist)
         bench = self._build_benchmark_summary(
             historical, spy_hist, symbol=symbol, index_tracked=index_tracked
@@ -825,8 +908,10 @@ class ETFService:
 
         resolved = resolve_interval(chart_range, interval)
         category = f"chart:{chart_range}:{resolved}"
-        # Non-intraday bars move at a close, so they persist. An intraday series must NOT:
-        # a 12h-old 5-minute chart would paint yesterday's session under a live header.
+        # Non-intraday bars move at a close, so they persist (settled bars only — see
+        # `_settled_bars`; the row is fresh for one close cycle via `_tier2_is_fresh`).
+        # An intraday series must NOT: a 12h-old 5-minute chart would paint yesterday's
+        # session under a live header.
         persistable = resolved not in INTRADAY_INTERVALS
 
         if persistable:
@@ -857,8 +942,11 @@ class ETFService:
             )
             return []
 
+        # Settled bars only, BEFORE the slice/aggregate and before `_tier2_put`: the
+        # in-progress bar used to be persisted as "today" for 12h (see `_settled_bars`).
         historical = (
-            [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
+            [] if resolved in INTRADAY_INTERVALS
+            else _settled_bars(await self._get_history(symbol))
         )
 
         if resolved in AGGREGATED_INTERVALS and historical:
@@ -1157,6 +1245,51 @@ class ETFService:
         # Safety net: compute from change/previousClose if FMP didn't return percentage
         if not change_pct and change and prev_close > 0:
             change_pct = round((change / prev_close) * 100, 4)
+
+        # No usable quote (`_get_quote` degrades to `{}` on ANY exception, including the
+        # un-retried FMP 429, and `_from_profile` yields `price: None` for a halted
+        # listing). This used to fall straight through: `get_etf_detail` only declined
+        # to CACHE the result, `get_etf_quote` projected it into the 30-s slice, and the
+        # header flipped from $754.05 to "$0.00 —" under a live badge with "NAV $0.00"
+        # beside it (`nav` defaults to `price`). Mirror `index_service` /
+        # `commodity_service` / `get_etf_core`: recover the last settled close from the
+        # history this build already holds, or refuse with the typed upstream error the
+        # endpoint maps to FMP_UNAVAILABLE — never a fabricated zero with HTTP 200.
+        # Sits ABOVE `nav` and `dividend_yield_from_profile`, so both see a real price.
+        if price <= 0:
+            from app.services.chart_helper import _finite_or_none
+            historical = await self._get_history(symbol)
+            last_close = None
+            prev_close_hist = None
+            for row in reversed(historical):  # `_fetch_all_daily` is oldest-first
+                if not isinstance(row, dict):
+                    continue
+                c = _finite_or_none(row.get("close") or row.get("adjClose"))
+                if c is None or c <= 0:
+                    continue
+                if last_close is None:
+                    last_close = c
+                else:
+                    prev_close_hist = c
+                    break
+            if last_close is None:
+                raise FMPUnavailableException(
+                    f"No usable quote or price history for ETF {symbol}"
+                )
+            logger.warning(
+                "ETF %s quote unavailable — falling back to last historical close "
+                "%.4f (chart data is still live)", symbol, last_close,
+            )
+            price = last_close
+            if prev_close_hist:
+                prev_close = prev_close_hist
+                change = round(last_close - prev_close_hist, 6)
+                change_pct = round((change / prev_close_hist) * 100, 4)
+                change_known = True
+            else:
+                # One close is a price; it is not a day's move. Leave the flag false so
+                # iOS renders "—" rather than a fabricated "+0.00 (+0.00%)".
+                change, change_pct, change_known = 0.0, 0.0, False
         volume = quote.get("volume") or 0
         avg_volume = (
             quote.get("avgVolume")
@@ -2321,13 +2454,37 @@ class ETFService:
             res = by_symbol.get(sym.upper())
             if not res:
                 continue
+            # Three-state reads, and an `is None` chain rather than `a or b` (which folds
+            # a genuine 0.0 into the fallback key). `_finite_num(None)` is 0.0, and
+            # `RelatedTickerResponse.change_percent` is a non-Optional Double on iOS
+            # coloured off `>= 0`, so an UNKNOWN change used to render "+0.0%" in green:
+            # the batch path (`price_service._from_screener`) answers
+            # `changePercentage: None` for exactly a stale or missing close snapshot —
+            # 46 stale symbols per batch in the 2026-09-17 log — and the whole `closes`
+            # map degrades to `{}` on a Supabase error, which painted every sibling on
+            # every ETF screen as a fabricated flat day. Mirror the crypto rail
+            # (`crypto_service._build_related_cryptos`): OMIT the row, keep a real 0.0.
+            rel_price = _finite_or_none_num(res.get("price"))
+            rel_change = _finite_or_none_num(res.get("changePercentage"))
+            if rel_change is None:
+                rel_change = _finite_or_none_num(res.get("changesPercentage"))
+            if rel_price is None or rel_price <= 0:
+                logger.warning(
+                    "Related ETF %s (for %s) has no usable price — omitting the row "
+                    "rather than rendering $0.00", sym, symbol,
+                )
+                continue
+            if rel_change is None:
+                logger.info(
+                    "Related ETF %s (for %s) has a price but no day change — omitting "
+                    "the row rather than rendering a green +0.0%%", sym, symbol,
+                )
+                continue
             related.append(RelatedTickerResponse(
                 symbol=sym,
                 name=res.get("name") or sym,
-                price=_finite_num(res.get("price")),
-                change_percent=round(_finite_num(
-                    res.get("changePercentage") or res.get("changesPercentage")
-                ), 2),
+                price=rel_price,
+                change_percent=round(rel_change, 2),
             ))
         return related
 

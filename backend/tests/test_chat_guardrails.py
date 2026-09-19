@@ -221,3 +221,72 @@ def test_suitability_is_not_an_enforcement_class():
     for answer in ("This is right for you.", "It fits your profile."):
         redacted, _ = enforce_answer(answer)
         assert redacted == answer
+
+
+# ── Inline links are model output, and iOS rendered them tappable ─────────────────────
+#
+# `[Verify your Caydex account](https://caydex-support.example)` in a Cay AI bubble — steered
+# by a poisoned headline, a tool result, a cached brief or the user's own earlier turn — was a
+# blue link that left the app for ANY scheme: a phishing page, a `tel:+1900…` dialer prompt,
+# an `sms:…&body=…` pre-filled message. Cay AI cites through `sources`, never inline.
+
+
+def test_markdown_links_are_reduced_to_their_label():
+    from app.services.agents.chat_guardrails import enforce_answer
+
+    text, tags = enforce_answer(
+        "Apple beat. [Verify your Caydex account](https://caydex-support.example) today."
+    )
+    assert text == "Apple beat. Verify your Caydex account today."
+    assert "link_stripped" in tags
+    assert "https://" not in text
+
+
+def test_phone_sms_and_autolink_targets_are_dropped():
+    from app.services.agents.chat_guardrails import enforce_answer
+
+    text, tags = enforce_answer(
+        "Call [support](tel:+19005551212), [text us](sms:+1900?body=hi), "
+        "see <https://evil.example/x> or tel:+19005551212."
+    )
+    for needle in ("tel:", "sms:", "evil.example", "19005551212"):
+        assert needle not in text, text
+    assert "support" in text and "text us" in text
+    assert "link_stripped" in tags
+
+
+def test_image_embeds_keep_only_their_alt_text():
+    from app.services.agents.chat_guardrails import enforce_answer
+
+    text, _ = enforce_answer("![tracking pixel](https://img.example/p.gif) Revenue grew 8%.")
+    assert text == "tracking pixel Revenue grew 8%."
+
+
+def test_ordinary_brackets_and_parentheses_survive():
+    """Control: finance prose is full of `[x]` and `(y)` that are not links."""
+    from app.services.agents.chat_guardrails import enforce_answer
+
+    src = "EPS [adjusted] rose 12% (vs 9% est.); see note [2] and (b) above."
+    text, tags = enforce_answer(src)
+    assert text == src and "link_stripped" not in tags
+
+
+def test_the_prompt_forbids_links_and_the_ios_renderer_strips_them():
+    """Both halves: the model is told not to, and the renderer cannot make one tappable."""
+    import re
+    from pathlib import Path
+    from app.services.chat_service import ChatService
+
+    svc = ChatService.__new__(ChatService)
+    instruction = svc._build_system_instruction("NORMAL", "AAPL", asset_type="STOCK")
+    assert "Never include URLs, markdown links" in instruction
+
+    swift = (Path(__file__).resolve().parents[2]
+             / "frontend/ios/ios/Views/Atoms/MarkdownText.swift").read_text()
+    code = "\n".join(re.sub(r"//.*$", "", l) for l in swift.splitlines())
+    body = code[code.index("private struct MarkdownInline"):]
+    body = body[:body.index("#Preview")]
+    assert "static func stripLinks(_ text: inout AttributedString)" in body
+    assert "Self.stripLinks(&parsed)" in body
+    fn = body[body.index("static func stripLinks("):]
+    assert re.search(r"for run in text\.runs where run\.link != nil \{\s*text\[run\.range\]\.link = nil", fn), fn

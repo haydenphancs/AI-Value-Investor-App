@@ -223,6 +223,28 @@ class Settings(BaseSettings):
     # concurrency gauge. Over this → 409 SYSTEM_BUSY. Set 0 to disable.
     REPORT_GET_MAX_INFLIGHT: int = 24
 
+    # ── Tracking feed / watchlist fan-out bounds (F15-3) ─────────────────────
+    # `GET /tracking/assets` fans out one FMP call PER WATCHLIST TICKER for the
+    # sparkline (`historical-chart/5min`, 2-min tier-1 cache) and one for the insider
+    # alert (`insider-trading/search`, no cache until this landed). Nothing bounded the
+    # watchlist and nothing bounded the fan-out, so one free account with 2,000 rows
+    # polling the feed every 31 s cost ~4,000-6,000 FMP requests/min and rate-limited
+    # every OTHER user's detail, Home and Tracking screens.
+    #
+    # Per-request cap on the tickers that get the per-ticker enrichment (sparkline +
+    # insider). Rows past it are STILL in the feed — the iOS Assets tab purges any
+    # portfolio ticker missing from the response, so dropping rows would delete the
+    # user's own holdings — they just come back with an empty sparkline and no insider
+    # alert. Bounds rows already in production, which a write cap alone cannot. <= 0
+    # disables.
+    TRACKING_FEED_MAX_TICKERS: int = 500
+    # Per-user watchlist row cap, enforced on BOTH insert paths (`POST /watchlist` and
+    # `POST /tracking/holdings`, which upserts the same table). Generous on purpose: the
+    # paged reads support far larger lists, and the read-side cap above is the
+    # load-bearing bound; this stops the row count itself being the attack surface
+    # (each insert already costs one FMP profile call). <= 0 disables.
+    WATCHLIST_MAX_ITEMS: int = 500
+
     # Free AI reports per INSTALL per month for signed-out users (migration 106).
     # Guests can't be metered by user_credits — that table is FK-bound to
     # public.users and a per-install id has no users row — so they get their own
@@ -361,6 +383,22 @@ class Settings(BaseSettings):
     # This spawns ONLY the notification loops in local dev, leaving the FMP-heavy
     # pre-warmers off so a laptop does not burn the quota.
     RUN_NOTIFICATION_JOBS_LOCALLY: bool = False
+
+    # The second half of the local opt-in, and it is NOT redundant with PUSH_DRY_RUN.
+    # Dry-run replaces only the APNs POST. Everything before it still runs against the
+    # Supabase in backend/.env — which is PRODUCTION — and three of those steps are
+    # CLAIMS on shared state: `claim_due_notifications` flips real users' due `deferred`
+    # rows to `pending` and dry-run then stamps them `dry_run`, a terminal state Railway's
+    # dispatcher never re-claims (those users never get the buzz); `claim_notification_job`
+    # takes the once-per-ET-day earnings / smart-money claim and marks it done, so
+    # Railway's sender is refused for the day; the price-alert loop persists
+    # `is_active=False` on every fired one-shot rule BEFORE the (dry-run) push. A laptop
+    # following the old "pair with PUSH_DRY_RUN=true" advice silently consumed
+    # production's notification queue with nothing in Railway's logs. The lifespan now
+    # refuses to spawn those three loops in local dev unless this flag asserts that
+    # SUPABASE_URL points at a non-production project. It is an ASSERTION, not a switch:
+    # setting it while .env still points at prod is the same defect with a signature.
+    NOTIFICATION_JOBS_LOCALLY_DB_IS_NOT_PROD: bool = False
 
     # ET hour after which each daily sender may run. `_run_scheduled_notification_senders`
     # wakes hourly and skips a sender until the local ET hour reaches its value; the real
@@ -695,6 +733,12 @@ class Settings(BaseSettings):
     # `*_AI_ENABLED` flags on the other grounded-search services.
     CHAT_WEB_SEARCH_ENABLED: bool = True
     CHAT_WEB_SEARCH_DAILY_CAP: int = 200
+    # ...plus a PER-ACCOUNT sub-bucket beneath it (S01-4). The global ceiling bounds the
+    # bill, but on its own one account looping "why did X move" over material movers drains
+    # the day's 200 units in minutes and every other user's turn falls back to the free
+    # tiers. Claimed BEFORE the global unit and refunded whenever the global unit is, so
+    # the two counts never drift; same `chat_usage_budget` table, no migration.
+    CHAT_WEB_SEARCH_USER_DAILY_CAP: int = 10
 
     # ── Pre-warmed suggestion-chip answers (`chat_starter_warm_service`) ──────────
     #
@@ -812,6 +856,18 @@ class Settings(BaseSettings):
 
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+    # Per-ACCOUNT ceilings on the five market-data routers (stocks / etfs / indices / crypto /
+    # commodities), keyed on the token's user id. They existed with NO per-caller bound: one
+    # free account could request `/stocks/{t}/growth` for 150 distinct uncached symbols a
+    # minute (5 FMP calls each, unknown tickers included) and exhaust the plan-wide FMP
+    # minute budget, so every other user's Home, detail screens, report collection and
+    # pre-warmers surfaced FMP_RATE_LIMITED — with no credits spent and nothing to identify
+    # the account from FMP's side. `MARKET_RATE_LIMIT_PER_MINUTE` is sized to real browsing
+    # (one TickerDetailView open fires ~12-15 stocks routes in parallel; iOS intercepts a
+    # 429, so this must never fire on a human); `MARKET_FANOUT_RATE_LIMIT_PER_MINUTE` is the
+    # tighter bound on the handlers that cost ~5 upstream calls on a cache miss.
+    MARKET_RATE_LIMIT_PER_MINUTE: int = 300
+    MARKET_FANOUT_RATE_LIMIT_PER_MINUTE: int = 60
 
     # Timeouts
     HTTP_TIMEOUT_SECONDS: int = 30

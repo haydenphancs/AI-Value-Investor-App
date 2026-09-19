@@ -25,7 +25,14 @@ _TOOL_NAMES = set(chat_tools.TOOL_DESCRIPTIONS)
 
 @pytest.fixture
 def licensed_analyst_data(monkeypatch):
+    # BOTH bindings: `chat_tools` (the class table) and `chat_service` (the analyst
+    # clause) each import the function by name. Patching one used to leave the full
+    # instruction self-contradictory under the real licence — a capability block that
+    # names get_analyst_analysis beside a clause saying there are NO analyst ratings —
+    # and the `<=` assertion below passed on it (F12-11).
     monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: True)
+    import app.services.chat_service as cs
+    monkeypatch.setattr(cs, "analyst_section_available", lambda: True)
 
 
 def _svc() -> ChatService:
@@ -86,17 +93,28 @@ def test_the_session_word_rule_rides_with_the_snapshot(asset_type, licensed_anal
     assert "as_of_session.word" in block and "'on Fri', not 'today'" in block
 
 
+@pytest.mark.parametrize("licensed", [True, False])
 @pytest.mark.parametrize("asset_type,symbol", [
     ("INDEX", "^GSPC"), ("COMMODITY", "GCUSD"), ("STOCK", "AAPL"), ("CRYPTO", "BTCUSD"),
 ])
-def test_the_full_system_instruction_names_only_granted_tools(asset_type, symbol, licensed_analyst_data):
-    """End to end through `_build_system_instruction`, which also carries the analyst clause."""
+def test_the_full_system_instruction_names_exactly_the_granted_tools(asset_type, symbol, licensed, monkeypatch):
+    """End to end through `_build_system_instruction`, under BOTH licence states and with
+    both bindings patched. Exactly the granted set — `<=` let a self-contradictory prompt
+    (a capability block naming get_analyst_analysis beside "NO analyst ratings") pass — and
+    the analyst clause must agree with the class table: it names the tool iff the licence
+    AND the class grant it, and says NO otherwise (F12-11)."""
+    import app.services.chat_service as cs
+    monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: licensed)
+    monkeypatch.setattr(cs, "analyst_section_available", lambda: licensed)
     instruction = _svc()._build_system_instruction("NORMAL", symbol, asset_type=asset_type)
     allowed = set(chat_tools.tools_for_asset_type(asset_type))
-    # The analyst clause names get_analyst_analysis only when the licence has it AND the
-    # class has it; with the licence forced on, STOCK has it and the others do not.
     named = _named_tools(instruction)
-    assert named <= allowed, f"{asset_type}: {named - allowed}"
+    assert named == allowed, f"{asset_type}/licensed={licensed}: named {named} vs granted {allowed}"
+    has_analyst = "get_analyst_analysis" in allowed
+    assert ("When you have access to analyst data from the get_analyst_analysis tool" in instruction) == has_analyst
+    assert ("NO analyst ratings" in instruction) == (not has_analyst)
+    if asset_type == "STOCK":
+        assert has_analyst == licensed, "STOCK is granted the analyst tool iff the licence has it"
 
 
 def test_the_unlicensed_analyst_clause_names_no_tool(monkeypatch):
@@ -140,6 +158,62 @@ def test_the_tool_less_fallback_instruction_names_no_tool(licensed_analyst_data)
     assert _named_tools(instruction) == set(), _named_tools(instruction)
     # The rest of the prompt is intact — identity, advice boundary, the subject line.
     assert "Cay AI" in instruction and "AAPL" in instruction
+
+
+def test_the_tool_less_replayed_context_clause_does_not_point_at_tools(licensed_analyst_data):
+    """A history reopen replays the client snapshot with a clause steering the model to
+    'rely on your live tools' — which the tool-less merge / fallback does not have; a
+    model told that supplies a tool's output from memory (F06-9)."""
+    kw = dict(asset_type="STOCK", client_context="AAPL P/E 28.1, target $250",
+              context_is_replayed=True)
+    with_tools = _svc()._build_system_instruction("NORMAL", "AAPL", tools_granted=True, **kw)
+    no_tools = _svc()._build_system_instruction("NORMAL", "AAPL", tools_granted=False, **kw)
+    assert "live tools" in with_tools
+    assert "live tools" not in no_tools, no_tools
+    assert "point-in-time snapshot" in no_tools and "LIVE QUOTE line below" in no_tools
+    assert "<<<CLIENT_CONTEXT>>>" in no_tools, "the snapshot itself is still there"
+
+
+@pytest.mark.asyncio
+async def test_prep_hands_the_live_quote_to_the_tool_less_instruction_too(monkeypatch, licensed_analyst_data):
+    """The synthesis merge narrates the chart card as well; without the LIVE QUOTE line its
+    only 'current' numbers were the replayed snapshot's."""
+    import app.services.chat_service as cs
+    svc = _svc()
+    widget = {"widget_type": "stock_chart", "ticker": "AAPL", "current_price": 231.5,
+              "change": 1.2, "change_percent": 0.52, "is_market_open": True}
+
+    async def _widget(*a, **k):
+        return widget
+
+    async def _grounding(*a, **k):          # (context, server_grounded, replayed, cache_safe)
+        return None, False, False, True
+
+    async def _retrieve(*a, **k):
+        return [], []
+
+    async def _condense(*a, **k):
+        return ""
+
+    async def _none(*a, **k):
+        return None
+    # Every upstream the prep touches is stubbed at the method boundary — the suite's
+    # network guard would block them anyway, but noisily and slowly.
+    monkeypatch.setattr(svc, "_deterministic_widget", _widget)
+    monkeypatch.setattr(svc, "_resolve_grounding", _grounding)
+    monkeypatch.setattr(svc, "_get_recent_messages", lambda *a, **k: [])
+    monkeypatch.setattr(svc, "_retrieve_context", _retrieve)
+    monkeypatch.setattr(svc, "_condense_history", _condense)
+    monkeypatch.setattr(svc, "_check_deep_dive_cache", lambda *a, **k: None)
+    for name in ("_get_profit_summary", "_get_snapshot_summary", "_get_company_profile_summary"):
+        monkeypatch.setattr(svc, name, _none)
+    prep = await svc.prepare_stream_generation(
+        session_id="s1", user_message="how is it doing", session_type="NORMAL",
+        stock_id="AAPL", context=None, context_type="TICKER", reference_id="AAPL",
+    )
+    assert "LIVE QUOTE" in prep["system_instruction"]
+    assert "LIVE QUOTE" in prep["system_instruction_no_tools"]
+    assert "$231.50" in prep["system_instruction_no_tools"]
 
 
 def test_prep_builds_a_tool_free_instruction_for_the_merge():

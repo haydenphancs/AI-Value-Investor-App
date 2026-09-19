@@ -572,7 +572,16 @@ struct TickerDetailData: Identifiable {
     var currentPrice: Double
     var priceChange: Double
     var priceChangePercent: Double
-    let marketStatus: MarketStatus
+    /// `false` = the backend had no day change for this listing (`change_known`), so
+    /// `priceChange` / `priceChangePercent` are the 0.0 wire placeholder, not a flat day.
+    /// Same rule as `TickerCoreData` / `ETFDetailData`: never a direction, never a sign,
+    /// "—" for the text. The equity screen was the fifth asset class and the only one that
+    /// still painted the placeholder as "▲ +0.00 (+0.00%)" in green. `var` because a later
+    /// live tick that DOES carry a change flips it back to true.
+    var changeKnown: Bool = true
+    /// `var` so a live tick can heal a badge the last fetch left stale — see
+    /// `MarketHoursUtil.liveSessionStatus`.
+    var marketStatus: MarketStatus
     var chartPricePoints: [StockPricePoint]
     let keyStatistics: [KeyStatistic]
     let keyStatisticsGroups: [KeyStatisticsGroup]
@@ -588,7 +597,16 @@ struct TickerDetailData: Identifiable {
     }
 
     var isPositive: Bool {
-        priceChange >= 0
+        changeKnown && priceChange >= 0
+    }
+
+    /// The chart tint when the day change is unknown: derived from the series itself
+    /// (first vs last close), as the ETF and crypto screens do — never from the placeholder.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
     }
 
     var formattedPrice: String {
@@ -596,11 +614,13 @@ struct TickerDetailData: Identifiable {
     }
 
     var formattedChange: String {
+        guard changeKnown else { return "—" }
         let sign = priceChange >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", priceChange))"
     }
 
     var formattedChangePercent: String {
+        guard changeKnown else { return "" }
         let sign = priceChangePercent >= 0 ? "+" : ""
         return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
     }
@@ -1486,12 +1506,22 @@ struct SentimentAnalysisData {
     // reader below (value, change, colour) has a neutral state for false.
     let socialMentionsKnown: Bool
     let socialMentions7dKnown: Bool
+    /// Was the news arm MEASURED? `false` = the feed failed, so the ▲/=/▼ counts are an
+    /// outage's zeros, not a quiet week. Both news readers render "—" for it (the
+    /// old "N/A" over ▲0 =0 ▼0 asserted a quiet week the app never checked).
+    var newsKnown: Bool = true
 
     // MARK: - Timeframe-aware accessors
 
     func socialKnown(for timeframe: SentimentTimeframe) -> Bool {
         timeframe == .last24h ? socialMentionsKnown : socialMentions7dKnown
     }
+
+    /// "Not tracked on Reddit" is a claim about BOTH windows (the backend computes
+    /// `social_data_available` as `count_24h > 0 || count_7d > 0`), so it may only be
+    /// stated when both were measured. A measured-zero 24 h beside an unknown 7 d used to
+    /// reach it because the gate checked only the SELECTED window (F19-8).
+    var socialBothWindowsKnown: Bool { socialMentionsKnown && socialMentions7dKnown }
 
     func score(for timeframe: SentimentTimeframe) -> Int {
         timeframe == .last24h ? moodScore : moodScore7d
@@ -1519,6 +1549,7 @@ struct SentimentAnalysisData {
     }
 
     func formattedNewsArticles(for timeframe: SentimentTimeframe) -> String {
+        guard newsKnown else { return "—" }
         let bullish = timeframe == .last24h ? newsBullish : newsBullish7d
         let bearish = timeframe == .last24h ? newsBearish : newsBearish7d
         let neutral = timeframe == .last24h ? newsNeutral : newsNeutral7d
@@ -1548,6 +1579,7 @@ struct SentimentAnalysisData {
     }
 
     func formattedNewsChange(for timeframe: SentimentTimeframe) -> String {
+        guard newsKnown else { return "News feed unavailable" }
         let bullish = timeframe == .last24h ? newsBullish : newsBullish7d
         let bearish = timeframe == .last24h ? newsBearish : newsBearish7d
         let neutral = timeframe == .last24h ? newsNeutral : newsNeutral7d

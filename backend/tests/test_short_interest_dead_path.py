@@ -27,6 +27,11 @@ import pytest
 import app.integrations.finra_short_interest as fsi
 
 
+# The autouse fixture below replaces the stale pre-read with a lambda; the two tests that
+# exercise the REAL pre-read bind it here, before any fixture runs.
+_REAL_STALE_READ = fsi._supabase_cache_get_stale
+
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     fsi._cache.clear()
@@ -537,3 +542,264 @@ async def test_that_answer_skips_nasdaq_and_gets_the_LONG_memo(monkeypatch):
 
 async def _token():
     return "tok"
+
+
+# ── F18-4: a served STALE row must not be pinned for 3 days by one failure ───────────
+
+
+@pytest.mark.asyncio
+async def test_a_stale_row_served_on_failure_gets_the_FAILURE_memo_not_three_days(monkeypatch):
+    """One FINRA 5xx on a 48-day-old row (BIGC, prod) used to write that print into the
+    memory tier with a fresh `time.time()` stamp — a 3-day memo for a failed fetch — so the
+    Overview's Short % of float and the report's Hidden Signals were ~3 cycles old for 72 h
+    while FINRA had recovered seconds later.
+    """
+    monkeypatch.setattr(fsi, "_supabase_cache_get_stale",
+                        lambda t: {"shares_short": 1, "settlement_date": "2026-07-01"})
+    monkeypatch.setattr(fsi, "_fetch_from_finra", lambda t: _none())
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", lambda t: _none())
+
+    out = await fsi.get_short_interest("BIGC")
+    assert out["shares_short"] == 1, "the stale print still beats N/A"
+    ts, memo = fsi._cache["finra_short:BIGC"]
+    assert memo is out
+    remaining = fsi._CACHE_TTL - (time.time() - ts)
+    assert remaining == pytest.approx(fsi._FAILURE_TTL_SECONDS, abs=5), (
+        f"a stale row served after a FAILED fetch is memoised for {remaining:.0f}s, "
+        f"not the {fsi._FAILURE_TTL_SECONDS}s failure memo"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_next_request_after_the_failure_memo_retries_finra_and_gets_the_new_print(monkeypatch):
+    calls = []
+
+    async def _finra(ticker):
+        calls.append(ticker)
+        return None if len(calls) == 1 else {"shares_short": 2, "settlement_date": "2026-09-15"}
+
+    monkeypatch.setattr(fsi, "_supabase_cache_get_stale",
+                        lambda t: {"shares_short": 1, "settlement_date": "2026-07-01"})
+    monkeypatch.setattr(fsi, "_fetch_from_finra", _finra)
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", lambda t: _none())
+
+    assert (await fsi.get_short_interest("BIGC"))["shares_short"] == 1
+    # Within the memo the stale row is still served without a retry (no hammering).
+    assert (await fsi.get_short_interest("BIGC"))["shares_short"] == 1
+    assert calls == ["BIGC"]
+
+    # Age the memo past the failure TTL.
+    ts, val = fsi._cache["finra_short:BIGC"]
+    fsi._cache["finra_short:BIGC"] = (ts - fsi._FAILURE_TTL_SECONDS - 1, val)
+    assert (await fsi.get_short_interest("BIGC"))["shares_short"] == 2, \
+        "after the cooldown the recovered FINRA print must replace the stale row"
+    assert calls == ["BIGC", "BIGC"]
+    # and the real print carries the FULL memo
+    ts2, _ = fsi._cache["finra_short:BIGC"]
+    assert fsi._CACHE_TTL - (time.time() - ts2) == pytest.approx(fsi._CACHE_TTL, abs=5)
+
+
+@pytest.mark.asyncio
+async def test_a_stale_row_served_after_a_204_gets_the_EMPTY_memo(monkeypatch):
+    """A 204 is an ANSWER, so the stale row is re-checked on the 900 s cadence, not 60 s."""
+    monkeypatch.setattr(fsi, "_supabase_cache_get_stale",
+                        lambda t: {"shares_short": 1, "settlement_date": "2026-07-01"})
+
+    async def _answered(ticker):
+        return fsi._NO_DATA
+
+    nasdaq = []
+
+    async def _nasdaq(ticker):
+        nasdaq.append(ticker)
+        return None
+
+    monkeypatch.setattr(fsi, "_fetch_from_finra", _answered)
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", _nasdaq)
+    assert (await fsi.get_short_interest("DLST"))["shares_short"] == 1
+    assert nasdaq == []
+    ts, _ = fsi._cache["finra_short:DLST"]
+    remaining = fsi._CACHE_TTL - (time.time() - ts)
+    assert remaining == pytest.approx(fsi._EMPTY_TTL_SECONDS, abs=5)
+    assert remaining < fsi._CACHE_TTL / 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale", [None, {}, {"shares_short": 0}])
+async def test_a_missing_or_empty_stale_row_still_takes_the_empty_memo_path(monkeypatch, stale):
+    """`{}`/None stale → `{}` memo; a dict with falsy VALUES is still a dict and is served."""
+    monkeypatch.setattr(fsi, "_supabase_cache_get_stale", lambda t: stale)
+    monkeypatch.setattr(fsi, "_fetch_from_finra", lambda t: _none())
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", lambda t: _none())
+    out = await fsi.get_short_interest("XYZ")
+    if stale:
+        assert out == stale
+    else:
+        assert out == {}
+    ts, _ = fsi._cache["finra_short:XYZ"]
+    assert fsi._CACHE_TTL - (time.time() - ts) == pytest.approx(fsi._FAILURE_TTL_SECONDS, abs=5)
+
+
+@pytest.mark.asyncio
+async def test_using_stale_is_logged_only_on_use_never_on_the_pre_read(monkeypatch, caplog):
+    """Prod showed `using STALE Supabase data for AI` immediately followed by a successful
+    FINRA print: the line fired on the pre-read, so the one log that would reveal the
+    3-day pin was already misleading."""
+    monkeypatch.setattr(fsi, "_supabase_cache_get_stale",
+                        lambda t: {"shares_short": 1, "settlement_date": "2026-07-01"})
+
+    async def _finra_ok(ticker):
+        return {"shares_short": 9, "settlement_date": "2026-09-15"}
+
+    monkeypatch.setattr(fsi, "_fetch_from_finra", _finra_ok)
+    monkeypatch.setattr(fsi, "_fetch_from_nasdaq", lambda t: _none())
+    with caplog.at_level("INFO", logger="app.integrations.finra_short_interest"):
+        assert (await fsi.get_short_interest("AI"))["shares_short"] == 9
+    assert not [r for r in caplog.records if "using STALE" in r.getMessage()]
+
+    fsi._cache.clear()
+    caplog.clear()
+    monkeypatch.setattr(fsi, "_fetch_from_finra", lambda t: _none())
+    with caplog.at_level("INFO", logger="app.integrations.finra_short_interest"):
+        assert (await fsi.get_short_interest("AI"))["shares_short"] == 1
+    used = [r.getMessage() for r in caplog.records if "using STALE" in r.getMessage()]
+    assert len(used) == 1 and "2026-07-01" in used[0] and "AI" in used[0]
+
+
+def test_the_stale_pre_read_itself_does_not_log_use(monkeypatch, caplog):
+    class _Res:
+        data = [{"response_json": {"shares_short": 1}}]
+
+    class _Q:
+        def select(self, *a): return self
+        def eq(self, *a): return self
+        def limit(self, *a): return self
+        def execute(self): return _Res()
+
+    class _SB:
+        def table(self, name): return _Q()
+
+    import app.database as db
+    monkeypatch.setattr(db, "get_supabase", lambda: _SB())
+    with caplog.at_level("INFO", logger="app.integrations.finra_short_interest"):
+        assert _REAL_STALE_READ("AI") == {"shares_short": 1}
+    assert not [r for r in caplog.records if "using STALE" in r.getMessage()]
+
+
+def test_the_stale_pre_read_logs_its_own_failure(monkeypatch, caplog):
+    class _SB:
+        def table(self, name): raise RuntimeError("520 edge")
+
+    import app.database as db
+    monkeypatch.setattr(db, "get_supabase", lambda: _SB())
+    with caplog.at_level("WARNING", logger="app.integrations.finra_short_interest"):
+        assert _REAL_STALE_READ("AI") is None
+    assert any("STALE Supabase read failed for AI" in r.getMessage() and "RuntimeError" in r.getMessage()
+               for r in caplog.records)
+
+
+# ── F18-7: the token refresh is single-flight ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ten_cold_callers_post_credentials_once_and_share_the_token(monkeypatch):
+    import asyncio as _aio
+    import app.integrations.finra_short_interest as fsi2
+
+    monkeypatch.setattr(fsi2, "_finra_access_token", None)
+    monkeypatch.setattr(fsi2, "_finra_token_expiry", 0)
+    monkeypatch.setattr(fsi2, "_finra_token_inflight", None)
+    monkeypatch.setenv("FINRA_CLIENT_ID", "id")
+    monkeypatch.setenv("FINRA_CLIENT_SECRET", "secret")
+    posts = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+        def json(self): return {"access_token": "tok-1"}
+
+    class _Client:
+        async def post(self, *a, **k):
+            posts["n"] += 1
+            await _aio.sleep(0.02)          # long enough for every caller to pile in
+            return _Resp()
+
+    async def _client():
+        return _Client()
+    monkeypatch.setattr(fsi2, "_get_finra_client", _client)
+
+    tokens = await _aio.gather(*(fsi2._fetch_finra_token() for _ in range(10)))
+    assert posts["n"] == 1, f"{posts['n']} credential POSTs for one cold burst"
+    assert tokens == ["tok-1"] * 10
+    assert fsi2._finra_token_inflight is None, "the in-flight slot must clear"
+
+
+@pytest.mark.asyncio
+async def test_a_throttled_refresh_is_shared_not_retried_per_caller(monkeypatch):
+    """Followers share the leader's None: retrying serially N times against a throttling
+    identity provider is exactly the burst this exists to prevent."""
+    import asyncio as _aio
+    import app.integrations.finra_short_interest as fsi2
+
+    monkeypatch.setattr(fsi2, "_finra_access_token", None)
+    monkeypatch.setattr(fsi2, "_finra_token_expiry", 0)
+    monkeypatch.setattr(fsi2, "_finra_token_inflight", None)
+    monkeypatch.setenv("FINRA_CLIENT_ID", "id")
+    monkeypatch.setenv("FINRA_CLIENT_SECRET", "secret")
+    posts = {"n": 0}
+
+    class _Resp:
+        status_code = 429
+        def json(self): return {}
+
+    class _Client:
+        async def post(self, *a, **k):
+            posts["n"] += 1
+            await _aio.sleep(0.02)
+            return _Resp()
+
+    async def _client():
+        return _Client()
+    monkeypatch.setattr(fsi2, "_get_finra_client", _client)
+    tokens = await _aio.gather(*(fsi2._fetch_finra_token() for _ in range(5)))
+    assert posts["n"] == 1 and tokens == [None] * 5
+
+
+# ── W2 security-2 (tidy-up): the leader slot is owned by the TASK, not the awaiter ──
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_keeps_serving_joiners_and_no_second_post_starts(monkeypatch):
+    """`asyncio.shield` keeps the POST running when the leader's caller is cancelled, but
+    the awaiter's `finally` nulled the slot at that moment, so the next arrival started a
+    second credential POST beside the orphan. The slot now clears when the TASK finishes."""
+    import asyncio as _aio
+    from app.integrations import finra_short_interest as fsi2
+    monkeypatch.setattr(fsi2, "_finra_access_token", None)
+    monkeypatch.setattr(fsi2, "_finra_token_expiry", 0.0)
+    monkeypatch.setattr(fsi2, "_finra_token_inflight", None)
+    gate = _aio.Event()
+    posts = {"n": 0}
+
+    async def _once():
+        posts["n"] += 1
+        await gate.wait()
+        return "tok"
+    monkeypatch.setattr(fsi2, "_fetch_finra_token_once", _once)
+
+    leader_caller = _aio.create_task(fsi2._fetch_finra_token())
+    for _ in range(3):        # the caller registers the slot, then the task runs to its await
+        await _aio.sleep(0)
+    assert posts["n"] == 1 and fsi2._finra_token_inflight is not None
+    leader_caller.cancel()
+    with pytest.raises(_aio.CancelledError):
+        await leader_caller
+    assert fsi2._finra_token_inflight is not None, "the orphaned POST still owns the slot"
+    joiners = [_aio.create_task(fsi2._fetch_finra_token()) for _ in range(5)]
+    for _ in range(3):
+        await _aio.sleep(0)
+    assert posts["n"] == 1, "no second POST: the joiners attached to the running leader"
+    gate.set()
+    assert await _aio.gather(*joiners) == ["tok"] * 5
+    for _ in range(3):
+        await _aio.sleep(0)
+    assert fsi2._finra_token_inflight is None, "released by the task's done callback"

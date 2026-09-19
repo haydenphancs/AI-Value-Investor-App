@@ -91,15 +91,31 @@ class _FakeDB:
 # ── the quota + chat service fakes ───────────────────────────────────────────
 
 class _Quota:
+    """Mirrors `_ChatQuota`'s ONE-SHOT settlement: the real `refund_once` / `settle_no_cost`
+    return after the first call (`_settled`), so a later backstop (the `finally` in
+    `_metered_stream`) is a no-op. Without the flag the fake recorded a second entry on
+    every error-site path and no exact reason list was assertable — which is how four
+    stream-door refund sites went untested (F12-5). `every_call` keeps the raw log."""
+
     def __init__(self):
-        self.refunds: List[str] = []      # `refund_once`: the turn never arrived
+        self.refunds: List[str] = []      # `refund_once`: the turn never arrived (first only)
         self.settled: List[str] = []      # `settle_no_cost`: delivered, but cost nothing
+        self.every_call: List[str] = []   # every settlement attempt, in order
         self.delivered = 0
+        self._settled = False
 
     def refund_once(self, reason: str) -> None:
+        self.every_call.append(f"refund:{reason}")
+        if self._settled:
+            return
+        self._settled = True
         self.refunds.append(reason)
 
     def settle_no_cost(self, reason: str) -> None:
+        self.every_call.append(f"settle:{reason}")
+        if self._settled:
+            return
+        self._settled = True
         self.settled.append(reason)
 
     def on_delivered(self) -> None:
@@ -383,6 +399,36 @@ def test_a_bad_session_is_a_json_404_not_an_sse_frame(harness):
     assert quota.refunds == [] and quota.delivered == 0
 
 
+# ── F12-12: the pre-flight refusals are JSON at the endpoint, on BOTH doors ──────
+#
+# `_claim_chat_quota` answers 402 INSUFFICIENT_CREDITS / 409 SYSTEM_BUSY as a JSONResponse
+# BEFORE the stream opens (iOS decodes bodies only for 400/402/403/409). Nothing drove
+# that at the endpoint: a refactor that deferred the return into the SSE body would have
+# turned the friendly 402 into an `error` frame with every unit test green.
+
+
+@pytest.mark.parametrize("door", ["stream", "send"])
+@pytest.mark.parametrize("code, status, kwargs", [
+    ("INSUFFICIENT_CREDITS", 402, {}),                 # no explicit status: pins the default
+    ("SYSTEM_BUSY", 409, {"status_code": 409}),
+])
+def test_a_preflight_refusal_is_a_json_status_not_an_sse_frame(harness, monkeypatch, door, code, status, kwargs):
+    from app.api.error_response import ErrorCode, make_error_response
+
+    client, db, quota, _ = harness
+    refusal = make_error_response(getattr(ErrorCode, code), message="refused", **kwargs)
+    monkeypatch.setattr(chat_mod, "_claim_chat_quota", lambda *a, **k: (None, refusal))
+    path = f"/api/v1/chat/sessions/{_SESSION}/messages" + ("/stream" if door == "stream" else "")
+    r = client.post(path, json={"message": "How is Apple doing?"},
+                    headers={"Authorization": "Bearer test"})
+    assert r.status_code == status
+    assert r.headers["content-type"].startswith("application/json"), r.headers
+    assert r.json()["error_code"] == code
+    assert db.inserted_messages == [], "nothing persisted for a refused turn"
+    assert _FakeChatService.instances == [], "no generation was started"
+    assert quota.refunds == [] and quota.delivered == 0, "the harness quota was never touched"
+
+
 # ── settlement parity between the two doors ───────────────────────────────────
 
 def _route_synthesize(monkeypatch):
@@ -560,6 +606,144 @@ def test_a_quiet_stream_carries_keepalive_comments(harness, monkeypatch):
     names = [f[0] for f in _parse_sse(r.text)]
     assert names[0] == "meta" and names[-1] == "done" and "token" in names
     assert quota.settled == [] and quota.delivered == 1
+
+
+def _keepalives_after_last_token(text: str) -> int:
+    """Count `: keepalive` comment lines that sit AFTER the final `event: token` frame and
+    BEFORE the `credits` frame — i.e. the ones that cover the post-persist suggestions call."""
+    last_token = text.rfind("event: token")
+    credits = text.find("event: credits")
+    assert last_token >= 0 and credits > last_token, text[:400]
+    return text[last_token:credits].count(": keepalive")
+
+
+def test_the_suggestions_step_after_persist_carries_keepalives(harness, monkeypatch):
+    """F01-4. The follow-up-suggestions call runs AFTER the last `token` frame and is one
+    awaited Gemini call (2 × 90 s ceilings plus the overload ladder's backoffs). With no
+    heartbeat, an overloaded model crossed iOS's 120 s idle timeout in silence: the client
+    dropped the socket, removed the bubble the user was reading, and never saw `credits`.
+    This exact assertion counted 0 before the fix."""
+    import asyncio as _aio
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 0.02)
+
+    async def _slow_suggestions(self, *a, **k):
+        self.suggestion_calls += 1
+        await _aio.sleep(0.25)
+        return ["What about its margins?", "How does it compare to peers?"]
+    monkeypatch.setattr(_FakeChatService, "generate_followup_suggestions", _slow_suggestions)
+
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _keepalives_after_last_token(r.text) >= 2, r.text[-600:]
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    assert names[-2:] == ["credits", "done"]
+    # The chips still arrive, live and in `done`, and the turn is still charged once.
+    assert "suggestions" in names
+    done = frames[-1][1]["message"]
+    assert done["rich_content"]["suggestions"] == ["What about its margins?", "How does it compare to peers?"]
+    assert quota.settled == [] and quota.delivered == 1
+    assert _FakeChatService.instances[-1].suggestion_calls == 1
+
+
+def test_a_suggestions_call_that_outruns_the_turn_budget_is_cancelled_not_awaited(harness, monkeypatch):
+    """Chips are best-effort: a call that outlives the turn deadline is cancelled and the
+    turn completes without them — never a hung stream, never a lost `credits`/`done`."""
+    import asyncio as _aio
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 0.02)
+    # The deadline is max(now+5, min(started+STREAM_BUDGET, now+SEND_BUDGET)) and is
+    # computed BEFORE the suggestions task first runs. Rather than waiting 50 s of wall
+    # time (or shrinking the budgets, which also starves the answer pump that runs under
+    # the same STREAM_BUDGET), the suggestions call jumps the monotonic clock past it.
+    import time as _t
+    real = _t.monotonic
+    skew = {"v": 0.0}
+    monkeypatch.setattr(_t, "monotonic", lambda: real() + skew["v"])
+    budget = max(5.0, min(settings.CHAT_STREAM_BUDGET_SECONDS, settings.CHAT_SEND_BUDGET_SECONDS))
+
+    cancelled = {"v": False}
+
+    async def _hung(self, *a, **k):
+        self.suggestion_calls += 1
+        skew["v"] = budget + 10.0         # the whole turn budget is now behind us
+        try:
+            await _aio.sleep(30)
+        except _aio.CancelledError:
+            cancelled["v"] = True
+            raise
+        return ["never"]
+    monkeypatch.setattr(_FakeChatService, "generate_followup_suggestions", _hung)
+
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    assert names[-2:] == ["credits", "done"], names
+    assert "token" in names and _FakeChatService.instances[-1].fallback_calls == 0
+    assert "suggestions" not in names
+    assert frames[-1][1]["message"]["rich_content"].get("suggestions") is None
+    assert cancelled["v"] is True, "the orphaned Gemini call was left running"
+    assert quota.settled == [] and quota.delivered == 1
+
+
+def test_a_budget_overrun_is_logged_once_and_never_reads_a_pending_task(harness, monkeypatch, caplog):
+    """W2 regress-A-1: after the deadline's `cancel()` the task is still pending, so
+    `.result()` raised InvalidStateError into the generic except — the same "no chips"
+    outcome, reached through a misleading second warning on every overrun."""
+    import asyncio as _aio
+    import logging as _logging
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 0.02)
+    import time as _t
+    real = _t.monotonic
+    skew = {"v": 0.0}
+    monkeypatch.setattr(_t, "monotonic", lambda: real() + skew["v"])
+    budget = max(5.0, min(settings.CHAT_STREAM_BUDGET_SECONDS, settings.CHAT_SEND_BUDGET_SECONDS))
+
+    async def _hung(self, *a, **k):
+        self.suggestion_calls += 1
+        skew["v"] = budget + 10.0
+        await _aio.sleep(30)
+        return ["never"]
+    monkeypatch.setattr(_FakeChatService, "generate_followup_suggestions", _hung)
+
+    with caplog.at_level(_logging.WARNING, logger="app.api.v1.endpoints.chat"):
+        r = _post(client)
+    assert r.status_code == 200
+    names = [f[0] for f in _parse_sse(r.text)]
+    assert names[-2:] == ["credits", "done"] and "suggestions" not in names
+    msgs = [rec.getMessage() for rec in caplog.records if rec.name == "app.api.v1.endpoints.chat"]
+    assert any("exceeded the turn budget" in m for m in msgs)
+    assert not any("InvalidStateError" in m for m in msgs), msgs
+    assert not any("suggestions step failed" in m for m in msgs), msgs
+
+
+def test_a_suggestions_failure_still_delivers_credits_and_done(harness, monkeypatch):
+    client, db, quota, _ = harness
+
+    async def _boom(self, *a, **k):
+        raise RuntimeError("flash-lite 503")
+    monkeypatch.setattr(_FakeChatService, "generate_followup_suggestions", _boom)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    names = [f[0] for f in _parse_sse(r.text)]
+    assert names[-2:] == ["credits", "done"] and "suggestions" not in names
+    assert quota.settled == [] and quota.delivered == 1
+
+
+def test_a_quiet_stream_with_a_fast_suggestions_call_emits_no_stray_keepalive(harness, monkeypatch):
+    """Control: a prompt suggestions call yields no comment frames after the last token."""
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_STREAM_KEEPALIVE_SECONDS", 5.0)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _keepalives_after_last_token(r.text) == 0
 
 
 def test_the_stream_is_never_gzip_buffered_for_a_gzip_accepting_client(harness):
@@ -1003,3 +1187,257 @@ def test_the_owner_still_passes_the_filtered_lookup(harness, door):
     else:
         r = client.delete(f"/api/v1/chat/sessions/{_SESSION}")
     assert r.status_code == 200, (door, r.status_code, r.text[:300])
+
+
+# ── F12-5: every stream-door refund site, at the endpoint ────────────────────────────
+#
+# `refund_once` has four callers on the stream door (fallback failed, empty answer, persist
+# failed, the `finally` backstop on a client disconnect). None had an endpoint test: deleting
+# any one of them left every chat/credit guard file green while a turn whose stream died
+# kept its precharged credit — and the `error` frame it emits is TERMINAL on iOS (no
+# re-POST), so nothing on the client recovered it either.
+
+
+def test_refund_site_fallback_failed(harness):
+    """The stream dies before any answer and the non-stream fallback raises too."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("thought", "Let me check.")]     # no answer → fallback
+    _FakeChatService.fallback_result = None                        # fallback raises
+    r = _post(client)
+    assert r.status_code == 200
+    names = [f[0] for f in _parse_sse(r.text)]
+    assert "error" in names and "done" not in names
+    assert quota.refunds == ["chat_stream_fallback_failed"], quota.every_call
+    assert quota.delivered == 0 and db.inserted_messages == []
+
+
+def test_refund_site_empty_answer(harness):
+    """Thought-only stream, fallback answers an EMPTY string: nothing to persist or charge."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("thought", "Let me check.")]
+    _FakeChatService.fallback_result = {"content": "", "tokens_used": 0}
+    r = _post(client)
+    names = [f[0] for f in _parse_sse(r.text)]
+    assert names[-1] == "error" and "done" not in names
+    assert quota.refunds == ["chat_stream_empty"], quota.every_call
+    assert quota.delivered == 0 and db.inserted_messages == []
+
+
+def test_refund_site_persist_failed(harness):
+    """The answer streamed, the 2-row insert raised: not recorded → handed back."""
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_messages", RuntimeError("insert died"))
+    r = _post(client)
+    frames = _parse_sse(r.text)
+    names = [f[0] for f in frames]
+    assert "token" in names and names[-1] == "error"
+    assert frames[-1][1]["user_message"].startswith("Your answer was generated but couldn't be saved")
+    assert quota.refunds == ["chat_stream_persist_failed"], quota.every_call
+    assert quota.delivered == 0
+
+
+def test_refund_site_client_disconnect_backstop(harness, monkeypatch):
+    """The phone drops mid-stream: the `finally` in `_metered_stream` is the ONLY thing
+    that hands the credit back. Driven over raw ASGI so the disconnect actually lands."""
+    import asyncio as _aio
+    client, db, quota, _ = harness
+    slow_events = [("thought", "Let me check."), ("answer", "Apple is ")]
+
+    async def _slow_gen(*a, **k):
+        yield slow_events[0]
+        await _aio.sleep(0.5)          # long enough for the disconnect to land
+        yield slow_events[1]
+        yield ("answer", "doing fine.")
+    _FakeChatService.events = slow_events
+
+    monkeypatch.setattr(_FakeGemini, "stream_agentic", lambda self, prompt, **kw: _slow_gen())
+
+    body = json.dumps({"message": "How is Apple doing?"}).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": f"/api/v1/chat/sessions/{_SESSION}/messages/stream",
+        "raw_path": f"/api/v1/chat/sessions/{_SESSION}/messages/stream".encode(),
+        "query_string": b"", "root_path": "", "server": ("testserver", 80), "client": ("127.0.0.1", 1),
+        "headers": [
+            (b"host", b"testserver"), (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()), (b"accept", b"text/event-stream"),
+        ],
+    }
+    sent: List[Dict[str, Any]] = []
+    state = {"body": False}
+
+    async def receive():
+        if state["body"]:
+            await _aio.sleep(0.05)
+            return {"type": "http.disconnect"}
+        state["body"] = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    _aio.run(app(scope, receive, send))
+    text = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body").decode()
+    names = [f[0] for f in _parse_sse(text)]
+    assert "done" not in names
+    assert quota.delivered == 0 and db.inserted_messages == []
+    assert quota.refunds == ["chat_stream_cancelled"], quota.every_call
+
+
+# ── F03-10 / F03-8 / F02-6 / F13-6 ─────────────────────────────────────────────
+
+
+def test_a_per_call_gemini_timeout_is_not_reported_as_a_budget_overrun(harness, monkeypatch):
+    """`GeminiTimeoutError` subclasses `asyncio.TimeoutError`, so the budget arm swallowed
+    it and blamed CHAT_SEND_BUDGET_SECONDS for a call that timed out on its own ceiling."""
+    from app.integrations.gemini import GeminiTimeoutError
+    client, db, quota, _ = harness
+
+    async def _boom(self, *a, **k):
+        raise GeminiTimeoutError("generate_content timed out after 60s")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _boom)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    body = r.json()
+    assert body["error_code"] == "GEMINI_UNAVAILABLE", r.text
+    assert body.get("details", {}).get("step") != "chat_send_budget", body
+    assert quota.refunds == ["chat_undelivered"]
+
+
+def test_a_whitespace_only_streamed_answer_is_refunded_like_an_empty_one(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("thought", "Let me check."), ("answer", "\n  \n")]
+    # A whitespace-only stream reads as "empty stream result" and falls back; the
+    # fallback answering whitespace too is the case the door then has to judge.
+    _FakeChatService.fallback_result = {"content": " \n\t", "tokens_used": 1}
+    r = _post(client)
+    names = [f[0] for f in _parse_sse(r.text)]
+    assert names[-1] == "error" and "done" not in names
+    assert quota.refunds == ["chat_stream_empty"], quota.every_call
+    assert db.inserted_messages == []
+
+
+def test_a_deep_dive_cache_hit_does_not_promise_a_specialist(harness, monkeypatch):
+    """The replayed brief was written by the general path; a `routing` frame naming
+    "Valuation" put a false stage on the thinking card for a lens that never ran."""
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {
+        "is_deep_dive": True,
+        "deep_dive_cached": "# Cached brief\n\nApple looks fine." + " More." * 30,
+    }
+    r = _post(client, message="Give me a full AI Analyst brief on AAPL")
+    frames = _parse_sse(r.text)
+    routing = [f[1] for f in frames if f[0] == "routing"]
+    assert all(fr.get("specialists") == ["general"] for fr in routing), routing
+    assert all("Valuation" not in (fr.get("labels") or []) for fr in routing), routing
+
+
+def test_the_stream_handler_map_is_class_filtered_like_the_declarations(harness):
+    """The declarations decide what the model is OFFERED; a handler left in the map for
+    an undeclared tool still ran if the model named it from memory. On an INDEX screen
+    only the two index tools may be executable."""
+    from app.services.agents.chat_tools import build_chat_tool_handlers, tools_for_asset_type
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"asset_type": "INDEX"}
+    _FakeChatService.events = [("answer", "The S&P is up.")]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    # BEHAVIOURAL (W2 vacuity-1: this used to be two comment-blind source greps with a
+    # capture that was never wired): the handler map the pump actually hands the model.
+    sent = _FakeChatService.instances[-1].gemini.stream_calls[0]
+    handlers = set((sent.get("tool_handlers") or {}).keys())
+    allowed = set(tools_for_asset_type("INDEX"))
+    assert handlers == allowed, handlers ^ allowed
+    assert "get_analyst_analysis" not in handlers and "explain_price_move" not in handlers
+    # ...and the filter is what removed them: the unfiltered map is strictly larger.
+    assert set(build_chat_tool_handlers(_FakeChatService.instances[-1])) > handlers
+    # Every DECLARED tool has a handler and vice versa — the two tables cannot drift.
+    declared = {fd.name for t in (sent.get("tools") or []) for fd in (t.function_declarations or [])}
+    assert declared == handlers, declared ^ handlers
+
+
+# ── F03-6: a LOST REPLY on the insert is not a lost write ─────────────────────────
+
+
+def _commit_then_raise_db(base, exc):
+    """`chat_messages` INSERT commits the rows and THEN raises (an edge 520 on the reply);
+    a later SELECT by id finds them."""
+    class _DB(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_messages":
+                db = self
+                q.filters = []
+
+                def eq(col, val):
+                    q.filters.append((col, val)); return q
+                q.eq = eq
+
+                def execute():
+                    if q.op == "insert":
+                        rows = q.payload if isinstance(q.payload, list) else [q.payload]
+                        db.inserted_messages.extend(dict(r) for r in rows)
+                        db.calls.append(("chat_messages", "insert", q.payload))
+                        raise exc
+                    if q.op == "select":
+                        wanted = dict(q.filters).get("id")
+                        return _Result([r for r in db.inserted_messages if r.get("id") == wanted])
+                    return _Result([])
+                q.execute = execute
+            return q
+    out = _DB(base.session_row)
+    out.calls, out.inserted_messages = base.calls, base.inserted_messages
+    return out
+
+
+@pytest.mark.parametrize("door", ["stream", "send"])
+def test_a_transient_failure_on_a_committed_insert_is_delivered_not_refunded(harness, door):
+    """The rows committed; only the reply was lost. Refunding here charged the re-send
+    twice and left history with two identical exchanges, the first unacknowledged."""
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _commit_then_raise_db(db, _gateway_520())
+    if door == "stream":
+        r = _post(client)
+        names = [f[0] for f in _parse_sse(r.text)]
+        assert names[-1] == "done", names
+    else:
+        _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+        assert r.status_code == 200, r.text
+    assert quota.delivered == 1 and quota.refunds == [], quota.every_call
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"]
+    assert len(assistant) == 1 and assistant[0].get("id"), "ids must be pre-minted"
+
+
+@pytest.mark.parametrize("door", ["stream", "send"])
+def test_a_transient_failure_on_an_uncommitted_insert_still_refunds(harness, door):
+    """The re-read finds nothing → the write never landed → the existing refund stands."""
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_messages", _gateway_520())
+    if door == "stream":
+        r = _post(client)
+        assert [f[0] for f in _parse_sse(r.text)][-1] == "error"
+        assert quota.refunds == ["chat_stream_persist_failed"]
+    else:
+        _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+        r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+        assert r.status_code != 200
+        assert quota.refunds == ["chat_undelivered"]
+    assert quota.delivered == 0
+
+
+def test_the_non_stream_door_persists_the_same_rich_content_shape_as_the_stream_door(harness):
+    """F03-9 / F01-7: thinking + sources + widget(s), never a bare `{"widget": w}`."""
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Plain answer. " * 3, "tokens_used": 30,
+        "sources": [{"kind": "screen", "label": "Stock detail", "detail": "AAPL"}],
+        "widget": {"widget_type": "stock_chart", "ticker": "AAPL"},
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    rich = assistant["rich_content"]
+    assert set(rich) >= {"thinking", "sources", "widget", "widgets"}, rich
+    assert rich["thinking"]["source_count"] == 1 and rich["thinking"]["stages"] == []
+    assert isinstance(rich["thinking"]["elapsed_ms"], int)
+    assert rich["widgets"] == [rich["widget"]]

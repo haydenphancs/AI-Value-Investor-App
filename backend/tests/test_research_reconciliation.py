@@ -19,6 +19,7 @@ Covered:
   - a refund RPC failure leaves the row claimed (under-refund, never double)
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -923,3 +924,192 @@ async def test_a_successful_reconciled_refund_does_not_log_a_leak(caplog, pushes
     assert pushes and "credits have been returned" in pushes[0]["body"], (
         f"a completed refund did not tell the user their credits are back: {pushes!r}"
     )
+
+
+# ── F24-2: a cancel between the claim and the refund must not leak the refund ─────────
+#
+# The sweep runs in a lifespan task the shutdown block cancels. A cancel that lands while
+# the UPDATE is on the wire cancels only the awaiting coroutine; the executor thread cannot
+# be interrupted, so PostgREST commits `is_refunded=True` and, with a plain
+# `await asyncio.to_thread(_claim)`, the result was discarded — `CancelledError` is a
+# BaseException, so neither the refund nor the REFUND LEAK line ever ran and the one-shot
+# claim was spent with nothing to show for it.
+
+
+class _BlockingSupabase(FakeSupabase):
+    """The UPDATE blocks on `gate` (simulating the wire) before applying; the test cancels
+    the awaiting task while it is blocked."""
+
+    def __init__(self, rows, gate, started):
+        super().__init__(rows)
+        self._gate, self._started = gate, started
+
+    def table(self, name):
+        q = super().table(name)
+        outer = self
+
+        class _Blocking(_Query):
+            def execute(inner):
+                if inner._op == "update":
+                    outer._started.set()
+                    outer._gate.wait(timeout=5)
+                return _Query.execute(inner)
+
+        b = _Blocking(self._store)
+        b.raise_on, b.commit_before_raise = q.raise_on, q.commit_before_raise
+        return b
+
+
+async def _yield(seconds: float) -> None:
+    """A REAL yield to the loop. `_no_retry_backoff` (autouse, above) replaces
+    `asyncio.sleep` module-wide with a no-op that never suspends, so polling with it would
+    spin without ever letting the shielded task or its thread run."""
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    loop.call_later(seconds, fut.set_result, None)
+    await fut
+
+
+async def _wait_until(pred, *, timeout=5.0):
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while not pred():
+        if _time.monotonic() > deadline:
+            return False
+        await _yield(0.01)
+    return True
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_the_claim_still_refunds_exactly_once(caplog):
+    import logging
+    import threading
+
+    gate, started = threading.Event(), threading.Event()
+    rows = [_row(credits_charged=20)]
+    sb = _BlockingSupabase(rows, gate, started)
+
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set), "the UPDATE never started"
+    with caplog.at_level(logging.INFO):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()                                  # the wire answers AFTER the cancel
+        assert await _wait_until(lambda: bool(FakeCreditService.calls)), (
+            "the UPDATE committed is_refunded=True but the refund never ran — a silent "
+            "REFUND LEAK with no log line"
+        )
+    assert FakeCreditService.calls == [("u1", 20)]
+    assert rows[0]["is_refunded"] is True and rows[0]["status"] == "failed"
+    assert any("Refunded 20 credits for failed report r1" in r.getMessage() for r in caplog.records)
+    # A second pass — the next process's sweep — must find the row already settled.
+    assert await recon.claim_and_mark_failed("r1", _BLOB, supabase=FakeSupabase(rows)) is False
+    assert FakeCreditService.calls == [("u1", 20)], "the shielded refund ran twice"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_a_claim_whose_refund_leaks_still_pages(caplog):
+    """The shield must carry the REFUND LEAK line too — a leak with no page is the worst
+    of the shapes this primitive exists to prevent."""
+    import logging
+    import threading
+
+    FakeCreditService.outcome = {"outcome": "no_matching_debit", "refunded": 0, "spendable": 1}
+    gate, started = threading.Event(), threading.Event()
+    sb = _BlockingSupabase([_row(credits_charged=20)], gate, started)
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set)
+    with caplog.at_level(logging.ERROR):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        assert await _wait_until(lambda: any(
+            "REFUND LEAK" in r.getMessage() and "r1" in r.getMessage() for r in caplog.records
+        )), "the refund that moved nothing produced no REFUND LEAK line after a cancel"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_before_the_update_ran_refunds_nothing():
+    """Anti-over-correction: if the CAS never committed there is nothing to refund, and the
+    next sweep must see the row untouched."""
+    import threading
+
+    gate, started = threading.Event(), threading.Event()
+    rows = [_row(credits_charged=20)]
+    sb = _BlockingSupabase(rows, gate, started)
+    sb._raise_on = lambda op, _set: RuntimeError("connection reset") if op == "update" else None
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    gate.set()
+    await _yield(0.1)
+    assert FakeCreditService.calls == [], "refunded a row the UPDATE never claimed"
+    assert rows[0]["is_refunded"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_no_user_id_row_claimed_under_cancel_does_not_crash_the_thread(caplog):
+    import logging
+    import threading
+
+    gate, started = threading.Event(), threading.Event()
+    rows = [_row(credits_charged=20, user_id=None)]
+    sb = _BlockingSupabase(rows, gate, started)
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set)
+    with caplog.at_level(logging.ERROR):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        assert await _wait_until(lambda: any(
+            "has no user_id" in r.getMessage() for r in caplog.records))
+    assert FakeCreditService.calls == []
+
+
+def test_the_claim_and_the_refund_share_one_shielded_thread_body():
+    """Source pin. The shield is only sufficient because the refund is INSIDE the thread
+    body: at interpreter exit `_cancel_all_tasks` cancels the shielded inner task before any
+    post-await code runs, and only the executor thread is drained."""
+    import inspect
+    import re
+
+    src = inspect.getsource(recon.claim_and_mark_failed)
+    code = "\n".join(re.sub(r"#.*$", "", ln) for ln in src.splitlines())
+    assert "inner = asyncio.ensure_future(asyncio.to_thread(_claim_and_settle))" in code
+    assert "await asyncio.shield(inner)" in code
+    body_start = code.index("def _claim_and_settle")
+    body_end = code.index("asyncio.shield(")
+    assert "_settle(" in code[body_start:body_end], "the refund left the thread body"
+    settle = code[code.index("def _settle"):body_start]
+    assert "refund_ledgered" in settle and "REFUND LEAK" in settle
+    assert "except asyncio.CancelledError" in code and "raise" in code
+
+
+@pytest.mark.asyncio
+async def test_an_update_that_raises_after_the_cancel_is_logged_not_lost(caplog):
+    """With the inner future shielded, an UPDATE that raises AFTER the cancel would only
+    surface as asyncio's "exception was never retrieved" at GC. The cancel arm attaches a
+    done-callback that logs it by report id."""
+    import logging
+    import threading
+
+    gate, started = threading.Event(), threading.Event()
+    rows = [_row(credits_charged=20)]
+    sb = _BlockingSupabase(rows, gate, started)
+    sb._raise_on = lambda op, _set: RuntimeError("connection reset") if op == "update" else None
+    task = asyncio.create_task(recon.claim_and_mark_failed("r1", _BLOB, supabase=sb))
+    assert await _wait_until(started.is_set)
+    with caplog.at_level(logging.INFO):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        assert await _wait_until(lambda: any(
+            "failed after the cancel" in r.getMessage() and "r1" in r.getMessage()
+            and "RuntimeError" in r.getMessage() for r in caplog.records))
+    assert FakeCreditService.calls == []

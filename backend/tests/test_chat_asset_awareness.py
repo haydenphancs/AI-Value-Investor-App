@@ -43,12 +43,18 @@ def _svc() -> ChatService:
 
 @pytest.fixture
 def licensed_analyst_data(monkeypatch):
+    # Both bindings — `chat_service` imports the same name for its analyst clause, and a
+    # one-sided patch builds a self-contradictory instruction (F12-11).
     monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: True)
+    import app.services.chat_service as cs
+    monkeypatch.setattr(cs, "analyst_section_available", lambda: True)
 
 
 @pytest.fixture
 def unlicensed_analyst_data(monkeypatch):
     monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: False)
+    import app.services.chat_service as cs
+    monkeypatch.setattr(cs, "analyst_section_available", lambda: False)
 
 
 # The market-awareness tools added after Cay AI told a user its tools "are designed to
@@ -419,7 +425,7 @@ async def test_a_report_chat_on_a_collider_keeps_the_equity_screen_exemption():
     seen: dict = {}
 
     def _rec(name):
-        async def _f(ticker, is_crypto=None):
+        async def _f(ticker, is_crypto=None, user_id=None):
             seen[name] = (ticker, is_crypto)
             return {"ok": True}
         return _f
@@ -601,7 +607,7 @@ async def test_every_ticker_tool_handler_resolves_through_chat_symbol():
     seen: dict = {}
     for name in ("_fetch_stock_widget_data", "_fetch_analyst_data", "_fetch_sentiment_data",
                  "_fetch_ticker_news_data", "_fetch_price_move_data"):
-        async def _rec(ticker, _name=name):
+        async def _rec(ticker, _name=name, **_kw):
             seen[_name] = ticker
             return {"ok": True}
         setattr(svc, name, _rec)
@@ -671,7 +677,7 @@ async def test_the_equity_screen_exemption_travels_as_is_crypto_false():
     seen: dict = {}
 
     def _rec(name):
-        async def _f(ticker, is_crypto=None):
+        async def _f(ticker, is_crypto=None, user_id=None):
             seen[name] = (ticker, is_crypto)
             return {"ok": True}
         return _f

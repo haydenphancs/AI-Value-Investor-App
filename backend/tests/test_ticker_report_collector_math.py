@@ -3406,3 +3406,68 @@ def test_moat_dimension_normalizer_survives_malformed_rows():
 
     assert _apply_peer_score_baseline([]) == []
     assert _apply_peer_score_baseline([None, "x", 7]) == []   # type: ignore[list-item]
+
+
+def test_a_failed_news_feed_is_flagged_rather_than_read_as_no_catalyst():
+    """`fmp.get_stock_news` degrades an outage to an `EmptyAfterFailure` — an empty list
+    that remembers it failed. The price-action payload used to treat it like a quiet
+    window, and Stage B narrated a Notable+ move as "no catalyst" (a finding the
+    collector never established)."""
+    from app.integrations.fmp import EmptyAfterFailure
+    from app.services.agents import narrative_prompts as npr
+    from app.services.agents.persona_config import get_persona_config
+
+    prices = [100.0] * 19 + [112.0]           # a big move with nothing to explain it
+    failed = EmptyAfterFailure("503 after retries")
+    result = _build_price_action(prices, 112.0, [], failed)
+    assert result["_news_unavailable"] is True
+    assert result["_news_headlines"] == []
+    quiet = _build_price_action(prices, 112.0, [], [])
+    assert quiet["_news_unavailable"] is False
+
+    persona = get_persona_config("warren_buffett")
+    prompt = npr._price_action_narrative_prompt(persona, "EVIDENCE", {"price_action": result})
+    assert "could not be checked" in prompt and "news feed unavailable" in prompt
+    assert "none in window" not in prompt
+    quiet_prompt = npr._price_action_narrative_prompt(persona, "EVIDENCE", {"price_action": quiet})
+    assert "none in window" in quiet_prompt and "could not be checked" not in quiet_prompt
+
+
+def test_the_collector_keeps_the_failed_marker_when_the_news_fetch_raises():
+    """A RAISED news fetch fell to the plain `[]` default in the gather loop and the
+    marker was lost. BEHAVIOURAL, through the arm the loop calls (W2 vacuity-2-2: the
+    source pin this replaced asserted two substrings and could not see the `continue`)."""
+    from types import SimpleNamespace
+    from app.integrations.fmp import EmptyAfterFailure
+    from app.services.agents.ticker_report_data_collector import _settle_pass1_result
+
+    out = SimpleNamespace()
+    _settle_pass1_result(out, "news", RuntimeError("503 from FMP"), [], "AAPL")
+    assert isinstance(out.news, EmptyAfterFailure) and out.news.fetch_failed
+    assert "RuntimeError" in out.news.reason and out.news == []
+    # A measured empty feed is the plain default — the two must stay distinguishable.
+    _settle_pass1_result(out, "news", [], [], "AAPL")
+    assert out.news == [] and not getattr(out.news, "fetch_failed", False)
+    # Every other arm falls to its default with the failure logged…
+    _settle_pass1_result(out, "peer_tickers", RuntimeError("x"), [], "AAPL")
+    assert out.peer_tickers == [] and not getattr(out.peer_tickers, "fetch_failed", False)
+    # …a value lands as is (None → default)…
+    _settle_pass1_result(out, "transcript", "text", "", "AAPL")
+    assert out.transcript == "text"
+    _settle_pass1_result(out, "transcript", None, "", "AAPL")
+    assert out.transcript == ""
+    # …and a failed profile re-raises the REAL exception for the endpoint's classifier.
+    with pytest.raises(RuntimeError, match="auth"):
+        _settle_pass1_result(out, "profile", RuntimeError("auth"), {}, "AAPL")
+
+
+def test_the_gather_loop_lands_every_result_through_the_settle_arm():
+    """The behavioural test above proves the arm; this pins that the loop USES it (a
+    loop body re-inlined with the marker dropped would pass the arm's test)."""
+    import inspect, re
+    from app.services.agents import ticker_report_data_collector as C
+    src = inspect.getsource(C.TickerReportDataCollector._fetch_all)
+    src = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+    loop = re.search(r"for \(attr, _coro, default\), result in zip\(tasks, results\):\n(\s+)(.*)\n", src)
+    assert loop, "the pass-1 landing loop changed shape — re-read this test"
+    assert loop.group(2).strip() == "_settle_pass1_result(out, attr, result, default, ticker)", loop.group(2)

@@ -46,3 +46,9 @@ class SentimentAnalysisResponse(BaseModel):
     # any other builder keeps the old meaning; `sentiment_service` sets both explicitly.
     social_mentions_known: bool = True
     social_mentions_7d_known: bool = True
+    # Was the NEWS arm measured? False when the feed FAILED (an `EmptyAfterFailure`, or the
+    # fetch raised): the 0 articles / ▲0 =0 ▼0 counts are then an outage, not a quiet week.
+    # The reading is already served uncached in that case; this is what lets the client
+    # render "—" instead of a confident "N/A" over fabricated zeros. Default True so any
+    # other builder keeps the old meaning; `sentiment_service` sets it explicitly.
+    news_known: bool = True

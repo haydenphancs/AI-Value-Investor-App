@@ -255,3 +255,37 @@ def test_instruction_replayed_context_labeled_stale():
 def test_instruction_replayed_flag_defaults_to_live():
     # Default (omitted) → live framing, so existing callers are unaffected.
     assert "current data visible to the user" in _instruction()
+
+
+# ── whitespace-only context is ABSENT for every reader (F03-11) ─────────────────
+
+
+def test_a_whitespace_only_context_never_overwrites_the_stored_snapshot():
+    class _Q:
+        def __init__(self, log): self.log = log
+        def update(self, payload): self.log.append(payload); return self
+        def eq(self, *a): return self
+        def execute(self): return None
+
+    log: list = []
+    sb = type("SB", (), {"table": lambda self, name: _Q(log)})()
+    _persist_context_snapshot(sb, "s1", "   \n\t ", {"context_snapshot": "STORED"})
+    assert log == [], "spaces replaced a real stored snapshot"
+    _persist_context_snapshot(sb, "s1", "NEW", {"context_snapshot": "STORED"})
+    assert log == [{"context_snapshot": "NEW"}]
+
+
+def test_both_doors_sanitise_the_request_context_once_before_any_reader():
+    """The prompt read `sanitize_context(...)` (spaces → None) while the replay flag and
+    the persist read the RAW string (spaces → truthy): a whitespace-only `context` was
+    'live' to one reader and 'absent' to another."""
+    import inspect
+    from app.api.v1.endpoints import chat as chat_mod
+
+    for handler in (chat_mod.send_chat_message, chat_mod.stream_chat_message):
+        src = inspect.getsource(handler)
+        assert "req_ctx = sanitize_context(request.context)" in src, handler.__name__
+        assert "context_is_replayed = not req_ctx and bool(effective_context)" in src, handler.__name__
+        assert "_effective_context(req_ctx," in src, handler.__name__
+        assert "_persist_context_snapshot(supabase, session_id, req_ctx," in src, handler.__name__
+        assert "_effective_context(request.context" not in src, handler.__name__

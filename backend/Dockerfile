@@ -42,4 +42,11 @@ ENV PYTHONUNBUFFERED=1
 # proxy's). Needed for accurate client-IP logging and for the per-IP auth rate
 # limiters (`core/security.py`). Safe here: Railway's
 # edge is the only ingress and always sets the header.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+# --timeout-graceful-shutdown 30: on SIGTERM uvicorn waits for open connections to
+# drain BEFORE it runs the lifespan shutdown, and with no bound that wait is infinite
+# — one live SSE chat stream held the old instance until Railway SIGKILLed it, so the
+# lifespan `finally` blocks that release the durable job claims (migration 147) never
+# ran and a claim sat parked for its whole stale window (W2 B-1). 30 s is enough for a
+# normal drain and well inside Railway's stop grace; the SSE reader reconciles on a
+# drop (it never re-POSTs), so cutting a stream is safe.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"]

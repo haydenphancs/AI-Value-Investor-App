@@ -145,8 +145,20 @@ _RE_REVOKE = re.compile(
     r"REVOKE\s+ALL(?:\s+PRIVILEGES)?\s+ON\s+(?:TABLE\s+)?(?:public\.)?([a-z0-9_]+)\s+FROM\s+([^;']+)",
     re.I,
 )
+# The privilege list may carry column lists (`SELECT(col)`), and the object may be
+# double-quoted — both used to slip past the scan (F11-3).
 _RE_GRANT = re.compile(
-    r"GRANT\s+([A-Z ,]+?)\s+ON\s+(?:TABLE\s+)?(?:public\.)?([a-z0-9_]+)\s+TO\s+([^;']+)",
+    r"GRANT\s+([A-Za-z0-9_ ,()]+?)\s+ON\s+(?:TABLE\s+)?"
+    r'(?:"?public"?\.)?"?([a-z0-9_]+)"?\s+TO\s+([^;\']+)',
+    re.I,
+)
+#: `GRANT ... TO PUBLIC` reaches every role and survives a per-role REVOKE. It has no
+#: legitimate use in this project (every client-visible table is granted by role, on
+#: purpose), so on a service-role-only table it is an outright failure rather than a
+#: state to replay.
+_RE_GRANT_TO_PUBLIC = re.compile(
+    r"GRANT\s+[A-Z_ ,()]+?\s+ON\s+(?:TABLE\s+)?(?:\"?public\"?\.)?\"?([a-z0-9_]+)\"?\s+TO\s+"
+    r"(?:[a-z_\", ]*,\s*)?public\b",
     re.I,
 )
 _RE_CREATE_TABLE = re.compile(
@@ -357,6 +369,12 @@ def test_the_detectors_are_not_vacuous():
     assert _RE_REVOKE.search("REVOKE ALL PRIVILEGES ON TABLE x FROM authenticated;")
     assert not _RE_REVOKE.search("REVOKE UPDATE (is_admin) ON public.users FROM anon;"), \
         "a column-level REVOKE must NOT count as closing the table (Postgres ignores it under a table-level grant)"
+    # F11-3: column-level and quoted grants are seen; TO PUBLIC is flagged.
+    c = _RE_GRANT.search('GRANT SELECT(id), UPDATE(name) ON "public"."z" TO anon;')
+    assert c and c.group(2) == "z" and "anon" in _roles(c.group(3))
+    assert _RE_GRANT_TO_PUBLIC.search("GRANT SELECT ON public.z TO PUBLIC;").group(1) == "z"
+    assert _RE_GRANT_TO_PUBLIC.search("GRANT SELECT ON TABLE z TO anon, public;").group(1) == "z"
+    assert _RE_GRANT_TO_PUBLIC.search("GRANT SELECT ON public.z TO authenticated;") is None
     g = _RE_GRANT.search("GRANT SELECT, INSERT ON public.y TO anon, authenticated;")
     assert g and _roles(g.group(3)) == ["anon", "authenticated"]
     # A FUNCTION/SEQUENCE grant must not read as a table grant (the object token has a
@@ -370,6 +388,19 @@ def test_the_detectors_are_not_vacuous():
 
 
 # ── the two statements that would re-open everything at once ────────────────────────
+
+
+def test_no_migration_grants_a_service_role_only_table_to_public():
+    """F11-3: a grant TO PUBLIC is invisible to the per-role replay and survives a per-role
+    REVOKE. None is legitimate here."""
+    only = _all_service_role_only()
+    hits = []
+    for path in _sql_files():
+        code = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        for m in _RE_GRANT_TO_PUBLIC.finditer(code):
+            if m.group(1).lower() in only:
+                hits.append((path.name, m.group(1).lower()))
+    assert hits == [], f"GRANT ... TO PUBLIC on a service-role-only table: {hits}"
 
 
 def test_no_migration_grants_the_whole_schema_to_a_client_role():

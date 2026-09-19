@@ -25,6 +25,9 @@ private enum ChatStreamError: LocalizedError {
     /// The turn may have been saved and charged, but history could not be read to confirm
     /// it — so it was neither adopted nor regenerated. The user should reload, not resend.
     case unconfirmed
+    /// The stream door answered 404: the conversation no longer exists server-side (deleted
+    /// from another device, or purged). Nothing was charged; the row is dropped locally.
+    case sessionGone
 
     /// `AppError.from` renders an unmapped error as `.unknown(localizedDescription)`, and a
     /// bare enum's description is "The operation couldn't be completed. (… error 3.)".
@@ -36,6 +39,8 @@ private enum ChatStreamError: LocalizedError {
         case .unconfirmed:
             return "We couldn't confirm whether your answer was saved. "
                 + "Refresh the conversation before sending again."
+        case .sessionGone:
+            return "This conversation no longer exists — start a new one."
         }
     }
 }
@@ -99,7 +104,21 @@ class ChatViewModel: ObservableObject {
         if case APIError.rateLimited = error {
             return true
         }
-        return false
+        // Status-line refusals that arrive BEFORE the handler runs, so nothing was charged
+        // and nothing can be in history: a 404 (the session is gone), any 401 (the token was
+        // refused — `authRequired` never left the client; `unauthorized` / `authError` are the
+        // bearer being rejected at the door), and the auth service being down. Reconciling
+        // these spent a history GET that failed the same way and then laundered the real
+        // reason into "couldn't confirm" — a user with an expired session was told to
+        // refresh a conversation instead of being signed back in.
+        switch error {
+        case APIError.notFound, APIError.authRequired, APIError.unauthorized, APIError.authError:
+            return true
+        case APIError.businessError(let code, _) where code == "AUTH_UNAVAILABLE":
+            return true
+        default:
+            return false
+        }
     }
 
     /// Surface a failed turn BOTH in the chat's own banner and through the global error
@@ -826,7 +845,10 @@ class ChatViewModel: ObservableObject {
                         return
                     }
                 case .unavailable:
-                    guard sessionId == currentSessionId else { return }
+                    // `!Task.isCancelled` too: a same-session reload cancels this Task and
+                    // the read comes back `.unavailable(CancellationError)` — painting
+                    // "couldn't confirm" over a conversation that just reloaded fine.
+                    guard sessionId == currentSessionId, !Task.isCancelled else { return }
                     isAITyping = false
                     reportTurnFailure(ChatStreamError.unconfirmed)
                     return
@@ -844,10 +866,18 @@ class ChatViewModel: ObservableObject {
             // attaches the action: `.insufficientCredits` carries `.upgrade`, i.e. the route
             // to Buy Credits. Setting only `errorMessage`, as this did, left a user who had
             // run out of credits staring at a red banner with an ✕ and no way to fix it.
-            reportTurnFailure(error)
+            if case APIError.notFound = error {
+                // Parity with the stream door: the ghost row goes FIRST (its reset clears
+                // `errorMessage`), then the chat copy.
+                removeSessionLocally(sessionId)
+                reportTurnFailure(ChatStreamError.sessionGone)
+            } else {
+                reportTurnFailure(error)
+            }
             // A 402 means our local balance was already stale — that is exactly what the
-            // server just corrected us on.
-            if Self.isTerminalPreflightRefusal(error) {
+            // server just corrected us on. Only the 402: the classifier now also covers
+            // 401/404 refusals, on which a balance read would fail the same way.
+            if case APIError.businessError(let code, _) = error, code == "INSUFFICIENT_CREDITS" {
                 Task { [weak appState] in await appState?.refreshCredits() }
             }
         }
@@ -1126,7 +1156,17 @@ class ChatViewModel: ObservableObject {
             // reader learned to decode 402 it ended as a bare red banner with no way out.
             if Self.isTerminalPreflightRefusal(error) {
                 isAITyping = false
-                reportTurnFailure(error)
+                if case APIError.notFound = error {
+                    // `AppError.from` renders a bare 404 as a generic "not found"; drop the
+                    // ghost row FIRST (resets the conversation when it is the current one,
+                    // which also clears the optimistic bubble — and `errorMessage`, so the
+                    // banner has to be set AFTER it or it never renders; W2 E-4), then say
+                    // what happened.
+                    removeSessionLocally(sessionId)
+                    reportTurnFailure(ChatStreamError.sessionGone)
+                } else {
+                    reportTurnFailure(error)
+                }
                 return
             }
 
@@ -1196,11 +1236,17 @@ class ChatViewModel: ObservableObject {
                     // The stream DID persist this turn — adopt server state, don't re-send.
                     messages = history.messages.map { $0.toRichChatMessage() }
                     isAITyping = false
+                    // The `credits` frame never arrived (it precedes `done`), so the
+                    // balance was last read BEFORE this charged turn; the non-stream
+                    // door's adopt path already re-reads it — this one did not, and the
+                    // wallet sat one credit stale until the next turn.
+                    refreshCreditsIfMoved(nil)
                     return
                 }
                 if i == delays.count - 1 { break }
             case .unavailable(let error):
-                guard sessionId == currentSessionId else { isAITyping = false; return }
+                // See the non-stream arm: a cancelled read is not an unconfirmed turn.
+                guard sessionId == currentSessionId, !Task.isCancelled else { isAITyping = false; return }
                 print("⚠️ [ChatVM] Reconcile could not read history — NOT regenerating: \(error)")
                 isAITyping = false
                 reportTurnFailure(ChatStreamError.unconfirmed)
@@ -1279,7 +1325,12 @@ class ChatViewModel: ObservableObject {
         let folded = text.precomposedStringWithCompatibilityMapping
         let scalars = folded.unicodeScalars.filter { scalar in
             switch scalar.value {
-            case 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064, 0xFEFF: return false
+            // Mirrors `chat_security._INVISIBLE_CODEPOINTS` (pinned by
+            // test_ios_paid_path_guards): zero-width, bidi embeddings, bidi ISOLATES
+            // (0x2066–0x2069 — missing here until 2026-09-18, so a message carrying one
+            // never matched its persisted copy), word-joiner, BOM.
+            case 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064, 0x2066...0x2069, 0xFEFF:
+                return false
             default: return !(scalar.properties.generalCategory == .control)
             }
         }

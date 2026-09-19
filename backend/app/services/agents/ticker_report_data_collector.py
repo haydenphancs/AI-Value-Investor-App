@@ -460,6 +460,37 @@ class CollectedTickerData:
 # ── Public API ────────────────────────────────────────────────────────
 
 
+def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker: str) -> None:
+    """Land ONE pass-1 gather result on `out`. A module-level function (not a loop body)
+    so its four arms are behaviourally testable — the source-pin guard this replaced could
+    not see the `continue` that keeps the news marker off the default (W2 vacuity-2-2).
+
+    * a value → stored (None falls to the default);
+    * `profile` failed → re-raised: it is non-recoverable, and the endpoint's classifier
+      must see the real upstream exception (FMPAuthException / FMPRateLimitException /
+      httpx) to map FMP_UNAVAILABLE / FMP_RATE_LIMITED — the empty-dict default would
+      masquerade as TICKER_NOT_FOUND;
+    * `news` failed → an `EmptyAfterFailure` marker, NOT the plain `[]` default: Stage B
+      otherwise narrated a Notable+ move as "no catalyst in window", the same shape as a
+      quiet week;
+    * anything else failed → its default, with a warning.
+    """
+    if isinstance(result, Exception):
+        logger.warning(
+            f"Collector: {attr} failed for {ticker}: "
+            f"{type(result).__name__}: {result}"
+        )
+        if attr == "profile":
+            raise result
+        if attr == "news":
+            from app.integrations.fmp import EmptyAfterFailure
+            setattr(out, attr, EmptyAfterFailure(f"{type(result).__name__}: {result}"[:200]))
+            return
+        setattr(out, attr, default)
+        return
+    setattr(out, attr, result if result is not None else default)
+
+
 class TickerReportDataCollector:
     """Fetches and shapes every non-AI field of TickerReportResponse."""
 
@@ -827,21 +858,7 @@ class TickerReportDataCollector:
         )
 
         for (attr, _coro, default), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                logger.warning(
-                    f"Collector: {attr} failed for {ticker}: "
-                    f"{type(result).__name__}: {result}"
-                )
-                if attr == "profile":
-                    # Profile is non-recoverable — re-raise so the endpoint's
-                    # classifier sees the real upstream exception (FMPAuthException
-                    # / FMPRateLimitException / httpx error) and maps to
-                    # FMP_UNAVAILABLE / FMP_RATE_LIMITED. Falling through to the
-                    # empty-dict default would masquerade as TICKER_NOT_FOUND.
-                    raise result
-                setattr(out, attr, default)
-            else:
-                setattr(out, attr, result if result is not None else default)
+            _settle_pass1_result(out, attr, result, default, ticker)
 
         # ── Pass 2: fetches that depend on pass-1 results ─────────────
         # peer_profiles needs peer_tickers; sector_aggregates needs
@@ -2672,11 +2689,24 @@ def _hist_list(historical: Any) -> List[Dict[str, Any]]:
     return normalize_history(historical)
 
 
-def _latest_completed_close(historical: Any) -> Tuple[Optional[date], Optional[float]]:
-    """Most recent COMPLETED daily close from FMP /historical (newest-first +
-    EOD-only, so during market hours this is the prior session's close — exactly
-    the 'last close' the report anchors to). Returns (close_date, close_price),
-    or (None, None) when no usable bar exists."""
+def _latest_completed_close(
+    historical: Any, now: Optional[datetime] = None,
+) -> Tuple[Optional[date], Optional[float]]:
+    """Most recent SETTLED daily close from FMP /historical (newest-first).
+
+    "EOD-only, so during market hours this is the prior session's close" was the premise
+    and it is false: `historical-price-eod/full` includes the CURRENT session's partial
+    bar (live evidence 2026-09-16, the last ^GSPC row was a ~10-minute snapshot with 6M of
+    volume against 32-46M on every prior bar). A report generated mid-session therefore
+    anchored `current_price` — and every "last close" comparison — to a bar that was still
+    moving. Rows dated after the current close cycle's date (weekday 18:00 ET, the same
+    boundary the report cache uses, so FMP has finalised the bar) are skipped. Returns
+    (close_date, close_price), or (None, None) when no usable bar exists.
+    """
+    from app.services.ticker_report_cache import current_close_cycle_start
+    from app.utils.market_hours import ET
+
+    cutoff = current_close_cycle_start(now).astimezone(ET).date()
     for p in _hist_list(historical):
         close = p.get("close")
         date_str = p.get("date") or ""
@@ -2684,6 +2714,11 @@ def _latest_completed_close(historical: Any) -> Tuple[Optional[date], Optional[f
             continue
         try:
             d = date.fromisoformat(date_str[:10])
+        except (TypeError, ValueError):
+            continue
+        if d > cutoff:
+            continue  # the in-progress session (or a stray future-dated row)
+        try:
             return d, float(close)
         except (TypeError, ValueError):
             continue
@@ -5618,6 +5653,10 @@ def _build_price_action(
         "expected_band_pct": expected_band_pct,
         "_news_headlines": evidence_payload,  # Pydantic-ignored
         "_change_days": change_days,  # detection-window span (Pydantic-ignored)
+        # The news arm FAILED (an `EmptyAfterFailure`): "no matched headlines" is then an
+        # outage, not a finding, and the Stage B prompt must say "could not be checked"
+        # rather than let the model narrate a big move as catalyst-free.
+        "_news_unavailable": bool(getattr(news, "fetch_failed", False)),
     }
 
 
@@ -5637,6 +5676,7 @@ def _empty_price_action(current_price: float) -> Dict[str, Any]:
         "sigma_daily_pct": None,
         "expected_band_pct": None,
         "_news_headlines": [],
+        "_news_unavailable": False,
     }
 
 

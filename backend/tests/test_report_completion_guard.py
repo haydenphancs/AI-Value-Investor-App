@@ -147,3 +147,65 @@ def test_status_writes_never_admit_a_terminal_state_to_the_filter():
     assert rs._ACTIVE_STATUSES == ["pending", "processing"]
     for terminal in ("completed", "failed", "deleted"):
         assert terminal not in rs._ACTIVE_STATUSES
+
+
+# ── F08-8: the completion write and every status tick run OFF the event loop ──
+#
+# `generate_report` used to call `_update_status` (a sync Supabase UPDATE) six times per
+# report straight from the coroutine, and the completion UPDATE — carrying the ~200 KB
+# report JSONB — the same way. Each one parked the single event loop for a round trip.
+
+import threading
+
+
+@pytest.mark.asyncio
+async def test_status_ticks_and_the_completion_write_leave_the_loop_thread(monkeypatch):
+    loop_thread = threading.get_ident()
+    threads: dict = {"status": set(), "completion": set()}
+
+    svc = object.__new__(ResearchService)
+    q = MagicMock()
+    for m in ("table", "update", "eq", "in_"):
+        getattr(q, m).return_value = q
+
+    def _execute():
+        threads["completion"].add(threading.get_ident())
+        return MagicMock(data=[{"id": "rid"}])
+    q.execute.side_effect = _execute
+    svc.supabase = q
+
+    def _status(*a, **k):
+        threads["status"].add(threading.get_ident())
+    monkeypatch.setattr(svc, "_update_status", _status)
+    monkeypatch.setattr(svc, "_lookup_shared_cache", AsyncMock(return_value=_CACHED))
+    monkeypatch.setattr(rs, "compute_quality_score", lambda persona, data: 70)
+    monkeypatch.setattr(rs, "upsert_cached_report", AsyncMock())
+    monkeypatch.setattr(
+        "app.services.push_dispatch_service.get_push_dispatch_service",
+        lambda: MagicMock(notify_users=AsyncMock(return_value=1)),
+    )
+
+    assert await svc.generate_report("rid", "AAPL", "warren_buffett", "u1") is True
+    assert threads["status"], "no status tick was recorded — the harness is broken"
+    assert loop_thread not in threads["status"], "a status tick ran ON the event loop"
+    assert threads["completion"] and loop_thread not in threads["completion"], (
+        "the completion UPDATE ran ON the event loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_failure_stamp_leaves_the_loop_thread_too(monkeypatch):
+    loop_thread = threading.get_ident()
+    seen: list = []
+    svc = object.__new__(ResearchService)
+    svc.supabase = MagicMock()
+
+    def _status(report_id, status, progress, current_step=None, error_message=None):
+        seen.append((status, threading.get_ident()))
+    monkeypatch.setattr(svc, "_update_status", _status)
+    monkeypatch.setattr(svc, "_lookup_shared_cache", AsyncMock(side_effect=RuntimeError("db down")))
+
+    with pytest.raises(RuntimeError):
+        await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
+    failed = [t for st, t in seen if st == "failed"]
+    assert failed and loop_thread not in failed

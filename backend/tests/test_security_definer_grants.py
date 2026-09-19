@@ -137,7 +137,8 @@ def _balanced_args(code: str, open_paren: int) -> str:
 
 
 def _revoked_functions() -> set[str]:
-    """Every function name revoked from PUBLIC anywhere in the migration set.
+    """Every function name revoked from PUBLIC and still LIVE at the end of the ordered
+    replay (a dropped function owes nothing).
 
     Kept NAME-keyed because the REVOKE and the CREATE are often written with different
     (but equivalent) spellings of the same types; `_revoked_signatures` is the strict
@@ -146,21 +147,76 @@ def _revoked_functions() -> set[str]:
     return {sig.split("(")[0] for sig in _revoked_signatures()}
 
 
+def _live_secdef_functions() -> dict[str, str]:
+    """{name: defining migration} for SECDEF functions still live after the ordered replay —
+    the name-level companion of the ledger, so a DROPped function is not demanded a REVOKE."""
+    return {sig.split("(")[0]: mig for sig, mig in _secdef_ledger()[0].items()}
+
+
 def _revoked_signatures() -> set[str]:
+    return _secdef_ledger()[1]
+
+
+_EVENT_RE = re.compile(
+    r"(?P<create>CREATE\s+(?P<replace>OR\s+REPLACE\s+)?FUNCTION)\s+(?:public\.)?(?P<cname>[a-z0-9_]+)\s*\("
+    r"|(?P<drop>DROP\s+FUNCTION)\s+(?:IF\s+EXISTS\s+)?(?:public\.)?(?P<dname>[a-z0-9_]+)\s*\("
+    r"|(?P<revoke>REVOKE\s+(?:ALL|EXECUTE)[A-Z\s]*ON\s+FUNCTION)\s+(?:public\.)?(?P<rname>[a-z0-9_]+)\s*\(",
+    re.I,
+)
+
+
+def _replay(files) -> tuple[dict[str, str], set[str]]:
+    """ORDERED replay of every CREATE / DROP / REVOKE over `files` (a sequence of
+    (filename, sql) pairs) → ({secdef signature: last defining file}, {revoked signatures}).
+
+    Order is the point (F11-4). The previous shape unioned every REVOKE ever written
+    against every definition ever written, so `DROP FUNCTION f(...)` in one migration
+    followed by a fresh `CREATE FUNCTION f(...)` in a later one — a NEW object on the
+    default `EXECUTE TO PUBLIC` — still "had a REVOKE" from the migration that created
+    the original. Replayed:
+
+      * DROP            → the signature leaves BOTH ledgers (no REVOKE is owed for an
+                          object that no longer exists — `cleanup_expired_news_articles`,
+                          created 104, revoked 153, dropped 168).
+      * plain CREATE    → a brand-new object: any earlier REVOKE is discarded (it targeted
+                          a different object), then the definition is recorded if SECDEF.
+      * CREATE OR REPLACE → the ACL is preserved (Postgres semantics), so `revoked` is left
+                          alone; the definition is recorded if SECDEF and forgotten if the
+                          replacement dropped SECURITY DEFINER.
+      * REVOKE          → the signature is covered from here on.
+    """
+    defined: dict[str, str] = {}
     revoked: set[str] = set()
-    for path in _sql_files():
-        code = _strip_sql_comments(path.read_text(encoding="utf-8"))
-        for match in re.finditer(
-            r"REVOKE\s+(?:ALL|EXECUTE)[A-Z\s]*ON\s+FUNCTION\s+(?:public\.)?([a-z0-9_]+)\s*\(",
-            code, re.I,
-        ):
-            args = _balanced_args(code, match.end() - 1)
-            revoked.add(_signature(match.group(1), args))
-    return revoked
+    for fname, sql in files:
+        code = _strip_sql_comments(sql)
+        for m in _EVENT_RE.finditer(code):
+            if m.group("drop"):
+                sig = _signature(m.group("dname"), _balanced_args(code, m.end() - 1))
+                defined.pop(sig, None)
+                revoked.discard(sig)
+            elif m.group("revoke"):
+                sig = _signature(m.group("rname"), _balanced_args(code, m.end() - 1))
+                revoked.add(sig)
+            else:
+                sig = _signature(m.group("cname"), _balanced_args(code, m.end() - 1))
+                start = m.end()
+                nxt = re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION", code[start:], re.I)
+                body = code[start:start + (nxt.start() if nxt else len(code))]
+                if not m.group("replace"):
+                    revoked.discard(sig)
+                if re.search(r"SECURITY\s+DEFINER", body, re.I):
+                    defined[sig] = fname
+                else:
+                    defined.pop(sig, None)
+    return defined, revoked
+
+
+def _secdef_ledger() -> tuple[dict[str, str], set[str]]:
+    return _replay((p.name, p.read_text(encoding="utf-8")) for p in _sql_files())
 
 
 def test_every_security_definer_function_is_revoked_from_public():
-    defined = _defined_secdef_functions()
+    defined = _live_secdef_functions()     # ordered replay: a DROPped function owes nothing
     revoked = _revoked_functions()
 
     missing = {
@@ -211,6 +267,7 @@ def test_the_detectors_are_not_vacuous():
     revoked = _revoked_functions()
     assert len(defined) >= 25, f"the SECDEF detector found only {len(defined)}"
     assert len(revoked) >= 25, f"the REVOKE detector found only {len(revoked)}"
+    assert len(_live_secdef_functions()) >= 25
 
     # And they must DISCRIMINATE, proven against synthetic SQL rather than the live tree.
     import tempfile
@@ -240,8 +297,9 @@ def test_every_secdef_signature_is_revoked_too():
     Signature normalisation is best-effort on hand-written SQL, so a definition whose
     types this scan cannot line up with its REVOKE is reported, not silently passed.
     """
-    defined = _defined_secdef_signatures()
-    revoked = _revoked_signatures()
+    # The ORDERED ledger, not the two flat scans: a DROP+CREATE of the same signature is a
+    # new object, and only a REVOKE written AFTER the CREATE covers it.
+    defined, revoked = _secdef_ledger()
 
     # EXACT signature match, with no "the name is revoked somewhere" escape. That escape
     # was the whole hole: an overload IS a name that is revoked somewhere, and it is
@@ -259,6 +317,67 @@ def test_every_secdef_signature_is_revoked_too():
         + "\n".join(f"  • public.{sig}  (defined in {mig})"
                      for sig, mig in sorted(missing.items()))
     )
+
+
+def test_the_ledger_replay_is_order_aware():
+    """Synthetic migrations, so the ORDER semantics are proven rather than assumed."""
+    secdef = "RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN END $$;"
+    plain = "RETURNS void LANGUAGE plpgsql AS $$ BEGIN END $$;"
+
+    # 1. create + revoke, then DROP + fresh CREATE with no new REVOKE → uncovered.
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.f(p uuid) {secdef}\n"
+                    "REVOKE ALL ON FUNCTION public.f(uuid) FROM PUBLIC;"),
+        ("002.sql", f"DROP FUNCTION IF EXISTS public.f(uuid);\nCREATE FUNCTION public.f(p uuid) {secdef}"),
+    ])
+    assert "f(uuid)" in defined and "f(uuid)" not in revoked, (defined, revoked)
+
+    # 2. ...and the same with the REVOKE re-issued after the CREATE → covered.
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.f(p uuid) {secdef}\n"
+                    "REVOKE ALL ON FUNCTION public.f(uuid) FROM PUBLIC;"),
+        ("002.sql", f"DROP FUNCTION IF EXISTS public.f(uuid);\nCREATE FUNCTION public.f(p uuid) {secdef}\n"
+                    "REVOKE ALL ON FUNCTION public.f(uuid) FROM PUBLIC;"),
+    ])
+    assert "f(uuid)" in defined and "f(uuid)" in revoked
+
+    # 3. DROP with no later CREATE → nothing is owed (cleanup_expired_news_articles).
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.g() {secdef}\nREVOKE ALL ON FUNCTION public.g() FROM PUBLIC;"),
+        ("002.sql", "DROP FUNCTION IF EXISTS public.g();"),
+    ])
+    assert "g()" not in defined
+
+    # 4. CREATE OR REPLACE keeps the earlier REVOKE (ACL preserved).
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.h(p text) {secdef}\nREVOKE ALL ON FUNCTION public.h(text) FROM PUBLIC;"),
+        ("002.sql", f"CREATE OR REPLACE FUNCTION public.h(p text) {secdef}"),
+    ])
+    assert "h(text)" in defined and "h(text)" in revoked
+
+    # 5. A replacement that drops SECURITY DEFINER leaves the SECDEF ledger.
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.k() {secdef}\nREVOKE ALL ON FUNCTION public.k() FROM PUBLIC;"),
+        ("002.sql", f"CREATE OR REPLACE FUNCTION public.k() {plain}"),
+    ])
+    assert "k()" not in defined
+
+    # 6. A commented-out DROP is not a DROP.
+    defined, revoked = _replay([
+        ("001.sql", f"CREATE OR REPLACE FUNCTION public.f(p uuid) {secdef}\nREVOKE ALL ON FUNCTION public.f(uuid) FROM PUBLIC;"),
+        ("002.sql", "-- DROP FUNCTION IF EXISTS public.f(uuid);"),
+    ])
+    assert "f(uuid)" in revoked
+
+    # The live tree under the ordered ledger agrees with the flat scans on what is DEFINED
+    # today (the two must not drift apart silently).
+    live_defined, _ = _secdef_ledger()
+    flat = _defined_secdef_signatures()
+    # Only signatures DROPPED and never recreated differ: 168 dropped the news reaper,
+    # 171 the dead ledger door. (142's DROP+CREATE of refund_credits stays defined — and is
+    # covered, because 142 re-issues its REVOKE after the CREATE.)
+    dropped = {"cleanup_expired_news_articles()", "add_credit_transaction(uuid,integer,text,text,integer)"}
+    assert set(live_defined) == set(flat) - dropped, (set(live_defined) ^ (set(flat) - dropped))
 
 
 def test_the_signature_normaliser_does_what_it_claims():

@@ -770,6 +770,40 @@ ChatRateLimit = Depends(
     IdentityRateLimitChecker("chat", settings.CHAT_RATE_LIMIT_PER_MINUTE, 60)
 )
 
+
+class UserIdRateLimitChecker(IdentityRateLimitChecker):
+    """`IdentityRateLimitChecker` keyed on the TOKEN's user id — no database read.
+
+    The base class resolves the caller through `get_current_user_or_guest` (a `users` read
+    per request). The market-data routers already run the token-only `get_current_user_id`
+    at router level, so a limiter there must not add a second round trip to every one of the
+    ~15 requests a detail screen fires; it keys on the same token-derived id instead.
+    Account-only routes never see a guest, so no per-install fallback is needed.
+    """
+
+    async def __call__(  # type: ignore[override]
+        self,
+        user_id: str = Depends(get_current_user_id),
+    ) -> None:
+        key = f"{self.bucket}:{user_id}"
+        if not rate_limiter.is_allowed(key, self.max_requests, self.window_seconds):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Please slow down and try again shortly.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+
+
+#: Router-level ceiling on every market-data route — see `MARKET_RATE_LIMIT_PER_MINUTE`.
+MarketRateLimit = Depends(
+    UserIdRateLimitChecker("market", settings.MARKET_RATE_LIMIT_PER_MINUTE, 60)
+)
+#: The tighter bound on handlers that cost ~5 FMP calls on a cache miss (growth,
+#: profit-power, health-check, financials-full, revenue-breakdown, fundamentals).
+MarketFanoutRateLimit = Depends(
+    UserIdRateLimitChecker("market_fanout", settings.MARKET_FANOUT_RATE_LIMIT_PER_MINUTE, 60)
+)
+
 # A report generation is ~20x the cost of a chat turn (~17 Gemini + ~20 FMP calls
 # on a cache miss), so its window is far tighter than chat's. This is the ONLY
 # per-caller control on GET /stocks/{ticker}/report — it was previously

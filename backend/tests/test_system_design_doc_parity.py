@@ -400,6 +400,12 @@ _CURATED_TABLES = {
     "market_close_snapshot", "corporate_action_cache", "crypto_fundamentals_cache",
     # §9b.9 (chat starters, migrations 161/162) names this table; the snapshot now holds it.
     "chat_starter_answers",
+    # 2026-09-18: the benchmark-scheduling invariants name the durable claim ledger the
+    # quarterly chain and weekly TTM job hold their per-phase claims in (migration 147).
+    "notification_job_state",
+    # 2026-09-18: §9.3 LLM06 names the one tool-reachable write path (the grounded
+    # catalyst's cache + audit rows), so the row stays coupled to those tables.
+    "price_catalyst_cache", "price_catalyst_audit",
     # Named by §9c.0b as the corpus that is EMPTY — the reason the book source pill
     # had to be earned rather than asserted. Curated so dropping it fails here
     # instead of quietly orphaning that paragraph.
@@ -714,3 +720,19 @@ def test_every_rule_cross_reference_resolves(rule: str, section: str) -> None:
 #   * added `import CoreData` to a scratch .swift file     => 1 test  RED  => file deleted
 #   * added ```swift fence to the doc                      => 1 test  RED  => reverted
 #   * broke _IOS path constant                             => sentinel RED => restored
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F. Rulebook pins that are guaranteed to rot
+# ─────────────────────────────────────────────────────────────────────────────
+# CLAUDE.md and database.md carried "#168 as of 2026-09-11" and "136 at the 2026-09-11
+# dump, 101 in public" — the migration number rotted from #111 to #168 to #171 and the
+# table count is regenerated with every dump. The rulebook points at `ls … | tail -1`
+# and the atlas header instead; this keeps a literal from coming back (F13-9).
+
+
+@pytest.mark.parametrize("rel", ["CLAUDE.md", ".claude/rules/database.md"])
+def test_the_rulebook_carries_no_migration_number_or_table_count_literal(rel):
+    text = (_REPO / rel).read_text(encoding="utf-8")
+    assert not re.search(r"#\d{3} as of \d{4}-\d{2}-\d{2}", text), f"{rel}: migration-number pin is back"
+    assert not re.search(r"\(\d+ at the \d{4}-\d{2}-\d{2} dump", text), f"{rel}: table-count pin is back"

@@ -21,6 +21,7 @@ changes, or the client throttles itself to demo speed on a paid key.
 import asyncio
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import logging
 
@@ -227,6 +228,7 @@ class CoinGeckoClient:
         self._rate_lock = asyncio.Lock()
         # In-memory cache for dynamically resolved IDs (symbol → coingecko_id)
         self._dynamic_id_cache: Dict[str, str] = {}
+        self._unresolved_until: Dict[str, float] = {}   # Tier 2a negative memo (see resolve_coin_id)
         # Request dedup (CLAUDE.md invariant #4). Call volume is the binding constraint
         # on this integration — 100K/month — so N concurrent viewers of the same coin
         # must cost ONE upstream call, not N. Keyed on endpoint + sorted params.
@@ -472,8 +474,10 @@ class CoinGeckoClient:
 
         Three-tier lookup:
           1. Hardcoded top 100 map (instant)
-          2. In-memory + Supabase permanent cache (for dynamic coins)
-          3. CoinGecko /search API (1 call, cached permanently after)
+          2. In-memory + Supabase cache (for dynamic coins; the Supabase row is honoured
+             only when stamped after the exact-symbol rule and inside a 30 d TTL —
+             see `_coin_id_row_is_trusted`)
+          3. CoinGecko /search API (1 call, exact symbol match only, then cached)
         """
         symbol = symbol.upper()
 
@@ -487,7 +491,23 @@ class CoinGeckoClient:
         if coin_id:
             return coin_id
 
-        # Tier 2b: Supabase permanent cache
+        # Tier 2a: NEGATIVE memo. A symbol `/search` has already answered "no such coin"
+        # for (no coins, or no exact symbol match) is unresolvable for a while — nothing
+        # about it changes minute to minute. Without this the distrusted fuzzy-era rows
+        # (`_coin_id_row_is_trusted`) never converged: they are by construction the symbols
+        # with no exact match, so every cache miss re-read the row, skipped it, and paid a
+        # `/search` — one per Tracking-feed poll per symbol, forever (W2 B-3). Transport
+        # failures are deliberately NOT memoised (a 429 is not an answer).
+        # `setdefault` on the instance dict: several tests build the client with
+        # `__new__` and set only the attributes they know about.
+        unresolved = self.__dict__.setdefault("_unresolved_until", {})
+        until = unresolved.get(symbol)
+        if until is not None:
+            if time.monotonic() < until:
+                return None
+            unresolved.pop(symbol, None)
+
+        # Tier 2b: Supabase cache (trusted rows only — a fuzzy-era pin is skipped)
         coin_id = await asyncio.to_thread(self._check_coin_id_db, symbol)
         if coin_id:
             self._dynamic_id_cache[symbol] = coin_id
@@ -510,6 +530,7 @@ class CoinGeckoClient:
         coins = search_result.get("coins", [])
         if not coins:
             logger.warning(f"CoinGecko /search returned no results for: {symbol}")
+            unresolved[symbol] = time.monotonic() + self._UNRESOLVED_TTL_SECONDS
             return None
 
         # Pick best match: exact symbol match with highest market cap rank. NO fuzzy
@@ -529,6 +550,7 @@ class CoinGeckoClient:
                 "first %r) — unresolved, not cached",
                 symbol, len(coins), (coins[0].get("symbol") if isinstance(coins[0], dict) else None),
             )
+            unresolved[symbol] = time.monotonic() + self._UNRESOLVED_TTL_SECONDS
             return None
 
         coin_id = best.get("id")
@@ -542,35 +564,96 @@ class CoinGeckoClient:
 
         return coin_id
 
+    # Rows written BEFORE the exact-symbol rule shipped (7f0b1fd3, 2026-09-13 22:26 -0600)
+    # may be the fuzzy `coins[0]` pins that rule was written to stop — 5½ months of them,
+    # with no TTL and no migration that purges the table. Served unconditionally, they kept
+    # answering another coin's price under the requested symbol AFTER the fix. Any row with
+    # a `cached_at` before this instant is ignored (and re-resolved by the exact rule); a
+    # row with no / unparseable `cached_at` is of unknown provenance and treated the same.
+    _COIN_ID_PIN_VALID_FROM = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    # And an honoured lifetime, so a future bad pin (or a coin that CoinGecko re-ids) is
+    # bounded instead of permanent. One `/search` per symbol per 30 d is negligible on the
+    # 100K/month budget.
+    _COIN_ID_PIN_TTL = timedelta(days=30)
+    # How long a "no such coin" answer from `/search` is remembered in memory (Tier 2a).
+    # Long enough to collapse a feed's ~31 s polls into one search, short enough that a
+    # newly listed coin appears within the hour.
+    _UNRESOLVED_TTL_SECONDS = 3600.0
+
+    @classmethod
+    def _coin_id_row_is_trusted(cls, row: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+        """True only for a row stamped after the exact-symbol rule and inside the TTL."""
+        stamp = row.get("cached_at")
+        if not isinstance(stamp, str) or not stamp.strip():
+            return False
+        try:
+            cached_at = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        if cached_at < cls._COIN_ID_PIN_VALID_FROM:
+            return False
+        if cached_at > now + timedelta(minutes=5):
+            # A stamp from the future is a clock/row-shape problem, not a fresh pin.
+            return False
+        return now - cached_at <= cls._COIN_ID_PIN_TTL
+
     def _check_coin_id_db(self, symbol: str) -> Optional[str]:
-        """Check Supabase crypto_coin_id_cache for a permanently cached ID."""
+        """Check Supabase crypto_coin_id_cache for a cached ID that is still trusted.
+
+        Returns None for a row that predates the exact-symbol rule or is past the TTL —
+        the caller then re-resolves via `/search` and the upsert refreshes `cached_at`.
+        """
         try:
             from app.database import get_supabase
             sb = get_supabase()
             row = (
                 sb.table("crypto_coin_id_cache")
-                .select("coingecko_id")
+                .select("coingecko_id, cached_at")
                 .eq("symbol", symbol)
                 .limit(1)
                 .execute()
             )
             if row.data and len(row.data) > 0:
-                return row.data[0].get("coingecko_id")
+                first = row.data[0] or {}
+                coin_id = first.get("coingecko_id")
+                if not coin_id:
+                    return None
+                if not self._coin_id_row_is_trusted(first):
+                    logger.info(
+                        "Coin ID cache row for %s (%s, cached_at=%r) predates the exact-symbol "
+                        "rule or is past its TTL — ignored, re-resolving via /search",
+                        symbol, coin_id, first.get("cached_at"),
+                    )
+                    return None
+                return coin_id
         except Exception as e:
-            logger.debug(f"Coin ID cache read failed for {symbol}: {e}")
+            logger.warning("Coin ID cache read failed for %s: %s: %s", symbol, type(e).__name__, e)
         return None
 
     def _upsert_coin_id_db(self, symbol: str, coin_id: str, name: str) -> None:
-        """Permanently cache a resolved symbol → CoinGecko ID mapping."""
+        """Cache a resolved symbol → CoinGecko ID mapping, stamping `cached_at` NOW.
+
+        The stamp must be explicit: the column's DEFAULT only fires on INSERT, so an
+        upsert that lands on an existing (possibly fuzzy-era) row would otherwise keep
+        the old `cached_at` and the fresh exact-rule pin would be ignored forever.
+        """
         try:
             from app.database import get_supabase
             sb = get_supabase()
             sb.table("crypto_coin_id_cache").upsert(
-                {"symbol": symbol, "coingecko_id": coin_id, "name": name},
+                {
+                    "symbol": symbol,
+                    "coingecko_id": coin_id,
+                    "name": name,
+                    "cached_at": datetime.now(timezone.utc).isoformat(),
+                },
                 on_conflict="symbol",
             ).execute()
         except Exception as e:
-            logger.debug(f"Coin ID cache write failed for {symbol}: {e}")
+            logger.warning("Coin ID cache write failed for %s: %s: %s", symbol, type(e).__name__, e)
 
     # ── Public methods ──────────────────────────────────────────
 

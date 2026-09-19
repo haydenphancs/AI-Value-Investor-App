@@ -36,8 +36,9 @@ from app.services.benchmark_math import (
     format_since,
     overlapping_cagrs,
 )
-from app.utils.market_hours import to_utc_instant
+from app.utils.market_hours import ET, to_utc_instant
 from app.services.price_service import price_source
+from app.services.ticker_report_cache import current_close_cycle_start
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,11 @@ _FRED_OBSERVATION_LIMIT: int = 4000
 _QUOTE_TTL = 45          # live price / intraday key-stat rows
 _RELATED_TTL = 60        # sibling commodity quotes — same data class, less prominent
 _INTRADAY_CHART_TTL = 60 # 1D/1W bars; the only genuinely per-range fetch
-_HISTORY_TTL = 43_200    # 12h — daily EOD bars only change at the close
+# 12h is the CEILING; both are also cut at the next settled close (`_cache_get_settled`).
+# "Daily EOD bars only change at the close" was the premise and it is false for the LAST
+# row of an FMP-served (ETF-proxied metal) history — see `_settled_bars` below. A FRED
+# series is a daily settlement published days behind, so the cut is a no-op for it.
+_HISTORY_TTL = 43_200    # 12h — daily EOD bars, close-cycle aligned
 _DERIVED_TTL = 43_200    # 12h — performance / benchmark / daily key stats, all from history
 
 # Hard cap: `_cache_get` only evicts a key when that same key is read again after
@@ -76,6 +81,46 @@ _DERIVED_TTL = 43_200    # 12h — performance / benchmark / daily key stats, al
 # forever. Bounded, evicting least-recently-written. 1024 matches every sibling service
 # — 256 was below the ~294 keys this service can hold, so it evicted under normal use.
 _CACHE_MAX_ENTRIES = 1024
+
+
+# ── Settled-close alignment for everything derived from the daily history ─────
+#
+# Same defect and same shape as `index_service` / `etf_service` (F16-2): FMP's
+# `historical-price-eod/full` for the metal proxies (GLD/SLV/PPLT/PALL) includes the
+# CURRENT session's partial bar, so the first viewer after 09:30 pinned a ~10-minute
+# snapshot as "today's bar" into the derived section and every persisted daily chart for
+# 12h — a chart that ended above/below the live level, and every 1M/YTD/1Y return and
+# moving average off by the intraday move. Two halves: `_settled_bars` drops rows dated
+# after the last SETTLED session (the current close cycle's date, weekday 18:00 ET — the
+# same boundary the report cache uses, so FMP has finalised the bar), and
+# `_cache_get_settled` / `_tier2_is_fresh` treat an entry written before the current
+# cycle as a MISS whatever the rolling TTL says, so the completed bar lands as soon as the
+# cycle turns instead of up to 12h later.
+
+
+def _settled_cutoff_date(now: Optional[datetime] = None) -> str:
+    """ISO date of the most recent SETTLED session — the last row a daily chart may show."""
+    return current_close_cycle_start(now).astimezone(ET).date().isoformat()
+
+
+def _settled_bars(historical: List[Dict], now: Optional[datetime] = None) -> List[Dict]:
+    """The daily rows whose session has settled; anything dated after the current close
+    cycle's date is the in-progress bar (or a stray future-dated row) and is dropped.
+    Non-dict rows are dropped; a row without a date is kept (every consumer tolerates it)."""
+    cutoff = _settled_cutoff_date(now)
+    return [
+        r for r in (historical or [])
+        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
+    ]
+
+
+def _cache_get_settled(key: str) -> Optional[Any]:
+    """`_cache_get`, plus a MISS when the entry predates the current close cycle."""
+    entry = _cache.get(key)
+    if entry is not None and entry[0] < current_close_cycle_start().timestamp():
+        _cache.pop(key, None)
+        return None
+    return _cache_get(key)
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -658,7 +703,7 @@ class CommodityService:
             row = (
                 get_supabase()
                 .table("commodity_cache")
-                .select("response_json, cached_at")
+                .select("response_json, cached_at, category")
                 .eq("cache_key", cache_key)
                 .limit(1)
                 .execute()
@@ -669,8 +714,9 @@ class CommodityService:
             cached_at = datetime.fromisoformat(
                 (entry.get("cached_at") or "").replace("Z", "+00:00")
             )
-            age = datetime.now(timezone.utc) - cached_at
-            if age > timedelta(hours=CommodityService._TIER2_TTL_HOURS):
+            if not CommodityService._tier2_is_fresh(
+                str(entry.get("category") or cache_key.split(":", 1)[-1]), cached_at
+            ):
                 return None
             return entry.get("response_json")
         except Exception as e:
@@ -679,6 +725,22 @@ class CommodityService:
                 cache_key, type(e).__name__, e,
             )
             return None
+
+    @staticmethod
+    def _tier2_is_fresh(
+        category: str, cached_at: datetime, now: Optional[datetime] = None
+    ) -> bool:
+        """Rolling 12h for the slow sections; close-cycle aligned for the daily ones.
+
+        `derived` and every persisted `chart:*` row are pure functions of the settled
+        daily history, so a row written before the current close cycle began describes
+        the PREVIOUS session's bars — stale at any age, and fresh for up to ~72h over a
+        weekend under a rolling TTL. See `_settled_bars`.
+        """
+        now = now or datetime.now(timezone.utc)
+        if category == "derived" or category.startswith("chart"):
+            return cached_at >= current_close_cycle_start(now)
+        return now - cached_at <= timedelta(hours=CommodityService._TIER2_TTL_HOURS)
 
     @staticmethod
     def _tier2_put(
@@ -748,7 +810,10 @@ class CommodityService:
         range per 5 minutes.
         """
         key = f"com:hist:{fmp_symbol}"
-        cached = _cache_get(key)
+        # Served RAW (the price-recovery fallback legitimately wants the partial bar), but
+        # a list pulled in the previous cycle is a miss so the settled bar lands on time.
+        # Consumers that persist or derive from it go through `_settled_bars`.
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
         source, ref = _source_of(fmp_symbol), _ref_of(fmp_symbol)
@@ -836,7 +901,7 @@ class CommodityService:
         never been measured over anything.
         """
         key = "com:spy_hist"
-        cached = _cache_get(key)
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
         try:
@@ -869,7 +934,7 @@ class CommodityService:
         thing this design refuses to do.
         """
         key = f"com:derived:{fmp_symbol}"
-        cached = _cache_get(key)
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
 
@@ -883,6 +948,9 @@ class CommodityService:
         historical, spy_hist = await asyncio.gather(
             self._get_history(fmp_symbol), self._get_spy_history(),
         )
+        # Settled bars only: the in-progress session would otherwise be the end anchor
+        # of every return and the newest term of both moving averages, persisted 12h.
+        historical, spy_hist = _settled_bars(historical), _settled_bars(spy_hist)
         derived = self._derive_from_history(historical, spy_hist)
 
         # Degradation gate: a history that failed or came back empty yields a bundle of
@@ -1077,8 +1145,11 @@ class CommodityService:
             )
             return []
 
+        # Settled bars only, BEFORE the slice/aggregate and before `_tier2_put`: the
+        # in-progress bar used to be persisted as "today" for 12h (see `_settled_bars`).
         historical = (
-            [] if resolved in INTRADAY_INTERVALS else await self._get_history(fmp_symbol)
+            [] if resolved in INTRADAY_INTERVALS
+            else _settled_bars(await self._get_history(fmp_symbol))
         )
 
         if resolved in AGGREGATED_INTERVALS and historical:
@@ -1137,6 +1208,45 @@ class CommodityService:
         if bars:
             _cache_set(key, bars, _INTRADAY_CHART_TTL)
         return bars
+
+    @staticmethod
+    def _build_related_commodities(related_quotes) -> List["RelatedCommodityResponse"]:
+        """The "People Also Check" rail from `(symbol, quote)` pairs.
+
+        THREE-state read, like `crypto_service._build_related_cryptos` and the ETF/stock
+        rails (F16-7): a missing or non-finite price / change is a MISS and the row is
+        OMITTED — `or 0` used to render "$0.00 +0.00%" for a related commodity whose quote
+        carried no change (a FRED settlement series answers no day change at all), a
+        confident flat day the app never measured. A real 0.0 move survives:
+        `_finite_or_none` keeps it, only None drops the row. A non-dict quote is skipped.
+        """
+        out: List[RelatedCommodityResponse] = []
+        for pair in related_quotes or []:
+            try:
+                sym, rq = pair
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(rq, dict):
+                continue
+            rel_name = _resolve_name(str(sym).replace("USD", ""))
+            rel_price = _finite_or_none(rq.get("price"))
+            # FMP returns the daily move under `changesPercentage` (plural) for most
+            # symbols; reading only the singular key left every related commodity at
+            # +0.00%. Singular (the /stable spelling) first, plural as the fallback.
+            rel_change = _finite_or_none(rq.get("changePercentage"))
+            if rel_change is None:
+                rel_change = _finite_or_none(rq.get("changesPercentage"))
+            if rel_price is None or rel_price <= 0 or rel_change is None:
+                logger.info(
+                    "commodity related rail: omitting %s (price=%r change=%r) rather than "
+                    "fabricating a flat row", sym, rq.get("price"), rel_change,
+                )
+                continue
+            out.append(RelatedCommodityResponse(
+                symbol=sym, name=rel_name,
+                price=round(rel_price, 2), change_percent=round(rel_change, 2),
+            ))
+        return out
 
     async def _build_commodity_detail(
         self, symbol: str, chart_range: str = "3M", interval: str = None
@@ -1397,23 +1507,7 @@ class CommodityService:
         )
 
         # ── Step 8: Build related commodities ─────────────────────
-        related_commodities = []
-        for sym, rq in related_quotes:
-            rel_name = _resolve_name(sym.replace("USD", ""))
-            rel_price = rq.get("price") or 0
-            # FMP returns the daily move under `changesPercentage` (plural) for most
-            # symbols; reading only the singular key left every related commodity at
-            # +0.00%. Mirror the main quote (both keys).
-            rel_change = rq.get("changePercentage") or rq.get("changesPercentage") or 0
-            related_commodities.append(RelatedCommodityResponse(
-                symbol=sym,
-                name=rel_name,
-                # Finite-guard: a NaN/Inf from a related quote survives round() into
-                # the REQUIRED price/change_percent Doubles and crashes the whole
-                # CommodityDetail decode on one bad related row.
-                price=round(_finite_or_none(rel_price) or 0.0, 2),
-                change_percent=round(_finite_or_none(rel_change) or 0.0, 2),
-            ))
+        related_commodities = self._build_related_commodities(related_quotes)
 
         # ── Step 9: Build benchmark summary ───────────────────────
         # Use the earliest available data point for longest history

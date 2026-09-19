@@ -3,4 +3,4 @@
 # anyone starting the app with a Procfile runner. tests/test_deploy_command_parity.py
 # fails the build if the two drift — and if either grows `--workers`: every lifespan job
 # in app/main.py runs UNCLAIMED and is safe only because exactly ONE uvicorn worker runs.
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+web: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30

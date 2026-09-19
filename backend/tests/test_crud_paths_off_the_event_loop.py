@@ -39,7 +39,9 @@ _APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 _NOT_YET = {
     "api/v1/endpoints/chat.py",
     "api/v1/endpoints/research.py",
-    "services/research_service.py",
+    # `services/research_service.py` LEFT this list on 2026-09-18 (F08-8): every progress
+    # tick, the 'Saving report...' stamp, the failure stamp and the completion UPDATE
+    # (carrying the ~200 KB report JSONB) now run through `asyncio.to_thread`.
     # ⚠️ ADDED 2026-09-12 (post-deploy review). This file was NEITHER swept NOR listed, so
     # its nine blocking round trips — including the `_search_filing_chunks` /
     # `_search_all_chunks` pgvector similarity searches that freeze the worker for the

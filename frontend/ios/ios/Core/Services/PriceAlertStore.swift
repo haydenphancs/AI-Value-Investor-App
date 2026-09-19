@@ -245,6 +245,10 @@ final class PriceAlertStore: ObservableObject {
         assetType: String,
         repeatMode: PriceAlertRepeat
     ) async -> Bool {
+        // Same epoch discipline as `performLoad`: a mutation that resolves after `reset()`
+        // (sign-out mid-request) must not publish the ended session's row — or its revert
+        // snapshot, or a toast about it — into the next account's list (auth.md §7).
+        let epoch = identityEpoch
         do {
             let created = try await repository.createPriceAlert(
                 ticker: ticker,
@@ -253,10 +257,12 @@ final class PriceAlertStore: ObservableObject {
                 assetType: assetType,
                 repeatMode: repeatMode
             )
+            guard epoch == identityEpoch else { return false }
             alerts.insert(created, at: 0)
             state = .loaded
             return true
         } catch {
+            guard epoch == identityEpoch else { return false }
             // Never a bare `try?` and never a DEBUG-only print: a user-initiated mutation
             // that fails silently looks like a UI glitch and leaves no trace anywhere.
             AppActions.shared.reportMutationFailure(
@@ -269,17 +275,22 @@ final class PriceAlertStore: ObservableObject {
     /// OPTIMISTIC. The bell has to stop badging the instant the last active rule is switched
     /// off — waiting for the round trip leaves the toggle and the bell disagreeing on screen.
     func toggleActive(_ alert: PriceAlertDTO) async {
+        let epoch = identityEpoch
         let snapshot = alerts
         applyIsActive(!alert.isActive, to: alert.id)
         do {
             let updated = try await repository.updatePriceAlert(
                 id: alert.id, threshold: nil, isActive: !alert.isActive, repeatMode: nil
             )
+            guard epoch == identityEpoch else { return }
             // The server row, not our guess: `armed` also changes server-side when a rule is
             // re-enabled, and showing a stale one is how "my alert never fires" becomes
             // unexplainable.
             replace(updated)
         } catch {
+            // The revert arm is the one that bleeds: restoring a pre-sign-out snapshot over
+            // the next account's (empty) list is a cross-account leak.
+            guard epoch == identityEpoch else { return }
             alerts = snapshot
             AppActions.shared.reportMutationFailure(
                 AppError.from(error),
@@ -291,11 +302,14 @@ final class PriceAlertStore: ObservableObject {
     func delete(_ alert: PriceAlertDTO) async {
         // Optimistic in MEMORY only — nothing is persisted before the server confirms, so a
         // kill mid-request cannot make a deletion the server never received durable.
+        let epoch = identityEpoch
         let snapshot = alerts
         alerts.removeAll { $0.id == alert.id }
         do {
             _ = try await repository.deletePriceAlert(id: alert.id)
+            guard epoch == identityEpoch else { return }
         } catch {
+            guard epoch == identityEpoch else { return }
             alerts = snapshot
             AppActions.shared.reportMutationFailure(
                 AppError.from(error), action: "delete that price alert"

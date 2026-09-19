@@ -199,10 +199,10 @@ struct IndexDetailView: View {
             viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            if let status = viewModel.indexData?.marketStatus,
-               MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                viewModel.startLivePriceUpdates()
-            }
+            // UNCONDITIONAL — `indexData.marketStatus` is the last-fetched value, not the
+            // clock, and gating on it latched the screen closed after an overnight
+            // background (see TickerDetailView). The loop self-gates per tick.
+            viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
         .navigationDestination(item: $selectedSearchResult) { selection in

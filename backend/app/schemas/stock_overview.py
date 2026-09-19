@@ -104,6 +104,16 @@ class StockOverviewCoreResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # False when neither the quote nor the profile carried a day change — FMP
+    # `/stable/profile` legitimately answers `change: null` for a halted/OTC listing,
+    # and the quote leg can fail while the profile lands. `price_change` /
+    # `price_change_percent` are then the 0.0 wire placeholder, NOT a flat day: shipped
+    # builds decode a plain Double, so the floats cannot become Optional (the `pe_known`
+    # / `sector_performance_known` pattern). The equity screen was the FIFTH asset class
+    # and the only one without this flag — it painted "▲ +0.00 (+0.00%)" in green with
+    # a bullish flash. iOS renders "—" when False. Defaults True so older cached
+    # payloads keep their meaning.
+    change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[Dict[str, Any]]
 
@@ -115,6 +125,8 @@ class StockOverviewResponse(BaseModel):
     current_price: float
     price_change: float
     price_change_percent: float
+    # Twin of `StockOverviewCoreResponse.change_known` — same rule, same source list.
+    change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[Dict[str, Any]]
     key_statistics: List[KeyStatisticItem]

@@ -50,9 +50,14 @@ def test_the_delete_and_insert_are_one_replayable_unit():
     # The callable must CONTAIN the delete, not sit beside it: a retry that replays only
     # the insert would double-insert on a partial success.
     inner = code[code.index("def _replace_items"):code.index("retry_idempotent_async(")]
-    assert ".delete()" in inner and ".insert(" in inner, (
+    # `.upsert(` since F15-8: a 23505 from a concurrent write-through is deterministic and
+    # deliberately NOT retried, so an INSERT raised once and left the group empty; the
+    # merge on (portfolio_id, ticker) lets the snapshot win over the slipped row instead.
+    assert ".delete()" in inner and ".upsert(" in inner, (
         "the retried callable must own BOTH statements"
     )
+    assert 'on_conflict="portfolio_id,ticker"' in inner
+    assert ".insert(" not in inner, "a plain insert raises 23505 on a slipped row and is not retried"
 
 
 def test_the_holdings_snapshot_is_taken_outside_the_retried_block():

@@ -246,6 +246,13 @@ class SentimentService:
         )
 
         articles = results[0] if not isinstance(results[0], Exception) else []
+        # Was the news arm MEASURED? False when the feed FAILED (an `EmptyAfterFailure`
+        # from `_get_articles`, or the fetch raised): its 0 articles / 0-0-0 counts are
+        # then an outage, not a quiet week, and the reading must not be cached.
+        news_known = (
+            not isinstance(results[0], Exception)
+            and not getattr(articles, "fetch_failed", False)
+        )
         price_data = results[1] if not isinstance(results[1], Exception) else {}
         hist_prices = results[2] if not isinstance(results[2], Exception) else []
         # A timeout / exception is an UNKNOWN count, never a measured zero.
@@ -329,6 +336,7 @@ class SentimentService:
                 float(social_cur_24h), float(social_prev_24h)
             ),
             social_mentions_known=bool(social_known_24h),
+            news_known=bool(news_known),
             news_articles=news_cur_24h,
             news_articles_change=self._pct_change(
                 float(news_cur_24h), float(news_prev_24h)
@@ -372,6 +380,18 @@ class SentimentService:
             )
             return response
 
+        # Same refusal for a PARTIAL failure on the news arm. A measured price arm used
+        # to be enough to cache the whole reading, so one FMP `news/stock` outage on a
+        # ticker with no `ticker_news_cache` rows pinned "0 articles, ▲0 =0 ▼0" for the
+        # full 15 min TTL — a fabricated quiet week, not a degraded answer.
+        if not news_known:
+            logger.warning(
+                "Sentiment for %s: news arm FAILED (%s) — returning the reading UNCACHED "
+                "so the next request retries the feed",
+                ticker, getattr(articles, "reason", "fetch raised") or "fetch failed",
+            )
+            return response
+
         _cache_set(f"sentiment:{ticker}", response)
         return response
 
@@ -412,6 +432,10 @@ class SentimentService:
                     f"Using stale DB articles for {ticker}: {len(stale)}"
                 )
                 return stale
+            if getattr(fmp_articles, "fetch_failed", False):
+                # No fresh feed, no stale rows: the count is UNKNOWN, not zero. Return
+                # the marker so `get_sentiment` refuses to cache the reading.
+                return fmp_articles
             return []
 
         # Persist to DB in background (fire-and-forget)
@@ -615,12 +639,24 @@ class SentimentService:
                     ticker=ticker, limit=1000,
                     from_date=from_date, to_date=to_date,
                 )
+            if getattr(articles, "fetch_failed", False):
+                # Keep the marker. `articles if articles else []` rebuilt a PLAIN `[]`
+                # from an `EmptyAfterFailure`, so a 503'd feed scored as a measured
+                # "0 articles, ▲0 =0 ▼0" — and, because the price arm was measured, the
+                # whole reading was CACHED for 15 min (see `get_sentiment`).
+                return articles
             return articles if articles else []
         except Exception as e:
+            # A RAISE is a failed fetch too: `get_stock_news` re-raises rate-limit and
+            # auth errors (the plan-wide minute budget being exhausted is routine) rather
+            # than degrading them, and a plain `[]` here laundered that into a measured
+            # "0 articles" — cached 15 min, with the price arm — exactly the outage the
+            # marker exists to keep out of the cache (W2 regress-C-1).
             logger.warning(
                 f"FMP news fetch failed for {ticker}: {e}"
             )
-            return []
+            from app.integrations.fmp import EmptyAfterFailure
+            return EmptyAfterFailure(f"{type(e).__name__}: {e}"[:200])
 
     async def _fetch_price_data(
         self, ticker: str

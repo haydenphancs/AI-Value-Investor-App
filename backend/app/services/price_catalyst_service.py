@@ -290,6 +290,11 @@ class PriceCatalystService:
             # its pre-claimed unit.
             if not future.done():
                 future.set_exception(exc)
+                # Mark retrieved (ticker_data_cache.py idiom): with NO joiner attached the
+                # future is garbage-collected unread and asyncio logs "Future exception
+                # was never retrieved" at ERROR — one Sentry event per refused search.
+                # Joiners still get the raise: `exception()` only clears the log flag.
+                future.exception()
             raise
         except Exception as exc:
             logger.exception(
@@ -297,12 +302,12 @@ class PriceCatalystService:
             )
             if not future.done():
                 future.set_exception(exc)
+                future.exception()  # mark retrieved — see the arm above
             return None
         finally:
             _inflight.pop(ctx_key, None)
             if not future.done():
-                if not future.done():
-                    future.set_result(None)
+                future.set_result(None)
 
     # ── Grounded call ──────────────────────────────────────────────────
 

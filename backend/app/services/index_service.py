@@ -34,7 +34,8 @@ from app.schemas.index import (
 )
 from app.database import get_supabase
 from app.utils.postgrest_paging import fetch_all_rows
-from app.utils.market_hours import market_status_fields, to_utc_instant
+from app.utils.market_hours import ET, market_status_fields, to_utc_instant
+from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
 
@@ -180,8 +181,11 @@ _MACRO_CACHE_TTL_DAYS = 7  # 7 days for macro forecast (changes weekly)
 _QUOTE_TTL = 45             # live level + the quote-derived key-stat rows
 _INTRADAY_CHART_TTL = 60    # 1D/1W bars; the only genuinely per-range fetch
 _SECTOR_PERF_TTL = 900      # 15 min — today's sector moves, shared by every index
-_HISTORY_TTL = 43_200       # 12h — daily EOD bars only change at the close
-_DERIVED_TTL = 43_200       # 12h — performance periods + the moving averages
+# 12h is the CEILING; both are also cut at the next settled close (`_cache_get_settled`).
+# "Daily EOD bars only change at the close" was the premise and it is false for the LAST
+# row — see `_settled_bars` below.
+_HISTORY_TTL = 43_200       # 12h — daily EOD bars, close-cycle aligned
+_DERIVED_TTL = 43_200       # 12h — performance periods + the moving averages, same
 # `_compute_index_pe_from_sectors` pages its read: PostgREST clamps a response to ~1,000
 # rows however large a `.limit()` you pass, and the sector-aggregate pe_ratio set is 11
 # sectors × the quarterly backfill depth — already ~880 rows and growing one page per year.
@@ -217,6 +221,68 @@ def _cache_set(key: str, value: Any, ttl: Optional[float] = None):
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Settled-close alignment for everything derived from the daily history ─────
+#
+# The premise behind the 12h history / derived / Tier-2 TTLs — "daily EOD bars only
+# change at the close" — is FALSE for the last row: FMP `historical-price-eod/full`
+# includes the CURRENT session's partial bar. Live evidence (2026-09-16, read at ~21:35
+# ET, five hours AFTER the close): the ^GSPC header said 754.05 / -0.44%, while the 1Y
+# chart's last bar was `{2026-09-16, close 759.07, volume 5,894,959}` — every preceding
+# bar carried 32-46M shares, so that was a ~10-minute snapshot the first viewer after
+# 09:30 had pinned as "today's bar" into `index_cache` for 12h. The chart ended 0.66%
+# ABOVE the live level, the day's high/low/volume were wrong, and every 1M/YTD/1Y return
+# and moving average in `derived` was off by the same intraday move.
+#
+# Two halves, and both are needed:
+#   1. `_settled_bars` — drop rows dated after the last SETTLED session before anything
+#      is sliced, aggregated, derived or persisted. The cutoff is the date of the current
+#      close cycle (`current_close_cycle_start`, weekday 18:00 ET, the same boundary the
+#      report cache uses) rather than the 16:00 bell, so FMP has had time to finalise the
+#      bar — at 16:02 the "closing" row is still settling.
+#   2. `_cache_get_settled` / `_tier2_is_fresh` — an entry written BEFORE the current
+#      cycle started is a MISS, whatever the rolling TTL says. Without this the fix trades
+#      a wrong bar for a missing one: a history pulled at 17:59 (partial bar dropped) was
+#      12h-fresh until 05:59 the next morning, so the completed bar never appeared until
+#      then, and a Tier-2 chart rebuilt from it at 18:30 would have pinned the gap for a
+#      further 12h.
+#
+# During the session the header carries the live level and 1D/1W are intraday fetches,
+# so the daily charts simply end at the previous close — which is what "daily" means.
+
+
+def _settled_cutoff_date(now: Optional[datetime] = None) -> str:
+    """ISO date of the most recent SETTLED session — the last row a daily chart may show."""
+    return current_close_cycle_start(now).astimezone(ET).date().isoformat()
+
+
+def _settled_bars(historical: List[Dict], now: Optional[datetime] = None) -> List[Dict]:
+    """The daily rows whose session has settled: everything dated after the current close
+    cycle's date is the in-progress bar (or a stray future-dated row) and is dropped.
+
+    Total for any list input: non-dict rows are dropped, a row without a date is kept
+    (it cannot be placed in time, and every consumer already tolerates it). `now` is
+    injectable for tests.
+    """
+    cutoff = _settled_cutoff_date(now)
+    return [
+        r for r in (historical or [])
+        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
+    ]
+
+
+def _cache_get_settled(key: str) -> Optional[Any]:
+    """`_cache_get`, plus a MISS when the entry predates the current close cycle.
+
+    For the history and derived keys only: their content changes exactly once per
+    settled close, so an entry from the previous cycle is stale however young it is.
+    """
+    entry = _cache.get(key)
+    if entry is not None and entry[0] < current_close_cycle_start().timestamp():
+        _cache.pop(key, None)
+        return None
+    return _cache_get(key)
 
 
 # ── Background AI refresh: task ownership + per-symbol dedup ─────────
@@ -624,9 +690,7 @@ class IndexService:
             cached_at = datetime.fromisoformat(
                 (entry.get("cached_at") or "").replace("Z", "+00:00")
             )
-            if datetime.now(timezone.utc) - cached_at > timedelta(
-                hours=IndexService._TIER2_TTL_HOURS
-            ):
+            if not IndexService._tier2_is_fresh(category, cached_at):
                 return None
             return entry.get("response_json")
         except Exception as e:
@@ -635,6 +699,22 @@ class IndexService:
                 symbol, category, type(e).__name__, e,
             )
             return None
+
+    @staticmethod
+    def _tier2_is_fresh(
+        category: str, cached_at: datetime, now: Optional[datetime] = None
+    ) -> bool:
+        """Rolling 12h for the slow sections; close-cycle aligned for the daily ones.
+
+        `derived` and every persisted `chart:*` row (only non-intraday charts persist)
+        are pure functions of the settled daily history, so a row written before the
+        current close cycle began describes the PREVIOUS session's bars — stale at any
+        age, and fresh for up to ~72h over a weekend. See `_settled_bars`.
+        """
+        now = now or datetime.now(timezone.utc)
+        if category == "derived" or category.startswith("chart:"):
+            return cached_at >= current_close_cycle_start(now)
+        return now - cached_at <= timedelta(hours=IndexService._TIER2_TTL_HOURS)
 
     @staticmethod
     def _tier2_put(symbol: str, category: str, payload: Any) -> None:
@@ -697,7 +777,12 @@ class IndexService:
         call it would replace.
         """
         key = f"idx:hist:{symbol}"
-        cached = _cache_get(key)
+        # Close-cycle aligned: the list is served RAW (its last row may be today's
+        # in-progress bar, which the price-recovery fallback in `_build_index_detail`
+        # legitimately wants), but a list pulled in the previous cycle is a miss so the
+        # settled bar lands as soon as the cycle turns. Consumers that persist or derive
+        # from it go through `_settled_bars`.
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
         # Per-section dedup, separate from the detail-level one. Two callers inside a
@@ -830,7 +915,7 @@ class IndexService:
         pulling the history — and nothing stale can hide in here.
         """
         key = f"idx:derived:{symbol}"
-        cached = _cache_get(key)
+        cached = _cache_get_settled(key)
         if cached is not None:
             return cached
 
@@ -840,7 +925,9 @@ class IndexService:
             _cache_set(key, db, _DERIVED_TTL)
             return db
 
-        historical = await self._get_history(symbol)
+        # Settled bars only: the in-progress session would otherwise be the end anchor
+        # of every return and the newest term of both moving averages, persisted 12h.
+        historical = _settled_bars(await self._get_history(symbol))
         try:
             derived = self._derive_from_history(historical)
         except Exception as e:
@@ -1006,8 +1093,11 @@ class IndexService:
             )
             return []
 
+        # Settled bars only, BEFORE the slice/aggregate and before `_tier2_put`: the
+        # in-progress bar used to be persisted as "today" for 12h (see `_settled_bars`).
         historical = (
-            [] if resolved in INTRADAY_INTERVALS else await self._get_history(symbol)
+            [] if resolved in INTRADAY_INTERVALS
+            else _settled_bars(await self._get_history(symbol))
         )
 
         if resolved in AGGREGATED_INTERVALS and historical:

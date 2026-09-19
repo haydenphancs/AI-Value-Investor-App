@@ -107,6 +107,133 @@ _sparkline_cache: Dict[str, Tuple[float, Tuple[List[float], float, float]]] = {}
 # the span makes "where the data stops" visible instead of stretching it away.
 SPARKLINE_CACHE_TTL = 120
 
+# In-flight dedup on the per-user feed BUILD (CLAUDE.md invariant 4). Two clients on one
+# account (phone + iPad, or a scripted pair) hitting the feed inside the same 30 s window
+# used to run TWO full fan-outs — every per-ticker sparkline and insider call twice —
+# because the cache is only written at the end. Keyed by user; a joiner awaits the
+# leader's future and gets the same response (or the same WatchlistUnavailableError).
+_feed_inflight: Dict[str, asyncio.Future] = {}
+
+
+class _InflightLeaderCancelled(RuntimeError):
+    """The leader's request went away before the build finished (client disconnect).
+
+    `CancelledError` is a BaseException, so it would skip an `except Exception` and leave
+    the future unresolved forever — every joiner would hang for the life of the process
+    (`project_report_scaling`). The leader sets THIS on the future instead, and a joiner
+    that receives it simply becomes the next leader rather than failing its own request
+    for someone else's disconnect.
+    """
+
+
+# Per-ticker tier-1 cache for the insider (Form 4) fan-out, mirroring `_sparkline_cache`.
+# This pass had NO cache at all: every feed build re-issued `insider-trading/search` for
+# every watchlist ticker, 2× per minute per client. Form 4 data moves daily, so 10 min is
+# comfortably fresh. Value is the per-ticker roll-up (or None — most tickers have no
+# notable trade, and caching the None is where the saving is).
+_insider_cache: Dict[str, Tuple[float, Any]] = {}
+INSIDER_CACHE_TTL = 600
+# Opportunistic sweep threshold — the key space is the union of every user's watchlist,
+# which a scripted account can grow; entries are tiny but must not be unbounded.
+_INSIDER_CACHE_SWEEP_AT = 5000
+
+# Concurrency of each per-ticker fan-out (sparklines, insider). Unbounded, a 2,000-row
+# watchlist launched 2,000 coroutines per pass; bounded, the same request costs the same
+# number of calls but cannot open them all at once against FMP's per-minute window.
+_PER_TICKER_FANOUT_CONCURRENCY = 16
+
+
+def _insider_cache_get(ticker: str) -> Tuple[bool, Any]:
+    """(hit, value). A cached None is a HIT — that is the common case and the saving."""
+    entry = _insider_cache.get(ticker)
+    if entry is None:
+        return False, None
+    ts, value = entry
+    if _time.monotonic() - ts > INSIDER_CACHE_TTL:
+        del _insider_cache[ticker]
+        return False, None
+    return True, value
+
+
+def _insider_cache_set(ticker: str, value: Any) -> None:
+    if len(_insider_cache) >= _INSIDER_CACHE_SWEEP_AT:
+        now = _time.monotonic()
+        for key in [k for k, (ts, _v) in _insider_cache.items() if now - ts > INSIDER_CACHE_TTL]:
+            _insider_cache.pop(key, None)
+        if len(_insider_cache) >= _INSIDER_CACHE_SWEEP_AT:
+            # Still full of live entries: evict oldest-written first, like the feed cache.
+            overflow = len(_insider_cache) - _INSIDER_CACHE_SWEEP_AT + 1
+            for key in list(_insider_cache.keys())[:overflow]:
+                _insider_cache.pop(key, None)
+    _insider_cache[ticker] = (_time.monotonic(), value)
+
+
+def _fanout_tickers(tickers: List[str], user_id: str) -> List[str]:
+    """The subset of the watchlist that gets the PER-TICKER enrichment this request.
+
+    Bounds the READ, which a write cap cannot: rows already in production can exceed any
+    cap added today. The feed still carries EVERY row (the client purges portfolio tickers
+    missing from it); rows past the cap just come back with an empty sparkline and no
+    insider alert. Newest-first, since that is the watchlist's own order.
+    """
+    cap = int(settings.TRACKING_FEED_MAX_TICKERS or 0)
+    if cap <= 0 or len(tickers) <= cap:
+        return tickers
+    logger.warning(
+        "[Tracking] user=%s has %d watchlist tickers — per-ticker enrichment capped at %d "
+        "(TRACKING_FEED_MAX_TICKERS); the rest render without a sparkline/insider alert",
+        user_id, len(tickers), cap,
+    )
+    return tickers[:cap]
+
+
+def watchlist_is_full(supabase, user_id: str, ticker: str) -> bool:
+    """True when adding `ticker` would push the user past `WATCHLIST_MAX_ITEMS`.
+
+    Shared by BOTH insert paths — `POST /watchlist` and `POST /tracking/holdings` (an
+    upsert into the same table) — because a cap on one is bypassable through the other.
+    Counts rows OTHER than `ticker`, so a re-add / holdings edit of a ticker already on
+    the list is never refused at the cap. Sync (postgrest is sync): call via `to_thread`.
+
+    Fails OPEN with a WARNING: the cap is an abuse bound, not a correctness invariant, and
+    refusing every add during a datastore blip would turn a 30 s Supabase hiccup into a
+    user-visible "watchlist full". The insert itself still fails loudly if the store is
+    really down.
+    """
+    cap = int(settings.WATCHLIST_MAX_ITEMS or 0)
+    if cap <= 0:
+        return False
+    try:
+        res = (
+            supabase.table("watchlist_items")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .neq("ticker", ticker)
+            .limit(1)
+            .execute()
+        )
+        count = res.count
+        if count is None:
+            # `count="exact"` unsupported by the client in use → cannot enforce; say so.
+            logger.warning(
+                "[Watchlist] row-cap check for user=%s got no count from PostgREST — "
+                "cap not enforced for this add", user_id,
+            )
+            return False
+        if int(count) >= cap:
+            logger.warning(
+                "[Watchlist] user=%s is at the watchlist cap (%d rows, cap %d) — refusing %s",
+                user_id, count, cap, ticker,
+            )
+            return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail open, loudly
+        logger.warning(
+            "[Watchlist] row-cap check failed for user=%s (%s: %s) — cap not enforced "
+            "for this add", user_id, type(e).__name__, e,
+        )
+        return False
+
 
 def _feed_cache_get(user_id: str) -> Optional[TrackingFeedResponse]:
     entry = _feed_cache.get(user_id)
@@ -229,13 +356,60 @@ class TrackingService:
         self.fmp: FMPClient = get_fmp_client()
 
     async def get_tracking_feed(self, user_id: str) -> TrackingFeedResponse:
-        """Return complete tracking feed for the Assets tab."""
+        """Return complete tracking feed for the Assets tab.
 
-        # Check cache first
-        cached = _feed_cache_get(user_id)
-        if cached is not None:
-            logger.debug("Tracking feed served from cache for user %s", user_id)
-            return cached
+        Cache → in-flight join → build. The join is what stops two clients on one account
+        (or two requests inside the 30 s TTL from one) from each running the full
+        per-ticker fan-out; see `_feed_inflight`.
+        """
+        while True:
+            cached = _feed_cache_get(user_id)
+            if cached is not None:
+                logger.debug("Tracking feed served from cache for user %s", user_id)
+                return cached
+            leader = _feed_inflight.get(user_id)
+            if leader is None:
+                break
+            try:
+                # `shield`: a joiner that is itself cancelled must not cancel the shared
+                # build out from under the leader and every other joiner.
+                return await asyncio.shield(leader)
+            except _InflightLeaderCancelled:
+                # The leader's client went away mid-build. Take over rather than fail.
+                continue
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        _feed_inflight[user_id] = future
+        try:
+            feed = await self._build_tracking_feed(user_id)
+            if not future.done():
+                future.set_result(feed)
+            return feed
+        except asyncio.CancelledError:
+            # BaseException — it skips the handler below. Resolve the joiners with a
+            # normal exception they can recover from (they re-loop and rebuild), or they
+            # hang for the life of the process.
+            if not future.done():
+                future.set_exception(_InflightLeaderCancelled("tracking feed leader cancelled"))
+                future.exception()  # mark retrieved — see the arm below
+            raise
+        except BaseException as e:
+            if not future.done():
+                future.set_exception(e)
+                # Mark retrieved (ticker_data_cache.py idiom): the leader re-raises `e`
+                # on its own frame, and in the COMMON case — one client, no concurrent
+                # request inside the build window — no joiner ever awaits this future,
+                # so it was garbage-collected unread and asyncio logged "Future exception
+                # was never retrieved" at ERROR (a second Sentry event per failed build).
+                # A joiner awaiting `asyncio.shield(future)` still receives the exception.
+                future.exception()
+            raise
+        finally:
+            _feed_inflight.pop(user_id, None)
+
+    async def _build_tracking_feed(self, user_id: str) -> TrackingFeedResponse:
+        """One uncached build of the feed. Only ever entered via `get_tracking_feed`."""
 
         # 1. Fetch user's watchlist from Supabase
         sb = get_supabase()
@@ -319,13 +493,19 @@ class TrackingService:
         # and gives every user the same answer for the same stock.
         await self._backfill_classification(user_id, watchlist)
 
-        # 2. Fetch data concurrently
+        # 2. Fetch data concurrently.
+        #
+        # Quotes, earnings and whale trades are ONE upstream read each whatever the list
+        # size; sparklines and insider alerts are one FMP call PER TICKER, so those two
+        # take the capped subset (`TRACKING_FEED_MAX_TICKERS`). Every row is still in the
+        # feed either way — see `_fanout_tickers`.
+        fanout = _fanout_tickers(tickers, user_id)
         quotes_task = self._get_batch_quotes(tickers)
-        sparklines_task = self._get_all_sparklines(tickers, asset_types)
+        sparklines_task = self._get_all_sparklines(fanout, asset_types)
         earnings_task = self._get_earnings_alerts(tickers)
         whale_task = self._get_whale_trade_alerts(tickers)
         analyst_task = self._get_analyst_rating_alerts(tickers)
-        insider_task = self._get_insider_transaction_alerts(tickers)
+        insider_task = self._get_insider_transaction_alerts(fanout, asset_types)
 
         results = await asyncio.gather(
             quotes_task,
@@ -635,6 +815,9 @@ class TrackingService:
         and diverge from the detail 1D chart one tap later.
         """
         asset_types = asset_types or {}
+        # Bounded fan-out: the cache check stays outside the gate (free), only the
+        # upstream fetch takes a slot.
+        gate = asyncio.Semaphore(_PER_TICKER_FANOUT_CONCURRENCY)
 
         async def _fetch_one(ticker: str) -> Tuple[str, List[float], float, float]:
             # Resolve the session window FIRST — it is part of the cache identity
@@ -647,6 +830,12 @@ class TrackingService:
             if cached is not None:
                 return (ticker, *cached)
 
+            async with gate:
+                return await _fetch_uncached(ticker, extended_hours)
+
+        async def _fetch_uncached(
+            ticker: str, extended_hours: bool
+        ) -> Tuple[str, List[float], float, float]:
             try:
                 # Use the SAME series the TickerDetailView 1D chart draws:
                 # 5-min intraday bars, oldest-first, via the shared chart_helper,
@@ -1147,16 +1336,27 @@ class TrackingService:
     # ── Insider Transaction Alerts ──────────────────────────────────
 
     async def _get_insider_transaction_alerts(
-        self, watchlist_tickers: List[str]
+        self,
+        watchlist_tickers: List[str],
+        asset_types: Optional[Dict[str, str]] = None,
     ) -> List[AlertResponse]:
         """Roll up recent notable insider (Form 4) transactions into at most
         two alerts: one "Insider Bought" and one "Insider Sold".
+
+        One `insider-trading/search` call per EQUITY ticker, through a 10-min per-ticker
+        cache and a bounded gate. Coins, indices and commodities are skipped before the
+        call: that endpoint is entitled and NOT symbol-gated (`fmp_entitlements`), so a
+        BTCUSD row used to make a real HTTP round trip to be told nothing — not a pre-HTTP
+        `FMPNotEntitledException`. `asset_types` is the stored column, a hint only;
+        `resolve_asset_class` falls back to the symbol's shape.
         """
         if not watchlist_tickers:
             return []
+        asset_types = asset_types or {}
 
         cutoff = datetime.now() - timedelta(days=14)
         MIN_AMOUNT = 100_000  # $100K threshold to reduce noise
+        gate = asyncio.Semaphore(_PER_TICKER_FANOUT_CONCURRENCY)
 
         async def _fetch_one(
             ticker: str,
@@ -1165,13 +1365,40 @@ class TrackingService:
 
             Returns (action_word, item, raw_amount).
             """
+            key = (ticker or "").upper()
+            if not key:
+                return None
+            if resolve_asset_class(key, asset_types.get(ticker)).lower() not in _CLASSIFIABLE_ASSET_TYPES:
+                return None
+            hit, cached = _insider_cache_get(key)
+            if hit:
+                return cached
+            async with gate:
+                result, measured = await _fetch_uncached(ticker)
+            # Only a MEASURED answer is cached (a genuine "no notable Form 4 in the window"
+            # included). A failed fetch — an FMP 429 while the cold fan-out is over the
+            # minute budget, a 5xx — used to be stored as `None` for the full TTL,
+            # process-wide, so every user's feed read "no insider activity" for those
+            # tickers for 10 minutes (W2 regress-C-3).
+            if measured:
+                _insider_cache_set(key, result)
+            return result
+
+        async def _fetch_uncached(
+            ticker: str,
+        ) -> Tuple[Optional[Tuple[str, InsiderTransactionItemResponse, float]], bool]:
+            """(alert or None, measured). `measured` is False when the fetch FAILED —
+            including `get_insider_trading`'s own `[]`-on-rate-limit degradation, which
+            surfaces here as an `EmptyAfterFailure`-style marker or a raise."""
             try:
                 trades = await self.fmp.get_insider_trading(ticker, limit=30)
             except Exception as exc:
                 logger.warning("Insider trading for %s failed: %s", ticker, exc)
-                return None
+                return None, False
+            if getattr(trades, "fetch_failed", False):
+                return None, False
             if not isinstance(trades, list) or not trades:
-                return None
+                return None, True
 
             # Aggregate by (insider_name, transaction_date, action) because
             # Form 4 filings often split one decision across many small rows.
@@ -1224,7 +1451,7 @@ class TrackingService:
                 bucket["amount"] += amount
 
             if not buckets:
-                return None
+                return None, True
 
             best: Optional[Tuple[Tuple[str, str, str], Dict[str, Any]]] = None
             for key, bucket in buckets.items():
@@ -1233,7 +1460,7 @@ class TrackingService:
                 if best is None or bucket["amount"] > best[1]["amount"]:
                     best = (key, bucket)
             if best is None:
-                return None
+                return None, True
 
             (insider_name, _, action_word), bucket = best
             item = InsiderTransactionItemResponse(
@@ -1245,7 +1472,7 @@ class TrackingService:
                 day=bucket["dt"].day,
                 month=bucket["dt"].strftime("%b").upper(),
             )
-            return (action_word, item, bucket["amount"])
+            return (action_word, item, bucket["amount"]), True
 
         results = await asyncio.gather(
             *[_fetch_one(t) for t in watchlist_tickers], return_exceptions=True

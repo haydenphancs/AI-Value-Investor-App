@@ -9,12 +9,14 @@
 No network.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from google.genai import types
 
+from app.config import settings
 from app.integrations import gemini as gem
 from app.services.agents import chat_tools
 
@@ -186,6 +188,167 @@ async def test_stream_agentic_fails_fast_when_circuit_open(monkeypatch):
     with pytest.raises(gem.GeminiQuotaError):
         async for _ in c.stream_agentic("prompt", tools=[_TOOL], tool_handlers={}):
             pass
+
+
+# ── F20-11: a tool re-issued with identical args replays this turn's result ──
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_identical_tool_call_replays_the_result_without_rerunning():
+    fc = _FakeFC("get_x", {"ticker": "AAPL"})
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(function_call=fc))],          # round 0: call
+        [_chunk(_FakePart(function_call=fc))],          # round 1: the SAME call again
+        [_chunk(_FakePart(text="Answer."))],            # round 2: answer
+    ])
+    c = _client(chat)
+    ran = []
+
+    async def handler(args):
+        ran.append(args)
+        return {"widget_type": "stock_chart", "ticker": args["ticker"]}
+
+    events = [ev async for ev in c.stream_agentic("p", tools=[_TOOL], tool_handlers={"get_x": handler},
+                                                  max_rounds=4)]
+    assert ran == [{"ticker": "AAPL"}], "the handler ran ONCE"
+    tool_events = [p for k, p in events if k == "tool"]
+    assert len(tool_events) == 2, "still one tool event per CALL"
+    assert tool_events[0].get("memoized") is None and tool_events[1]["memoized"] is True
+    assert tool_events[1]["result"] == tool_events[0]["result"]
+    # One function_response per call: rounds 1 and 2 were each sent exactly one part.
+    assert len(chat.sent[1]) == 1 and len(chat.sent[2]) == 1
+    assert ("answer", "Answer.") in events
+
+
+@pytest.mark.asyncio
+async def test_different_args_are_not_memoized_together():
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(function_call=_FakeFC("get_x", {"ticker": "AAPL"})))],
+        [_chunk(_FakePart(function_call=_FakeFC("get_x", {"ticker": "MSFT"})))],
+        [_chunk(_FakePart(text="Answer."))],
+    ])
+    c = _client(chat)
+    ran = []
+
+    async def handler(args):
+        ran.append(args["ticker"])
+        return {"ok": args["ticker"]}
+
+    [ev async for ev in c.stream_agentic("p", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=4)]
+    assert ran == ["AAPL", "MSFT"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_call_is_not_frozen_for_the_turn():
+    """Only SUCCESSFUL results are memoized: a transient round-1 failure must let the
+    model's retry actually run."""
+    fc = _FakeFC("get_x", {"ticker": "AAPL"})
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(function_call=fc))],
+        [_chunk(_FakePart(function_call=fc))],
+        [_chunk(_FakePart(text="Answer."))],
+    ])
+    c = _client(chat)
+    n = {"calls": 0}
+
+    async def handler(args):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            return {"error": "timed_out", "upstream": True}
+        return {"ok": True}
+
+    events = [ev async for ev in c.stream_agentic("p", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=4)]
+    assert n["calls"] == 2
+    tool_events = [p for k, p in events if k == "tool"]
+    assert tool_events[1]["result"] == {"ok": True} and "memoized" not in tool_events[1]
+
+
+def test_the_chart_tool_tells_the_model_its_result_is_a_rendered_card():
+    """Prompt half of F20-11: with nothing saying so, the model denied the capability under
+    the chart it had just drawn."""
+    desc = chat_tools.TOOL_DESCRIPTIONS["get_stock_chart_data"].lower()
+    cap = chat_tools.TOOL_CAPABILITIES["get_stock_chart_data"].lower()
+    assert "rendered" in desc and "never say charts are unavailable" in desc
+    assert "rendered" in cap and "never say charts are unavailable" in cap
+
+
+# ── F04-3: the half-open trial's verdict is the FIRST chunk, not the last round ──
+
+
+def _half_open(monkeypatch, clock_start=1000.0):
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30.0)
+    now = {"t": clock_start}
+    monkeypatch.setattr(gem.time, "time", lambda: now["t"])
+    gem._quota_circuit.reset()
+    gem._quota_circuit.record_quota_error(); gem._quota_circuit.record_quota_error()
+    now["t"] += 31.0
+    return now
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_trial_closes_the_breaker_before_the_tool_round(monkeypatch):
+    """A synthesis turn admitted as the trial ran two tool rounds (a web search, an FMP
+    fetch) while every other Gemini call in the process failed fast. The first chunk
+    of round 0 already proves the quota is back."""
+    fc = _FakeFC("get_x", {"ticker": "AAPL"})
+    chat = _FakeChat(rounds=[
+        [_chunk(_FakePart(text="thinking", thought=True), _FakePart(function_call=fc))],
+        [_chunk(_FakePart(text="Answer here."))],
+    ])
+    c = _client(chat)
+    _half_open(monkeypatch)
+    cb = gem._quota_circuit
+    seen = {}
+
+    async def handler(args):
+        seen["tripped_during_tool"] = cb.tripped
+        seen["half_open_during_tool"] = cb.half_open
+        return {"ok": True}
+
+    events = [ev async for ev in c.stream_agentic("prompt", tools=[_TOOL], tool_handlers={"get_x": handler})]
+    assert ("answer", "Answer here.") in events
+    assert seen == {"tripped_during_tool": False, "half_open_during_tool": False}, (
+        "the breaker must already be CLOSED while the tool runs"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_trial_dropped_before_the_first_chunk_releases_the_slot(monkeypatch):
+    class _Hangs:
+        sent = []
+        async def send_message_stream(self, message):
+            await asyncio.sleep(3600)
+    c = _client(_Hangs())
+    _half_open(monkeypatch)
+    cb = gem._quota_circuit
+
+    gen = c.stream_agentic("prompt", tools=[_TOOL], tool_handlers={})
+    task = asyncio.ensure_future(gen.__anext__())
+    await asyncio.sleep(0)
+    assert cb.half_open is True, "admitted as the trial"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await gen.aclose()
+    assert cb.half_open is False, "released — no verdict"
+    assert cb.is_open() is False and cb.half_open is True, "the next caller is the trial at once"
+
+
+@pytest.mark.asyncio
+async def test_stream_agentic_trial_that_fails_on_quota_keeps_the_breaker_open(monkeypatch):
+    class _Exhausted:
+        async def send_message_stream(self, message):
+            raise gem.GeminiQuotaError("429 RESOURCE_EXHAUSTED")
+    c = _client(_Exhausted())
+    now = _half_open(monkeypatch)
+    cb = gem._quota_circuit
+    with pytest.raises(gem.GeminiQuotaError):
+        async for _ in c.stream_agentic("prompt", tools=[_TOOL], tool_handlers={}):
+            pass
+    assert cb.is_open() is True
+    now["t"] += 29.0
+    assert cb.is_open() is True, "re-opened from the failed trial; the release did not undo it"
 
 
 # ── chat_tools helpers ──────────────────────────────────────────────────────

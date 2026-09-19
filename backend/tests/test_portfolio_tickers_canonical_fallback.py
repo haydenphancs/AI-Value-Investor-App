@@ -41,12 +41,21 @@ class _Q:
 
     def select(self, *_a): self._op = "select"; return self
     def insert(self, p): self._op, self._payload = "insert", p; return self
+    def upsert(self, p, on_conflict=None, ignore_duplicates=False):
+        # F15-8: the seed/replace writes MERGE on (portfolio_id, ticker) now; the fake keeps
+        # the 23505 twin on `insert` so a plain insert still explodes on a collision.
+        self._op, self._payload = "upsert", p
+        self._on_conflict, self._ignore_duplicates = on_conflict, ignore_duplicates
+        return self
     def update(self, p): self._op, self._payload = "update", p; return self
     def delete(self): self._op = "delete"; return self
     def eq(self, c, v): self._filters[c] = v; return self
     def in_(self, c, vals): self._in = (c, list(vals)); return self
     def limit(self, n): self._limit = n; return self
     def order(self, *_a, **_k): return self
+    # The membership lookup, the pre-replace snapshot and the response read are all paged
+    # through `fetch_all_rows` now (F22-1) — without this the chain raised AttributeError.
+    def range(self, *_a, **_k): return self
 
     def _matched(self, rows):
         out = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]
@@ -66,6 +75,19 @@ class _Q:
                            for r in rows):
                         raise RuntimeError(f"23505 duplicate key {p['ticker']}")
                 rows.append(dict(p))
+            self.log.append(("insert", self.table, [p["ticker"] for p in payload
+                                                     if "ticker" in p]))
+            return type("R", (), {"data": [dict(p) for p in payload]})()
+        if self._op == "upsert":
+            assert self._on_conflict == "portfolio_id,ticker", self._on_conflict
+            payload = self._payload if isinstance(self._payload, list) else [self._payload]
+            for p in payload:
+                existing = next((r for r in rows if r["portfolio_id"] == p["portfolio_id"]
+                                 and r["ticker"] == p["ticker"]), None)
+                if existing is None:
+                    rows.append(dict(p))
+                elif not self._ignore_duplicates:
+                    existing.update(p)          # merge-duplicates: the payload wins
             self.log.append(("insert", self.table, [p["ticker"] for p in payload
                                                      if "ticker" in p]))
             return type("R", (), {"data": [dict(p) for p in payload]})()

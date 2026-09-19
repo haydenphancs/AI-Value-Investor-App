@@ -182,10 +182,14 @@ struct ETFDetailView: View {
             viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            if let status = viewModel.etfData?.marketStatus,
-               MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                viewModel.startLivePriceUpdates()
-            }
+            // Unconditional: gating this on `etfData.marketStatus` — a value captured at
+            // the LAST fetch — latched the refresh off across an overnight background
+            // (opened at 20:30 ET, foregrounded at 09:40 → still `.closed` → no timer →
+            // last night's price under a "Market Closed" badge all session). The timer
+            // self-gates per tick on the wall clock (`MarketHoursUtil.isMarketActive()`)
+            // and its first live tick rewrites `marketStatus`. See
+            // `ETFDetailViewModel.maybeStartStreaming` / `CommodityDetailView`.
+            viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {

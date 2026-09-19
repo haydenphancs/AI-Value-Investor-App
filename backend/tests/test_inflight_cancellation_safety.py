@@ -30,6 +30,13 @@ _SERVICES = Path(__file__).resolve().parents[1] / "app/services"
 
 # Every module using the shared-future dedup pattern. Adding one without adding it here is
 # what let three of these drift — `test_no_inflight_service_is_missing_from_this_list` catches it.
+# Modules that only JOIN another service's shared future and never create one. They are
+# listed in `_INFLIGHT_MODULES` so the shield-on-join guards cover them, but the
+# leader-resolves-its-future proofs do not apply: there is no leader frame here. Their
+# `create_task(` is unrelated (a detached refund), so the Task-shape arm must not demand an
+# `add_done_callback` on it.
+_INFLIGHT_JOINERS_ONLY = {"chat_market_tools.py"}
+
 _INFLIGHT_MODULES = [
     # The universe sweep is ~1.5 s and every tile on screen shares it, so a burst of
     # requests must collapse to ONE upstream call — and a caller that times out must not
@@ -73,6 +80,16 @@ _INFLIGHT_MODULES = [
     # and the arm that matters is `add_done_callback` — the in-flight entry must clear
     # from the task's own completion, which is what its `finally` does.
     "crypto_service.py",
+    # Added 2026-09-17 with F15-3: the Tracking feed build (sparkline + insider fan-out over
+    # the whole watchlist) is deduped per USER behind a shared future, so two clients of one
+    # account (or a DELETE-driven invalidation storm) collapse to one build — and a joiner
+    # that gives up must not cancel it for the leader's own client.
+    "tracking_service.py",
+    # Added 2026-09-17 with F04-5: a JOINER only. It never creates the shared future — it
+    # awaits `price_catalyst_service._inflight[ctx_key]` under `shield` so a chat turn does
+    # not claim a second web-search unit for a search someone else already paid for. Its
+    # `create_task(` is the detached unit refund, not a shared awaitable.
+    "chat_market_tools.py",
     # Added 2026-09-10 with the rotating chat starters. TWO shared futures, not one: the
     # editorial POOL (hourly) and the composed RESPONSE (15 min). The response build is the
     # one that matters — it is fronted by a 2.5 s `wait_for`, so without the shield the
@@ -386,7 +403,7 @@ def test_cancellation_cannot_leave_a_future_pending(module):
             f"(auth_methods_service.py)."
         )
 
-    if creates_task and not creates_future:
+    if creates_task and not creates_future and module not in _INFLIGHT_JOINERS_ONLY:
         assert "add_done_callback(" in src, (
             f"{module} shares a Task but never clears its in-flight entry from the "
             f"task's own completion. Clearing it in the LEADER's `finally` drops a "

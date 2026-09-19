@@ -190,8 +190,8 @@ struct UpdatesView: View {
                     tickers: viewModel.manageableTickers,
                     groupName: viewModel.groupName,
                     onDismiss: { showManageAssetsSheet = false },
-                    onAddTicker: { ticker in
-                        Task { await viewModel.addTicker(ticker) }
+                    onAddTicker: { ticker, assetType in
+                        Task { await viewModel.addTicker(ticker, assetType: assetType) }
                     },
                     onRemoveTicker: { ticker in
                         Task { await viewModel.removeTicker(ticker) }
@@ -362,7 +362,11 @@ struct ManageAssetsSheet: View {
     /// group and the chips fell back to their master watchlist.
     var groupName: String?
     var onDismiss: (() -> Void)?
-    var onAddTicker: ((String) -> Void)?
+    /// `(ticker, assetType)`. The type is the search result's own wire class and MUST
+    /// travel with the symbol: `POST /watchlist` resolves an UNDECLARED bare coin symbol
+    /// toward the coin by design, so "LTC" sent alone is stored as "LTCUSD / Litecoin"
+    /// even though this sheet only ever offers the equity ("LTC Properties").
+    var onAddTicker: ((String, String?) -> Void)?
     var onRemoveTicker: ((String) -> Void)?
 
     @State private var showTickerSearch = false
@@ -468,8 +472,9 @@ struct ManageAssetsSheet: View {
         }
         .presentationDetents([.medium, .large])
         .sheet(isPresented: $showTickerSearch) {
-            TickerSearchSheet { ticker in
-                onAddTicker?(ticker)
+            TickerSearchSheet { item in
+                // The sheet filters to equities, so a missing type can only be "stock".
+                onAddTicker?(item.ticker, item.type ?? "stock")
                 showTickerSearch = false
             }
         }
@@ -478,7 +483,9 @@ struct ManageAssetsSheet: View {
 
 // MARK: - Ticker Search Sheet
 struct TickerSearchSheet: View {
-    var onSelectTicker: ((String) -> Void)?
+    /// The whole item, not just the symbol — the caller needs `type` to declare the
+    /// asset class on the write (see `ManageAssetsSheet.onAddTicker`).
+    var onSelectTicker: ((TickerSearchItem) -> Void)?
 
     @State private var searchText = ""
     @State private var searchResults: [TickerSearchItem] = []
@@ -490,14 +497,14 @@ struct TickerSearchSheet: View {
     /// point, not search results — everything below the fold comes from the
     /// live `/stocks/search` endpoint, so the user is not limited to 15 names.
     private let popularTickers: [TickerSearchItem] = [
-        TickerSearchItem(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "GOOGL", companyName: "Alphabet Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "AMZN", companyName: "Amazon.com Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "TSLA", companyName: "Tesla Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "NVDA", companyName: "NVIDIA Corp.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "META", companyName: "Meta Platforms Inc.", exchange: "NASDAQ"),
-        TickerSearchItem(ticker: "BRK.B", companyName: "Berkshire Hathaway", exchange: "NYSE"),
+        TickerSearchItem(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "GOOGL", companyName: "Alphabet Inc.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "AMZN", companyName: "Amazon.com Inc.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "TSLA", companyName: "Tesla Inc.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "NVDA", companyName: "NVIDIA Corp.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "META", companyName: "Meta Platforms Inc.", exchange: "NASDAQ", type: "stock"),
+        TickerSearchItem(ticker: "BRK.B", companyName: "Berkshire Hathaway", exchange: "NYSE", type: "stock"),
     ]
 
     private var filteredResults: [TickerSearchItem] {
@@ -533,7 +540,9 @@ struct TickerSearchSheet: View {
                         TickerSearchItem(
                             ticker: $0.ticker,
                             companyName: $0.companyName,
-                            exchange: $0.exchange ?? ""
+                            exchange: $0.exchange ?? "",
+                            // Carried, not dropped: this is what the add declares.
+                            type: $0.type
                         )
                     }
                 print("✅ TickerSearch: \(searchResults.count) results for '\(trimmed)'")
@@ -588,7 +597,7 @@ struct TickerSearchSheet: View {
                             ) {
                                 ForEach(filteredResults) { item in
                                     Button {
-                                        onSelectTicker?(item.ticker)
+                                        onSelectTicker?(item)
                                     } label: {
                                         HStack {
                                             VStack(alignment: .leading, spacing: 2) {
@@ -634,6 +643,10 @@ struct TickerSearchItem: Identifiable {
     let ticker: String
     let companyName: String
     let exchange: String
+    /// The `/stocks/search` wire class ("stock", "etf", "crypto", …). It used to be
+    /// filtered on and then DROPPED here, so the add went out undeclared and the
+    /// backend's nil→coin rule turned "LTC" (LTC Properties) into Litecoin.
+    let type: String?
 }
 
 // MARK: - News Filter Sheet

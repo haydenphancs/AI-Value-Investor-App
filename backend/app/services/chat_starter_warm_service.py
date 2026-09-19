@@ -201,9 +201,33 @@ async def lookup(question: str) -> Optional[Dict[str, Any]]:
         "widget": widget,
         # The endpoint re-fetches (or drops) a stale card by symbol; a warmed
         # `current_price` must never reach the client under a "Live" dot hours later.
-        "widget_stale": bool(widget) and (age is None or age > widget_max_age),
+        # Two tests: AGE (older than one quote cadence) and SESSION PHASE — a card
+        # warmed at 15:55 and replayed at 16:05 is under the cadence but still carries
+        # `is_market_open: True` into a closed session, and the green dot is that flag
+        # (F13-10). Round-the-clock assets are stamped open unconditionally, so only a
+        # class with a session is compared.
+        "widget_stale": bool(widget) and (
+            age is None or age > widget_max_age or _widget_phase_mismatch(widget)
+        ),
         "suggestions": list(row.get("suggestions") or []),
     }
+
+
+def _widget_phase_mismatch(widget: Dict[str, Any]) -> bool:
+    """A stored card's `is_market_open` disagrees with the CURRENT session for an asset
+    that has one. Never raises; unknown flag or class → False (age decides alone)."""
+    flag = widget.get("is_market_open")
+    if not isinstance(flag, bool):
+        return False
+    try:
+        from app.services.asset_class import detect_asset_class, trades_extended_hours
+        if widget.get("widget_type") != "market_overview" and trades_extended_hours(
+            detect_asset_class(str(widget.get("ticker") or ""), include_bare_coins=True)
+        ):
+            return False
+        return flag != (session_phase() == SESSION_REGULAR)
+    except Exception:  # noqa: BLE001 — a classification hiccup must not fail the replay
+        return False
 
 
 def _stale_for_the_tape(question: str, age: Optional[float], created_at: Any = None) -> bool:

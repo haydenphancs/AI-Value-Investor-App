@@ -40,10 +40,15 @@ class _Q:
         self.store, self.table, self.log = store, table, log
         self._op, self._payload, self._filters = "select", None, {}
 
-    def select(self, *_a): self._op = "select"; return self
+    # `**_k` + `neq` + `.count`: the F15-3 row-cap check reads
+    # `.select("id", count="exact").eq(...).neq("ticker", t)`. Without these the fake raised
+    # TypeError, the cap check failed OPEN with a warning, and every add here passed through
+    # a degraded path it should never take.
+    def select(self, *_a, **_k): self._op = "select"; return self
     def insert(self, p): self._op, self._payload = "insert", p; return self
     def delete(self): self._op = "delete"; return self
     def eq(self, c, v): self._filters[c] = v; return self
+    def neq(self, c, v): self._neq = (c, v); return self
     def limit(self, n): return self
     def order(self, *a, **k): return self
 
@@ -53,10 +58,13 @@ class _Q:
             rows.append(dict(self._payload)); self.log.append(("insert", self.table, dict(self._payload)))
             return type("R", (), {"data": [dict(self._payload)]})()
         matched = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]
+        if getattr(self, "_neq", None):
+            c, v = self._neq
+            matched = [r for r in matched if r.get(c) != v]
         if self._op == "delete":
             for r in matched: rows.remove(r)
             self.log.append(("delete", self.table, [r["ticker"] for r in matched]))
-        return type("R", (), {"data": [dict(r) for r in matched]})()
+        return type("R", (), {"data": [dict(r) for r in matched], "count": len(matched)})()
 
 
 class _SB:

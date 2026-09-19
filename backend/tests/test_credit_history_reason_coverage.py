@@ -44,7 +44,6 @@ _BACKEND = pathlib.Path(__file__).resolve().parents[1]
 _REASON_CALLS = {
     "precharge": "reason",          # CreditService.precharge(..., reason=...)
     "refund_ledgered": "reason",    # CreditService.refund_ledgered(..., reason=...)
-    "log_transaction": "reason",    # CreditService.log_transaction(..., reason=...)
     "refund_once": 0,               # _ChatQuota.refund_once(reason)  — positional
     "settle_no_cost": 0,            # _ChatQuota.settle_no_cost(reason) — positional; the
                                     # DELIVERED-but-free settlement (cache hit, degraded)

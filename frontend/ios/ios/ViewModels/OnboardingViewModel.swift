@@ -64,13 +64,22 @@ final class OnboardingViewModel: ObservableObject {
         } else {
             selected.append(symbol)
             Analytics.shared.track(.watchlistAdded, ["ticker": .string(symbol)])
-            Task { await self.add(symbol) }
+            // UNDECLARED on purpose for the curated chips: "BTC — Bitcoin" (above) relies
+            // on the backend's nil→coin rule to land as BTCUSD. Every other chip is an
+            // equity whose bare symbol names no coin, so nil resolves to the stock.
+            Task { await self.add(symbol, assetType: nil) }
         }
     }
 
     /// A result chosen from the search sheet. Adds a chip so the choice is visible
     /// alongside the suggestions rather than vanishing into an invisible count.
-    func addFromSearch(symbol: String, name: String) {
+    ///
+    /// `assetType` defaults to "stock" because `TargetSearchSheet` filters its results to
+    /// equities (`type == "stock"`) — and an equity picked from search must be DECLARED:
+    /// sent undeclared, "LTC" (LTC Properties), "BCH" (Banco de Chile), "ATOM" (Atomera),
+    /// "LINK" (Interlink) and "SOL" (Emeren) are resolved toward the coin by the backend
+    /// and stored as Litecoin / Bitcoin Cash / Cosmos / Chainlink / Solana.
+    func addFromSearch(symbol: String, name: String, assetType: String? = "stock") {
         let upper = symbol.uppercased()
         guard !upper.isEmpty else { return }
         if !allChips.contains(where: { $0.symbol == upper }) {
@@ -79,7 +88,7 @@ final class OnboardingViewModel: ObservableObject {
         guard !isSelected(upper) else { return }
         selected.append(upper)
         Analytics.shared.track(.watchlistAdded, ["ticker": .string(upper)])
-        Task { await self.add(upper) }
+        Task { await self.add(upper, assetType: assetType ?? "stock") }
     }
 
     // MARK: - Learning preferences
@@ -169,9 +178,9 @@ final class OnboardingViewModel: ObservableObject {
 
     // MARK: - Best-effort backend sync
 
-    private func add(_ symbol: String) async {
+    private func add(_ symbol: String, assetType: String?) async {
         do {
-            try await apiClient.request(endpoint: .addToWatchlist(stockId: symbol, assetType: nil))
+            try await apiClient.request(endpoint: .addToWatchlist(stockId: symbol, assetType: assetType))
         } catch {
             // Intentionally non-fatal, and deliberately NOT rolled back in the UI: the
             // user's intent is recorded locally, and un-checking a chip they just

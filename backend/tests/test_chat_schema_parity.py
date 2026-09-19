@@ -34,6 +34,7 @@ from app.config import settings
 from app.schemas.chat import (
     ChatHistoryResponse,
     ChatMessageResponse,
+    CreateChatSessionRequest,
     ChatSessionListResponse,
     ChatSessionResponse,
     HistoricalDataPoint,
@@ -614,3 +615,22 @@ def test_legacy_row_without_rich_content_has_no_credit_chip():
     dumped = _row_to_message(row).model_dump()
     _assert_keys_subset(_MESSAGE_ALL_KEYS, dumped, "legacy row")
     assert dumped["credit"] is None
+
+
+# ── S03-7: the two client-chosen grounding fields have a hard ceiling ─────────
+
+
+@pytest.mark.parametrize("model", [SendChatMessageRequest, CreateChatSessionRequest])
+@pytest.mark.parametrize("field, limit", [("context_type", 64), ("reference_id", 256)])
+def test_over_cap_grounding_fields_are_a_422_not_a_log_line(model, field, limit):
+    base = {"message": "hi"} if model is SendChatMessageRequest else {}
+    model(**base, **{field: "x" * limit})               # at the cap: accepted
+    with pytest.raises(ValidationError):
+        model(**base, **{field: "x" * (limit + 1)})
+
+
+def test_the_longest_legitimate_reference_fits():
+    """"TICKER|persona|<uuid>" is the longest reference iOS sends (~70 chars)."""
+    ref = "GOOGL|warren_buffett|" + "0123456789abcdef" * 2 + "-0123"
+    assert len(ref) < 256
+    assert SendChatMessageRequest(message="hi", reference_id=ref).reference_id == ref

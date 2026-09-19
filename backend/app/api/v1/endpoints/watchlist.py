@@ -10,10 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import Client
 import logging
 
+from app.api.error_response import ErrorCode, make_error_response
+from app.config import settings
+from app.utils.postgrest_paging import fetch_all_rows
 from app.database import get_supabase
-from app.dependencies import get_watchlist_identity
+from app.dependencies import StandardRateLimit, get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
-from app.services.tracking_service import invalidate_feed_cache
+from app.services.tracking_service import invalidate_feed_cache, watchlist_is_full
 from app.services._classification_common import classification_from_profile
 from app.services.asset_class import (
     canonical_stored_symbol,
@@ -27,6 +30,7 @@ from app.schemas.watchlist import (
     WatchlistItemResponse,
 )
 from app.utils.supabase_async import sb_exec
+from app.utils.supabase_errors import is_transient_supabase_error, retry_idempotent_sync
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -47,16 +51,19 @@ async def get_watchlist(
     logger.info("[Watchlist] GET watchlist for user=%s", user_id)
 
     try:
-        result = (
-            (await sb_exec(
-                supabase.table("watchlist_items")
-                .select("*")
-                .eq("user_id", user_id)
-                .order("added_at", desc=True)
-            ))
+        # PAGED, like the Tracking feed's read of the same table (F15-10): PostgREST clamps
+        # a single page at ~1,000 rows, and this is the reader the iOS star state comes
+        # from — a >1,000-item user saw their oldest stars unfilled and could re-add them.
+        # Ordered on the unique `id` for the walk, then sorted newest-first for the client.
+        rows = await asyncio.to_thread(
+            lambda: fetch_all_rows(
+                lambda: supabase.table("watchlist_items").select("*").eq("user_id", user_id),
+                order_by="id", what=f"watchlist for user={user_id}",
+            )
         )
-        logger.info("[Watchlist] Returned %d items", len(result.data or []))
-        return result.data or []
+        rows.sort(key=lambda r: str(r.get("added_at") or ""), reverse=True)
+        logger.info("[Watchlist] Returned %d items", len(rows))
+        return rows
     except Exception as exc:
         logger.error("[Watchlist] DB error fetching watchlist: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to fetch watchlist: {exc}")
@@ -67,6 +74,10 @@ async def add_to_watchlist(
     request: AddToWatchlistRequest,
     user: dict = Depends(get_watchlist_identity),
     supabase: Client = Depends(get_supabase),
+    # Per-caller window. Every add costs one FMP profile call and grows the list the
+    # Tracking feed fans out over, and this route had no limiter at all — a scripted
+    # account could add thousands of rows a minute. 60/min is far above any human.
+    _rate: None = StandardRateLimit,
 ):
     """Add a stock to user's watchlist. Fetches company info from FMP."""
     # Canonicalise BEFORE anything else — the duplicate check, the insert and every
@@ -123,6 +134,22 @@ async def add_to_watchlist(
     except Exception as exc:
         logger.error("[Watchlist] DB error checking duplicate for %s: %s", ticker, exc)
         raise HTTPException(status_code=500, detail=f"Database error: {exc}")
+
+    # Row cap — AFTER the duplicate/converge check (a re-add of a ticker already on the
+    # list must never be refused at the cap) and BEFORE the FMP profile call below (the
+    # refusal must not cost the call it exists to bound). `POST /tracking/holdings` runs
+    # the same check; a cap on one insert path alone is bypassable through the other.
+    if (await asyncio.to_thread(watchlist_is_full, supabase, user_id, ticker)):
+        cap = int(settings.WATCHLIST_MAX_ITEMS or 0)
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            status_code=400,
+            message=f"watchlist for user {user_id} is at the {cap}-row cap; refused {ticker}",
+            user_message=(
+                f"Your watchlist is full ({cap} tickers). Remove one to add another."
+            ),
+            details={"max": cap},
+        )
 
     # Fetch company info from FMP for display AND classification.
     #
@@ -225,10 +252,23 @@ def _write_through_to_active_portfolio(supabase: Client, user_id: str, ticker: s
     where you added it" true by construction.
 
     Best-effort: the watchlist row is already committed and IS the source of truth. A failure
-    here must never fail the add — it degrades to the pre-existing behaviour, which the
-    `GET /portfolios` backfill then repairs.
+    here must never fail the add.
+
+    ⚠️ But it is RETRIED, because nothing repairs it afterwards. This docstring used to end
+    "which the `GET /portfolios` backfill then repairs", and that was false:
+    `_backfill_lone_empty_portfolio` runs only for a user with EXACTLY ONE group holding
+    ZERO items that was never edited — one mirrored ticker disarms it for good — and no other
+    reconciler of `watchlist_items` → `portfolio_items` exists. Every non-Tracking add path
+    (the detail-screen star, Updates → Manage Assets, onboarding) relies solely on this
+    mirror, so a single transient Supabase 520 on the upsert used to strand the ticker: on
+    the watchlist (star filled, so the star cannot re-add it) but in no group, hence
+    invisible on Home, Updates AND Tracking, forever. The sequence below (active read →
+    position read → ON CONFLICT DO NOTHING upsert) is idempotent, and this already runs off
+    the event loop via `to_thread`, so the sync retry helper's backoff is fine here. If all
+    attempts fail, the only recovery is re-adding the ticker from Tracking, and the log
+    line says so.
     """
-    try:
+    def _mirror_once() -> None:
         active = (
             supabase.table("portfolios")
             .select("id")
@@ -299,12 +339,27 @@ def _write_through_to_active_portfolio(supabase: Client, user_id: str, ticker: s
         logger.info(
             "[Watchlist] Mirrored %s into the user's active group %s", ticker, portfolio_id
         )
-    except Exception as e:  # noqa: BLE001 — never fail the add for a mirror
-        logger.warning(
-            "[Watchlist] Could not mirror %s into a portfolio for user=%s (%s: %s) — "
-            "GET /portfolios will backfill it",
-            ticker, user_id, type(e).__name__, e,
+
+    try:
+        retry_idempotent_sync(
+            _mirror_once,
+            what=f"watchlist mirror {ticker} user={user_id}",
+            logger=logger,
         )
+    except Exception as e:  # noqa: BLE001 — never fail the add for a mirror
+        # Retries are exhausted (or the error was never transient). There is NO automatic
+        # repair from here — see the docstring — so this is not "will be backfilled", it is
+        # a ticker the user can only get back by re-adding it from Tracking. A transient
+        # blip that outlived the retries is WARNING; anything else is a bug, with a stack.
+        detail = (
+            "[Watchlist] Could not mirror %s into a portfolio for user=%s after retries "
+            "(%s: %s) — NO automatic repair exists: the ticker stays watchlist-only and "
+            "invisible on Home/Updates/Tracking until re-added from Tracking"
+        )
+        if is_transient_supabase_error(e):
+            logger.warning(detail, ticker, user_id, type(e).__name__, e)
+        else:
+            logger.error(detail, ticker, user_id, type(e).__name__, e, exc_info=True)
 
 
 @router.delete("")
@@ -378,10 +433,12 @@ async def remove_from_watchlist(
             )
         else:
             logger.info("[Watchlist] Removed %s from watchlist", ticker)
-
-        # Keep the feed honest immediately — a stale cache would keep serving the
-        # removed ticker for up to FEED_CACHE_TTL after the row is gone.
-        invalidate_feed_cache(user_id)
+            # Keep the feed honest immediately — a stale cache would keep serving the
+            # removed ticker for up to FEED_CACHE_TTL after the row is gone. Only when a
+            # row actually went: a DELETE of a ticker that was never there changes
+            # nothing the feed reads, and dropping the cache on it made a no-op request
+            # force a full per-ticker rebuild on the next GET (an invalidation storm).
+            invalidate_feed_cache(user_id)
         (await asyncio.to_thread(_delete_through_from_groups, supabase, user_id, ticker))
         return {"message": f"{ticker} removed from watchlist"}
     except Exception as exc:

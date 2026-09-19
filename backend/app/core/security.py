@@ -212,6 +212,72 @@ def create_widget_token(user_id: str) -> str:
     )
 
 
+# ── Device proof: "this install has signed into this account before" ─────────────────
+#
+# The per-EMAIL login/forgot/reset buckets are the brute-force control that per-IP alone
+# cannot be (an address pool gets the full per-IP budget against ONE account). Their cost
+# was a trivial lockout: anyone who knows victim@example.com could send ten wrong passwords
+# every fifteen minutes — inside their own per-IP budget — and the victim's correct password
+# from any device answered 429 for as long as the loop ran; three forgot-password posts an
+# hour blocked the reset email too. A per-email lock that counts the attacker's failures
+# cannot avoid that on its own, so the exemption has to be a PROOF the victim's own devices
+# carry and the attacker cannot mint: an HMAC over (email, issue time) signed with
+# `SECRET_KEY`, handed out only by a flow that verified a credential (password sign-in,
+# provider sign-in, session exchange) and presented back as `X-Device-Token`. A request
+# bearing a valid proof for the email it is signing in as skips the per-email bucket and
+# is bounded by a per-proof bucket instead; the per-IP bucket applies to everyone.
+#
+# It is not a session: it carries no user id, unlocks nothing on its own, and a stolen
+# proof only buys its holder ordinary rate-limit headroom against one address they would
+# still need the password for. Rotating `SECRET_KEY` voids every proof at once.
+DEVICE_PROOF_VERSION = "v1"
+DEVICE_PROOF_TTL_DAYS = 180
+
+
+def _device_proof_email_digest(email: str) -> str:
+    import hashlib
+    return hashlib.sha256((email or "").strip().lower().encode("utf-8")).hexdigest()[:32]
+
+
+def _device_proof_signature(iat: str, digest: str) -> str:
+    import hashlib
+    import hmac as _hmac
+    msg = f"{DEVICE_PROOF_VERSION}.{iat}.{digest}".encode("utf-8")
+    return _hmac.new(settings.SECRET_KEY.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:40]
+
+
+def create_device_proof(email: str, *, now: Optional[datetime] = None) -> str:
+    """Mint the proof for `email`. Format `v1.<iat>.<email digest>.<sig>` — opaque to clients."""
+    iat = str(int((now or datetime.now(timezone.utc)).timestamp()))
+    digest = _device_proof_email_digest(email)
+    return f"{DEVICE_PROOF_VERSION}.{iat}.{digest}.{_device_proof_signature(iat, digest)}"
+
+
+def verify_device_proof(token: Optional[str], email: str, *, now: Optional[datetime] = None) -> bool:
+    """True only for an unexpired proof signed by this server FOR THIS EMAIL.
+
+    Constant-time on the signature; every malformed shape is simply False (the caller then
+    applies the ordinary per-email bucket — the proof can only relax a limit, never fail a
+    request).
+    """
+    import hmac as _hmac
+    try:
+        if not token or not isinstance(token, str) or len(token) > 160:
+            return False
+        version, iat, digest, sig = token.split(".")
+        if version != DEVICE_PROOF_VERSION or not iat.isdigit():
+            return False
+        if digest != _device_proof_email_digest(email):
+            return False
+        if not _hmac.compare_digest(sig, _device_proof_signature(iat, digest)):
+            return False
+        issued = datetime.fromtimestamp(int(iat), tz=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return timedelta(0) <= (current - issued) <= timedelta(days=DEVICE_PROOF_TTL_DAYS)
+    except Exception:
+        return False
+
+
 def widget_token_expires_at(token: str) -> Optional[datetime]:
     """The `exp` of a widget token as an aware UTC datetime, or None if it is not readable.
 

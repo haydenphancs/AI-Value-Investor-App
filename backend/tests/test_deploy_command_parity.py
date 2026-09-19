@@ -45,3 +45,14 @@ def test_single_worker_is_pinned():
             f"{cmd!r}: the lifespan jobs are unclaimed — more than one worker double-runs them"
         )
         assert cmd.startswith("uvicorn app.main:app")
+
+
+def test_the_graceful_shutdown_is_bounded():
+    """uvicorn drains open connections BEFORE the lifespan shutdown, with no bound by
+    default: one live SSE chat stream kept the old instance alive until Railway SIGKILLed
+    it, and the lifespan `finally` that releases the durable job claims never ran (the
+    claim then sat parked for its stale window — W2 B-1). Both entrypoints bound it."""
+    for cmd in (_procfile_cmd(), _dockerfile_cmd()):
+        m = re.search(r"--timeout-graceful-shutdown (\d+)", cmd)
+        assert m, f"{cmd!r}: no graceful-shutdown bound"
+        assert 5 <= int(m.group(1)) <= 60, "must beat Railway's stop grace while draining a normal request"

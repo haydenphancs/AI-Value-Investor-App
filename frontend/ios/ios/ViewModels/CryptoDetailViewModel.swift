@@ -513,12 +513,45 @@ class CryptoDetailViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
 
-                // Only refresh for intraday intervals (crypto is 24/7 — no market hours check)
-                guard self.chartSettings.selectedInterval.isIntraday else { continue }
-
-                await self.refreshChartOnly()
+                // Crypto is 24/7 — no market-hours check. An intraday interval refreshes
+                // the chart (and derives the header from its last candle); a DAILY range
+                // used to `continue` here, so a coin the user had switched to 1M/3M sat
+                // frozen at its load-time price for the rest of the visit (F16-6). The
+                // header is refreshed from /core on those ranges instead — at the
+                // backend's ~5-minute fundamentals cadence, which beats never.
+                await self.refreshLiveSlice(includeChart: self.chartSettings.selectedInterval.isIntraday)
             }
         }
+    }
+
+    /// One timer tick: the chart + header on an intraday interval, the header alone on a
+    /// daily range.
+    private func refreshLiveSlice(includeChart: Bool) async {
+        if includeChart {
+            await refreshChartOnly()
+        } else {
+            await refreshHeaderOnly()
+        }
+    }
+
+    /// Header-only refresh for a daily range: `/core` is the cheap quote read, and its
+    /// `priceChange` is the 24 h change the backend computed — never the chart-anchor
+    /// arithmetic `refreshChartOnly` does, which against an hourly-cached daily close
+    /// would drift the 24 h change. Observe-only: the gen is read, never bumped.
+    private func refreshHeaderOnly() async {
+        let gen = detailRequestGen
+        guard let core = try? await StockRepository.shared.getCryptoCore(
+            symbol: cryptoSymbol,
+            range: selectedChartRange.rawValue,
+            interval: chartSettings.selectedInterval.rawValue
+        ) else { return }
+        guard gen == self.detailRequestGen else { return }
+        guard var data = self.cryptoData, core.currentPrice > 0 else { return }
+        data.currentPrice = core.currentPrice
+        data.priceChange = core.priceChange
+        data.priceChangePercent = core.priceChangePercent
+        data.changeKnown = core.changeKnown ?? true
+        self.cryptoData = data
     }
 
     private func stopChartRefreshTimer() {

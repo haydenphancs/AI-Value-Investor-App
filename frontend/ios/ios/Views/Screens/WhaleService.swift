@@ -71,7 +71,14 @@ class WhaleService: ObservableObject {
     /// freshly-fetched profile's `is_following`) WITHOUT issuing a backend
     /// follow/unfollow. Lets a screen converge stale local state to server truth
     /// so downstream lookups (isFollowing) stop contradicting the server.
-    func reconcileLocalFollow(_ whaleId: String, isFollowing: Bool) {
+    ///
+    /// `asOf` is the `currentIdentityEpoch` the caller read BEFORE its request: this is
+    /// the third writer of the device-global follows key, and it had no epoch — a profile
+    /// fetched as account A and landing after A signed out wrote A's follow into the set
+    /// (and the key) the next account reads, and `TrackingViewModel.reconcileFollowState`
+    /// is driven off that set, so guarding only the save would not be enough (F19-5).
+    func reconcileLocalFollow(_ whaleId: String, isFollowing: Bool, asOf epoch: Int) {
+        guard epoch == identityEpoch else { return }
         guard followedWhaleIds.contains(whaleId) != isFollowing else { return }
         if isFollowing {
             followedWhaleIds.insert(whaleId)

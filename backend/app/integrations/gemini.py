@@ -8,7 +8,7 @@ Uses the unified `google-genai` SDK (async-native via `client.aio.*`). The
 `get_gemini_client()` are unaffected by the SDK swap.
 """
 
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 import logging
 import asyncio
 import hashlib
@@ -123,8 +123,11 @@ class _QuotaCircuitBreaker:
     The previous shape cleared all state at the cooldown boundary, which readmitted
     every parallel caller at once — under a sustained 429 that cycled 30 s off /
     ~20 errors on, and the docstring's "half-open" was a promise the code did not
-    keep. A trial that never reports (a non-quota failure, a disconnect) expires
-    after another cooldown, so a lost trial cannot wedge the breaker open.
+    keep. A trial that ends WITHOUT a verdict (a non-quota failure, a give-up, a
+    disconnect before the first chunk) hands the slot back at once via
+    `release_trial`; one that is truly lost (no `finally` ever ran) expires after
+    another cooldown, so a lost trial cannot wedge the breaker open. For streams the
+    verdict is the FIRST chunk, so a long answer does not hold every other caller.
 
     Single-event-loop process → no lock needed (all access is on one thread).
     """
@@ -173,6 +176,27 @@ class _QuotaCircuitBreaker:
             "Gemini quota circuit HALF-OPEN — admitting one trial call after %.0fs", cooldown,
         )
         return False
+
+    @property
+    def trial_stamp(self) -> float:
+        """The in-flight trial's start time (0.0 when none) — the token `release_trial`
+        needs, captured by the admitted caller right after `is_open()` admitted it."""
+        return self._trial_started_at
+
+    def release_trial(self, stamp: float) -> None:
+        """Give the half-open slot back when the trial ended WITHOUT a verdict.
+
+        The trial used to be held for its whole life — and then for a full cooldown
+        after a lost one — by whichever call happened to arrive first after the outage:
+        a chat stream the user stopped after the first token, a synthesis that ran two
+        tool rounds, a timeout that gave up. Every other Gemini call in the process failed
+        fast for those seconds/minutes on a quota that had already recovered (F04-3).
+        Stamp-guarded: after a cooldown a SUCCESSOR trial is admitted concurrently, and an
+        unguarded release from the expired one would clear the successor's slot.
+        """
+        if stamp > 0.0 and self._trial_started_at == stamp:
+            self._trial_started_at = 0.0
+            logger.info("Gemini quota circuit trial ended without a verdict — slot released")
 
     def record_quota_error(self) -> None:
         if self.half_open:
@@ -334,137 +358,147 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
             timeout_attempt = 0    # per-call timeouts (own budget, default 0)
             admitted = False       # the breaker gate is consulted ONCE per logical call
             is_trial = False       # ...and only the admitted half-open TRIAL may ignore a trip
-            while True:
-                # Fail fast while the breaker is open — don't add load to an
-                # already-exhausted quota; the caller's sentinel fallback fires.
-                #
-                # Consulted ONCE: `is_open()` admits the single half-open trial as a side
-                # effect, so re-checking it on every retry iteration made the trial call
-                # reject ITSELF — an overload/5xx retry came back to the loop top, saw its
-                # own trial marker, and raised a quota error for a retryable 503.
-                if not admitted:
-                    if _quota_circuit.is_open():
-                        raise GeminiQuotaError(
-                            "Gemini quota circuit open (resource_exhausted) — "
-                            "failing fast"
-                        )
-                    admitted = True
-                    is_trial = _quota_circuit.half_open
-                elif not is_trial:
-                    # Admitted while CLOSED, then slept through a backoff while other
-                    # callers tripped the breaker: don't wake up and add one more request
-                    # to an exhausted quota (whose 429 would be booked as a trial failure).
-                    # Through the ADMITTING gate, not the read-only one: if the cooldown
-                    # has since elapsed with no trial in flight, this straggler becomes the
-                    # trial rather than firing un-admitted with its 429 landing as a plain
-                    # increment on a stale deadline. The trial itself never re-checks — it
-                    # is the one call allowed to probe.
-                    if _quota_circuit.is_open():
-                        raise GeminiQuotaError(
-                            "Gemini quota circuit opened during backoff — failing fast"
-                        )
-                    is_trial = _quota_circuit.half_open
-                try:
-                    result = await func(*args, **kwargs)
-                    if isinstance(result, _CacheHit):
-                        # Served from the response cache: NO upstream call happened, so
-                        # it proves nothing about the quota. Booking it as a success used
-                        # to close a half-open breaker from a cache hit and readmit every
-                        # parallel caller to a still-exhausted quota.
-                        return result.value
-                    _quota_circuit.record_success()
-                    return result
-                except Exception as e:
-                    # PER-CALL TIMEOUT — checked FIRST and by isinstance ONLY.
-                    # A string match would be one wording change away from landing in
-                    # the quota branch, which would trip the shared circuit breaker
-                    # and fail-fast every other Gemini call in the process.
+            trial_stamp = 0.0      # the slot token, so a give-up can hand the trial back
+            verdict = False        # record_success / record_quota_error ran
+            try:
+                while True:
+                    # Fail fast while the breaker is open — don't add load to an
+                    # already-exhausted quota; the caller's sentinel fallback fires.
                     #
-                    # Budget defaults to 0 (no retry), which is what the docstrings
-                    # always claimed and what the latency arithmetic wants: the
-                    # generic branch used to retry these, so one hung call cost
-                    # 90s + backoff + 90s ≈ 182s against a 600s pipeline ceiling with
-                    # ~15 parallel narratives. A read that stalled a full 90s is a
-                    # stuck connection, not a blip. Kept as its own SETTING rather
-                    # than deleted so it is one env var away if that judgement changes.
-                    if isinstance(e, GeminiTimeoutError):
-                        timeout_attempt += 1
-                        if timeout_attempt > settings.GEMINI_TIMEOUT_MAX_RETRIES:
-                            # WARNING, not ERROR: the caller's sentinel fallback
-                            # covers the user, and _timeout_streak escalates a
-                            # SUSTAINED run to a single ERROR.
+                    # Consulted ONCE: `is_open()` admits the single half-open trial as a side
+                    # effect, so re-checking it on every retry iteration made the trial call
+                    # reject ITSELF — an overload/5xx retry came back to the loop top, saw its
+                    # own trial marker, and raised a quota error for a retryable 503.
+                    if not admitted:
+                        if _quota_circuit.is_open():
+                            raise GeminiQuotaError(
+                                "Gemini quota circuit open (resource_exhausted) — "
+                                "failing fast"
+                            )
+                        admitted = True
+                        is_trial = _quota_circuit.half_open
+                        trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
+                    elif not is_trial:
+                        # Admitted while CLOSED, then slept through a backoff while other
+                        # callers tripped the breaker: don't wake up and add one more request
+                        # to an exhausted quota (whose 429 would be booked as a trial failure).
+                        # Through the ADMITTING gate, not the read-only one: if the cooldown
+                        # has since elapsed with no trial in flight, this straggler becomes the
+                        # trial rather than firing un-admitted with its 429 landing as a plain
+                        # increment on a stale deadline. The trial itself never re-checks — it
+                        # is the one call allowed to probe.
+                        if _quota_circuit.is_open():
+                            raise GeminiQuotaError(
+                                "Gemini quota circuit opened during backoff — failing fast"
+                            )
+                        is_trial = _quota_circuit.half_open
+                        trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
+                    try:
+                        result = await func(*args, **kwargs)
+                        if isinstance(result, _CacheHit):
+                            # Served from the response cache: NO upstream call happened, so
+                            # it proves nothing about the quota. Booking it as a success used
+                            # to close a half-open breaker from a cache hit and readmit every
+                            # parallel caller to a still-exhausted quota.
+                            return result.value
+                        verdict = True
+                        _quota_circuit.record_success()
+                        return result
+                    except Exception as e:
+                        # PER-CALL TIMEOUT — checked FIRST and by isinstance ONLY.
+                        # A string match would be one wording change away from landing in
+                        # the quota branch, which would trip the shared circuit breaker
+                        # and fail-fast every other Gemini call in the process.
+                        #
+                        # Budget defaults to 0 (no retry), which is what the docstrings
+                        # always claimed and what the latency arithmetic wants: the
+                        # generic branch used to retry these, so one hung call cost
+                        # 90s + backoff + 90s ≈ 182s against a 600s pipeline ceiling with
+                        # ~15 parallel narratives. A read that stalled a full 90s is a
+                        # stuck connection, not a blip. Kept as its own SETTING rather
+                        # than deleted so it is one env var away if that judgement changes.
+                        if isinstance(e, GeminiTimeoutError):
+                            timeout_attempt += 1
+                            if timeout_attempt > settings.GEMINI_TIMEOUT_MAX_RETRIES:
+                                # WARNING, not ERROR: the caller's sentinel fallback
+                                # covers the user, and _timeout_streak escalates a
+                                # SUSTAINED run to a single ERROR.
+                                logger.warning(
+                                    "Gemini call timed out — giving up after %d "
+                                    "attempt(s); the caller's sentinel fallback "
+                                    "applies: %s",
+                                    timeout_attempt, e,
+                                )
+                                raise
+                            backoff = (
+                                settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS * timeout_attempt
+                            )
                             logger.warning(
-                                "Gemini call timed out — giving up after %d "
-                                "attempt(s); the caller's sentinel fallback "
-                                "applies: %s",
-                                timeout_attempt, e,
+                                "Gemini timeout (attempt %d/%d) — backing off %.1fs: %s",
+                                timeout_attempt,
+                                settings.GEMINI_TIMEOUT_MAX_RETRIES,
+                                backoff, e,
                             )
-                            raise
-                        backoff = (
-                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS * timeout_attempt
-                        )
-                        logger.warning(
-                            "Gemini timeout (attempt %d/%d) — backing off %.1fs: %s",
-                            timeout_attempt,
-                            settings.GEMINI_TIMEOUT_MAX_RETRIES,
-                            backoff, e,
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
-                    if _is_quota_error(e):
-                        _quota_circuit.record_quota_error()
-                        quota_attempt += 1
-                        if (
-                            quota_attempt > settings.GEMINI_QUOTA_MAX_RETRIES
-                            or _quota_circuit.tripped
-                        ):
-                            logger.error(
-                                f"Quota/rate-limit error — giving up after "
-                                f"{quota_attempt} attempt(s): {e}"
+                            await asyncio.sleep(backoff)
+                            continue
+                        if _is_quota_error(e):
+                            verdict = True
+                            _quota_circuit.record_quota_error()
+                            quota_attempt += 1
+                            if (
+                                quota_attempt > settings.GEMINI_QUOTA_MAX_RETRIES
+                                or _quota_circuit.tripped
+                            ):
+                                logger.error(
+                                    f"Quota/rate-limit error — giving up after "
+                                    f"{quota_attempt} attempt(s): {e}"
+                                )
+                                raise
+                            backoff = (
+                                settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
+                                * quota_attempt
                             )
-                            raise
-                        backoff = (
-                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
-                            * quota_attempt
-                        )
-                        logger.warning(
-                            f"Quota/rate-limit (attempt {quota_attempt}/"
-                            f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing "
-                            f"off {backoff:.1f}s: {e}"
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
-                    # Server overload / 5xx ("high demand"): transient upstream
-                    # capacity, NOT a code bug. Retry with backoff (Google's own
-                    # guidance) on its OWN budget, log at WARNING (the caller's
-                    # sentinel fallback covers the user), and DON'T touch the quota
-                    # circuit — an overload is not a quota exhaustion.
-                    if _is_overload_error(e):
-                        overload_attempt += 1
-                        if overload_attempt > settings.GEMINI_QUOTA_MAX_RETRIES:
                             logger.warning(
-                                f"Gemini overloaded — giving up after "
-                                f"{overload_attempt} attempt(s): {e}"
+                                f"Quota/rate-limit (attempt {quota_attempt}/"
+                                f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing "
+                                f"off {backoff:.1f}s: {e}"
                             )
+                            await asyncio.sleep(backoff)
+                            continue
+                        # Server overload / 5xx ("high demand"): transient upstream
+                        # capacity, NOT a code bug. Retry with backoff (Google's own
+                        # guidance) on its OWN budget, log at WARNING (the caller's
+                        # sentinel fallback covers the user), and DON'T touch the quota
+                        # circuit — an overload is not a quota exhaustion.
+                        if _is_overload_error(e):
+                            overload_attempt += 1
+                            if overload_attempt > settings.GEMINI_QUOTA_MAX_RETRIES:
+                                logger.warning(
+                                    f"Gemini overloaded — giving up after "
+                                    f"{overload_attempt} attempt(s): {e}"
+                                )
+                                raise
+                            backoff = (
+                                settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
+                                * overload_attempt
+                            )
+                            logger.warning(
+                                f"Gemini overloaded (attempt {overload_attempt}/"
+                                f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing off "
+                                f"{backoff:.1f}s: {e}"
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        attempt += 1
+                        if attempt >= max_attempts:
                             raise
-                        backoff = (
-                            settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS
-                            * overload_attempt
-                        )
                         logger.warning(
-                            f"Gemini overloaded (attempt {overload_attempt}/"
-                            f"{settings.GEMINI_QUOTA_MAX_RETRIES}) — backing off "
-                            f"{backoff:.1f}s: {e}"
+                            f"Attempt {attempt} failed: {e}. Retrying..."
                         )
-                        await asyncio.sleep(backoff)
-                        continue
-                    attempt += 1
-                    if attempt >= max_attempts:
-                        raise
-                    logger.warning(
-                        f"Attempt {attempt} failed: {e}. Retrying..."
-                    )
-                    await asyncio.sleep(delay * attempt)
+                        await asyncio.sleep(delay * attempt)
+            finally:
+                if is_trial and not verdict:
+                    _quota_circuit.release_trial(trial_stamp)
         return wrapper
     return decorator
 
@@ -986,6 +1020,14 @@ class GeminiClient:
             raise GeminiQuotaError(
                 "Gemini quota circuit open (resource_exhausted) — failing fast"
             )
+        # Half-open TRIAL bookkeeping (F04-3): the slot is a token, not a lease on the
+        # whole stream. The first chunk proves the quota accepted the request, so the
+        # breaker closes THERE — not minutes later when a long answer finishes — and a
+        # stream that ends without a verdict (disconnect before the first chunk, a
+        # non-quota error) hands the slot back instead of holding it for a cooldown.
+        is_trial = _quota_circuit.half_open
+        trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
+        verdict = False
         config = self._config(
             system_instruction=system_instruction,
             max_output_tokens=max_output_tokens,
@@ -1003,6 +1045,9 @@ class GeminiClient:
             answered = False
             async for chunk in stream:
                 usage.observe(chunk)
+                if not verdict:
+                    verdict = True
+                    _quota_circuit.record_success()
                 finish = _response_finish(chunk) or finish
                 for part in _iter_parts(chunk):
                     # part.text raises on non-text parts (finish-only) — treat as empty.
@@ -1019,12 +1064,16 @@ class GeminiClient:
                 # The answer was CUT after real text streamed. Callers must not settle it
                 # as complete (the empty-answer cut still surfaces as "empty stream result").
                 yield "finish", str(finish)
+            verdict = True
             _quota_circuit.record_success()
         except Exception as e:
             if _is_quota_error(e):
+                verdict = True
                 _quota_circuit.record_quota_error()
             raise
         finally:
+            if is_trial and not verdict:
+                _quota_circuit.release_trial(trial_stamp)
             # `finally`, not the happy path: a client disconnect closes this async
             # generator (GeneratorExit) and an error raises past it, and BOTH still
             # spent tokens. Logging only on success would hide exactly the turns
@@ -1573,6 +1622,11 @@ class GeminiClient:
         circuit breaker manually (a partial stream can't be safely @async_retry'd)."""
         if _quota_circuit.is_open():
             raise GeminiQuotaError("Gemini quota circuit open (resource_exhausted) — failing fast")
+        # See stream_text: the trial's verdict is the FIRST chunk, and a no-verdict exit
+        # releases the half-open slot (F04-3).
+        is_trial = _quota_circuit.half_open
+        trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
+        verdict = False
         config = self._config(
             system_instruction=system_instruction,
             tools=tools,
@@ -1591,6 +1645,15 @@ class GeminiClient:
         # as complete (yielded as a `("finish", reason)` event).
         answered = False
         finish: Optional[str] = None
+        # Per-turn memo of SUCCESSFUL tool results keyed on (name, canonical args). The
+        # model re-issues `get_stock_chart_data("AAPL")` in a later round often enough to
+        # matter (it cannot see that the first result was rendered as a card): the repeat
+        # used to run the handler again — another quote fetch, another 75 s ceiling — and
+        # the second identical card was deduped away. A repeat now replays the stored
+        # result: still one tool event and one function_response per CALL, so the
+        # call/response invariant holds, and only results without an `error` are kept so
+        # a transient round-1 failure is not frozen for the turn.
+        memo: Dict[Tuple[str, str], Any] = {}
         try:
             for _round in range(max_rounds):
                 fcalls: List[Any] = []
@@ -1598,6 +1661,9 @@ class GeminiClient:
                 stream = await chat.send_message_stream(message)
                 async for chunk in stream:
                     usage.observe(chunk)
+                    if not verdict:
+                        verdict = True
+                        _quota_circuit.record_success()
                     finish = _response_finish(chunk) or finish
                     for part in _iter_parts(chunk):
                         fc = getattr(part, "function_call", None)
@@ -1618,14 +1684,25 @@ class GeminiClient:
                 if not fcalls:
                     if answered and not _is_clean_finish(finish):
                         yield "finish", str(finish)
+                    verdict = True
                     _quota_circuit.record_success()
                     return
                 # Run the requested tools, emit a "tool" event each, feed responses back next round.
                 response_parts: List[Any] = []
                 for fc in fcalls:
                     args = dict(fc.args) if fc.args else {}
-                    result = await _run_tool_handler(fc.name, tool_handlers.get(fc.name), args)
-                    yield "tool", {"name": fc.name, "args": args, "result": result}
+                    memo_key = (fc.name, json.dumps(args, sort_keys=True, default=str))
+                    if memo_key in memo:
+                        result = memo[memo_key]
+                        logger.info("Gemini re-issued tool '%s' with identical args — "
+                                    "replaying this turn's result", fc.name)
+                        yield "tool", {"name": fc.name, "args": args, "result": result,
+                                       "memoized": True}
+                    else:
+                        result = await _run_tool_handler(fc.name, tool_handlers.get(fc.name), args)
+                        if not (isinstance(result, dict) and result.get("error")):
+                            memo[memo_key] = result
+                        yield "tool", {"name": fc.name, "args": args, "result": result}
                     response_parts.append(types.Part.from_function_response(
                         name=fc.name,
                         response={"result": json.dumps(truncate_tool_result(result), default=str)},
@@ -1638,6 +1715,9 @@ class GeminiClient:
             finish = None
             async for chunk in final_stream:
                 usage.observe(chunk)
+                if not verdict:
+                    verdict = True
+                    _quota_circuit.record_success()
                 finish = _response_finish(chunk) or finish
                 for part in _iter_parts(chunk):
                     if getattr(part, "function_call", None):
@@ -1652,12 +1732,16 @@ class GeminiClient:
                         yield ("thought" if is_thought else "answer"), text
             if answered and not _is_clean_finish(finish):
                 yield "finish", str(finish)
+            verdict = True
             _quota_circuit.record_success()
         except Exception as e:
             if _is_quota_error(e):
+                verdict = True
                 _quota_circuit.record_quota_error()
             raise
         finally:
+            if is_trial and not verdict:
+                _quota_circuit.release_trial(trial_stamp)
             # See stream_text: the early `return` above, a client disconnect, and an
             # exception all land here, and all three spent tokens.
             _log_gemini_usage(

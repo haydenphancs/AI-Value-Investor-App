@@ -34,6 +34,7 @@ def _sweeper() -> InsightSweeper:
     s = object.__new__(InsightSweeper)   # bypass __init__ (no DB/FMP clients)
     s._catalyst_day = None
     s._catalyst_count = 0
+    s._catalyst_scopes = set()
     return s
 
 
@@ -278,3 +279,90 @@ async def test_the_sweeper_hands_the_listed_name_to_the_grounded_search(stub):
     assert pm is not None and stub.company_name == "LTC Properties, Inc."
     await s._maybe_price_move("LTC", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.2})
     assert stub.company_name is None
+
+
+# ── F04-8: a search the breaker refused must not consume a distinct-mover slot ──
+#
+# On an open-breaker day every grounded attempt fails fast inside the process, and
+# each one still burned one of the 30 daily slots — so the afternoon's movers, when
+# the quota was back, got nothing.
+
+from app.integrations import gemini as _gem
+from app.services.price_catalyst_service import CatalystNotAttempted
+
+
+class _RefusingCatalyst(_StubCatalyst):
+    async def get_catalyst(self, ticker, change_pct, window_label, *, company_name=None):
+        self.calls += 1
+        raise CatalystNotAttempted("quota circuit open")
+
+
+@pytest.fixture
+def closed_breaker():
+    _gem._quota_circuit.reset()
+    yield
+    _gem._quota_circuit.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_search_releases_its_day_cap_unit(monkeypatch, closed_breaker):
+    st = _RefusingCatalyst(None)
+    monkeypatch.setattr(mod, "get_price_catalyst_service", lambda: st)
+    monkeypatch.setattr(mod.settings, "PRICE_CATALYST_AI_ENABLED", True)
+    s = _sweeper()
+    assert await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0}) is None
+    assert st.calls == 1
+    assert s._catalyst_count == 0, "nothing ran, nothing billed — the slot goes back"
+    assert "AAPL" not in s._catalyst_scopes, "...and the scope may try again later today"
+
+
+@pytest.mark.asyncio
+async def test_an_attempted_but_unusable_search_keeps_its_unit(monkeypatch, closed_breaker):
+    """A None return means the search RAN and answered unusably — Google billed it."""
+    st = _StubCatalyst(None)
+    monkeypatch.setattr(mod, "get_price_catalyst_service", lambda: st)
+    monkeypatch.setattr(mod.settings, "PRICE_CATALYST_AI_ENABLED", True)
+    s = _sweeper()
+    assert await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0}) is None
+    assert s._catalyst_count == 1 and "AAPL" in s._catalyst_scopes
+
+
+@pytest.mark.asyncio
+async def test_an_open_breaker_claims_no_unit_and_makes_no_call(monkeypatch, stub):
+    monkeypatch.setattr(_gem.settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(_gem.settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 3600)
+    _gem._quota_circuit.reset()
+    try:
+        _gem._quota_circuit.record_quota_error(); _gem._quota_circuit.record_quota_error()
+        assert _gem._quota_circuit.tripped
+        s = _sweeper()
+        assert await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0}) is None
+        assert stub.calls == 0
+        assert s._catalyst_count == 0
+    finally:
+        _gem._quota_circuit.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_for_a_scope_counted_earlier_today_keeps_that_unit(monkeypatch, closed_breaker):
+    """The earlier search for this scope RAN (and was billed, gemini_error → not cached); a
+    later refusal for the same scope must not hand back a unit it did not take."""
+    ran = _StubCatalyst(None)
+    monkeypatch.setattr(mod, "get_price_catalyst_service", lambda: ran)
+    monkeypatch.setattr(mod.settings, "PRICE_CATALYST_AI_ENABLED", True)
+    s = _sweeper()
+    await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0})
+    assert s._catalyst_count == 1
+    refused = _RefusingCatalyst(None)
+    monkeypatch.setattr(mod, "get_price_catalyst_service", lambda: refused)
+    await s._maybe_price_move("AAPL", _dec(TIER_EXTREME), NOW, {"changePercentage": -8.0})
+    assert s._catalyst_count == 1 and "AAPL" in s._catalyst_scopes
+
+
+def test_release_ignores_a_day_rollover_between_claim_and_release():
+    s = _sweeper()
+    assert s._claim_catalyst_budget(NOW, "AAPL")
+    next_day = NOW + timedelta(days=1)
+    assert s._claim_catalyst_budget(next_day, "MSFT")        # the ledger rolled
+    s._release_catalyst_budget(NOW, "AAPL")                  # yesterday's unit
+    assert s._catalyst_count == 1 and s._catalyst_scopes == {"MSFT"}

@@ -898,3 +898,55 @@ async def test_report_chat_falls_back_when_the_row_is_not_the_callers(resolver, 
         "TICKER_REPORT", "ORCL|warren_buffett|rid-1", None, user_id="user-42",
     )
     assert "cache text" in block and "Not Yours" not in block
+
+
+# ── S03-7: client-chosen grounding fields cannot forge or flood a log line ────
+
+import logging as _logging
+
+
+@pytest.mark.asyncio
+async def test_a_newline_in_context_type_cannot_forge_a_second_log_record(resolver, caplog):
+    forged = "TICKER\nERROR app.security: admin login from 1.2.3.4"
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        out = await resolver.resolve(forged, "AAPL", client_context="ctx")
+    assert out == "ctx"
+    records = [r for r in caplog.records if r.name == "app.services.chat_context_resolver"]
+    assert len(records) == 1
+    rendered = records[0].getMessage()
+    assert "\n" not in rendered, rendered           # `%r` escapes it: '\\n' stays one line
+    assert "\\n" in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_huge_reference_id_is_bounded_in_the_log(resolver, caplog):
+    with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+        await resolver.resolve("NOT_A_TYPE", "x" * 100_000, client_context=None)
+    rendered = [r.getMessage() for r in caplog.records
+                if r.name == "app.services.chat_context_resolver"][0]
+    assert len(rendered) < 400, len(rendered)
+    assert "…" in rendered
+
+
+@pytest.mark.asyncio
+async def test_the_timeout_and_failure_arms_are_bounded_too(resolver, caplog, monkeypatch):
+    import asyncio
+
+    async def _slow(self, ref, ctx):
+        await asyncio.sleep(3600)
+
+    async def _boom(self, ref, ctx):
+        raise RuntimeError("upstream")
+
+    from app.services import chat_context_resolver as mod
+    monkeypatch.setattr(mod, "_RESOLVE_TIMEOUT_SECONDS", 0.01)
+    huge = "y\n" * 50_000
+    for handler in (_slow, _boom):
+        monkeypatch.setattr(ChatContextResolver, "_dispatch", classmethod(lambda cls, h=handler: {"TICKER": h}))
+        caplog.clear()
+        with caplog.at_level(_logging.WARNING, logger="app.services.chat_context_resolver"):
+            assert await resolver.resolve("TICKER", huge, client_context="ctx") == "ctx"
+        rendered = [r.getMessage() for r in caplog.records
+                    if r.name == "app.services.chat_context_resolver"]
+        assert len(rendered) == 1
+        assert "\n" not in rendered[0] and len(rendered[0]) < 500

@@ -545,6 +545,13 @@ _VOLATILE_MARKET_DATA_FIELDS = (
     "price_change_24h",
     "price_change_percentage_24h",
     "market_cap",
+    # FDV is price × max (or total) supply — exactly as live as `market_cap`, and it sits
+    # beside it in the Supply column. It was missing from this tuple, so a DB hit served a
+    # 12-hour-old "Fully Diluted Val." next to a LIVE market cap: BTC +5% intraday showed
+    # FDV $1.60T under Market Cap $1.68T, an FDV below cap, which is impossible by
+    # definition (max supply ≥ circulating). Both `/coins/{id}` and `/coins/markets` carry
+    # it, so it re-hydrates like the cap does; an uncapped coin's null stays absent.
+    "fully_diluted_valuation",
     "total_volume",
     "high_24h",
     "low_24h",
@@ -554,7 +561,8 @@ _VOLATILE_MARKET_DATA_FIELDS = (
 # `/coins/markets`) versus bare floats on both. Getting this backwards is the silent-0 trap
 # `_usd` documents: a bare float handed to `_usd` hits its `not isinstance(sub, dict)` arm.
 _VOLATILE_CURRENCY_KEYED = frozenset({
-    "current_price", "market_cap", "total_volume", "high_24h", "low_24h",
+    "current_price", "market_cap", "fully_diluted_valuation", "total_volume",
+    "high_24h", "low_24h",
 })
 # Rolling price returns: derived from the live price, so exactly as stale as it. Stripped
 # from the persisted row like the fields above — but kept OUT of that tuple, because they
@@ -1111,9 +1119,14 @@ class CryptoService:
             out["market_data"] = md
         for field in _VOLATILE_MARKET_DATA_FIELDS:
             value = row.get(field)
-            if value is None:
+            if value is None or (
+                isinstance(value, float) and not math.isfinite(value)
+            ):
                 # Absent stays absent. Writing a 0 here is the exact fabrication the
-                # strip exists to prevent.
+                # strip exists to prevent — and a NaN/Inf is worse than absent: `_usd_opt`
+                # accepts any float, so it would reach `_fmt` and print "$nan" in the
+                # Supply column (or, for the header, 500 the response as an invalid JSON
+                # token). Treat it as the provider saying nothing.
                 continue
             md[field] = (
                 {"usd": value} if field in _VOLATILE_CURRENCY_KEYED else value

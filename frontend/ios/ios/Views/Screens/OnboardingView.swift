@@ -61,7 +61,10 @@ struct OnboardingView: View {
         .sheet(isPresented: $viewModel.showSearch) {
             // Reuses the existing company search rather than building a second one.
             TargetSearchSheet { result in
-                viewModel.addFromSearch(symbol: result.ticker, name: result.companyName)
+                // Declare the class at the call site: the sheet is stocks-only, and an
+                // undeclared LTC/BCH/ATOM/LINK/SOL is stored as the COIN by the backend.
+                viewModel.addFromSearch(symbol: result.ticker, name: result.companyName,
+                                        assetType: result.type ?? "stock")
             }
         }
     }

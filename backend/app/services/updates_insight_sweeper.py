@@ -579,6 +579,24 @@ class InsightSweeper:
         self._catalyst_scopes.add(scope)
         return True
 
+    def _release_catalyst_budget(self, now: datetime, scope: str) -> None:
+        """Hand back the unit `_claim_catalyst_budget` took for ``scope`` THIS call, when
+        the search provably did not run (`CatalystNotAttempted`: the quota breaker's
+        fail-fast, a 429 the ladder gave up on, the kill switch).
+
+        Without this, an open-breaker day burned the 30 distinct-mover budget on searches
+        that never left the process, and the movers of the afternoon — when the quota was
+        back — got no catalyst (F04-8). Only a unit from TODAY's ledger is returned (a day
+        rollover between claim and release must not decrement a fresh day), and only for a
+        scope still in the set (a scope counted earlier by a search that RAN keeps its
+        unit: that one was billed).
+        """
+        day = now.astimezone(ET).date()
+        if self._catalyst_day != day or scope not in self._catalyst_scopes:
+            return
+        self._catalyst_scopes.discard(scope)
+        self._catalyst_count = max(0, self._catalyst_count - 1)
+
     def _claim_enrich_budget(self, now: datetime) -> bool:
         """Take one unit of today's proactive-enrichment BATCH-CALL budget
         (in-process ET-day counter). Returns False once ``_ENRICH_DAILY_CAP`` batch
@@ -672,6 +690,19 @@ class InsightSweeper:
             return None
         if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
             return None
+        # Don't CLAIM a distinct-mover unit the search provably cannot spend: with the
+        # Gemini quota breaker open every grounded attempt fails fast before any HTTP
+        # (mirrors `chat_market_tools._maybe_web_catalyst`).
+        from app.integrations.gemini import _quota_circuit
+        if _quota_circuit.tripped:
+            logger.info("Price-move catalyst for %s skipped — Gemini quota breaker open", scope)
+            return None
+        # Whether the claim below takes a NEW unit (vs re-admitting a scope counted
+        # earlier today); decided before the claim, on the day it will be counted in.
+        fresh_unit = (
+            self._catalyst_day != now.astimezone(ET).date()
+            or scope not in self._catalyst_scopes
+        )
         if not self._claim_catalyst_budget(now, scope):
             logger.info(
                 "Price-move catalyst day cap (%d distinct movers) reached — skipping %s",
@@ -679,6 +710,7 @@ class InsightSweeper:
             )
             return None
 
+        from app.services.price_catalyst_service import CatalystNotAttempted
         try:
             grounded = await get_price_catalyst_service().get_catalyst(
                 scope, cp, "today",
@@ -686,6 +718,17 @@ class InsightSweeper:
                 # grounded search on the security rather than a same-ticker coin.
                 company_name=(quote or {}).get("name"),
             )
+        except CatalystNotAttempted as e:
+            # Nothing ran and nothing was billed: the unit goes back so a later mover
+            # can use it. A None return below is the opposite case (the search RAN and
+            # answered unusably — Google billed it) and keeps its unit.
+            if fresh_unit:
+                self._release_catalyst_budget(now, scope)
+            logger.info(
+                "Price-move catalyst for %s not attempted (%s) — day-cap unit released",
+                scope, e,
+            )
+            return None
         except Exception as e:
             logger.warning(
                 "Price-move catalyst failed for %s (%s: %s)",

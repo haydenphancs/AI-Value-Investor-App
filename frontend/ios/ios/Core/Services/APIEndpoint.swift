@@ -1096,6 +1096,18 @@ enum APIEndpoint: Sendable {
     /// Exhaustiveness makes that impossible: a new endpoint does not compile until someone decides
     /// which of the three answers applies. Pair any change here with the backend dependency on the
     /// matching route — `tests/test_ios_auth_policy_parity.py` asserts the two agree.
+    /// The address a per-EMAIL rate limit applies to on this route, so `APIClient` can attach
+    /// the install's lockout exemption (`X-Device-Token`, see `DeviceProofStore`). Exactly the
+    /// three credential routes the backend limits per email; nil everywhere else.
+    nonisolated var deviceProofEmail: String? {
+        switch self {
+        case .signIn(let email, _), .forgotPassword(let email), .resetPassword(let email, _, _):
+            return email
+        default:
+            return nil
+        }
+    }
+
     nonisolated var authPolicy: AuthPolicy {
         switch self {
 

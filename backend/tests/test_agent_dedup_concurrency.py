@@ -29,6 +29,7 @@ import copy
 import pytest
 
 import app.services.research_service as svc
+svc_mod = svc
 
 _run_agent_deduped = svc._run_agent_deduped
 
@@ -438,3 +439,149 @@ async def test_direct_path_routes_through_the_semaphore():
         "the direct path must use its OWN dedup namespace — sharing the deep "
         "path's would hand /research/generate callers a shallow report"
     )
+
+
+# ── F08-3 / F21-7: a leader failure with NO follower must not become a second
+#    Sentry event ("Future exception was never retrieved") ─────────────────────
+#
+# `fut` stores the leader's exception for followers. When none ever attached, the
+# future was garbage-collected unread and asyncio logged the traceback at ERROR —
+# one duplicate event per abandoned / timed-out / failed leader, on top of the
+# caller's own logger.error. `fut.exception()` marks it retrieved; followers still
+# receive it through `asyncio.shield(fut)`.
+
+import gc
+
+
+def _capture_loop_errors(loop):
+    seen: list = []
+    loop.set_exception_handler(lambda _l, ctx: seen.append(ctx))
+    return seen
+
+
+def _never_retrieved(seen) -> list:
+    return [c for c in seen if "never retrieved" in str(c.get("message", ""))]
+
+
+@pytest.mark.asyncio
+async def test_harness_detects_an_unretrieved_future():
+    """Positive control — without it the tests below could pass vacuously."""
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        fut = loop.create_future()
+        fut.set_exception(RuntimeError("bare"))
+        del fut
+        gc.collect()
+        assert _never_retrieved(seen)
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_a_followerless_leader_failure_is_not_reported_as_never_retrieved():
+    _reset(1)
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        async def run_callable():
+            raise RuntimeError("agent blew up")
+
+        try:                                      # catch WITHOUT binding: a bound name
+            await _run_agent_deduped("IBM", "warren_buffett", run_callable)
+        except RuntimeError:                      # keeps the frame (and fut) alive
+            pass
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+        assert svc._AGENT_INFLIGHT == {}
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_a_followerless_cancelled_leader_is_not_reported_as_never_retrieved():
+    _reset(1)
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        gate = asyncio.Event()
+
+        async def run_callable():
+            await gate.wait()
+
+        leader = asyncio.create_task(_run_agent_deduped("IBM", "warren_buffett", run_callable))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(leader, timeout=2)
+        del leader
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_marking_retrieved_does_not_hide_the_failure_from_a_follower():
+    _reset(1)
+    gate = asyncio.Event()
+
+    class Boom(Exception):
+        pass
+
+    async def run_callable():
+        await gate.wait()
+        raise Boom("agent blew up")
+
+    leader = asyncio.create_task(_run_agent_deduped("IBM", "cathie_wood", run_callable))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    follower = asyncio.create_task(_run_agent_deduped("IBM", "cathie_wood", run_callable))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(Boom):
+        await asyncio.wait_for(leader, timeout=2)
+    with pytest.raises(Boom):
+        await asyncio.wait_for(follower, timeout=2)
+
+
+# ── F08-7: a queued report says so ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_queued_report_reads_waiting_for_a_slot_before_the_run(monkeypatch):
+    """Between "Checking shared cache..." and the agent's first tick a row used to keep
+    the cache line — minutes, under a deep queue."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.services.research_service import ResearchService
+
+    steps: list = []
+    svc = object.__new__(ResearchService)
+    svc.supabase = MagicMock()
+
+    async def _status(report_id, status, progress, current_step=None, error_message=None):
+        steps.append((progress, current_step))
+    monkeypatch.setattr(svc, "_update_status_async", _status)
+    monkeypatch.setattr(svc, "_lookup_shared_cache", AsyncMock(return_value=None))
+    monkeypatch.setattr(svc, "_mark_processing_started", lambda rid: None)
+    monkeypatch.setattr(svc, "_is_still_active", lambda rid: True)
+    svc.fmp = svc.gemini = None
+
+    class _Agent:
+        def __init__(self, **k): pass
+        async def run(self, ticker, progress_cb):
+            await progress_cb(5, "Gathering market data...")
+            raise RuntimeError("stop here")
+    monkeypatch.setattr(svc_mod, "ResearchAgent", _Agent)
+    _reset(1)
+
+    with pytest.raises(RuntimeError):
+        await svc.generate_report("rid", "AAPL", "warren_buffett", "u1")
+    labels = [st for _, st in steps]
+    i_cache = labels.index("Checking shared cache...")
+    i_wait = labels.index("Waiting for an analysis slot...")
+    i_run = labels.index("Gathering market data...")
+    assert i_cache < i_wait < i_run, labels
+    assert all(p >= 5 for p, st in steps if st in ("Waiting for an analysis slot...",)), "never regress the bar"

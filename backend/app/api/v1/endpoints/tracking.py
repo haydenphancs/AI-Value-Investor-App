@@ -21,6 +21,7 @@ Routes:
 from fastapi import APIRouter, Depends
 from supabase import Client
 from typing import List, Optional
+import asyncio
 import logging
 
 from app.api.error_response import (
@@ -28,8 +29,9 @@ from app.api.error_response import (
     error_response_from_exception,
     make_error_response,
 )
+from app.config import settings
 from app.database import get_supabase
-from app.dependencies import get_watchlist_identity
+from app.dependencies import StandardRateLimit, get_watchlist_identity
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
     TrackingFeedResponse,
@@ -42,7 +44,7 @@ from app.schemas.tracking import (
 from app.services._classification_common import classification_from_profile
 from app.services.asset_class import canonical_stored_symbol
 from app.services.portfolio_insights_service import PortfolioInsightsService
-from app.services.tracking_service import TrackingService
+from app.services.tracking_service import TrackingService, watchlist_is_full
 from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.price_service import price_source
 from app.utils.supabase_async import sb_exec
@@ -58,6 +60,10 @@ router = APIRouter()
 @router.get("/assets", response_model=TrackingFeedResponse)
 async def get_tracking_assets(
     user: dict = Depends(get_watchlist_identity),
+    # Per-caller window on the most expensive read in the tab: one FMP call per watchlist
+    # ticker for the sparkline and another for the insider alert on every cache miss.
+    # iOS polls this at 2/min; 60/min is a scripted loop, not a user.
+    _rate: None = StandardRateLimit,
 ):
     """Get enriched watchlist with real-time prices, sparklines, and alerts.
 
@@ -153,6 +159,20 @@ async def add_holding(
         logger.info(
             "[Tracking] normalised %s -> %s (asset_type=%s) so the row is unambiguous",
             request.ticker, ticker, request.asset_type,
+        )
+
+    # Row cap, the same check `POST /watchlist` runs: this upserts the SAME table, so a
+    # cap on that route alone is bypassable here. Counted excluding this ticker, so
+    # editing a holding that already exists is never refused. Before the FMP calls.
+    if (await asyncio.to_thread(watchlist_is_full, supabase, user["id"], ticker)):
+        cap = int(settings.WATCHLIST_MAX_ITEMS or 0)
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"watchlist for user {user['id']} is at the {cap}-row cap; refused {ticker}",
+            user_message=(
+                f"Your watchlist is full ({cap} tickers). Remove one to add another."
+            ),
+            details={"max": cap},
         )
 
     # Enrich with FMP profile + current price. The profile also seeds the

@@ -1,7 +1,7 @@
 """Chat schemas matching DB chat_sessions + chat_messages tables."""
 
 from enum import Enum
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Any, Dict
 
 from app.config import settings
@@ -32,17 +32,34 @@ class ChatContextType(str, Enum):
 
 # ── Request Schemas ─────────────────────────────────────────────────
 
+# Hard ceilings on the two client-chosen grounding fields. Legitimate values are short
+# (enum names ≤ 19 chars; the longest reference is "TICKER|persona|<uuid>" ≈ 70) and both
+# reach log lines and Supabase filters, so an unbounded value is a log-flood / forged-line
+# vector, not a feature. A Pydantic 422 — the same non-contract body the message/context
+# hard maxima below already accept for absurd payloads.
+CONTEXT_TYPE_MAX_LENGTH = 64
+REFERENCE_ID_MAX_LENGTH = 256
+
+
 class CreateChatSessionRequest(BaseModel):
     stock_id: Optional[str] = None  # ticker symbol, optional (back-compat)
-    context_type: Optional[str] = None  # ChatContextType value (screen the user asks from)
-    reference_id: Optional[str] = None  # e.g. ticker, "TICKER|persona", article slug, book order
+    context_type: Optional[str] = Field(  # ChatContextType value (screen the user asks from)
+        default=None, max_length=CONTEXT_TYPE_MAX_LENGTH,
+    )
+    reference_id: Optional[str] = Field(  # e.g. ticker, "TICKER|persona", article slug, book order
+        default=None, max_length=REFERENCE_ID_MAX_LENGTH,
+    )
 
 
 class SendChatMessageRequest(BaseModel):
     message: str
     context: Optional[str] = None  # legacy/BOOK client context string (title/author/core)
-    context_type: Optional[str] = None  # per-message override of the session's context type
-    reference_id: Optional[str] = None  # per-message override of the session's reference id
+    context_type: Optional[str] = Field(  # per-message override of the session's context type
+        default=None, max_length=CONTEXT_TYPE_MAX_LENGTH,
+    )
+    reference_id: Optional[str] = Field(  # per-message override of the session's reference id
+        default=None, max_length=REFERENCE_ID_MAX_LENGTH,
+    )
 
     # Structural hard ceilings (a cheap Pydantic 422 for absurd payloads BEFORE any
     # work). The friendly, contract-shaped 400 (CHAT_MESSAGE_TOO_LONG) is enforced in

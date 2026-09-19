@@ -375,3 +375,110 @@ def test_the_prompt_subject_is_bounded_and_whitespace_folded():
     """A 5,000-char "name" from a hostile profile row must not become a 5,000-char search."""
     subj = pcs._prompt_subject("LTC", "LTC   Properties,\n Inc. " + "x" * 5000)
     assert len(subj) < 120 and "LTC Properties, Inc." in subj and "\n" not in subj
+
+
+# ── F04-7: a joiner-less refusal must not become a Sentry event ──────────────
+#
+# `get_catalyst` stores the refusal / error on the shared `_inflight` future for
+# joiners. With none attached the future was garbage-collected unread and asyncio
+# logged "Future exception was never retrieved" at ERROR — one event per refused
+# search, i.e. one per sweeper mover on an open-breaker day.
+
+import asyncio
+import gc
+
+
+def _capture_loop_errors(loop):
+    seen: list = []
+    loop.set_exception_handler(lambda _l, ctx: seen.append(ctx))
+    return seen
+
+
+def _never_retrieved(seen) -> list:
+    return [c for c in seen if "never retrieved" in str(c.get("message", ""))]
+
+
+@pytest.mark.asyncio
+async def test_harness_detects_an_unretrieved_future():
+    """Positive control — without it the tests below could pass vacuously."""
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        fut = loop.create_future()
+        fut.set_exception(RuntimeError("bare"))
+        del fut
+        gc.collect()
+        assert _never_retrieved(seen)
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_a_joinerless_refusal_is_not_reported_as_never_retrieved():
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        try:                                      # catch WITHOUT binding the exception
+            await _svc(_QuotaGemini()).get_catalyst("AAPL", 9.0, "today")
+        except pcs.CatalystNotAttempted:
+            pass
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+        assert pcs._inflight == {}
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_a_joinerless_unhandled_error_is_not_reported_as_never_retrieved(monkeypatch):
+    class _Explodes(_FakeGemini):
+        async def generate_grounded_research(self, *a, **k):
+            raise ValueError("unexpected shape")
+    svc = _svc(_Explodes())
+
+    async def _boom(*a, **k):
+        raise ValueError("unexpected shape")
+    monkeypatch.setattr(svc, "_do_grounded", _boom)
+    # pytest's log-capture handlers keep the `logger.exception` record — and with it the
+    # traceback → frame → future chain — alive for the whole test, which would make this
+    # assertion pass for the wrong reason (mutation-tested: without this line the guard
+    # is vacuous). Production handlers format to a string and drop the record.
+    monkeypatch.setattr(pcs.logger, "propagate", False)
+
+    loop = asyncio.get_running_loop()
+    seen = _capture_loop_errors(loop)
+    try:
+        assert await svc.get_catalyst("AAPL", 9.0, "today") is None
+        gc.collect()
+        assert not _never_retrieved(seen), seen
+    finally:
+        loop.set_exception_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_marking_retrieved_still_hands_the_refusal_to_a_joiner():
+    gate = asyncio.Event()
+
+    class _HeldQuota(_QuotaGemini):
+        """Holds the leader in flight until the joiner has attached. (The service
+        registers `_inflight` only after its DB read, so two callers whose reads land
+        far enough apart both lead — the accepted residual race; this test pins the
+        JOIN path, not that race.)"""
+        async def generate_grounded_research(self, *a, **k):
+            await gate.wait()
+            return await super().generate_grounded_research(*a, **k)
+    fake = _HeldQuota()
+    svc = _svc(fake)
+    leader = asyncio.create_task(svc.get_catalyst("AAPL", 9.0, "today"))
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+        if pcs._inflight:
+            break
+    assert pcs._inflight, "leader registered"
+    joiner = asyncio.create_task(svc.get_catalyst("AAPL", 9.0, "today"))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(leader, joiner, return_exceptions=True)
+    assert all(isinstance(r, pcs.CatalystNotAttempted) for r in results), results
+    assert fake.calls == 1, "the joiner shared the leader's refusal, it did not re-run it"

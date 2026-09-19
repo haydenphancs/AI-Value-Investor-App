@@ -396,3 +396,74 @@ async def test_delete_account_would_fail_on_the_demoted_client(_no_purges):
     res = await _delete_account(demoted, demoted)
     assert res.status_code == 500
     assert json.loads(res.body)["error_code"] == "ACCOUNT_DELETE_INCOMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# F11-6: the dict write cannot un-demote a postgrest client REBUILT under a user JWT
+# ---------------------------------------------------------------------------
+#
+# SIGNED_IN nulls `_postgrest`; the next `.table()` rebuilds it from the (user-JWT) dict
+# into an httpx session that snapshots the headers. Writing the dict afterwards repaired
+# `auth.admin.*` but left every subsequent query on the shared client carrying the user's
+# JWT until restart — a process-wide 42501 since migration 163.
+
+
+def _postgrest_bearer(client) -> str:
+    return client.postgrest.session.headers["Authorization"]
+
+
+def test_a_postgrest_client_rebuilt_under_a_user_jwt_is_restored_on_re_resolution():
+    service = db.get_supabase()
+    _sign_in_on(service)                       # the header rewrite + `_postgrest = None`
+    service.table("users")                     # ...and the rebuild that snapshots USER_A_JWT
+    assert _postgrest_bearer(service) == _USER_JWT, "demoted, as the SDK does it"
+
+    healed = db.get_supabase()
+    assert healed is service
+    assert healed.options.headers["Authorization"] == _SERVICE
+    assert _postgrest_bearer(healed) == _SERVICE, "the rebuilt session is re-stamped, not just the dict"
+
+
+def test_the_repair_keeps_the_http1_postgrest_session(monkeypatch):
+    """Nulling `_postgrest` would rebuild an http2=True client and re-arm the h2
+    stale-connection errors `_force_http1_on_postgrest` exists to prevent. The repair
+    re-stamps the header on the SAME session instead."""
+    service = db.get_supabase()
+    _sign_in_on(service)
+    service.table("users")
+    session_before = service.postgrest.session
+    db.get_supabase()
+    assert service.postgrest.session is session_before
+    assert _postgrest_bearer(service) == _SERVICE
+
+
+def test_a_query_built_after_the_repair_goes_on_the_wire_as_service_role():
+    """`execute()` calls `session.request(..., headers=builder.headers)` and httpx merges
+    those over the SESSION headers — so the wire bearer is the session's, and that is the
+    layer the assertion has to sit on."""
+    service = db.get_supabase()
+    _sign_in_on(service)
+    service.table("users")
+    builder = db.get_supabase().table("users").select("id")
+    request = service.postgrest.session.build_request(
+        builder.http_method, builder.path, params=builder.params, headers=builder.headers,
+    )
+    assert request.headers["Authorization"] == _SERVICE
+
+
+def test_a_storage_client_rebuilt_under_a_user_jwt_is_restored_too():
+    service = db.get_supabase()
+    _sign_in_on(service)
+    service.storage                            # rebuild under USER_A_JWT
+    assert service.storage.session.headers["Authorization"] == _USER_JWT
+    db.get_supabase()
+    assert service.storage.session.headers["Authorization"] == _SERVICE
+
+
+def test_an_undemoted_client_is_left_alone(caplog):
+    """The common path stays a dict write: no warning, no header churn."""
+    service = db.get_supabase()
+    service.table("users")
+    with caplog.at_level("WARNING", logger="app.database"):
+        db.get_supabase()
+    assert not [r for r in caplog.records if "non-service-role bearer" in r.getMessage()]

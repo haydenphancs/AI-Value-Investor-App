@@ -680,6 +680,41 @@ async def test_lookup_flags_a_widget_older_than_the_quote_cadence(monkeypatch, a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ticker,phase,flag,stale", [
+    ("NVDA", "afterhours", True, True),     # warmed at 15:55, replayed at 16:05: closed now
+    ("NVDA", "regular", False, True),       # warmed pre-open, replayed at 09:35: open now
+    ("NVDA", "regular", True, False),
+    ("NVDA", "afterhours", False, False),
+    ("BTCUSD", "afterhours", True, False),  # 24/7: stamped open unconditionally, never a mismatch
+    ("^GSPC", "afterhours", True, True),    # an index has a session
+])
+async def test_lookup_flags_a_widget_whose_session_flag_no_longer_matches(monkeypatch, ticker, phase, flag, stale):
+    """F13-10: the green Live dot IS `is_market_open`. A card under the quote cadence by age
+    still carried a warm-time `True` into a closed session (and a pre-open `False` into an
+    open one), so the doc's 'never sits under a green Live dot' was not what shipped."""
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WIDGET_MAX_AGE_SECONDS", 900)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: phase)
+    widget = {"widget_type": "stock_chart", "ticker": ticker, "current_price": 100.0,
+              "is_market_open": flag}
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": widget, "suggestions": [],
+                             "created_at": _ago(600)})
+    out = await warm.lookup("What is a P/E ratio?")
+    assert out["widget_stale"] is stale
+
+
+@pytest.mark.asyncio
+async def test_a_widget_without_a_session_flag_is_judged_by_age_alone(monkeypatch):
+    monkeypatch.setattr(warm.settings, "CHAT_STARTER_WIDGET_MAX_AGE_SECONDS", 900)
+    monkeypatch.setattr(warm, "_today_et", lambda: "2026-09-14")
+    monkeypatch.setattr(warm, "session_phase", lambda now=None: "afterhours")
+    widget = {"widget_type": "stock_chart", "ticker": "NVDA", "current_price": 100.0}
+    _lookup_db(monkeypatch, {"answer": "a" * 200, "widget": widget, "suggestions": [],
+                             "created_at": _ago(600)})
+    assert (await warm.lookup("What is a P/E ratio?"))["widget_stale"] is False
+
+
+@pytest.mark.asyncio
 async def test_lookup_treats_an_unreadable_age_as_a_stale_widget_but_a_fresh_answer(monkeypatch):
     """No stamp = cannot prove the card is fresh → refresh it; the ANSWER keeps the
     once-a-day behaviour (an unreadable stamp must not force every tap live)."""

@@ -147,7 +147,9 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "get_stock_chart_data": (
         "Fetch the current quote + 30-day price history for a ticker. Call when the user asks "
         "about a specific stock's price, performance, chart, or how it's trading — including a "
-        "DIFFERENT ticker than the current screen (e.g. a comparison)."
+        "DIFFERENT ticker than the current screen (e.g. a comparison). The result is rendered "
+        "to the user as an interactive price-chart card beneath your answer: never say charts "
+        "are unavailable, and do not call it twice for the same ticker in one turn."
     ),
     "get_analyst_analysis": (
         "Fetch Wall Street analyst ratings, consensus, price targets, and recent "
@@ -189,7 +191,11 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
 }
 
 TOOL_CAPABILITIES: Dict[str, str] = {
-    "get_stock_chart_data": "get_stock_chart_data for a ticker's live quote and 30-day price history",
+    "get_stock_chart_data": (
+        "get_stock_chart_data for a ticker's live quote and 30-day price history — its result "
+        "is rendered to the user as an interactive price-chart card beneath your answer, so "
+        "never say charts are unavailable; describe what the card shows"
+    ),
     "get_analyst_analysis": "get_analyst_analysis for Wall Street ratings, consensus and price targets",
     "get_sentiment_analysis": "get_sentiment_analysis for social and news mood on a ticker",
     "get_ticker_news": "get_ticker_news for recent headlines about a company or coin",
@@ -315,8 +321,8 @@ def capability_block(allowed: frozenset) -> str:
         "question gets one of exactly three answers: (a) the actual cause, when a tool "
         "gives you one; (b) that the move is ordinary — say it moved within its normal "
         "range, the everyday up-and-down, and give the number; or (c) that the move is "
-        "genuinely large but no single catalyst is visible in today's news — say that "
-        "plainly and then give the context you DO have. "
+        "genuinely large but no single catalyst is visible in that session's news — say "
+        "that plainly, name the session, and then give the context you DO have. "
     )
     if has_why:
         text += (
@@ -344,7 +350,7 @@ def _is_profiled_index(symbol: str) -> bool:
     """True only for an index `index_service` has a profile for (`^GSPC`, `^IXIC`, `^DJI`).
 
     Lazy import: this module is imported by the Gemini declaration path and must not pull
-    the index service (and its Supabase client) in at module load.
+    the index service (and its datastore client) in at module load.
     """
     from app.services.index_service import _INDEX_PROFILES
 
@@ -355,12 +361,15 @@ def build_chat_tool_handlers(
     svc: Any,
     screen_symbol: Optional[str] = None,
     screen_asset_type: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]]:
     """Map each tool name → async handler delegating to the ChatService fetch methods.
 
     `screen_symbol` is the session's `stock_id` and `screen_asset_type` the class the screen
     resolved it as (STOCK / ETF / CRYPTO / …). Together they let a handler trust the screen
-    over the ticker's spelling — see `_resolve` below.
+    over the ticker's spelling — see `_resolve` below. `user_id` reaches the one PAID tool
+    (`explain_price_move`) so its web-search spend is metered per account as well as
+    globally; every other handler is free and ignores it.
     """
     screen = (screen_symbol or "").strip().upper()
     # Every NON-crypto screen earns the exemption — STOCK, and also ETF / INDEX / COMMODITY,
@@ -482,8 +491,8 @@ def build_chat_tool_handlers(
         if sym is None:
             return _invalid(args)
         if on_equity:
-            return await svc._fetch_price_move_data(sym, is_crypto=False)
-        return await svc._fetch_price_move_data(sym)
+            return await svc._fetch_price_move_data(sym, is_crypto=False, user_id=user_id)
+        return await svc._fetch_price_move_data(sym, user_id=user_id)
 
     async def _snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
         return await svc._fetch_market_snapshot_data()

@@ -2277,8 +2277,12 @@ async def test_etf_tier2_never_persists_a_price(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_etf_a_priceless_build_is_not_cached(monkeypatch):
-    """A failed quote must not pin "$0.00" for the whole TTL."""
+async def test_etf_a_priceless_build_recovers_the_last_close_and_never_ships_zero(monkeypatch):
+    """A failed quote must not ship "$0.00" with HTTP 200 (and the 30-s slice then merged
+    that zero over a live price). The build now recovers the last settled close from the
+    history it already holds — the same fallback index/commodity/`get_etf_core` use — with
+    the day's move computed from the two newest closes, or refuses with the typed upstream
+    error when there is no history at all. Until 2026-09-17 this test PINNED the zero."""
     from app.services import etf_service as M
 
     svc, calls = _etf_svc(monkeypatch)
@@ -2289,12 +2293,52 @@ async def test_etf_a_priceless_build_is_not_cached(monkeypatch):
 
     svc.fmp.get_stock_price_quote = dead_quote
     resp = await svc.get_etf_detail("SPY", chart_range="3M")
-    assert resp.current_price == 0
-    assert not [k for k in M._cache if k.startswith("SPY_3M")], (
-        "a priceless build was cached"
-    )
-    # ...but the sections it DID get are still cached, so the retry is cheap.
+    rows = [r for r in await svc.fmp.get_historical_prices("SPY", None, None) if r.get("close")]
+    last, prev = rows[-1]["close"], rows[-2]["close"]
+    assert resp.current_price == pytest.approx(last) and resp.current_price > 0
+    assert resp.change_known is True
+    assert resp.price_change == pytest.approx(round(last - prev, 6))
+    # A recovered close is a real price, so the (30 s) detail slice may cache it; the
+    # sections it DID get are cached too, so the retry is cheap.
     assert f"etf:fund:SPY" in M._cache
+
+
+@pytest.mark.asyncio
+async def test_etf_no_quote_and_no_history_is_a_typed_upstream_error_not_a_zero(monkeypatch):
+    from app.integrations.fmp import FMPUnavailableException
+
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    async def dead_quote(_sym):
+        raise RuntimeError("FMP 429")
+
+    async def no_history(*a, **k):
+        return []
+
+    svc.fmp.get_stock_price_quote = dead_quote
+    svc.fmp.get_historical_prices = no_history
+    with pytest.raises(FMPUnavailableException):
+        await svc.get_etf_detail("SPY", chart_range="3M")
+
+
+@pytest.mark.asyncio
+async def test_etf_a_single_close_is_a_price_but_not_a_days_move(monkeypatch):
+    svc, calls = _etf_svc(monkeypatch)
+    _isolate_etf_tier2(monkeypatch)
+
+    async def dead_quote(_sym):
+        raise RuntimeError("FMP 429")
+
+    async def one_row(*a, **k):
+        return [{"date": "2026-09-16", "close": 430.49, "open": 430, "high": 431,
+                 "low": 429, "volume": 10}]
+
+    svc.fmp.get_stock_price_quote = dead_quote
+    svc.fmp.get_historical_prices = one_row
+    resp = await svc.get_etf_detail("SPY", chart_range="3M")
+    assert resp.current_price == pytest.approx(430.49)
+    assert resp.change_known is False, "one close is not a day's move — iOS must render —"
 
 
 @pytest.mark.asyncio

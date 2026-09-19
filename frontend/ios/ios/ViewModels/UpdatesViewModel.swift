@@ -268,7 +268,15 @@ final class UpdatesViewModel: ObservableObject {
 
     /// Add a ticker to the real watchlist, then refresh the pills. Previously
     /// this only appended a local row, so the tab vanished on next launch.
-    func addTicker(_ symbol: String) async {
+    ///
+    /// `assetType` is the search result's wire class and is REQUIRED, not defaulted:
+    /// `POST /watchlist` resolves an undeclared bare coin symbol toward the coin by
+    /// design (`canonical_stored_symbol("LTC", nil)` → "LTCUSD"), so sending nil for the
+    /// equity the user tapped stored LTC Properties as Litecoin, Banco de Chile (BCH) as
+    /// Bitcoin Cash, Atomera (ATOM) as Cosmos, Interlink (LINK) as Chainlink and Emeren
+    /// (SOL) as Solana — the strip and Tracking then showed the coin, and the REIT they
+    /// chose was tracked nowhere.
+    func addTicker(_ symbol: String, assetType: String?) async {
         let ticker = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !ticker.isEmpty else { return }
         guard !filterTabs.contains(where: { $0.scope == ticker }) else {
@@ -276,7 +284,7 @@ final class UpdatesViewModel: ObservableObject {
             return
         }
         do {
-            try await apiClient.request(endpoint: .addToWatchlist(stockId: ticker, assetType: nil))
+            try await apiClient.request(endpoint: .addToWatchlist(stockId: ticker, assetType: assetType))
             print("✅ UpdatesVM: Added \(ticker) to watchlist")
             await loadTabs()
         } catch {

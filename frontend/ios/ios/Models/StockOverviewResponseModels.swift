@@ -22,6 +22,11 @@ struct StockOverviewResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `false` when neither the quote nor the profile carried a day change (a
+    /// halted/OTC listing's `/stable/profile` answers `change: null`): `priceChange`
+    /// / `priceChangePercent` are then the 0.0 wire placeholder, NOT a flat day.
+    /// Optional so a payload from an older backend still decodes (`?? true`).
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
     let keyStatistics: [KeyStatisticItemDTO]
@@ -39,6 +44,7 @@ struct StockOverviewResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
         case keyStatistics = "key_statistics"
@@ -74,6 +80,8 @@ struct StockOverviewCoreResponseDTO: Decodable {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// See `StockOverviewResponseDTO.changeKnown`.
+    let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
 
@@ -83,6 +91,7 @@ struct StockOverviewCoreResponseDTO: Decodable {
         case currentPrice = "current_price"
         case priceChange = "price_change"
         case priceChangePercent = "price_change_percent"
+        case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
     }
@@ -96,6 +105,7 @@ struct StockOverviewCoreResponseDTO: Decodable {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: marketStatus.resolvedMarketStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close,
@@ -139,19 +149,35 @@ struct TickerCoreData {
     let currentPrice: Double
     let priceChange: Double
     let priceChangePercent: Double
+    /// `false` = the backend had no day change for this listing (`change_known`), so
+    /// `priceChange` is a 0.0 placeholder. Same rule as `ETFDetailData.changeKnown`:
+    /// never a direction, never a sign, "—" for the text. The equity screen was the
+    /// fifth asset class and the only one that painted the placeholder as
+    /// "▲ +0.00 (+0.00%)" in green with a bullish flash. Pass it to
+    /// `TickerPriceHeader(changeKnown:)` — the header hides the arrow and the flash.
+    var changeKnown: Bool = true
     let marketStatus: MarketStatus
     /// `var` so the ViewModel can keep the fast-core chart in sync with the selected
     /// range pill while only coreData is shown (the pill is interactive before the
     /// full overview lands). See TickerDetailViewModel.fetchChartData.
     var chartPricePoints: [StockPricePoint]
 
-    var isPositive: Bool { priceChange >= 0 }
+    var isPositive: Bool { changeKnown && priceChange >= 0 }
+    /// Chart tint with an unknown change: from the series, never the placeholder.
+    var chartIsPositive: Bool {
+        if changeKnown { return isPositive }
+        guard let first = chartPricePoints.first?.close, let last = chartPricePoints.last?.close,
+              first.isFinite, last.isFinite else { return true }
+        return last >= first
+    }
     var formattedPrice: String { String(format: "$%.2f", currentPrice) }
     var formattedChange: String {
+        guard changeKnown else { return "—" }
         let sign = priceChange >= 0 ? "+" : ""
         return "\(sign)\(String(format: "%.2f", priceChange))"
     }
     var formattedChangePercent: String {
+        guard changeKnown else { return "" }
         let sign = priceChangePercent >= 0 ? "+" : ""
         return "(\(sign)\(String(format: "%.2f", priceChangePercent))%)"
     }
@@ -359,6 +385,7 @@ extension StockOverviewResponseDTO {
             currentPrice: currentPrice,
             priceChange: priceChange,
             priceChangePercent: priceChangePercent,
+            changeKnown: changeKnown ?? true,
             marketStatus: mktStatus,
             chartPricePoints: chartData.map {
                 StockPricePoint(

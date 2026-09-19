@@ -251,21 +251,28 @@ class ScheduledJobResult:
 
 
 def claim_scheduled(
-    job: str, *, timezone_name: str = "UTC", now: Optional[datetime] = None
+    job: str, *, timezone_name: str = "UTC", now: Optional[datetime] = None,
+    stale_seconds: Optional[int] = None,
 ) -> bool:
     """Try to take the daily claim for `job`. True = it's yours.
 
     Returns False on ANY error, for the same fail-closed reason as `claim`: a skipped
     wake is cheap, a duplicated sweep is not.
+
+    `stale_seconds` overrides `NOTIFICATION_JOB_STALE_SECONDS` (900 s) for a job whose
+    single run is LONGER than that: Railway overlaps the old and new instance on a deploy,
+    and a 15-minute window would let the new one steal a phase the old one is still
+    running (the quarterly moat recompute is 60-90 min).
     """
     stamp = (now or datetime.now(timezone.utc)).isoformat()
+    stale = settings.NOTIFICATION_JOB_STALE_SECONDS if stale_seconds is None else int(stale_seconds)
     try:
         result = _sb().rpc(
             "claim_scheduled_job",
             {
                 "p_job": job,
                 "p_now": stamp,
-                "p_stale_seconds": settings.NOTIFICATION_JOB_STALE_SECONDS,
+                "p_stale_seconds": stale,
                 "p_timezone": timezone_name,
             },
         ).execute()
@@ -313,9 +320,34 @@ def finish_scheduled(
         )
 
 
+def scheduled_job_state(job: str) -> Optional[dict]:
+    """The job's ledger row (`run_day`, `claim_at`, `enabled`), or None when unreadable.
+
+    `claim_scheduled` answers one bit — yours or not — and "not" covers three cases a
+    long-running chain must tell apart: it already RAN today (skip), it is HELD by another
+    instance right now (wait — a deploy overlaps the old and new process), or the claim
+    RPC failed (fail closed). `main._run_claimed_phase` reads this row to decide.
+    """
+    try:
+        result = (
+            _sb().table("notification_job_state")
+            .select("job, run_day, claim_at, enabled")
+            .eq("job", job)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(
+            "scheduled job %s: state read failed (%s: %s)", job, type(e).__name__, e,
+        )
+        return None
+    rows = list(getattr(result, "data", None) or [])
+    return dict(rows[0]) if rows else {"job": job, "run_day": None, "claim_at": None, "enabled": True}
+
+
 @contextlib.asynccontextmanager
 async def claimed_scheduled_job(
-    job: str, *, timezone_name: str = "UTC"
+    job: str, *, timezone_name: str = "UTC", stale_seconds: Optional[int] = None,
 ) -> AsyncIterator[Optional[ScheduledJobResult]]:
     """Hold the daily claim for the duration of the block.
 
@@ -333,7 +365,7 @@ async def claimed_scheduled_job(
     early or raises leaves `run_day` unset and the next wake retries the same day.
     """
     granted = await asyncio.to_thread(
-        claim_scheduled, job, timezone_name=timezone_name
+        claim_scheduled, job, timezone_name=timezone_name, stale_seconds=stale_seconds,
     )
     if not granted:
         yield None

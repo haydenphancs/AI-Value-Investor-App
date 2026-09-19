@@ -233,6 +233,18 @@ def _watched_tickers() -> set:
             type(e).__name__, e,
         )
         raise
+    if len(rows) >= _WATCHED_LOOKUP_LIMIT:
+        # The clamp bit: anyone watching a ticker outside the top-N most-watched gets no
+        # earnings alert today, silently. Loud so the day it first happens is visible; the
+        # fix when it does is a DISTINCT-returning membership RPC fed the calendar's own
+        # symbols (bounded by the calendar, never by watcher count) — NOT a bigger N, and
+        # NOT `watchlist_items.select("ticker").in_(...)`, which is one row per WATCHER and
+        # clamps on a different axis (F17-8).
+        logger.warning(
+            "earnings notifications: the watched-ticker read returned %d rows (the %d-row "
+            "clamp) — watchers of less-popular tickers will be skipped this pass",
+            len(rows), _WATCHED_LOOKUP_LIMIT,
+        )
     return {str(r["ticker"]).upper() for r in rows if r.get("ticker")}
 
 

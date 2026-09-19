@@ -480,3 +480,18 @@ def test_the_rotatable_guest_budget_is_no_longer_consulted():
 #  5. Anti-vacuity: `guest_user_id_for` and `GUEST_USER_ID` written into a wrapper's DOCSTRING
 #     with the code left correct.
 #       -> 46 passed ✅ — the scan reads code, not the prose that narrates the history.
+
+
+def test_the_home_feed_resolves_the_caller_through_the_users_row_like_the_dashboard():
+    """`/home/feed` serves the caller's OWN research reports. A token-only dependency has
+    no eviction — a deleted account's still-valid JWT read its reports for the token's
+    lifetime — so it must resolve the `users` row (`get_watchlist_identity`) exactly as
+    `/home/dashboard` does (F14-5)."""
+    import inspect
+    from app.api.v1.endpoints import home as home_ep
+    from app.dependencies import get_watchlist_identity
+
+    for handler in (home_ep.get_home_feed, home_ep.get_home_dashboard):
+        deps = [p.default.dependency for p in inspect.signature(handler).parameters.values()
+                if hasattr(p.default, "dependency")]
+        assert get_watchlist_identity in deps, handler.__name__

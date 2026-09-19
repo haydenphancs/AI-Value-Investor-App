@@ -179,6 +179,10 @@ final class PortfolioStore: ObservableObject {
         guard portfolios.contains(where: { $0.id == id }) else { return }
         guard id != activePortfolioId else { return }
 
+        // Epoch, as in `load()`: a switch that resolves after `reset()` must not write the
+        // ended session's id into UserDefaults (device-global, auth.md §7) or revert the
+        // next account's active flag to it.
+        let epoch = identityEpoch
         let previous = activePortfolioId
         activePortfolioId = id
         applyActiveFlag(id)
@@ -188,12 +192,14 @@ final class PortfolioStore: ObservableObject {
                 endpoint: .activatePortfolio(id: id),
                 responseType: PortfolioDTO.self
             )
+            guard epoch == identityEpoch else { return }
             UserDefaults.standard.set(id, forKey: Self.activeIdKey)
             // Only AFTER the server confirms. Announcing optimistically would make Home
             // and Updates re-fetch against the OLD server state and cache the old group
             // again, right before the revert below puts the UI back.
             announceActiveGroupChange()
         } catch {
+            guard epoch == identityEpoch else { return }
             activePortfolioId = previous
             applyActiveFlag(previous)
             AppActions.shared.reportMutationFailure(

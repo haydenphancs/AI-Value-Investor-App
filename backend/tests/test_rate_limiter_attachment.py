@@ -39,7 +39,10 @@ from fastapi import Depends, HTTPException
 from fastapi.params import Depends as DependsParam
 
 import app.dependencies as deps
-from app.api.v1.endpoints import chat, ticker_report, users, widget
+from app.api.v1.endpoints import (
+    chat, commodities, crypto, etfs, indices, stocks, ticker_report, tracking, users,
+    watchlist, widget,
+)
 from app.core.security import rate_limiter
 from app.dependencies import (
     GUEST_USER_ID,
@@ -51,8 +54,12 @@ from app.dependencies import (
     ProfileRateLimit,
     RateLimitChecker,
     ReportRateLimit,
+    StandardRateLimit,
     WidgetRateLimit,
     WidgetRateLimitChecker,
+    MarketFanoutRateLimit,
+    MarketRateLimit,
+    UserIdRateLimitChecker,
 )
 
 # Every per-caller checker class in app/dependencies.py. `WidgetRateLimitChecker` is listed
@@ -63,6 +70,7 @@ _LIMITER_CLASSES = (
     IdentityRateLimitChecker,
     WidgetRateLimitChecker,
     IdentityOnlyRateLimitChecker,
+    UserIdRateLimitChecker,
 )
 
 # (module, handler name, router attribute on that module, the limiter it must carry).
@@ -79,7 +87,26 @@ GUARDED_ROUTES = [
     (users, "upload_my_avatar", "router", AvatarRateLimit),
     (users, "delete_my_avatar", "router", AvatarRateLimit),
     (widget, "get_market_mover", "widget_client_router", WidgetRateLimit),
+    # F15-3: the Tracking feed fans out one FMP call per watchlist ticker (sparkline +
+    # insider) on every cache miss, and every watchlist add costs a profile call and grows
+    # that fan-out. Neither route carried a limiter; a scripted free account could burn
+    # the shared FMP window from one identity.
+    (tracking, "get_tracking_assets", "router", StandardRateLimit),
+    (watchlist, "add_to_watchlist", "router", StandardRateLimit),
+    # S04-3: the handlers that cost ~5 FMP calls on a cache miss carry the tighter
+    # per-account fan-out bound on top of the router-level market ceiling (below). One free
+    # account requesting 150 uncached symbols a minute exhausted the plan-wide FMP window.
+    (stocks, "get_growth", "router", MarketFanoutRateLimit),
+    (stocks, "get_profit_power", "router", MarketFanoutRateLimit),
+    (stocks, "get_health_check", "router", MarketFanoutRateLimit),
+    (stocks, "get_stock_fundamentals", "router", MarketFanoutRateLimit),
+    (stocks, "get_stock_financials_full", "router", MarketFanoutRateLimit),
+    (stocks, "get_revenue_breakdown", "router", MarketFanoutRateLimit),
 ]
+
+#: Every market-data router carries the per-account ceiling at ROUTER level, so a new route
+#: on any of them is bounded the moment it is mounted.
+_MARKET_ROUTERS = [stocks, etfs, indices, crypto, commodities]
 _ROUTE_IDS = [f"{m.__name__.rsplit('.', 1)[-1]}.{h}" for m, h, _r, _l in GUARDED_ROUTES]
 
 
@@ -421,3 +448,43 @@ def test_the_report_window_is_tighter_than_chat():
     assert report.max_requests < chat_.max_requests, (
         f"report window {report.max_requests}/min is not tighter than chat's {chat_.max_requests}/min"
     )
+
+
+# ── S04-3: the market-data routers are bounded per account at router level ──────────
+
+
+@pytest.mark.parametrize("module", _MARKET_ROUTERS, ids=[m.__name__.rsplit(".", 1)[-1] for m in _MARKET_ROUTERS])
+def test_every_market_router_carries_the_market_ceiling(module):
+    deps_on_router = [getattr(d, "dependency", None) for d in module.router.dependencies]
+    assert any(d is MarketRateLimit.dependency for d in deps_on_router), (
+        f"{module.__name__}.router lost MarketRateLimit — every route on it is unbounded per "
+        "account again"
+    )
+    # And still account-only: the token dependency did not get dropped in the edit.
+    assert any(d is deps.get_current_user_id for d in deps_on_router)
+
+
+@pytest.mark.asyncio
+async def test_the_user_id_limiter_keys_on_the_token_id_and_refuses_at_the_cap():
+    """No database read: the market routers already resolve the token-only user id, and a
+    detail screen fires ~15 of these at once."""
+    checker = UserIdRateLimitChecker("t-market", 2, 60)
+    seen = []
+    for uid in ("u1", "u1", "u1", "u2"):
+        try:
+            await checker(user_id=uid)
+            seen.append("ok")
+        except HTTPException as e:
+            seen.append((e.status_code, e.headers.get("Retry-After")))
+    assert seen == ["ok", "ok", (429, "60"), "ok"], seen
+
+
+def test_the_fanout_bound_is_tighter_than_the_ceiling_and_both_come_from_settings():
+    from app.config import settings
+
+    assert MarketFanoutRateLimit.dependency.max_requests == settings.MARKET_FANOUT_RATE_LIMIT_PER_MINUTE
+    assert MarketRateLimit.dependency.max_requests == settings.MARKET_RATE_LIMIT_PER_MINUTE
+    assert settings.MARKET_FANOUT_RATE_LIMIT_PER_MINUTE < settings.MARKET_RATE_LIMIT_PER_MINUTE
+    # A TickerDetailView open fires ~12-15 stocks routes in parallel; iOS intercepts a 429,
+    # so the ceiling must sit far above a human's browsing rate.
+    assert settings.MARKET_RATE_LIMIT_PER_MINUTE >= 200

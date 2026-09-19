@@ -138,12 +138,28 @@ private struct MarkdownInline: View {
     /// Parse inline markdown; on ANY failure fall back to the raw string so a
     /// half-streamed fragment (e.g. an unclosed `**`) never crashes/blanks the row.
     private var attributed: AttributedString {
-        (try? AttributedString(
+        var parsed = (try? AttributedString(
             markdown: raw,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace
             )
         )) ?? AttributedString(raw)
+        Self.stripLinks(&parsed)
+        return parsed
+    }
+
+    /// Drop every link attribute the parser produced, keeping the label as plain text.
+    ///
+    /// A `[label](target)` in a Cay AI bubble is MODEL OUTPUT — steered by a headline, a
+    /// tool result, a cached brief or the user's own earlier turn — and `Text` rendered it
+    /// as a tappable blue link that left the app for ANY scheme: a phishing page, a
+    /// `tel:+1900…` dialer prompt, an `sms:…&body=…` pre-filled message. Cay AI cites through
+    /// the `sources` pills, never inline, so the label stays and the tap target goes — no
+    /// dead blue text either, which a discarded `OpenURLAction` would have left.
+    static func stripLinks(_ text: inout AttributedString) {
+        for run in text.runs where run.link != nil {
+            text[run.range].link = nil
+        }
     }
 }
 

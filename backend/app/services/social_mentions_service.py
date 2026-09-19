@@ -18,8 +18,29 @@ from app.integrations.apewisdom import (
     get_ticker_mentions,
     is_cache_populated,
 )
+from app.utils.supabase_errors import retry_idempotent_async
 
 logger = logging.getLogger(__name__)
+
+
+def _int_or_zero(value: Any) -> int:
+    """A snapshot `mentions` cell as an int; None / NaN / junk reads as 0 rather than raising
+    inside a fallback whose whole job is to degrade quietly."""
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(n, 0)
+
+
+def _consecutive_days(latest: Any, prior: Any) -> bool:
+    """True when `prior` is exactly the day before `latest` (both ISO date strings)."""
+    try:
+        d0 = date.fromisoformat(str(latest)[:10])
+        d1 = date.fromisoformat(str(prior)[:10])
+    except (TypeError, ValueError):
+        return False
+    return (d0 - d1).days == 1
 
 
 class SocialMentionsService:
@@ -29,7 +50,7 @@ class SocialMentionsService:
 
     # ── Daily snapshot (called by scheduled task) ─────────────────
 
-    async def snapshot_all(self) -> int:
+    async def snapshot_all(self) -> Tuple[int, int]:
         """
         Fetch all mention data from ApeWisdom and store in DB.
 
@@ -39,13 +60,18 @@ class SocialMentionsService:
         rewrites the same rows. Rate-limit-safe — the ApeWisdom client handles page delays
         internally. Supabase calls run off the event loop.
 
-        Returns number of tickers stored.
+        Returns `(stored, expected)` — the tickers written and the tickers the cache held.
+        The pair, not a bare count, because the caller decides whether the DAY is done:
+        this used to return `stored` alone and `_social_snapshot_once` marked the day done
+        on any `stored > 0`, so a chunk lost to a Supabase 520 ("complete: 500/974") left
+        474 tickers without that day's row, `get_mentions_7d` summed six days instead of
+        seven for a week, and nothing retried because the writer had said "stored 500".
         """
         all_data = await get_all_mentions()
 
         if not all_data:
             logger.warning("ApeWisdom returned no data for snapshot")
-            return 0
+            return 0, 0
 
         today = date.today().isoformat()
         rows = []
@@ -67,21 +93,36 @@ class SocialMentionsService:
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
             try:
-                await asyncio.to_thread(
+                # Retried in place on a transient edge error (the Cloudflare 520 this
+                # project has seen): the upsert is idempotent on the unique key, so a
+                # replay converges. Runs off the loop — `retry_idempotent_async` supplies
+                # the `to_thread` hop. A non-transient failure still lets the other chunks
+                # land; the (stored, expected) pair below reports the hole.
+                await retry_idempotent_async(
                     lambda c=chunk: self.supabase.table("social_mentions_history").upsert(
                         c, on_conflict="ticker,snapshot_date,source",
-                    ).execute()
+                    ).execute(),
+                    what=f"social_mentions_history upsert chunk {i}",
+                    logger=logger,
                 )
                 total_upserted += len(chunk)
             except Exception as e:
                 logger.error(
-                    f"Snapshot upsert failed for chunk {i}: {e}"
+                    "Snapshot upsert failed for chunk %d (%d rows, %s): %s: %s",
+                    i, len(chunk), today, type(e).__name__, e,
                 )
 
-        logger.info(
-            f"Social mentions snapshot complete: "
-            f"{total_upserted}/{len(rows)} tickers stored for {today}"
-        )
+        if total_upserted < len(rows):
+            logger.warning(
+                "Social mentions snapshot PARTIAL: %d/%d tickers stored for %s — the day "
+                "is not done, the hourly tick re-upserts",
+                total_upserted, len(rows), today,
+            )
+        else:
+            logger.info(
+                f"Social mentions snapshot complete: "
+                f"{total_upserted}/{len(rows)} tickers stored for {today}"
+            )
 
         # Cleanup old data (>30 days)
         try:
@@ -92,9 +133,9 @@ class SocialMentionsService:
                 ).execute()
             )
         except Exception as e:
-            logger.warning(f"Social mentions cleanup failed: {e}")
+            logger.warning(f"Social mentions cleanup failed: {type(e).__name__}: {e}")
 
-        return total_upserted
+        return total_upserted, len(rows)
 
     # ── 24h lookups (fast, from ApeWisdom cache) ──────────────────
 
@@ -119,29 +160,48 @@ class SocialMentionsService:
         data = await get_ticker_mentions(ticker)
         if data is not None:
             return data["mentions"], data["mentions_24h_ago"], True
-        cache_consulted = is_cache_populated(ticker)
+        if is_cache_populated(ticker):
+            # Both filters have landed and the ticker is not on either list: Reddit is
+            # not talking about it TODAY, and that is the answer. The DB fallback below
+            # must not run here — it would serve the latest snapshot row (up to 30 days
+            # old: a name that trended three weeks ago) as the CURRENT count, and with a
+            # fabricated 0 as the previous window the Sentiment card printed "+100% today"
+            # in the gain colour with `known=True`.
+            return 0, 0, True
 
-        # Fallback: latest DB row
+        # Fallback while the cache is COLD (boot, or a filter that has never landed): the
+        # two latest daily snapshots. `previous` is only honest when the rows are
+        # consecutive days — the snapshot's `mentions` is that day's 24h figure, so
+        # yesterday vs the day before is the same shape as `mentions_24h_ago`. A single
+        # row, or a gap, has no previous window; handing `_pct_change` a 0 there is what
+        # fabricated the +100%. The tuple has no per-field flag, so the CHANGE being
+        # unknown makes the pair `known=False` (iOS renders "—" / muted); the count is
+        # ≤24h stale in any case.
         try:
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("social_mentions_history")
-                .select("mentions")
+                .select("mentions, snapshot_date")
                 .eq("ticker", ticker)
                 .order("snapshot_date", desc=True)
-                .limit(1)
+                .limit(2)
                 .execute()
             )
-            if result.data:
-                mentions = result.data[0].get("mentions", 0)
-                return mentions, 0, True  # No previous data from single row
         except Exception as e:
             logger.warning(
-                f"DB fallback for 24h mentions failed for {ticker}: {e}"
+                f"DB fallback for 24h mentions failed for {ticker}: {type(e).__name__}: {e}"
             )
             return 0, 0, False
 
-        # Nothing anywhere: a real "not tracked" only if ApeWisdom was actually consulted.
-        return 0, 0, cache_consulted
+        rows = result.data or []
+        if rows:
+            mentions = _int_or_zero(rows[0].get("mentions"))
+            if len(rows) >= 2 and _consecutive_days(rows[0].get("snapshot_date"),
+                                                    rows[1].get("snapshot_date")):
+                return mentions, _int_or_zero(rows[1].get("mentions")), True
+            return mentions, 0, False
+
+        # Nothing anywhere and ApeWisdom was never consulted: unknown, not "not tracked".
+        return 0, 0, False
 
     # ── 7d lookups (from DB history) ──────────────────────────────
 

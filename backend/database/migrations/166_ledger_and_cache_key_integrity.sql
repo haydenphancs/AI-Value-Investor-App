@@ -9,13 +9,13 @@
 --    money invariant in the ledger — and it lives only in the bodies of the SECURITY DEFINER
 --    RPCs that write the table. Migration 139's own header notes the pre-117 rows carry
 --    `granted_delta = purchased_delta = 0` beside a non-zero `delta` ("unknown split"), so
---    the constraint below exempts that shape and is added NOT VALID. ⚠️ The exemption is NOT
---    only historical: `add_credit_transaction` (called from credit_service.log_transaction)
---    still inserts without the split columns today, so it keeps minting (0, 0) rows that the
---    CHECK cannot judge and that `refund_credits` handles through its unknown-split fallback.
---    What the CHECK does bind is every row that RECORDS a split — the ones the refund
---    matcher actually reads. Closing the exemption means teaching add_credit_transaction to
---    record the split (a follow-up RPC change), then tightening this constraint.
+--    the constraint below exempts that shape and is added NOT VALID. ⚠️ CORRECTED IN 171: this
+--    header used to claim the exemption was "NOT only historical" because
+--    `add_credit_transaction` (credit_service.log_transaction) "still inserts without the
+--    split columns today". `log_transaction` had no callers — every live ledger write goes
+--    through the 101 RPCs, which record the split — so 171 dropped that function and
+--    re-issued the COMMENT below. The (0, 0) escape is historical only; tightening it to an
+--    id cutover is the follow-up once VALIDATE has run.
 --
 --    ⚠️ VALIDATE is a separate, deliberate step. Run the count first; if it returns 0, run
 --    the VALIDATE statement at the end of this file. If it does not, a post-139 row broke the

@@ -181,3 +181,35 @@ def test_crypto_2y_chart_carries_the_history_caption():
     i = src.index("History limited to 2 years")
     assert "selectedChartRange == .twoYears" in src[max(0, i - 300): i]
     assert "AppColors.textMuted" in src[i: i + 300]
+
+
+# ── F19-7: an early-close day narrows the session axis to the 13:00 bell ──────
+
+
+def test_a_half_day_narrows_the_equity_session_to_the_early_bell():
+    """On the day after Thanksgiving the 1D line stopped at 54% under a 4:00 PM axis while
+    the card's sparkline (server-computed span) filled 100%. The chart now narrows its
+    own window from the bars' date; `window(for:)` stays class-only and untouched."""
+    coords = _code(_COORDS)
+    win = _block(coords, "struct SessionWindow")
+    assert re.search(r"static let halfDay = SessionWindow\(openMinute: 9 \* 60 \+ 30, closeMinute: 13 \* 60\)", win), win
+    chart = _code(_CHART)
+    body = _block(chart, "private var sessionWindow")
+    assert "MarketHoursUtil.isEarlyClose(" in body
+    assert "pricePoints.last?.date" in body, "the day is read from the bars themselves"
+    assert "window != .roundTheClock" in body, "crypto has no early close"
+    assert ".halfDay" in body
+    # Extended hours on a half-day: pre-market as usual, after-hours 13:00–17:00 ET (the
+    # exchanges do trade it and the backend passes those bars through), so the extended
+    # window ends at 17:00 — narrowing it to 13:00 piled two hours of real prints on the
+    # right edge (W2 E-3).
+    assert "TradingDayHelper.SessionWindow.extendedHalfDay" in body
+    assert re.search(r"static let extendedHalfDay = SessionWindow\(openMinute: 4 \* 60, closeMinute: 17 \* 60\)", win), win
+    assert "halfDay.closeMinute" not in body
+    # The class switch is unchanged (a conditional return there would break the
+    # session-window regex test and re-window every class).
+    switch = _block(coords, "static func window(for context: ChartAssetContext) -> SessionWindow")
+    assert "isEarlyClose" not in switch and "halfDay" not in switch
+    util = _code(_IOS / "Core" / "Utilities" / "MarketHoursUtil.swift")
+    fn = _block(util, "static func isEarlyClose(_ ymd: String) -> Bool")
+    assert "earlyCloses.contains(ymd)" in fn

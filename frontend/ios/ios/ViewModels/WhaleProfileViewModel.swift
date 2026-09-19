@@ -124,6 +124,9 @@ class WhaleProfileViewModel: ObservableObject {
         loadTask = Task { [weak self] in
             guard let self = self else { return }
 
+            // Read BEFORE the await, so the reconcile below carries the identity that
+            // made the request, not whichever account is signed in when it lands.
+            let epoch = self.whaleService.currentIdentityEpoch
             do {
                 let dto = try await self.apiClient.request(
                     endpoint: .getWhaleProfile(whaleId: self.whaleId),
@@ -138,7 +141,7 @@ class WhaleProfileViewModel: ObservableObject {
                 // "Following" header after a cross-device unfollow). Reconcile is
                 // a local-only cache alignment; it issues no backend call.
                 self.whaleService.reconcileLocalFollow(
-                    self.whaleId, isFollowing: loadedProfile.isFollowing
+                    self.whaleId, isFollowing: loadedProfile.isFollowing, asOf: epoch
                 )
 
                 self.profile = loadedProfile

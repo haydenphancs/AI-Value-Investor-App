@@ -160,6 +160,27 @@ def test_the_level_refresh_is_not_killed_by_a_daily_range(vm):
     assert "includeChart:" in body, f"{vm}: timer body shape changed — re-read this test"
 
 
+def test_the_crypto_header_keeps_refreshing_on_a_daily_range():
+    """F16-6: a 24/7 asset's timer `continue`d on every non-intraday interval, so a coin
+    the user switched to 1M/3M sat frozen at its load-time price for the visit. The
+    header now refreshes from `/core` on those ranges (the chart only on intraday), and
+    the merge is observe-only (reads the gen, never bumps it) so a range change during
+    the await drops it."""
+    src = _read("ViewModels/CryptoDetailViewModel.swift")
+    timer = _func_body(src, "private func startChartRefreshTimer()")
+    assert "isIntraday else { continue }" not in timer, "the daily-range freeze is back"
+    assert "refreshLiveSlice(includeChart: self.chartSettings.selectedInterval.isIntraday)" in timer
+    header = _func_body(src, "private func refreshHeaderOnly()")
+    assert "getCryptoCore(" in header
+    assert "let gen = detailRequestGen" in header and "guard gen == self.detailRequestGen" in header
+    assert "detailRequestGen += 1" not in header, "a timer refresh must never bump the gen"
+    for field in ("currentPrice", "priceChange", "priceChangePercent", "changeKnown"):
+        assert f"data.{field} = core.{field}" in header, f"{field} is not merged from /core"
+    # The daily-range path must NOT reuse the chart-anchor arithmetic (it would drift the
+    # 24h change against an hourly-cached daily close).
+    assert "anchor" not in header
+
+
 @pytest.mark.parametrize("vm", _VIEWMODELS)
 def test_every_detail_viewmodel_exposes_the_renamed_lifecycle_pair(vm):
     """The Screens call these from onDisappear / willResignActive / didBecomeActive."""

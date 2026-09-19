@@ -48,6 +48,7 @@ class _Q:
     def upsert(self, payload, *a, **k):
         self._op = "upsert"
         self._payload = payload
+        self._kwargs = dict(k)
         return self
 
     def eq(self, col, val):
@@ -71,6 +72,12 @@ class _Q:
             if exc is not None:
                 self.sb.insert_errors[self.table] = None  # fire once
                 raise exc
+        if self._op == "upsert":
+            self.sb.upserts.append((self.table, self._payload, getattr(self, "_kwargs", {})))
+            # Models ON CONFLICT: a plain upsert (DO UPDATE) on a row that already exists
+            # in `existing_keys` still succeeds, and `ignore_duplicates=True` (DO NOTHING)
+            # succeeds too — only a plain INSERT raises 23505. The seed's items write is
+            # what this distinction pins (F15-4).
         return type("R", (), {"data": self.sb.rows.get((self.table, self._op), [])})()
 
 
@@ -80,6 +87,7 @@ class _SB:
         self.insert_errors = dict(insert_errors or {})
         self.ops: list[tuple[str, str]] = []
         self.inserts: list[tuple[str, object]] = []
+        self.upserts: list[tuple[str, object, dict]] = []
 
     def table(self, name):
         return _Q(self, name)
@@ -117,7 +125,7 @@ def test_seed_adopts_the_winner_instead_of_raising():
     assert sb.count("portfolios", "select") == 1, "did not re-read to find the winner"
 
 
-def test_seed_inserts_no_items_when_it_loses_the_race():
+def test_seed_writes_no_items_when_it_loses_the_race():
     """The winner owns the items.
 
     Writing them here would collide on portfolio_items_portfolio_id_ticker_key, and
@@ -136,6 +144,7 @@ def test_seed_inserts_no_items_when_it_loses_the_race():
     pf._seed_default_portfolio(sb, "u1")
 
     assert sb.count("portfolio_items", "insert") == 0
+    assert sb.count("portfolio_items", "upsert") == 0
 
 
 def test_the_existing_backfill_heal_recovers_the_dropped_items():
@@ -184,7 +193,9 @@ def test_the_happy_path_is_unchanged():
     pf._seed_default_portfolio(sb, "u1")
 
     assert sb.count("portfolios", "insert") == 1
-    assert sb.count("portfolio_items", "insert") == 1
+    # `upsert`, not `insert` — see the F15-4 block below.
+    assert sb.count("portfolio_items", "upsert") == 1
+    assert sb.count("portfolio_items", "insert") == 0
     assert sb.count("portfolios", "select") == 0, "no need to re-read when we won"
 
 
@@ -231,6 +242,103 @@ def test_an_empty_insert_result_also_adopts_rather_than_indexerrors():
 
     pf._seed_default_portfolio(sb, "u1")  # must not raise
     assert sb.count("portfolio_items", "insert") == 0
+    assert sb.count("portfolio_items", "upsert") == 0
+
+
+# ── F15-4: the seed's ITEMS write must survive a concurrent mirror ───────────
+#
+# The group is inserted ACTIVE and is visible to `POST /watchlist` immediately, so a star
+# tapped on a detail screen in the same second is mirrored into it by
+# `_write_through_to_active_portfolio` BEFORE the seed writes its rows. A plain multi-row
+# `.insert` then hit `portfolio_items_portfolio_id_ticker_key` on the mirrored ticker, the
+# whole statement was rejected, GET /portfolios answered 500 — and because the group now
+# held the one mirrored row, `_backfill_lone_empty_portfolio` (`if only.items: return`)
+# never healed the other tickers. They stayed watchlist-only and invisible everywhere.
+
+_THREE = [
+    {"ticker": "AAPL", "added_at": "2026-08-03", "shares": 1, "market_value": 10.0},
+    {"ticker": "MSFT", "added_at": "2026-08-02", "shares": None, "market_value": None},
+    {"ticker": "NVDA", "added_at": "2026-08-01", "shares": 3, "market_value": 100.0},
+]
+
+
+def test_the_fake_really_raises_on_a_plain_items_insert():
+    """Anti-vacuity for the block: the injected 23505 fires on INSERT only. If the seed
+    still used `.insert`, the test below would raise; if it uses `.upsert`, it must not."""
+    sb = _SB(insert_errors={"portfolio_items": _Violation("portfolio_items_portfolio_id_ticker_key")})
+    with pytest.raises(_Violation):
+        sb.table("portfolio_items").insert([{"ticker": "NVDA"}]).execute()
+
+
+def test_a_mirrored_ticker_no_longer_rejects_the_whole_seed():
+    """The race, modelled: the items statement would 23505 as a plain INSERT (NVDA was
+    mirrored in between the group insert and this write). The seed must not raise, and
+    must still carry EVERY watchlist ticker in the one conflict-tolerant write."""
+    sb = _SB(
+        rows={
+            ("watchlist_items", "select"): _THREE,
+            ("portfolios", "insert"): [{"id": "new"}],
+        },
+        insert_errors={"portfolio_items": _Violation("portfolio_items_portfolio_id_ticker_key")},
+    )
+
+    pf._seed_default_portfolio(sb, "u1")  # must not raise
+
+    assert sb.count("portfolio_items", "insert") == 0, "a plain INSERT is what 500'd the route"
+    assert len(sb.upserts) == 1
+    table, payload, kwargs = sb.upserts[0]
+    assert table == "portfolio_items"
+    assert [r["ticker"] for r in payload] == ["AAPL", "MSFT", "NVDA"], (
+        "every seed ticker must be in the ONE write — dropping the mirrored one would "
+        "leave the others to a heal that never runs on a non-empty group"
+    )
+
+
+def test_the_seed_upsert_is_conflict_tolerant_on_the_membership_key():
+    """`on_conflict` must name the real unique key and `ignore_duplicates` must be True
+    (DO NOTHING): DO UPDATE would move the mirrored row's position and would still fail on
+    an intra-batch duplicate (two watchlist spellings collapsing under `.upper()`)."""
+    sb = _SB(rows={("watchlist_items", "select"): _THREE,
+                   ("portfolios", "insert"): [{"id": "new"}]})
+
+    pf._seed_default_portfolio(sb, "u1")
+
+    _t, _payload, kwargs = sb.upserts[0]
+    assert kwargs.get("on_conflict") == "portfolio_id,ticker", kwargs
+    assert kwargs.get("ignore_duplicates") is True, kwargs
+
+
+def test_the_seed_upsert_carries_positions_and_holdings():
+    """The write is the same rows the INSERT used to carry — seeded newest-first, each
+    with the watchlist row's shares / market_value, and a blank ticker skipped."""
+    # Blank rows are OLDEST so they sort last: `position` is the enumerate index over the
+    # sorted seed rows (a pre-existing gap-tolerant rule, not something this fix changes).
+    rows = _THREE + [{"ticker": "", "added_at": "2026-07-09", "shares": 9, "market_value": 9.0},
+                     {"ticker": None, "added_at": "2026-07-08", "shares": None, "market_value": None}]
+    sb = _SB(rows={("watchlist_items", "select"): rows,
+                   ("portfolios", "insert"): [{"id": "new"}]})
+
+    pf._seed_default_portfolio(sb, "u1")
+
+    _t, payload, _k = sb.upserts[0]
+    assert [(r["portfolio_id"], r["ticker"], r["position"], r["shares"], r["market_value"])
+            for r in payload] == [
+        ("new", "AAPL", 0, 1, 10.0),
+        ("new", "MSFT", 1, None, None),
+        ("new", "NVDA", 2, 3, 100.0),
+    ]
+
+
+def test_an_empty_watchlist_writes_no_items_at_all():
+    """Boundary: nothing to seed → no items statement (an empty upsert is a wasted
+    round trip and, on some PostgREST versions, a 400)."""
+    sb = _SB(rows={("watchlist_items", "select"): [],
+                   ("portfolios", "insert"): [{"id": "new"}]})
+
+    pf._seed_default_portfolio(sb, "u1")
+
+    assert sb.count("portfolios", "insert") == 1
+    assert sb.upserts == [] and sb.count("portfolio_items", "insert") == 0
 
 
 # ── end-to-end: the route must not 500 ───────────────────────────────────────

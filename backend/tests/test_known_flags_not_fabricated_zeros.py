@@ -167,6 +167,23 @@ def test_the_tracking_row_passes_the_flag_to_the_label():
     assert ".nan" not in args, "pre-mangling the percent bypasses the label's own guard"
 
 
+def test_the_tracking_row_sparkline_draws_no_verdict_for_an_unknown_change():
+    """F15-11 / F23-6: `asset.isPositive` is hard-false for an unknown change and the
+    neutral sparkline mode strokes one tone by that flag — so a newly starred ticker with
+    no close snapshot drew an all-red line, a dashed baseline at data[0] and a red end
+    dot under a "—" label. Mirror of MarketPulseCard: series direction for the colour,
+    no reference line, both keyed on `changeKnown`. Comments stripped (the surrounding
+    prose names every token)."""
+    body = _swift_block(_IOS / "Views/Molecules/AssetRow.swift", "struct AssetRow")
+    call = re.search(r"SparklineView\((.*?)\n\s*\)", body, re.S)
+    assert call, "AssetRow no longer renders SparklineView"
+    args = re.sub(r"//.*$", "", call.group(1), flags=re.M)
+    assert "showReference: asset.changeKnown" in args
+    assert "referencePrice: asset.changeKnown ? asset.previousClose : nil" in args
+    assert re.search(r"isPositive:\s*asset\.changeKnown\s*\?\s*asset\.isPositive\s*:\s*\(\(asset\.sparklineData\.last", args), \
+        "the unknown-change colour must be the SERIES direction, not the hard-false isPositive"
+
+
 def test_the_tracked_asset_flags_decode_leniently_and_default_true():
     body = _swift_block(_IOS / "Models/TrackingModels.swift", "struct TrackedAssetDTO")
     assert re.search(r"let priceKnown:\s*Bool\?", body)

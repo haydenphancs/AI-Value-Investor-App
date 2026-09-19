@@ -106,13 +106,17 @@ PGPASSWORD="$SUPABASE_DB_PASSWORD" "$PG_DUMP" \
 # only their policies (see migrations 163-165). --no-owner alone already suppresses the
 # ownership noise; the GRANT/REVOKE lines that remain are the point.
 
+# `|| true` on every count: `grep -c` exits 1 when it matches NOTHING, and under `set -e`
+# that killed the script right here — so the "no GRANT lines" tripwire below could never
+# print; a privilege-less dump died silently with the bad snapshot already on disk.
 line_count=$(wc -l < "$OUTPUT_FILE")
-table_count=$(grep -c "^CREATE TABLE" "$OUTPUT_FILE")
-policy_count=$(grep -c "^CREATE POLICY" "$OUTPUT_FILE")
-grant_count=$(grep -cE "^(GRANT|REVOKE) " "$OUTPUT_FILE")
+table_count=$(grep -c "^CREATE TABLE" "$OUTPUT_FILE" || true)
+policy_count=$(grep -c "^CREATE POLICY" "$OUTPUT_FILE" || true)
+grant_count=$(grep -cE "^(GRANT|REVOKE) " "$OUTPUT_FILE" || true)
 
 echo "Done. $line_count lines, $table_count tables, $policy_count RLS policies, $grant_count GRANT/REVOKE statements."
 if [ "$grant_count" -eq 0 ]; then
-  echo "WARNING: no GRANT/REVOKE statements in the dump — was --no-privileges re-added? Migration VERIFY steps and reviewers read grants from this file." >&2
+  echo "ERROR: no GRANT/REVOKE statements in the dump — was --no-privileges re-added? Migration VERIFY steps and reviewers read grants from this file. Snapshot NOT accepted: restore it with 'git checkout -- $OUTPUT_FILE'." >&2
+  exit 1
 fi
 echo "Review with: git diff $OUTPUT_FILE"

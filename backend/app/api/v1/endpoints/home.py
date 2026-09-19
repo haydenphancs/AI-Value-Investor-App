@@ -53,9 +53,14 @@ router = APIRouter(dependencies=[Depends(get_current_user_id)])
 async def get_home_feed(
     # Was `get_optional_user_id`, which answered None for a signed-out caller and served the
     # feed anyway. The feed is FMP market data, so under the End-User Display licence there is
-    # no signed-out case left to be optional about. `Optional[str]` is kept on the annotation
-    # only because the service signature takes one; it is never None now.
-    user_id: Optional[str] = Depends(get_current_user_id),
+    # no signed-out case left to be optional about.
+    #
+    # `get_watchlist_identity`, not the token-only `get_current_user_id`, because the feed
+    # serves the CALLER'S OWN research reports: a token-only dependency has no eviction —
+    # a deleted account's still-valid JWT read its reports for the token's lifetime — while
+    # the `users`-row read (threaded, and shared with the router-level dependency) refuses a
+    # gone account, exactly as `/dashboard` below does.
+    user: dict = Depends(get_watchlist_identity),
 ):
     """
     Aggregated home feed — single request for the entire home screen.
@@ -63,6 +68,7 @@ async def get_home_feed(
     Fetches market tickers, insight summary, daily briefings, and recent
     research concurrently.  Each section degrades gracefully on failure.
     """
+    user_id = user["id"]
     service = HomeService()
     return await service.get_home_feed(user_id)
 

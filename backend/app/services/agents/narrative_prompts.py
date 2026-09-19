@@ -718,6 +718,15 @@ def _price_action_narrative_prompt(
         headlines_block = (
             f"\nRECENT MATCHED HEADLINES (within the chart window):\n{headlines_str}\n"
         )
+    elif pa.get("_news_unavailable"):
+        # The feed FAILED — the absence of headlines is an outage, not evidence. Without
+        # this arm a Notable+ move was narrated as having no catalyst, which reads as a
+        # finding ("nothing drove it") the collector never actually established.
+        headlines_block = (
+            "\nRECENT MATCHED HEADLINES: could not be checked (news feed unavailable). "
+            "Do NOT describe the move as having no catalyst or no news — say the news "
+            "could not be reviewed.\n"
+        )
     else:
         headlines_block = "\nRECENT MATCHED HEADLINES: none in window\n"
 

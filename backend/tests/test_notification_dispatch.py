@@ -620,18 +620,21 @@ async def test_a_fresh_deferred_row_is_delivered_with_its_stored_payload():
     assert stats["sent"] == 1
     assert push.calls[0]["title"] == "NVDA"
     assert push.calls[0]["data"]["ticker"] == "NVDA"
-    # The badge is the unread count AS-IS — no `+1`.
+    # The badge is `unread + 1`: what the icon should read AFTER this notification lands.
     #
-    # ⚠️ This assertion used to read `== 3`, which pinned a real bug rather than catching it.
-    # A deferred row is INSERTED unread at defer time, hours before this flush, so the count
-    # read here ALREADY includes it. Adding one made every quiet-hours delivery badge one
-    # higher than the user's true unread count, permanently — and for a batch of N rows for
-    # one user, all N sent the same inflated number.
+    # ⚠️ This assertion has flipped TWICE, and the second flip was the bug. It read `== 3`,
+    # was changed to `== 2` on the premise that "a deferred row is INSERTED unread at defer
+    # time, so the count read here ALREADY includes it" — and that premise is false.
+    # `unread_counts_bulk` counts `push_state = 'sent'` rows only (a `deferred` row was
+    # never shown and must not badge the icon), and `claim_due_notifications` flips the row
+    # to `pending`, never `sent`, so at flush time it is STILL excluded. `== 2` therefore
+    # pinned a badge that left out the very notification it announced: a new user's first
+    # deferred alert went out with `aps.badge: 0`, which iOS treats as CLEAR.
     #
-    # The stub's `{"u1": 2}` therefore means "2 unread, and this flushed row is one of them".
-    # The claim path is the one that adds 1, because there `resolve_recipients` runs before
-    # the INSERT — pinned separately by `test_the_claim_path_badge_includes_the_new_row`.
-    assert push.calls[0]["badge"] == 2
+    # The stub's `{"u1": 2}` means "2 delivered-and-unread rows, and this one is NOT among
+    # them". The per-batch increment for a second row to the same user is pinned in
+    # `test_flush_badge_*` below.
+    assert push.calls[0]["badge"] == 3
 
 
 @pytest.mark.asyncio

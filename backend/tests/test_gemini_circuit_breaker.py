@@ -381,3 +381,191 @@ async def test_generate_text_returns_a_plain_dict_on_a_cache_hit():
     _reset_breaker()
     out = await client.generate_text(prompt="same prompt")
     assert out == {"text": "cached answer", "tokens_used": 1}
+
+
+# ── F04-3: a trial that ends WITHOUT a verdict hands the slot back ───────────
+#
+# The half-open slot was held for the trial's whole life and then for a full
+# cooldown after a LOST one, by whichever call arrived first: a chat stream the
+# user stopped, a synthesis that ran two tool rounds, a timeout that gave up.
+# Every other Gemini call failed fast for those seconds on a quota that had
+# already recovered.
+
+
+def test_release_trial_hands_the_slot_back_at_once(monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 3)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30.0)
+    clock = _install_clock(monkeypatch, start=1000.0)
+    _reset_breaker()
+    cb = gemini._quota_circuit
+
+    for _ in range(3):
+        cb.record_quota_error()
+    clock.advance(30.0)
+    assert cb.is_open() is False            # trial admitted
+    stamp = cb.trial_stamp
+    assert stamp == 1030.0
+    assert cb.is_open() is True             # everyone else waits on it
+
+    cb.release_trial(stamp)                 # the trial gave up without a verdict
+    assert cb.half_open is False
+    assert cb.is_open() is False, "the very next caller becomes the trial — no extra cooldown"
+    assert cb.half_open is True, "released ≠ closed: the next caller is a TRIAL, still open for cause"
+    assert cb.is_open() is True
+
+
+def test_release_trial_is_stamp_guarded_against_a_successor(monkeypatch):
+    """After a cooldown a SUCCESSOR trial is admitted while the expired one may still be
+    unwinding; the expired one's release must not clear the successor's slot."""
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 3)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30.0)
+    clock = _install_clock(monkeypatch, start=1000.0)
+    _reset_breaker()
+    cb = gemini._quota_circuit
+
+    for _ in range(3):
+        cb.record_quota_error()
+    clock.advance(30.0)
+    assert cb.is_open() is False
+    old = cb.trial_stamp
+    clock.advance(30.1)
+    assert cb.is_open() is False            # presumed lost → successor admitted
+    new = cb.trial_stamp
+    assert new != old
+
+    cb.release_trial(old)                   # the expired trial finally unwinds
+    assert cb.trial_stamp == new, "a stale stamp must be a no-op"
+    assert cb.is_open() is True, "the successor still holds the slot"
+
+    cb.release_trial(0.0)                   # a never-admitted caller's stamp
+    assert cb.trial_stamp == new
+
+
+def test_release_trial_after_a_verdict_is_a_no_op(monkeypatch):
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 3)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30.0)
+    clock = _install_clock(monkeypatch, start=1000.0)
+    _reset_breaker()
+    cb = gemini._quota_circuit
+
+    for _ in range(3):
+        cb.record_quota_error()
+    clock.advance(30.0)
+    assert cb.is_open() is False
+    stamp = cb.trial_stamp
+    cb.record_quota_error()                 # trial FAILED → re-opened from now
+    assert cb.is_open() is True
+    cb.release_trial(stamp)
+    assert cb.is_open() is True, "a release must never undo a failed trial's re-open"
+    clock.advance(29.9)
+    assert cb.is_open() is True
+
+
+@pytest.mark.asyncio
+async def test_a_trial_that_gives_up_on_a_generic_error_releases_the_slot(monkeypatch):
+    """`async_retry`: the trial exhausts its generic budget (a 500, a reset) and raises.
+    That proves nothing about the quota, so the slot goes back immediately instead of
+    every other caller failing fast for another cooldown."""
+    clock = _install_clock(monkeypatch)
+    _reset_breaker()
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30)
+
+    async def _no_sleep(_):
+        return None
+    monkeypatch.setattr(gemini.asyncio, "sleep", _no_sleep)
+
+    cb = gemini._quota_circuit
+    cb.record_quota_error(); cb.record_quota_error()
+    clock.advance(31)
+
+    @gemini.async_retry(max_attempts=2, delay=0.0)
+    async def broken():
+        raise RuntimeError("connection reset")
+
+    with pytest.raises(RuntimeError):
+        await broken()
+    assert cb.half_open is False, "the slot is free again"
+    assert cb._opened_at > 0.0, "...but the breaker is still open for cause, not closed"
+
+    seen = {}
+
+    @gemini.async_retry(max_attempts=1, delay=0.0)
+    async def ok():
+        seen["trial"] = cb.half_open
+        return "ok"
+
+    assert await ok() == "ok", "the next caller is admitted as the trial at once"
+    assert seen["trial"] is True, "...as the TRIAL, not as a closed-breaker call"
+    assert cb.tripped is False and cb._opened_at == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_trial_that_times_out_releases_the_slot(monkeypatch):
+    clock = _install_clock(monkeypatch)
+    _reset_breaker()
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30)
+    monkeypatch.setattr(settings, "GEMINI_TIMEOUT_MAX_RETRIES", 0)
+
+    cb = gemini._quota_circuit
+    cb.record_quota_error(); cb.record_quota_error()
+    clock.advance(31)
+
+    @gemini.async_retry(max_attempts=1, delay=0.0)
+    async def slow():
+        raise gemini.GeminiTimeoutError("read timed out")
+
+    with pytest.raises(gemini.GeminiTimeoutError):
+        await slow()
+    assert cb.half_open is False
+    assert cb.is_open() is False, "next caller is the trial"
+
+
+@pytest.mark.asyncio
+async def test_a_trial_that_fails_on_quota_keeps_the_breaker_open(monkeypatch):
+    """The release runs in `finally` — it must NOT fire after a quota verdict, or the
+    re-open a failed trial just recorded would be undone on the way out."""
+    clock = _install_clock(monkeypatch)
+    _reset_breaker()
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30)
+
+    cb = gemini._quota_circuit
+    cb.record_quota_error(); cb.record_quota_error()
+    clock.advance(31)
+
+    @gemini.async_retry(max_attempts=1, delay=0.0)
+    async def still_exhausted():
+        raise gemini.GeminiQuotaError("429 RESOURCE_EXHAUSTED")
+
+    with pytest.raises(gemini.GeminiQuotaError):
+        await still_exhausted()
+    assert cb.is_open() is True, "re-opened by the failed trial, and the finally left it so"
+    clock.advance(29)
+    assert cb.is_open() is True
+
+
+@pytest.mark.asyncio
+async def test_a_non_trial_caller_never_releases_anyone_elses_slot(monkeypatch):
+    """A caller admitted while the breaker was CLOSED carries no stamp; its give-up must
+    not touch a trial that opened later."""
+    clock = _install_clock(monkeypatch)
+    _reset_breaker()
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_THRESHOLD", 2)
+    monkeypatch.setattr(settings, "GEMINI_QUOTA_CIRCUIT_COOLDOWN_SECONDS", 30)
+    cb = gemini._quota_circuit
+
+    async def _others_trip_then_trial_starts(_):
+        cb.record_quota_error(); cb.record_quota_error()
+        clock.advance(31)
+        assert cb.is_open() is False          # someone else becomes the trial
+    monkeypatch.setattr(gemini.asyncio, "sleep", _others_trip_then_trial_starts)
+
+    @gemini.async_retry(max_attempts=2, delay=0.0)
+    async def flaky():
+        raise RuntimeError("reset")
+
+    with pytest.raises(gemini.GeminiQuotaError):   # refused after the backoff (admit-once)
+        await flaky()
+    assert cb.half_open is True, "the other caller's trial is untouched"

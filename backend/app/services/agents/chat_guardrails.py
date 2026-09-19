@@ -149,6 +149,26 @@ _IDENTITY_ENFORCE_PATTERNS = (
 _IDENTITY_ENFORCE_RE = re.compile("|".join(_IDENTITY_ENFORCE_PATTERNS), re.IGNORECASE)
 
 
+# Markdown links `[label](target)` and image embeds `![alt](target)`. The label is kept, the
+# target is dropped: a link in a Cay AI bubble is model output — steered by a headline, a
+# tool result, a cached brief or the user's own earlier turn — and iOS rendered it as a
+# tappable blue link that left the app for ANY scheme (`https://phishing`, `tel:+1900…`,
+# `sms:…&body=…`). Cay AI cites through the `sources` pills, never inline. The iOS renderer
+# strips link attributes too; this is the server belt for persisted rows and older builds.
+_MD_LINK_RE = re.compile(r"!?\[([^\]\n]{0,200})\]\(\s*<?[^)\s]*>?(?:\s+\"[^\"]*\")?\s*\)")
+# Autolinks `<https://…>` and bare non-web schemes that a client could linkify.
+_AUTOLINK_RE = re.compile(r"<(?:https?|mailto|tel|sms|facetime|itms[a-z-]*):[^>\s]+>", re.IGNORECASE)
+_BARE_SCHEME_RE = re.compile(r"\b(?:tel|sms|facetime|mailto|itms[a-z-]*):[^\s)\]]+", re.IGNORECASE)
+
+
+def strip_links(text: str) -> Tuple[str, int]:
+    """`[label](target)` → `label`; `![alt](img)` → `alt`; autolinks / tel: / sms: removed."""
+    out, n1 = _MD_LINK_RE.subn(lambda m: m.group(1), text)
+    out, n2 = _AUTOLINK_RE.subn("", out)
+    out, n3 = _BARE_SCHEME_RE.subn("", out)
+    return out, n1 + n2 + n3
+
+
 def enforce_answer(answer: str) -> Tuple[str, List[str]]:
     """Redact high-confidence leaks from `answer` and return `(redacted, tags)`.
 
@@ -156,12 +176,17 @@ def enforce_answer(answer: str) -> Tuple[str, List[str]]:
       - secrets / API keys / JWTs → ``***``
       - internal DB schema identifiers + secret names → ``***``
       - self-referential model-identity phrases → ``Cay AI``
+      - markdown links / image embeds → their label; autolinks and tel:/sms: targets dropped
 
     Advice-boundary phrasing is intentionally NOT redacted (see ``scan_answer``).
     Never raises.
     """
     text = answer or ""
     tags: List[str] = []
+
+    text, n_links = strip_links(text)
+    if n_links:
+        tags.append("link_stripped")
 
     text, n_secret = _SECRET_RE.subn("***", text)
     if n_secret:

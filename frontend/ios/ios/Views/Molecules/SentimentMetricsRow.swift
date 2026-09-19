@@ -22,9 +22,13 @@ struct SentimentMetricsRow: View {
             // question that was never answered. That is precisely the incident the flag
             // was added for (the 42501 that answered every ticker "0 mentions this week"
             // for months). When the window is unknown, take the accessor branch: its three
-            // readers already render "—" / "Reddit data unavailable" / muted.
+            // readers already render "—" / "Reddit data unavailable" / muted. And "Not
+            // tracked" is a claim about BOTH windows, so it needs both measured — a
+            // known-zero 24 h beside an unknown 7 d stays on the accessor branch, which
+            // renders the measured window honestly and dashes the other.
             if sentimentData.socialDataAvailable
-                || !sentimentData.socialKnown(for: selectedTimeframe) {
+                || !sentimentData.socialKnown(for: selectedTimeframe)
+                || !sentimentData.socialBothWindowsKnown {
                 SentimentMetricCard(
                     iconName: "bubble.left.and.bubble.right.fill",
                     title: "Social Mentions",

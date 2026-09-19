@@ -1049,6 +1049,7 @@ extension StockChartWidgetData {
         yearHigh: 299.29,
         yearLow: 138.80,
         dayRangeKnown: true,
+        changeKnown: true,
         isMarketOpen: true,
         historicalData: [
             HistoricalDataPointDTO(date: "2026-01-30", open: 220, high: 223, low: 218, close: 220, volume: 80_000_000),

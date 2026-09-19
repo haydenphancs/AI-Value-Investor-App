@@ -235,6 +235,22 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
         limit = min(limit, 15)
         try:
             data = await fmp.get_stock_news(ticker, limit)
+            if getattr(data, "fetch_failed", False):
+                # An OUTAGE, not a quiet week. `get_stock_news` degrades a non-quota
+                # failure to an empty list that remembers it failed (`EmptyAfterFailure`);
+                # iterating it here handed the model `{"articles": []}` — byte-identical
+                # to "no coverage" — and a 20-credit report then narrated "there is no
+                # recent news" and froze that claim in `ticker_report_data` for the whole
+                # close-aligned window. Same shape the chat tool already returns.
+                logger.warning(
+                    "Tool fetch_more_news: news feed FAILED for %s (%s) — reported as "
+                    "unavailable, not empty", ticker, getattr(data, "reason", ""),
+                )
+                return {
+                    "error": "news feed unavailable (upstream fetch failed)",
+                    "articles": [],
+                    "note": "The news feed could not be reached; do not say there is no news.",
+                }
             # Compress to key fields
             articles = []
             for a in data:

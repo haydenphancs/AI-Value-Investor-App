@@ -131,6 +131,11 @@ def test_a_premarket_payload_is_dated_and_worded_for_friday(monkeypatch):
 def test_a_live_payload_is_unchanged(monkeypatch):
     monkeypatch.setattr(wm, "session_trading_date", lambda now=None: LIVE)
     monkeypatch.setattr(wm, "session_label", lambda now=None: "Live 10:15 AM ET")
+    # "today" is worded only when the live session IS the ET calendar day: at 07:00 ET on
+    # a Monday the screener still reports Friday and `session_trading_date` says Friday, so
+    # a session-only comparison called Friday's move "today". LIVE is a date literal, so
+    # the calendar must be pinned with it or this test rots the day after it was written.
+    monkeypatch.setattr(wm, "_et_calendar_day", lambda: LIVE)
     out = WidgetMoversService()._payload(mode="market", ranked=[_mover(stamp="2026-09-14")],
                                          cards={}, ctx=_MarketContext(), basket=None)
     assert out.session_date == "2026-09-14"

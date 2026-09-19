@@ -78,15 +78,96 @@ def test_a_fast_flick_counts_as_a_drag():
     )
 
 
+def _new_gesture_block(changed: str) -> str:
+    """The touch-down block keyed on GESTURE IDENTITY (`value.startLocation`), brace-bound.
+
+    Found by its condition rather than by name so the assertion cannot be satisfied by an
+    `if !isTouching { … }` block that merely mentions the token in a comment (stripped) or
+    somewhere else in `onChanged`.
+    """
+    m = re.search(r"if [^{\n]*\bstartLocation\b[^{\n]*\{", changed)
+    assert m, (
+        "no touch-down branch keyed on value.startLocation — the reset is gated on the "
+        "timer-released isTouching latch again (F19-1 / F19-2)"
+    )
+    return _braced(changed, m.group(0)[: m.group(0).index("{")].rstrip())
+
+
 def test_the_drag_flag_is_reset_on_touch_down_and_never_on_touch_up():
     """`onEnded` and the Button's action BOTH fire on release, with no defined order.
     Clearing `didDrag` in `onEnded` would race the one read it exists for — and would do so
-    intermittently, which is the worst way for this to come back."""
+    intermittently, which is the worst way for this to come back.
+
+    And "touch-down" means a NEW GESTURE, not `!isTouching`: that latch is released by a
+    timer and stays true for `resumeDelay` after a swipe, so a tap landing in that window
+    skipped the reset, inherited the swipe's `didDrag = true`, and was swallowed — with every
+    retry re-arming the 3 s watchdog and keeping the row dead (F19-1)."""
     pan = _braced(_source(), "private var pan")
     changed, _, ended = pan.partition(".onEnded")
     assert "didDrag = false" in changed, "didDrag must be reset at touch-down"
     assert "didDrag" not in ended, (
         "didDrag is touched in onEnded — that races the Button action on release"
+    )
+    latch_block = _braced(changed, "if !isTouching")
+    assert "didDrag = false" not in latch_block, (
+        "didDrag is reset only under `if !isTouching` — a tap inside the previous swipe's "
+        "resume window inherits its didDrag and is swallowed"
+    )
+    assert "didDrag = false" in _new_gesture_block(changed), (
+        "didDrag is not reset in the gesture-identity block, so a new touch can inherit "
+        "the previous swipe's flag"
+    )
+
+
+def test_a_still_finger_re_entering_after_the_watchdog_keeps_its_translation():
+    """F19-2. The watchdog is re-armed only by MOVE events, so a finger held still for
+    `cancelledGestureTimeout` is released while still down and the row drifts under it.
+    That is acceptable ONLY if the next nudge applies the incremental delta: zeroing
+    `lastTranslation` inside `if !isTouching` re-applied the whole translation since
+    touch-down — the ~150 pt jump — on the very "drag, then hold to read" the resume delay
+    exists for. Only a NEW gesture (a different `startLocation`) may zero it."""
+    pan = _braced(_source(), "private var pan")
+    changed, _, ended = pan.partition(".onEnded")
+    latch_block = _braced(changed, "if !isTouching")
+    assert "lastTranslation = 0" not in latch_block, (
+        "lastTranslation is zeroed on every latch re-entry — a finger held still for 3 s "
+        "then nudged jumps by its whole translation"
+    )
+    assert "lastTranslation = 0" in _new_gesture_block(changed), (
+        "a NEW gesture must start its translation from zero, or the first delta of the next "
+        "touch is measured against the previous gesture's last translation"
+    )
+    # The same-gesture re-entry still re-latches and commits the drifted position, so the
+    # delta below it is measured from where the row actually is.
+    assert "isTouching = true" in latch_block and "base = offset(at: .now)" in latch_block
+    # …and the incremental delta is still what gets applied.
+    assert "let delta = value.translation.width - lastTranslation" in changed
+    assert "lastTranslation = 0" in ended, "onEnded must still zero the translation"
+
+
+def test_gesture_identity_is_cleared_on_end_and_never_by_the_watchdog():
+    """`gestureStart` must be cleared in `onEnded` (so a re-tap on the same point is a new
+    gesture) and must NOT be cleared by the timer release: with zero events the watchdog
+    cannot tell a still finger from a cancelled gesture, and clearing it there brings the
+    F19-2 jump straight back."""
+    src = _source()
+    assert re.search(r"@State private var gestureStart: CGPoint\?", src), (
+        "gestureStart must be view @State — a local would not survive between events"
+    )
+    pan = _braced(src, "private var pan")
+    changed, _, ended = pan.partition(".onEnded")
+    assert "gestureStart = nil" in ended, "onEnded must clear the gesture identity"
+    assert "gestureStart = value.startLocation" in _new_gesture_block(changed), (
+        "the identity block must record the new gesture, or every event is a new gesture"
+    )
+    watchdog = _braced(src, "private func scheduleResume")
+    assert "gestureStart" not in watchdog, (
+        "the watchdog clears gestureStart — a still finger then nudged is treated as a new "
+        "gesture and the ~150 pt jump is back"
+    )
+    body = _braced(src, "var body: some View")
+    assert "gestureStart = nil" in _braced(body, ".onDisappear"), (
+        "leaving the screen must drop the identity along with the latch"
     )
 
 

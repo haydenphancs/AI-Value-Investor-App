@@ -311,16 +311,24 @@ class ETFDetailViewModel: ObservableObject {
         }
     }
 
-    /// Start the 30-second live-slice refresh if the market is active. Idempotent — any
-    /// path that paints etfData (initial fetch OR a range change that supersedes it) can
-    /// call it, and `startChartRefreshTimer` cancels before it re-arms.
+    /// Arm the 30-second live-slice refresh. Idempotent — any path that paints etfData
+    /// (initial fetch OR a range change that supersedes it) can call it, and
+    /// `startChartRefreshTimer` cancels before it re-arms.
     ///
-    /// The `!livePriceManager.isConnected` guard that opened this is gone with the socket.
-    /// It must NOT be replaced by anything that can latch: it used to mean "not streaming
-    /// yet", and the timer it guards is now the only thing refreshing the price.
+    /// UNCONDITIONAL, on purpose. The `!livePriceManager.isConnected` guard that opened
+    /// this is gone with the socket, and the `shouldStreamLivePrice(for:
+    /// etfData.marketStatus)` guard that replaced it was exactly the latch the note below
+    /// warned against: `marketStatus` is the value captured at the LAST fetch, not the
+    /// clock. Open SPY at 20:30 ET (`.closed`), background overnight, foreground at 09:40
+    /// — the model still said `.closed`, so nothing armed, and the header kept last
+    /// night's price under a "Market Closed" badge for the whole live session until a
+    /// pull-to-refresh. The timer body already gates every tick on
+    /// `MarketHoursUtil.isMarketActive()` (the wall clock), so arming while closed costs
+    /// one `continue` per 30 s, and the first live tick rewrites `marketStatus` through
+    /// `merged(into:)`, healing the badge. Same shape as `IndexDetailViewModel` at load
+    /// and `CommodityDetailView` on foreground. Nothing that can latch may go back here —
+    /// this timer is the only thing refreshing the price.
     private func maybeStartStreaming() {
-        guard let status = etfData?.marketStatus,
-              MarketHoursUtil.shouldStreamLivePrice(for: status) else { return }
         startChartRefreshTimer()
     }
 

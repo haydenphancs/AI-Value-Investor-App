@@ -545,6 +545,21 @@ def test_the_reconcile_oracle_is_identity_based_and_never_regenerates_on_a_trans
     assert "messages[messages.count - 2]" in oracle and 'question.role == "user"' in oracle
     assert "reconcileKey(" in oracle, "both sides must be folded like the backend's normalize_text"
     assert "expectedUserMatches" not in vm, "the count oracle must be gone everywhere"
+    # F03-7: the fold strips every code point the server's `normalize_text` strips. The
+    # server persists the stripped copy and the client compares its RAW message folded by
+    # this function, so a code point stripped on one side only never matches (the bidi
+    # isolates 0x2066-0x2069 were that gap).
+    from app.services.chat_security import _INVISIBLE_CODEPOINTS
+    fold = _decl_body(vm, "static func reconcileKey(")
+    ranges = re.findall(r"0x([0-9A-Fa-f]{4})\.\.\.0x([0-9A-Fa-f]{4})|0x([0-9A-Fa-f]{4})(?![0-9A-Fa-f.])", fold)
+    covered = set()
+    for lo, hi, single in ranges:
+        if single:
+            covered.add(int(single, 16))
+        else:
+            covered.update(range(int(lo, 16), int(hi, 16) + 1))
+    missing = sorted(hex(cp) for cp in _INVISIBLE_CODEPOINTS if cp not in covered)
+    assert missing == [], f"reconcileKey does not strip {missing}, which normalize_text does"
     rec = _decl_body(vm, "private func reconcileAfterStreamFailure(")
     assert "mayRegenerate" in rec
     assert "[0, 2, 5, 10, 15, 15]" in rec, "a transport failure gets a bounded WAIT, not a verdict"
@@ -629,6 +644,51 @@ def test_insufficient_credits_is_classified_as_terminal():
     assert "INTERNAL_ERROR" not in body
 
 
+def test_status_line_refusals_on_the_stream_open_are_terminal_not_reconciled():
+    """F10-10: a 404 (session gone), any 401 (token refused at the door) and AUTH_UNAVAILABLE
+    arrive BEFORE the handler runs, so nothing was charged and nothing is in history. The
+    reconcile spent a history GET that failed the same way and then laundered the real
+    reason into "couldn't confirm" — an expired session became "refresh the conversation"."""
+    vm = _code(_CHAT_VM)
+    body = _decl_body(vm, "static func isTerminalPreflightRefusal(")
+    for case in ("APIError.notFound", "APIError.authRequired", "APIError.unauthorized",
+                 "APIError.authError"):
+        assert case in body, f"{case} is reconciled instead of reported"
+    assert '"AUTH_UNAVAILABLE"' in body
+    # The stream door gives a 404 chat copy and drops the ghost row — row FIRST: its
+    # `resetConversation()` nils `errorMessage`, so a banner set before it never rendered
+    # (W2 E-4).
+    stream = _decl_body(vm, "private func streamMessageToSession(")
+    terminal = stream[stream.index("if Self.isTerminalPreflightRefusal(error)"):]
+    terminal = terminal[:terminal.index("reconcileAfterStreamFailure")]
+    assert "ChatStreamError.sessionGone" in terminal and "removeSessionLocally(sessionId)" in terminal
+    assert terminal.index("removeSessionLocally(sessionId)") < terminal.index("ChatStreamError.sessionGone")
+    # ...and so does the non-stream door, in the same order.
+    non_stream = _decl_body(vm, "private func sendMessageToSession(")
+    catch = non_stream[non_stream.index("} catch {"):]
+    assert "ChatStreamError.sessionGone" in catch and "removeSessionLocally(sessionId)" in catch
+    assert catch.index("removeSessionLocally(sessionId)") < catch.index("ChatStreamError.sessionGone")
+    reset = _decl_body(vm, "func resetConversation(")
+    assert "errorMessage = nil" in reset, "the ordering above only matters while reset clears the banner"
+    # The credits re-read stays tied to the 402, not to every terminal code (a 401 would
+    # fail the same way).
+    assert 'code == "INSUFFICIENT_CREDITS"' in catch
+    enum = _decl_body(vm, "private enum ChatStreamError")
+    assert "case sessionGone" in enum and "no longer exists" in enum
+
+
+def test_a_cancelled_reconcile_read_does_not_paint_unconfirmed(monkeypatch=None):
+    """F10-6: a same-session reload cancels the reconcile Task; its history read then
+    returns `.unavailable(CancellationError)`, and both `.unavailable` arms reported
+    "couldn't confirm" over a conversation that had just reloaded fine."""
+    vm = _code(_CHAT_VM)
+    for decl in ("private func reconcileAfterStreamFailure(", "private func sendMessageToSession("):
+        body = _decl_body(vm, decl)
+        arm = body[body.index("case .unavailable"):]
+        arm = arm[:arm.index("reportTurnFailure(ChatStreamError.unconfirmed)")]
+        assert "!Task.isCancelled" in arm, f"{decl}: the .unavailable arm reports on a cancelled read"
+
+
 def test_a_failed_chat_turn_reaches_the_global_error_host():
     """Setting `errorMessage` alone is a dead end.
 
@@ -707,3 +767,15 @@ def test_a_send_cannot_race_a_history_load():
     chips = screen[screen.index("suggestions: (viewModel.messages.isEmpty"):]
     chips = chips[:chips.index("suggestions.map")]
     assert "!viewModel.isLoadingSession" in chips, "chips must hide while a history row loads"
+
+
+def test_an_adopted_turn_refreshes_the_wallet_like_the_non_stream_door_does():
+    """The `credits` frame precedes `done`, so a stream that died after the answer never
+    delivered it; the reconcile adopted the persisted (charged) turn and left the balance
+    one credit stale until the next turn. `sendMessageToSession`'s adopt path already
+    re-read it; the stream's did not."""
+    vm = _code(_CHAT_VM)
+    rec = _decl_body(vm, "private func reconcileAfterStreamFailure(")
+    adopt = rec[rec.index("Self.historyContainsTurn(history.messages, userMessage: target"):]
+    adopt = adopt[:adopt.index("return")]
+    assert "refreshCreditsIfMoved(nil)" in adopt, adopt

@@ -24,10 +24,33 @@ import logging
 import re
 from typing import Any
 
-# Match a `?`/`&`-prefixed secret query param and replace its VALUE with `***`.
-# The leading `[?&]` anchor avoids clobbering unrelated words (e.g. `sort_key=`).
+# Match a secret query param and replace its VALUE with `***`.
+#
+# Anchored on a `?`/`&` OR on the start of the text / a separator: the old `[?&]`-only
+# anchor meant a BARE `apikey=K` — which is exactly how sentry-sdk's httpx integration
+# records a request's query string (`breadcrumb.data["http.query"]`, no leading `?`) and how
+# a `params={'apikey': K}` frame var reprs — passed through untouched, so every Sentry event
+# raised after an FMP call carried the production key in its breadcrumbs. The word boundary
+# still avoids clobbering `sort_key=`: the name must not be preceded by a letter/underscore.
+# The BARE name `key` stays QUERY-anchored only (`?key=` / `&key=` — a Google-style API
+# key parameter). Widening it to the prose anchors alongside the others turned every
+# operational `key=<value>` — the push dispatcher's dedup keys, the marketing publisher's
+# idempotency keys — into `key=***` in exactly the log lines written to find a stranded
+# row (W2 regress-B-2).
 _SECRET_QS_RE = re.compile(
-    r"(?i)([?&](?:api[_-]?key|token|access[_-]?token|secret|password|key)=)[^&\s'\"]+"
+    r"(?i)(?:(^|[?&\s'\"(,{\[:])((?:api[_-]?key|token|access[_-]?token|secret|password)=)"
+    r"|([?&])(key=))"
+    r"[^&\s'\"]+"
+)
+
+
+def _qs_sub(m: "re.Match") -> str:
+    return (m.group(1) or m.group(3) or "") + (m.group(2) or m.group(4) or "") + "***"
+# `'apikey': 'K'` / `"apikey": "K"` — the repr / JSON form a frame's `params` dict takes.
+# (`authorization` is left to the Bearer / JWT patterns so `Bearer ***` stays legible.)
+_SECRET_KV_RE = re.compile(
+    r"""(?i)((['"])(?:api[_-]?key|token|access[_-]?token|secret|password)\2"""
+    r"""\s*[:=]\s*(['"]))[^'"]+(['"])"""
 )
 
 # Email addresses. Deliberately conservative so it can't eat surrounding log structure.
@@ -53,7 +76,8 @@ def redact_secrets(text: Any) -> str:
     """
     try:
         s = str(text)
-        s = _SECRET_QS_RE.sub(r"\1***", s)
+        s = _SECRET_QS_RE.sub(_qs_sub, s)
+        s = _SECRET_KV_RE.sub(r"\1***\4", s)
         s = _DSN_RE.sub(r"\1***\2", s)
         s = _BEARER_RE.sub(r"\1***", s)
         s = _JWT_RE.sub("***", s)
@@ -90,14 +114,82 @@ def scrub_sentry_event(event: dict, _hint: Any = None) -> dict:
         bc = event.get("breadcrumbs")
         if isinstance(bc, dict):
             for b in bc.get("values") or []:
-                if isinstance(b, dict) and isinstance(b.get("message"), str):
+                if not isinstance(b, dict):
+                    continue
+                if isinstance(b.get("message"), str):
                     b["message"] = redact_secrets(b["message"])
+                data = b.get("data")
+                if isinstance(data, dict):
+                    # The httpx integration records `http.query` on every outbound call —
+                    # for FMP that is `symbol=AAPL&apikey=<key>`, no leading `?`. It has
+                    # no triage value (`url` keeps host + path); drop it outright, then
+                    # redact whatever strings remain.
+                    for k in ("http.query", "http.fragment"):
+                        data.pop(k, None)
+                    _redact_strings_in_place(data)
+
+        # Frame locals: on an FMP HTTPStatusError the failing frame holds
+        # `e=HTTPStatusError("... apikey=<key>")` and `params={'apikey': '<key>'}`. By the
+        # time before_send runs the event is serialised, so these are strings or
+        # dict/list trees of repr strings — walk them all.
+        exc = event.get("exception")
+        if isinstance(exc, dict):
+            for val in exc.get("values") or []:
+                st = (val or {}).get("stacktrace") if isinstance(val, dict) else None
+                _scrub_frames(st)
+        _scrub_frames(event.get("stacktrace"))
+        for th in ((event.get("threads") or {}).get("values") or []):
+            if isinstance(th, dict):
+                _scrub_frames(th.get("stacktrace"))
+        extra = event.get("extra")
+        if isinstance(extra, dict):
+            _redact_strings_in_place(extra)
 
         _scrub_request_body(event)
         _scrub_request_headers(event)
     except Exception:
         pass
     return event
+
+
+def _scrub_frames(stacktrace: Any) -> None:
+    if not isinstance(stacktrace, dict):
+        return
+    for frame in stacktrace.get("frames") or []:
+        if isinstance(frame, dict) and isinstance(frame.get("vars"), dict):
+            _redact_strings_in_place(frame["vars"])
+
+
+def _is_credential_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    low = key.lower()
+    return low in _CREDENTIAL_KEYS or any(s in low for s in _CREDENTIAL_SUBSTRINGS)
+
+
+def _redact_strings_in_place(node: Any, _depth: int = 0) -> None:
+    """Apply `redact_secrets` to every str leaf of a dict/list tree, in place.
+
+    KEY-aware as well as value-aware: a serialised frame local `params={'apikey': K}`
+    arrives as a dict whose key is `apikey` and whose value is the bare repr `'K'` — no
+    `apikey=` prefix for the regex to anchor on — so a credential-named key blanks its value.
+    """
+    if _depth > 12:
+        return
+    if isinstance(node, dict):
+        for k, v in list(node.items()):
+            if _is_credential_key(k) and not isinstance(v, (dict, list)):
+                node[k] = "[redacted]"
+            elif isinstance(v, str):
+                node[k] = redact_secrets(v)
+            elif isinstance(v, (dict, list)):
+                _redact_strings_in_place(v, _depth + 1)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                node[i] = redact_secrets(v)
+            elif isinstance(v, (dict, list)):
+                _redact_strings_in_place(v, _depth + 1)
 
 
 # Request headers that carry a credential. sentry-sdk's own SENSITIVE_HEADERS list covers
@@ -186,6 +278,16 @@ class SecretRedactingFilter(logging.Filter):
             if red != msg:
                 record.msg = red
                 record.args = ()
+            # The TRACEBACK too. `Formatter.format` renders `exc_info` into `exc_text` only
+            # if nothing pre-set it, so a filter that touched the message alone left every
+            # `logger.error(..., exc_info=True)` site — the stock endpoints, the chat widget
+            # fetcher, the global 500 handler — printing the raw httpx line, FMP key and all,
+            # into the Railway log. `formatException` walks `__cause__` / `__context__`, so a
+            # `raise Typed(...) from e` chain is covered as well.
+            if record.exc_info and not record.exc_text:
+                record.exc_text = redact_secrets(
+                    logging.Formatter().formatException(record.exc_info)
+                )
         except Exception:
             pass
         return True

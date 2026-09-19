@@ -85,6 +85,23 @@ def test_the_caller_captures_the_epoch_before_its_request():
     assert "asOf: whaleSyncEpoch" in body
 
 
+def test_the_third_follow_writer_carries_the_epoch_too():
+    """F19-5: `reconcileLocalFollow` writes the device-global follows key (and the set that
+    drives `TrackingViewModel.reconcileFollowState`) with no epoch — a profile fetched as
+    account A and landing after A signed out wrote A's follow under the next account."""
+    svc = _code("Views/Screens/WhaleService.swift")
+    body = _block(svc, r"func reconcileLocalFollow\(_ whaleId: String, isFollowing: Bool, asOf epoch: Int\)")
+    guard_idx = body.index("guard epoch == identityEpoch else { return }")
+    assert guard_idx < body.index("followedWhaleIds.insert(whaleId)"), \
+        "the epoch guard must precede the in-memory insert, not only the save"
+    vm = _code("ViewModels/WhaleProfileViewModel.swift")
+    load = _block(vm, r"func loadProfile\(")
+    cap = load.index("let epoch = self.whaleService.currentIdentityEpoch")
+    req = load.index(".getWhaleProfile(whaleId: self.whaleId)")
+    assert cap < req, "the epoch must be read BEFORE the request"
+    assert "asOf: epoch" in load
+
+
 def test_the_price_alert_store_refuses_an_ended_session():
     src = _code("Core/Services/PriceAlertStore.swift")
     load = _block(src, r"private func performLoad\(\) async")
@@ -99,6 +116,37 @@ def test_the_price_alert_store_refuses_an_ended_session():
     assert "identityEpoch &+= 1" in reset
     assert reset.index("identityEpoch &+= 1") < reset.index("alerts = []"), \
         "bump FIRST, or an in-flight load re-fills what reset just cleared"
+
+
+@pytest.mark.parametrize("decl, await_call, min_guards", [
+    (r"func create\(", "createPriceAlert", 2),
+    (r"func toggleActive\(_ alert: PriceAlertDTO\) async", "updatePriceAlert", 2),
+    (r"func delete\(_ alert: PriceAlertDTO\) async", "deletePriceAlert", 2),
+])
+def test_every_price_alert_mutation_has_the_epoch_check_the_load_has(decl, await_call, min_guards):
+    """F15-12: `performLoad` bailed on a bumped epoch; the three mutations did not. A
+    toggle or delete resolving after sign-out re-published the ended session's snapshot
+    (the REVERT arm is the one that bleeds) or toasted the next account about it."""
+    src = _code("Core/Services/PriceAlertStore.swift")
+    body = _block(src, decl)
+    assert "let epoch = identityEpoch" in body, f"{decl}: no epoch capture"
+    assert body.index("let epoch = identityEpoch") < body.index(await_call), \
+        f"{decl}: the epoch must be captured before the await"
+    assert body.count("guard epoch == identityEpoch else") >= min_guards, \
+        f"{decl}: both the success and the revert/report arm must bail"
+    assert body.index(await_call) < body.index("guard epoch == identityEpoch else"), \
+        f"{decl}: the first guard sits after the await, not before it"
+
+
+def test_the_portfolio_switch_has_the_epoch_check_too():
+    """Sibling of F15-12: `setActivePortfolio` writes a device-global UserDefaults key on
+    success — after `reset()` that is the ended session's id under the next account."""
+    src = _code("Core/Services/PortfolioStore.swift")
+    body = _block(src, r"func setActivePortfolio\(_ id: String\) async")
+    assert "let epoch = identityEpoch" in body
+    assert body.index("let epoch = identityEpoch") < body.index("activatePortfolio(id: id)")
+    assert body.count("guard epoch == identityEpoch else { return }") == 2
+    assert body.index("guard epoch == identityEpoch else { return }") < body.index("UserDefaults.standard.set")
 
 
 # ── the two lifecycle leaks ─────────────────────────────────────────────────────────

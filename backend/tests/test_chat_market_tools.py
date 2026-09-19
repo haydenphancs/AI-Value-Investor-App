@@ -270,6 +270,132 @@ async def test_the_daily_cap_refuses_at_the_ceiling(monkeypatch):
     assert await cmt._claim_web_search() is True
 
 
+# ── S01-4: a per-ACCOUNT sub-bucket beneath the global cap ────────────────────
+#
+# The global ceiling bounds the bill; on its own it let one account loop "why did X
+# move" over material movers until the day's 200 units were gone for everyone.
+
+
+class _Ledger:
+    """A fake `chat_usage_budget`: counts per bucket, refuses at `caps[bucket]`."""
+    def __init__(self, caps):
+        self.caps = caps
+        self.counts: dict = {}
+        self.claims: list = []
+        self.refunds: list = []
+
+    def try_claim_turn(self, bucket, limit=None):
+        self.claims.append((bucket, limit))
+        cap = self.caps.get(bucket, limit)
+        if self.counts.get(bucket, 0) >= cap:
+            return -1
+        self.counts[bucket] = self.counts.get(bucket, 0) + 1
+        return self.counts[bucket]
+
+    def refund_turn(self, bucket):
+        self.refunds.append(bucket)
+        self.counts[bucket] = max(0, self.counts.get(bucket, 0) - 1)
+
+
+_GLOBAL = cmt._WEB_SEARCH_BUCKET
+_USER = cmt._user_web_search_bucket("user-1")
+
+
+def _ledger(monkeypatch, caps) -> _Ledger:
+    monkeypatch.setattr(cmt.settings, "CHAT_WEB_SEARCH_ENABLED", True)
+    monkeypatch.setattr(cmt.settings, "CHAT_WEB_SEARCH_DAILY_CAP", 200)
+    monkeypatch.setattr(cmt.settings, "CHAT_WEB_SEARCH_USER_DAILY_CAP", 2)
+    led = _Ledger(caps)
+    monkeypatch.setattr(cmt, "get_chat_budget_service", lambda: led)
+    return led
+
+
+def test_the_per_account_bucket_is_derived_never_the_raw_id():
+    """The column is shared with the per-install chat bucket keyed on the account id itself;
+    a raw id would count web searches as chat turns."""
+    assert _USER != "user-1"
+    assert _USER != _GLOBAL
+    assert cmt._user_web_search_bucket("user-2") != _USER
+
+
+@pytest.mark.asyncio
+async def test_a_claim_with_an_account_takes_both_buckets_in_order(monkeypatch):
+    led = _ledger(monkeypatch, {})
+    assert await cmt._claim_web_search("user-1") is True
+    assert [b for b, _ in led.claims] == [_USER, _GLOBAL]
+    assert led.claims[0][1] == 2 and led.claims[1][1] == 200
+    assert led.counts == {_USER: 1, _GLOBAL: 1}
+
+
+@pytest.mark.asyncio
+async def test_the_per_account_cap_refuses_without_touching_the_global_unit(monkeypatch):
+    led = _ledger(monkeypatch, {_USER: 2})
+    assert await cmt._claim_web_search("user-1") is True
+    assert await cmt._claim_web_search("user-1") is True
+    assert await cmt._claim_web_search("user-1") is False, "third search of the day refused"
+    assert led.counts[_GLOBAL] == 2, "a refused per-account claim spends no global unit"
+    # Another account is unaffected by the first one's ceiling.
+    assert await cmt._claim_web_search("user-2") is True
+    assert led.counts[_GLOBAL] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_global_refusal_hands_the_per_account_unit_back(monkeypatch):
+    led = _ledger(monkeypatch, {_GLOBAL: 0})
+    assert await cmt._claim_web_search("user-1") is False
+    assert led.counts[_USER] == 0, "the sub-bucket unit was refunded, not stranded"
+    assert led.refunds == [_USER]
+
+
+@pytest.mark.asyncio
+async def test_a_release_refunds_both_buckets(monkeypatch):
+    led = _ledger(monkeypatch, {})
+    assert await cmt._claim_web_search("user-1") is True
+    await cmt._release_web_search("user-1")
+    assert led.counts == {_USER: 0, _GLOBAL: 0}
+    assert set(led.refunds) == {_USER, _GLOBAL}
+
+
+@pytest.mark.asyncio
+async def test_an_anonymous_claim_uses_the_global_bucket_only(monkeypatch):
+    """Callers that carry no account (the sweeper path, tests) keep the old contract."""
+    led = _ledger(monkeypatch, {})
+    assert await cmt._claim_web_search() is True
+    assert [b for b, _ in led.claims] == [_GLOBAL]
+    await cmt._release_web_search()
+    assert led.refunds == [_GLOBAL]
+
+
+@pytest.mark.asyncio
+async def test_a_per_account_budget_outage_fails_closed(monkeypatch):
+    monkeypatch.setattr(cmt.settings, "CHAT_WEB_SEARCH_ENABLED", True)
+
+    def _boom(bucket, limit=None):
+        if bucket == _USER:
+            raise cmt.ChatBudgetUnavailable("db down")
+        return 1
+    monkeypatch.setattr(cmt, "get_chat_budget_service",
+                        lambda: SimpleNamespace(try_claim_turn=_boom))
+    assert await cmt._claim_web_search("user-1") is False
+
+
+def test_the_paid_tool_receives_the_account_from_the_handler_map():
+    """Source-scan: `build_chat_tool_handlers` threads `user_id` to `explain_price_move` via
+    `_fetch_price_move_data`, and both chat doors pass it. A handler map built without
+    it silently meters that account against the global bucket only."""
+    import re
+    from pathlib import Path
+    root = Path(cmt.__file__).resolve().parents[1]
+    tools_src = (root / "services" / "agents" / "chat_tools.py").read_text()
+    svc_src = (root / "services" / "chat_service.py").read_text()
+    door_src = (root / "api" / "v1" / "endpoints" / "chat.py").read_text()
+    assert re.search(r"_fetch_price_move_data\(sym, is_crypto=False, user_id=user_id\)", tools_src)
+    assert re.search(r"_fetch_price_move_data\(sym, user_id=user_id\)", tools_src)
+    assert "explain_price_move(ticker, is_crypto=is_crypto, user_id=user_id)" in svc_src
+    assert re.search(r"build_chat_tool_handlers\([^)]*user_id=user_id", svc_src, re.S)
+    assert re.search(r"build_chat_tool_handlers\([^)]*user_id=user\[\"id\"\]", door_src, re.S)
+
+
 # ── Degradation: silence is never a finding ──────────────────────────────────
 
 @pytest.mark.asyncio
@@ -669,7 +795,7 @@ async def test_a_search_that_never_ran_releases_its_unit(monkeypatch):
     from app.services.price_catalyst_service import CatalystNotAttempted
     released = []
 
-    async def _release():
+    async def _release(user_id=None):
         released.append(1)
     calls = {"cache_only": 0, "fresh": 0}
 
@@ -695,7 +821,7 @@ async def test_a_search_that_ran_and_found_nothing_keeps_its_unit(monkeypatch):
     """Google billed that search; a spend gate refunds only what provably was not spent."""
     released = []
 
-    async def _release():
+    async def _release(user_id=None):
         released.append(1)
 
     async def _get_catalyst(ticker, change_pct, window_label, cache_only=False, **kw):
@@ -736,7 +862,35 @@ async def test_explain_price_move_carries_the_session_and_words_the_bottom_line_
     monkeypatch.setattr(cmt, "_maybe_web_catalyst", AsyncMock(return_value=None))
     out = await cmt.explain_price_move("NAVN")
     assert out["session"] == "on Fri" and out["session_date"] == "2026-09-11"
-    assert "on Fri" in out["bottom_line"] and "today" not in out["bottom_line"].split("—")[0]
+    assert "on Fri" in out["bottom_line"]
+    # The WHOLE line, not just the arithmetic head: the news clause used to say "today"
+    # under a move worded "on Fri" — a cross-session sentence handed to the model (F07-9).
+    assert "today" not in out["bottom_line"].lower(), out["bottom_line"]
+    assert "No company news was published on Fri." in out["bottom_line"]
+
+
+@pytest.mark.parametrize("news, expect", [
+    ({"news_available": False}, "Friday's news could not be checked"),
+    ({"news_available": True, "articles": []}, "No company news was published on Fri."),
+    ({"news_available": True, "articles": [{"title": "x"}]}, "stands out in Friday's news."),
+])
+def test_every_news_clause_of_the_bottom_line_names_the_session(news, expect):
+    exp = _explanation(tier="Typical", kind=CauseKind.NONE, change=-1.2)
+    exp.session_word = "on Fri"
+    line = cmt._bottom_line(exp, news)
+    assert expect in line, line
+    assert "today" not in line.lower(), line
+
+
+@pytest.mark.parametrize("news, expect", [
+    ({"news_available": False}, "Today's news could not be checked"),
+    ({"news_available": True, "articles": []}, "No company news was published today."),
+    ({"news_available": True, "articles": [{"title": "x"}]}, "stands out in today's news."),
+])
+def test_the_today_wording_is_byte_identical_to_before(news, expect):
+    exp = _explanation(tier="Typical", kind=CauseKind.NONE, change=-1.2)
+    exp.session_word = "today"
+    assert expect in cmt._bottom_line(exp, news)
 
 
 @pytest.mark.asyncio
@@ -1008,3 +1162,195 @@ async def test_a_symbol_missing_from_a_healthy_batch_is_unreadable_but_not_an_er
     out = await cmt.explain_price_move("ZZZZ")
     assert out["move_readable"] is False
     assert "error" not in out and "upstream" not in out
+
+
+# ── F04-5: a joiner never spends a unit ──────────────────────────────────────
+#
+# `get_catalyst` answers a `cache_only` probe with None BEFORE its `_inflight` join, so a
+# probe miss used to claim a unit and then JOIN the leader's future — one Google search,
+# two or three units: a second user in the same window, a turn while the sweeper's row was
+# in flight, or the model re-issuing `explain_price_move` after the 75 s ceiling answered
+# `timed_out` (the shielded handler keeps running). The claim is now made only by the leader.
+
+import asyncio as _aio
+
+from app.services import price_catalyst_service as pcs
+
+
+@pytest.fixture
+def catalyst_isolation(monkeypatch):
+    """A clean `_inflight` / mem tier, the kill switch on, the quota breaker closed."""
+    monkeypatch.setattr(pcs, "_inflight", {})
+    monkeypatch.setattr(pcs, "_mem_cache", {})
+    from app.config import settings
+    monkeypatch.setattr(settings, "PRICE_CATALYST_AI_ENABLED", True, raising=True)
+    from app.integrations import gemini as _g
+    monkeypatch.setattr(_g, "_quota_circuit", type(_g._quota_circuit)())
+    return pcs._ctx_key("NAVN", "today", -22.0)
+
+
+def _probe_miss_service():
+    async def _get_catalyst(ticker, change_pct, window_label, *, cache_only=False, **kw):
+        if cache_only:
+            return None
+        raise AssertionError("a joiner must never run its own search")
+    return SimpleNamespace(get_catalyst=_get_catalyst)
+
+
+@pytest.mark.asyncio
+async def test_a_search_already_in_flight_is_joined_WITHOUT_a_claim(monkeypatch, catalyst_isolation):
+    key = catalyst_isolation
+    fut = _aio.get_running_loop().create_future()
+    pcs._inflight[key] = fut
+    claim = AsyncMock(return_value=True)
+    release = AsyncMock()
+    monkeypatch.setattr(cmt, "_claim_web_search", claim)
+    monkeypatch.setattr(cmt, "_release_web_search", release)
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        _probe_miss_service)
+
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    task = _aio.ensure_future(cmt._maybe_web_catalyst("NAVN", exp, "none"))
+    await _aio.sleep(0.01)
+    assert not task.done(), "the joiner returned before the leader answered"
+    fut.set_result({"tag": "Guidance Cut", "reason": "Navan guided down.", "sources": []})
+    out = await task
+    assert out is not None and out["catalyst"] == "Guidance Cut"
+    assert out["freshly_searched"] is False, "a joined result is not a paid search"
+    claim.assert_not_awaited()
+    release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["none", "not_attempted", "error"])
+async def test_a_joined_future_that_yields_nothing_degrades_with_no_claim(monkeypatch, catalyst_isolation, settle):
+    key = catalyst_isolation
+    fut = _aio.get_running_loop().create_future()
+    if settle == "none":
+        fut.set_result(None)
+    elif settle == "not_attempted":
+        fut.set_exception(pcs.CatalystNotAttempted("breaker open"))
+    else:
+        fut.set_exception(RuntimeError("leader exploded"))
+    pcs._inflight[key] = fut
+    claim = AsyncMock(return_value=True)
+    release = AsyncMock()
+    monkeypatch.setattr(cmt, "_claim_web_search", claim)
+    monkeypatch.setattr(cmt, "_release_web_search", release)
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        _probe_miss_service)
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    assert await cmt._maybe_web_catalyst("NAVN", exp, "none") is None
+    claim.assert_not_awaited()
+    release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_leader_that_appears_DURING_the_claim_gets_the_unit_back(monkeypatch, catalyst_isolation):
+    """`_claim_web_search` is a DB round trip that yields; a leader can be elected in that
+    gap. The claim is then a joiner's and must be released before anything is awaited."""
+    key = catalyst_isolation
+    fut = _aio.get_running_loop().create_future()
+    fut.set_result({"tag": "Cached", "reason": "leader's answer", "sources": []})
+
+    async def _claim(user_id=None):
+        pcs._inflight[key] = fut          # the sweeper became leader while we claimed
+        return True
+    claim = AsyncMock(side_effect=_claim)
+    release = AsyncMock()
+    monkeypatch.setattr(cmt, "_claim_web_search", claim)
+    monkeypatch.setattr(cmt, "_release_web_search", release)
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        _probe_miss_service)
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    out = await cmt._maybe_web_catalyst("NAVN", exp, "none")
+    assert out is not None and out["freshly_searched"] is False
+    claim.assert_awaited_once()
+    release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_leader_skips_the_service_cache_re_read_so_the_election_is_synchronous(monkeypatch, catalyst_isolation):
+    """The probe just missed. The service's own re-read of the two tiers is an `await`
+    between the in-flight check and `_inflight[ctx_key] = future` — the very gap in which
+    a claimed call turned into a join. `force_refresh=True` removes it."""
+    seen = []
+
+    async def _get_catalyst(ticker, change_pct, window_label, *, cache_only=False,
+                            force_refresh=False, **kw):
+        seen.append((cache_only, force_refresh))
+        return None if cache_only else {"tag": "X", "reason": "because", "sources": []}
+
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        lambda: SimpleNamespace(get_catalyst=_get_catalyst))
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    out = await cmt._maybe_web_catalyst("NAVN", exp, "none")
+    assert out is not None and out["freshly_searched"] is True
+    assert seen == [(True, False), (False, True)], seen
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_turns_share_one_search_and_one_unit(monkeypatch, catalyst_isolation):
+    """End to end through the REAL `get_catalyst`, with the grounded call parked on an Event:
+    claims == grounded searches == 1, and both turns get the answer."""
+    key = catalyst_isolation
+    gate = _aio.Event()
+    grounded = []
+
+    async def _do_grounded(self, ticker, change_pct, window_label, *, company_name=None):
+        grounded.append(ticker)
+        await gate.wait()
+        return {"status": "ok", "tag": "Guidance Cut", "reason": "Navan guided down.",
+                "sources": [], "model_version": "m"}
+
+    monkeypatch.setattr(pcs.PriceCatalystService, "_do_grounded", _do_grounded)
+    monkeypatch.setattr(pcs.PriceCatalystService, "_read_cache", lambda self, *a, **k: None)
+    monkeypatch.setattr(pcs.PriceCatalystService, "_write_cache", lambda self, *a, **k: None)
+    monkeypatch.setattr(pcs.PriceCatalystService, "_write_audit", lambda self, *a, **k: None)
+    svc = pcs.PriceCatalystService()
+    monkeypatch.setattr(pcs, "get_price_catalyst_service", lambda: svc)
+
+    claims = []
+
+    async def _claim(user_id=None):
+        claims.append(1)
+        await _aio.sleep(0.01)           # the real one is a DB round trip: it yields
+        return True
+    monkeypatch.setattr(cmt, "_claim_web_search", _claim)
+    release = AsyncMock()
+    monkeypatch.setattr(cmt, "_release_web_search", release)
+
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    t1 = _aio.ensure_future(cmt._maybe_web_catalyst("NAVN", exp, "none"))
+    t2 = _aio.ensure_future(cmt._maybe_web_catalyst("NAVN", exp, "none"))
+    await _aio.sleep(0.05)
+    assert key in pcs._inflight, "no leader was elected"
+    assert grounded == ["NAVN"], "the search ran more than once"
+    assert not t1.done() and not t2.done()
+    gate.set()
+    o1, o2 = await _aio.gather(t1, t2)
+    assert o1 and o2 and o1["catalyst"] == o2["catalyst"] == "Guidance Cut"
+    # Exactly one unit is KEPT: either only one claim ran, or the second was given back.
+    assert len(claims) - release.await_count == 1, (claims, release.await_count)
+    assert sorted([o1["freshly_searched"], o2["freshly_searched"]]) == [False, True]
+    assert key not in pcs._inflight
+
+
+@pytest.mark.asyncio
+async def test_a_joiners_cancellation_does_not_cancel_the_shared_future(monkeypatch, catalyst_isolation):
+    key = catalyst_isolation
+    fut = _aio.get_running_loop().create_future()
+    pcs._inflight[key] = fut
+    monkeypatch.setattr(cmt, "_claim_web_search", AsyncMock(return_value=True))
+    monkeypatch.setattr(cmt, "_release_web_search", AsyncMock())
+    monkeypatch.setattr("app.services.price_catalyst_service.get_price_catalyst_service",
+                        _probe_miss_service)
+    exp = _explanation(tier="Extreme", kind=CauseKind.NONE)
+    task = _aio.ensure_future(cmt._maybe_web_catalyst("NAVN", exp, "none"))
+    await _aio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(_aio.CancelledError):
+        await task
+    assert not fut.cancelled(), "cancelling one joiner cancelled the leader's future"
+    fut.set_result(None)

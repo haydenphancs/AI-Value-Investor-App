@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.config import settings
-from app.database import check_supabase_health, get_supabase
+from app.database import check_supabase_health, close_health_client, get_supabase
 from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
 from app.integrations.finra_short_interest import close_finra_client
@@ -149,6 +149,7 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
     import sentry_sdk
     from sentry_sdk.integrations.fastapi import FastApiIntegration
     from sentry_sdk.integrations.logging import LoggingIntegration
+    from sentry_sdk.scrubber import EventScrubber
 
     def _sentry_before_send(event: dict, hint: dict) -> dict:
         exc_info = (hint or {}).get("exc_info")
@@ -176,6 +177,11 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
         ],
         before_send=_sentry_before_send,
         send_default_pii=False,
+        # Client-side belt under `scrub_sentry_event`: the SDK's own scrubber walks frame
+        # locals, breadcrumb data and `extra` and blanks every denylisted KEY (`apikey`,
+        # `token`, `password`, …) — `recursive=True` so a nested `params={'apikey': K}` in a
+        # frame's vars is caught even if the value-based regex walk ever regresses.
+        event_scrubber=EventScrubber(recursive=True),
         # `send_default_pii=False` does NOT cover request bodies — it gates only cookies.
         # `StarletteRequestExtractor.extract_request_info` attaches the parsed JSON body to
         # every event unconditionally (integrations/starlette.py: `request_info["data"] =
@@ -290,12 +296,32 @@ async def lifespan(app: FastAPI):
     # Everything else here is FMP/Gemini-heavy and belongs to Railway, but with the
     # blanket skip there was no way to exercise a notification sender on a laptop at
     # all — which made "does this notification actually fire?" unanswerable before
-    # deploying it. Pair with PUSH_DRY_RUN=true to run the full pipeline (audience,
-    # preferences, caps, quiet hours, claim, ledger row) with no APNs and no device.
+    # deploying it. Dry-run is forced below, but dry-run is NOT what makes this safe —
+    # see `NOTIFICATION_JOBS_LOCALLY_DB_IS_NOT_PROD` in config.py: the pipeline runs three
+    # CLAIMS against the Supabase in backend/.env before the APNs POST it replaces.
     run_notification_jobs = (not is_local_dev) or settings.RUN_NOTIFICATION_JOBS_LOCALLY
 
     if is_local_dev:
         logger.info("Local dev mode — skipping background tasks (Railway handles them)")
+        if run_notification_jobs and not settings.NOTIFICATION_JOBS_LOCALLY_DB_IS_NOT_PROD:
+            # REFUSED. `backend/.env` points at PRODUCTION, and `PUSH_DRY_RUN` only
+            # replaces the APNs POST: `flush_deferred` still claims real users' due
+            # quiet-hours rows and stamps them `dry_run` (terminal — Railway never
+            # re-claims them, so those users never get the buzz); the senders take the
+            # once-per-ET-day `claimed_job` and mark it done, so Railway's sender is
+            # refused for that day; the price-alert loop deactivates every fired one-shot
+            # rule before its dry-run push. A laptop started at 16:05 ET consumed the
+            # day's earnings notifications for every production user, with nothing in
+            # Railway's logs. The flag is an assertion about SUPABASE_URL, not a switch.
+            logger.error(
+                "RUN_NOTIFICATION_JOBS_LOCALLY is set but "
+                "NOTIFICATION_JOBS_LOCALLY_DB_IS_NOT_PROD is not — REFUSING to start the "
+                "notification loops: PUSH_DRY_RUN replaces only the APNs POST, and the "
+                "loops would still claim production's deferred rows, daily sender jobs "
+                "and one-shot price alerts. Point SUPABASE_URL at a non-production "
+                "project and set NOTIFICATION_JOBS_LOCALLY_DB_IS_NOT_PROD=true."
+            )
+            run_notification_jobs = False
         if run_notification_jobs:
             # ⚠️ FORCE DRY RUN ON A LAPTOP unless it was deliberately turned off.
             #
@@ -305,7 +331,15 @@ async def lifespan(app: FastAPI):
             # with PUSH_DRY_RUN=true" — advisory, and nothing enforced it. Opting back IN
             # now takes an explicit `PUSH_DRY_RUN=false`, which is a thing you can only do
             # on purpose.
-            if settings.PUSH_DRY_RUN is not False:
+            # `PUSH_DRY_RUN` is a bool whose DEFAULT is False, so `is not False` could
+            # not tell "unset" from "explicitly false" — with the variable simply absent
+            # (the normal laptop state) dry-run was NOT forced, contrary to the comment.
+            # `model_fields_set` names the fields a source (env / .env) actually
+            # provided; only an explicit `PUSH_DRY_RUN=false` opts back in.
+            explicitly_off = (
+                "PUSH_DRY_RUN" in settings.model_fields_set and settings.PUSH_DRY_RUN is False
+            )
+            if not explicitly_off:
                 settings.PUSH_DRY_RUN = True
             logger.info(
                 "RUN_NOTIFICATION_JOBS_LOCALLY is set — starting the notification "
@@ -473,6 +507,7 @@ async def lifespan(app: FastAPI):
     await close_openfda_client()
     await close_uspto_client()
     await close_finra_client()
+    await close_health_client()
     logger.info("Shutting down")
 
 
@@ -482,21 +517,48 @@ _SOCIAL_SNAPSHOT_INTERVAL_SECONDS = 3600
 async def _social_snapshot_once(last_done):
     """Write today's `social_mentions_history` snapshot unless this process already did.
 
-    Returns the date now recorded as done — unchanged when nothing was stored (ApeWisdom
-    cache still cold, upsert failed), so the next hourly tick retries. The upsert is
-    idempotent on (ticker, snapshot_date, source), so a duplicate run is harmless.
+    Returns the date now recorded as done — unchanged when the day is NOT complete, so the
+    next hourly tick retries. The upsert is idempotent on (ticker, snapshot_date, source),
+    so a duplicate run is harmless, and the rows that did land are kept either way.
+
+    Three things leave the day open, each of which used to mark it done:
+      * nothing stored (ApeWisdom cache still cold, every upsert failed);
+      * a PARTIAL write — `snapshot_all` reports `(stored, expected)` because a chunk lost
+        to a Supabase 520 ("500/974") silently cost 474 tickers that day's row for a week
+        of 7-day sums;
+      * a PARTIAL CACHE — `is_cache_populated()` is False when a filter has never landed
+        (boot at 23:50 UTC, all-stocks page 1 answers 429, all-crypto lands): the boot
+        snapshot wrote ~100 crypto rows, returned > 0, and every stock lost the day. The
+        rows are still written (a permanently dead filter must not starve the table), only
+        the "done" stamp is withheld. Read BEFORE the write so a refresh landing mid-write
+        can only make us retry, never skip.
     """
     from datetime import date as _date
 
     today = _date.today()
     if last_done == today:
         return last_done
+    from app.integrations.apewisdom import is_cache_populated
     from app.services.social_mentions_service import get_social_mentions_service
 
-    stored = await get_social_mentions_service().snapshot_all()
+    complete_cache = is_cache_populated()
+    stored, expected = await get_social_mentions_service().snapshot_all()
     if stored <= 0:
         logger.warning(
             "Social mentions snapshot for %s stored 0 tickers — retrying next tick", today
+        )
+        return last_done
+    if stored < expected:
+        logger.warning(
+            "Social mentions snapshot for %s stored %d/%d tickers — PARTIAL, retrying "
+            "next tick", today, stored, expected,
+        )
+        return last_done
+    if not complete_cache:
+        logger.warning(
+            "Social mentions snapshot for %s stored %d tickers from a PARTIAL ApeWisdom "
+            "cache (a filter has not landed yet) — day left open, retrying next tick",
+            today, stored,
         )
         return last_done
     logger.info("Social mentions snapshot for %s stored %d tickers", today, stored)
@@ -524,6 +586,21 @@ async def _run_social_snapshot_loop():
     last_done = None
     while True:
         try:
+            # A half-landed cache (one filter 429'd) is retried HERE, not left to request
+            # traffic: readers only kick a background refresh, and the partial stamp is
+            # fresh for `_PARTIAL_RETRY_SECONDS`, so with no traffic the failed filter
+            # would otherwise wait for the next hourly tick to even start — and that tick
+            # would snapshot the stale cache first. This task has no `wait_for` around it,
+            # so awaiting the full fetch (≥30 s) is fine.
+            from app.integrations.apewisdom import is_cache_populated, refresh_cache
+            if not is_cache_populated():
+                try:
+                    await refresh_cache()
+                except Exception as e:
+                    logger.warning(
+                        "ApeWisdom refresh before snapshot failed: %s: %s",
+                        type(e).__name__, e,
+                    )
             last_done = await _social_snapshot_once(last_done)
         except Exception as e:
             logger.error(
@@ -1032,6 +1109,115 @@ def _next_weekly_ttm_run(now: "datetime") -> "datetime":
     return candidate
 
 
+def _last_weekly_ttm_run(now: "datetime") -> "datetime":
+    """The most recent Sunday _TTM_WEEKLY_HOUR_UTC:00 UTC at or before `now` — the anchor a
+    restart inside the run's day must catch up to. Mirror of `_next_weekly_ttm_run`."""
+    from datetime import timedelta
+
+    return _next_weekly_ttm_run(now) - timedelta(days=7)
+
+
+# A restart inside a scheduled run's day re-enters that run instead of sleeping to the
+# NEXT anchor (a quarter / a week away). The window is the length of the day the chain
+# owns: the quarterly chain starts 02:00 UTC and its last phase can run past 05:00.
+_SCHEDULED_CATCHUP_WINDOW_HOURS = 20
+# Per-phase claim stale window: longer than the longest phase (moat, 60-90 min), because
+# Railway overlaps the old and new instance on a deploy and a 15-minute window (the
+# notification default) would let the new one steal a phase the old one is mid-way through.
+_CHAIN_PHASE_STALE_SECONDS = 3 * 3600
+
+JOB_TTM_BENCHMARK_WEEKLY = "ttm_benchmark_weekly"
+JOB_INDUSTRY_DOSSIER_QUARTERLY = "industry_dossier_quarterly"
+JOB_COMPETITOR_INTEL_QUARTERLY = "competitor_intel_quarterly"
+JOB_IP_INTEL_QUARTERLY = "ip_intel_quarterly"
+JOB_INDUSTRY_MOAT_QUARTERLY = "industry_moat_benchmark_quarterly"
+JOB_INDUSTRY_BENCHMARK_QUARTERLY = "industry_benchmark_quarterly"
+
+
+def _catchup_anchor(now: "datetime", last_run, window_hours: int = _SCHEDULED_CATCHUP_WINDOW_HOURS):
+    """The anchor a freshly (re)started loop should ENTER NOW, or None to sleep to the next.
+
+    `last_run(now)` is the most recent scheduled anchor at or before `now`. Inside
+    `window_hours` of it the loop re-enters that run — every phase then decides for
+    itself, through its durable day-keyed claim, whether it already ran today. Without
+    this a redeploy at 03:00 on a quarter-start Sunday slept straight to the NEXT
+    quarter, skipping the remaining phases for three months (F24-6).
+    """
+    from datetime import timedelta
+
+    anchor = last_run(now)
+    if anchor <= now < anchor + timedelta(hours=window_hours):
+        return anchor
+    return None
+
+
+# How often a phase whose claim is HELD by another instance re-asks for it.
+_CLAIM_RETRY_SECONDS = 120
+
+
+async def _run_claimed_phase(job: str, label: str, body) -> None:
+    """Run one scheduled phase under its durable claim (migration 147).
+
+    `body` is an async callable returning a summary. The claim is day-keyed and shared
+    across instances, so a phase that already completed today (before a restart, or on
+    the other instance of a deploy overlap) is skipped rather than re-run — the fiscal
+    dossier recompute and the two Gemini-grounded `refresh_top_tickers` batches have no
+    freshness gate of their own, so the claim is what makes a catch-up pass idempotent.
+    A phase that raises releases the claim with success=False (retried on the next
+    catch-up pass); one cancelled by a redeploy does the same, in the manager's `finally`.
+
+    A REFUSED claim is not "done". It is one of three things, told apart by reading the
+    ledger row: the phase already ran today (skip); the claim is HELD — the old instance
+    of a deploy overlap is still running it, or a SIGKILL left `claim_at` set (WAIT and
+    re-ask every `_CLAIM_RETRY_SECONDS`, bounded by the stale window, so when the holder
+    finishes we skip, and when it died mid-phase we take over once its claim expires);
+    or the RPC failed (fail closed, skip — never duplicate). Treating every refusal as
+    "done" lost the in-flight phase for the whole quarter on a deploy overlap (W2 B-1).
+    """
+    from datetime import datetime, timezone
+
+    from app.services.notification_jobs import claimed_scheduled_job, scheduled_job_state
+
+    deadline = time.monotonic() + _CHAIN_PHASE_STALE_SECONDS + 10 * 60
+    while True:
+        try:
+            async with claimed_scheduled_job(job, stale_seconds=_CHAIN_PHASE_STALE_SECONDS) as run:
+                if run is not None:
+                    summary = await body()
+                    run.success = True
+                    logger.info(f"{label} completed: {summary}")
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"{label} failed: {e}", exc_info=True)
+            return
+
+        state = await asyncio.to_thread(scheduled_job_state, job)
+        if state is None:
+            logger.warning("%s: claim refused and the job ledger is unreadable — skipping (fail closed)", label)
+            return
+        if not state.get("enabled", True):
+            logger.info("%s: disabled by the operator kill switch — skipping", label)
+            return
+        today = datetime.now(timezone.utc).date().isoformat()
+        if str(state.get("run_day") or "")[:10] == today:
+            logger.info("%s: already ran today (durable claim) — skipping", label)
+            return
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "%s: claim still held after the %ds stale window — skipping this pass "
+                "(the holder never released it; re-entered on the next catch-up)",
+                label, _CHAIN_PHASE_STALE_SECONDS,
+            )
+            return
+        logger.info(
+            "%s: claim held by another instance (claim_at=%s) — re-asking in %ds",
+            label, state.get("claim_at"), _CLAIM_RETRY_SECONDS,
+        )
+        await asyncio.sleep(_CLAIM_RETRY_SECONDS)
+
+
 async def _run_ttm_benchmark_job():
     """Weekly TTM (trailing-twelve-month) benchmark refresh — Sunday 06:00 UTC.
 
@@ -1051,27 +1237,33 @@ async def _run_ttm_benchmark_job():
 
     await asyncio.sleep(180)  # let app fully start
 
+    entered = None  # the anchor this process last entered — a catch-up runs once per anchor
     while True:
         now = datetime.now(timezone.utc)
-        next_run = _next_weekly_ttm_run(now)
-        sleep_seconds = (next_run - now).total_seconds()
-        logger.info(
-            f"TTM benchmark job: next run at {next_run.isoformat()} "
-            f"(sleeping {sleep_seconds / 3600:.1f}h)"
-        )
-        await asyncio.sleep(sleep_seconds)
+        catchup = _catchup_anchor(now, _last_weekly_ttm_run)
+        if catchup is not None and catchup != entered:
+            # A restart inside the run's day: re-enter it now; the durable claim below
+            # decides whether it already ran (F24-6).
+            next_run = catchup
+            logger.info(f"TTM benchmark job: re-entering this week's run ({next_run.isoformat()})")
+        else:
+            next_run = _next_weekly_ttm_run(now)
+            sleep_seconds = (next_run - now).total_seconds()
+            logger.info(
+                f"TTM benchmark job: next run at {next_run.isoformat()} "
+                f"(sleeping {sleep_seconds / 3600:.1f}h)"
+            )
+            await asyncio.sleep(sleep_seconds)
+        entered = next_run
 
-        try:
+        async def _ttm():
             from app.services.industry_benchmark_service import (
                 get_industry_benchmark_service,
             )
-
-            result = await get_industry_benchmark_service().recompute_all_ttm(
+            return await get_industry_benchmark_service().recompute_all_ttm(
                 skip_if_fresh_hours=24,
             )
-            logger.info(f"TTM benchmark weekly job completed: {result}")
-        except Exception as e:
-            logger.error(f"TTM benchmark weekly job failed: {e}", exc_info=True)
+        await _run_claimed_phase(JOB_TTM_BENCHMARK_WEEKLY, "TTM benchmark weekly job", _ttm)
 
 
 def _next_daily_run(now: "datetime", hour_utc: int = 8) -> "datetime":
@@ -1221,6 +1413,23 @@ def _next_quarterly_dossier_run(now: "datetime") -> "datetime":
     return min(candidates)
 
 
+def _last_quarterly_dossier_run(now: "datetime") -> "datetime":
+    """The most recent quarterly anchor at or before `now` — mirror of
+    `_next_quarterly_dossier_run`, for the catch-up decision after a restart."""
+    from datetime import datetime, timedelta, timezone
+
+    candidates = []
+    for year_offset in (-1, 0):
+        for month in (1, 4, 7, 10):
+            anchor = datetime(now.year + year_offset, month, 1, 2, 0, 0,
+                              tzinfo=timezone.utc)
+            days_to_sunday = (6 - anchor.weekday()) % 7
+            first_sunday = anchor + timedelta(days=days_to_sunday)
+            if first_sunday <= now:
+                candidates.append(first_sunday)
+    return max(candidates)
+
+
 async def _run_industry_dossier_job():
     """Background task: recompute the industry_dossier table quarterly
     on the first Sunday of January / April / July / October at 02:00 UTC.
@@ -1259,24 +1468,35 @@ async def _run_industry_dossier_job():
         if delta > 0:
             await asyncio.sleep(delta)
 
+    # Every phase runs under a durable, day-keyed claim (`_run_claimed_phase`), and a
+    # restart inside the chain's day re-enters it (`_catchup_anchor`) instead of sleeping
+    # to the next quarter. Before this the chain lived only in this coroutine's stack: a
+    # redeploy at 03:00 on the first Sunday lost every phase after the one in flight for
+    # three months, with nothing logged but the new boot's "next run in 2183.0h" (F24-6).
+    entered = None
     while True:
         now = datetime.now(timezone.utc)
-        next_run = _next_quarterly_dossier_run(now)
-        sleep_seconds = (next_run - now).total_seconds()
-        logger.info(
-            f"Industry dossier job (quarterly): next run at {next_run.isoformat()} "
-            f"(sleeping {sleep_seconds / 3600:.1f}h)"
-        )
-        await asyncio.sleep(sleep_seconds)
+        catchup = _catchup_anchor(now, _last_quarterly_dossier_run)
+        if catchup is not None and catchup != entered:
+            next_run = catchup
+            logger.info(
+                f"Industry dossier job (quarterly): re-entering this quarter's chain "
+                f"({next_run.isoformat()}) — each phase's claim decides whether it already ran"
+            )
+        else:
+            next_run = _next_quarterly_dossier_run(now)
+            sleep_seconds = (next_run - now).total_seconds()
+            logger.info(
+                f"Industry dossier job (quarterly): next run at {next_run.isoformat()} "
+                f"(sleeping {sleep_seconds / 3600:.1f}h)"
+            )
+            await asyncio.sleep(sleep_seconds)
+        entered = next_run
 
-        try:
+        async def _dossier():
             from app.services.industry_dossier_service import get_industry_dossier_service
-
-            service = get_industry_dossier_service()
-            result = await service.recompute_all()
-            logger.info(f"Industry dossier job completed: {result}")
-        except Exception as e:
-            logger.error(f"Industry dossier job failed: {e}", exc_info=True)
+            return await get_industry_dossier_service().recompute_all()
+        await _run_claimed_phase(JOB_INDUSTRY_DOSSIER_QUARTERLY, "Industry dossier job", _dossier)
 
         # ── Phase 2 chained: competitor intel @ base + 30 min ──
         # Waits until the staggered start time so its Gemini-grounded
@@ -1285,35 +1505,25 @@ async def _run_industry_dossier_job():
         # the loop.
         from datetime import timedelta as _td
         await _wait_until(next_run + _td(minutes=30))
-        try:
+
+        async def _competitor():
             from app.services.competitor_intel_service import (
                 get_competitor_intel_service,
             )
-
-            competitor_summary = (
-                await get_competitor_intel_service().refresh_top_tickers()
-            )
-            logger.info(
-                f"Competitor intel quarterly batch completed: {competitor_summary}"
-            )
-        except Exception as e:
-            logger.error(f"Competitor intel quarterly batch failed: {e}", exc_info=True)
+            return await get_competitor_intel_service().refresh_top_tickers()
+        await _run_claimed_phase(
+            JOB_COMPETITOR_INTEL_QUARTERLY, "Competitor intel quarterly batch", _competitor,
+        )
 
         # ── Phase 3C chained: ip_intel (USPTO + FDA) @ base + 60 min ──
         # USPTO patents and FDA approvals change very slowly. Run an
         # hour after base so the FMP rate-limit window has fully reset.
         await _wait_until(next_run + _td(minutes=60))
-        try:
-            from app.services.ip_intel_service import get_ip_intel_service
 
-            ip_summary = (
-                await get_ip_intel_service().refresh_top_tickers()
-            )
-            logger.info(
-                f"IP intel quarterly batch completed: {ip_summary}"
-            )
-        except Exception as e:
-            logger.error(f"IP intel quarterly batch failed: {e}", exc_info=True)
+        async def _ip():
+            from app.services.ip_intel_service import get_ip_intel_service
+            return await get_ip_intel_service().refresh_top_tickers()
+        await _run_claimed_phase(JOB_IP_INTEL_QUARTERLY, "IP intel quarterly batch", _ip)
 
         # ── Industry moat benchmarks (Peer Avg overlay) @ base + 90 min ──
         # Heaviest job in the chain (~140k FMP calls, ~60-90 min wall-clock
@@ -1322,23 +1532,17 @@ async def _run_industry_dossier_job():
         # quarterly run from blowing through FMP quota redoing rows
         # the operator already triggered manually within the last day.
         await _wait_until(next_run + _td(minutes=90))
-        try:
+
+        async def _moat():
             from app.services.industry_moat_benchmark_service import (
                 get_industry_moat_benchmark_service,
             )
-
-            moat_bench_summary = (
-                await get_industry_moat_benchmark_service().recompute_all(
-                    skip_if_fresh_hours=24,
-                )
+            return await get_industry_moat_benchmark_service().recompute_all(
+                skip_if_fresh_hours=24,
             )
-            logger.info(
-                f"Industry moat benchmark quarterly batch completed: {moat_bench_summary}"
-            )
-        except Exception as e:
-            logger.error(
-                f"Industry moat benchmark quarterly batch failed: {e}", exc_info=True,
-            )
+        await _run_claimed_phase(
+            JOB_INDUSTRY_MOAT_QUARTERLY, "Industry moat benchmark quarterly batch", _moat,
+        )
 
         # ── Sector + industry benchmarks (vs-industry overlay) @ base + 120 min ──
         # Replaces the retired weekly sector-only job: ONE pass computes every
@@ -1351,23 +1555,17 @@ async def _run_industry_dossier_job():
         # scripts.build_benchmark_universe`) — industries shift slowly, so the
         # committed universe is stable between quarterly recomputes.
         await _wait_until(next_run + _td(minutes=120))
-        try:
+
+        async def _benchmarks():
             from app.services.industry_benchmark_service import (
                 get_industry_benchmark_service,
             )
-
-            industry_bench_summary = (
-                await get_industry_benchmark_service().recompute_all(
-                    skip_if_fresh_hours=24,
-                )
+            return await get_industry_benchmark_service().recompute_all(
+                skip_if_fresh_hours=24,
             )
-            logger.info(
-                f"Industry benchmark quarterly batch completed: {industry_bench_summary}"
-            )
-        except Exception as e:
-            logger.error(
-                f"Industry benchmark quarterly batch failed: {e}", exc_info=True,
-            )
+        await _run_claimed_phase(
+            JOB_INDUSTRY_BENCHMARK_QUARTERLY, "Industry benchmark quarterly batch", _benchmarks,
+        )
 
 
 # Set once the hydration job's first politician sweep completes. The pre-warmer waits on
@@ -2048,6 +2246,12 @@ async def apple_app_site_association():
     )
 
 
+# The first SUCCESSFUL `/health/pdf` render, memoised for the life of the process. Never a
+# failure: a 503 keeps re-rendering so the deploy gate can flip to healthy once the image is
+# right. See `health_pdf`.
+_PDF_HEALTH_OK: Optional[dict] = None
+
+
 @app.get("/health/pdf", tags=["Root"])
 async def health_pdf():
     """Verify the PDF stack end-to-end. Returns 503 when it can't render, so a
@@ -2056,9 +2260,22 @@ async def health_pdf():
     Importing weasyprint already probes the native libs (cairo/pango load at import
     time), but that alone can NOT catch a weasyprint/pydyf version mismatch — that
     fails inside `write_pdf`, e.g. the pre-0.11 `transform()` API break the pin in
-    requirements.txt guards against. So this actually renders a one-line document.
-    Cheap (a few ms, no I/O) and it exercises the exact call path the report PDF uses.
+    requirements.txt guards against. So this actually renders a one-line document,
+    exercising the exact call path the report PDF uses.
+
+    ONCE per process. The render is a CPU-bound native call on the single worker's event
+    loop, on an unauthenticated, unlimited route — the "a few ms" premise was the
+    amplifier: `while :; do curl /health/pdf & done` from one host held the loop for a
+    render per request, and every signed-in user's dashboard, chat stream and report poll
+    queued behind it with no 429 ever returned. Railway needs exactly one real render per
+    deploy (`railway.toml` healthcheckPath) and pinned versions cannot change in-process,
+    so the first success is the answer for the rest of the process's life. A failure is
+    never memoised. Moving the render to a thread would not close it — WeasyPrint is
+    mostly pure Python and holds the GIL.
     """
+    global _PDF_HEALTH_OK
+    if _PDF_HEALTH_OK is not None:
+        return _PDF_HEALTH_OK
     try:
         import io
 
@@ -2072,12 +2289,13 @@ async def health_pdf():
 
         import pydyf
 
-        return {
+        _PDF_HEALTH_OK = {
             "status": "healthy",
             "weasyprint": weasyprint.__version__,
             "pydyf": getattr(pydyf, "__version__", "unknown"),
             "rendered_bytes": len(data),
         }
+        return _PDF_HEALTH_OK
     except Exception as e:
         logger.error("PDF healthcheck FAILED: %s: %s", type(e).__name__, e, exc_info=True)
         return JSONResponse(

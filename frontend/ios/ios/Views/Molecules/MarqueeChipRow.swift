@@ -78,6 +78,26 @@ struct MarqueeChipRow: View {
     /// action both fire on release with no defined order — clearing it there would race
     /// the very read it exists for.
     @State private var didDrag = false
+    /// The identity of the touch currently (or most recently) driving `pan`: the
+    /// `startLocation` of its `DragGesture.Value`, which is constant for the life of one
+    /// gesture and differs for the next. This — NOT the `isTouching` latch — decides what
+    /// "touch-down" means in `onChanged`, because the latch is released by a TIMER and is
+    /// wrong in both directions:
+    ///
+    ///  • it stays TRUE for `resumeDelay` after a swipe's `onEnded` (and for
+    ///    `cancelledGestureTimeout` when `onEnded` is never delivered), so a tap landing in
+    ///    that window skipped the touch-down reset, inherited the previous swipe's
+    ///    `didDrag = true`, and was swallowed by the chip's guard — and every retry re-armed
+    ///    the watchdog, so the row sat frozen and dead until left alone for 3 s;
+    ///  • it goes FALSE under a finger held STILL for 3 s (no move events, so nothing
+    ///    re-arms the watchdog), and the next 1 pt nudge re-ran the reset, zeroed
+    ///    `lastTranslation` and re-applied the whole translation since touch-down — the
+    ///    ~150 pt jump — for exactly the "drag, then hold to read" the delay exists for.
+    ///
+    /// Cleared in `onEnded` only. Never by the watchdog: with no events it cannot tell a
+    /// still finger from a cancelled gesture, and clearing it there would bring the jump
+    /// back. A cancelled gesture is superseded by the next touch's different start point.
+    @State private var gestureStart: CGPoint?
 
     /// Movement past which a touch is a swipe, matching UIKit's own pan slop. Below it a
     /// finger that wobbled a point or two on a small target still counts as a tap.
@@ -185,6 +205,7 @@ struct MarqueeChipRow: View {
             // is down, and never drift again.
             isTouching = false
             didDrag = false
+            gestureStart = nil
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Suggested questions")
@@ -274,11 +295,23 @@ struct MarqueeChipRow: View {
                 // into `5 - unit` — the whole row translated off-screen for the life of the
                 // view. Same guard `accessibilityScrollAction` already applies.
                 guard overflows else { return }
-                if !isTouching {
-                    base = offset(at: .now)
-                    anchor = .now
+                // Touch-DOWN is a NEW GESTURE, keyed on its identity (see `gestureStart`),
+                // never on `!isTouching`: the latch can still be held by the previous
+                // swipe's resume timer (a tap in that window must not inherit its
+                // `didDrag`), or already released under a still finger (a nudge after that
+                // must not restart its translation from zero).
+                if gestureStart != value.startLocation {
+                    gestureStart = value.startLocation
                     lastTranslation = 0
                     didDrag = false
+                }
+                if !isTouching {
+                    // Commit wherever the row is NOW — for a fresh touch that is the drifting
+                    // position; for the same gesture re-entering after the watchdog released
+                    // it, the position it drifted to under the finger. Either way the delta
+                    // applied below is only the movement since the last event.
+                    base = offset(at: .now)
+                    anchor = .now
                     isTouching = true
                     // ⚠️ ARMED HERE, NOT ONLY IN `onEnded` — this is the other half of the
                     // TestFlight report, *"It doesn't move."*
@@ -295,14 +328,13 @@ struct MarqueeChipRow: View {
                     // `onEnded` merely replaces it with the shorter, nicer one. A dropped
                     // `onEnded` now costs a couple of still seconds instead of the feature.
                 }
-                // RE-ARMED ON EVERY EVENT, not only at touch-down. Armed once, the watchdog
-                // fired MID-DRAG on any touch held longer than the timeout (drag, then hold
-                // to read the chip under the finger — exactly what `resumeDelay` says users
-                // do): `isTouching` released while the finger was still down, the row began
-                // drifting under it, and the next 1 pt move re-entered the touch-down branch,
-                // reset `lastTranslation` to 0 and re-applied the WHOLE translation as a
-                // second delta — a ~150 pt jump. A live drag now keeps pushing the deadline
-                // back; a cancelled gesture (no more events) still heals in the same time.
+                // RE-ARMED ON EVERY EVENT, not only at touch-down, so a live drag keeps
+                // pushing the deadline back and a cancelled gesture (no more events) still
+                // heals in the same time. This alone is NOT the hold-still fix: a finger
+                // that stops moving produces no events, so the watchdog does release it —
+                // which is fine only because the block above keys the translation reset on
+                // gesture identity, so the re-entry applies the incremental delta, not the
+                // whole translation.
                 scheduleResume(after: Self.cancelledGestureTimeout)
                 let delta = value.translation.width - lastTranslation
                 lastTranslation = value.translation.width
@@ -324,6 +356,9 @@ struct MarqueeChipRow: View {
                 guard overflows else { return }
                 anchor = .now
                 lastTranslation = 0
+                // The gesture is over; the next touch is a new one even if it starts on the
+                // same point. (`didDrag` is deliberately NOT cleared here — see its doc.)
+                gestureStart = nil
                 // A beat before drifting again, so letting go to read something does not
                 // immediately pull it away.
                 scheduleResume(after: Self.resumeDelay)

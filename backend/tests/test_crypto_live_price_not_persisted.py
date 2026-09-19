@@ -35,6 +35,7 @@ def _coin_payload(price=79_000.0):
         "market_data": {
             "current_price": {"usd": price},
             "market_cap": {"usd": 1.5e12},
+            "fully_diluted_valuation": {"usd": 1.6e12},
             "total_volume": {"usd": 4.2e10},
             "high_24h": {"usd": price * 1.02},
             "low_24h": {"usd": price * 0.98},
@@ -58,6 +59,7 @@ def _markets_row(price=81_500.0):
         "id": "bitcoin", "symbol": "btc", "name": "Bitcoin",
         "current_price": price,
         "market_cap": 1.55e12,
+        "fully_diluted_valuation": 1.68e12,
         "total_volume": 4.4e10,
         "high_24h": price * 1.01,
         "low_24h": price * 0.99,
@@ -168,6 +170,49 @@ async def test_a_db_hit_serves_the_live_price_not_the_persisted_one(svc):
     assert md["market_cap"] == {"usd": 1.55e12}
     assert md["high_24h"] == {"usd": 81_500.0 * 1.01}
     assert "_volatile_stripped" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_db_hit_serves_the_live_fdv_not_the_persisted_one(svc):
+    """FDV is price-derived like the cap and sits beside it. It was missing from the strip
+    tuple, so a DB hit rendered a 12h-old FDV ($1.60T) UNDER a live market cap ($1.68T) —
+    an FDV below cap, impossible by definition. It must track the live row, re-wrapped as
+    `{usd: …}` so `_usd_opt` reads it instead of hitting its non-dict arm."""
+    svc.coingecko = _FakeCG(_markets_row())
+    durable = strip_volatile_market_data(_coin_payload())
+    assert "fully_diluted_valuation" not in durable["market_data"], "FDV persisted for 12h"
+
+    md = (await svc._rehydrate_volatile("BTC", durable))["market_data"]
+    assert md["fully_diluted_valuation"] == {"usd": 1.68e12}, "served the persisted FDV"
+    # Internal consistency the live pair must keep: FDV ≥ market cap.
+    assert md["fully_diluted_valuation"]["usd"] >= md["market_cap"]["usd"]
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_coin_null_fdv_stays_absent_on_a_db_hit(svc):
+    """`/coins/markets` answers `fully_diluted_valuation: null` for an uncapped coin. The
+    persisted (stripped) value must NOT resurface, and no 0 may be written: an absent FDV
+    is what sends `_build_supply_stats` to its live market-cap fallback."""
+    row = _markets_row()
+    row["fully_diluted_valuation"] = None
+    svc.coingecko = _FakeCG(row)
+    md = (await svc._rehydrate_volatile("BTC", strip_volatile_market_data(_coin_payload())))["market_data"]
+    assert "fully_diluted_valuation" not in md
+    assert md["market_cap"] == {"usd": 1.55e12}
+
+
+def test_an_absent_fdv_falls_back_to_the_live_market_cap_never_zero():
+    """The renderer half of the degrade: with FDV unknown the row prints the (live) market
+    cap; with both unknown it prints "—", never "$0.00"."""
+    svc = cs.CryptoService.__new__(cs.CryptoService)
+    kw = dict(circulating_supply=100.0, total_supply=100.0, max_supply=None,
+              avg_volume=None, symbol="ETH", max_supply_known=True)
+    with_cap = svc._build_supply_stats(fdv=None, market_cap=1.55e12, **kw)
+    fdv_row = next(s for s in with_cap if s.label == "Fully Diluted Val.")
+    assert fdv_row.value == cs._fmt(1.55e12)
+    assert "0.00" not in fdv_row.value
+    none_at_all = svc._build_supply_stats(fdv=None, market_cap=None, **kw)
+    assert next(s for s in none_at_all if s.label == "Fully Diluted Val.").value == "—"
 
 
 @pytest.mark.asyncio

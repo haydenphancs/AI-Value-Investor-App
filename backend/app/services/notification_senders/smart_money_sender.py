@@ -71,9 +71,11 @@ INSIDER_LOOKBACK_DAYS = 3
 # Trade-date floor for whale rows. A 13F is a quarterly snapshot, so its `date` is
 # legitimately weeks old — but not months. See `_recent_whale_rows`.
 WHALE_TRADE_MAX_AGE_DAYS = 45
-# Pages of 1,000 `whale_trades` rows one run will evaluate. A run that fills every page
-# does NOT advance its cursor, so nothing is skipped — the remainder is evaluated next run
-# (a 13F deadline day writes ~1,500 rows; ten pages is far above it).
+# Pages of 1,000 `whale_trades` rows one run will evaluate. The read is in `created_at`
+# order (id as the tiebreak), so a run that fills every page has read the OLDEST rows
+# since its cursor and advances the cursor to just below the last stamp it read — the
+# remainder is genuinely evaluated next run (a 13F deadline day writes ~1,500 rows; ten
+# pages is far above it). See `_capped_cursor` for why the cursor must move at all.
 WHALE_PHASE_MAX_PAGES = 10
 
 # Ceiling on distinct notifications per phase, before per-user caps. A heavy filing day
@@ -331,19 +333,35 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
 
     def _query() -> List[Dict[str, Any]]:
         try:
-            # PAGED. The old `.order(desc).limit(1000)` read the NEWEST 1,000 rows since
-            # the cursor and then advanced the cursor to the newest stamp — so on a 13F
-            # deadline day (~1,500 rows from one hydration) the ~500 written first were
-            # never evaluated and never re-read. Paged on the unique `id` (OFFSET paging
-            # on a non-unique `created_at` can skip/duplicate a boundary row); a CAPPED
-            # read is handled by the caller, which then does not advance the cursor.
+            # PAGED, IN TIME ORDER. The old `.order(desc).limit(1000)` read the NEWEST
+            # 1,000 rows since the cursor and then advanced the cursor to the newest
+            # stamp — so on a 13F deadline day (~1,500 rows from one hydration) the ~500
+            # written first were never evaluated and never re-read.
+            #
+            # ⚠️ The first paged rewrite ordered on `id` ALONE and, on a capped read, held
+            # the cursor "so the remainder is evaluated next run". `whale_trades.id` is
+            # `gen_random_uuid()` — a random order unrelated to time — so the next run
+            # issued the identical query from the identical `since`, got the identical
+            # first 10,000 rows, and the rows beyond the cap were never reached; nothing
+            # deletes `whale_trades`, so once >10,000 rows sat past the cursor (a held job
+            # across a 13F season, a registry backfill) whale/congress notifications
+            # stopped for good while the log promised otherwise.
+            #
+            # `created_at` first, so the cap falls on the OLDEST unread rows and the
+            # cursor can advance past them; `id` as the tiebreak, because `created_at`
+            # is `DEFAULT now()` — per-TRANSACTION — and every row of one bulk upsert
+            # shares a stamp, on which OFFSET paging alone can skip/duplicate a boundary
+            # row. postgrest-py `.order()` APPENDS (verified: `order=created_at.asc,id.asc`),
+            # so the primary key here plus `fetch_all_rows`'s `order_by="id"` is the
+            # two-column ORDER BY; `idx_whale_trades_created_at` supports it.
             return fetch_all_rows(
                 lambda: supabase.table("whale_trades")
                 .select(
                     "id, ticker, company_name, action, amount, amount_range, date, "
                     "created_at, whale_id, whales(name, firm_name, data_source)"
                 )
-                .gt("created_at", since.isoformat()),
+                .gt("created_at", since.isoformat())
+                .order("created_at"),
                 order_by="id",
                 what="smart money: whale_trades since cursor",
                 max_pages=WHALE_PHASE_MAX_PAGES,
@@ -357,18 +375,24 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
             return []
 
     raw = await asyncio.to_thread(_query)
-    # A read that filled every page may have rows beyond it. Paging is by id, so those
-    # rows are not "the newest" — advancing the cursor to the max stamp read would skip
-    # them forever. Evaluate what arrived and leave the cursor where it was: the dedup
-    # claim makes a re-evaluation next run harmless, a skipped 13F filing is not.
+    # A read that filled every page may have rows beyond it. The read is in `created_at`
+    # order, so what arrived is the OLDEST rows since the cursor, and the cursor moves to
+    # just below the last stamp read (`_capped_cursor`) — the boundary tie group is
+    # re-read next run (the dedup claim absorbs that), everything after it is reached for
+    # the first time. Holding the cursor here was the bug: see the comment in `_query`.
     capped = len(raw) >= WHALE_PHASE_MAX_PAGES * PAGE_SIZE
     if capped:
+        next_cursor = _capped_cursor(raw, since)
         logger.error(
-            "smart money: whale_trades read hit the %d-row cap since %s — cursor NOT "
-            "advanced; the remainder is evaluated next run",
-            WHALE_PHASE_MAX_PAGES * PAGE_SIZE, since.isoformat(),
+            "smart money: whale_trades read hit the %d-row cap since %s — cursor "
+            "advanced to %s; the remainder is evaluated next run%s",
+            WHALE_PHASE_MAX_PAGES * PAGE_SIZE, since.isoformat(), next_cursor.isoformat(),
+            "" if next_cursor > since else
+            " — ⚠️ it could NOT advance (every row read shares one created_at), so the "
+            "same rows will be re-read until the cap is raised",
         )
-    next_cursor = since if capped else _max_created_at(raw, since)
+    else:
+        next_cursor = _max_created_at(raw, since)
     rows = _recent_whale_rows(raw, cutoff_date=cutoff_date)
     if not rows:
         return 0, next_cursor
@@ -458,14 +482,10 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
     return sent, next_cursor
 
 
-def _max_created_at(rows: Any, fallback: datetime) -> datetime:
-    """High-water mark from the RAW rows, not the filtered ones.
-
-    Deliberately advanced past rows the backfill guard rejected: they were evaluated and
-    correctly declined, so re-reading them tomorrow is pure waste. Advancing only past
-    ACCEPTED rows would make a quiet week re-scan the same backfill forever.
-    """
-    high = fallback
+def _created_at_stamps(rows: Any) -> List[datetime]:
+    """Every parseable `created_at` in `rows`, tz-aware (naive → UTC). Unparseable and
+    missing stamps are skipped, never guessed."""
+    out: List[datetime] = []
     for row in rows if isinstance(rows, list) else []:
         raw = str((row or {}).get("created_at") or "").replace("Z", "+00:00")
         if not raw:
@@ -476,8 +496,44 @@ def _max_created_at(rows: Any, fallback: datetime) -> datetime:
             continue
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        high = max(high, stamp)
-    return high
+        out.append(stamp)
+    return out
+
+
+def _max_created_at(rows: Any, fallback: datetime) -> datetime:
+    """High-water mark from the RAW rows, not the filtered ones.
+
+    Deliberately advanced past rows the backfill guard rejected: they were evaluated and
+    correctly declined, so re-reading them tomorrow is pure waste. Advancing only past
+    ACCEPTED rows would make a quiet week re-scan the same backfill forever.
+    """
+    return max([fallback, *_created_at_stamps(rows)])
+
+
+def _capped_cursor(rows: Any, fallback: datetime) -> datetime:
+    """Where to resume after a read that filled every page.
+
+    The rows are the OLDEST `WHALE_PHASE_MAX_PAGES × PAGE_SIZE` since `fallback`, in
+    `created_at` order, and rows beyond the cap may share the LAST stamp read: `created_at`
+    is `DEFAULT now()`, i.e. per-transaction, so every row of one bulk upsert (≤50 in
+    `hydrate_whales`, ≤600 in `whale_service._bulk_write_trades`) carries one value. The
+    read filter is `gt`, so advancing to the last stamp itself would skip the unread tail
+    of that tie group FOREVER. Advance to the highest stamp STRICTLY BELOW it instead: the
+    whole boundary group is re-read next run (the dedup claim makes that harmless) and
+    nothing after it is skipped.
+
+    Falls back to `fallback` — no progress — only when every row read shares one stamp,
+    which no bulk writer here can produce; the caller logs that case by name. Never moves
+    the cursor backwards.
+    """
+    stamps = _created_at_stamps(rows)
+    if not stamps:
+        return fallback
+    last = max(stamps)
+    below = [s for s in stamps if s < last]
+    if not below:
+        return fallback
+    return max(fallback, max(below))
 
 
 # ── entry point ──────────────────────────────────────────────────────────────

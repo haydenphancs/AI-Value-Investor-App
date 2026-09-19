@@ -273,6 +273,11 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     user_id: str
+    # The install's lockout exemption for this address (`core.security.create_device_proof`).
+    # Issued by the flows that VERIFIED a credential (password sign-in, provider sign-in,
+    # session exchange); absent on a refresh. Optional so an older client's decoder never
+    # sees a required key it does not know.
+    device_token: Optional[str] = None
 
 
 class AuthUserResponse(BaseModel):

@@ -142,15 +142,20 @@ def _row_to_portfolio(row: dict, items: List[PortfolioItemResponse]) -> Portfoli
 def _fetch_portfolio_items(
     supabase: Client, portfolio_id: str
 ) -> List[PortfolioItemResponse]:
-    rows = (
-        supabase.table("portfolio_items")
-        .select("ticker,shares,market_value")
-        .eq("portfolio_id", portfolio_id)
-        .order("position")
-        .execute()
-        .data
-        or []
+    # PAGED, like `_fetch_user_portfolios`. This is the body of EVERY write response —
+    # PUT /tickers, rename, activate, PUT /holdings — and a single `.order("position")`
+    # read is clamped to ~1,000 rows by PostgREST. iOS `PortfolioStore.syncTickers`
+    # adopts the PUT response as the truth, so a truncated answer shrank the local list
+    # and the next whole-list PUT DELETED the rows the client never saw. Page on the
+    # unique id, then order by position in Python.
+    rows = fetch_all_rows(
+        lambda: supabase.table("portfolio_items")
+        .select("id,ticker,position,shares,market_value")
+        .eq("portfolio_id", portfolio_id),
+        order_by="id",
+        what=f"portfolio_items for portfolio={portfolio_id}",
     )
+    rows.sort(key=lambda r: int(r.get("position") or 0))
     return [
         PortfolioItemResponse(
             ticker=r["ticker"],
@@ -308,7 +313,21 @@ def _seed_default_portfolio(supabase: Client, user_id: str) -> None:
             if r.get("ticker")
         ]
         if item_rows:
-            supabase.table("portfolio_items").insert(item_rows).execute()
+            # ON CONFLICT DO NOTHING — the same call `_backfill_lone_empty_portfolio` makes,
+            # and NOT a plain `.insert`. The group above is inserted ACTIVE and is visible
+            # to `POST /watchlist` the moment it lands, so a star tapped on a detail screen
+            # in the same second is mirrored into it by `_write_through_to_active_portfolio`
+            # before this line runs. A plain multi-row INSERT then hit
+            # `portfolio_items_portfolio_id_ticker_key` on the mirrored ticker, the WHOLE
+            # statement was rejected, `GET /portfolios` answered 500 — and on the next GET
+            # the group held only the mirrored row, so `_backfill_lone_empty_portfolio`
+            # (`if only.items: return`) never healed the rest: every other watchlist ticker
+            # stayed invisible on Tracking, Home and Updates until re-added by hand.
+            # DO NOTHING also tolerates an intra-batch duplicate (two watchlist spellings
+            # collapsing under `.upper()`), which DO UPDATE would not.
+            supabase.table("portfolio_items").upsert(
+                item_rows, on_conflict="portfolio_id,ticker", ignore_duplicates=True
+            ).execute()
 
 
 #: Slack between a row's `created_at` and `updated_at` at INSERT time. Both default to
@@ -762,16 +781,19 @@ async def set_portfolio_tickers(
             for cand in (sym, canonical_stored_symbol(sym, None)):
                 if cand not in lookup:
                     lookup.append(cand)
-        watchlist = (
-            (await sb_exec(
-                supabase.table("watchlist_items")
-                .select("ticker")
-                .eq("user_id", user["id"])
-                .in_("ticker", lookup)
+        # The user's WHOLE watchlist, paged — not `.in_("ticker", lookup)`. That single
+        # read was clamped to ~1,000 rows by PostgREST, so with >1,000 valid tickers the
+        # tail was logged as "dropped (on neither spelling)" and REMOVED from the group by
+        # the delete+reinsert below, on the first PUT, with a 200. (It also put an
+        # ~8.5 KB `in.()` list on the query string for 1,051 tickers.) Filtering in Python
+        # against the paged seed read costs the same one request for a normal watchlist.
+        wanted = set(lookup)
+        watchlist = [
+            row for row in (await asyncio.to_thread(
+                _read_watchlist_seed_rows, supabase, user["id"]
             ))
-            .data
-            or []
-        )
+            if str(row.get("ticker") or "").upper() in wanted
+        ]
         valid = {row["ticker"].upper() for row in watchlist if row.get("ticker")}
         dropped: List[str] = []
         for sym in requested:
@@ -791,14 +813,18 @@ async def set_portfolio_tickers(
 
     # Capture existing holdings so kept tickers don't lose shares /
     # market_value when we delete + reinsert below.
-    existing_items = (
-        (await sb_exec(
-            supabase.table("portfolio_items")
-            .select("ticker,shares,market_value")
-            .eq("portfolio_id", portfolio_id)
-        ))
-        .data
-        or []
+    #
+    # PAGED. This snapshot is the ONLY carrier of hand-entered `shares` / `market_value`
+    # across the delete+reinsert, and a bare `.select().eq()` returned an arbitrary
+    # ~1,000 of a larger group's rows: every kept ticker past the clamp was reinserted
+    # with `shares: None`, silently, with a 200.
+    existing_items = await asyncio.to_thread(
+        fetch_all_rows,
+        lambda: supabase.table("portfolio_items")
+        .select("id,ticker,shares,market_value")
+        .eq("portfolio_id", portfolio_id),
+        order_by="id",
+        what=f"portfolio_items snapshot portfolio={portfolio_id}",
     )
     existing_holdings = {
         (item["ticker"] or "").upper(): {
@@ -841,7 +867,15 @@ async def set_portfolio_tickers(
                         "market_value": prior.get("market_value"),
                     }
                 )
-            supabase.table("portfolio_items").insert(rows).execute()
+            # UPSERT (merge on the group's unique key), not INSERT. The comment above
+            # names a concurrent watchlist write-through slipping a row into the group as
+            # one trigger of the replay — but a 23505 is a deterministic PostgREST error,
+            # so `retry_idempotent_async` deliberately does NOT retry it: the block raised
+            # once and the group stayed EMPTY (F15-8). Merge-duplicates makes the
+            # snapshot's shares/position win over the slipped row without raising.
+            supabase.table("portfolio_items").upsert(
+                rows, on_conflict="portfolio_id,ticker",
+            ).execute()
 
     try:
         # `retry_idempotent_async`, NOT the sync twin. `set_portfolio_tickers` is
@@ -939,25 +973,38 @@ async def set_portfolio_holdings(
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
-    for item in request.items:
-        # Raw first, then the canonical spelling — the row for a coin is "BTCUSD", and a
-        # client sending "BTC" for it used to update 0 rows and report success.
-        raw_ticker = item.ticker.upper()
-        canonical = canonical_stored_symbol(raw_ticker, None)
-        values = {"shares": item.shares, "market_value": item.market_value}
-        result = (await sb_exec(
-            supabase.table("portfolio_items")
-            .update(values)
-            .eq("portfolio_id", portfolio_id)
-            .eq("ticker", raw_ticker)
-        ))
-        if not result.data and canonical != raw_ticker:
-            (await sb_exec(
+    # ONE replayable unit for the whole loop, like `_replace_items` above (F15-7): each row
+    # was its own UPDATE with no retry, so a transient 5xx on row 3 of 5 answered a failure
+    # after rows 1-2 had committed — iOS reverted its optimistic sheet while the server kept
+    # half the edit. Every UPDATE here sets absolute values, so replaying the loop from the
+    # top is idempotent. Runs off the loop; `.execute()` directly (no `sb_exec` inside a
+    # thread).
+    def _write_holdings() -> None:
+        for item in request.items:
+            # Raw first, then the canonical spelling — the row for a coin is "BTCUSD", and
+            # a client sending "BTC" for it used to update 0 rows and report success.
+            raw_ticker = item.ticker.upper()
+            canonical = canonical_stored_symbol(raw_ticker, None)
+            values = {"shares": item.shares, "market_value": item.market_value}
+            result = (
                 supabase.table("portfolio_items")
                 .update(values)
                 .eq("portfolio_id", portfolio_id)
-                .eq("ticker", canonical)
-            ))
+                .eq("ticker", raw_ticker)
+                .execute()
+            )
+            if not result.data and canonical != raw_ticker:
+                (
+                    supabase.table("portfolio_items")
+                    .update(values)
+                    .eq("portfolio_id", portfolio_id)
+                    .eq("ticker", canonical)
+                    .execute()
+                )
+
+    await retry_idempotent_async(
+        _write_holdings, what=f"holdings for portfolio={portfolio_id}",
+    )
 
     (await sb_exec(
         supabase.table("portfolios").update(

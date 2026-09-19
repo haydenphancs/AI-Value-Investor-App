@@ -85,8 +85,22 @@ struct AssetRow: View {
                     // Sparkline Chart
                     SparklineView(
                         data: asset.sparklineData,
-                        isPositive: asset.isPositive,
-                        referencePrice: asset.previousClose,
+                        // Direction of the SERIES when today's change is unknown:
+                        // `asset.isPositive` is hard-false then, and the neutral mode
+                        // strokes one tone by this flag, so the whole line went red
+                        // under a "—" label. Same rule as MarketPulseCard.
+                        isPositive: asset.changeKnown
+                            ? asset.isPositive
+                            : ((asset.sparklineData.last ?? 0) >= (asset.sparklineData.first ?? 0)),
+                        // `showReference: false` is what removes the dashed baseline —
+                        // `referencePrice: nil` alone means "anchor to the first point",
+                        // which is exactly what a newly-starred ticker with no
+                        // `market_close_snapshot` row got: a dashed line at data[0],
+                        // red segments and a red end dot beneath it — a fabricated
+                        // intraday decline beside a label that said "—" (F20-4 wired the
+                        // flag into MarketPulseCard only; this was the second reader).
+                        referencePrice: asset.changeKnown ? asset.previousClose : nil,
+                        showReference: asset.changeKnown,
                         // Only the traded part of the session, so a mid-morning row
                         // stops partway across instead of looking like a finished
                         // day. Matches the 1D chart this row opens into.

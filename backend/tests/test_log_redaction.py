@@ -142,6 +142,80 @@ def test_scrub_sentry_event_covers_every_free_text_field():
     assert _JWT not in out["breadcrumbs"]["values"][0]["message"]
 
 
+_FMP_KEY = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+def test_a_bare_query_string_is_redacted_without_a_leading_question_mark():
+    """sentry-sdk's httpx integration records `http.query` WITHOUT the `?`, and a frame's
+    `params={'apikey': K}` reprs without one either. The old `[?&]`-only anchor let both
+    through, so every event raised after an FMP call carried the production key."""
+    assert _FMP_KEY not in redact_secrets(f"symbol=AAPL&apikey={_FMP_KEY}")
+    assert redact_secrets(f"apikey={_FMP_KEY}") == "apikey=***"
+    assert _FMP_KEY not in redact_secrets(f"{{'apikey': '{_FMP_KEY}', 'symbol': 'AAPL'}}")
+    assert _FMP_KEY not in redact_secrets(f'{{"apikey": "{_FMP_KEY}"}}')
+    # The boundary still protects unrelated names.
+    assert redact_secrets("sort_key=abc") == "sort_key=abc"
+
+
+def test_sentry_http_breadcrumbs_and_frame_vars_never_carry_the_fmp_key():
+    """THE leak: any request that made an FMP call and then logged at ERROR produced an event
+    whose breadcrumb list held `http.query: symbol=AAPL&apikey=<key>` for every FMP call in
+    that request, and on an HTTPStatusError the frame vars held `e=...apikey=<key>` and
+    `params={'apikey': '<key>'}`. Anyone with Sentry access (90-day retention) could read
+    the key. Breadcrumb `data`, `extra` and every frame's `vars` are walked."""
+    event = {
+        "breadcrumbs": {"values": [
+            {"type": "http", "category": "httpx", "data": {
+                "url": "https://financialmodelingprep.com/stable/profile",
+                "method": "GET", "status_code": 403,
+                "http.query": f"symbol=AAPL&apikey={_FMP_KEY}",
+                "http.fragment": "",
+                "nested": {"again": [f"token={_FMP_KEY}"]},
+            }},
+            {"message": "plain", "data": "not-a-dict"},
+        ]},
+        "exception": {"values": [{
+            "type": "HTTPStatusError",
+            "value": f"Client error '403 Forbidden' for url 'https://x?apikey={_FMP_KEY}'",
+            "stacktrace": {"frames": [
+                {"function": "_make_request", "vars": {
+                    "e": f"HTTPStatusError(\"Client error for url 'https://x?apikey={_FMP_KEY}'\")",
+                    "params": {"apikey": f"'{_FMP_KEY}'", "symbol": "'AAPL'"},
+                    "url": "'https://x/stable/profile'",
+                    "headers": ["'Authorization: Bearer " + _JWT + "'"],
+                }},
+                {"function": "caller", "vars": None},
+            ]},
+        }]},
+        "threads": {"values": [{"stacktrace": {"frames": [
+            {"vars": {"q": f"apikey={_FMP_KEY}"}}]}}]},
+        "extra": {"request_url": f"https://x?apikey={_FMP_KEY}"},
+    }
+    out = scrub_sentry_event(event)
+    blob = str(out)
+    assert _FMP_KEY not in blob, blob
+    assert _JWT not in blob
+    crumb = out["breadcrumbs"]["values"][0]["data"]
+    assert "http.query" not in crumb and "http.fragment" not in crumb
+    assert crumb["url"].endswith("/stable/profile"), "the diagnostic host+path must survive"
+    assert crumb["status_code"] == 403
+    frame = out["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]
+    assert frame["params"]["symbol"] == "'AAPL'", "non-secret locals must survive"
+    assert frame["params"]["apikey"] == "[redacted]", "a credential-named key is blanked"
+
+
+def test_the_sentry_init_declares_the_sdk_scrubber_as_a_belt():
+    """`EventScrubber(recursive=True)` blanks denylisted KEYS client-side, so a nested
+    `params={'apikey': …}` is caught even if the value-based walk above regresses."""
+    import inspect
+    import app.main as main_mod
+
+    init = inspect.getsource(main_mod)
+    init = init[init.index("sentry_sdk.init("):]
+    init = init[:init.index("\n    )\n")]
+    assert "event_scrubber=EventScrubber(recursive=True)" in init
+
+
 def test_sentry_never_receives_a_plaintext_password():
     """THE regression this guard exists for.
 
@@ -278,3 +352,64 @@ def test_scrub_sentry_event_tolerates_events_without_request_headers():
     assert scrub_sentry_event({"message": "x"})["message"] == "x"
     assert scrub_sentry_event({"request": {"headers": None}})["request"]["headers"] is None
     assert scrub_sentry_event({"request": "not a dict"})["request"] == "not a dict"
+
+
+def test_the_log_filter_redacts_the_traceback_not_just_the_message():
+    """`exc_info=True` sites — the stock endpoints, the chat widget fetcher, the global 500
+    handler — rendered the raw httpx line into the Railway log because the filter only
+    touched `record.msg`; `Formatter.format` builds `exc_text` AFTER filters run unless one
+    pre-sets it."""
+    import io
+    import logging as _logging
+
+    import httpx
+
+    from app.log_redaction import SecretRedactingFilter
+
+    key = "d41d8cd98f00b204e9800998ecf8427e"
+    url = f"https://financialmodelingprep.com/stable/profile?symbol=AAPL&apikey={key}"
+    resp = httpx.Response(403, request=httpx.Request("GET", url))
+    stream = io.StringIO()
+    handler = _logging.StreamHandler(stream)
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    handler.addFilter(SecretRedactingFilter())
+    log = _logging.getLogger("test.redaction.traceback")
+    log.propagate = False
+    log.addHandler(handler)
+    try:
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            log.error("profile fetch failed", exc_info=True)
+        # A chained typed exception keeps the raw cause in the traceback too.
+        try:
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError("typed wrapper") from e
+        except RuntimeError:
+            log.error("wrapped", exc_info=True)
+    finally:
+        log.removeHandler(handler)
+    out = stream.getvalue()
+    assert "Traceback" in out, "vacuous: no traceback was rendered"
+    assert key not in out, out
+    assert "apikey=***" in out
+
+
+# ── W2 regress-B-2: operational `key=<value>` is not a secret ────────────────────
+
+
+def test_a_bare_operational_key_survives_but_a_query_key_param_does_not():
+    """Widening the anchor for `apikey=` (Sentry breadcrumbs carry it bare) dragged the
+    bare word `key` along, and every push dedup key / marketing idempotency key in the
+    logs became `key=***` — in exactly the lines written to find a stranded row."""
+    kept = redact_secrets("push: could not return row user=u1 key=whale:abc:2026 to deferred")
+    assert "key=whale:abc:2026" in kept
+    assert "idempotency_key=abc-123" in redact_secrets("marketing post idempotency_key=abc-123 not ledgered")
+    # ...while a Google-style `?key=` / `&key=` query parameter is still a secret.
+    assert redact_secrets("GET https://g.com/x?key=GOOG123&q=1") == "GET https://g.com/x?key=***&q=1"
+    assert "key=***" in redact_secrets("https://g.com/x?q=1&key=GOOG123")
+    # ...and the bare secret names are still caught in prose (the Sentry breadcrumb shape).
+    assert redact_secrets("apikey=SECRET in breadcrumb") == "apikey=*** in breadcrumb"
+    assert redact_secrets("token=abc123") == "token=***"

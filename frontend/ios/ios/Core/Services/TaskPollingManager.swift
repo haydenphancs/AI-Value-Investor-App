@@ -367,10 +367,18 @@ actor TaskPollingManager {
         return AppError.from(APIError.businessError(code: code, message: message))
     }
 
+    /// The one code `ResearchViewModel` matches on: a report the user (or a bulk delete)
+    /// removed while its monitor was still running. ONE definition — the VM used to
+    /// literal-match `"RESEARCH_DELETED"` against a string this file assembled from the
+    /// status, and only the VM side was pinned (F21-8).
+    nonisolated static let deletedCode = "RESEARCH_DELETED"
+
     /// A status that is neither in-flight nor a known outcome. Today: `deleted`.
     nonisolated private static func terminalUnknown(_ status: ResearchStatusResponse) -> AppError {
         .apiError(
-            code: "RESEARCH_\(status.status.uppercased())",
+            code: status.status == "deleted"
+                ? Self.deletedCode
+                : "RESEARCH_\(status.status.uppercased())",
             message: "This analysis is no longer available."
         )
     }

@@ -182,3 +182,6 @@ def test_the_page_no_longer_carries_the_known_rot():
                   "only</b> this path checks", "identical persisted message"):
         assert stale not in block, f"stale claim is back: {stale!r}"
     assert "402" in block and "settle_no_cost" in block and "refund_once" in block
+    # F13-7: the stage-6 compensation for an unconfirmed pre-charge is a refund reason the
+    # page used to document nowhere.
+    assert "chat_precharge_unconfirmed" in block

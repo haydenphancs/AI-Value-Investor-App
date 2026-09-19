@@ -1401,6 +1401,8 @@ struct SentimentAnalysisDTO: Codable {
     // older backends did not send them; absent means "measured", the pre-flag meaning.
     let socialMentionsKnown: Bool?
     let socialMentions7dKnown: Bool?
+    /// Was the news arm MEASURED? Absent on older backends → measured (`?? true`).
+    let newsKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -1425,6 +1427,7 @@ struct SentimentAnalysisDTO: Codable {
         case socialDataAvailable = "social_data_available"
         case socialMentionsKnown = "social_mentions_known"
         case socialMentions7dKnown = "social_mentions_7d_known"
+        case newsKnown = "news_known"
     }
 
     func toDisplayModel() -> SentimentAnalysisData {
@@ -1449,7 +1452,8 @@ struct SentimentAnalysisDTO: Codable {
             newsNeutral7d: newsNeutral7d,
             socialDataAvailable: socialDataAvailable,
             socialMentionsKnown: socialMentionsKnown ?? true,
-            socialMentions7dKnown: socialMentions7dKnown ?? true
+            socialMentions7dKnown: socialMentions7dKnown ?? true,
+            newsKnown: newsKnown ?? true
         )
     }
 }

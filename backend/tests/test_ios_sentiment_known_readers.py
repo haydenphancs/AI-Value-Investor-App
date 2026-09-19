@@ -98,6 +98,15 @@ def test_the_row_does_not_let_social_data_available_preempt_the_known_flag():
         "the known flag is read somewhere in the row but does not affect which branch runs"
     )
     assert "!sentimentData.socialKnown(for: selectedTimeframe)" in gate
+    # F19-8: "Not tracked" is a both-windows claim. A measured-zero 24 h beside an unknown
+    # 7 d used to reach it because only the SELECTED window was checked.
+    assert "!sentimentData.socialBothWindowsKnown" in gate, (
+        "the gate must also require BOTH windows known before stating 'Not tracked on Reddit'"
+    )
+    model = _strip((_IOS / "Models" / "TickerDetailModels.swift").read_text(encoding="utf-8"))
+    helper = model[model.index("var socialBothWindowsKnown: Bool"):]
+    helper = helper[:helper.index("\n")]
+    assert "socialMentionsKnown && socialMentions7dKnown" in helper
 
 
 def test_the_not_tracked_copy_still_exists_for_a_measured_zero():
@@ -145,3 +154,34 @@ def test_the_tie_word_is_explained_in_the_info_sheet_and_crypto_shares_the_reade
     assert "sentimentAnalysisData = dto.toDisplayModel()" in crypto_vm, "crypto no longer maps into the shared model"
     row = _strip((_IOS / "Views" / "Molecules" / "SentimentMetricsRow.swift").read_text(encoding="utf-8"))
     assert "formattedNewsArticles(for:" in row, "the tile no longer reads the shared label"
+
+
+# ── the NEWS arm has the same flag (F18-5) ───────────────────────────────────────
+
+
+def test_the_news_readers_consult_news_known_end_to_end():
+    """A failed news feed used to arrive as `news_articles: 0, ▲0 =0 ▼0` — the same shape
+    as a quiet week — and the row printed "N/A" as if it had measured that. The backend
+    already served that reading UNCACHED; `news_known` is what lets the client say so."""
+    from app.schemas.sentiment import SentimentAnalysisResponse
+    import inspect
+    from app.services import sentiment_service as ss
+
+    assert SentimentAnalysisResponse.model_fields["news_known"].default is True
+    src_py = inspect.getsource(ss.SentimentService.get_sentiment)
+    assert "news_known=bool(news_known)" in src_py, "the builder must set the flag explicitly"
+
+    src = _strip(_REPO.read_text(encoding="utf-8"))
+    dto = _block(src, r"struct SentimentAnalysisDTO\s*:\s*Codable\s*")
+    assert "let newsKnown: Bool?" in dto
+    assert 'case newsKnown = "news_known"' in _block(dto, r"enum CodingKeys")
+    assert "newsKnown: newsKnown ?? true" in _block(dto, r"func toDisplayModel\(\)")
+
+    models = _strip(_MODELS.read_text(encoding="utf-8"))
+    data = _block(models, r"struct SentimentAnalysisData\s*")
+    assert "var newsKnown: Bool = true" in data
+    for reader in (r"func formattedNewsArticles\(for", r"func formattedNewsChange\(for"):
+        body = _block(data, reader)
+        assert re.search(r"guard newsKnown else \{ return \"[^\"]+\" \}", body), reader
+        # The guard comes BEFORE any count is read.
+        assert body.index("guard newsKnown") < body.index("newsBullish"), reader

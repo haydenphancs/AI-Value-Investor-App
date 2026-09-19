@@ -34,6 +34,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+def _log_ref(value: Any, cap: int) -> str:
+    """A client-chosen field as it may appear in a log line: bounded and rendered with
+    `%r` by the caller, so a newline or a 1 MB string cannot forge a second record or
+    flood the log (S03-7). The schema caps these at 64 / 256 chars too; this is the
+    belt for any path that reaches the resolver without going through it."""
+    text = "" if value is None else str(value)
+    return text if len(text) <= cap else text[:cap] + "…"
+
 # Hard bound on how long a single context resolve may take. Cache-only reads
 # (report / money-moves) finish well under this; the ETF/CRYPTO/INDEX services
 # fall through to a cold recompute — this ceiling stops that from stalling the
@@ -247,8 +256,8 @@ class ChatContextResolver:
         handler = self._dispatch().get(ctype)
         if handler is None:
             logger.warning(
-                "chat_context: unknown context_type=%s (ref=%s) — using client context",
-                context_type, reference_id,
+                "chat_context: unknown context_type=%r (ref=%r) — using client context",
+                _log_ref(context_type, 64), _log_ref(reference_id, 128),
             )
             return client_context
 
@@ -275,15 +284,15 @@ class ChatContextResolver:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "chat_context: resolve TIMED OUT (>%.1fs) for %s/%s — likely a cold "
+                "chat_context: resolve TIMED OUT (>%.1fs) for %r/%r — likely a cold "
                 "detail-cache recompute; proceeding ungrounded",
-                _RESOLVE_TIMEOUT_SECONDS, context_type, reference_id,
+                _RESOLVE_TIMEOUT_SECONDS, _log_ref(context_type, 64), _log_ref(reference_id, 128),
             )
             return client_context
         except Exception as e:
             logger.warning(
-                "chat_context: resolve failed for %s/%s: %s: %s — degrading to client context",
-                context_type, reference_id, type(e).__name__, e,
+                "chat_context: resolve failed for %r/%r: %s: %s — degrading to client context",
+                _log_ref(context_type, 64), _log_ref(reference_id, 128), type(e).__name__, e,
             )
             return client_context
         return block or client_context
@@ -477,7 +486,7 @@ class ChatContextResolver:
             # the screen shows $0.00). Grounding on it hands the model a zeroed payload
             # and — with the deep-dive cache keyed without the block — would pin that
             # brief for every user for 24 h. No grounding beats wrong grounding.
-            logger.warning("chat grounding: ETF %s build has no usable price — not grounding", symbol)
+            logger.warning("chat grounding: ETF %r build has no usable price — not grounding", _log_ref(symbol, 64))
             return None
         chg = detail.price_change_percent
         price_str = (f" Price ${px} ({chg:+.2f}%) {_as_of_et()}."
@@ -503,7 +512,7 @@ class ChatContextResolver:
             return None
         px = _price(detail.current_price)
         if px is None:
-            logger.warning("chat grounding: crypto %s build has no usable price — not grounding", symbol)
+            logger.warning("chat grounding: crypto %r build has no usable price — not grounding", _log_ref(symbol, 64))
             return None
         chg = detail.price_change_percent
         price_str = (f" Price ${px} ({chg:+.2f}%) {_as_of_et()}."
@@ -531,7 +540,7 @@ class ChatContextResolver:
         lead = f"The user is viewing the market/index detail screen for {name or symbol}."
         px = _price(getattr(detail, "current_price", None))
         if px is None:
-            logger.warning("chat grounding: index %s build has no usable level — not grounding", symbol)
+            logger.warning("chat grounding: index %r build has no usable level — not grounding", _log_ref(symbol, 64))
             return None
         chg = getattr(detail, "price_change_percent", None)
         if isinstance(chg, (int, float)) and math.isfinite(chg):
@@ -557,7 +566,7 @@ class ChatContextResolver:
             from app.services.commodity_service import _get_meta
             meta = _get_meta(symbol)
         except Exception as e:
-            logger.warning("chat_context: commodity profile lookup failed for %s: %s", symbol, e)
+            logger.warning("chat_context: commodity profile lookup failed for %r: %s", _log_ref(symbol, 64), e)
             return client_context
         if not isinstance(meta, dict) or not meta:
             return client_context
@@ -582,7 +591,7 @@ class ChatContextResolver:
             None,
         )
         if not article:
-            logger.info("chat_context: money move slug=%s not found", slug)
+            logger.info("chat_context: money move slug=%r not found", _log_ref(slug, 64))
             return None
         author = article.get("author") or {}
         author_name = author.get("name") if isinstance(author, dict) else str(author or "")

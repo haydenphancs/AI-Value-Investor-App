@@ -162,12 +162,35 @@ class ResearchViewModel: ObservableObject {
     private let startedTimeoutSeconds: TimeInterval = 660
     private let queuedTimeoutSeconds: TimeInterval = 12000
 
+    /// Where each of those clocks STARTS, per backend id — the instant THIS device first
+    /// saw the row on that clock (`stamped` = it carried `processingStartedAt`; a row that
+    /// gains its stamp moves from the queued clock to the started clock and re-anchors).
+    ///
+    /// Both clocks are aged on the DEVICE clock from that anchor, never by subtracting a
+    /// server stamp (`processing_started_at`, `created_at` — the server's `now()`) from the
+    /// device's `Date()`. Nothing in the client is anchored to server time, so a phone with
+    /// "Set Automatically" off and its clock 15 min fast read `now - started` as 900 s on the
+    /// first stamped list load — past the 660 s clock — and flipped every STARTED report to
+    /// "failed" the moment it began: no Refunded chip, no explanation, and Retry then
+    /// DELETED (refunded) the live run and started another that flipped the same way. The
+    /// user could never see a report finish and every retry threw away a ~17-Gemini run.
+    /// Aged from first observation, skew cancels: both ends are device time. The cost is
+    /// an undercount of at most one poll interval (or a backgrounded gap), which only
+    /// DELAYS the flip — safe, because the server's own sweep kills and refunds at 600 s
+    /// and the re-read then shows that. Pruned to the rows the server still lists on every
+    /// server-truth pass, so it cannot grow with deleted ids or survive an account change.
+    private var timeoutClockAnchors: [String: (stamped: Bool, firstSeen: Date)] = [:]
+
     /// Backend report IDs the user has retried out of (or otherwise
     /// dismissed). The failed card disappears from the list immediately
     /// on retry tap; we then filter these out of every loadReports()
     /// result so it doesn't pop back when the backend still returns the
     /// stale failed row. In-memory only — app restart resets it.
     private var dismissedReportIds: Set<String> = []
+    /// Backend ids whose Retry is in flight. Taken SYNCHRONOUSLY at the tap, before the
+    /// Task's first await, so a second tap on the still-visible card during the credits
+    /// pre-read cannot spawn a second DELETE + a second 20-credit generation (W2 E-1).
+    private var retryInFlightIds: Set<String> = []
 
     // MARK: - Initialization
     init(prefilledTicker: String? = nil, apiClient: APIClient = .shared) {
@@ -425,22 +448,32 @@ class ResearchViewModel: ObservableObject {
     /// re-read. The card stayed "failed" with no Refunded chip until a manual refresh.
     private func applyClientSideTimeoutPass(serverTruth: Bool) {
         let now = Date()
+        var inFlightIds = Set<String>()
         reports = reports.map { report in
             guard let backendId = report.backendId else { return report }
             // Backend gave us a terminal status — trust it, clear any prior flag.
             if report.status == .ready || report.status == .failed {
                 if serverTruth {
                     locallyTimedOutReportIds.remove(backendId)
+                    timeoutClockAnchors.removeValue(forKey: backendId)
                 }
                 return report
             }
-            // Still .processing — age out against the clock the server actually uses.
-            let timedOut: Bool
-            if let started = report.processingStartedAt {
-                timedOut = now.timeIntervalSince(started) > startedTimeoutSeconds
+            inFlightIds.insert(backendId)
+            // Still .processing — age out against the clock the server actually uses, but
+            // from the instant THIS device first saw the row on that clock (see
+            // `timeoutClockAnchors`): the server stamps are read only to pick the clock,
+            // never subtracted from the device's `Date()`.
+            let stamped = report.processingStartedAt != nil
+            let anchor: Date
+            if let existing = timeoutClockAnchors[backendId], existing.stamped == stamped {
+                anchor = existing.firstSeen
             } else {
-                timedOut = now.timeIntervalSince(report.date) > queuedTimeoutSeconds
+                anchor = now
+                timeoutClockAnchors[backendId] = (stamped: stamped, firstSeen: now)
             }
+            let limit = stamped ? startedTimeoutSeconds : queuedTimeoutSeconds
+            let timedOut = now.timeIntervalSince(anchor) > limit
             if timedOut {
                 locallyTimedOutReportIds.insert(backendId)
             }
@@ -448,6 +481,12 @@ class ResearchViewModel: ObservableObject {
                 return report.withClientTimeout()
             }
             return report
+        }
+        if serverTruth {
+            // The list endpoint hides deleted rows, so an anchor for an id the server no
+            // longer lists would otherwise live for the rest of the process — same leak the
+            // flag set had (`formIntersection` in `loadReports`).
+            timeoutClockAnchors = timeoutClockAnchors.filter { inFlightIds.contains($0.key) }
         }
     }
 
@@ -806,6 +845,7 @@ class ResearchViewModel: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             var startedId: String?
+            let tapTime = Date()
 
             do {
                 let stream = await self.pollingManager.generateAndMonitorResearch(
@@ -878,7 +918,7 @@ class ResearchViewModel: ObservableObject {
                             print("🗑️ ResearchVM: monitor for \(id) ended after the user deleted it — no alert")
                             continue
                         }
-                        if case .apiError(let code, _) = appError, code == "RESEARCH_DELETED" {
+                        if case .apiError(let code, _) = appError, code == TaskPollingManager.deletedCode {
                             print("🗑️ ResearchVM: report was deleted elsewhere — no alert")
                             await self.loadReports()
                             // That delete refunded the charge on the other device; this
@@ -892,12 +932,7 @@ class ResearchViewModel: ObservableObject {
                             print("🛑 ResearchVM: monitor for \(ticker) cancelled — no alert")
                             continue
                         }
-                        // `code` only — never the message, which can carry backend text.
-                        Analytics.shared.track(.reportFailed, [
-                            "ticker": .string(ticker),
-                            "reason": .string(appError.analyticsCode),
-                        ])
-                        if case .timeout = appError {
+                        if case .timeout = appError, startedId != nil {
                             // CLIENT-side poll timeout only — NOT a real
                             // failure. The backend keeps generating; the
                             // report still resolves in the Reports list
@@ -906,10 +941,59 @@ class ResearchViewModel: ObservableObject {
                             // credits. Don't surface a hard error — keep the
                             // in-flight card and point the user at the Reports
                             // tab.
+                            //
+                            // `startedId != nil` is what makes this the POLL's timeout:
+                            // with no `.started` yet, the only producer of `.timeout` is
+                            // the POST itself (F09-10).
+                            Analytics.shared.track(.reportFailed, [
+                                "ticker": .string(ticker),
+                                "reason": .string(appError.analyticsCode),
+                            ])
                             print("⏳ ResearchVM: client poll timed out — report continues on the server")
                             await self.loadReports()
                             self.startReportsPolling()
+                        } else if case .timeout = appError {
+                            // The POST to /research/generate timed out BEFORE a report id
+                            // came back. The server may have committed the row and charged
+                            // 20 credits, or never received it — unknowable from here. This
+                            // used to be classified as the benign poll timeout above: no
+                            // error, no in-flight card, and the next tap could charge a
+                            // second time. Reload the list and the wallet so a charge that
+                            // landed is visible, adopt a fresh processing row for this
+                            // (ticker, persona) silently if one appears, and otherwise say so.
+                            Analytics.shared.track(.reportFailed, [
+                                "ticker": .string(ticker),
+                                "reason": .string("post_timeout"),
+                            ])
+                            print("⏳ ResearchVM: POST timed out before a report id — reconciling with the list")
+                            await self.loadReports()
+                            await self.loadCredits()
+                            // A minute of slack on the row's stamp: the phone's clock and
+                            // the server's need not agree to the second.
+                            let adopted = self.reports.first {
+                                $0.ticker.uppercased() == ticker.uppercased()
+                                    && $0.persona.backendKey == personaKey
+                                    && $0.status == .processing
+                                    && $0.date >= tapTime.addingTimeInterval(-60)
+                            }
+                            if let adopted, let adoptedId = adopted.backendId {
+                                // Adopt by LIST: the row is already a processing card, and
+                                // the 5 s list poll carries it to completion. NOT into
+                                // `inFlightReportIds` — no monitor owns that id, so nothing
+                                // would ever remove it and one of the four concurrency slots
+                                // stayed burned for the session (W2 E-2).
+                                print("✅ ResearchVM: POST timed out but the report row exists — adopting \(adoptedId) via the list")
+                                self.startReportsPolling()
+                            } else {
+                                self.error = "We couldn't confirm the request — check your Reports before retrying."
+                                self.startReportsPolling()
+                            }
                         } else {
+                            // `code` only — never the message, which can carry backend text.
+                            Analytics.shared.track(.reportFailed, [
+                                "ticker": .string(ticker),
+                                "reason": .string(appError.analyticsCode),
+                            ])
                             print("❌ ResearchVM: Research failed — \(type(of: appError)): \(appError.message)")
                             self.error = appError.message
                             // Refresh so the failed card appears in the list — and adopt
@@ -1160,21 +1244,52 @@ class ResearchViewModel: ObservableObject {
             error = "You can run up to \(maxConcurrentGenerations) analyses at once — wait for one to finish."
             return
         }
+        // The refund-independent guards `generateAnalysis()` runs, BEFORE the card is
+        // dismissed and the row deleted (F09-9): a signed-out tap used to delete the
+        // failed card first and then bounce off the sign-in gate, leaving neither report.
+        guard AppActions.shared.isSignedIn else {
+            AppActions.shared.requestSignIn(for: "retry this analysis")
+            return
+        }
+        // Re-entry guard, taken BEFORE the Task: the F09-9 reorder moved the card's dismissal
+        // behind an await, so the enabled button stayed on screen during the credits read
+        // and a double tap ran the whole path twice (two DELETEs, two charges).
+        if let id = report.backendId {
+            guard !retryInFlightIds.contains(id) else {
+                print("🔄 ResearchVM: retry for \(id) already in flight — ignoring the second tap")
+                return
+            }
+            retryInFlightIds.insert(id)
+        }
         print("🔄 ResearchVM: Retrying report for \(report.ticker)...")
-        // Drop the failed card immediately — both from the in-memory list
-        // and from the dismiss-set so the next loadReports() doesn't
-        // re-surface it. The new processing card will appear when
-        // generateAnalysis() spawns the next report.
         let ticker = report.ticker
         let persona = report.persona
         let backendId = report.backendId
-        if let backendId {
-            dismissedReportIds.insert(backendId)
-            reports.removeAll { $0.backendId == backendId }
-        }
 
         Task { [weak self] in
             guard let self else { return }
+            defer { if let backendId { self.retryInFlightIds.remove(backendId) } }
+            if backendId != nil, report.isRefunded {
+                // An already-refunded row's DELETE is a plain soft-delete — no refund is
+                // coming — so the balance guard can run up front: a fresh read below the
+                // cost means the retry cannot start, and the failed card must stay. For an
+                // UNREFUNDED row the DELETE is what refunds, so a pre-DELETE balance would
+                // refuse a retry the refund is about to fund; that case keeps the
+                // post-DELETE reload below and lets the backend's 402 be the authority.
+                await self.loadCredits()
+                if let balance = self.creditBalance, balance.credits < self.analysisCost.credits {
+                    print("⚠️ ResearchVM: retry refused before the delete — insufficient credits (\(balance.credits) < \(self.analysisCost.credits))")
+                    self.error = "Insufficient credits"
+                    return
+                }
+            }
+            // Drop the failed card now — both from the in-memory list and from the
+            // dismiss-set so the next loadReports() doesn't re-surface it. The new
+            // processing card will appear when generateAnalysis() spawns the next report.
+            if let backendId {
+                self.dismissedReportIds.insert(backendId)
+                self.reports.removeAll { $0.backendId == backendId }
+            }
             if let backendId {
                 // A card THIS client flipped is failed only on its own clock; the server may
                 // have finished it since. Ask before deleting — a completed row would be a

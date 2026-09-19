@@ -183,3 +183,38 @@ def test_the_watched_lookup_limit_does_not_claim_a_bound_it_does_not_have():
         "server cap — the constant promises a reach the read does not have"
     )
 
+
+
+# ── F17-8: hitting the clamp is LOUD ─────────────────────────────────────────
+
+
+def _rpc_with_rows(monkeypatch, n: int):
+    class _Res:
+        data = [{"ticker": f"T{i}"} for i in range(n)]
+
+    class _Q:
+        def execute(self):
+            return _Res()
+
+    class _SB:
+        def rpc(self, name, params):
+            assert params == {"n": es._WATCHED_LOOKUP_LIMIT}
+            return _Q()
+
+    monkeypatch.setattr("app.database.get_supabase", lambda: _SB())
+
+
+def test_a_clamped_watched_read_warns_that_watchers_will_be_skipped(monkeypatch, caplog):
+    _rpc_with_rows(monkeypatch, es._WATCHED_LOOKUP_LIMIT)
+    with caplog.at_level("WARNING"):
+        out = es._watched_tickers()
+    assert len(out) == es._WATCHED_LOOKUP_LIMIT
+    hits = [r for r in caplog.records if "clamp" in r.getMessage() and "skipped" in r.getMessage()]
+    assert hits, "a full page is the clamp — the skip must be visible in the log"
+
+
+def test_a_short_watched_read_is_silent(monkeypatch, caplog):
+    _rpc_with_rows(monkeypatch, es._WATCHED_LOOKUP_LIMIT - 1)
+    with caplog.at_level("WARNING"):
+        es._watched_tickers()
+    assert not [r for r in caplog.records if "clamp" in r.getMessage()]

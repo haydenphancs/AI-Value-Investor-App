@@ -70,9 +70,18 @@ async def _fetch_filter(
     """
     Fetch all pages for a filter (e.g., 'all-stocks').
 
-    Returns dict keyed by ticker with mentions data, or **None when page 1 failed** — a
+    Returns dict keyed by ticker with mentions data, or **None when ANY page failed** — a
     failed filter must be distinguishable from an empty one, or `refresh_cache` replaces a
     good cache with half a fetch and stamps it fresh.
+
+    "Any page", not "page 1": a lost page 2..N used to be `continue`d and the truncated
+    dict returned as a complete answer, so a mid-pagination 429 (the exact failure the 2 s
+    page delay exists for; all-stocks is 9 pages in prod) replaced 874 stock entries with
+    the ~100 that arrived, stamped the cache fresh for the full TTL, and had
+    `is_cache_populated()` answer "real zero" for the ~774 dropped tickers — the F19-1
+    half-fetch defect on its likelier axis. The pages that did arrive are discarded on
+    purpose: `refresh_cache` then keeps the previous entries and retries in
+    `_PARTIAL_RETRY_SECONDS`, which is the same degraded shape a failed page 1 gets.
     Fetches one page at a time with delays to avoid rate limiting.
     """
     result: Dict[str, Dict[str, Any]] = {}
@@ -103,7 +112,8 @@ async def _fetch_filter(
         logger.warning(f"ApeWisdom {filter_name} page 1 error: {type(e).__name__}: {e}")
         return None
 
-    # Remaining pages with delay
+    # Remaining pages with delay. A lost page is counted, not skipped — see the docstring.
+    lost_pages: list = []
     for page in range(2, total_pages + 1):
         await asyncio.sleep(_PAGE_DELAY)
         try:
@@ -117,6 +127,7 @@ async def _fetch_filter(
                     f"ApeWisdom {filter_name} page {page} failed: "
                     f"{r.status_code}"
                 )
+                lost_pages.append(page)
                 continue
 
             page_data = r.json()
@@ -124,9 +135,18 @@ async def _fetch_filter(
 
         except Exception as e:
             logger.warning(
-                f"ApeWisdom {filter_name} page {page} error: {e}"
+                f"ApeWisdom {filter_name} page {page} error: {type(e).__name__}: {e}"
             )
+            lost_pages.append(page)
             continue
+
+    if lost_pages:
+        logger.warning(
+            "ApeWisdom %s INCOMPLETE: lost %d/%d pages (%s) — discarding the %d tickers "
+            "that arrived so the previous entries are kept instead of a truncated list",
+            filter_name, len(lost_pages), total_pages, lost_pages, len(result),
+        )
+        return None
 
     logger.info(
         f"ApeWisdom {filter_name} complete: {len(result)} tickers"

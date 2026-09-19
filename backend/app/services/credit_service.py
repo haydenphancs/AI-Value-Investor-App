@@ -42,9 +42,11 @@ class CreditServiceUnavailable(Exception):
 # the same way `revoke_purchased_credits` reports `reclaimed: 0`.
 #
 # Since 2026-09-10 this tuple is DOCUMENTATION and log classification only. The predicate
-# below no longer reads it — see REFUND_SETTLED_OUTCOMES for why. `partial` is minted by
-# `refund_ledgered` itself (not the RPC) when `0 < refunded < amount`.
-REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero", "partial")
+# below no longer reads it — see REFUND_SETTLED_OUTCOMES for why. This tuple is the RPC's OWN
+# owed vocabulary (pinned by test_refund_correctness_helpers); `partial` — minted by
+# `refund_ledgered` itself when `0 < refunded < amount` — is owed too, and reads as owed
+# through the allow-list below without being an RPC outcome.
+REFUND_FAILURE_OUTCOMES = ("no_matching_debit", "no_credits_row", "capped_to_zero")
 
 # Outcomes after which the user is NOT owed anything: the refund moved (whatever the caps let
 # it move), it had already moved, or there was never a charge to reverse. THIS is the set the
@@ -202,38 +204,6 @@ class CreditService:
             ) from e
         remaining = result.data
         return int(remaining) if remaining is not None else None
-
-    def log_transaction(
-        self,
-        user_id: str,
-        delta: int,
-        reason: str,
-        ref_id: Optional[str] = None,
-        balance_after: Optional[int] = None,
-    ) -> None:
-        """Best-effort append to the `credit_transactions` audit ledger (migration 100).
-
-        Never raises — a ledger write must not break the (already-decided) credit
-        action. Failures are logged with context so the drop is diagnosable. Wired in
-        during the enforcement phase alongside charge/refund and the monthly reset.
-        """
-        try:
-            self.supabase.rpc(
-                "add_credit_transaction",
-                {
-                    "p_user_id": user_id,
-                    "p_delta": delta,
-                    "p_reason": reason,
-                    "p_ref_id": ref_id,
-                    "p_balance_after": balance_after,
-                },
-            ).execute()
-        except Exception as e:
-            logger.warning(
-                "add_credit_transaction failed for user=%s reason=%s (%s: %s) — "
-                "ledger row dropped",
-                user_id, reason, type(e).__name__, e,
-            )
 
     # ── Unified credit gate (enforcement) ──────────────────────────────────
     # precharge / refund_ledgered are the single gate every metered AI action

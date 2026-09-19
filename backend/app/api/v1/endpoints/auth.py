@@ -15,8 +15,8 @@ from app.database import (
 )
 from app.dependencies import get_current_user_id
 from app.core.security import (
-    create_access_token, create_refresh_token, decode_token, rate_limiter,
-    trusted_client_ip, verify_supabase_token,
+    create_access_token, create_device_proof, create_refresh_token, decode_token,
+    rate_limiter, trusted_client_ip, verify_device_proof, verify_supabase_token,
 )
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.services.auth_methods_service import auth_methods_service
@@ -138,9 +138,13 @@ async def sign_in(
     # `protected=True` on every credential limiter: it routes these keys into a pool that
     # attacker-minted identifiers cannot reach. Sharing one table with the X-Guest-Id-keyed
     # buckets let ~20k cheap requests evict this very bucket and reset the cap below.
+    # The per-email bucket is what made a known address trivially LOCKABLE (ten wrong
+    # passwords every fifteen minutes, inside the attacker's own per-IP budget); a device
+    # that has signed into this account before carries a proof and is judged on its own
+    # bucket instead — see `_per_email_check`.
     _enforce_credential_limits(
         (f"login:ip:{client_ip}", 10, 60),
-        (f"login:email:{email_key}", 10, 900),
+        _per_email_check("login", email_key, 10, 900, req),
         detail="Too many login attempts. Please try again later.",
         retry_after="60",
     )
@@ -198,6 +202,8 @@ async def sign_in(
             access_token=access_token,
             refresh_token=refresh_token,
             user_id=user_id,
+            # A verified credential earns this install its lockout exemption for the address.
+            device_token=create_device_proof(email_key),
         )
     except HTTPException:
         raise
@@ -615,6 +621,27 @@ def _enforce_credential_limits(
             )
 
 
+def _per_email_check(
+    bucket: str, email_key: str, max_requests: int, window_seconds: int, req: Request,
+) -> tuple[str, int, int]:
+    """The per-EMAIL limiter for a credential route, or its per-PROOF stand-in.
+
+    A request that carries `X-Device-Token` proving a PRIOR verified sign-in for exactly
+    this email (`core.security.verify_device_proof`) skips the per-email bucket — that is
+    the bucket an attacker fills with wrong passwords to lock a known address out — and is
+    bounded by a bucket keyed on the proof instead, at the same rate. Everyone still passes
+    the per-IP bucket first. A missing, foreign or forged proof changes nothing: the
+    ordinary per-email bucket applies, so the proof can only relax a limit, never fail a
+    request. Only a hash of the proof becomes a key, never the proof itself.
+    """
+    proof = req.headers.get("x-device-token") if req is not None and getattr(req, "headers", None) else None
+    if proof and verify_device_proof(proof, email_key):
+        import hashlib
+        digest = hashlib.sha256(proof.encode("utf-8")).hexdigest()[:24]
+        return (f"{bucket}:device:{digest}", max_requests, window_seconds)
+    return (f"{bucket}:email:{email_key}", max_requests, window_seconds)
+
+
 def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
     """Does this id have a `public.users` row?
 
@@ -644,11 +671,13 @@ def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
 
 
 def _issue_app_tokens_for(user_id: str, email: Optional[str]) -> TokenResponse:
-    """Mint the app's own JWTs for an authenticated Supabase user."""
+    """Mint the app's own JWTs for an authenticated Supabase user (a provider sign-in or a
+    session exchange — both verified a credential, so both earn the device proof)."""
     access_token = create_access_token(data={"sub": user_id, "email": email})
     refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
     return TokenResponse(
-        access_token=access_token, refresh_token=refresh_token, user_id=user_id
+        access_token=access_token, refresh_token=refresh_token, user_id=user_id,
+        device_token=create_device_proof(email) if email else None,
     )
 
 
@@ -864,7 +893,9 @@ async def forgot_password(
     # Still a generic response shape, but 429 so a legitimate client can back off.
     _enforce_credential_limits(
         (f"forgot:ip:{client_ip}", 5, 3600),
-        (f"forgot:email:{email_key}", 3, 3600),
+        # Same exemption as sign-in: three posts an hour from anyone used to block the
+        # victim's OWN reset email for the hour.
+        _per_email_check("forgot", email_key, 3, 3600, req),
         detail="Too many reset requests. Please try again later.",
         retry_after="3600",
     )
@@ -907,7 +938,7 @@ async def reset_password(
 
     _enforce_credential_limits(
         (f"reset:ip:{client_ip}", 10, 3600),
-        (f"reset:email:{email_key}", 10, 3600),
+        _per_email_check("reset", email_key, 10, 3600, req),
         detail="Too many attempts. Please request a new code and try again later.",
         retry_after="3600",
     )

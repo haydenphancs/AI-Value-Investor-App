@@ -760,7 +760,10 @@ def _persist_context_snapshot(
     turns send no context; live turns resend the same frozen snapshot every
     message — so this writes once, then no-ops for the rest of the session).
     """
-    if not req_context or req_context == session_row.get("context_snapshot"):
+    # Whitespace-only counts as ABSENT: `sanitize_context` already reads it as none for the
+    # prompt, so persisting it here overwrote a real stored snapshot with spaces (and the
+    # replay flag read the turn as "live" because the raw string was truthy).
+    if not (req_context or "").strip() or req_context == session_row.get("context_snapshot"):
         return
     try:
         supabase.table("chat_sessions").update(
@@ -851,6 +854,77 @@ async def _with_keepalive(agen, deadline: Optional[float] = None):
 def _sse(event: str, data: dict) -> str:
     """Format a single Server-Sent Events frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _rich_content_for_turn(
+    thinking: dict, widgets: Optional[list], sources: Optional[list],
+) -> dict:
+    """The `rich_content` blob BOTH doors persist, built in one place.
+
+    The non-stream door used to write `{"widget": w}` alone, so a turn re-POSTed through
+    it after a stream verdict rendered on the next history load as a bare bubble beside
+    neighbours that all had a thinking card and source pills (F03-9 / F01-7). The
+    `widget` key stays for old iOS builds; `widgets` is the list new ones read.
+    """
+    rich: dict = {"thinking": thinking}
+    if widgets:
+        rich["widgets"] = list(widgets)
+        rich["widget"] = widgets[0]
+    if sources:
+        rich["sources"] = sources
+    return rich
+
+
+def _persist_turn(supabase, session_id: str, user_row: dict, ai_msg: dict) -> dict:
+    """Insert the user + assistant rows in ONE statement and return the assistant row.
+
+    Ids are PRE-MINTED so a lost REPLY can be told apart from a lost WRITE: on a transient
+    Supabase failure (an edge 520/503 after the statement committed) the assistant row
+    is re-selected by its id — found means the turn IS durable and the caller continues
+    as delivered; absent means the write never landed and the original error propagates.
+    Before this, a blip on the insert response refunded a turn that had committed, the
+    user re-sent the same question, was charged again, and history held two identical
+    exchanges — the first unacknowledged and free (F03-6).
+    """
+    user_row.setdefault("id", str(uuid.uuid4()))
+    ai_msg.setdefault("id", str(uuid.uuid4()))
+    try:
+        inserted = supabase.table("chat_messages").insert([user_row, ai_msg]).execute()
+    except Exception as e:
+        if not is_transient_supabase_error(e):
+            raise
+        logger.warning(
+            "chat_messages insert reply lost for session=%s assistant=%s (%s: %s) — "
+            "re-reading the row to tell a lost reply from a lost write",
+            session_id, ai_msg["id"], type(e).__name__, e,
+        )
+        try:
+            found = (
+                supabase.table("chat_messages").select("*")
+                .eq("id", ai_msg["id"]).limit(1).execute()
+            )
+        except Exception as e2:  # noqa: BLE001
+            logger.warning(
+                "chat_messages re-read failed for assistant=%s (%s: %s) — treating the "
+                "turn as NOT persisted", ai_msg["id"], type(e2).__name__, e2,
+            )
+            raise e
+        rows = getattr(found, "data", None) or []
+        if rows:
+            logger.warning(
+                "chat_messages insert HAD committed for session=%s assistant=%s — "
+                "Supabase lost the reply, not the write; continuing as delivered",
+                session_id, ai_msg["id"],
+            )
+            return dict(rows[0])
+        raise e
+    assistant_row = next(
+        (r for r in (getattr(inserted, "data", None) or []) if r.get("role") == "assistant"),
+        None,
+    )
+    if assistant_row is None:
+        raise RuntimeError("assistant row missing from chat_messages insert result")
+    return assistant_row
 
 
 def _attach_turn_cost(supabase, assistant_row: dict, quota, rich: Optional[dict] = None):
@@ -1151,15 +1225,20 @@ async def send_chat_message(
         # sends none → replay the snapshot persisted at open time (migration 087).
         # Sanitize + bound the client grounding blob (it lands in the SYSTEM
         # instruction — an injection surface).
-        effective_context = sanitize_context(_effective_context(request.context, session.data))
+        # Sanitised ONCE, up front: a whitespace-only `context` is absent for every
+        # reader — the prompt, the replay flag and the snapshot persist — or the three
+        # disagreed (prompt saw none, flag said live, persist wrote spaces).
+        req_ctx = sanitize_context(request.context)
+        effective_context = sanitize_context(_effective_context(req_ctx, session.data))
         # True only when a stored snapshot is being replayed (reopen) — so the
         # prompt labels it as a point-in-time copy, not live data.
-        context_is_replayed = not request.context and bool(effective_context)
+        context_is_replayed = not req_ctx and bool(effective_context)
 
         # Skips the DB round trip when it cannot apply, and never blocks the loop
         # when it does (see _reader_lens_for_async).
         reader_lens = await _reader_lens_for_async(user)
 
+        started = _time.monotonic()
         try:
             ai_result = await asyncio.wait_for(
                 chat_service.generate_response(
@@ -1178,7 +1257,13 @@ async def send_chat_message(
                 ),
                 timeout=settings.CHAT_SEND_BUDGET_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
+            if isinstance(e, GeminiTimeoutError):
+                # A per-CALL Gemini timeout (the SDK's own ceiling) is a subclass of
+                # `asyncio.TimeoutError`, so this arm swallowed it and reported a "budget
+                # overrun" for a turn that never got near the budget. Let the classifier
+                # below map it to GEMINI_UNAVAILABLE with the right step.
+                raise
             # Past the client's ceiling nobody is listening: iOS has already reported the
             # turn failed. Answer BEFORE any write so `delivered` stays False and the
             # `finally` refunds — a charged, persisted answer the user never saw is the
@@ -1259,24 +1344,28 @@ async def send_chat_message(
             "content": msg,
             "created_at": now.isoformat(),
         }
+        # Same shape the stream door persists (`_rich_content_for_turn`): a thinking card
+        # with no streamed reasoning, the source pills, and the widget under both keys.
+        sources = ai_result.get("sources") or None
+        thinking_payload = {
+            "stages": [],
+            "reasoning": "",
+            "source_count": len(sources) if sources else 0,
+            "elapsed_ms": int((_time.monotonic() - started) * 1000),
+        }
         ai_msg: dict = {
             "session_id": session_id,
             "role": "assistant",
             "content": ai_result["content"],
             "citations": ai_result.get("citations"),
             "tokens_used": ai_result.get("tokens_used"),
+            "rich_content": _rich_content_for_turn(
+                thinking_payload, [widget_payload] if widget_payload else None, sources,
+            ),
             "created_at": (now + timedelta(milliseconds=1)).isoformat(),
         }
-        # Persist widget in rich_content column so history reloads work
-        if widget_payload:
-            ai_msg["rich_content"] = {"widget": widget_payload}
 
-        result = supabase.table("chat_messages").insert([user_msg, ai_msg]).execute()
-        assistant_row = next(
-            (r for r in (result.data or []) if r.get("role") == "assistant"), None
-        )
-        if assistant_row is None:
-            raise RuntimeError("assistant row missing from chat_messages insert result")
+        assistant_row = _persist_turn(supabase, session_id, user_msg, ai_msg)
 
         # The answer is durably persisted → the turn was delivered. Past this point the
         # finally must NOT refund (a disconnect during the best-effort session/token steps
@@ -1339,7 +1428,7 @@ async def send_chat_message(
             )
 
         # Persist the on-screen snapshot (best-effort, guarded) so a later reopen re-grounds.
-        _persist_context_snapshot(supabase, session_id, request.context, session.data)
+        _persist_context_snapshot(supabase, session_id, req_ctx, session.data)
 
         # Best-effort daily token accounting for spend observability.
         _record_chat_tokens(user, x_guest_id, ai_result.get("tokens_used"))
@@ -1437,10 +1526,11 @@ async def stream_chat_message(
     # Live turn → the iOS on-screen snapshot; history reopen (context=None) →
     # the snapshot persisted at open time (migration 087). Sanitized + bounded
     # since it lands in the SYSTEM instruction (injection surface).
-    effective_context = sanitize_context(_effective_context(request.context, sdata))
+    req_ctx = sanitize_context(request.context)   # whitespace-only → absent, everywhere
+    effective_context = sanitize_context(_effective_context(req_ctx, sdata))
     # True only when a stored snapshot is being replayed (reopen) — labels it as
     # a point-in-time copy in the prompt so stale figures aren't answered as live.
-    context_is_replayed = not request.context and bool(effective_context)
+    context_is_replayed = not req_ctx and bool(effective_context)
     session_type = sdata.get("session_type", "NORMAL")
     stock_id = sdata.get("stock_id")
     user_message = msg
@@ -1580,10 +1670,11 @@ async def stream_chat_message(
                     route_question(chat_service.gemini, user_message),
                     _warm_if_ungrounded(),
                 )
-                if warmed is not None:
-                    # The stored answer was written by the general path, so labelling the
-                    # turn with a specialist the replay never consulted would put a false
-                    # "Consulting Macro" stage on the thinking card.
+                if warmed is not None or prep.get("deep_dive_cached"):
+                    # The stored answer was written by the general path (a starter-warm row
+                    # or the 24 h deep-dive cache), so labelling the turn with a specialist
+                    # the replay never consulted would put a false "Consulting Macro" stage
+                    # on the thinking card.
                     route = {"specialists": ["general"], "mode": "single", "labels": ["General"]}
             else:
                 prep, warmed = await asyncio.gather(prep_coro, _warm_if_ungrounded())
@@ -1606,15 +1697,24 @@ async def stream_chat_message(
             # mid-stream. thought → reasoning card, answer → bubble, tool → progress + widget.
             from app.services.agents.chat_tools import (
                 build_chat_tool_declarations, build_chat_tool_handlers,
-                widget_from_tool_result, widget_key,
+                tools_for_asset_type, widget_from_tool_result, widget_key,
             )
             asset_type = prep.get("asset_type") or "NORMAL"
             # Filtered to the tools that MEAN something for this asset class — not just
             # "equity three, plus the index one for INDEX". See `chat_tools._TOOLS_BY_ASSET_TYPE`.
             tools = build_chat_tool_declarations(asset_type)
-            handlers = build_chat_tool_handlers(
-                chat_service, screen_symbol=stock_id, screen_asset_type=asset_type,
-            )
+            # The HANDLER map is filtered too: the declarations decide what the model is
+            # offered, but a handler left in the map for an undeclared tool would still
+            # run if the model named it from memory (a second door around the class table).
+            allowed = tools_for_asset_type(asset_type)
+            handlers = {
+                name: fn
+                for name, fn in build_chat_tool_handlers(
+                    chat_service, screen_symbol=stock_id, screen_asset_type=asset_type,
+                    user_id=user["id"],
+                ).items()
+                if name in allowed
+            }
 
             # Start with the deterministic base widget (so an asset-detail chat always shows its
             # chart); agentic tool calls add more, deduped by (widget_type, ticker).
@@ -1886,7 +1986,9 @@ async def stream_chat_message(
                 })
                 return
 
-        if not content:
+        if not (content or "").strip():
+            # Whitespace-only is empty: the non-stream door refunds it, and persisting
+            # "\n" as an answer charged the user for a blank bubble.
             quota.refund_once("chat_stream_empty")  # no answer produced → hand the turn back
             yield _sse("error", {
                 "error_code": "INTERNAL_ERROR",
@@ -1953,12 +2055,7 @@ async def stream_chat_message(
             # rich_content carries the widget + futuristic-chat fields (thinking / sources /
             # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
             # this durable write (below), so they can never block or drop it.
-            rich_content: dict = {"thinking": thinking_payload}
-            if widgets:
-                rich_content["widgets"] = widgets
-                rich_content["widget"] = widgets[0]   # back-compat: old iOS builds read `widget`
-            if sources:
-                rich_content["sources"] = sources
+            rich_content: dict = _rich_content_for_turn(thinking_payload, widgets, sources)
 
             # Persist the user + assistant rows TOGETHER in ONE insert so the turn is atomic: a
             # failing assistant write can never leave an orphaned user row for the client's
@@ -1979,12 +2076,7 @@ async def stream_chat_message(
                 "rich_content": rich_content,
                 "created_at": (now + timedelta(milliseconds=1)).isoformat(),
             }
-            inserted = supabase.table("chat_messages").insert([user_row, ai_msg]).execute()
-            assistant_row = next(
-                (r for r in (inserted.data or []) if r.get("role") == "assistant"), None
-            )
-            if assistant_row is None:
-                raise RuntimeError("assistant row missing from chat_messages insert result")
+            assistant_row = _persist_turn(supabase, session_id, user_row, ai_msg)
 
             # Durably persisted → delivered. The finally backstop must not refund past this
             # point (a disconnect during the best-effort steps below is not a failed turn).
@@ -2052,7 +2144,7 @@ async def stream_chat_message(
             supabase.table("chat_sessions").update(update_payload).eq(
                 "id", session_id
             ).execute()
-            _persist_context_snapshot(supabase, session_id, request.context, sdata)
+            _persist_context_snapshot(supabase, session_id, req_ctx, sdata)
         except Exception as e:
             logger.warning(
                 "Chat stream post-delivery metadata write failed for %s (%s: %s) — ignoring",
@@ -2087,11 +2179,62 @@ async def stream_chat_message(
                 # could have saved for free and did not.
                 suggestions = warm_suggestions[:2]
             else:
-                suggestions = await chat_service.generate_followup_suggestions(
+                # HEARTBEAT this call like the answer pump and the fallback arm. It is one
+                # awaited Gemini call — `generate_json` under a 2-attempt retry with a 90 s
+                # ceiling each, plus the overload/quota ladder's 5 s/10 s backoffs — and
+                # nothing reached the client while it ran. An overloaded flash-lite (~60 s
+                # hold, 503, back off, ~60 s hold) crossed iOS's 120 s idle timeout AFTER the
+                # last `token` frame: the client dropped the socket, `ChatStreamError
+                # .incomplete` removed the bubble the user was already reading, re-adopted
+                # the saved turn from history — and the `credits` frame never arrived, so the
+                # balance shown stayed one credit stale. Bounded by the SAME turn deadline
+                # the fallback arm uses: chips are best-effort, and a turn that has spent
+                # its budget gets a short grace, not another budget.
+                _sugg_task = asyncio.ensure_future(chat_service.generate_followup_suggestions(
                     user_message=user_message,
                     answer=content,
                     context_type=ctx_type,
                     reference_id=ref_id,
+                ))
+                _sugg_deadline = max(
+                    _time.monotonic() + 5.0,
+                    min(started + _stream_budget_seconds(),
+                        _time.monotonic() + settings.CHAT_SEND_BUDGET_SECONDS),
+                )
+                try:
+                    while True:
+                        _remaining = _sugg_deadline - _time.monotonic()
+                        if _remaining <= 0:
+                            _sugg_task.cancel()
+                            logger.warning(
+                                "Chat suggestions step exceeded the turn budget for "
+                                "session %s — skipping chips (answer already persisted)",
+                                session_id,
+                            )
+                            break
+                        _done, _ = await asyncio.wait(
+                            {_sugg_task}, timeout=min(_keepalive_seconds(), _remaining)
+                        )
+                        if _done:
+                            break
+                        yield ": keepalive\n\n"
+                except BaseException:
+                    # A client disconnect must not orphan the Gemini call.
+                    _sugg_task.cancel()
+                    raise
+                # `.result()` ONLY on a task that finished cleanly. After the deadline's
+                # `cancel()` the task is still PENDING (cancellation lands on the next loop
+                # tick), so `cancelled()` is False and `.result()` raised InvalidStateError
+                # into the except below — the right outcome (no chips) reached through a
+                # misleading "suggestions step failed (InvalidStateError)" warning on every
+                # budget overrun (W2 regress-A-1). `generate_followup_suggestions` never
+                # raises, but the exception check keeps `.result()` from re-raising if it
+                # ever does.
+                suggestions = (
+                    _sugg_task.result()
+                    if _sugg_task.done() and not _sugg_task.cancelled()
+                    and _sugg_task.exception() is None
+                    else None
                 )
             if suggestions:
                 yield _sse("suggestions", {"questions": suggestions})

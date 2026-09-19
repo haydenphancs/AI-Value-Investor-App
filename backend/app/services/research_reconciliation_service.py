@@ -137,8 +137,143 @@ async def claim_and_mark_failed(
             .execute()
         )
 
+    def _settle(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Refund a row THIS call just claimed, and log the outcome. SYNC, in the worker.
+
+        `refund_ledgered` is synchronous, so this used to run on the event loop after the
+        `to_thread(_claim)` returned. Moving it into the same thread as the CAS is what
+        makes the shield below sufficient (see there) and takes a PostgREST RPC off the
+        loop as a side effect.
+        """
+        user_id = row.get("user_id")
+        amount = row.get("credits_charged") or CreditService.DEEP_RESEARCH_COST
+        if not user_id:
+            logger.error(
+                "claim_and_mark_failed: claimed report %s has no user_id — "
+                "cannot refund %s credits", report_id, amount,
+            )
+            return {"user_id": None, "amount": amount, "ticker": None, "failed": True}
+
+        # ⚠️ `ref_id` MUST match the one the CHARGE used — `research.py` passes the
+        # upper-cased ticker (`precharge(..., ref_id=request.stock_id.upper())`). This used
+        # to pass `report_id`, which is never equal to a ticker, and since migration 118
+        # that mismatch is no longer cosmetic: `refund_credits` looks the original spend up
+        # BY ref_id to learn which pool it drained. With no match it takes the granted-first
+        # fallback, so a user whose report was paid for out of PURCHASED credits got the
+        # refund into their GRANTED pool — which `ensure_credit_period` then wipes at the
+        # month boundary. That silently destroys credits bought with real money, i.e.
+        # exactly the App Store Guideline 3.1.1 violation the two-pool design exists to
+        # prevent, on the primary failure path of the 20-credit action.
+        ticker = (row.get("ticker") or "").upper() or None
+        if not ticker:
+            logger.warning(
+                "claim_and_mark_failed: report %s has no ticker — refunding %s credits "
+                "without a split lookup (granted-first fallback)", report_id, amount,
+            )
+        # Inspected, not wrapped in try/except. `refund_ledgered` NEVER raises — it catches
+        # and returns None — so the `except Exception` that used to guard this call was dead
+        # code, and this is the ONLY log line carrying `report_id` for a manual correction.
+        # It could not fire.
+        #
+        # We already won the claim (is_refunded=True), so we never retry — biased to
+        # under-refund (safe) over double-refund. That bias is deliberate; what was wrong is
+        # that it was silent.
+        try:
+            outcome = CreditService().refund_ledgered(
+                user_id, amount, reason="report_refund_reconciled", ref_id=ticker,
+            )
+        except Exception as e:
+            # `refund_ledgered` does not raise, but CreditService() construction could, and
+            # this runs inside a background sweep where an escape kills the whole pass.
+            # Normalised to the same "did not happen" shape so there is ONE reporting path.
+            logger.warning(
+                "claim_and_mark_failed: refund call raised for report %s (%s: %s)",
+                report_id, type(e).__name__, e,
+            )
+            outcome = None
+        # None = transport fault; the business no-ops carry their own outcome. Both mean the
+        # user keeps neither the report nor the credits, and the CAS is spent.
+        failed = refund_did_not_happen(outcome)
+        if failed:
+            logger.error(
+                "REFUND LEAK: report %s claimed (is_refunded=True) but the refund of %s "
+                "credits to user %s did not happen (outcome=%s, ref_id=%s) — the claim is "
+                "spent so nothing will retry; manual correction needed. The client will "
+                "still show '[Refunded]'.",
+                report_id, amount, user_id,
+                "rpc_failed" if outcome is None else outcome.get("outcome"), ticker,
+            )
+        else:
+            logger.info(
+                "Refunded %s credits for failed report %s (user %s, outcome=%s)",
+                outcome.get("refunded", amount) if isinstance(outcome, dict) else amount,
+                report_id, user_id,
+                outcome.get("outcome") if isinstance(outcome, dict) else "legacy_int",
+            )
+        return {"user_id": user_id, "amount": amount, "ticker": ticker, "failed": failed}
+
+    def _claim_and_settle() -> Optional[Dict[str, Any]]:
+        """ONE worker-thread body: the CAS and, if it was won, the refund + its logging."""
+        result = _claim()
+        rows = result.data or []
+        if not rows:
+            # Lost the claim, or the row was already terminal/refunded.
+            return None
+        return _settle(rows[0])
+
+    # SHIELDED, and the refund lives INSIDE the thread body — both halves are load-bearing.
+    #
+    # The sweep runs in a lifespan task the shutdown block cancels. A cancel that lands
+    # while the UPDATE is on the wire (~100-300 ms) cancels only the awaiting coroutine;
+    # the executor thread cannot be interrupted, so PostgREST still commits
+    # `is_refunded=True` + error_message "your credits were refunded" — and with a plain
+    # `await asyncio.to_thread(_claim)` the result was discarded: `CancelledError` is a
+    # BaseException, so neither `refund_ledgered` nor the REFUND LEAK line below ever ran,
+    # and the one-shot claim was spent with no refund and no log. A Railway redeploy timed
+    # against a sweep tick is a silent 20-credit leak per orphaned report.
+    #
+    # `asyncio.shield` keeps the inner task alive through the cancel. It is only enough
+    # because the refund is in the SAME thread body: at interpreter exit `asyncio.run`'s
+    # `_cancel_all_tasks` cancels the shielded inner task before any post-await code would
+    # run, and only the executor thread is guaranteed to finish
+    # (`shutdown_default_executor`). A queued-but-unstarted item CAN still be discarded by
+    # that final cancel — but then the UPDATE never ran, nothing was claimed, and the next
+    # process's sweep sees the row again. SIGKILL/OOM mid-UPDATE remains outside what
+    # in-process code can close.
+    inner = asyncio.ensure_future(asyncio.to_thread(_claim_and_settle))
     try:
-        result = await asyncio.to_thread(_claim)
+        settled = await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        logger.warning(
+            "claim_and_mark_failed: cancelled while the claim for report %s was in "
+            "flight — the CAS and its refund continue in their worker thread", report_id,
+        )
+
+        def _after_cancel(done: "asyncio.Future") -> None:
+            # The thread body logs a won claim itself (Refunded / REFUND LEAK). This
+            # covers the two outcomes it cannot: an UPDATE that raised after the cancel
+            # (otherwise only an unretrieved-task warning at GC) and a lost claim.
+            if done.cancelled():
+                logger.warning(
+                    "claim_and_mark_failed: claim for report %s discarded before its "
+                    "UPDATE ran (shutdown) — nothing claimed, the next sweep retries",
+                    report_id,
+                )
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.error(
+                    "claim_and_mark_failed: UPDATE for report %s failed after the "
+                    "cancel: %s: %s", report_id, type(exc).__name__, exc,
+                )
+            elif done.result() is None:
+                logger.info(
+                    "claim_and_mark_failed: report %s was already settled by another "
+                    "caller (post-cancel)", report_id,
+                )
+
+        inner.add_done_callback(_after_cancel)
+        raise
     except Exception as e:
         logger.error(
             "claim_and_mark_failed: UPDATE failed for report %s: %s: %s",
@@ -146,73 +281,14 @@ async def claim_and_mark_failed(
         )
         return False
 
-    rows = result.data or []
-    if not rows:
-        # Lost the claim, or the row was already terminal/refunded.
+    if settled is None:
         return False
-
-    row = rows[0]
-    user_id = row.get("user_id")
-    amount = row.get("credits_charged") or CreditService.DEEP_RESEARCH_COST
+    user_id = settled["user_id"]
     if not user_id:
-        logger.error(
-            "claim_and_mark_failed: claimed report %s has no user_id — "
-            "cannot refund %s credits", report_id, amount,
-        )
         return True
-
-    # ⚠️ `ref_id` MUST match the one the CHARGE used — `research.py` passes the upper-cased
-    # ticker (`precharge(..., ref_id=request.stock_id.upper())`). This used to pass
-    # `report_id`, which is never equal to a ticker, and since migration 118 that mismatch is
-    # no longer cosmetic: `refund_credits` looks the original spend up BY ref_id to learn which
-    # pool it drained. With no match it takes the granted-first fallback, so a user whose
-    # report was paid for out of PURCHASED credits got the refund into their GRANTED pool —
-    # which `ensure_credit_period` then wipes at the month boundary. That silently destroys
-    # credits bought with real money, i.e. exactly the App Store Guideline 3.1.1 violation the
-    # two-pool design exists to prevent, on the primary failure path of the 20-credit action.
-    ticker = (row.get("ticker") or "").upper() or None
-    if not ticker:
-        logger.warning(
-            "claim_and_mark_failed: report %s has no ticker — refunding %s credits without a "
-            "split lookup (granted-first fallback)", report_id, amount,
-        )
-    # Inspected, not wrapped in try/except. `refund_ledgered` NEVER raises — it catches and
-    # returns None — so the `except Exception` that used to guard this call was dead code, and
-    # this is the ONLY log line carrying `report_id` for a manual correction. It could not fire.
-    #
-    # We already won the claim (is_refunded=True), so we never retry — biased to under-refund
-    # (safe) over double-refund. That bias is deliberate; what was wrong is that it was silent.
-    try:
-        outcome = CreditService().refund_ledgered(
-            user_id, amount, reason="report_refund_reconciled", ref_id=ticker,
-        )
-    except Exception as e:
-        # `refund_ledgered` does not raise, but CreditService() construction could, and this
-        # runs inside a background sweep where an escape kills the whole pass. Normalised to
-        # the same "did not happen" shape so there is ONE reporting path below.
-        logger.warning(
-            "claim_and_mark_failed: refund call raised for report %s (%s: %s)",
-            report_id, type(e).__name__, e,
-        )
-        outcome = None
-    # None = transport fault; the business no-ops carry their own outcome. Both mean the user
-    # keeps neither the report nor the credits, and the CAS is spent.
-    failed = refund_did_not_happen(outcome)
-    if failed:
-        logger.error(
-            "REFUND LEAK: report %s claimed (is_refunded=True) but the refund of %s credits "
-            "to user %s did not happen (outcome=%s, ref_id=%s) — the claim is spent so nothing "
-            "will retry; manual correction needed. The client will still show '[Refunded]'.",
-            report_id, amount, user_id,
-            "rpc_failed" if outcome is None else outcome.get("outcome"), ticker,
-        )
-    else:
-        logger.info(
-            "Refunded %s credits for failed report %s (user %s, outcome=%s)",
-            outcome.get("refunded", amount) if isinstance(outcome, dict) else amount,
-            report_id, user_id,
-            outcome.get("outcome") if isinstance(outcome, dict) else "legacy_int",
-        )
+    amount = settled["amount"]
+    ticker = settled["ticker"]
+    failed = settled["failed"]
 
     await _notify_report_failed(
         report_id=report_id,

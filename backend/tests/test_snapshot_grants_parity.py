@@ -80,8 +80,12 @@ _RE_SEQ = re.compile(r"^CREATE SEQUENCE (?:IF NOT EXISTS )?public\.([a-z0-9_]+)\
 # GRANT SELECT,INSERT,UPDATE ON TABLE public.x TO authenticated;
 # REVOKE ALL ON TABLE public.x FROM anon, authenticated;
 # GRANT SELECT,USAGE ON SEQUENCE public.x_id_seq TO service_role;
+# Privilege tokens may carry a COLUMN list (`GRANT SELECT(col), UPDATE(col) ON TABLE ...`)
+# and the schema / object may be double-quoted; both used to fall straight through the
+# scan, so a column-level GRANT to anon was invisible (F11-3).
 _RE_ACL = re.compile(
-    r"^(GRANT|REVOKE)\s+([A-Z_ ,]+?)\s+ON\s+(TABLE|SEQUENCE)\s+public\.([a-z0-9_]+)\s+"
+    r"^(GRANT|REVOKE)\s+([A-Za-z0-9_ ,()]+?)\s+ON\s+(TABLE|SEQUENCE)\s+"
+    r'"?public"?\."?([a-z0-9_]+)"?\s+'
     r"(?:TO|FROM)\s+([^;]+?)(?:\s+WITH\s+GRANT\s+OPTION)?\s*;",
     re.M | re.I,
 )
@@ -91,7 +95,9 @@ _RE_DEFAULT_PRIV_PUBLIC = re.compile(
 
 
 def _privs(clause: str, kind: str) -> frozenset[str]:
-    toks = {t.strip().upper() for t in clause.split(",") if t.strip()}
+    # `SELECT(col)` counts as SELECT: a column-level grant to a client role still opens
+    # that column to the shipped anon key.
+    toks = {re.sub(r"\s*\(.*\)\s*$", "", t).strip().upper() for t in clause.split(",") if t.strip()}
     if "ALL" in toks or "ALL PRIVILEGES" in toks:
         return _TABLE_ALL if kind == "TABLE" else _SEQ_ALL
     return frozenset(toks)
@@ -135,8 +141,16 @@ def _migration(num: str) -> str:
 
 
 def _client_privs(state, table: str) -> dict[str, set[str]]:
-    return {r: state.get(("TABLE", table, r), set()) for r in _CLIENT_ROLES
-            if state.get(("TABLE", table, r))}
+    # A grant TO PUBLIC reaches every role, anon and authenticated included, and it
+    # SURVIVES a `REVOKE ... FROM anon` (a PUBLIC ACL entry is its own entry) — so it is
+    # folded into each client role's view here, never merged into their replay keys.
+    public = state.get(("TABLE", table, "public"), set())
+    out = {}
+    for r in _CLIENT_ROLES:
+        have = state.get(("TABLE", table, r), set()) | public
+        if have:
+            out[r] = have
+    return out
 
 
 # ── 1. service_role must be able to read AND write every table ─────────────────────────
@@ -269,3 +283,99 @@ def test_the_snapshot_detectors_are_not_vacuous():
 
     # The pending dicts describe DEFECTS, so nothing may be declared both fixed-by-design and pending.
     assert not set(_PENDING_SERVICE_ROLE_GRANTS) & set(_CLIENT_ACCESS_BY_DESIGN)
+
+
+# ── F11-7: the dump script's "no GRANT lines" tripwire must be reachable ──────
+#
+# `grep -c` exits 1 on zero matches, and under `set -e` that killed dump_schema.sh
+# before the WARNING it was about to print — the exact dump the guard exists to reject
+# died silently with the privilege-less snapshot already written.
+
+
+def _dump_script_lines():
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "dump_schema.sh"
+    return [ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#")]
+
+
+def test_every_grep_count_in_the_dump_script_survives_a_zero_match():
+    lines = _dump_script_lines()
+    counts = [ln for ln in lines if "$(grep -c" in ln]
+    assert len(counts) == 3, counts
+    for ln in counts:
+        assert "|| true" in ln, f"`grep -c` exits 1 on no match; under set -e this line aborts: {ln}"
+
+
+def test_a_privilege_less_dump_is_rejected_not_just_warned_about():
+    src = "\n".join(_dump_script_lines())
+    assert 'if [ "$grant_count" -eq 0 ]; then' in src
+    import re
+    tail = src.split('if [ "$grant_count" -eq 0 ]; then', 1)[1]
+    branch = re.split(r"^fi$", tail, maxsplit=1, flags=re.M)[0]
+    assert "exit 1" in branch, "a dump without GRANT lines must fail the script, not print and succeed"
+
+
+# ── F11-4 (Studio-born half): every LIVE SECURITY DEFINER function is revoked from PUBLIC ──
+#
+# The migration-side ledger (`test_security_definer_grants.py`) cannot see a function whose
+# body was created or DROP+CREATEd in Supabase Studio. The dump can: pg_dump emits the
+# function's ACL as `REVOKE ALL ON FUNCTION public.<name>(...) FROM PUBLIC` only when it
+# differs from the default (`EXECUTE TO PUBLIC`), so a live SECDEF function with no such
+# line is callable by anon/authenticated through PostgREST RPC as its owner.
+
+
+def _live_secdef_names() -> dict[str, int]:
+    sql = _SNAPSHOT.read_text(encoding="utf-8")
+    names: dict[str, int] = {}
+    for m in re.finditer(r"^CREATE FUNCTION public\.([a-z0-9_]+)\(", sql, re.M):
+        end = sql.find("$$;", m.end())
+        body = sql[m.end():end if end > 0 else len(sql)]
+        if re.search(r"SECURITY DEFINER", body):
+            names[m.group(1)] = names.get(m.group(1), 0) + 1
+    return names
+
+
+def _snapshot_revoked_names() -> set[str]:
+    sql = _SNAPSHOT.read_text(encoding="utf-8")
+    return set(re.findall(r"^REVOKE ALL ON FUNCTION public\.([a-z0-9_]+)\(", sql, re.M))
+
+
+def test_every_live_security_definer_function_is_revoked_from_public():
+    secdef = _live_secdef_names()
+    revoked = _snapshot_revoked_names()
+    assert len(secdef) >= 25, f"the snapshot SECDEF detector found only {len(secdef)}"
+    missing = sorted(n for n in secdef if n not in revoked)
+    assert missing == [], (
+        f"live SECURITY DEFINER function(s) with no REVOKE ... FROM PUBLIC in the dump — "
+        f"callable by any role through PostgREST RPC as the owner: {missing}"
+    )
+
+
+def test_the_snapshot_secdef_detector_discriminates():
+    sample = (
+        "CREATE FUNCTION public.a() RETURNS void\n    LANGUAGE plpgsql SECURITY DEFINER\n    AS $$\nBEGIN END $$;\n"
+        "CREATE FUNCTION public.b() RETURNS void\n    LANGUAGE plpgsql\n    AS $$\nBEGIN END $$;\n"
+        "REVOKE ALL ON FUNCTION public.a() FROM PUBLIC;\n"
+    )
+    names = {}
+    for m in re.finditer(r"^CREATE FUNCTION public\.([a-z0-9_]+)\(", sample, re.M):
+        end = sample.find("$$;", m.end())
+        if re.search(r"SECURITY DEFINER", sample[m.end():end]):
+            names[m.group(1)] = 1
+    assert names == {"a": 1}
+    assert set(re.findall(r"^REVOKE ALL ON FUNCTION public\.([a-z0-9_]+)\(", sample, re.M)) == {"a"}
+
+
+def test_the_replay_sees_column_level_and_public_grants():
+    """F11-3 anti-vacuity: a column-level grant TO PUBLIC reaches both client roles and
+    survives a per-role REVOKE, and a quoted object name is still matched."""
+    state = replay(
+        'GRANT SELECT(id), UPDATE(name) ON TABLE "public"."z" TO PUBLIC;\n'
+        "REVOKE ALL ON TABLE public.z FROM anon, authenticated;\n"
+    )
+    assert state[("TABLE", "z", "public")] == {"SELECT", "UPDATE"}
+    seen = _client_privs(state, "z")
+    assert seen == {"anon": {"SELECT", "UPDATE"}, "authenticated": {"SELECT", "UPDATE"}}, seen
+    # ...and a per-role grant on its own is unchanged.
+    state = replay("GRANT SELECT ON TABLE public.z TO anon;\n")
+    assert _client_privs(state, "z") == {"anon": {"SELECT"}}

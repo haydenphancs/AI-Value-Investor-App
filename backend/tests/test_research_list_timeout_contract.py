@@ -61,7 +61,7 @@ def test_the_timeout_pass_uses_two_clocks():
     assert body, "applyClientSideTimeoutPass(serverTruth:) not found"
     b = body.group(1)
     assert "report.processingStartedAt" in b and "startedTimeoutSeconds" in b
-    assert "report.date" in b and "queuedTimeoutSeconds" in b
+    assert "queuedTimeoutSeconds" in b
     assert "processingTimeoutSeconds" not in src, "the single 600 s created_at clock is back"
     started = re.search(r"startedTimeoutSeconds: TimeInterval = (\d+)", src)
     queued = re.search(r"queuedTimeoutSeconds: TimeInterval = (\d+)", src)
@@ -79,6 +79,77 @@ def test_the_timeout_pass_uses_two_clocks():
         f"queuedTimeoutSeconds {queued.group(1)} < the server's "
         f"RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS {recon.RECON_QUEUE_ABANDONED_THRESHOLD_SECONDS}"
     )
+
+
+# ── F21-6: neither clock may subtract a SERVER stamp from the DEVICE's Date() ─────────
+#
+# `processing_started_at` and `created_at` are the server's `now()`; nothing in the client
+# anchors to server time. A phone with "Set Automatically" off and its clock 15 min fast
+# read `now - started` as 900 s on the first stamped list load — past the 660 s clock — and
+# flipped every STARTED report to "failed" the moment it began; Retry then DELETED
+# (refunded) the live run and started another that flipped the same way. Both clocks are
+# now aged on the device clock from the instant this device FIRST SAW the row on that clock,
+# so skew cancels; the undercount (≤ one poll interval) only delays the flip.
+
+
+def _timeout_pass_body(src: str) -> str:
+    return _brace_block(src, "private func applyClientSideTimeoutPass(serverTruth: Bool)")
+
+
+def test_the_timeout_pass_never_ages_a_server_stamp_against_the_device_clock():
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    b = _timeout_pass_body(src)
+    # The two subtractions that made a fast device clock flip a live report.
+    assert not re.search(r"timeIntervalSince\(\s*started\s*\)", b), (
+        "the started clock subtracts processingStartedAt from Date() again — a device clock "
+        "15 min fast flips every started report on its first stamped load"
+    )
+    assert not re.search(r"timeIntervalSince\(\s*report\.date\s*\)", b), (
+        "the queued clock subtracts created_at from Date() again"
+    )
+    assert "timeIntervalSinceNow" not in b and "Date().timeIntervalSince(report" not in b
+    # No `Date(...)` built from a server field is subtracted anywhere in the pass: the ONLY
+    # `timeIntervalSince` is against the device-time anchor.
+    subtractions = re.findall(r"timeIntervalSince\(([^)]*)\)", b)
+    assert subtractions == ["anchor"], subtractions
+    # The stamp is read only to CHOOSE the clock.
+    assert "let stamped = report.processingStartedAt != nil" in b
+    assert "stamped ? startedTimeoutSeconds : queuedTimeoutSeconds" in b
+
+
+def test_the_anchor_is_first_observation_on_the_device_clock_and_is_keyed_per_clock():
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    assert re.search(
+        r"private var timeoutClockAnchors: \[String: \(stamped: Bool, firstSeen: Date\)\] = \[:\]",
+        src), "timeoutClockAnchors must be view-model state keyed by backend id"
+    b = _timeout_pass_body(src)
+    assert "let now = Date()" in b
+    # An existing anchor is reused ONLY on the same clock; a row that gains its stamp moves
+    # from the queued clock to the started clock and must re-anchor, or it inherits up to
+    # 12,000 s of queued age and flips the instant it starts.
+    reuse = _brace_block(b, "if let existing = timeoutClockAnchors[backendId], existing.stamped == stamped")
+    assert "anchor = existing.firstSeen" in reuse
+    fresh = b[b.index(reuse) + len(reuse):]
+    fresh = _brace_block(fresh, "else")
+    assert "anchor = now" in fresh
+    assert "timeoutClockAnchors[backendId] = (stamped: stamped, firstSeen: now)" in fresh
+    assert "now.timeIntervalSince(anchor) > limit" in b
+
+
+def test_the_anchors_are_pruned_on_server_truth_and_dropped_with_a_terminal_row():
+    """Same leak the flag set had: the list endpoint hides deleted rows, so an anchor for a
+    retired id would otherwise live for the rest of the process."""
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    b = _timeout_pass_body(src)
+    terminal = _brace_block(b, "if report.status == .ready || report.status == .failed")
+    guarded = _brace_block(terminal, "if serverTruth")
+    assert "timeoutClockAnchors.removeValue(forKey: backendId)" in guarded
+    assert "inFlightIds.insert(backendId)" in b
+    tail = b[b.rindex("if serverTruth"):]
+    prune = _brace_block(tail, "if serverTruth")
+    assert "timeoutClockAnchors = timeoutClockAnchors.filter { inFlightIds.contains($0.key) }" in prune
+    # …and NOT on a failed read, which would re-anchor every row and stall the flip.
+    assert b.count("timeoutClockAnchors.filter") == 1
 
 
 def _brace_block(src: str, opener: str) -> str:
@@ -123,6 +194,83 @@ def test_retry_checks_the_server_before_it_deletes_and_deletes_with_retry_intent
     assert "self.creditBalance = nil" in body[delete:credits]
 
 
+def test_retry_runs_the_refund_independent_guards_before_it_deletes_the_card():
+    """F09-9: `generateAnalysis()`'s sign-in gate ran only AFTER the failed card had been
+    dismissed and the row soft-deleted — a signed-out tap left neither report. The balance
+    gate is moved up ONLY for an already-refunded row (its DELETE refunds nothing); for an
+    unrefunded row the DELETE is what funds the retry, so the post-DELETE reload stays."""
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    body = _brace_block(src, "func retryReport(_ report: AnalysisReport)")
+    dismiss = body.index("self.dismissedReportIds.insert(backendId)")
+    delete = body.index(".deleteReport(reportId: backendId, forRetry: true)")
+    sign_in = body.index("guard AppActions.shared.isSignedIn else")
+    assert sign_in < dismiss < delete, "sign-in must be checked before the card is dismissed"
+    refunded_gate = body.index("report.isRefunded")
+    assert refunded_gate < dismiss, "the refunded-row balance gate runs before the dismissal"
+    gate = body[refunded_gate:dismiss]
+    assert "await self.loadCredits()" in gate and "balance.credits < self.analysisCost.credits" in gate
+    assert "return" in gate
+    # An unrefunded row keeps the post-DELETE reload (the refund it just received).
+    assert "self.creditBalance = nil" in body[delete:]
+
+
+def test_retry_cannot_be_double_tapped_during_its_pre_check():
+    """W2 E-1: the F09-9 reorder put the card's dismissal behind an await, so the enabled
+    Retry button stayed on screen during the credits read and a second tap ran the whole
+    path again — two DELETEs, two 20-credit generations. The guard is taken SYNCHRONOUSLY
+    at the tap, before the Task, and released on every exit of the Task."""
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    body = _brace_block(src, "func retryReport(_ report: AnalysisReport)")
+    guard_idx = body.index("guard !retryInFlightIds.contains(id) else")
+    insert_idx = body.index("retryInFlightIds.insert(id)")
+    task_idx = body.index("Task { [weak self] in")
+    assert guard_idx < insert_idx < task_idx, "the re-entry guard must be taken before the Task starts"
+    task_body = body[task_idx:]
+    assert "defer { if let backendId { self.retryInFlightIds.remove(backendId) } }" in task_body, \
+        "every exit of the Task (return, error, success) must release the guard"
+    assert task_body.index("defer {") < task_body.index("await ")
+    assert "private var retryInFlightIds: Set<String> = []" in src
+
+
+def test_a_post_timeout_is_not_the_benign_poll_timeout():
+    """F09-10: `.timeout` with no `.started` yet can only be the POST to /research/generate
+    — the row may have committed and charged 20 credits, or never arrived. It used to be
+    classified as the poll's client-side timeout: no error, no card, and the next tap could
+    charge again."""
+    src = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    body = _brace_block(src, "func generateAnalysis()")
+    assert "if case .timeout = appError, startedId != nil {" in body, \
+        "the benign arm must be qualified by startedId != nil"
+    post = body[body.index("} else if case .timeout = appError {"):]
+    post = post[:post.index("self.error = appError.message")]   # up to the generic arm
+    assert "await self.loadReports()" in post and "await self.loadCredits()" in post
+    assert '"post_timeout"' in post
+    assert "$0.status == .processing" in post
+    # W2 E-2: adoption is BY LIST. Inserting the id into `inFlightReportIds` burned one of
+    # the four concurrency slots for the session — no monitor owned it, so nothing removed it.
+    assert "inFlightReportIds.insert" not in post, post
+    assert "liveProgress[" not in post
+    assert "check your Reports before retrying" in post
+    assert post.count("self.startReportsPolling()") >= 2, "both the adopt and the unconfirmed arm keep polling"
+
+
+def test_the_deleted_code_has_one_definition_on_both_sides():
+    """F21-8: TPM assembled `"RESEARCH_" + status.uppercased()` and the VM literal-matched
+    `"RESEARCH_DELETED"`; only the VM side was pinned, so a rename of the prefix would have
+    silently turned every deletion into a red "failed" alert."""
+    tpm = _strip_swift_comments(_DTO.read_text(encoding="utf-8"))
+    assert tpm.count('deletedCode = "RESEARCH_DELETED"') == 1
+    fn = _brace_block(tpm, "nonisolated private static func terminalUnknown(")
+    assert 'status.status == "deleted"' in fn and "Self.deletedCode" in fn
+    vm = _strip_swift_comments(_VM.read_text(encoding="utf-8"))
+    assert '"RESEARCH_DELETED"' not in vm, "the VM must reference TaskPollingManager.deletedCode, not the literal"
+    assert "TaskPollingManager.deletedCode" in vm
+    # The backend really answers `deleted` for a soft-deleted row.
+    import inspect
+    from app.api.v1.endpoints import research as ep
+    assert '"deleted"' in inspect.getsource(ep.delete_report)
+
+
 def test_the_retry_delete_carries_the_intent_on_the_wire():
     src = _strip_swift_comments(_API_ENDPOINT.read_text(encoding="utf-8"))
     assert "case deleteReport(reportId: String, forRetry: Bool = false)" in src
@@ -147,7 +295,7 @@ def test_deleting_your_own_generating_card_is_not_an_error():
     body = _brace_block(src, "func generateAnalysis()")
     failed = body[body.index("case .failed(let appError):"):]
     guard = failed.index("self.dismissedReportIds.contains(id)")
-    deleted_code = failed.index('code == "RESEARCH_DELETED"')
+    deleted_code = failed.index("code == TaskPollingManager.deletedCode")
     surfaced = failed.index("self.error = appError.message")
     tracked = failed.index("Analytics.shared.track(.reportFailed")
     assert guard < tracked and deleted_code < tracked, "a deletion must not log reportFailed"
@@ -301,3 +449,30 @@ def test_one_transient_status_poll_miss_does_not_end_the_monitor():
     failed = _brace_block(vm, "func generateAnalysis()")
     failed = failed[failed.index("case .failed(let appError):"):]
     assert failed.index("if appError.isCancellation") < failed.index("Analytics.shared.track(.reportFailed")
+
+
+def test_the_list_endpoint_applies_the_schema_on_the_wire():
+    """The schema pins above guard nothing unless the handler APPLIES the model (F12-10):
+    rows used to leave as raw dicts, so a renamed column reached iOS un-validated."""
+    from typing import List, get_args, get_origin
+
+    from app.api.v1.endpoints.research import router
+
+    route = next(r for r in router.routes if getattr(r, "path", "") == "/reports"
+                 and "GET" in getattr(r, "methods", set()))
+    model = route.response_model
+    assert get_origin(model) is list or model is List[ResearchReportListItem]
+    assert get_args(model) == (ResearchReportListItem,)
+
+
+def test_every_selected_column_is_declared_on_the_model_and_required_fields_are_not_null():
+    """`response_model` must never 500 the list: every selected column exists on the model
+    (nothing is stripped) and every non-Optional field has a DB NOT NULL guarantee."""
+    src = _ENDPOINT.read_text(encoding="utf-8")
+    m = re.search(r'select\(\s*((?:"[^"]*"\s*)+)\)\.eq\("user_id"', src)
+    assert m, "list select not found"
+    cols = {c.strip() for c in "".join(re.findall(r'"([^"]*)"', m.group(1))).split(",") if c.strip()}
+    fields = ResearchReportListItem.model_fields
+    assert cols <= set(fields), cols - set(fields)
+    required = {n for n, f in fields.items() if f.is_required()}
+    assert required <= {"id", "ticker", "investor_persona", "status", "created_at"}, required

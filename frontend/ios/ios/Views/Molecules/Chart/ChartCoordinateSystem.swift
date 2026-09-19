@@ -127,6 +127,14 @@ enum TradingDayHelper {
 
         /// US equities / ETFs / indices: 09:30 – 16:00 ET.
         static let regular = SessionWindow(openMinute: 9 * 60 + 30, closeMinute: 16 * 60)
+        /// The same session on an early-close day (day after Thanksgiving, Christmas
+        /// Eve…): 09:30 – 13:00 ET, and no after-hours. Chosen by `TickerChartView`
+        /// from the bars' own date — never by `window(for:)`, which is class-only. On
+        /// a 16:00 axis a half-day's line stopped at 54% with the card at 100% (F19-7).
+        static let halfDay = SessionWindow(openMinute: 9 * 60 + 30, closeMinute: 13 * 60)
+        /// Extended hours on an early-close day: pre-market from 04:00 as usual, and the
+        /// after-hours session that follows the 13:00 bell runs to 17:00 ET.
+        static let extendedHalfDay = SessionWindow(openMinute: 4 * 60, closeMinute: 17 * 60)
         /// Crypto: the whole calendar day. (Commodity futures used to share it; since
         /// Phase 4 a commodity screen is an equity-hours ETF or a once-a-day FRED print.)
         static let roundTheClock = SessionWindow(openMinute: 0, closeMinute: 24 * 60)

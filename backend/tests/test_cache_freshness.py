@@ -179,3 +179,27 @@ def test_legacy_cached_report_is_schema_validated_before_serving():
     assert "_validate_report(" in head, (
         "the legacy cache hit must be validated like every other return on this endpoint"
     )
+
+
+def test_latest_completed_close_skips_the_in_progress_session():
+    """FMP's EOD history carries TODAY's partial bar during the session (live: a ^GSPC row
+    with 6M shares against 32-46M on every prior bar). The report's close anchor must be
+    the last SETTLED bar — the current close cycle's date (weekday 18:00 ET) — so a report
+    generated at 11:00 ET does not anchor to a still-moving number."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    mid_session = datetime(2026, 9, 16, 11, 0, tzinfo=et).astimezone(timezone.utc)   # Wed
+    hist = [
+        {"date": "2026-09-16", "close": 759.07},   # today's partial bar
+        {"date": "2026-09-15", "close": 754.05},   # last settled close
+    ]
+    assert _latest_completed_close(hist, now=mid_session) == (date(2026, 9, 15), 754.05)
+    # After the cycle turns (18:00 ET) today's bar is settled and IS the anchor.
+    settled = datetime(2026, 9, 16, 19, 0, tzinfo=et).astimezone(timezone.utc)
+    assert _latest_completed_close(hist, now=settled) == (date(2026, 9, 16), 759.07)
+    # Saturday: Friday's bar is settled; a stray future-dated row is skipped.
+    saturday = datetime(2026, 9, 19, 12, 0, tzinfo=et).astimezone(timezone.utc)
+    hist = [{"date": "2026-09-21", "close": 1.0}, {"date": "2026-09-18", "close": 760.0}]
+    assert _latest_completed_close(hist, now=saturday) == (date(2026, 9, 18), 760.0)

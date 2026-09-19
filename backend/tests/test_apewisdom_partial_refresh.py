@@ -114,3 +114,139 @@ async def test_fetch_filter_distinguishes_a_failed_page_from_an_empty_one():
         _C(_Resp(200, {"pages": 1, "results": [{"ticker": "aapl", "mentions": "7"}]})), "all-stocks")
     assert got == {"AAPL": {"mentions": 7, "mentions_24h_ago": 0, "upvotes": 0, "rank": 0,
                             "_filter": "all-stocks"}}
+
+
+# ── F18-1: a lost page 2..N is a FAILED filter, not a short answer ─────────────────────
+#
+# `_fetch_filter` only distinguished a failed PAGE 1. Every later 429 / timeout was
+# `continue`d and the truncated dict returned as a complete answer, so `refresh_cache`
+# replaced 874 stock entries with the ~100 that arrived, stamped the cache fresh for the
+# full TTL, and `is_cache_populated()` answered "real zero" for the ~774 dropped tickers.
+
+
+class _Resp:
+    def __init__(self, status, payload=None):
+        self.status_code, self._p = status, payload or {}
+
+    def json(self):
+        return self._p
+
+
+class _PagedClient:
+    """`pages` maps page number → _Resp | Exception; records the pages requested."""
+
+    def __init__(self, pages):
+        self.pages, self.requested = pages, []
+
+    async def get(self, url, **_k):
+        page = int(url.rsplit("/page/", 1)[1])
+        self.requested.append(page)
+        ans = self.pages[page]
+        if isinstance(ans, Exception):
+            raise ans
+        return ans
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _page(total, *tickers):
+    return _Resp(200, {"pages": total, "results": [{"ticker": t, "mentions": 3} for t in tickers]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", [_Resp(429), RuntimeError("timeout"), _Resp(503)])
+async def test_a_lost_later_page_fails_the_whole_filter(monkeypatch, lost):
+    monkeypatch.setattr(ape, "_PAGE_DELAY", 0.0)
+    client = _PagedClient({1: _page(3, "A1", "A2"), 2: lost, 3: _page(3, "C1")})
+    assert await ape._fetch_filter(client, "all-stocks") is None, (
+        "a truncated list came back as a complete answer"
+    )
+    assert client.requested == [1, 2, 3], "every page is still attempted before deciding"
+
+
+@pytest.mark.asyncio
+async def test_all_pages_landing_is_the_merged_complete_answer(monkeypatch):
+    monkeypatch.setattr(ape, "_PAGE_DELAY", 0.0)
+    client = _PagedClient({1: _page(3, "A1"), 2: _page(3, "B1"), 3: _page(3, "C1")})
+    got = await ape._fetch_filter(client, "all-stocks")
+    assert set(got) == {"A1", "B1", "C1"}
+
+
+@pytest.mark.asyncio
+async def test_a_single_page_filter_is_unaffected(monkeypatch):
+    """Boundary: `pages: 1` never enters the later-page loop; `pages: 0` / missing too."""
+    monkeypatch.setattr(ape, "_PAGE_DELAY", 0.0)
+    assert set(await ape._fetch_filter(_PagedClient({1: _page(1, "A1")}), "all-stocks")) == {"A1"}
+    assert set(await ape._fetch_filter(_PagedClient({1: _page(0, "A1")}), "all-stocks")) == {"A1"}
+    assert set(await ape._fetch_filter(
+        _PagedClient({1: _Resp(200, {"results": [{"ticker": "A1"}]})}), "all-stocks")) == {"A1"}
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_refresh_keeps_the_previous_entries_and_the_short_stamp(monkeypatch):
+    """End to end through the REAL `_fetch_filter`: a warm 874-stock cache, then a refresh
+    whose all-stocks page 1 lands and pages 2-9 answer 429."""
+    monkeypatch.setattr(ape, "_PAGE_DELAY", 0.0)
+    previous = _rows("all-stocks", *[f"S{i}" for i in range(874)])
+    previous.update(_rows("all-crypto", "BTC", "ETH"))
+    monkeypatch.setattr(ape, "_cache", previous)
+    monkeypatch.setattr(ape, "_loaded", {"all-stocks": True, "all-crypto": True})
+    monkeypatch.setattr(ape, "_cache_ts", 0.0)      # stale → refresh proceeds
+
+    pages = {1: _page(9, *[f"N{i}" for i in range(100)])}
+    pages.update({p: _Resp(429) for p in range(2, 10)})
+    clients = {"all-stocks": _PagedClient(pages), "all-crypto": _PagedClient({1: _page(1, "BTC")})}
+    order = iter(["all-stocks", "all-crypto"])
+
+    class _Router:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **k):
+            name = "all-stocks" if "/all-stocks/" in url else "all-crypto"
+            return await clients[name].get(url, **k)
+
+    monkeypatch.setattr(ape.httpx, "AsyncClient", lambda **k: _Router())
+    got = await ape.refresh_cache()
+
+    stocks = {t for t, v in got.items() if v["_filter"] == "all-stocks"}
+    assert len(stocks) == 874 and "N0" not in stocks, (
+        f"the good cache was replaced by the truncated fetch ({len(stocks)} stocks)"
+    )
+    assert set(t for t, v in got.items() if v["_filter"] == "all-crypto") == {"BTC"}
+    assert ape._loaded == {"all-stocks": True, "all-crypto": True}   # unchanged
+    age_allowance = ape._CACHE_TTL - (time.time() - ape._cache_ts)
+    assert 0 < age_allowance <= ape._PARTIAL_RETRY_SECONDS + 1, "stamped FULL fresh"
+    assert ape.is_cache_populated("S500") is True                   # kept, so still known
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_cold_boot_leaves_the_class_cold_not_half_known(monkeypatch):
+    monkeypatch.setattr(ape, "_PAGE_DELAY", 0.0)
+    pages = {1: _page(2, "N0"), 2: _Resp(429)}
+    clients = {"all-stocks": _PagedClient(pages), "all-crypto": _PagedClient({1: _page(1, "BTC")})}
+
+    class _Router:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **k):
+            name = "all-stocks" if "/all-stocks/" in url else "all-crypto"
+            return await clients[name].get(url, **k)
+
+    monkeypatch.setattr(ape.httpx, "AsyncClient", lambda **k: _Router())
+    got = await ape.refresh_cache()
+    assert set(got) == {"BTC"}
+    assert ape._loaded == {"all-stocks": False, "all-crypto": True}
+    assert ape.is_cache_populated("N0") is False, "a dropped ticker read as a real zero"
+    assert ape.is_cache_populated("AAPL") is False

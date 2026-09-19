@@ -26,12 +26,16 @@ struct AuthResponse: Decodable, Sendable {
     let refreshToken: String
     let tokenType: String
     let userId: String
+    /// The install's lockout exemption for this address — see `DeviceProofStore`. Optional:
+    /// a refresh carries none, and an older backend sends none.
+    let deviceToken: String?
 
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
         case tokenType = "token_type"
         case userId = "user_id"
+        case deviceToken = "device_token"
     }
 }
 
@@ -129,6 +133,8 @@ final class AuthService {
 
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+        // A verified password earns this install its per-email lockout exemption.
+        DeviceProofStore.remember(response.deviceToken, for: email)
         sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
 
         // Update API client
@@ -276,7 +282,10 @@ final class AuthService {
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         await apiClient.setAuthToken(response.accessToken)
-        return try await fetchCurrentUser()
+        let profile = try await fetchCurrentUser()
+        // The address is only known once the profile is back; the proof is bound to it.
+        DeviceProofStore.remember(response.deviceToken, for: profile.email)
+        return profile
     }
 
     /// Exchange a Supabase-issued access token for app tokens (web OAuth flow, e.g. Google).
@@ -288,7 +297,9 @@ final class AuthService {
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         await apiClient.setAuthToken(response.accessToken)
-        return try await fetchCurrentUser()
+        let profile = try await fetchCurrentUser()
+        DeviceProofStore.remember(response.deviceToken, for: profile.email)
+        return profile
     }
 
     /// Fetch the current user's canonical profile (`GET /users/me`).

@@ -682,7 +682,12 @@ async def regenerate_research_report_pdf(
 # ── List User Reports ────────────────────────────────────────────────────────
 
 
-@router.get("/reports")
+# `response_model`: the wire shape IS the schema. Without it the schema's pins (the
+# `processing_started_at` clock, the `[Refunded]` chip fields) guarded a model the
+# handler never applied — the rows went out as raw dicts (F12-10). Safe: every column
+# the select names is declared below, and every non-Optional field is DB NOT NULL, so
+# no row can fail validation and 500 the list.
+@router.get("/reports", response_model=List[ResearchReportListItem])
 async def get_my_reports(
     # `ge=1`, not just `le=100`: `?limit=0` returned an empty list, which the Reports
     # tab renders as its first-run "No analyses yet · Generate your first analysis"

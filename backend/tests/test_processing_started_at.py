@@ -170,7 +170,7 @@ async def test_an_abandoned_leader_with_no_followers_gives_the_slot_back_without
     rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
     ran = []
 
-    async def _before_run():
+    async def _before_run(members=frozenset()):
         raise rs.ReportAbandonedError("deleted while queued")
 
     async def _run():
@@ -197,7 +197,7 @@ async def test_an_abandoned_leader_still_runs_for_an_attached_follower():
         await hold.wait()
         return 1
 
-    async def _before_run():
+    async def _before_run(members=frozenset()):
         raise rs.ReportAbandonedError("deleted while queued")
 
     async def _run():
@@ -247,6 +247,183 @@ def test_is_still_active_fails_open_and_reads_status_and_refund(monkeypatch):
     assert svc._is_still_active("r") is True, "read error = fail open"
 
 
+# ── F08-6: abandonment is judged over EVERY row riding on the run ────────────
+#
+# "A follower is attached" used to be enough for an abandoned leader to run the whole
+# pipeline — but a follower deleted while queued is still attached. The hook now sees
+# the member set and asks whether ANY of those rows is still live, in one read.
+
+
+def test_any_still_active_reads_the_whole_member_set_in_one_query():
+    svc = rs.ResearchService.__new__(rs.ResearchService)
+    seen = {}
+
+    class _DB:
+        def __init__(self, rows=None, raises=None):
+            self.rows, self.raises = rows, raises
+
+        def table(self, *_a): return self
+        def select(self, *_a, **_k): return self
+
+        def in_(self, col, vals):
+            seen["in_"] = (col, list(vals))
+            return self
+
+        def execute(self):
+            if self.raises:
+                raise self.raises
+            return type("R", (), {"data": self.rows})()
+
+    svc.supabase = _DB([{"id": "a", "status": "deleted", "is_refunded": True},
+                        {"id": "b", "status": "processing", "is_refunded": False}])
+    assert svc._any_still_active({"a", "b"}) is True
+    assert seen["in_"] == ("id", ["a", "b"]), "ONE read over the whole set"
+    svc.supabase = _DB([{"id": "a", "status": "deleted", "is_refunded": True},
+                        {"id": "b", "status": "failed", "is_refunded": True}])
+    assert svc._any_still_active({"a", "b"}) is False
+    svc.supabase = _DB([{"id": "a", "status": "processing", "is_refunded": True}])
+    assert svc._any_still_active({"a"}) is False, "refunded = not live"
+    svc.supabase = _DB([])
+    assert svc._any_still_active({"a"}) is True, "no rows = fail open"
+    svc.supabase = _DB(raises=RuntimeError("520"))
+    assert svc._any_still_active({"a"}) is True, "read error = fail open"
+    assert svc._any_still_active(set()) is True
+
+
+@pytest.mark.asyncio
+async def test_the_hook_sees_the_leader_and_every_attached_follower():
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    hold = asyncio.Event()
+    seen = {}
+
+    async def _blocker():
+        await hold.wait()
+        return 1
+
+    async def _before_run(members):
+        seen["members"] = set(members)
+
+    async def _run():
+        return {"x": 1}
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(rs._run_agent_deduped(
+        "X", "p", _run, before_run=_before_run, member_id="r-leader"))
+    await asyncio.sleep(0.02)
+    f1 = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, member_id="r-f1"))
+    f2 = asyncio.create_task(rs._run_agent_deduped("X", "p", _run))   # no id → invisible
+    await asyncio.sleep(0.02)
+    hold.set()
+    await asyncio.gather(blocker, leader, f1, f2)
+    assert seen["members"] == {"r-leader", "r-f1"}
+    assert rs._AGENT_RUNS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_leader_and_follower_both_deleted_while_queued_do_not_run(monkeypatch):
+    """generate_report's hook, driven end to end through the dedup runner: every member
+    row is dead → the slot goes back and nothing runs."""
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    hold = asyncio.Event()
+    ran = []
+    asked = []
+
+    async def _blocker():
+        await hold.wait()
+        return 1
+
+    svc = rs.ResearchService.__new__(rs.ResearchService)
+
+    def _any(ids):
+        asked.append(set(ids))
+        return False                      # every row is deleted/refunded
+    monkeypatch.setattr(svc, "_any_still_active", _any)
+
+    def _hook_for(report_id):
+        async def _before_run(members):
+            ids = set(members) | {report_id}
+            if not await asyncio.to_thread(svc._any_still_active, ids):
+                raise rs.ReportAbandonedError("all dead")
+        return _before_run
+
+    async def _run():
+        ran.append(1)
+        return {"x": 1}
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(rs._run_agent_deduped(
+        "X", "p", _run, before_run=_hook_for("r1"), member_id="r1"))
+    await asyncio.sleep(0.02)
+    follower = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, member_id="r2"))
+    await asyncio.sleep(0.02)
+    hold.set()
+    with pytest.raises(rs.ReportAbandonedError):
+        await leader
+    with pytest.raises(rs.ReportAbandonedError):
+        await follower
+    assert ran == [], "nothing ran for two dead rows"
+    assert asked == [{"r1", "r2"}], "judged over BOTH rows, in one read"
+    assert rs._AGENT_INFLIGHT == {} and rs._AGENT_RUNS == {}
+
+
+@pytest.mark.asyncio
+async def test_a_dead_leader_with_a_live_follower_still_runs(monkeypatch):
+    rs._AGENT_INFLIGHT.clear()
+    rs._AGENT_RUNS.clear()
+    rs._AGENT_SEMAPHORE = asyncio.Semaphore(1)
+    hold = asyncio.Event()
+    ran = []
+
+    async def _blocker():
+        await hold.wait()
+        return 1
+
+    live = {"r2"}
+
+    def _any(ids):
+        return bool(set(ids) & live)
+
+    def _hook_for(report_id):
+        async def _before_run(members):
+            if not await asyncio.to_thread(_any, set(members) | {report_id}):
+                raise rs.ReportAbandonedError("all dead")
+        return _before_run
+
+    async def _run():
+        ran.append(1)
+        return {"x": 1}
+
+    blocker = asyncio.create_task(rs._run_agent_deduped("OTHER", "p", _blocker))
+    await asyncio.sleep(0.02)
+    leader = asyncio.create_task(rs._run_agent_deduped(
+        "X", "p", _run, before_run=_hook_for("r1"), member_id="r1"))
+    await asyncio.sleep(0.02)
+    follower = asyncio.create_task(rs._run_agent_deduped("X", "p", _run, member_id="r2"))
+    await asyncio.sleep(0.02)
+    hold.set()
+    out = await asyncio.gather(blocker, leader, follower)
+    assert out[1] == out[2] == {"x": 1} and ran == [1]
+
+
+def test_generate_report_wires_the_member_set_into_its_hook():
+    """Source-scan, brace-bound to `generate_report`: the hook must take the member set,
+    OR the leader's own id with it, and ask `_any_still_active` — a hook that still
+    checks only `report_id` reintroduces the bug with every test above green."""
+    import inspect
+    src = inspect.getsource(rs.ResearchService.generate_report)
+    src = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+    assert "async def _before_run(members)" in src
+    assert "set(members) | {report_id}" in src
+    assert "self._any_still_active" in src
+    assert "member_id=report_id" in src
+
+
 @pytest.mark.asyncio
 async def test_the_pipeline_ceiling_raises_a_typed_worded_timeout(monkeypatch):
     """The bare `TimeoutError` from `wait_for` has an empty str(); the failed card said
@@ -294,6 +471,9 @@ def test_mark_processing_started_stamps_with_isnull_guard():
 
     assert "processing_started_at" in seen["payload"]
     assert seen["isnull"] == ("processing_started_at", "null")  # only stamps once
+    # F08-7: the stamp carries a truthful step for the FOLLOWER's row, which no agent
+    # tick ever touches — it used to read "Checking shared cache..." for the whole run.
+    assert seen["payload"]["current_step"] == "Analysis in progress..."
     # ...and only on a row still IN the pipeline. Without this the stamp lands on a
     # row the user already deleted (terminal, already refunded) or one the
     # reconciliation sweep already claimed, re-arming the sweep's own age check

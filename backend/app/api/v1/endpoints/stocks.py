@@ -69,6 +69,8 @@ from app.dependencies import (
     get_current_user_id,
     get_watchlist_identity,
     StandardRateLimit,
+    MarketRateLimit,
+    MarketFanoutRateLimit,
 )
 from app.services.ticker_data_cache import warm_ticker_collection
 from app.services.price_service import price_source
@@ -86,7 +88,7 @@ logger = logging.getLogger(__name__)
 # tomorrow is authenticated by default. The per-route form relies on the author remembering,
 # and this file alone has 23 routes — the failure mode is silent (a 200 with real prices)
 # and nothing downstream would notice.
-router = APIRouter(dependencies=[Depends(get_current_user_id)])
+router = APIRouter(dependencies=[Depends(get_current_user_id), MarketRateLimit])
 
 # Ticker validation pattern: 1-10 uppercase letters, digits, dots, or hyphens
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,10}$")
@@ -808,7 +810,7 @@ async def get_stock_quote(ticker: str):
 
 
 @router.get("/{ticker}/fundamentals")
-async def get_stock_fundamentals(ticker: str):
+async def get_stock_fundamentals(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get key financial metrics and ratios from FMP."""
     ticker = _validate_ticker(ticker)
     fmp = get_fmp_client()
@@ -905,7 +907,7 @@ async def get_stock_chart(
 # ── Full financials endpoint ───────────────────────────────────────
 
 @router.get("/{ticker}/financials-full")
-async def get_stock_financials_full(ticker: str):
+async def get_stock_financials_full(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """
     Get comprehensive financial data for a ticker.
 
@@ -1126,7 +1128,7 @@ async def get_earnings(ticker: str):
 # ── Growth endpoint ──────────────────────────────────────────────
 
 @router.get("/{ticker}/growth", response_model=GrowthResponse)
-async def get_growth(ticker: str):
+async def get_growth(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get growth data (EPS & Revenue YoY growth with sector comparison)."""
     ticker = ticker.upper()
     try:
@@ -1145,7 +1147,7 @@ async def get_growth(ticker: str):
 # ── Profit Power endpoint ────────────────────────────────────────
 
 @router.get("/{ticker}/profit-power", response_model=ProfitPowerResponse)
-async def get_profit_power(ticker: str):
+async def get_profit_power(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get profit power data (margin metrics with sector average net margin)."""
     ticker = ticker.upper()
     try:
@@ -1168,7 +1170,7 @@ async def get_profit_power(ticker: str):
 # ── Health Check endpoint ────────────────────────────────────────
 
 @router.get("/{ticker}/health-check", response_model=HealthCheckResponse)
-async def get_health_check(ticker: str):
+async def get_health_check(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get health check data (financial ratio analysis vs sector benchmarks)."""
     ticker = ticker.upper()
     try:
@@ -1191,7 +1193,7 @@ async def get_health_check(ticker: str):
 # ── Revenue breakdown endpoint ───────────────────────────────────
 
 @router.get("/{ticker}/revenue-breakdown", response_model=RevenueBreakdownResponse)
-async def get_revenue_breakdown(ticker: str):
+async def get_revenue_breakdown(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """
     Get revenue breakdown showing how the company makes money.
 

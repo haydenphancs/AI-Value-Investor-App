@@ -33,6 +33,12 @@ enum MarketHoursUtil {
         "2027-11-26",
     ]
 
+    /// Whether `ymd` ("YYYY-MM-DD", ET) is a 13:00 early close. The set stays private;
+    /// the chart asks this to narrow its session axis to the half-day bell.
+    static func isEarlyClose(_ ymd: String) -> Bool {
+        earlyCloses.contains(ymd)
+    }
+
     private static let etCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .current
@@ -145,5 +151,22 @@ enum MarketHoursUtil {
         case .closed:
             return false
         }
+    }
+
+    /// The US equity session the WALL CLOCK says we are in right now, or nil when no session
+    /// is active (overnight, weekend, holiday, after a half-day bell).
+    ///
+    /// Used by the detail screens' live poll to HEAL a stale badge: `marketStatus` on the
+    /// model is whatever the last fetch captured, so a screen opened at 20:30 ET and
+    /// foregrounded at 09:40 kept "Market Closed" beside a price that was now moving every
+    /// 15 s. A live tick that lands while this says a session is on rewrites the badge.
+    static func liveSessionStatus(at now: Date = Date()) -> MarketStatus? {
+        guard isMarketActive(at: now) else { return nil }
+        let components = etCalendar.dateComponents([.hour, .minute], from: now)
+        guard let hour = components.hour, let minute = components.minute else { return nil }
+        let minuteOfDay = hour * 60 + minute
+        if minuteOfDay < 9 * 60 + 30 { return .preMarket }
+        if minuteOfDay < 16 * 60 { return .open }
+        return .afterHours
     }
 }

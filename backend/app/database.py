@@ -144,17 +144,38 @@ def _reset_to_service_role(client: Client) -> Client:
     `_save_session` there instead of storage, so the last signer's session would otherwise stay
     readable on the next caller's request.
 
+    THE DICT WRITE ALONE CANNOT UN-DEMOTE A REBUILT SUB-CLIENT. The SIGNED_IN listener also
+    sets `_postgrest` / `_storage` / `_functions` to None, and the next `.table()` /
+    `.storage` access rebuilds them from the (then user-JWT) dict — into an httpx session
+    that SNAPSHOTS the headers. A later dict write repairs `auth.admin.*` and any sub-client
+    not yet rebuilt, but a postgrest client built in between keeps sending the user's JWT on
+    every query until restart (a process-wide 42501 since migration 163). So this also
+    re-stamps the bearer on any already-built postgrest / storage session — the SDK's own
+    `postgrest.auth(token)` idiom — rather than nulling them, which would rebuild an
+    `http2=True` postgrest client and undo `_force_http1_on_postgrest`.
+
     Best-effort: a supabase-py bump that renames these internals must degrade, not take auth
     down. The structural guarantee is the separate INSTANCE; this is a self-healing layer on
     top, and `tests/test_supabase_client_isolation.py` is what actually detects misuse.
     """
     try:
-        client.options.headers["Authorization"] = (
-            f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}"
-        )
+        bearer = f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}"
+        client.options.headers["Authorization"] = bearer
         auth = getattr(client, "auth", None)
         if getattr(auth, "_in_memory_session", None) is not None:
             auth._in_memory_session = None
+        for attr in ("_postgrest", "_storage"):
+            sub = getattr(client, attr, None)
+            session = getattr(sub, "session", None)
+            headers = getattr(session, "headers", None)
+            if headers is None or headers.get("Authorization") == bearer:
+                continue
+            headers["Authorization"] = bearer
+            logger.warning(
+                "Supabase %s sub-client was carrying a non-service-role bearer — "
+                "restored to service_role (a sign-in ran on a shared client)",
+                attr.lstrip("_"),
+            )
     except Exception as e:
         logger.warning(
             "Could not reset a Supabase client to service_role (%s: %s) — the isolated "
@@ -290,25 +311,53 @@ def resolve_admin_client(*candidates) -> Client:
     return candidates[-1]
 
 
-async def check_supabase_health() -> bool:
-    """Check Supabase connection health via the PostgREST root endpoint."""
-    try:
-        import httpx
+# One persistent client for the readiness probe. `/health` is unauthenticated and
+# reachable by anyone; it used to open a fresh `httpx.AsyncClient` (a new TLS handshake to
+# Supabase) per hit and GET the PostgREST ROOT — which makes PostgREST build the whole
+# ~556 KB OpenAPI schema document server-side on every call. A curl loop against `/health`
+# was therefore a cheap amplifier against the database's API layer. The probe is now a
+# HEAD on one tiny table over a shared pool, and the pool is closed in the lifespan
+# teardown next to the integration clients.
+_health_http: Optional[httpx.AsyncClient] = None
 
+#: A small, always-present table for the readiness HEAD. `limit=1` bounds the scan;
+#: `Prefer: count=none` keeps PostgREST from counting.
+_HEALTH_PROBE_PATH = "/rest/v1/agent_personas?select=id&limit=1"
+
+
+def _get_health_client() -> httpx.AsyncClient:
+    global _health_http
+    if _health_http is None:
+        _health_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=3.0),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+        )
+    return _health_http
+
+
+async def close_health_client() -> None:
+    global _health_http
+    if _health_http is not None:
+        await _health_http.aclose()
+        _health_http = None
+
+
+async def check_supabase_health() -> bool:
+    """Readiness: can PostgREST answer a trivial, bounded read right now?"""
+    try:
         # Eagerly initialise the client singleton
         get_supabase()
 
-        # Hit the PostgREST schema endpoint — no table permissions needed
-        async with httpx.AsyncClient() as http:
-            resp = await http.get(
-                f"{settings.SUPABASE_URL}/rest/v1/",
-                headers={
-                    "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
-                    "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
-                },
-                timeout=5.0,
-            )
-            return resp.status_code == 200
+        resp = await _get_health_client().head(
+            f"{settings.SUPABASE_URL}{_HEALTH_PROBE_PATH}",
+            headers={
+                "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+                "Prefer": "count=none",
+            },
+        )
+        # 200 (rows) or 206 (a Range-limited answer) both prove the API layer is up.
+        return resp.status_code in (200, 206)
     except Exception as e:
-        logger.error(f"Supabase health check failed: {e}")
+        logger.error(f"Supabase health check failed: {type(e).__name__}: {e}")
         return False

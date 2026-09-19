@@ -154,7 +154,7 @@ async def test_the_e2_failure_stamp_is_structured_and_redacted(monkeypatch):
     async def _no_cache(ticker, persona_key):
         return None
 
-    async def _boom(ticker, persona_key, run, on_started=None, before_run=None):
+    async def _boom(ticker, persona_key, run, on_started=None, before_run=None, member_id=None):
         raise _fmp_403()
 
     monkeypatch.setattr(svc, "_lookup_shared_cache", _no_cache)
@@ -194,7 +194,7 @@ async def test_a_gemini_failure_never_names_the_vendor_on_the_status_surface(mon
     async def _no_cache(ticker, persona_key):
         return None
 
-    async def _boom(ticker, persona_key, run, on_started=None, before_run=None):
+    async def _boom(ticker, persona_key, run, on_started=None, before_run=None, member_id=None):
         raise GeminiQuotaError("429 RESOURCE_EXHAUSTED: Gemini quota exceeded")
 
     monkeypatch.setattr(svc, "_lookup_shared_cache", _no_cache)

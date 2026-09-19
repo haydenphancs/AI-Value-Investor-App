@@ -2259,12 +2259,14 @@ class FMPClient:
                 "senate-trades returned %s for %s, expected a list",
                 type(data).__name__, symbol,
             )
-        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException):
-            # RE-RAISE. A rate limit, a bad key or a licence refusal on the one-call path
-            # is not cured by four parallel pages of `senate-latest` — it multiplied a 429
-            # into a 5-request sweep per symbol, per Holders build, and the fallback's
-            # own `except` then swallowed the partial into `[]`, which the caller's
-            # `critical=True` guard assumed could never happen.
+        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException,
+                FMPUnavailableException):
+            # RE-RAISE. A rate limit, a bad key, a licence refusal — or a 5xx outage after
+            # retries — on the one-call path is not cured by four parallel pages of
+            # `senate-latest`: it multiplied a 429 into a 5-request sweep per symbol, per
+            # Holders build (and a 502 into 30 requests instead of 6 across both
+            # chambers), and the fallback's own `except` then swallowed the partial into
+            # `[]`, which the caller's `critical=True` guard assumed could never happen.
             raise
         except Exception as e:
             logger.warning(
@@ -2313,12 +2315,9 @@ class FMPClient:
                 "house-trades returned %s for %s, expected a list",
                 type(data).__name__, symbol,
             )
-        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException):
-            # RE-RAISE. A rate limit, a bad key or a licence refusal on the one-call path
-            # is not cured by four parallel pages of `house-latest` — it multiplied a 429
-            # into a 5-request sweep per symbol, per Holders build, and the fallback's
-            # own `except` then swallowed the partial into `[]`, which the caller's
-            # `critical=True` guard assumed could never happen.
+        except (FMPRateLimitException, FMPAuthException, FMPNotEntitledException,
+                FMPUnavailableException):
+            # RE-RAISE — same reasoning as the senate arm, including the 5xx outage case.
             raise
         except Exception as e:
             logger.warning(

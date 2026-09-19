@@ -330,12 +330,11 @@ class TickerDetailViewModel: ObservableObject {
             // Show UI immediately — price/chart/overview are ready
             self.isLoading = false
 
-            // Start live price streaming + chart refresh if market is active
-            if let status = self.tickerData?.marketStatus,
-               MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                self.startLivePriceUpdates()
-                self.startChartRefreshTimer()
-            }
+            // Arm the live price poll + chart refresh. UNCONDITIONAL: the loops gate every
+            // tick on the wall clock (`MarketHoursUtil.isMarketActive()`), whereas
+            // `tickerData.marketStatus` is the value the fetch captured — gating on it
+            // latched a screen opened while closed shut for the whole next session.
+            self.startLivePriceUpdates()
 
             // Phase 2: Fetch supplementary data in parallel (non-blocking)
             await withTaskGroup(of: Void.self) { group in
@@ -379,6 +378,10 @@ class TickerDetailViewModel: ObservableObject {
     /// `false` there used to mean "the socket is down, poll now" and silently reading as
     /// "poll forever" by accident is not something the next reader should have to infer.
     func startLivePriceUpdates() {
+        // Symmetric with `stopLivePriceUpdates()`, which stops BOTH: the 1D chart timer
+        // used to be armed only from the initial load, so after a background/foreground
+        // cycle the price kept polling while the intraday chart stayed frozen.
+        startChartRefreshTimer()
         quotePollTask?.cancel()
         quotePollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -415,9 +418,18 @@ class TickerDetailViewModel: ObservableObject {
             data.currentPrice = price
             if let change = quote.change {
                 data.priceChange = change
+                // A real change has arrived: the "—" placeholder must not outlive it.
+                data.changeKnown = true
             }
             if let changePct = quote.changePercent {
                 data.priceChangePercent = changePct
+                data.changeKnown = true
+            }
+            // A live tick is proof the session is on: heal the badge the last fetch left
+            // behind (see `MarketHoursUtil.liveSessionStatus`). Never the other way —
+            // "closed" is only ever written by a fetch that carries the close stamp.
+            if let live = MarketHoursUtil.liveSessionStatus() {
+                data.marketStatus = live
             }
 
             // Update last chart candle for intraday ranges
@@ -1077,8 +1089,13 @@ class TickerDetailViewModel: ObservableObject {
 
     private func buildTickerDetailData() -> TickerDetailData {
         let price = stockQuote?.price ?? stockDetail?.price ?? 0
-        let change = stockQuote?.change ?? stockDetail?.change ?? 0
-        let changePercent = stockQuote?.changePercent ?? stockDetail?.changePercent ?? 0
+        let rawChange = stockQuote?.change ?? stockDetail?.change
+        let rawChangePercent = stockQuote?.changePercent ?? stockDetail?.changePercent
+        let change = rawChange ?? 0
+        let changePercent = rawChangePercent ?? 0
+        // Same `*_known` rule as the overview payload: neither source carried a change →
+        // the 0 above is a placeholder, and the header must say "—", not "+0.00 (+0.00%)".
+        let changeKnown = rawChange != nil || rawChangePercent != nil
         let companyName = stockDetail?.companyName ?? tickerSymbol
 
         print("🔧 buildTickerDetailData: symbol=\(tickerSymbol), companyName=\(companyName), price=\(price), change=\(change)")
@@ -1128,6 +1145,7 @@ class TickerDetailViewModel: ObservableObject {
             currentPrice: price,
             priceChange: change,
             priceChangePercent: changePercent,
+            changeKnown: changeKnown,
             marketStatus: marketStatus,
             chartPricePoints: existingChart,
             keyStatistics: keyStats,

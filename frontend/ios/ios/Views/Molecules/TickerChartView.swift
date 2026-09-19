@@ -133,7 +133,23 @@ struct TickerChartView: View {
         let wantsExtended = assetContext.supportsExtendedHours
             && usesIntradayTimeMapping
             && hasExtendedBars
-        return TradingDayHelper.window(for: assetContext, extendedHours: wantsExtended)
+        let window = TradingDayHelper.window(for: assetContext, extendedHours: wantsExtended)
+        // Early close (13:00 ET bell): judged from the bars' OWN date, so the axis and the
+        // line follow the session the data describes. Only the equity bell narrows — a
+        // round-the-clock window has no early close. Both readers of this window
+        // (`ChartXAxisLabels`, `intradayTimeFractions`) pick the change up.
+        if usesIntradayTimeMapping, window != .roundTheClock,
+           let last = pricePoints.last?.date, last.count >= 10,
+           MarketHoursUtil.isEarlyClose(String(last.prefix(10))) {
+            // Extended hours on a half-day: pre-market is unchanged and after-hours runs
+            // 13:00–17:00 ET (the exchanges do trade it; the backend passes those bars
+            // through unfiltered), so the extended window ends at 17:00, not 13:00 —
+            // narrowing it piled two hours of real prints on the right edge (W2 E-3).
+            return window == .extended
+                ? TradingDayHelper.SessionWindow.extendedHalfDay
+                : .halfDay
+        }
+        return window
     }
 
     /// Shading, boundary dashes and the EXT badge follow the same rule as the window.

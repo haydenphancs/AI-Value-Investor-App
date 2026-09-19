@@ -7,7 +7,7 @@ Frontend: GET /api/v1/etfs/{symbol}?range=3M&interval=daily
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from app.dependencies import StandardRateLimit, get_current_user_id
+from app.dependencies import StandardRateLimit, get_current_user_id, MarketRateLimit
 from typing import Optional, Dict, Any
 import logging
 import re
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # tomorrow is authenticated by default. The per-route form relies on the author remembering,
 # and this file alone has 8 routes — the failure mode is silent (a 200 with real prices)
 # and nothing downstream would notice.
-router = APIRouter(dependencies=[Depends(get_current_user_id)])
+router = APIRouter(dependencies=[Depends(get_current_user_id), MarketRateLimit])
 
 # ETF tickers are ordinary NMS symbols (SPY, QQQ, ARKK). Same shape as stocks.
 _ETF_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")

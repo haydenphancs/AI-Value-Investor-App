@@ -17,6 +17,7 @@ from app.schemas.commodity import (
 )
 from app.schemas.crypto import CryptoCoreResponse, CryptoDetailResponse
 from app.schemas.etf import ETFCoreResponse, ETFDetailResponse, ETFQuoteResponse
+from app.schemas.stock_overview import StockOverviewCoreResponse, StockOverviewResponse
 from app.services import commodity_service as cms
 from app.services import crypto_service as crs
 from app.services import etf_service as ets
@@ -25,6 +26,9 @@ from app.services import etf_service as ets
 @pytest.mark.parametrize("model", [
     CryptoCoreResponse, CryptoDetailResponse, CommodityCoreResponse, CommodityDetailResponse,
     CommodityQuoteResponse, ETFCoreResponse, ETFDetailResponse, ETFQuoteResponse,
+    # The equity screen was the FIFTH asset class and the last without the flag (F19-6):
+    # a halted/OTC profile row with `change: null` rendered "▲ +0.00 (+0.00%)" in green.
+    StockOverviewCoreResponse, StockOverviewResponse,
 ])
 def test_change_known_defaults_true_for_shipped_builds(model):
     assert model.model_fields["change_known"].default is True
@@ -213,3 +217,60 @@ def test_ios_headers_render_neutral_with_no_arrow_when_unknown(header):
     src = _strip((_IOS / header).read_text())
     assert "guard changeKnown else { return AppColors.textSecondary }" in src
     assert re.search(r"if changeKnown \{\s*Image\(systemName: arrowIcon\)", src)
+
+
+# ── the equity screen, the fifth asset class ──────────────────────────────────
+
+
+def test_ios_equity_dtos_and_models_carry_the_flag():
+    dto_file = _IOS / "Models/StockOverviewResponseModels.swift"
+    for dto in ("struct StockOverviewResponseDTO: Decodable", "struct StockOverviewCoreResponseDTO: Decodable"):
+        block = _block(dto_file, dto)
+        assert "let changeKnown: Bool?" in block, dto
+        assert 'case changeKnown = "change_known"' in block, dto
+    core = _block(dto_file, "struct TickerCoreData")
+    assert "var changeKnown: Bool = true" in core
+    assert "changeKnown && priceChange >= 0" in core
+    assert 'guard changeKnown else { return "—" }' in core
+    assert "var chartIsPositive: Bool" in core
+    detail = _block(_IOS / "Models/TickerDetailModels.swift", "struct TickerDetailData")
+    assert "var changeKnown: Bool = true" in detail
+    assert "changeKnown && priceChange >= 0" in detail
+    assert 'guard changeKnown else { return "—" }' in detail
+    assert "var chartIsPositive: Bool" in detail
+    # Both builders thread the wire flag through (default true for an older backend).
+    src = _strip(dto_file.read_text())
+    assert src.count("changeKnown: changeKnown ?? true") >= 2
+
+
+def test_ios_equity_screen_hands_the_flag_to_both_headers_and_charts():
+    src = _strip((_IOS / "Views/Screens/TickerDetailView.swift").read_text())
+    for model_var in ("tickerData", "core"):
+        assert f"changeKnown: {model_var}.changeKnown" in src, model_var
+        assert f"isPositive: {model_var}.chartIsPositive" in src, model_var
+    # And a live tick that carries a change clears the placeholder state.
+    vm = _strip((_IOS / "ViewModels/TickerDetailViewModel.swift").read_text())
+    poll = _block(_IOS / "ViewModels/TickerDetailViewModel.swift", "private func pollQuotePrice()")
+    assert "data.changeKnown = true" in poll
+    builder = _block(_IOS / "ViewModels/TickerDetailViewModel.swift", "private func buildTickerDetailData()")
+    assert "let changeKnown = rawChange != nil || rawChangePercent != nil" in builder
+    assert "changeKnown: changeKnown" in builder
+
+
+def test_ios_detail_screens_rearm_the_live_poll_unconditionally_on_foreground():
+    """F16-8 / F19-3: gating the re-arm on the model's LAST-FETCHED `marketStatus` latched
+    a screen opened while closed shut for the whole next session; the poll loops gate every
+    tick on the wall clock, so the arm must be unconditional."""
+    for screen in ("Views/Screens/TickerDetailView.swift", "Views/Screens/IndexDetailView.swift",
+                   "Views/Screens/ETFDetailView.swift"):
+        src = _strip((_IOS / screen).read_text())
+        i = src.index("didBecomeActiveNotification")
+        arm = src[i:i + 400]
+        assert "shouldStreamLivePrice" not in arm, screen
+        assert "startLivePriceUpdates()" in arm or "maybeStartStreaming()" in arm or "resumeLive" in arm, screen
+    vm = _strip((_IOS / "ViewModels/TickerDetailViewModel.swift").read_text())
+    assert "shouldStreamLivePrice" not in vm
+    start = _block(_IOS / "ViewModels/TickerDetailViewModel.swift", "func startLivePriceUpdates()")
+    assert "startChartRefreshTimer()" in start, "start must be symmetric with stop (both timers)"
+    poll = _block(_IOS / "ViewModels/TickerDetailViewModel.swift", "private func pollQuotePrice()")
+    assert "MarketHoursUtil.liveSessionStatus()" in poll, "a live tick must heal a stale badge"

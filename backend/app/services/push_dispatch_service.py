@@ -79,6 +79,9 @@ TABLE = "notification_events"
 # skipped is LOGGED, never silently dropped — a truncated fan-out that looked complete
 # would read as "push works" while most users got nothing.
 MAX_RECIPIENTS_PER_SCOPE = 500
+#: Pages of 1,000 an audience selector may walk. 20 pages = 20,000 rows — far above any
+#: scope today, and a hard ceiling so a runaway table cannot pin the sender.
+MAX_AUDIENCE_SCAN_PAGES = 20
 
 # Upper bound on the daily-count probe. Only the comparison against the cap
 # matters, so there is no reason to pull more rows than could change it.
@@ -136,15 +139,24 @@ class _Recipient:
     #:
     #:   * claim path — `resolve_recipients` runs BEFORE `claim_send` inserts, so the new
     #:     row is not in `unread` yet and the badge is `unread + 1`;
-    #:   * flush path — the deferred row was inserted (unread) hours ago at defer time, so
-    #:     it is ALREADY in `unread` and the badge is `unread`.
+    #:   * flush path — the deferred row was inserted hours ago at defer time, but it is
+    #:     NOT in `unread` either: `unread_counts_bulk` counts `push_state = 'sent'` only
+    #:     (a `deferred` row was never shown, so it must not badge the icon — see
+    #:     `notification_inbox_service._DELIVERED`), and `claim_due_notifications` flips
+    #:     it to `pending`, not `sent`, so it is still excluded at flush time. The badge
+    #:     is therefore `unread + 1` here too, PLUS the rows already delivered to the same
+    #:     user earlier in the same batch, which the up-front count could not see.
     #:
-    #: `_deliver` used to add 1 unconditionally, which over-counted every quiet-hours flush
-    #: by exactly one. Each caller now states its own arithmetic.
+    #: ⚠️ The flush path used to set `badge=unread` on the premise that the deferred row
+    #: was "already in `unread`". It never was: a new user's first deferred alert flushed
+    #: with `aps.badge: 0`, which iOS treats as CLEAR — banner delivered, icon blank,
+    #: Alerts tab showing 1 unread; k rows for one user in one batch all carried the
+    #: same stale number. Each caller states its own arithmetic, and `_deliver` only
+    #: applies the `unread + 1` default when the caller left this `None`.
     #:
     #: `None` means "claim-path semantics" — `unread + 1` — because that is the overwhelmingly
-    #: common construction and the one every direct caller wants. The flush path is the single
-    #: exception and sets it explicitly.
+    #: common construction and the one every direct caller wants. The flush path sets it
+    #: explicitly because of the per-batch increment.
     badge: Optional[int] = None
     # False when the bulk read failed for this user, so per-user code can fail OPEN in
     # the same direction the single-user reads always did.
@@ -193,22 +205,23 @@ class PushDispatchService:
         Uses the ticker-leading index added in migration 108; before that this was a
         sequential scan of the whole watchlist table.
         """
+        # The WHOLE audience, paged to completion (bounded by `MAX_AUDIENCE_SCAN_PAGES`).
+        # The 500 cap used to be applied HERE — before anyone had looked at a preference —
+        # so on a scope with 600 watchers the 500 lowest uuids were taken and the rest
+        # never alerted on ANY event, even the ones who had the toggle on, while ~2/3 of
+        # the 500 were then dropped by their own preference. The cap now lands in
+        # `_notify_users_inner`, AFTER the preference filter, with a rotating cut.
         try:
-            rows = (
-                self.supabase.table("watchlist_items")
-                .select("user_id")
-                .eq("ticker", ticker.upper())
-                # ORDER BY, so truncation is DETERMINISTIC AND FAIR-BY-KEY rather than
-                # heap order. PostgREST returns physical row order otherwise — arbitrary
-                # but STABLE — so once this scope crosses the cap the SAME tail of rows is
-                # excluded on every single alert, forever, with nothing to indicate it.
-                # `profile_match_sender` already does this and says why; the dispatcher
-                # selectors never got the same treatment.
-                .order("user_id")
-                .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
-                .execute()
-                .data
-                or []
+            rows = fetch_all_rows(
+                lambda: (
+                    self.supabase.table("watchlist_items")
+                    .select("user_id")
+                    .eq("ticker", ticker.upper())
+                ),
+                # `id`, not `user_id`: OFFSET paging needs a UNIQUE sort key or a row
+                # can straddle the page boundary (`test_postgrest_paging_order_key`).
+                order_by="id", what=f"watchers of {ticker}",
+                max_pages=MAX_AUDIENCE_SCAN_PAGES,
             )
         except Exception as e:
             logger.warning(
@@ -216,15 +229,7 @@ class PushDispatchService:
                 ticker, type(e).__name__, e,
             )
             return []
-
-        users = list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
-        if len(users) > MAX_RECIPIENTS_PER_SCOPE:
-            logger.warning(
-                "push: %s has %d+ watchers — notifying the first %d only this cycle",
-                ticker, len(users), MAX_RECIPIENTS_PER_SCOPE,
-            )
-            users = users[:MAX_RECIPIENTS_PER_SCOPE]
-        return users
+        return list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
 
     # `asset_type_of()` USED TO LIVE HERE AND WAS DELETED. It read the modal
     # `watchlist_items.asset_type` for a ticker — selecting on `ticker` ALONE, with no
@@ -374,22 +379,17 @@ class PushDispatchService:
         """User ids following a whale. The second audience selector, used by the
         smart-money sender alongside `watchers_of` (a user may qualify via either, and
         the union is de-duplicated before fan-out so they get ONE notification)."""
+        # Whole audience, same reasoning as `watchers_of`; the cap lands after the
+        # preference filter in `_notify_users_inner`.
         try:
-            rows = (
-                self.supabase.table("whale_follows")
-                .select("user_id")
-                .eq("whale_id", whale_id)
-                # ORDER BY, so truncation is DETERMINISTIC AND FAIR-BY-KEY rather than
-                # heap order. PostgREST returns physical row order otherwise — arbitrary
-                # but STABLE — so once this scope crosses the cap the SAME tail of rows is
-                # excluded on every single alert, forever, with nothing to indicate it.
-                # `profile_match_sender` already does this and says why; the dispatcher
-                # selectors never got the same treatment.
-                .order("user_id")
-                .limit(MAX_RECIPIENTS_PER_SCOPE + 1)
-                .execute()
-                .data
-                or []
+            rows = fetch_all_rows(
+                lambda: (
+                    self.supabase.table("whale_follows")
+                    .select("user_id")
+                    .eq("whale_id", whale_id)
+                ),
+                order_by="id", what=f"followers of whale {whale_id}",
+                max_pages=MAX_AUDIENCE_SCAN_PAGES,
             )
         except Exception as e:
             logger.warning(
@@ -397,14 +397,7 @@ class PushDispatchService:
                 whale_id, type(e).__name__, e,
             )
             return []
-        users = list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
-        if len(users) > MAX_RECIPIENTS_PER_SCOPE:
-            logger.warning(
-                "push: whale %s has %d+ followers — notifying the first %d only",
-                whale_id, len(users), MAX_RECIPIENTS_PER_SCOPE,
-            )
-            users = users[:MAX_RECIPIENTS_PER_SCOPE]
-        return users
+        return list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
 
     # ── whether ──────────────────────────────────────────────────────
 
@@ -634,10 +627,15 @@ class PushDispatchService:
         every row regardless of state; only the badge is restricted, because a badge is a
         promise that something is there to look at.
 
-        ⚠️ The row limit is PER USER, not per chunk. It used to be `len(chunk) * 50` across
-        the whole `IN` list with no ordering, so one user sitting on hundreds of unread rows
-        could consume the budget and zero every other user's badge in that fan-out — silently,
-        unlike its sibling `_category_counts_bulk`, which at least logs when it truncates.
+        ⚠️ The bound is PER 200-USER CHUNK — `len(chunk) × 50` rows (10 pages) over the whole
+        `IN` list — NOT per user; this docstring used to claim a per-user limit the code never
+        implemented (F17-10). What changed from the original shape is the ORDER: rows are read
+        in uuid (`id`) order, so when a chunk overflows the loss is spread across its users
+        and badges read LOW rather than one user consuming the budget and everyone after them
+        reading 0 (which APNs treats as "clear the icon"). Overflow is logged below, and the
+        inbox re-syncs the badge on next open, so exactness past 10,000 unread rows per chunk
+        is not a product requirement. An exact count would be a `GROUP BY user_id` RPC;
+        PostgREST aggregates are off on this project.
         """
         counts: Dict[str, int] = {uid: 0 for uid in user_ids}
         for chunk in _chunks(list(user_ids)):
@@ -674,6 +672,50 @@ class PushDispatchService:
                 if uid:
                     counts[uid] = counts.get(uid, 0) + 1
         return counts
+
+    def _cap_after_preferences(
+        self,
+        users: List[str],
+        kind: NotificationKind,
+        dedup_key: "str | Callable[[str], str]",
+        now: datetime,
+    ) -> List[str]:
+        """Filter an over-cap audience on `decide` step 1 (toggle + master), then cap the
+        survivors at `MAX_RECIPIENTS_PER_SCOPE` with a ROTATING cut.
+
+        Rotating: sorted by a hash of (user id, event key), so the tail excluded on one
+        event is not the same tail on the next — a fixed order starved the same users on
+        every alert. Users whose preference read FAILED keep their declared default (the
+        same fallback `decide` applies). Logs how many survivors were cut, by name of kind.
+        """
+        import hashlib
+
+        prefs = self._preferences_bulk(users)
+        survivors: List[str] = []
+        for uid in users:
+            blob = prefs.get(uid) or {}
+            keep = True
+            for key in (kind.preference_key, kind.master_preference_key):
+                if not key:
+                    continue
+                default = self._PREFERENCE_DEFAULTS.get(key, True)
+                if not self._coerce_toggle(blob.get(key), default, key=key, user_id=uid):
+                    keep = False
+                    break
+            if keep:
+                survivors.append(uid)
+        if len(survivors) <= MAX_RECIPIENTS_PER_SCOPE:
+            return survivors
+        salt = dedup_key("") if callable(dedup_key) else str(dedup_key)
+        salt = salt or now.date().isoformat()
+        survivors.sort(key=lambda u: hashlib.sha1(f"{u}:{salt}".encode("utf-8")).hexdigest())
+        cut = survivors[MAX_RECIPIENTS_PER_SCOPE:]
+        logger.warning(
+            "push: kind=%s has %d opted-in recipients — notifying %d this cycle, %d cut by "
+            "the per-scope cap (rotating by event key; first cut: %s)",
+            kind.key, len(survivors), MAX_RECIPIENTS_PER_SCOPE, len(cut), cut[:3],
+        )
+        return survivors[:MAX_RECIPIENTS_PER_SCOPE]
 
     def resolve_recipients(
         self,
@@ -847,10 +889,10 @@ class PushDispatchService:
 
         `only_if_state` makes the write CONDITIONAL (`push_state = only_if_state`). The
         shutdown requeue uses it: a row whose APNs POST was accepted has its `sent` stamp
-        written from a worker thread that a task cancellation does not stop, and an
-        unconditional `deferred` overwrite from the cancel arm re-delivered it 60 s later
-        on the new process — the same "AAPL moved 8%" buzz twice, and a second `sent_at`
-        against the daily cap.
+        written under `asyncio.shield` (see `_deliver` — a queued executor item is NOT
+        immune to cancellation, only a started one is), and an unconditional `deferred`
+        overwrite from the cancel arm re-delivered it 60 s later on the new process — the
+        same "AAPL moved 8%" buzz twice, and a second `sent_at` against the daily cap.
 
         A failure here is deliberately non-fatal but LOUD: the notification did go out,
         and losing the stamp costs an inbox state and a cap increment, not a duplicate
@@ -1005,15 +1047,30 @@ class PushDispatchService:
                     "push PARTIAL user=%s kind=%s: %d/%d devices accepted — %s",
                     uid, kind.key, outcome.accepted, outcome.attempted, detail,
                 )
-            await asyncio.to_thread(
+            # SHIELDED. APNs has ALREADY accepted this push; the only thing left is the
+            # stamp that records it. `asyncio.to_thread` is a plain executor future, and a
+            # task cancel on a future whose work item the executor has not STARTED yet
+            # discards it (`concurrent.futures.Future.cancel()` succeeds on a queued item)
+            # — so with the default executor saturated by concurrent `sb_exec` calls at the
+            # instant of a redeploy, the `sent` stamp simply never ran. The row still read
+            # `pending`, the flush's cancel arm returned it to `deferred`, and the next
+            # process re-claimed and re-sent it: the same "AAPL moved 8%" buzz twice, and a
+            # second `sent_at` against the daily cap. The shield keeps the stamp queued
+            # through the cancel; `asyncio.run`'s `shutdown_default_executor()` then drains
+            # it before the process exits (SIGKILL excepted — nothing in-process helps
+            # there). The conditional requeue converges on `sent` in either write order.
+            await asyncio.shield(asyncio.to_thread(
                 self.mark_state, uid, dedup_key, STATE_SENT, sent=True, error=detail
-            )
+            ))
             return True
 
-        await asyncio.to_thread(
+        # Shielded for the same reason: a dropped `failed` stamp leaves the row `pending`,
+        # and a re-delivery attempt on the next process is not what "APNs rejected every
+        # device" should turn into.
+        await asyncio.shield(asyncio.to_thread(
             self.mark_state, uid, dedup_key, STATE_FAILED,
             error=detail or "APNs accepted no device", sent=False,
-        )
+        ))
         return False
 
     async def notify_users(
@@ -1088,11 +1145,16 @@ class PushDispatchService:
         if not users:
             return 0
         if len(users) > MAX_RECIPIENTS_PER_SCOPE:
-            logger.warning(
-                "push: kind=%s has %d recipients — notifying the first %d only this cycle",
-                kind, len(users), MAX_RECIPIENTS_PER_SCOPE,
+            # Cap the SURVIVORS of the preference filter, not the raw audience. Applied
+            # to the raw list, the cap kept the 500 lowest uuids — most of whom then
+            # dropped out on their own toggle — and an opted-in follower whose uuid sorted
+            # 501st never received any alert on this scope, on every event, forever
+            # (`followers_of_whale` used to do exactly that at 600 followers / 40 opted
+            # in). Only the preference read runs on the full list (one bulk read per
+            # 200 ids); the expensive counts / devices / unread reads stay capped.
+            users = await asyncio.to_thread(
+                self._cap_after_preferences, users, nkind, dedup_key, now,
             )
-            users = users[:MAX_RECIPIENTS_PER_SCOPE]
 
         # APNs being unconfigured must NOT delete the inbox.
         #
@@ -1267,58 +1329,19 @@ class PushDispatchService:
         """
         stats = {"claimed": 0, "sent": 0, "stale": 0, "no_device": 0,
                  "failed": 0, "suppressed": 0, "requeued": 0}
-        rows = await asyncio.to_thread(
-            self._claim_due, settings.NOTIFICATION_DISPATCH_BATCH
-        )
+        rows = await self._claim_due_guarded(settings.NOTIFICATION_DISPATCH_BATCH)
         if not rows:
             return stats
         stats["claimed"] = len(rows)
-
-        now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(hours=settings.NOTIFICATION_MAX_DEFER_HOURS)
-        user_ids = list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
-        devices = await asyncio.to_thread(self._devices_bulk, user_ids)
-        unread = await asyncio.to_thread(self.unread_counts_bulk, user_ids)
-        # RE-READ the preferences. The decision that parked these rows was made hours
-        # ago, and the two things it depends on can both have moved since:
-        #
-        #   * the user may have turned the category off during the night, and
-        #   * the DAILY CAP was never charged — `sent_at` is stamped only on real
-        #     delivery, so five alerts deferred at 22:30 during an after-hours selloff
-        #     would ALL fire at 07:00 and blow straight past a 3/day ceiling. That is
-        #     the exact "ten notifications in one morning" failure the cap exists to
-        #     prevent, arriving through the back door.
-        preferences = await asyncio.to_thread(self._preferences_bulk, user_ids)
-        # Each user's OWN midnight, expressed in UTC — the same rule `dispatch` uses at the
-        # claim path. §11.3 of the system design names three clocks that must never be
-        # interchanged, and the cap day is the one anchored to `notify_timezone`.
-        flush_cutoffs: Dict[str, datetime] = {
-            uid: qh.local_day_start_utc(now, qh.resolve_timezone(preferences.get(uid) or {}))
-            for uid in user_ids
-        }
-        # Counted ONCE up front per (user, CATEGORY) and incremented locally as this batch
-        # delivers, so a single flush cannot exceed the ceiling within itself.
-        #
-        # ⚠️ TWO bugs lived in this counter, and both let a capped user be over-sent.
-        #
-        # 1. It called `alerts_sent_today`, which anchors on ET midnight — despite the comment
-        #    here claiming it used "the user's own day boundary, not ET". For a user in
-        #    Asia/Tokyo (UTC+9) the ET boundary lands at 14:00 local, so alerts sent between
-        #    their real midnight and 14:00 were counted against the PREVIOUS day's budget. A
-        #    quiet-hours flush at 07:00 JST saw a count of 0 for a user who had already been
-        #    sent their three, and delivered anyway.
-        # 2. It was keyed on the USER ALONE while the count it stores is per-CATEGORY. A user
-        #    with deferred rows in two categories had the first category's count reused for
-        #    the second — so an earnings row could be judged against the watchlist budget.
-        #
-        # Keyed on the pair now, and read through the timezone-aware bulk counter.
-        charged: Dict[Tuple[str, str], int] = {}
 
         # INDEX OF THE ROW BEING PROCESSED. An index, deliberately, NOT a set of rows
         # already handled: several paths below mark a row terminally FAILED and `continue`,
         # and a "not in the handled set" test would re-defer those — resurrecting a row
         # that was correctly given up on. Everything from `cursor` onward is untouched by
         # definition. See the CancelledError arm below.
+        #
+        # Bound HERE, above the bulk reads, because the arm below reads `rows[cursor:]`
+        # and a cancel during those reads must find `cursor == 0` — the whole batch.
         cursor = 0
         delivery_started = False
 
@@ -1333,7 +1356,68 @@ class PushDispatchService:
         # push, no terminal state, and an inbox row reading "pending" for its whole 30-day
         # retention. That is the same stranded state the per-row handler exists to prevent,
         # reached by the one path that handler cannot catch.
+        #
+        # ⚠️ The guarded region starts BEFORE the three bulk reads, not at the loop. The
+        # first version of this arm wrapped only the per-row loop, and `_devices_bulk`,
+        # `unread_counts_bulk` and `_preferences_bulk` — three more `to_thread` awaits
+        # that run AFTER the RPC has committed the `pending` flip — sat outside it. A
+        # redeploy landing 50-300 ms after the claim, while `_devices_bulk` was awaiting
+        # its thread, left the function with the arm never entered: every claimed row of
+        # that cycle (a whole `NOTIFICATION_DISPATCH_BATCH`) stranded at `pending`, which
+        # is exactly the state this arm exists to prevent. With `cursor == 0` the arm
+        # returns `rows[0:]`, i.e. all of them. The claim await itself has the same shape
+        # and is handled in `_claim_due_guarded`.
         try:
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(hours=settings.NOTIFICATION_MAX_DEFER_HOURS)
+            user_ids = list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
+            devices = await asyncio.to_thread(self._devices_bulk, user_ids)
+            unread = await asyncio.to_thread(self.unread_counts_bulk, user_ids)
+            # RE-READ the preferences. The decision that parked these rows was made hours
+            # ago, and the two things it depends on can both have moved since:
+            #
+            #   * the user may have turned the category off during the night, and
+            #   * the DAILY CAP was never charged — `sent_at` is stamped only on real
+            #     delivery, so five alerts deferred at 22:30 during an after-hours selloff
+            #     would ALL fire at 07:00 and blow straight past a 3/day ceiling. That is
+            #     the exact "ten notifications in one morning" failure the cap exists to
+            #     prevent, arriving through the back door.
+            preferences = await asyncio.to_thread(self._preferences_bulk, user_ids)
+            # Each user's OWN midnight, expressed in UTC — the same rule `dispatch` uses at
+            # the claim path. §11.3 of the system design names three clocks that must never
+            # be interchanged, and the cap day is the one anchored to `notify_timezone`.
+            flush_cutoffs: Dict[str, datetime] = {
+                uid: qh.local_day_start_utc(
+                    now, qh.resolve_timezone(preferences.get(uid) or {})
+                )
+                for uid in user_ids
+            }
+            # Counted ONCE up front per (user, CATEGORY) and incremented locally as this
+            # batch delivers, so a single flush cannot exceed the ceiling within itself.
+            #
+            # ⚠️ TWO bugs lived in this counter, and both let a capped user be over-sent.
+            #
+            # 1. It called `alerts_sent_today`, which anchors on ET midnight — despite the
+            #    comment here claiming it used "the user's own day boundary, not ET". For a
+            #    user in Asia/Tokyo (UTC+9) the ET boundary lands at 14:00 local, so alerts
+            #    sent between their real midnight and 14:00 were counted against the
+            #    PREVIOUS day's budget. A quiet-hours flush at 07:00 JST saw a count of 0
+            #    for a user who had already been sent their three, and delivered anyway.
+            # 2. It was keyed on the USER ALONE while the count it stores is per-CATEGORY.
+            #    A user with deferred rows in two categories had the first category's count
+            #    reused for the second — so an earnings row could be judged against the
+            #    watchlist budget.
+            #
+            # Keyed on the pair now, and read through the timezone-aware bulk counter.
+            charged: Dict[Tuple[str, str], int] = {}
+            # Rows DELIVERED to each user so far in THIS batch. `unread` was counted once,
+            # up front, over `push_state = 'sent'` rows — so the k-th row flushed to one
+            # user in one cycle would otherwise carry the same badge as the first, and
+            # the icon would read k-1 too low until the app next refreshed it. Bumped only
+            # on an accepted delivery: a `no_device` / `failed` / `suppressed` row was not
+            # shown, so it must not inflate the badge of the rows after it.
+            delivered_now: Dict[str, int] = {}
+
             for cursor, row in enumerate(rows):
                 uid, key = row.get("user_id"), row.get("dedup_key")
                 if not uid or not key:
@@ -1431,10 +1515,19 @@ class PushDispatchService:
                         preferences=prefs,
                         devices=devices.get(uid, []),
                         unread=unread.get(uid, 0),
-                        # NO +1 here: this row was inserted unread when it was DEFERRED, so
-                        # `unread_counts_bulk` above already includes it. Adding one made every
-                        # flushed notification badge one higher than the truth.
-                        badge=unread.get(uid, 0),
+                        # `unread + 1 + already delivered to this user this batch`.
+                        #
+                        # ⚠️ This used to be `unread.get(uid, 0)` — "NO +1, the deferred
+                        # row is already in `unread`". It is not: `unread_counts_bulk`
+                        # counts `push_state = 'sent'` only, and this row is `pending`
+                        # (flipped by `claim_due_notifications`) until `_deliver` stamps
+                        # it — so the badge EXCLUDED the very notification it announced.
+                        # A new user's first deferred alert went out with `aps.badge: 0`,
+                        # which iOS treats as CLEAR: banner delivered, icon blank, Alerts
+                        # tab showing 1 unread. Three rows → icon 0, inbox 3.
+                        # `test_notification_dispatch.py` used to pin `== 2` for a stub
+                        # of `{"u1": 2}`, agreeing with the bug.
+                        badge=unread.get(uid, 0) + 1 + delivered_now.get(uid, 0),
                         category_sent_today=charged[budget_key],
                     )
 
@@ -1467,6 +1560,7 @@ class PushDispatchService:
                         # Re-reading per row would be N queries and would still race the
                         # `mark_state` write that stamps `sent_at`.
                         charged[budget_key] = charged.get(budget_key, 0) + 1
+                        delivered_now[uid] = delivered_now.get(uid, 0) + 1
                     elif not recipient.devices:
                         stats["no_device"] += 1
                     else:
@@ -1498,14 +1592,16 @@ class PushDispatchService:
         except asyncio.CancelledError:
             # `cursor` INCLUSIVE: the row in flight when the cancel landed has an
             # indeterminate state. Its requeue is CONDITIONAL on the row still reading
-            # `pending` (`only_if_state` below): if the cancel landed AFTER APNs accepted
-            # the push, `_deliver`'s `sent` stamp is still being written from a worker
-            # thread that cancellation does not stop, and whichever write lands last must
-            # leave the row `sent` — an unconditional `deferred` here re-delivered it on
-            # the next process. The dedup claim only blocks a NEW claim; a `deferred` row
-            # with `deliver_after` in the past is re-claimed by `claim_due_notifications`.
-            # If the cancel landed DURING the APNs POST there is no stamp to protect and
-            # the requeue may duplicate; that case is logged by name.
+            # `pending` (`only_if_state` inside `_return_to_deferred`): if the cancel
+            # landed AFTER APNs accepted the push, `_deliver`'s `sent` stamp is queued
+            # under `asyncio.shield` (a queued executor item is NOT immune to a task
+            # cancel — only a started one is — which is why it is shielded there), and
+            # whichever write lands last must leave the row `sent` — an unconditional
+            # `deferred` here re-delivered it on the next process. The dedup claim only
+            # blocks a NEW claim; a `deferred` row with `deliver_after` in the past is
+            # re-claimed by `claim_due_notifications`. If the cancel landed DURING the
+            # APNs POST there is no stamp to protect and the requeue may duplicate; that
+            # case is logged by name.
             unsettled = [
                 r for r in rows[cursor:]
                 if r.get("user_id") and r.get("dedup_key")
@@ -1520,43 +1616,115 @@ class PushDispatchService:
                 # SHIELDED, for the same reason `claimed_job`'s release is: this runs
                 # DURING a cancellation, so an unshielded await would be cancelled too and
                 # the rows would stay stranded anyway.
-                #
-                # `mark_state` directly, NOT `_requeue_or_fail`: a redeploy is not the
-                # row's fault, and spending one of `MAX_FLUSH_ATTEMPTS` on it would let a
-                # few unlucky restarts fail a notification terminally. `deliver_after` is
-                # already in the past and untouched by the claim, so writing `deferred`
-                # back is enough for the next cycle to re-claim it.
-                def _return_to_deferred() -> int:
-                    returned = 0
-                    for r in unsettled:
-                        try:
-                            self.mark_state(
-                                r["user_id"], r["dedup_key"], STATE_DEFERRED,
-                                error="flush cancelled mid-batch (shutdown) — requeued",
-                                sent=False,
-                                only_if_state=STATE_PENDING,
-                            )
-                            returned += 1
-                        except Exception as exc:            # pragma: no cover - best effort
-                            logger.error(
-                                "push: could not return row user=%s key=%s to deferred "
-                                "during shutdown (%s: %s) — it is STRANDED at pending",
-                                r.get("user_id"), r.get("dedup_key"),
-                                type(exc).__name__, exc,
-                            )
-                    return returned
-
-                returned = await asyncio.shield(asyncio.to_thread(_return_to_deferred))
+                returned = await asyncio.shield(asyncio.to_thread(
+                    self._return_to_deferred, unsettled,
+                    reason="flush cancelled mid-batch (shutdown) — requeued",
+                ))
                 stats["requeued"] += returned
                 logger.warning(
                     "push: quiet-hours flush CANCELLED mid-batch — returned %d/%d "
-                    "unfinished row(s) to deferred so the next cycle retries them",
-                    returned, len(unsettled),
+                    "unfinished row(s) to %s so the next cycle retries them",
+                    returned, len(unsettled), STATE_DEFERRED,
                 )
             raise
 
         logger.info("push: quiet-hours flush %s", stats)
         return stats
+
+    # How long a cancelled flush waits for an in-flight `claim_due_notifications` RPC
+    # to hand back what it claimed, so the rows can be returned before the process
+    # exits. The RPC is one indexed UPDATE and returns in well under a second; the bound
+    # only exists so a wedged connection cannot hold the lifespan teardown open.
+    _CLAIM_SETTLE_SECONDS = 10.0
+
+    async def _claim_due_guarded(self, limit: int) -> List[dict]:
+        """`_claim_due` on a worker thread, with the cancel window closed.
+
+        `claim_due_notifications` COMMITS the `deferred → pending` flip inside the
+        thread, and a plain `await asyncio.to_thread(...)` cancelled while that thread
+        is in flight raises before `rows` is ever bound — the RPC finishes, the result is
+        discarded, and the batch it claimed is stranded at `pending` with no holder,
+        outside the reach of `flush_deferred`'s cancel arm (which needs `rows`).
+
+        `asyncio.shield` alone does not close this: it keeps the thread's future alive
+        but the outer await still raises without the rows. So the future is kept, and
+        on a cancel the arm waits (bounded) for it to settle, returns whatever it claimed
+        to `deferred`, then re-raises. SIGKILL after the commit is not covered — nothing
+        in-process can be — and is the reason to keep a DB-side reaper on the list.
+        """
+        claim = asyncio.ensure_future(asyncio.to_thread(self._claim_due, limit))
+        try:
+            return await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            rows: List[dict] = []
+            try:
+                rows = await asyncio.shield(
+                    asyncio.wait_for(claim, timeout=self._CLAIM_SETTLE_SECONDS)
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "push: flush cancelled during claim_due_notifications and the RPC "
+                    "did not settle within %.0fs — up to %d row(s) may be STRANDED at "
+                    "pending",
+                    self._CLAIM_SETTLE_SECONDS, limit,
+                )
+            except asyncio.CancelledError:
+                # A second cancel while waiting for the first to settle. Best effort is
+                # over; say what may be stranded and let the shutdown proceed.
+                logger.error(
+                    "push: flush cancelled twice during claim_due_notifications — up to "
+                    "%d row(s) may be STRANDED at pending",
+                    limit,
+                )
+            except Exception as e:                      # pragma: no cover - _claim_due catches
+                logger.error(
+                    "push: interrupted claim_due_notifications raised (%s: %s)",
+                    type(e).__name__, e,
+                )
+            if rows:
+                returned = await asyncio.shield(asyncio.to_thread(
+                    self._return_to_deferred, rows,
+                    reason="flush cancelled during claim (shutdown) — requeued",
+                ))
+                logger.warning(
+                    "push: quiet-hours flush CANCELLED during claim — returned %d/%d "
+                    "just-claimed row(s) to %s so the next cycle retries them",
+                    returned, len(rows), STATE_DEFERRED,
+                )
+            raise
+
+    def _return_to_deferred(self, rows: Sequence[dict], *, reason: str) -> int:
+        """Put claimed-but-unprocessed rows back for the next cycle. Returns how many.
+
+        `mark_state` directly, NOT `_requeue_or_fail`: a redeploy is not the row's
+        fault, and spending one of `MAX_FLUSH_ATTEMPTS` on it would let a few unlucky
+        restarts fail a notification terminally. `deliver_after` is already in the past
+        and untouched by the claim, so writing `deferred` back is enough for the next
+        cycle to re-claim it.
+
+        CONDITIONAL on the row still reading `pending`: a row whose APNs POST was
+        accepted has a shielded `sent` stamp in flight, and that must win in either
+        write order (see `mark_state`). Rows missing either half of their identity are
+        skipped — they cannot be addressed and are logged by `flush_deferred`.
+        """
+        returned = 0
+        for r in rows:
+            uid, key = r.get("user_id"), r.get("dedup_key")
+            if not uid or not key:
+                continue
+            try:
+                self.mark_state(
+                    uid, key, STATE_DEFERRED,
+                    error=reason, sent=False, only_if_state=STATE_PENDING,
+                )
+                returned += 1
+            except Exception as exc:            # pragma: no cover - best effort
+                logger.error(
+                    "push: could not return row user=%s key=%s to deferred during "
+                    "shutdown (%s: %s) — it is STRANDED at pending",
+                    uid, key, type(exc).__name__, exc,
+                )
+        return returned
 
     def _requeue_or_fail(
         self, user_id: str, dedup_key: str, attempts: int, error: str

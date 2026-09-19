@@ -199,17 +199,16 @@ def _safe_int(v: Any, default: int = 0) -> int:
     return int(f) if math.isfinite(f) else default
 
 
-def _first_present_float(*sources: tuple, default: float = 0.0) -> float:
-    """Return the first (dict, key) whose value is PRESENT (key exists, non-None,
-    finite) — so a legitimate ``0.0`` from a fresher source is NOT discarded in
-    favour of a staler fallback the way Python ``or`` (0.0 is falsy) would. Used
-    for price change / change%, where 0.0 is a valid flat-day value.
-    """
+def _first_present_or_none(*sources: tuple) -> Optional[float]:
+    """The first (dict, key) whose value is PRESENT (key exists, non-None, finite), or
+    None when NO source carries one — the three-state read `change_known` needs. A
+    coerced 0.0 cannot tell "no source had a change" from "a flat day", and the
+    equity header used to paint the former as "+0.00 (+0.00%)" in green."""
     for d, key in sources:
         if not isinstance(d, dict):
             continue
         v = d.get(key)
-        if v is None:
+        if v is None or isinstance(v, bool):
             continue
         try:
             f = float(v)
@@ -217,7 +216,17 @@ def _first_present_float(*sources: tuple, default: float = 0.0) -> float:
             continue
         if math.isfinite(f):
             return f
-    return default
+    return None
+
+
+def _first_present_float(*sources: tuple, default: float = 0.0) -> float:
+    """Return the first (dict, key) whose value is PRESENT (key exists, non-None,
+    finite) — so a legitimate ``0.0`` from a fresher source is NOT discarded in
+    favour of a staler fallback the way Python ``or`` (0.0 is falsy) would. Used
+    for price change / change%, where 0.0 is a valid flat-day value.
+    """
+    v = _first_present_or_none(*sources)
+    return default if v is None else v
 
 
 # ── Return computation helpers (same as etf_service) ─────────────
@@ -876,11 +885,20 @@ class StockOverviewService:
         # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
         # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
         # profile exposes "change", not "changes".)
-        change = _first_present_float((quote, "change"), (profile, "change"))
-        change_pct = _first_present_float(
+        raw_change = _first_present_or_none((quote, "change"), (profile, "change"))
+        raw_pct = _first_present_or_none(
             (quote, "changePercentage"), (quote, "changesPercentage"),
             (profile, "changePercentage"), (profile, "changesPercentage"),
         )
+        # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day. Only
+        # a change absent from EVERY source is unknown — `/stable/profile` answers
+        # `change: null` for a halted/OTC listing, and the quote leg can fail while
+        # the profile lands — and that used to ship as `price_change: 0.0` with no
+        # flag, which the equity header rendered as "▲ +0.00 (+0.00%)" in green with
+        # a bullish flash (the other four asset classes carry `change_known`).
+        change_known = raw_change is not None or raw_pct is not None
+        change = raw_change if raw_change is not None else 0.0
+        change_pct = raw_pct if raw_pct is not None else 0.0
         # A missing price is an upstream FAILURE, not a price of zero.
         #
         # Both fetches above degrade to `{}` on any exception, and `_safe_float` then
@@ -906,6 +924,7 @@ class StockOverviewService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
         )
@@ -1060,11 +1079,20 @@ class StockOverviewService:
         # real 0.0 change and surfaced the staler profile's nonzero %, contradicting
         # the (correctly 0.0) price_change. (Fallback key was also wrong: stable
         # profile exposes "change", not "changes".)
-        change = _first_present_float((quote, "change"), (profile, "change"))
-        change_pct = _first_present_float(
+        raw_change = _first_present_or_none((quote, "change"), (profile, "change"))
+        raw_pct = _first_present_or_none(
             (quote, "changePercentage"), (quote, "changesPercentage"),
             (profile, "changePercentage"), (profile, "changesPercentage"),
         )
+        # `is not None`, never truthiness: an explicit 0.0 is a KNOWN flat day. Only
+        # a change absent from EVERY source is unknown — `/stable/profile` answers
+        # `change: null` for a halted/OTC listing, and the quote leg can fail while
+        # the profile lands — and that used to ship as `price_change: 0.0` with no
+        # flag, which the equity header rendered as "▲ +0.00 (+0.00%)" in green with
+        # a bullish flash (the other four asset classes carry `change_known`).
+        change_known = raw_change is not None or raw_pct is not None
+        change = raw_change if raw_change is not None else 0.0
+        change_pct = raw_pct if raw_pct is not None else 0.0
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
         # Chart data: use volatile if available, else slice from historical
@@ -1125,6 +1153,7 @@ class StockOverviewService:
             current_price=price,
             price_change=change,
             price_change_percent=change_pct,
+            change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
             key_statistics=key_statistics,
@@ -1932,13 +1961,35 @@ class StockOverviewService:
                 symbol = q.get("symbol", "")
                 if not symbol:
                     continue
+                # Same defect as the ETF rail (`etf_service._build_related_etfs`):
+                # `_safe_float` coerces an ABSENT change to 0.0, and `a or b` folds a
+                # genuine 0.0 into the fallback key. The batch path answers
+                # `changePercentage: None` for a stale/missing close snapshot, and
+                # `RelatedTicker.changePercent` is a non-Optional Double on iOS coloured
+                # off `>= 0` — so the peer rendered "+0.0%" in green, a fabricated flat
+                # day. OMIT the row when price or change is unknown; keep a real 0.0.
+                rel_price = _finite(q.get("price"))
+                rel_change = _finite(q.get("changePercentage"))
+                if rel_change is None:
+                    rel_change = _finite(q.get("changesPercentage"))
+                if rel_price is None or rel_price <= 0:
+                    logger.warning(
+                        "Related ticker %s (for %s) has no usable price — omitting the "
+                        "row rather than rendering $0.00", symbol, ticker,
+                    )
+                    continue
+                if rel_change is None:
+                    logger.info(
+                        "Related ticker %s (for %s) has a price but no day change — "
+                        "omitting the row rather than rendering a green +0.0%%",
+                        symbol, ticker,
+                    )
+                    continue
                 related.append(RelatedTickerResponse(
                     symbol=symbol,
                     name=q.get("name") or symbol,
-                    price=round(_safe_float(q, "price"), 2),
-                    change_percent=round(
-                        _safe_float(q, "changePercentage") or _safe_float(q, "changesPercentage"), 2
-                    ),
+                    price=round(rel_price, 2),
+                    change_percent=round(rel_change, 2),
                 ))
             return related
         except Exception as e:

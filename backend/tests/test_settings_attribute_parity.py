@@ -131,3 +131,29 @@ def test_price_alert_caps_match_the_schema_defaults_ios_falls_back_to():
     defaults = PriceAlertListResponse()
     assert defaults.max_per_user == settings.PRICE_ALERT_MAX_PER_USER
     assert defaults.max_per_ticker == settings.PRICE_ALERT_MAX_PER_TICKER_PER_USER
+
+
+def test_the_chat_budgets_sit_under_the_ios_timeouts_that_bound_them():
+    """`CHAT_SEND_BUDGET_SECONDS` exists so the non-stream door answers BEFORE iOS gives up
+    (its client-side timeout is what turns a slow answer into a refund-or-double-charge
+    question); nothing pinned the two numbers together (F03-12). Read the iOS table rather
+    than hardcoding a third copy of the number."""
+    import re
+    from pathlib import Path
+
+    swift = (Path(__file__).resolve().parents[2]
+             / "frontend/ios/ios/Core/Services/APIEndpoint.swift").read_text(encoding="utf-8")
+    code = "\n".join(re.sub(r"//.*$", "", l) for l in swift.splitlines())
+    i = code.index("nonisolated var timeout: TimeInterval")
+    body = code[i:i + 3000]
+    send = re.search(r"case \.sendChatMessage:\s*return (\d+)", body)
+    stream = re.search(r"case \.streamChatMessage:\s*return (\d+)", body)
+    assert send and stream, "the iOS timeout table changed shape"
+    ios_send, ios_stream = int(send.group(1)), int(stream.group(1))
+    assert 0 < settings.CHAT_SEND_BUDGET_SECONDS < ios_send, (
+        f"CHAT_SEND_BUDGET_SECONDS={settings.CHAT_SEND_BUDGET_SECONDS} must be under the iOS "
+        f"sendChatMessage timeout ({ios_send}s) or the client reports failure first"
+    )
+    # The stream is kept alive by keepalives, so its wall-clock budget may exceed the
+    # client's IDLE timeout — but the keepalive interval itself must sit well under it.
+    assert settings.CHAT_STREAM_KEEPALIVE_SECONDS < ios_stream / 2

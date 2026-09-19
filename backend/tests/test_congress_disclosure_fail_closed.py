@@ -14,7 +14,7 @@ import pytest
 from app.integrations.fmp import (
     FMPAuthException,
     FMPClient,
-    FMPNotEntitledException,
+    FMPNotEntitledException, FMPUnavailableException,
     FMPPartialPageException,
     FMPRateLimitException,
 )
@@ -37,6 +37,9 @@ def _client(behavior):
 
 @pytest.mark.parametrize("exc", [
     FMPRateLimitException("429"), FMPAuthException("401"), FMPNotEntitledException("no package"),
+    # F18-6: a 5xx outage after retries is not cured by four parallel pages either — it
+    # multiplied a 502 into 30 requests instead of 6 across both chambers per Holders build.
+    FMPUnavailableException("502 after retries"),
 ])
 @pytest.mark.parametrize("chamber", ["senate", "house"])
 def test_a_typed_refusal_on_the_one_call_path_re_raises_without_a_sweep(exc, chamber):

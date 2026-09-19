@@ -702,6 +702,13 @@ actor APIClient {
         // valid Bearer token when one exists, so it is inert once auth lands.
         request.setValue(GuestIdentity.current, forHTTPHeaderField: "X-Guest-Id")
 
+        // The per-email lockout exemption, on the three credential routes that are limited
+        // per address. Sent only when this install has a proof for exactly that address —
+        // see `DeviceProofStore`; a missing proof simply leaves the ordinary limits in place.
+        if let email = endpoint.deviceProofEmail, let proof = DeviceProofStore.proof(for: email) {
+            request.setValue(proof, forHTTPHeaderField: "X-Device-Token")
+        }
+
         // Body
         if let body = endpoint.body {
             request.httpBody = try encoder.encode(body)

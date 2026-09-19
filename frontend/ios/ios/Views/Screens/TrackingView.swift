@@ -1531,6 +1531,79 @@ private enum HoldingInputMode: String, CaseIterable {
     case dollars = "Dollars"
 }
 
+/// Locale-aware read/write for the two `.decimalPad` fields in the config sheet.
+///
+/// `Double(String)` accepts only "." as the decimal separator. The fields are
+/// `.decimalPad`, which renders the LOCALE's separator — so on a German/French/
+/// Spanish/Brazilian device the user types "12,5", the bare parse returned nil,
+/// `(parsed ?? 0) > 0` was false, and the row went out as `{shares: null,
+/// market_value: null}`: the documented CLEAR. `PUT /portfolios/{id}/holdings`
+/// answered 200, the sheet dismissed with no error, and the 10 shares the user
+/// was EDITING were gone. `PriceAlertsViewModel.parsedThreshold` fixed the same
+/// defect for the alert threshold; this is its twin for holdings, and it has to
+/// cover BOTH directions:
+///
+///   * PARSE strips the locale's grouping separator and normalises its decimal
+///     separator to "." (byte-identical to the old behaviour in en_US).
+///   * RENDER goes through the same separator. `String(12.5)` is always "12.5",
+///     and on de_DE "." is the GROUPING separator — so a prefilled "12.5" the
+///     user never touched would be re-parsed as 125, a 10x corruption the
+///     un-fixed code did not have. Fix parsing without rendering and Save is
+///     worse than before.
+///
+/// Only a whitespace-trimmed EMPTY field (or "0") means clear. A non-empty field
+/// that does not parse to a finite positive number is `.invalid`, which blocks
+/// Save — it must never turn into a clear.
+private enum HoldingsNumberField {
+    static var decimalSeparator: String { Locale.current.decimalSeparator ?? "." }
+    static var groupingSeparator: String { Locale.current.groupingSeparator ?? "," }
+
+    enum Parsed: Equatable {
+        /// Nothing entered → the server clears the holding (documented behaviour).
+        case empty
+        /// A finite, positive amount.
+        case value(Double)
+        /// Non-empty but unparseable, negative, NaN or infinite → block Save.
+        case invalid
+
+        var valueOrNil: Double? {
+            if case .value(let v) = self { return v }
+            return nil
+        }
+    }
+
+    static func parse(_ raw: String) -> Parsed {
+        var cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { return .empty }
+        // People type what the field means — a leading "$" in the Dollars field.
+        cleaned = cleaned.replacingOccurrences(of: "$", with: "")
+        cleaned = cleaned.replacingOccurrences(of: groupingSeparator, with: "")
+        if decimalSeparator != "." {
+            cleaned = cleaned.replacingOccurrences(of: decimalSeparator, with: ".")
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { return .empty }
+        guard let value = Double(cleaned), value.isFinite else { return .invalid }
+        // "0" has always meant "no holding" here, like an empty field.
+        if value == 0 { return .empty }
+        return value > 0 ? .value(value) : .invalid
+    }
+
+    /// A number rendered by `String(Double)` / `String(Int)` ("12.5", "1e-05"),
+    /// re-spelled with the locale's decimal separator so it round-trips through
+    /// `parse` unchanged.
+    static func localize(_ rendered: String) -> String {
+        decimalSeparator == "."
+            ? rendered
+            : rendered.replacingOccurrences(of: ".", with: decimalSeparator)
+    }
+
+    /// Shown under a field that does not parse.
+    static var invalidHint: String {
+        "Enter a number like 12\(decimalSeparator)5, or leave it empty."
+    }
+}
+
 private struct PortfolioConfigRow: Identifiable {
     let id: String      // ticker — stable, unique per row
     let ticker: String
@@ -1575,7 +1648,10 @@ private struct PortfolioConfigRow: Identifiable {
            value.magnitude < 9_007_199_254_740_992 {   // 2^53
             return String(Int(value))
         }
-        return String(value)
+        // Through the LOCALE's decimal separator — see `HoldingsNumberField`. A
+        // "12.5" prefill on a comma-decimal device would otherwise be read back
+        // as 125 by the locale-aware parser (there "." is the grouping separator).
+        return HoldingsNumberField.localize(String(value))
     }
 
     /// Round to a fixed decimal precision before formatting, so a shares→
@@ -1594,14 +1670,14 @@ private struct PortfolioConfigRow: Identifiable {
     /// flip — never a silent zeroing.
     mutating func setInputMode(_ newMode: HoldingInputMode, price: Double?) {
         guard newMode != inputMode else { return }
-        if let price, price > 0 {
+        if let price, price > 0, price.isFinite {
             switch newMode {
             case .dollars:
-                if let shares = Double(sharesInput), shares > 0 {
+                if case .value(let shares) = HoldingsNumberField.parse(sharesInput) {
                     dollarsInput = Self.formatRounded(shares * price, places: 2)
                 }
             case .shares:
-                if let dollars = Double(dollarsInput), dollars > 0 {
+                if case .value(let dollars) = HoldingsNumberField.parse(dollarsInput) {
                     sharesInput = Self.formatRounded(dollars / price, places: 4)
                 }
             }
@@ -1609,17 +1685,23 @@ private struct PortfolioConfigRow: Identifiable {
         inputMode = newMode
     }
 
-    /// Build the wire payload for this row. A row with empty inputs becomes
-    /// a clear (both fields nil) on the server.
+    /// What the ACTIVE field currently says, read through the locale.
+    var parsedActiveInput: HoldingsNumberField.Parsed {
+        HoldingsNumberField.parse(inputMode == .shares ? sharesInput : dollarsInput)
+    }
+
+    /// False when the active field is non-empty but not a positive number. The
+    /// sheet blocks Save on it — an unparseable field must never become a clear.
+    var isValid: Bool { parsedActiveInput != .invalid }
+
+    /// Build the wire payload for this row. A row with an EMPTY input becomes a
+    /// clear (both fields nil) on the server. Only call when `isValid`.
     func toUpdateItem() -> HoldingUpdateItem {
+        let value = parsedActiveInput.valueOrNil
         switch inputMode {
         case .shares:
-            let parsed = Double(sharesInput)
-            let value = (parsed ?? 0) > 0 ? parsed : nil
             return HoldingUpdateItem(ticker: ticker, shares: value, marketValue: nil)
         case .dollars:
-            let parsed = Double(dollarsInput)
-            let value = (parsed ?? 0) > 0 ? parsed : nil
             return HoldingUpdateItem(ticker: ticker, shares: nil, marketValue: value)
         }
     }
@@ -1694,7 +1776,9 @@ struct PortfolioConfigSheet: View {
                         save()
                     }
                     .fontWeight(.semibold)
-                    .disabled(isSubmitting)
+                    // A row whose field does not parse must not be saveable: the
+                    // payload it would produce is a CLEAR of the holding it is editing.
+                    .disabled(isSubmitting || !allRowsValid)
                 }
             }
         }
@@ -1753,7 +1837,16 @@ struct PortfolioConfigSheet: View {
         }
     }
 
+    private var allRowsValid: Bool { rows.allSatisfy(\.isValid) }
+
     private func save() {
+        // Belt and braces with the disabled button: never ship a payload built from an
+        // unparseable field, because the wire shape for "could not read it" and "clear
+        // this holding" is the same `{shares: null, market_value: null}`.
+        guard allRowsValid else {
+            saveError = HoldingsNumberField.invalidHint
+            return
+        }
         isSubmitting = true
         saveError = nil
         let items = rows.map { $0.toUpdateItem() }
@@ -1808,6 +1901,12 @@ private struct PortfolioConfigRowView: View {
                 TextField("Dollars (e.g. 12500)", text: $row.dollarsInput)
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
+            }
+
+            if !row.isValid {
+                Text(HoldingsNumberField.invalidHint)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.loss)
             }
         }
         .padding(AppSpacing.md)

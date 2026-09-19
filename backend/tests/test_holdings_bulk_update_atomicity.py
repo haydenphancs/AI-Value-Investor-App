@@ -13,6 +13,7 @@ out of sync until something forced a refetch.
 from __future__ import annotations
 
 import ast
+import re
 import pathlib
 
 import pytest
@@ -111,3 +112,66 @@ def test_validation_precedes_every_write_in_source():
         "a holdings write happens before the payload is fully validated — a 400 then "
         "leaves partial state behind"
     )
+
+
+# ── F15-7: the loop is ONE replayable unit ──────────────────────────────────
+
+
+class _FlakySB(_SB):
+    """The Nth `portfolio_items` UPDATE raises a transient edge error ONCE, then heals."""
+
+    def __init__(self, fail_on_write: int):
+        super().__init__()
+        self.fail_on_write = fail_on_write
+        self.attempts = 0
+
+    def table(self, name):
+        q = super().table(name)
+        if name == "portfolio_items":
+            sb = self
+            real = q.execute
+
+            def execute():
+                if q._payload is not None:
+                    sb.attempts += 1
+                    if sb.attempts == sb.fail_on_write:
+                        from tests.test_supabase_transient_classifier import gateway_error
+                        raise gateway_error(520)
+                return real()
+            q.execute = execute
+        return q
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_mid_loop_replays_the_whole_loop_not_half(monkeypatch):
+    """Each row used to be its own UPDATE with no retry: a 5xx on row 2 answered a failure
+    after row 1 had committed, iOS reverted its optimistic sheet, and the server kept half
+    the edit. Now the loop is one `retry_idempotent_async` unit (absolute values, so a
+    replay from the top is idempotent)."""
+    import app.utils.supabase_errors as se
+    monkeypatch.setattr(se.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(pf, "_fetch_portfolio_items", lambda *a, **k: [])
+    sb = _FlakySB(fail_on_write=2)
+    req = pf.SetPortfolioHoldingsRequest(items=[
+        pf.HoldingItem(ticker="AAPL", shares=10.0, market_value=1900.0),
+        pf.HoldingItem(ticker="MSFT", shares=5.0, market_value=2100.0),
+        pf.HoldingItem(ticker="NVDA", shares=1.0, market_value=900.0),
+    ])
+    await pf.set_portfolio_holdings("p1", req, user={"id": "u1"}, supabase=sb)
+    written = [t for tbl, t, _v in sb.writes if tbl == "portfolio_items"]
+    # First attempt wrote AAPL then died on MSFT; the replay wrote all three again.
+    assert written == ["AAPL", "AAPL", "MSFT", "NVDA"], written
+
+
+async def _no_sleep(*a, **k):
+    return None
+
+
+def test_the_holdings_loop_is_wrapped_in_the_async_retry_in_source():
+    body = ast.get_source_segment(_SRC, _fn("set_portfolio_holdings"))
+    code = "\n".join(re.sub(r"#.*$", "", l) for l in body.splitlines())
+    assert "def _write_holdings()" in code
+    inner = code[code.index("def _write_holdings()"):code.index("retry_idempotent_async(")]
+    assert inner.count(".update(values)") == 2, "both spellings live inside the retried unit"
+    assert "sb_exec" not in inner, "the unit runs in a thread; no loop-bound helper inside it"
+    assert "await retry_idempotent_async(\n        _write_holdings" in code

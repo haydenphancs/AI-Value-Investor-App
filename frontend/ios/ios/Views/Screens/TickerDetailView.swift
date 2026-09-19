@@ -129,14 +129,15 @@ struct TickerDetailView: View {
                             priceChange: tickerData.formattedChange,
                             priceChangePercent: tickerData.formattedChangePercent,
                             isPositive: tickerData.isPositive,
-                            marketStatus: tickerData.marketStatus
+                            marketStatus: tickerData.marketStatus,
+                            changeKnown: tickerData.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         // Chart
                         TickerChartView(
                             pricePoints: tickerData.chartPricePoints,
-                            isPositive: tickerData.isPositive,
+                            isPositive: tickerData.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .stock,
@@ -154,13 +155,14 @@ struct TickerDetailView: View {
                             priceChange: core.formattedChange,
                             priceChangePercent: core.formattedChangePercent,
                             isPositive: core.isPositive,
-                            marketStatus: core.marketStatus
+                            marketStatus: core.marketStatus,
+                            changeKnown: core.changeKnown
                         )
                         .padding(.top, AppSpacing.sm)
 
                         TickerChartView(
                             pricePoints: core.chartPricePoints,
-                            isPositive: core.isPositive,
+                            isPositive: core.chartIsPositive,
                             selectedRange: $viewModel.selectedChartRange,
                             chartSettings: viewModel.chartSettings,
                             assetContext: .stock,
@@ -224,10 +226,14 @@ struct TickerDetailView: View {
             viewModel.stopLivePriceUpdates()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            if let status = viewModel.tickerData?.marketStatus,
-               MarketHoursUtil.shouldStreamLivePrice(for: status) {
-                viewModel.startLivePriceUpdates()
-            }
+            // UNCONDITIONAL. `tickerData.marketStatus` is the value captured at the LAST
+            // fetch, not the clock: open AAPL at 20:30 ET (closed), background overnight,
+            // foreground at 09:40 — the model still said closed, nothing re-armed, and the
+            // header kept last night's price under a "Market Closed" badge for the whole
+            // session until a pull-to-refresh. The poll loops gate every tick on
+            // `MarketHoursUtil.isMarketActive()` (the wall clock), so arming while closed
+            // costs one sleep per minute and the first live tick heals the badge.
+            viewModel.startLivePriceUpdates()
         }
         .backSwipe { handleBackTapped() }
         .sheet(isPresented: $showShareSheet) {

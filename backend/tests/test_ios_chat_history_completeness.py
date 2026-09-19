@@ -25,6 +25,7 @@ _VM = _IOS / "ViewModels/ChatViewModel.swift"
 _VIEW = _IOS / "Views/Screens/ChatHistoryView.swift"
 _MODELS = _IOS / "Models/ChatConversationModels.swift"
 _SCREEN = _IOS / "Views/Screens/AIChatScreen.swift"
+_ROW = _IOS / "Views/Molecules/ChatHistoryItemRow.swift"
 
 
 def _strip_comments(src: str) -> str:
@@ -160,3 +161,61 @@ def test_the_screen_wires_the_failure_flag_and_the_retry():
     call = call[:call.index("historyActionError")]
     assert "loadFailed: viewModel.historyLoadFailed" in call
     assert "onRetry: { viewModel.loadHistory() }" in call
+
+
+# ── 3. row density + the 3-dot target ────────────────────────────────────────
+#
+# Every session may be listed, but at ~140pt a row only four and a half of them
+# were on screen. The 3-dot's 44pt tap-target frame sat INSIDE the meta HStack and
+# made an 11pt caption line 44pt tall; it is a trailing overlay now, and the row
+# reserves that width so a truncated title never runs under the glyph. These pin
+# the shape that keeps the target at 44pt WITHOUT the row paying for it.
+
+
+def _row_label() -> str:
+    """The row Button's label — everything between `Button(action:` and `.buttonStyle`."""
+    body = _decl_block(_code(_ROW), "struct ChatHistoryItemRow")
+    start = body.index("Button(action:")
+    end = body.index(".buttonStyle(", start)
+    return body[start:end]
+
+
+def test_the_3_dot_is_an_overlay_not_a_meta_line_child():
+    body = _decl_block(_code(_ROW), "struct ChatHistoryItemRow")
+    label = _row_label()
+    assert "MoreOptionsButton" not in label, (
+        "the 3-dot is back inside the row label — its 44pt frame sets the meta line's "
+        "height again and the row grows ~30pt"
+    )
+    overlay_at = body.find(".overlay(alignment: .trailing)")
+    assert overlay_at != -1, "the 3-dot overlay is gone"
+    overlay = _decl_block(body[overlay_at:], ".overlay(alignment: .trailing)")
+    assert "MoreOptionsButton" in overlay
+    # The popup anchors under the tapped 3-dot; the anchor must ride with the button.
+    assert "anchorPreference(key: ChatRowMenuAnchorKey.self" in overlay
+
+
+def test_the_row_keeps_the_title_clear_of_the_3_dot_and_stays_tappable():
+    label = _row_label()
+    # Reserve the overlay's width on the trailing edge, and never let the row shrink
+    # below the 44pt target at small Dynamic Type sizes (slop is clipped by the parent).
+    assert ".padding(.trailing, HitSlop.minimumTarget)" in label
+    assert re.search(r"\.frame\([^)]*minHeight:\s*HitSlop\.minimumTarget", label), \
+        "the row no longer holds a 44pt minimum height"
+    # A Button hit-tests what its label DRAWS: the shape must come AFTER the padding
+    # and frame, or the trailing gap and the Spacer are dead.
+    shape_at = label.rindex(".contentShape(Rectangle())")
+    assert shape_at > label.rindex(".padding("), "contentShape must follow the padding"
+    assert shape_at > label.rindex(".frame("), "contentShape must follow the frame"
+
+
+def test_the_row_renders_the_title_and_not_the_answer_preview():
+    label = _row_label()
+    assert "Text(item.title)" in label
+    assert "item.preview" not in label, (
+        "the answer preview is back in the row — that is the 2-line block the compact "
+        "layout removed; search still reads `preview` from the model"
+    )
+    # The title stays one line: the density gain depends on it.
+    title = label[label.index("Text(item.title)"):]
+    assert ".lineLimit(1)" in title[:400]

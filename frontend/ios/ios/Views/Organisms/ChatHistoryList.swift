@@ -25,8 +25,10 @@ struct ChatHistoryList: View {
                         onSectionTap?(group.section)
                     }
                     .padding(.horizontal, AppSpacing.lg)
-                    .padding(.top, group.section == .today ? AppSpacing.md : AppSpacing.xl)
-                    .padding(.bottom, AppSpacing.sm)
+                    // Tight on purpose — the rows are compact now, and the header is an
+                    // 11pt caption; the old md/xl + sm read as a gap, not a section.
+                    .padding(.top, group.section == .today ? AppSpacing.sm : AppSpacing.lg)
+                    .padding(.bottom, AppSpacing.xs)
 
                     // Items in section
                     ForEach(group.items) { item in

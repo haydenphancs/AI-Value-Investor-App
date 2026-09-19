@@ -605,28 +605,93 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Load all user sessions for the history panel.
+    /// Page size for the history walk. The server caps `limit` at 100.
+    static let historyPageSize = 50
+    /// Hard ceiling on the walk (pages × `historyPageSize` rows) so a runaway `has_more`
+    /// can never loop forever; 20 pages = 1,000 sessions, far past any real account.
+    static let historyMaxPages = 20
+    /// The walk in flight. `loadHistory()` is called from `onAppear`, the history tap and
+    /// the retry notice, often back to back; a superseded walk must not publish over the
+    /// newer one or leave a stale failure flag on a fresh list (review finding).
+    private var historyLoadTask: Task<Void, Never>?
+
+    /// Load ALL of the user's sessions for the history panel, page by page.
+    ///
+    /// One `limit: 50` page used to be the whole fetch, so an account that grew past 50
+    /// sessions silently lost its oldest chats from the list (TestFlight 2026-09-16, E6:
+    /// the tester's account had 57). The walk continues while the server says `has_more`
+    /// (or, from an older backend that omits it, while a page comes back full), dedupes
+    /// by id (a chat that gets a message between two pages shifts the order), re-reads
+    /// page 0 after a multi-page walk (a session bumped to the top mid-walk would
+    /// otherwise be skipped), and publishes ONCE at the end so the panel never flickers
+    /// through partial lists.
+    ///
+    /// On failure the list already on screen is kept — stale beats blank — and
+    /// `historyLoadFailed` makes the panel SAY it is stale (`ChatHistoryView` renders a
+    /// retry notice above the list; it used to show the failed state only when the
+    /// list was empty, so a list that loaded once and then failed every refresh read
+    /// as the truth). A failure on page 2+ publishes the pages already fetched under
+    /// that same notice rather than discarding them.
     func loadHistory() {
         isLoadingHistory = true
         // Clear any previous failure so a retry can show the spinner, not the error.
         historyLoadFailed = false
+        historyLoadTask?.cancel()
 
-        Task {
+        historyLoadTask = Task { [weak self] in
+            guard let self else { return }
+            var all: [ChatSessionDTO] = []
+            var seen = Set<String>()
+            func absorb(_ page: [ChatSessionDTO]) {
+                for session in page where !seen.contains(session.id) {
+                    seen.insert(session.id)
+                    all.append(session)
+                }
+            }
             do {
                 print("📡 [ChatVM] Loading chat history...")
-                let response = try await APIClient.shared.request(
-                    endpoint: .listChatSessions(limit: 50, offset: 0),
-                    responseType: ChatSessionListDTO.self
-                )
+                var offset = 0
+                var pages = 0
+                while pages < Self.historyMaxPages {
+                    let response = try await APIClient.shared.request(
+                        endpoint: .listChatSessions(limit: Self.historyPageSize, offset: offset),
+                        responseType: ChatSessionListDTO.self
+                    )
+                    if Task.isCancelled { return }
+                    pages += 1
+                    absorb(response.sessions)
+                    let more = response.hasMore ?? (response.sessions.count >= Self.historyPageSize)
+                    if !more || response.sessions.isEmpty { break }
+                    offset += response.sessions.count
+                }
+                if pages > 1 {
+                    // A session that received a message during the walk moved UP into
+                    // page 0 after page 0 was read; the id dedup only covers the other
+                    // direction. One more read of the head closes it.
+                    let head = try await APIClient.shared.request(
+                        endpoint: .listChatSessions(limit: Self.historyPageSize, offset: 0),
+                        responseType: ChatSessionListDTO.self
+                    )
+                    if Task.isCancelled { return }
+                    absorb(head.sessions)
+                }
 
-                historySessions = response.sessions
-                historyGroups = groupSessionsByDate(response.sessions)
+                historySessions = all
+                historyGroups = groupSessionsByDate(all)
+                historyLoadFailed = false
                 isLoadingHistory = false
 
-                print("✅ [ChatVM] Loaded \(response.sessions.count) sessions")
+                print("✅ [ChatVM] Loaded \(all.count) sessions over \(pages) page(s)")
 
             } catch {
+                if Task.isCancelled { return }
                 print("❌ [ChatVM] Failed to load history: \(error)")
+                // Pages that DID arrive are worth showing: a stale-or-partial list under
+                // the notice beats the last list, or a blank.
+                if !all.isEmpty {
+                    historySessions = all
+                    historyGroups = groupSessionsByDate(all)
+                }
                 isLoadingHistory = false
                 // A FAILED load is not an empty account. Leaving both flags false
                 // rendered the "No conversations yet" empty state, which is
@@ -635,7 +700,9 @@ class ChatViewModel: ObservableObject {
                 //
                 // Deliberately NOT `errorMessage`: that drives the main chat's error
                 // banner, and a history-sheet failure must not paint an error over an
-                // otherwise-healthy conversation. Hence a separate flag.
+                // otherwise-healthy conversation. Hence a separate flag. `historyGroups`
+                // is deliberately NOT cleared: the last good list stays visible under
+                // the stale-list notice.
                 historyLoadFailed = true
             }
         }
@@ -1053,6 +1120,9 @@ class ChatViewModel: ObservableObject {
                             // Prefer the live frame: the `done` message carries the PERSISTED
                             // copy, which deliberately omits `balance`.
                             credit: turnCost ?? base.credit,
+                            // The explicit rebuild must carry the cut mark, or the live turn
+                            // renders complete while a history reload shows it cut short.
+                            truncated: base.truncated,
                             serverId: base.serverId
                         )
                     } else {

@@ -200,6 +200,11 @@ struct RichChatMessage: Identifiable {
     var suggestions: [String]?
     /// What this turn cost, when it cost less than usual. nil → render no chip.
     var credit: ChatTurnCostDTO?
+    /// The model CUT this answer (it hit its output ceiling mid-sentence) and the server's
+    /// continuation round did not complete it. The row renders a "cut short" notice and the
+    /// server sends the single "Continue your answer" chip in `suggestions`. Never true for
+    /// a user bubble, a legacy row, or a complete answer (TestFlight 2026-09-16, E1).
+    var truncated: Bool
     /// The backend row id (`chat_messages.id`) when this message came from the server —
     /// a history load or a `done` frame. nil for the optimistic user bubble and the live
     /// streaming bubble. The stream-failure reconcile keys on it: "is the last assistant
@@ -212,7 +217,7 @@ struct RichChatMessage: Identifiable {
     /// token without ForEach re-inserting the row.
     init(id: UUID = UUID(), role: ChatMessageRole, content: [RichContentType], timestamp: Date,
          thinking: ChatThinking? = nil, sources: [ChatSource]? = nil, suggestions: [String]? = nil,
-         credit: ChatTurnCostDTO? = nil, serverId: String? = nil) {
+         credit: ChatTurnCostDTO? = nil, truncated: Bool = false, serverId: String? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -221,6 +226,7 @@ struct RichChatMessage: Identifiable {
         self.sources = sources
         self.suggestions = suggestions
         self.credit = credit
+        self.truncated = truncated
         self.serverId = serverId
     }
 
@@ -842,6 +848,11 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
     let thinking: ChatThinking?
     /// What this turn cost. Present only when it cost less than usual (free / refunded).
     let credit: ChatTurnCostDTO?
+    /// `true` ONLY when the model cut this answer and no continuation completed it
+    /// (backend `ChatMessageResponse.truncated`, rich_content-backed). Absent on every
+    /// legacy row and every complete turn → nil → no notice. Optional so a backend that
+    /// predates the field decodes unchanged.
+    let truncated: Bool?
     let createdAt: String
 
     enum CodingKeys: String, CodingKey {
@@ -849,7 +860,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         case sessionId = "session_id"
         case role, content, widget, widgets, citations
         case tokensUsed = "tokens_used"
-        case sources, suggestions, thinking, credit
+        case sources, suggestions, thinking, credit, truncated
         case createdAt = "created_at"
     }
 
@@ -884,6 +895,7 @@ struct ChatMessageDTO: Codable, Identifiable, Sendable {
         return RichChatMessage(role: msgRole, content: richContent, timestamp: timestamp,
                                thinking: thinking, sources: sources?.filter { !$0.label.isEmpty },
                                suggestions: suggestions, credit: credit,
+                               truncated: msgRole == .assistant && (truncated ?? false),
                                serverId: id.isEmpty ? nil : id)
     }
 }
@@ -920,7 +932,18 @@ struct ChatCitationDTO: Codable, Sendable {
 /// Matches backend ``ChatSessionListResponse``.
 struct ChatSessionListDTO: Codable, Sendable {
     let sessions: [ChatSessionDTO]
+    /// The PAGE length (historical meaning), not the account's session count.
     let total: Int
+    /// Whether another page exists past this one (backend `has_more`). Optional: a
+    /// backend that predates it decodes as nil, and the client then falls back to the
+    /// page-length heuristic. Drives the history walk that lists EVERY session
+    /// (TestFlight 2026-09-16, E6).
+    let hasMore: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case sessions, total
+        case hasMore = "has_more"
+    }
 }
 
 /// Matches backend ``ChatHistoryResponse``.

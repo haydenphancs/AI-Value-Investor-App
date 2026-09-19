@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict TAovLsjwjgmhyPJaKuPrgQhnG59v03cfh9nzukZBMOtF2074LjZGYTxwobRgKqk
+\restrict hGjGqpoMzzAHZqXMCzwM9GSTGkKFOKuMVgMJ51rpT1SauYYu1Hfoz4DoReU6Te1
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -204,7 +204,8 @@ CREATE TYPE auth.factor_status AS ENUM (
 CREATE TYPE auth.factor_type AS ENUM (
     'totp',
     'webauthn',
-    'phone'
+    'phone',
+    'recovery_code'
 );
 
 
@@ -994,26 +995,6 @@ BEGIN
     RETURNING token_count INTO v_tokens;
 
     RETURN COALESCE(v_tokens, 0);
-END;
-$$;
-
-
---
--- Name: add_credit_transaction(uuid, integer, text, text, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) RETURNS bigint
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public', 'pg_temp'
-    SET row_security TO 'off'
-    AS $$
-DECLARE
-    v_id BIGINT;
-BEGIN
-    INSERT INTO public.credit_transactions (user_id, delta, reason, ref_id, balance_after)
-    VALUES (p_user_id, p_delta, p_reason, p_ref_id, p_balance_after)
-    RETURNING id INTO v_id;
-    RETURN v_id;
 END;
 $$;
 
@@ -3646,10 +3627,19 @@ begin
         '{}'
     ) from unnest(new.filters) f;
 
-    new.selected_columns = (
-        select array_agg(c order by c)
-        from unnest(new.selected_columns) c
-    );
+    -- Normalize selected_columns order so ARRAY['a','b'] and ARRAY['b','a'] are treated
+    -- as the same subscription group in apply_rls. Preserve an empty array as '{}'
+    -- ("primary keys only") so it stays distinct from NULL ("all columns"); array_agg
+    -- over an empty set would otherwise collapse '{}' back to NULL.
+    if new.selected_columns is not null then
+        new.selected_columns = coalesce(
+            (
+                select array_agg(c order by c)
+                from unnest(new.selected_columns) c
+            ),
+            '{}'::text[]
+        );
+    end if;
 
     return new;
 end;
@@ -3767,6 +3757,35 @@ $$;
 
 
 --
+-- Name: enforce_bucket_lifecycle_service_role(); Type: FUNCTION; Schema: storage; Owner: -
+--
+
+CREATE FUNCTION storage.enforce_bucket_lifecycle_service_role() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog'
+    AS $$
+BEGIN
+  IF current_user::text IS DISTINCT FROM TG_ARGV[0]
+     AND (
+       OLD.lifecycle_configuration IS DISTINCT FROM NEW.lifecycle_configuration
+       OR OLD.lifecycle_configuration_generation IS DISTINCT FROM NEW.lifecycle_configuration_generation
+     ) THEN
+    -- AFTER runs only after caller RLS has accepted the proposed row. The API
+    -- recognizes this specific error after rolling back its permission probe;
+    -- direct non-service writes still fail and cannot persist the change.
+    RAISE EXCEPTION 'bucket control columns may only be changed by the configured storage service role'
+      USING ERRCODE = 'PST01',
+            SCHEMA = TG_TABLE_SCHEMA,
+            TABLE = TG_TABLE_NAME,
+            CONSTRAINT = TG_NAME;
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+
+--
 -- Name: enforce_bucket_name_length(); Type: FUNCTION; Schema: storage; Owner: -
 --
 
@@ -3845,80 +3864,119 @@ CREATE FUNCTION storage.get_common_prefix(p_key text, p_prefix text, p_delimiter
     LANGUAGE sql IMMUTABLE
     AS $$
 SELECT CASE
-    WHEN position(p_delimiter IN substring(p_key FROM length(p_prefix) + 1)) > 0
-    THEN left(p_key, length(p_prefix) + position(p_delimiter IN substring(p_key FROM length(p_prefix) + 1)))
+    WHEN p_delimiter <> ''
+         AND position(p_delimiter IN substring(p_key FROM length(p_prefix) + 1)) > 0
+    THEN left(
+        p_key,
+        length(p_prefix)
+            + position(p_delimiter IN substring(p_key FROM length(p_prefix) + 1))
+            + length(p_delimiter) - 1
+    )
     ELSE NULL
 END;
 $$;
 
 
 --
--- Name: get_size_by_bucket(); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: get_size_by_bucket(text, text); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.get_size_by_bucket() RETURNS TABLE(size bigint, bucket_id text)
+CREATE FUNCTION storage.get_size_by_bucket(noncurrent_versions text DEFAULT 'include'::text, delete_markers text DEFAULT 'include'::text) RETURNS TABLE(size bigint, bucket_id text)
     LANGUAGE plpgsql STABLE
     AS $$
 BEGIN
+    -- COALESCE first: NULL NOT IN (...) evaluates to NULL (not TRUE), so a
+    -- bare NOT IN check silently leaves an explicit NULL argument unreset.
+    noncurrent_versions := COALESCE(noncurrent_versions, 'include');
+    delete_markers := COALESCE(delete_markers, 'include');
+    IF noncurrent_versions NOT IN ('exclude', 'only', 'include') THEN
+        noncurrent_versions := 'include';
+    END IF;
+    IF delete_markers NOT IN ('exclude', 'only', 'include') THEN
+        delete_markers := 'include';
+    END IF;
+
     return query
         select sum((metadata->>'size')::bigint)::bigint as size, obj.bucket_id
         from "storage".objects as obj
+        where (noncurrent_versions != 'exclude' OR obj.archived_at IS NULL)
+          and (noncurrent_versions != 'only' OR obj.archived_at IS NOT NULL)
+          and (delete_markers != 'exclude' OR NOT obj.is_delete_marker)
+          and (delete_markers != 'only' OR obj.is_delete_marker)
         group by obj.bucket_id;
 END
 $$;
 
 
 --
--- Name: list_multipart_uploads_with_delimiter(text, text, text, integer, text, text); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: list_multipart_uploads_with_delimiter(text, text, text, integer, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.list_multipart_uploads_with_delimiter(bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, next_key_token text DEFAULT ''::text, next_upload_token text DEFAULT ''::text) RETURNS TABLE(key text, id text, created_at timestamp with time zone)
-    LANGUAGE plpgsql
+CREATE FUNCTION storage.list_multipart_uploads_with_delimiter(bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, next_key_token text DEFAULT ''::text, next_upload_token text DEFAULT ''::text, raw_prefix_param text DEFAULT NULL::text) RETURNS TABLE(key text, id text, created_at timestamp with time zone)
+    LANGUAGE sql STABLE
     AS $_$
-BEGIN
-    RETURN QUERY EXECUTE
-        'SELECT DISTINCT ON(key COLLATE "C") * from (
-            SELECT
-                CASE
-                    WHEN position($2 IN substring(key from length($1) + 1)) > 0 THEN
-                        substring(key from 1 for length($1) + position($2 IN substring(key from length($1) + 1)))
-                    ELSE
-                        key
-                END AS key, id, created_at
-            FROM
-                storage.s3_multipart_uploads
-            WHERE
-                bucket_id = $5 AND
-                key ILIKE $1 || ''%'' AND
-                CASE
-                    WHEN $4 != '''' AND $6 = '''' THEN
-                        CASE
-                            WHEN position($2 IN substring(key from length($1) + 1)) > 0 THEN
-                                substring(key from 1 for length($1) + position($2 IN substring(key from length($1) + 1))) COLLATE "C" > $4
-                            ELSE
-                                key COLLATE "C" > $4
-                            END
-                    ELSE
-                        true
-                END AND
-                CASE
-                    WHEN $6 != '''' THEN
-                        id COLLATE "C" > $6
-                    ELSE
-                        true
-                    END
-            ORDER BY
-                key COLLATE "C" ASC, created_at ASC) as e order by key COLLATE "C" LIMIT $3'
-        USING prefix_param, delimiter_param, max_keys, next_key_token, bucket_id, next_upload_token;
-END;
+WITH candidates AS (
+    SELECT
+        upload.key AS object_key,
+        CASE
+            WHEN position($3 IN substring(upload.key FROM length(coalesce($7, $2)) + 1)) > 0
+            THEN left(
+                upload.key,
+                length(coalesce($7, $2))
+                    + position($3 IN substring(upload.key FROM length(coalesce($7, $2)) + 1))
+                    + length($3) - 1
+            )
+            ELSE upload.key
+        END AS result_key,
+        upload.id,
+        upload.created_at,
+        position($3 IN substring(upload.key FROM length(coalesce($7, $2)) + 1)) > 0 AS is_common_prefix
+    FROM storage.s3_multipart_uploads AS upload
+    WHERE upload.bucket_id = $1
+      AND upload.key COLLATE "C" LIKE $2 || '%'
+), filtered AS (
+    SELECT candidate.*
+    FROM candidates AS candidate
+    WHERE $5 = ''
+       OR candidate.result_key COLLATE "C" > $5
+       OR (
+           candidate.result_key COLLATE "C" = $5
+           AND NOT candidate.is_common_prefix
+           AND $6 <> ''
+           -- A completed or aborted marker repeats the remaining same-key uploads.
+           AND COALESCE(
+               (candidate.created_at, candidate.id COLLATE "C") > (
+                   SELECT marker.created_at, marker.id COLLATE "C"
+                   FROM storage.s3_multipart_uploads AS marker
+                   WHERE marker.bucket_id = $1
+                     AND marker.key COLLATE "C" = $5
+                     AND marker.id = $6
+               ),
+               TRUE
+           )
+       )
+), ranked AS (
+    SELECT
+        filtered.*,
+        row_number() OVER (
+            PARTITION BY filtered.result_key COLLATE "C"
+            ORDER BY filtered.created_at, filtered.id COLLATE "C"
+        ) AS prefix_rank
+    FROM filtered
+)
+SELECT ranked.result_key, ranked.id, ranked.created_at
+FROM ranked
+WHERE NOT ranked.is_common_prefix OR ranked.prefix_rank = 1
+ORDER BY ranked.result_key COLLATE "C", ranked.created_at, ranked.id COLLATE "C"
+LIMIT $4;
 $_$;
 
 
 --
--- Name: list_objects_with_delimiter(text, text, text, integer, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: list_objects_with_delimiter(text, text, text, integer, text, text, text, text, text, timestamp with time zone, text); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.list_objects_with_delimiter(_bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, start_after text DEFAULT ''::text, next_token text DEFAULT ''::text, sort_order text DEFAULT 'asc'::text) RETURNS TABLE(name text, id uuid, metadata jsonb, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone)
+CREATE FUNCTION storage.list_objects_with_delimiter(_bucket_id text, prefix_param text, delimiter_param text, max_keys integer DEFAULT 100, start_after text DEFAULT ''::text, next_token text DEFAULT ''::text, sort_order text DEFAULT 'asc'::text, noncurrent_versions text DEFAULT 'exclude'::text, delete_markers text DEFAULT 'exclude'::text, next_token_archived_at timestamp with time zone DEFAULT NULL::timestamp with time zone, next_token_version text DEFAULT ''::text) RETURNS TABLE(name text, id uuid, metadata jsonb, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, version text, archived_at timestamp with time zone, is_delete_marker boolean, is_versioned boolean)
     LANGUAGE plpgsql STABLE
     AS $_$
 DECLARE
@@ -3930,15 +3988,38 @@ DECLARE
     v_is_asc BOOLEAN;
     v_prefix TEXT;
     v_start TEXT;
+    v_start_relative TEXT;
     v_upper_bound TEXT;
     v_file_batch_size INT;
+    v_version_filter TEXT;
 
-    -- Seek state
+    -- true when noncurrent_versions can return >1 row per name; keeps them
+    -- ordered most-recent-first and lets pagination resume mid-key
+    v_multi_row BOOLEAN;
+    v_name_order TEXT;
+    v_exact_range_predicate TEXT;
+    v_strict_range_predicate TEXT;
+    v_inclusive_range_predicate TEXT;
+
+    -- Seek state for the current name. archived_at is normalized to JavaScript's
+    -- millisecond precision and version breaks ties within the same millisecond.
+    -- Current rows use 'infinity'; NULL means no tiebreak has been established.
     v_next_seek TEXT;
+    v_next_seek_at TIMESTAMPTZ;
+    v_next_seek_version TEXT;
+    v_next_seek_strict BOOLEAN := false;
+    v_cursor_is_folder BOOLEAN;
     v_count INT := 0;
+    v_previous_seek TEXT;
+    v_previous_seek_at TIMESTAMPTZ;
+    v_previous_seek_version TEXT;
+    v_previous_count INT;
 
     -- Dynamic SQL for batch query only
     v_batch_query TEXT;
+    v_batch_query_strict TEXT;
+    v_delete_marker_peek_query TEXT;
+    v_delete_marker_peek_query_strict TEXT;
 
 BEGIN
     -- ========================================================================
@@ -3948,36 +4029,204 @@ BEGIN
     v_prefix := coalesce(prefix_param, '');
     v_start := CASE WHEN coalesce(next_token, '') <> '' THEN next_token ELSE coalesce(start_after, '') END;
     v_file_batch_size := LEAST(GREATEST(max_keys * 2, 100), 1000);
+    v_next_seek_at := NULL;
+    v_next_seek_version := '';
+
+    -- COALESCE first: NULL NOT IN (...) evaluates to NULL (not TRUE), so a
+    -- bare NOT IN check silently leaves an explicit NULL argument unreset.
+    noncurrent_versions := COALESCE(noncurrent_versions, 'exclude');
+    delete_markers := COALESCE(delete_markers, 'exclude');
+    IF noncurrent_versions NOT IN ('exclude', 'only', 'include') THEN
+        noncurrent_versions := 'exclude';
+    END IF;
+    IF delete_markers NOT IN ('exclude', 'only', 'include') THEN
+        delete_markers := 'exclude';
+    END IF;
+
+    v_multi_row := noncurrent_versions IN ('only', 'include');
+    v_name_order := CASE WHEN v_is_asc THEN 'ASC' ELSE 'DESC' END;
+
+    v_version_filter := '';
+    IF noncurrent_versions = 'exclude' THEN
+        v_version_filter := v_version_filter || ' AND o.archived_at IS NULL';
+    ELSIF noncurrent_versions = 'only' THEN
+        v_version_filter := v_version_filter || ' AND o.archived_at IS NOT NULL';
+    END IF;
+    IF delete_markers = 'exclude' THEN
+        v_version_filter := v_version_filter || ' AND NOT o.is_delete_marker';
+    ELSIF delete_markers = 'only' THEN
+        v_version_filter := v_version_filter || ' AND o.is_delete_marker';
+    END IF;
 
     -- Calculate upper bound for prefix filtering (bytewise, using COLLATE "C")
     IF v_prefix = '' THEN
         v_upper_bound := NULL;
-    ELSIF right(v_prefix, 1) = delimiter_param THEN
-        v_upper_bound := left(v_prefix, -1) || chr(ascii(delimiter_param) + 1);
     ELSE
         v_upper_bound := left(v_prefix, -1) || chr(ascii(right(v_prefix, 1)) + 1);
     END IF;
 
-    -- Build batch query (dynamic SQL - called infrequently, amortized over many rows)
-    IF v_is_asc THEN
-        IF v_upper_bound IS NOT NULL THEN
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND o.name COLLATE "C" >= $2 ' ||
-                'AND o.name COLLATE "C" < $3 ORDER BY o.name COLLATE "C" ASC LIMIT $4';
+    -- Keep caller-provided cursors inside the requested prefix range.
+    IF v_start <> '' AND v_upper_bound IS NOT NULL THEN
+        IF v_is_asc THEN
+            IF v_start COLLATE "C" < v_prefix COLLATE "C" THEN
+                v_start := '';
+            ELSIF v_start COLLATE "C" >= v_upper_bound COLLATE "C" THEN
+                RETURN;
+            END IF;
         ELSE
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND o.name COLLATE "C" >= $2 ' ||
-                'ORDER BY o.name COLLATE "C" ASC LIMIT $4';
+            IF v_start COLLATE "C" < v_prefix COLLATE "C" THEN
+                RETURN;
+            ELSIF v_start COLLATE "C" >= v_upper_bound COLLATE "C" THEN
+                v_start := '';
+            END IF;
+        END IF;
+    END IF;
+
+    v_start_relative := substring(v_start FROM length(v_prefix) + 1);
+
+    -- Direction affects only the indexed name range and its ordering. Cursor
+    -- state transitions and within-key version ordering stay shared.
+    IF v_is_asc THEN
+        v_exact_range_predicate := 'TRUE';
+        v_strict_range_predicate := 'o.name COLLATE "C" > $2';
+        v_inclusive_range_predicate := 'o.name COLLATE "C" >= $2';
+        IF v_upper_bound IS NOT NULL THEN
+            v_exact_range_predicate := 'o.name COLLATE "C" < $3';
+            v_strict_range_predicate := v_strict_range_predicate || ' AND o.name COLLATE "C" < $3';
+            v_inclusive_range_predicate := v_inclusive_range_predicate || ' AND o.name COLLATE "C" < $3';
         END IF;
     ELSE
-        IF v_upper_bound IS NOT NULL THEN
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND o.name COLLATE "C" < $2 ' ||
-                'AND o.name COLLATE "C" >= $3 ORDER BY o.name COLLATE "C" DESC LIMIT $4';
-        ELSE
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND o.name COLLATE "C" < $2 ' ||
-                'ORDER BY o.name COLLATE "C" DESC LIMIT $4';
+        v_exact_range_predicate := 'TRUE';
+        v_strict_range_predicate := 'o.name COLLATE "C" < $2';
+        v_inclusive_range_predicate := 'o.name COLLATE "C" < $2';
+        IF v_prefix <> '' THEN
+            v_exact_range_predicate := 'o.name COLLATE "C" >= $3';
+            v_strict_range_predicate := v_strict_range_predicate || ' AND o.name COLLATE "C" >= $3';
+            v_inclusive_range_predicate := v_inclusive_range_predicate || ' AND o.name COLLATE "C" >= $3';
+        END IF;
+    END IF;
+
+    -- Build batch query (dynamic SQL - called infrequently, amortized over many rows)
+    -- The multi-row order matches the externally serialized cursor exactly:
+    -- archived_at at millisecond precision, then version as the final tiebreak.
+    --
+    -- When v_multi_row, the seek is a keyset tuple comparison ("name > $2 OR
+    -- (name = $2 AND tiebreak)") - Postgres won't split that OR into indexable
+    -- form (confirmed even with fully literal values), so as one WHERE clause
+    -- it forces a full bucket scan filtered row-by-row. Splitting it into two
+    -- independently-indexable branches (exact name match with the tiebreak
+    -- filter, vs. strictly-past names) combined with UNION ALL lets each
+    -- branch keep name as a real index condition; the outer ORDER BY/LIMIT
+    -- re-merges them into the same page the single query used to produce.
+    IF v_multi_row THEN
+        v_batch_query := format(
+            $sql$
+            SELECT *
+            FROM (
+                (
+                    SELECT o.name, o.id, o.updated_at, o.created_at,
+                           o.last_accessed_at, o.metadata, o.version,
+                           o.archived_at, o.is_delete_marker, o.is_versioned
+                    FROM storage.objects o
+                    WHERE o.bucket_id = $1
+                      AND o.name COLLATE "C" = $2
+                      AND %s
+                      AND NOT $7::boolean
+                      AND (
+                          $5::timestamptz IS NULL
+                          OR COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) < $5
+                          OR (
+                              COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) = $5
+                              AND COALESCE(o.version, '') > $6
+                          )
+                      )
+                      %s
+                    ORDER BY
+                        COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC,
+                        COALESCE(o.version, '') ASC
+                    LIMIT $4
+                )
+                UNION ALL
+                (
+                    SELECT o.name, o.id, o.updated_at, o.created_at,
+                           o.last_accessed_at, o.metadata, o.version,
+                           o.archived_at, o.is_delete_marker, o.is_versioned
+                    FROM storage.objects o
+                    WHERE o.bucket_id = $1
+                      AND %s
+                      %s
+                    ORDER BY
+                        o.name COLLATE "C" %s,
+                        COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC,
+                        COALESCE(o.version, '') ASC
+                    LIMIT $4
+                )
+            ) sub
+            ORDER BY
+                sub.name COLLATE "C" %s,
+                COALESCE(date_trunc('milliseconds', sub.archived_at), 'infinity'::timestamptz) DESC,
+                COALESCE(sub.version, '') ASC
+            LIMIT $4
+            $sql$,
+            v_exact_range_predicate,
+            v_version_filter,
+            v_strict_range_predicate,
+            v_version_filter,
+            v_name_order,
+            v_name_order
+        );
+    ELSE
+        v_batch_query := format(
+            $sql$
+            SELECT o.name, o.id, o.updated_at, o.created_at,
+                   o.last_accessed_at, o.metadata, o.version,
+                   o.archived_at, o.is_delete_marker, o.is_versioned
+            FROM storage.objects o
+            WHERE o.bucket_id = $1
+              AND %s
+              %s
+            ORDER BY o.name COLLATE "C" %s, o.archived_at DESC
+            LIMIT $4
+            $sql$,
+            v_inclusive_range_predicate,
+            v_version_filter,
+            v_name_order
+        );
+
+        -- Strict counterpart of the query above: used once the single-row
+        -- ASC batch advance (below) has left v_next_seek pointing at the
+        -- last row already emitted, so an inclusive predicate would
+        -- re-match it forever. Only single-row mode ever sets strict mode,
+        -- so this variant is never needed when v_multi_row.
+        v_batch_query_strict := format(
+            $sql$
+            SELECT o.name, o.id, o.updated_at, o.created_at,
+                   o.last_accessed_at, o.metadata, o.version,
+                   o.archived_at, o.is_delete_marker, o.is_versioned
+            FROM storage.objects o
+            WHERE o.bucket_id = $1
+              AND %s
+              %s
+            ORDER BY o.name COLLATE "C" %s, o.archived_at DESC
+            LIMIT $4
+            $sql$,
+            v_strict_range_predicate,
+            v_version_filter,
+            v_name_order
+        );
+    END IF;
+
+    -- The static peek predicates cannot use the partial delete-marker index
+    -- once PL/pgSQL switches to a generic plan because whether
+    -- is_delete_marker is required remains parameter-dependent. Reuse the
+    -- already-specialized batch query with a one-row limit for this sparse
+    -- filter so the plan sees a literal `o.is_delete_marker` predicate.
+    IF delete_markers = 'only' THEN
+        v_delete_marker_peek_query :=
+            'SELECT marker_page.name FROM (' || v_batch_query || ') marker_page LIMIT 1';
+        IF NOT v_multi_row THEN
+            v_delete_marker_peek_query_strict :=
+                'SELECT marker_page.name FROM (' || v_batch_query_strict || ') marker_page LIMIT 1';
         END IF;
     END IF;
 
@@ -3988,20 +4237,18 @@ BEGIN
         IF v_is_asc THEN
             v_next_seek := v_prefix;
         ELSE
-            -- DESC without cursor: find the last item in range
-            IF v_upper_bound IS NOT NULL THEN
-                SELECT o.name INTO v_next_seek FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" >= v_prefix AND o.name COLLATE "C" < v_upper_bound
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
-            ELSIF v_prefix <> '' THEN
-                SELECT o.name INTO v_next_seek FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" >= v_prefix
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
-            ELSE
-                SELECT o.name INTO v_next_seek FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
-            END IF;
+            -- DESC without cursor performs one specialized initial seek so
+            -- partial current-version and delete-marker indexes remain available.
+            EXECUTE format(
+                'SELECT o.name FROM storage.objects o WHERE o.bucket_id = $1%s%s ORDER BY o.name COLLATE "C" DESC LIMIT 1',
+                CASE WHEN v_upper_bound IS NOT NULL
+                    THEN ' AND o.name COLLATE "C" >= $2 AND o.name COLLATE "C" < $3'
+                    ELSE ''
+                END,
+                v_version_filter
+            )
+            INTO v_next_seek
+            USING _bucket_id, v_prefix, v_upper_bound;
 
             IF v_next_seek IS NOT NULL THEN
                 v_next_seek := v_next_seek || delimiter_param;
@@ -4010,23 +4257,38 @@ BEGIN
             END IF;
         END IF;
     ELSE
-        -- Cursor provided: determine if it refers to a folder or leaf
-        IF EXISTS (
-            SELECT 1 FROM storage.objects o
-            WHERE o.bucket_id = _bucket_id
-              AND o.name COLLATE "C" LIKE v_start || delimiter_param || '%'
-            LIMIT 1
-        ) THEN
-            -- Cursor refers to a folder
+        -- Folder continuation tokens retain their trailing delimiter. A
+        -- delimiter-less startAfter is always a literal key boundary.
+        v_cursor_is_folder := delimiter_param <> ''
+            AND v_start_relative <> ''
+            AND right(v_start_relative, length(delimiter_param)) = delimiter_param;
+
+        IF v_cursor_is_folder THEN
+            v_next_seek := CASE
+                WHEN right(v_start, length(delimiter_param)) = delimiter_param
+                    THEN v_start
+                ELSE v_start || delimiter_param
+            END;
             IF v_is_asc THEN
-                v_next_seek := v_start || chr(ascii(delimiter_param) + 1);
-            ELSE
-                v_next_seek := v_start || delimiter_param;
+                v_next_seek := left(v_next_seek, -1)
+                    || chr(ascii(right(v_next_seek, 1)) + 1);
             END IF;
+            v_next_seek_strict := NOT v_is_asc;
         ELSE
-            -- Cursor refers to a leaf object
-            IF v_is_asc THEN
-                v_next_seek := v_start || delimiter_param;
+            -- leaf object: when v_multi_row, stay on v_start with the
+            -- caller-supplied tiebreak so a page boundary mid-key resumes
+            -- that key's remaining rows instead of skipping them. Truncate
+            -- to milliseconds like every other v_next_seek_at assignment -
+            -- harmless today since object.ts's cursor always round-trips
+            -- through JS Date first, but this shouldn't rely on that.
+            IF v_multi_row THEN
+                v_next_seek := v_start;
+                v_next_seek_at := date_trunc('milliseconds', next_token_archived_at);
+                v_next_seek_version := coalesce(next_token_version, '');
+                v_next_seek_strict := coalesce(next_token, '') = '';
+            ELSIF v_is_asc THEN
+                v_next_seek := v_start;
+                v_next_seek_strict := true;
             ELSE
                 v_next_seek := v_start;
             END IF;
@@ -4040,30 +4302,196 @@ BEGIN
     LOOP
         EXIT WHEN v_count >= max_keys;
 
+        v_previous_seek := v_next_seek;
+        v_previous_seek_at := v_next_seek_at;
+        v_previous_seek_version := v_next_seek_version;
+        v_previous_count := v_count;
+
         -- STEP 1: PEEK using STATIC SQL (plan cached, very fast)
-        IF v_is_asc THEN
-            IF v_upper_bound IS NOT NULL THEN
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" >= v_next_seek AND o.name COLLATE "C" < v_upper_bound
-                ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+        -- v_multi_row is branched here (rather than folded into the WHERE
+        -- clause as a bound parameter) so each concrete query keeps an
+        -- unconditional seek predicate - once PL/pgSQL switches to its
+        -- cached generic plan (after 5 calls), a parameter-gated
+        -- "(NOT v_multi_row AND name >= $x) OR (v_multi_row AND ...)"
+        -- predicate stops the planner from using name as an index
+        -- condition at all, degrading every subsequent peek to a full
+        -- index scan filtered row-by-row instead of a bounded range scan.
+        -- v_multi_row's seek predicate is a keyset tuple comparison
+        -- ("name > x OR (name = x AND tiebreak)") - Postgres does not
+        -- split this OR into indexable form even with fully literal
+        -- values, so it falls back to a full scan filtered row-by-row.
+        -- Splitting it into two independently-indexable branches (exact
+        -- name match with the tiebreak filter, vs. strictly-past name)
+        -- combined with UNION ALL lets each branch keep name as a real
+        -- index condition; the outer ORDER BY/LIMIT picks whichever of
+        -- the (at most 2) rows sorts first.
+        IF delete_markers = 'only' THEN
+            EXECUTE CASE WHEN v_next_seek_strict AND NOT v_multi_row
+                THEN v_delete_marker_peek_query_strict
+                ELSE v_delete_marker_peek_query
+            END
+                INTO v_peek_name
+                USING _bucket_id, v_next_seek,
+                    CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix) ELSE v_prefix END,
+                    1, v_next_seek_at, v_next_seek_version, v_next_seek_strict;
+        ELSIF v_multi_row THEN
+            IF v_is_asc THEN
+                IF v_upper_bound IS NOT NULL THEN
+                    SELECT sub.name INTO v_peek_name FROM (
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" = v_next_seek
+                           AND o.name COLLATE "C" < v_upper_bound
+                           AND NOT v_next_seek_strict
+                           AND (v_next_seek_at IS NULL
+                                OR COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) < v_next_seek_at
+                                OR (COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) = v_next_seek_at
+                                    AND COALESCE(o.version, '') > v_next_seek_version))
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC, COALESCE(o.version, '') ASC LIMIT 1)
+                        UNION ALL
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" > v_next_seek AND o.name COLLATE "C" < v_upper_bound
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY o.name COLLATE "C" ASC LIMIT 1)
+                    ) sub ORDER BY sub.name COLLATE "C" ASC LIMIT 1;
+                ELSE
+                    SELECT sub.name INTO v_peek_name FROM (
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" = v_next_seek
+                           AND NOT v_next_seek_strict
+                           AND (v_next_seek_at IS NULL
+                                OR COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) < v_next_seek_at
+                                OR (COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) = v_next_seek_at
+                                    AND COALESCE(o.version, '') > v_next_seek_version))
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC, COALESCE(o.version, '') ASC LIMIT 1)
+                        UNION ALL
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" > v_next_seek
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY o.name COLLATE "C" ASC LIMIT 1)
+                    ) sub ORDER BY sub.name COLLATE "C" ASC LIMIT 1;
+                END IF;
             ELSE
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" >= v_next_seek
-                ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+                IF v_upper_bound IS NOT NULL THEN
+                    SELECT sub.name INTO v_peek_name FROM (
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" = v_next_seek
+                           AND o.name COLLATE "C" >= v_prefix
+                           AND NOT v_next_seek_strict
+                           AND (v_next_seek_at IS NULL
+                                OR COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) < v_next_seek_at
+                                OR (COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) = v_next_seek_at
+                                    AND COALESCE(o.version, '') > v_next_seek_version))
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC, COALESCE(o.version, '') ASC LIMIT 1)
+                        UNION ALL
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" < v_next_seek AND o.name COLLATE "C" >= v_prefix
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY o.name COLLATE "C" DESC LIMIT 1)
+                    ) sub ORDER BY sub.name COLLATE "C" DESC LIMIT 1;
+                ELSE
+                    SELECT sub.name INTO v_peek_name FROM (
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" = v_next_seek
+                           AND NOT v_next_seek_strict
+                           AND (v_next_seek_at IS NULL
+                                OR COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) < v_next_seek_at
+                                OR (COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) = v_next_seek_at
+                                    AND COALESCE(o.version, '') > v_next_seek_version))
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY COALESCE(date_trunc('milliseconds', o.archived_at), 'infinity'::timestamptz) DESC, COALESCE(o.version, '') ASC LIMIT 1)
+                        UNION ALL
+                        (SELECT o.name FROM storage.objects o
+                         WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" < v_next_seek
+                           AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                           AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                           AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                           AND (delete_markers != 'only' OR o.is_delete_marker)
+                         ORDER BY o.name COLLATE "C" DESC LIMIT 1)
+                    ) sub ORDER BY sub.name COLLATE "C" DESC LIMIT 1;
+                END IF;
             END IF;
         ELSE
-            IF v_upper_bound IS NOT NULL THEN
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" < v_next_seek AND o.name COLLATE "C" >= v_prefix
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
-            ELSIF v_prefix <> '' THEN
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" < v_next_seek AND o.name COLLATE "C" >= v_prefix
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
+            -- Single-row mode is always noncurrent_versions='exclude'. Keep
+            -- this predicate literal so generic plans use the current index.
+            IF v_is_asc THEN
+                IF v_next_seek_strict AND v_upper_bound IS NOT NULL THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" > v_next_seek
+                      AND o.name COLLATE "C" < v_upper_bound
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+                ELSIF v_next_seek_strict THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" > v_next_seek
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+                ELSIF v_upper_bound IS NOT NULL THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" >= v_next_seek
+                      AND o.name COLLATE "C" < v_upper_bound
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+                ELSE
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" >= v_next_seek
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" ASC LIMIT 1;
+                END IF;
             ELSE
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = _bucket_id AND o.name COLLATE "C" < v_next_seek
-                ORDER BY o.name COLLATE "C" DESC LIMIT 1;
+                IF v_upper_bound IS NOT NULL THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" < v_next_seek
+                      AND o.name COLLATE "C" >= v_prefix
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" DESC LIMIT 1;
+                ELSE
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = _bucket_id
+                      AND o.name COLLATE "C" < v_next_seek
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                      AND (delete_markers != 'only' OR o.is_delete_marker)
+                    ORDER BY o.name COLLATE "C" DESC LIMIT 1;
+                END IF;
             END IF;
         END IF;
 
@@ -4074,33 +4502,53 @@ BEGIN
 
         IF v_common_prefix IS NOT NULL THEN
             -- FOLDER: Emit and skip to next folder (no heap access needed)
-            name := rtrim(v_common_prefix, delimiter_param);
+            name := v_common_prefix;
             id := NULL;
             updated_at := NULL;
             created_at := NULL;
             last_accessed_at := NULL;
             metadata := NULL;
+            version := NULL;
+            archived_at := NULL;
+            is_delete_marker := NULL;
+            is_versioned := NULL;
             RETURN NEXT;
             v_count := v_count + 1;
 
             -- Advance seek past the folder range
             IF v_is_asc THEN
-                v_next_seek := left(v_common_prefix, -1) || chr(ascii(delimiter_param) + 1);
+                v_next_seek := left(v_common_prefix, -1)
+                    || chr(ascii(right(v_common_prefix, 1)) + 1);
             ELSE
                 v_next_seek := v_common_prefix;
             END IF;
+            v_next_seek_at := NULL;
+            v_next_seek_version := '';
+            v_next_seek_strict := NOT v_is_asc;
         ELSE
             -- FILE: Batch fetch using DYNAMIC SQL (overhead amortized over many rows)
             -- For ASC: upper_bound is the exclusive upper limit (< condition)
             -- For DESC: prefix is the inclusive lower limit (>= condition)
-            FOR v_current IN EXECUTE v_batch_query USING _bucket_id, v_next_seek,
-                CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix) ELSE v_prefix END, v_file_batch_size
+            FOR v_current IN EXECUTE CASE WHEN v_next_seek_strict AND NOT v_multi_row THEN v_batch_query_strict ELSE v_batch_query END
+                USING _bucket_id, v_next_seek,
+                CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix) ELSE v_prefix END, v_file_batch_size, v_next_seek_at, v_next_seek_version,
+                v_next_seek_strict
             LOOP
                 v_common_prefix := storage.get_common_prefix(v_current.name, v_prefix, delimiter_param);
 
                 IF v_common_prefix IS NOT NULL THEN
-                    -- Hit a folder: exit batch, let peek handle it
-                    v_next_seek := v_current.name;
+                    -- Hit a folder: exit batch, let peek handle it. Reset
+                    -- strict mode too it may have been set by an earlier
+                    -- row in this same batch (see the single-row ASC advance
+                    -- below), and v_next_seek here is the folder-triggering
+                    -- row's own name, which the next peek must find inclusively.
+                    v_next_seek := CASE
+                        WHEN v_is_asc THEN v_current.name
+                        ELSE v_current.name || delimiter_param
+                    END;
+                    v_next_seek_at := NULL;
+                    v_next_seek_version := '';
+                    v_next_seek_strict := false;
                     EXIT;
                 END IF;
 
@@ -4111,18 +4559,43 @@ BEGIN
                 created_at := v_current.created_at;
                 last_accessed_at := v_current.last_accessed_at;
                 metadata := v_current.metadata;
+                version := v_current.version;
+                archived_at := v_current.archived_at;
+                is_delete_marker := v_current.is_delete_marker;
+                is_versioned := v_current.is_versioned;
                 RETURN NEXT;
                 v_count := v_count + 1;
 
-                -- Advance seek past this file
-                IF v_is_asc THEN
-                    v_next_seek := v_current.name || delimiter_param;
+                -- when v_multi_row, stay on this name and record its
+                -- archived_at as the new tiebreak so remaining rows for the
+                -- same key are picked up before moving to the next name
+                IF v_multi_row THEN
+                    v_next_seek := v_current.name;
+                    v_next_seek_at := COALESCE(date_trunc('milliseconds', v_current.archived_at), 'infinity'::timestamptz);
+                    v_next_seek_version := COALESCE(v_current.version, '');
+                    v_next_seek_strict := false;
+                ELSIF v_is_asc THEN
+                    -- Appending the delimiter as a fake lexical successor
+                    -- would skip a real key like `name || '!'` (or any
+                    -- character sorting below the delimiter), which sorts
+                    -- between `name` and `name || delimiter`. Track the real
+                    -- name and mark the next comparison strict instead.
+                    v_next_seek := v_current.name;
+                    v_next_seek_strict := true;
                 ELSE
                     v_next_seek := v_current.name;
                 END IF;
 
                 EXIT WHEN v_count >= max_keys;
             END LOOP;
+        END IF;
+
+        IF v_count = v_previous_count
+           AND v_next_seek IS NOT DISTINCT FROM v_previous_seek
+           AND v_next_seek_at IS NOT DISTINCT FROM v_previous_seek_at
+           AND v_next_seek_version IS NOT DISTINCT FROM v_previous_seek_version THEN
+            RAISE EXCEPTION 'storage.list_objects_with_delimiter made no progress at seek (%, %, %)',
+                v_next_seek, v_next_seek_at, v_next_seek_version;
         END IF;
     END LOOP;
 END;
@@ -4138,6 +4611,64 @@ CREATE FUNCTION storage.operation() RETURNS text
     AS $$
 BEGIN
     RETURN current_setting('storage.operation', true);
+END;
+$$;
+
+
+--
+-- Name: protect_bucket_control_columns(); Type: FUNCTION; Schema: storage; Owner: -
+--
+
+CREATE FUNCTION storage.protect_bucket_control_columns() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog'
+    AS $$
+DECLARE
+  configuration_changed boolean;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.lifecycle_configuration IS NOT NULL
+       OR NEW.lifecycle_configuration_generation IS NOT NULL THEN
+      IF NOT pg_has_role(current_user, TG_ARGV[0], 'MEMBER') THEN
+        RAISE EXCEPTION 'only members of the configured storage service role may insert lifecycle policy state'
+          USING ERRCODE = '42501',
+                HINT = format(
+                  'Insert with both lifecycle columns NULL and configure lifecycle through the Storage API afterward, or insert as a member of %I.',
+                  TG_ARGV[0]
+                );
+      END IF;
+    END IF;
+
+    RETURN NEW;
+  END IF;
+
+  configuration_changed =
+    OLD.lifecycle_configuration IS DISTINCT FROM NEW.lifecycle_configuration
+    OR OLD.lifecycle_configuration_generation IS DISTINCT FROM NEW.lifecycle_configuration_generation;
+
+  IF NOT configuration_changed THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.type IS DISTINCT FROM 'STANDARD' THEN
+    RAISE EXCEPTION 'bucket versioning and lifecycle controls require a Standard bucket'
+      USING ERRCODE = '0A000';
+  END IF;
+
+  IF NEW.lifecycle_configuration IS NULL
+     AND NEW.lifecycle_configuration_generation IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.lifecycle_configuration IS NULL
+     OR NEW.lifecycle_configuration_generation IS NULL
+     OR OLD.lifecycle_configuration IS NOT DISTINCT FROM NEW.lifecycle_configuration
+     OR OLD.lifecycle_configuration_generation IS NOT DISTINCT FROM NEW.lifecycle_configuration_generation THEN
+    RAISE EXCEPTION 'a changed lifecycle policy requires a new non-null generation'
+      USING ERRCODE = '22023';
+  END IF;
+
+  RETURN NEW;
 END;
 $$;
 
@@ -4162,10 +4693,10 @@ $$;
 
 
 --
--- Name: search(text, text, integer, integer, integer, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: search(text, text, integer, integer, integer, text, text, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.search(prefix text, bucketname text, limits integer DEFAULT 100, levels integer DEFAULT 1, offsets integer DEFAULT 0, search text DEFAULT ''::text, sortcolumn text DEFAULT 'name'::text, sortorder text DEFAULT 'asc'::text) RETURNS TABLE(name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb)
+CREATE FUNCTION storage.search(prefix text, bucketname text, limits integer DEFAULT 100, levels integer DEFAULT 1, offsets integer DEFAULT 0, search text DEFAULT ''::text, sortcolumn text DEFAULT 'name'::text, sortorder text DEFAULT 'asc'::text, noncurrent_versions text DEFAULT 'exclude'::text, delete_markers text DEFAULT 'exclude'::text) RETURNS TABLE(name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb, version text, archived_at timestamp with time zone, is_delete_marker boolean, is_versioned boolean)
     LANGUAGE plpgsql STABLE
     AS $_$
 DECLARE
@@ -4186,14 +4717,26 @@ DECLARE
     v_sort_order TEXT;
     v_upper_bound TEXT;
     v_file_batch_size INT;
+    v_version_filter TEXT;
+    v_multi_row BOOLEAN;
 
     -- Dynamic SQL for batch query only
     v_batch_query TEXT;
+    v_delete_marker_peek_query TEXT;
+    v_delete_marker_peek_query_strict TEXT;
 
     -- Seek state
     v_next_seek TEXT;
+    v_next_seek_at TIMESTAMPTZ;
+    v_next_seek_version TEXT;
+    v_next_seek_strict BOOLEAN := false;
     v_count INT := 0;
     v_skipped INT := 0;
+    v_previous_seek TEXT;
+    v_previous_seek_at TIMESTAMPTZ;
+    v_previous_seek_version TEXT;
+    v_previous_count INT;
+    v_previous_skipped INT;
 BEGIN
     -- ========================================================================
     -- INITIALIZATION
@@ -4206,6 +4749,33 @@ BEGIN
     v_combined_levels := coalesce(array_length(string_to_array(v_prefix, v_delimiter), 1), 1);
     v_is_asc := lower(coalesce(sortorder, 'asc')) = 'asc';
     v_file_batch_size := LEAST(GREATEST(v_limit * 2, 100), 1000);
+    v_next_seek_at := NULL;
+    v_next_seek_version := '';
+
+    -- COALESCE first: NULL NOT IN (...) evaluates to NULL (not TRUE), so a
+    -- bare NOT IN check silently leaves an explicit NULL argument unreset.
+    noncurrent_versions := COALESCE(noncurrent_versions, 'exclude');
+    delete_markers := COALESCE(delete_markers, 'exclude');
+    IF noncurrent_versions NOT IN ('exclude', 'only', 'include') THEN
+        noncurrent_versions := 'exclude';
+    END IF;
+    IF delete_markers NOT IN ('exclude', 'only', 'include') THEN
+        delete_markers := 'exclude';
+    END IF;
+
+    v_multi_row := noncurrent_versions IN ('only', 'include');
+
+    v_version_filter := '';
+    IF noncurrent_versions = 'exclude' THEN
+        v_version_filter := v_version_filter || ' AND o.archived_at IS NULL';
+    ELSIF noncurrent_versions = 'only' THEN
+        v_version_filter := v_version_filter || ' AND o.archived_at IS NOT NULL';
+    END IF;
+    IF delete_markers = 'exclude' THEN
+        v_version_filter := v_version_filter || ' AND NOT o.is_delete_marker';
+    ELSIF delete_markers = 'only' THEN
+        v_version_filter := v_version_filter || ' AND o.is_delete_marker';
+    END IF;
 
     -- Validate sort column
     CASE lower(coalesce(sortcolumn, 'name'))
@@ -4230,6 +4800,10 @@ BEGIN
                 WHERE objects.name ILIKE $3 || '%%'
                   AND bucket_id = $4
                   AND array_length(objects.path_tokens, 1) <> $2
+                  AND ($7 != 'exclude' OR objects.archived_at IS NULL)
+                  AND ($7 != 'only' OR objects.archived_at IS NOT NULL)
+                  AND ($8 != 'exclude' OR NOT objects.is_delete_marker)
+                  AND ($8 != 'only' OR objects.is_delete_marker)
                 GROUP BY folder
                 ORDER BY folder %s
             )
@@ -4238,18 +4812,29 @@ BEGIN
                    NULL::timestamptz AS updated_at,
                    NULL::timestamptz AS created_at,
                    NULL::timestamptz AS last_accessed_at,
-                   NULL::jsonb AS metadata FROM folders)
+                   NULL::jsonb AS metadata,
+                   NULL::text AS version,
+                   NULL::timestamptz AS archived_at,
+                   NULL::boolean AS is_delete_marker,
+                   NULL::boolean AS is_versioned FROM folders)
             UNION ALL
             (SELECT array_to_string(path_tokens[$1:$2], '/') AS "name",
-                   id, updated_at, created_at, last_accessed_at, metadata
+                   id, updated_at, created_at, last_accessed_at, metadata,
+                   version, archived_at, is_delete_marker, is_versioned
              FROM storage.objects
              WHERE objects.name ILIKE $3 || '%%'
                AND bucket_id = $4
                AND array_length(objects.path_tokens, 1) = $2
-             ORDER BY %I %s)
+               AND ($7 != 'exclude' OR objects.archived_at IS NULL)
+               AND ($7 != 'only' OR objects.archived_at IS NOT NULL)
+               AND ($8 != 'exclude' OR NOT objects.is_delete_marker)
+               AND ($8 != 'only' OR objects.is_delete_marker)
+             -- name, then version, as tiebreaks so two versions of the same
+             -- key tying on the sort column still sort deterministically
+             ORDER BY %I %s, name COLLATE "C" %s, COALESCE(version, '') %s)
             LIMIT $5 OFFSET $6
-            $sql$, v_sort_order, v_order_by, v_sort_order
-        ) USING v_prefix_start, v_combined_levels, v_prefix, bucketname, v_limit, offsets;
+            $sql$, v_sort_order, v_order_by, v_sort_order, v_sort_order, v_sort_order
+        ) USING v_prefix_start, v_combined_levels, v_prefix, bucketname, v_limit, offsets, noncurrent_versions, delete_markers;
         RETURN;
     END IF;
 
@@ -4266,26 +4851,95 @@ BEGIN
         v_upper_bound := left(v_prefix_lower, -1) || chr(ascii(right(v_prefix_lower, 1)) + 1);
     END IF;
 
-    -- Build batch query (dynamic SQL - called infrequently, amortized over many rows)
+    -- Build a resume-safe batch query. The exact-name branch returns remaining
+    -- versions after the current (archived_at, version) boundary; the strict
+    -- name branch returns subsequent keys. UNION ALL keeps both predicates
+    -- independently indexable.
     IF v_is_asc THEN
         IF v_upper_bound IS NOT NULL THEN
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" >= $2 ' ||
-                'AND lower(o.name) COLLATE "C" < $3 ORDER BY lower(o.name) COLLATE "C" ASC LIMIT $4';
+            v_batch_query := 'SELECT * FROM (' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" = $2 AND ($5::timestamptz IS NULL OR COALESCE(o.archived_at, ''infinity''::timestamptz) < $5 OR (COALESCE(o.archived_at, ''infinity''::timestamptz) = $5 AND COALESCE(o.version, '''') > $6))' ||
+                v_version_filter || ' ORDER BY COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4) UNION ALL ' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" > $2 AND lower(o.name) COLLATE "C" < $3' || v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" ASC, COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4)' ||
+                ') sub ORDER BY lower(sub.name) COLLATE "C" ASC, COALESCE(sub.archived_at, ''infinity''::timestamptz) DESC, COALESCE(sub.version, '''') ASC LIMIT $4';
         ELSE
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" >= $2 ' ||
-                'ORDER BY lower(o.name) COLLATE "C" ASC LIMIT $4';
+            v_batch_query := 'SELECT * FROM (' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" = $2 AND ($5::timestamptz IS NULL OR COALESCE(o.archived_at, ''infinity''::timestamptz) < $5 OR (COALESCE(o.archived_at, ''infinity''::timestamptz) = $5 AND COALESCE(o.version, '''') > $6))' ||
+                v_version_filter || ' ORDER BY COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4) UNION ALL ' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" > $2' || v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" ASC, COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4)' ||
+                ') sub ORDER BY lower(sub.name) COLLATE "C" ASC, COALESCE(sub.archived_at, ''infinity''::timestamptz) DESC, COALESCE(sub.version, '''') ASC LIMIT $4';
         END IF;
     ELSE
         IF v_upper_bound IS NOT NULL THEN
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" < $2 ' ||
-                'AND lower(o.name) COLLATE "C" >= $3 ORDER BY lower(o.name) COLLATE "C" DESC LIMIT $4';
+            v_batch_query := 'SELECT * FROM (' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" = $2 AND ($5::timestamptz IS NULL OR COALESCE(o.archived_at, ''infinity''::timestamptz) < $5 OR (COALESCE(o.archived_at, ''infinity''::timestamptz) = $5 AND COALESCE(o.version, '''') > $6))' ||
+                v_version_filter || ' ORDER BY COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4) UNION ALL ' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" < $2 AND lower(o.name) COLLATE "C" >= $3' || v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" DESC, COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4)' ||
+                ') sub ORDER BY lower(sub.name) COLLATE "C" DESC, COALESCE(sub.archived_at, ''infinity''::timestamptz) DESC, COALESCE(sub.version, '''') ASC LIMIT $4';
         ELSE
-            v_batch_query := 'SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata ' ||
-                'FROM storage.objects o WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" < $2 ' ||
-                'ORDER BY lower(o.name) COLLATE "C" DESC LIMIT $4';
+            v_batch_query := 'SELECT * FROM (' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" = $2 AND ($5::timestamptz IS NULL OR COALESCE(o.archived_at, ''infinity''::timestamptz) < $5 OR (COALESCE(o.archived_at, ''infinity''::timestamptz) = $5 AND COALESCE(o.version, '''') > $6))' ||
+                v_version_filter || ' ORDER BY COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4) UNION ALL ' ||
+                '(SELECT o.name, o.id, o.updated_at, o.created_at, o.last_accessed_at, o.metadata, o.version, o.archived_at, o.is_delete_marker, o.is_versioned FROM storage.objects o ' ||
+                'WHERE o.bucket_id = $1 AND lower(o.name) COLLATE "C" < $2' || v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" DESC, COALESCE(o.archived_at, ''infinity''::timestamptz) DESC, COALESCE(o.version, '''') ASC LIMIT $4)' ||
+                ') sub ORDER BY lower(sub.name) COLLATE "C" DESC, COALESCE(sub.archived_at, ''infinity''::timestamptz) DESC, COALESCE(sub.version, '''') ASC LIMIT $4';
+        END IF;
+    END IF;
+
+    -- Keep the delete-marker predicate literal so the cached generic
+    -- plan can use idx_objects_delete_markers during the main-loop peek.
+    IF delete_markers = 'only' THEN
+        IF v_multi_row THEN
+            v_delete_marker_peek_query :=
+                'SELECT marker_page.name FROM (' || v_batch_query || ') marker_page LIMIT 1';
+        ELSIF v_is_asc THEN
+            -- Two separate literal query strings, not one gated by a bound
+            -- boolean: folding "$n AND op1 OR NOT $n AND op2" into a single
+            -- query defeats the generic plan's ability to push either
+            -- comparison into the index. Branching in PL/pgSQL control flow
+            -- instead keeps each query's index condition intact.
+            v_delete_marker_peek_query :=
+                'SELECT o.name FROM storage.objects o WHERE o.bucket_id = $1 ' ||
+                'AND lower(o.name) COLLATE "C" >= $2' ||
+                CASE WHEN v_upper_bound IS NOT NULL
+                    THEN ' AND lower(o.name) COLLATE "C" < $3'
+                    ELSE ''
+                END ||
+                v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1';
+            -- Strict variant: used once the single-row ASC batch advance
+            -- (below) has left v_next_seek pointing at the last row already
+            -- emitted, so a plain >= would re-match it forever.
+            v_delete_marker_peek_query_strict :=
+                'SELECT o.name FROM storage.objects o WHERE o.bucket_id = $1 ' ||
+                'AND lower(o.name) COLLATE "C" > $2' ||
+                CASE WHEN v_upper_bound IS NOT NULL
+                    THEN ' AND lower(o.name) COLLATE "C" < $3'
+                    ELSE ''
+                END ||
+                v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1';
+        ELSE
+            v_delete_marker_peek_query :=
+                'SELECT o.name FROM storage.objects o WHERE o.bucket_id = $1 ' ||
+                'AND lower(o.name) COLLATE "C" < $2' ||
+                CASE WHEN v_upper_bound IS NOT NULL
+                    THEN ' AND lower(o.name) COLLATE "C" >= $3'
+                    ELSE ''
+                END ||
+                v_version_filter ||
+                ' ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1';
         END IF;
     END IF;
 
@@ -4293,20 +4947,18 @@ BEGIN
     IF v_is_asc THEN
         v_next_seek := v_prefix_lower;
     ELSE
-        -- DESC: find the last item in range first (static SQL)
-        IF v_upper_bound IS NOT NULL THEN
-            SELECT o.name INTO v_peek_name FROM storage.objects o
-            WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_prefix_lower AND lower(o.name) COLLATE "C" < v_upper_bound
-            ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
-        ELSIF v_prefix_lower <> '' THEN
-            SELECT o.name INTO v_peek_name FROM storage.objects o
-            WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_prefix_lower
-            ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
-        ELSE
-            SELECT o.name INTO v_peek_name FROM storage.objects o
-            WHERE o.bucket_id = bucketname
-            ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
-        END IF;
+        -- DESC performs one specialized initial seek so partial current-version
+        -- and delete-marker indexes remain available.
+        EXECUTE format(
+            'SELECT o.name FROM storage.objects o WHERE o.bucket_id = $1%s%s ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1',
+            CASE WHEN v_upper_bound IS NOT NULL
+                THEN ' AND lower(o.name) COLLATE "C" >= $2 AND lower(o.name) COLLATE "C" < $3'
+                ELSE ''
+            END,
+            v_version_filter
+        )
+        INTO v_peek_name
+        USING bucketname, v_prefix_lower, v_upper_bound;
 
         IF v_peek_name IS NOT NULL THEN
             v_next_seek := lower(v_peek_name) || v_delimiter;
@@ -4317,39 +4969,172 @@ BEGIN
 
     -- ========================================================================
     -- MAIN LOOP: Hybrid peek-then-batch algorithm
-    -- Uses STATIC SQL for peek (hot path) and DYNAMIC SQL for batch
+    -- Uses STATIC SQL for peek (hot path) and DYNAMIC SQL for batch and
+    -- the delete-marker-only path
     -- ========================================================================
     LOOP
         EXIT WHEN v_count >= v_limit;
 
-        -- STEP 1: PEEK using STATIC SQL (plan cached, very fast)
-        IF v_is_asc THEN
-            IF v_upper_bound IS NOT NULL THEN
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek AND lower(o.name) COLLATE "C" < v_upper_bound
-                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
-            ELSE
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek
-                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+        v_previous_seek := v_next_seek;
+        v_previous_seek_at := v_next_seek_at;
+        v_previous_seek_version := v_next_seek_version;
+        v_previous_count := v_count;
+        v_previous_skipped := v_skipped;
+
+        -- STEP 1: PEEK
+        v_peek_name := NULL;
+        IF delete_markers = 'only' THEN
+            EXECUTE CASE WHEN v_next_seek_strict
+                THEN v_delete_marker_peek_query_strict
+                ELSE v_delete_marker_peek_query
+            END
+                INTO v_peek_name
+                USING bucketname, v_next_seek,
+                    CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix_lower) ELSE v_prefix_lower END,
+                    1, v_next_seek_at, v_next_seek_version;
+        ELSIF v_multi_row AND v_next_seek_at IS NOT NULL THEN
+            SELECT o.name INTO v_peek_name
+            FROM storage.objects o
+            WHERE o.bucket_id = bucketname
+              AND lower(o.name) COLLATE "C" = v_next_seek
+              AND (COALESCE(o.archived_at, 'infinity'::timestamptz) < v_next_seek_at
+                   OR (COALESCE(o.archived_at, 'infinity'::timestamptz) = v_next_seek_at
+                       AND COALESCE(o.version, '') > v_next_seek_version))
+              AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+              AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+              AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+              AND (delete_markers != 'only' OR o.is_delete_marker)
+            ORDER BY COALESCE(o.archived_at, 'infinity'::timestamptz) DESC,
+                     COALESCE(o.version, '') ASC
+            LIMIT 1;
+
+            -- The current key is exhausted. Clear its version boundary and
+            -- make the following ASC name peek strict. Appending '/' is not a
+            -- valid lexical successor because keys ending in characters such
+            -- as '!' sort between the exhausted name and name || '/'.
+            IF v_peek_name IS NULL THEN
+                IF v_is_asc THEN
+                    v_next_seek_strict := true;
+                END IF;
+                v_next_seek_at := NULL;
+                v_next_seek_version := '';
             END IF;
-        ELSE
-            IF v_upper_bound IS NOT NULL THEN
+        END IF;
+
+        -- Single-row mode is always noncurrent_versions='exclude'. Keep the
+        -- current-row predicate literal so generic plans use the current index.
+        IF delete_markers != 'only' AND v_peek_name IS NULL AND NOT v_multi_row THEN
+            IF v_is_asc THEN
+                IF v_next_seek_strict AND v_upper_bound IS NOT NULL THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" > v_next_seek AND lower(o.name) COLLATE "C" < v_upper_bound
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                    ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+                ELSIF v_next_seek_strict THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" > v_next_seek
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                    ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+                ELSIF v_upper_bound IS NOT NULL THEN
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek AND lower(o.name) COLLATE "C" < v_upper_bound
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                    ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+                ELSE
+                    SELECT o.name INTO v_peek_name FROM storage.objects o
+                    WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek
+                      AND o.archived_at IS NULL
+                      AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                    ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+                END IF;
+            ELSIF v_upper_bound IS NOT NULL THEN
                 SELECT o.name INTO v_peek_name FROM storage.objects o
                 WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" < v_next_seek AND lower(o.name) COLLATE "C" >= v_prefix_lower
-                ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
-            ELSIF v_prefix_lower <> '' THEN
-                SELECT o.name INTO v_peek_name FROM storage.objects o
-                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" < v_next_seek AND lower(o.name) COLLATE "C" >= v_prefix_lower
+                  AND o.archived_at IS NULL
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
                 ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
             ELSE
                 SELECT o.name INTO v_peek_name FROM storage.objects o
                 WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" < v_next_seek
+                  AND o.archived_at IS NULL
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
+            END IF;
+        ELSIF delete_markers != 'only' AND v_peek_name IS NULL AND v_is_asc THEN
+            IF v_next_seek_strict AND v_upper_bound IS NOT NULL THEN
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" > v_next_seek AND lower(o.name) COLLATE "C" < v_upper_bound
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+            ELSIF v_next_seek_strict THEN
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" > v_next_seek
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+            ELSIF v_upper_bound IS NOT NULL THEN
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek AND lower(o.name) COLLATE "C" < v_upper_bound
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+            ELSE
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" >= v_next_seek
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" ASC LIMIT 1;
+            END IF;
+        ELSIF delete_markers != 'only' AND v_peek_name IS NULL THEN
+            IF v_upper_bound IS NOT NULL THEN
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" < v_next_seek AND lower(o.name) COLLATE "C" >= v_prefix_lower
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
+                ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
+            ELSE
+                SELECT o.name INTO v_peek_name FROM storage.objects o
+                WHERE o.bucket_id = bucketname AND lower(o.name) COLLATE "C" < v_next_seek
+                  AND (noncurrent_versions != 'exclude' OR o.archived_at IS NULL)
+                  AND (noncurrent_versions != 'only' OR o.archived_at IS NOT NULL)
+                  AND (delete_markers != 'exclude' OR NOT o.is_delete_marker)
+                  AND (delete_markers != 'only' OR o.is_delete_marker)
                 ORDER BY lower(o.name) COLLATE "C" DESC LIMIT 1;
             END IF;
         END IF;
 
         EXIT WHEN v_peek_name IS NULL;
+
+        -- If the peek landed on a different key than we were tracking, any
+        -- version boundary belongs to the OLD key and must not leak into the
+        -- new one - e.g. the deleteMarkers='only' peek doesn't know or care
+        -- whether it's continuing the same key or jumping to a new one, so
+        -- it never clears these itself.
+        IF lower(v_peek_name) IS DISTINCT FROM v_next_seek THEN
+            v_next_seek_at := NULL;
+            v_next_seek_version := '';
+        END IF;
+
+        -- The peek is authoritative for the next key to process. This is
+        -- especially important after exhausting a multi-version key: the
+        -- version boundary has been cleared, so executing the batch against
+        -- a stale v_next_seek would replay every version of that old key.
+        v_next_seek := lower(v_peek_name);
+        v_next_seek_strict := false;
 
         -- STEP 2: Check if this is a FOLDER or FILE
         v_common_prefix := storage.get_common_prefix(lower(v_peek_name), v_prefix_lower, v_delimiter);
@@ -4365,6 +5150,10 @@ BEGIN
                 created_at := NULL;
                 last_accessed_at := NULL;
                 metadata := NULL;
+                version := NULL;
+                archived_at := NULL;
+                is_delete_marker := NULL;
+                is_versioned := NULL;
                 RETURN NEXT;
                 v_count := v_count + 1;
             END IF;
@@ -4375,19 +5164,32 @@ BEGIN
             ELSE
                 v_next_seek := lower(v_common_prefix);
             END IF;
+            v_next_seek_at := NULL;
+            v_next_seek_version := '';
         ELSE
             -- FILE: Batch fetch using DYNAMIC SQL (overhead amortized over many rows)
             -- For ASC: upper_bound is the exclusive upper limit (< condition)
             -- For DESC: prefix_lower is the inclusive lower limit (>= condition)
             FOR v_current IN EXECUTE v_batch_query
                 USING bucketname, v_next_seek,
-                    CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix_lower) ELSE v_prefix_lower END, v_file_batch_size
+                    CASE WHEN v_is_asc THEN COALESCE(v_upper_bound, v_prefix_lower) ELSE v_prefix_lower END, v_file_batch_size,
+                    v_next_seek_at, v_next_seek_version
             LOOP
                 v_common_prefix := storage.get_common_prefix(lower(v_current.name), v_prefix_lower, v_delimiter);
 
                 IF v_common_prefix IS NOT NULL THEN
-                    -- Hit a folder: exit batch, let peek handle it
-                    v_next_seek := lower(v_current.name);
+                    -- Hit a folder: exit batch, let peek handle it. Reset
+                    -- strict mode too - it may have been set by an earlier
+                    -- row in this same batch (see the single-row ASC advance
+                    -- below), and v_next_seek here is the folder-triggering
+                    -- row's own name, which the next peek must find inclusively.
+                    v_next_seek := CASE
+                        WHEN v_is_asc THEN lower(v_current.name)
+                        ELSE lower(v_current.name) || v_delimiter
+                    END;
+                    v_next_seek_at := NULL;
+                    v_next_seek_version := '';
+                    v_next_seek_strict := false;
                     EXIT;
                 END IF;
 
@@ -4402,13 +5204,29 @@ BEGIN
                     created_at := v_current.created_at;
                     last_accessed_at := v_current.last_accessed_at;
                     metadata := v_current.metadata;
+                    version := v_current.version;
+                    archived_at := v_current.archived_at;
+                    is_delete_marker := v_current.is_delete_marker;
+                    is_versioned := v_current.is_versioned;
                     RETURN NEXT;
                     v_count := v_count + 1;
                 END IF;
 
-                -- Advance seek past this file
-                IF v_is_asc THEN
-                    v_next_seek := lower(v_current.name) || v_delimiter;
+                -- Multi-row mode must remain on this key until all of its
+                -- versions have crossed the internal batch boundary.
+                IF v_multi_row THEN
+                    v_next_seek := lower(v_current.name);
+                    v_next_seek_at := COALESCE(v_current.archived_at, 'infinity'::timestamptz);
+                    v_next_seek_version := COALESCE(v_current.version, '');
+                ELSIF v_is_asc THEN
+                    -- Appending the delimiter as a fake lexical successor would
+                    -- skip a real key like `name || '!'` (or any character
+                    -- sorting below the delimiter), which sorts between `name`
+                    -- and `name || delimiter`. Track the real name and mark the
+                    -- next comparison strict instead - same fix as the
+                    -- exhausted-key case above.
+                    v_next_seek := lower(v_current.name);
+                    v_next_seek_strict := true;
                 ELSE
                     v_next_seek := lower(v_current.name);
                 END IF;
@@ -4416,26 +5234,56 @@ BEGIN
                 EXIT WHEN v_count >= v_limit;
             END LOOP;
         END IF;
+
+        IF v_count = v_previous_count
+           AND v_skipped = v_previous_skipped
+           AND v_next_seek IS NOT DISTINCT FROM v_previous_seek
+           AND v_next_seek_at IS NOT DISTINCT FROM v_previous_seek_at
+           AND v_next_seek_version IS NOT DISTINCT FROM v_previous_seek_version THEN
+            RAISE EXCEPTION 'storage.search made no progress at seek (%, %, %)',
+                v_next_seek, v_next_seek_at, v_next_seek_version;
+        END IF;
     END LOOP;
 END;
 $_$;
 
 
 --
--- Name: search_by_timestamp(text, text, integer, integer, text, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: search_by_timestamp(text, text, integer, integer, text, text, text, text, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.search_by_timestamp(p_prefix text, p_bucket_id text, p_limit integer, p_level integer, p_start_after text, p_sort_order text, p_sort_column text, p_sort_column_after text) RETURNS TABLE(key text, name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb)
+CREATE FUNCTION storage.search_by_timestamp(p_prefix text, p_bucket_id text, p_limit integer, p_level integer, p_start_after text, p_sort_order text, p_sort_column text, p_sort_column_after text, noncurrent_versions text DEFAULT 'exclude'::text, delete_markers text DEFAULT 'exclude'::text, p_start_after_version text DEFAULT ''::text) RETURNS TABLE(key text, name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb, version text, archived_at timestamp with time zone, is_delete_marker boolean, is_versioned boolean)
     LANGUAGE plpgsql STABLE
     AS $_$
 DECLARE
     v_cursor_op text;
     v_query text;
     v_prefix text;
+    v_prefix_pattern text;
     v_sort_order text;
     v_sort_column text;
+    v_version_tiebreak text;
 BEGIN
     v_prefix := coalesce(p_prefix, '');
+    -- Keep the raw prefix for common-prefix calculations and escape only LIKE metacharacters.
+    v_prefix_pattern := replace(v_prefix, chr(92), chr(92) || chr(92));
+    v_prefix_pattern := replace(v_prefix_pattern, '%', chr(92) || '%');
+    v_prefix_pattern := replace(v_prefix_pattern, '_', chr(92) || '_');
+
+    -- COALESCE first: NULL NOT IN (...) evaluates to NULL (not TRUE), so a
+    -- bare NOT IN check silently leaves an explicit NULL argument unreset.
+    noncurrent_versions := COALESCE(noncurrent_versions, 'exclude');
+    delete_markers := COALESCE(delete_markers, 'exclude');
+    IF noncurrent_versions NOT IN ('exclude', 'only', 'include') THEN
+        noncurrent_versions := 'exclude';
+    END IF;
+    IF delete_markers NOT IN ('exclude', 'only', 'include') THEN
+        delete_markers := 'exclude';
+    END IF;
+
+    -- $9 is only populated in multi-row mode; it's always '' otherwise, so
+    -- only use each row's real version as a tiebreak in multi-row mode.
+    v_version_tiebreak := CASE WHEN noncurrent_versions IN ('only', 'include') THEN 'COALESCE(version, '''')' ELSE '''''' END;
 
     -- Defense-in-depth: this function is independently reachable and must
     -- not trust p_sort_order/p_sort_column to already be validated by a
@@ -4466,21 +5314,33 @@ BEGIN
                 o.created_at AS obj_created_at,
                 o.last_accessed_at AS obj_last_accessed_at,
                 o.metadata AS obj_metadata,
+                o.version AS obj_version,
+                o.archived_at AS obj_archived_at,
+                o.is_delete_marker AS obj_is_delete_marker,
+                o.is_versioned AS obj_is_versioned,
                 storage.get_common_prefix(o.name, $1, '/') AS common_prefix
             FROM storage.objects o
             WHERE o.bucket_id = $2
-              AND o.name COLLATE "C" LIKE $1 || '%%'
+              AND o.name COLLATE "C" LIKE $10 || '%%'
+              AND ($7 != 'exclude' OR o.archived_at IS NULL)
+              AND ($7 != 'only' OR o.archived_at IS NOT NULL)
+              AND ($8 != 'exclude' OR NOT o.is_delete_marker)
+              AND ($8 != 'only' OR o.is_delete_marker)
         ),
         -- Aggregate common prefixes (folders)
         -- Both created_at and updated_at use MIN(obj_created_at) to match the old prefixes table behavior
         aggregated_prefixes AS (
             SELECT
-                rtrim(common_prefix, '/') AS name,
+                common_prefix AS name,
                 NULL::uuid AS id,
                 MIN(obj_created_at) AS updated_at,
                 MIN(obj_created_at) AS created_at,
                 NULL::timestamptz AS last_accessed_at,
                 NULL::jsonb AS metadata,
+                NULL::text AS version,
+                NULL::timestamptz AS archived_at,
+                NULL::boolean AS is_delete_marker,
+                NULL::boolean AS is_versioned,
                 TRUE AS is_prefix
             FROM raw_objects
             WHERE common_prefix IS NOT NULL
@@ -4494,6 +5354,10 @@ BEGIN
                 obj_created_at AS created_at,
                 obj_last_accessed_at AS last_accessed_at,
                 obj_metadata AS metadata,
+                obj_version AS version,
+                obj_archived_at AS archived_at,
+                obj_is_delete_marker AS is_delete_marker,
+                obj_is_versioned AS is_versioned,
                 FALSE AS is_prefix
             FROM raw_objects
             WHERE common_prefix IS NULL
@@ -4509,11 +5373,14 @@ BEGIN
             WHERE (
                 $5 = ''
                 OR ROW(
-                    date_trunc('milliseconds', %I),
-                    name COLLATE "C"
+                    COALESCE(date_trunc('milliseconds', %I), 'epoch'::timestamptz),
+                    name COLLATE "C",
+                    %s
                 ) %s ROW(
-                    COALESCE(NULLIF($6, '')::timestamptz, 'epoch'::timestamptz),
-                    $5
+                    -- truncated the same way as the stored value above
+                    date_trunc('milliseconds', COALESCE(NULLIF($6, '')::timestamptz, 'epoch'::timestamptz)),
+                    $5,
+                    $9
                 )
             )
         )
@@ -4524,31 +5391,40 @@ BEGIN
             updated_at,
             created_at,
             last_accessed_at,
-            metadata
+            metadata,
+            version,
+            archived_at,
+            is_delete_marker,
+            is_versioned
         FROM filtered
         ORDER BY
             COALESCE(date_trunc('milliseconds', %I), 'epoch'::timestamptz) %s,
-            name COLLATE "C" %s
+            name COLLATE "C" %s,
+            COALESCE(version, '') %s
         LIMIT $4
     $sql$,
         v_sort_column,
+        v_version_tiebreak,
         v_cursor_op,
         v_sort_column,
+        v_sort_order,
         v_sort_order,
         v_sort_order
     );
 
+    -- version is the third tiebreak component for two versions of the same
+    -- key tying on both timestamp and name (see filtered CTE / ORDER BY above)
     RETURN QUERY EXECUTE v_query
-    USING v_prefix, p_bucket_id, p_level, p_limit, p_start_after, p_sort_column_after;
+    USING v_prefix, p_bucket_id, p_level, p_limit, p_start_after, p_sort_column_after, noncurrent_versions, delete_markers, coalesce(p_start_after_version, ''), v_prefix_pattern;
 END;
 $_$;
 
 
 --
--- Name: search_v2(text, text, integer, integer, text, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
+-- Name: search_v2(text, text, integer, integer, text, text, text, text, text, text, timestamp with time zone, text, boolean); Type: FUNCTION; Schema: storage; Owner: -
 --
 
-CREATE FUNCTION storage.search_v2(prefix text, bucket_name text, limits integer DEFAULT 100, levels integer DEFAULT 1, start_after text DEFAULT ''::text, sort_order text DEFAULT 'asc'::text, sort_column text DEFAULT 'name'::text, sort_column_after text DEFAULT ''::text) RETURNS TABLE(key text, name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb)
+CREATE FUNCTION storage.search_v2(prefix text, bucket_name text, limits integer DEFAULT 100, levels integer DEFAULT 1, start_after text DEFAULT ''::text, sort_order text DEFAULT 'asc'::text, sort_column text DEFAULT 'name'::text, sort_column_after text DEFAULT ''::text, noncurrent_versions text DEFAULT 'exclude'::text, delete_markers text DEFAULT 'exclude'::text, start_after_archived_at timestamp with time zone DEFAULT NULL::timestamp with time zone, start_after_version text DEFAULT ''::text, start_after_is_continuation boolean DEFAULT false) RETURNS TABLE(key text, name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb, version text, archived_at timestamp with time zone, is_delete_marker boolean, is_versioned boolean)
     LANGUAGE plpgsql STABLE
     AS $$
 DECLARE
@@ -4582,22 +5458,31 @@ BEGIN
             l.updated_at,
             l.created_at,
             l.last_accessed_at,
-            l.metadata
+            l.metadata,
+            l.version,
+            l.archived_at,
+            l.is_delete_marker,
+            l.is_versioned
         FROM storage.list_objects_with_delimiter(
             bucket_name,
             coalesce(prefix, ''),
             '/',
             v_limit,
-            start_after,
-            '',
-            v_sort_ord
+            CASE WHEN start_after_is_continuation THEN '' ELSE start_after END,
+            CASE WHEN start_after_is_continuation THEN start_after ELSE '' END,
+            v_sort_ord,
+            noncurrent_versions,
+            delete_markers,
+            start_after_archived_at,
+            start_after_version
         ) l;
     ELSE
         -- Use aggregation approach for timestamp sorting
         -- Not efficient for large datasets but supports correct pagination
         RETURN QUERY SELECT * FROM storage.search_by_timestamp(
             prefix, bucket_name, v_limit, levels, start_after,
-            v_sort_ord, v_sort_col, sort_column_after
+            v_sort_ord, v_sort_col, sort_column_after,
+            noncurrent_versions, delete_markers, start_after_version
         );
     END IF;
 END;
@@ -4850,6 +5735,35 @@ COMMENT ON COLUMN auth.mfa_factors.last_webauthn_challenge_data IS 'Stores the l
 
 
 --
+-- Name: mfa_recovery_code_sets; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.mfa_recovery_code_sets (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    mfa_factor_id uuid NOT NULL,
+    failed_verification_count integer DEFAULT 0 NOT NULL,
+    verification_locked_until timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT mfa_recovery_code_sets_failed_verification_count_check CHECK ((failed_verification_count >= 0))
+);
+
+
+--
+-- Name: mfa_recovery_codes; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.mfa_recovery_codes (
+    id uuid NOT NULL,
+    mfa_recovery_code_set_id uuid NOT NULL,
+    code_hash text NOT NULL,
+    consumed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: oauth_authorizations; Type: TABLE; Schema: auth; Owner: -
 --
 
@@ -4955,6 +5869,7 @@ CREATE TABLE auth.one_time_tokens (
     relates_to text NOT NULL,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
     CONSTRAINT one_time_tokens_token_hash_check CHECK ((char_length(token_hash) > 0))
 );
 
@@ -5067,6 +5982,43 @@ CREATE TABLE auth.schema_migrations (
 --
 
 COMMENT ON TABLE auth.schema_migrations IS 'Auth: Manages updates to the auth system.';
+
+
+--
+-- Name: scim_tokens; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.scim_tokens (
+    id uuid NOT NULL,
+    sso_provider_id uuid NOT NULL,
+    token_hash text NOT NULL,
+    prefix text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    last_used_at timestamp with time zone,
+    CONSTRAINT scim_tokens_expires_at_future CHECK (((expires_at IS NULL) OR (expires_at > created_at))),
+    CONSTRAINT scim_tokens_revoked_after_created CHECK (((revoked_at IS NULL) OR (revoked_at >= created_at))),
+    CONSTRAINT scim_tokens_token_hash_check CHECK ((token_hash ~ '^[0-9a-f]{64}$'::text))
+);
+
+
+--
+-- Name: scim_users; Type: TABLE; Schema: auth; Owner: -
+--
+
+CREATE TABLE auth.scim_users (
+    id uuid NOT NULL,
+    sso_provider_id uuid NOT NULL,
+    user_id uuid,
+    resource jsonb NOT NULL,
+    user_name text GENERATED ALWAYS AS (lower((resource ->> 'userName'::text))) STORED NOT NULL,
+    external_id text GENERATED ALWAYS AS ((resource ->> 'externalId'::text)) STORED,
+    active boolean GENERATED ALWAYS AS (COALESCE(((resource ->> 'active'::text))::boolean, true)) STORED NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone
+);
 
 
 --
@@ -6582,6 +7534,110 @@ COMMENT ON COLUMN public.market_insights.sentiment IS 'Overall market sentiment:
 
 
 --
+-- Name: marketing_assets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.marketing_assets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid NOT NULL,
+    kind text NOT NULL,
+    storage_path text NOT NULL,
+    content_type text NOT NULL,
+    bytes bigint,
+    sha256 text NOT NULL,
+    duration_seconds numeric(8,3),
+    status text DEFAULT 'pending_upload'::text NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT marketing_assets_kind_check CHECK ((kind = ANY (ARRAY['manifest'::text, 'script'::text, 'audio'::text, 'podcast_audio'::text, 'video'::text, 'card'::text, 'carousel'::text, 'caption'::text, 'blog'::text]))),
+    CONSTRAINT marketing_assets_status_check CHECK ((status = ANY (ARRAY['pending_upload'::text, 'ready'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE marketing_assets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.marketing_assets IS 'Every artefact the marketing engine produces for a run (script, narration, podcast MP3, MP4, card PNGs, captions, blog HTML), keyed by its content-addressed path in the PUBLIC marketing-media bucket. Two-phase upload: pending_upload while the worker holds a signed upload URL, ready once the API has verified the object exists. Nothing FMP-licensed may be rendered into this bucket (auth.md §1a).';
+
+
+--
+-- Name: marketing_posts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.marketing_posts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid NOT NULL,
+    platform text NOT NULL,
+    format text NOT NULL,
+    status text DEFAULT 'pending_review'::text NOT NULL,
+    title text,
+    caption text DEFAULT ''::text NOT NULL,
+    asset_ids uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    idempotency_key text NOT NULL,
+    external_id text,
+    external_url text,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    cost_micros bigint DEFAULT 0 NOT NULL,
+    metrics jsonb DEFAULT '{}'::jsonb NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    claimed_at timestamp with time zone,
+    approved_at timestamp with time zone,
+    approved_by text,
+    published_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT marketing_posts_format_check CHECK ((format = ANY (ARRAY['video'::text, 'carousel'::text, 'image'::text, 'text'::text, 'podcast'::text, 'article'::text]))),
+    CONSTRAINT marketing_posts_platform_check CHECK ((platform = ANY (ARRAY['tiktok'::text, 'youtube'::text, 'instagram'::text, 'facebook'::text, 'linkedin'::text, 'threads'::text, 'bluesky'::text, 'x'::text, 'pinterest'::text, 'mastodon'::text, 'podcast'::text, 'blog'::text, 'hashnode'::text, 'devto'::text]))),
+    CONSTRAINT marketing_posts_status_check CHECK ((status = ANY (ARRAY['pending_review'::text, 'approved'::text, 'rejected'::text, 'queued'::text, 'published'::text, 'failed'::text, 'skipped'::text, 'retracted'::text])))
+);
+
+
+--
+-- Name: TABLE marketing_posts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.marketing_posts IS 'Publish ledger of the marketing engine: one row per (run, platform, format). Born pending_review; an admin (or MARKETING_AUTO_PUBLISH) makes it approved; the publisher loop in app/main.py claims it (approved → queued, atomically) before the first external call, then records published | failed with the platform''s id/URL, the attempt count and the cost in micro-dollars. idempotency_key is the key presented to the outlet, so a restart cannot double-post.';
+
+
+--
+-- Name: marketing_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.marketing_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_date date NOT NULL,
+    status text DEFAULT 'planned'::text NOT NULL,
+    stage text DEFAULT 'planned'::text NOT NULL,
+    content_class text DEFAULT 'A'::text NOT NULL,
+    template_id text,
+    source_ref text,
+    worker_version text,
+    dry_run boolean DEFAULT true NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    timings jsonb DEFAULT '{}'::jsonb NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    last_error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT marketing_runs_content_class_check CHECK ((content_class = ANY (ARRAY['A'::text, 'C'::text]))),
+    CONSTRAINT marketing_runs_stage_check CHECK ((stage = ANY (ARRAY['planned'::text, 'selected'::text, 'scripted'::text, 'voiced'::text, 'rendered'::text, 'assets_ready'::text]))),
+    CONSTRAINT marketing_runs_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'in_progress'::text, 'media_ready'::text, 'published'::text, 'failed'::text, 'skipped'::text])))
+);
+
+
+--
+-- Name: TABLE marketing_runs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.marketing_runs IS 'One row per ET calendar day of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS the day by inserting this row (UNIQUE run_date) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
+
+
+--
 -- Name: moat_intel_audit; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6748,6 +7804,31 @@ CREATE TABLE public.plan_credits (
     CONSTRAINT plan_credits_monthly_nonneg CHECK ((monthly_credits >= 0)),
     CONSTRAINT plan_credits_price_nonneg CHECK ((price_cents >= 0))
 );
+
+
+--
+-- Name: podcast_episodes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.podcast_episodes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    guid uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_id uuid,
+    title text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    mp3_path text NOT NULL,
+    bytes bigint NOT NULL,
+    duration_seconds integer NOT NULL,
+    published_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE podcast_episodes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.podcast_episodes IS 'Episodes of the self-hosted podcast RSS feed. Apple Podcasts and Spotify offer NO upload API: they ingest an RSS feed submitted once and re-poll it, so this table IS the podcast. guid never changes and mp3_path is immutable (Spotify only re-fetches an enclosure whose path changed).';
 
 
 --
@@ -8117,6 +9198,15 @@ CREATE TABLE storage.buckets (
     owner_id text,
     type storage.buckettype DEFAULT 'STANDARD'::storage.buckettype NOT NULL,
     versioning_status text DEFAULT 'DISABLED'::text NOT NULL,
+    lifecycle_configuration jsonb,
+    lifecycle_configuration_generation uuid,
+    CONSTRAINT buckets_lifecycle_configuration_pair_check CHECK (((lifecycle_configuration IS NULL) = (lifecycle_configuration_generation IS NULL))),
+    CONSTRAINT buckets_lifecycle_configuration_shape_check CHECK (((lifecycle_configuration IS NULL) OR ((jsonb_typeof(lifecycle_configuration) = 'object'::text) AND (lifecycle_configuration ? 'rules'::text) AND
+CASE
+    WHEN (jsonb_typeof((lifecycle_configuration -> 'rules'::text)) = 'array'::text) THEN ((jsonb_array_length((lifecycle_configuration -> 'rules'::text)) >= 1) AND (jsonb_array_length((lifecycle_configuration -> 'rules'::text)) <= 1000))
+    ELSE false
+END))),
+    CONSTRAINT buckets_lifecycle_configuration_standard_only_check CHECK (((type = 'STANDARD'::storage.buckettype) OR ((lifecycle_configuration IS NULL) AND (lifecycle_configuration_generation IS NULL)))),
     CONSTRAINT buckets_versioning_dark_check CHECK ((versioning_status = 'DISABLED'::text)),
     CONSTRAINT buckets_versioning_standard_only_check CHECK (((type = 'STANDARD'::storage.buckettype) OR (versioning_status = 'DISABLED'::text))),
     CONSTRAINT buckets_versioning_status_check CHECK ((versioning_status = ANY (ARRAY['DISABLED'::text, 'ENABLED'::text, 'SUSPENDED'::text])))
@@ -8486,6 +9576,38 @@ ALTER TABLE ONLY auth.mfa_factors
 
 
 --
+-- Name: mfa_recovery_code_sets mfa_recovery_code_sets_mfa_factor_id_key; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_code_sets
+    ADD CONSTRAINT mfa_recovery_code_sets_mfa_factor_id_key UNIQUE (mfa_factor_id);
+
+
+--
+-- Name: mfa_recovery_code_sets mfa_recovery_code_sets_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_code_sets
+    ADD CONSTRAINT mfa_recovery_code_sets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: mfa_recovery_code_sets mfa_recovery_code_sets_user_id_key; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_code_sets
+    ADD CONSTRAINT mfa_recovery_code_sets_user_id_key UNIQUE (user_id);
+
+
+--
+-- Name: mfa_recovery_codes mfa_recovery_codes_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_codes
+    ADD CONSTRAINT mfa_recovery_codes_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: oauth_authorizations oauth_authorizations_authorization_code_key; Type: CONSTRAINT; Schema: auth; Owner: -
 --
 
@@ -8595,6 +9717,22 @@ ALTER TABLE ONLY auth.saml_relay_states
 
 ALTER TABLE ONLY auth.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: scim_tokens scim_tokens_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.scim_tokens
+    ADD CONSTRAINT scim_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: scim_users scim_users_pkey; Type: CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.scim_users
+    ADD CONSTRAINT scim_users_pkey PRIMARY KEY (id);
 
 
 --
@@ -8889,7 +10027,7 @@ ALTER TABLE public.credit_transactions
 -- Name: CONSTRAINT credit_transactions_split_sums ON credit_transactions; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON CONSTRAINT credit_transactions_split_sums ON public.credit_transactions IS 'delta must equal granted_delta + purchased_delta, except the pre-117 rows that recorded no split (both zero). refund_credits reverses the RECORDED split, so a row that violates this would refund the wrong pool. Added NOT VALID in 166; VALIDATE once the count in that migration''s header returns 0. The (0,0) exemption is still being written by add_credit_transaction (credit_service.log_transaction) — tighten it only after that RPC records the split.';
+COMMENT ON CONSTRAINT credit_transactions_split_sums ON public.credit_transactions IS 'delta must equal granted_delta + purchased_delta, except the pre-117 rows that recorded no split (both zero). refund_credits reverses the RECORDED split, so a row that violates this would refund the wrong pool. Added NOT VALID in 166; VALIDATE once the count in that migration''s header returns 0. The (0,0) escape is HISTORICAL ONLY: no live writer produces it — add_credit_transaction, the last one that could, was dropped in 171 (it had no callers). Tighten to an id cutover once VALIDATE has run.';
 
 
 --
@@ -9165,6 +10303,62 @@ ALTER TABLE ONLY public.market_insights
 
 
 --
+-- Name: marketing_assets marketing_assets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_assets
+    ADD CONSTRAINT marketing_assets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: marketing_assets marketing_assets_storage_path_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_assets
+    ADD CONSTRAINT marketing_assets_storage_path_key UNIQUE (storage_path);
+
+
+--
+-- Name: marketing_posts marketing_posts_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_posts
+    ADD CONSTRAINT marketing_posts_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: marketing_posts marketing_posts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_posts
+    ADD CONSTRAINT marketing_posts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: marketing_posts marketing_posts_run_id_platform_format_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_posts
+    ADD CONSTRAINT marketing_posts_run_id_platform_format_key UNIQUE (run_id, platform, format);
+
+
+--
+-- Name: marketing_runs marketing_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_runs
+    ADD CONSTRAINT marketing_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: marketing_runs marketing_runs_run_date_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_runs
+    ADD CONSTRAINT marketing_runs_run_date_key UNIQUE (run_date);
+
+
+--
 -- Name: moat_intel_audit moat_intel_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -9218,6 +10412,30 @@ ALTER TABLE ONLY public.notification_job_state
 
 ALTER TABLE ONLY public.plan_credits
     ADD CONSTRAINT plan_credits_pkey PRIMARY KEY (tier);
+
+
+--
+-- Name: podcast_episodes podcast_episodes_guid_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.podcast_episodes
+    ADD CONSTRAINT podcast_episodes_guid_key UNIQUE (guid);
+
+
+--
+-- Name: podcast_episodes podcast_episodes_mp3_path_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.podcast_episodes
+    ADD CONSTRAINT podcast_episodes_mp3_path_key UNIQUE (mp3_path);
+
+
+--
+-- Name: podcast_episodes podcast_episodes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.podcast_episodes
+    ADD CONSTRAINT podcast_episodes_pkey PRIMARY KEY (id);
 
 
 --
@@ -9978,6 +11196,13 @@ CREATE INDEX mfa_factors_user_id_idx ON auth.mfa_factors USING btree (user_id);
 
 
 --
+-- Name: mfa_recovery_codes_set_id_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX mfa_recovery_codes_set_id_idx ON auth.mfa_recovery_codes USING btree (mfa_recovery_code_set_id);
+
+
+--
 -- Name: oauth_auth_pending_exp_idx; Type: INDEX; Schema: auth; Owner: -
 --
 
@@ -10108,6 +11333,97 @@ CREATE INDEX saml_relay_states_for_email_idx ON auth.saml_relay_states USING btr
 --
 
 CREATE INDEX saml_relay_states_sso_provider_id_idx ON auth.saml_relay_states USING btree (sso_provider_id);
+
+
+--
+-- Name: scim_tokens_expires_at_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_tokens_expires_at_idx ON auth.scim_tokens USING btree (expires_at);
+
+
+--
+-- Name: scim_tokens_revoked_at_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_tokens_revoked_at_idx ON auth.scim_tokens USING btree (revoked_at);
+
+
+--
+-- Name: scim_tokens_sso_provider_id_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_tokens_sso_provider_id_idx ON auth.scim_tokens USING btree (sso_provider_id);
+
+
+--
+-- Name: scim_tokens_token_hash_key; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE UNIQUE INDEX scim_tokens_token_hash_key ON auth.scim_tokens USING btree (token_hash);
+
+
+--
+-- Name: scim_users_created_at_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_created_at_idx ON auth.scim_users USING btree (sso_provider_id, created_at, id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: scim_users_deleted_at_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_deleted_at_idx ON auth.scim_users USING btree (deleted_at);
+
+
+--
+-- Name: scim_users_external_id_key; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE UNIQUE INDEX scim_users_external_id_key ON auth.scim_users USING btree (sso_provider_id, external_id) WHERE ((external_id IS NOT NULL) AND (deleted_at IS NULL));
+
+
+--
+-- Name: scim_users_id_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_id_idx ON auth.scim_users USING btree (sso_provider_id, id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: scim_users_sso_provider_id_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_sso_provider_id_idx ON auth.scim_users USING btree (sso_provider_id);
+
+
+--
+-- Name: scim_users_updated_at_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_updated_at_idx ON auth.scim_users USING btree (sso_provider_id, updated_at, id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: scim_users_user_id_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_user_id_idx ON auth.scim_users USING btree (user_id);
+
+
+--
+-- Name: scim_users_user_name_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX scim_users_user_name_idx ON auth.scim_users USING btree (sso_provider_id, user_name COLLATE "C", id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: scim_users_user_name_key; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE UNIQUE INDEX scim_users_user_name_key ON auth.scim_users USING btree (sso_provider_id, user_name) WHERE (deleted_at IS NULL);
 
 
 --
@@ -10734,6 +12050,34 @@ CREATE INDEX idx_market_insights_created ON public.market_insights USING btree (
 
 
 --
+-- Name: idx_marketing_assets_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_marketing_assets_run ON public.marketing_assets USING btree (run_id, kind);
+
+
+--
+-- Name: idx_marketing_posts_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_marketing_posts_run ON public.marketing_posts USING btree (run_id);
+
+
+--
+-- Name: idx_marketing_posts_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_marketing_posts_status ON public.marketing_posts USING btree (status, created_at);
+
+
+--
+-- Name: idx_marketing_runs_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_marketing_runs_status ON public.marketing_runs USING btree (status, run_date DESC);
+
+
+--
 -- Name: idx_moat_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -10822,6 +12166,13 @@ CREATE INDEX idx_notification_events_inbox ON public.notification_events USING b
 --
 
 CREATE INDEX idx_notification_events_unread ON public.notification_events USING btree (user_id) WHERE (read_at IS NULL);
+
+
+--
+-- Name: idx_podcast_episodes_published; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_podcast_episodes_published ON public.podcast_episodes USING btree (published_at DESC);
 
 
 --
@@ -11378,13 +12729,6 @@ CREATE UNIQUE INDEX bname ON storage.buckets USING btree (name);
 
 
 --
--- Name: bucketid_objname; Type: INDEX; Schema: storage; Owner: -
---
-
-CREATE UNIQUE INDEX bucketid_objname ON storage.objects USING btree (bucket_id, name);
-
-
---
 -- Name: buckets_analytics_unique_name_idx; Type: INDEX; Schema: storage; Owner: -
 --
 
@@ -11417,6 +12761,13 @@ CREATE INDEX idx_objects_bucket_id_name_lower ON storage.objects USING btree (bu
 --
 
 CREATE UNIQUE INDEX idx_objects_current_version ON storage.objects USING btree (bucket_id, name COLLATE "C") WHERE (archived_at IS NULL);
+
+
+--
+-- Name: idx_objects_delete_markers; Type: INDEX; Schema: storage; Owner: -
+--
+
+CREATE INDEX idx_objects_delete_markers ON storage.objects USING btree (bucket_id, name COLLATE "C") WHERE is_delete_marker;
 
 
 --
@@ -11532,6 +12883,27 @@ CREATE TRIGGER enforce_bucket_name_length_trigger BEFORE INSERT OR UPDATE OF nam
 
 
 --
+-- Name: buckets protect_bucket_control_insert; Type: TRIGGER; Schema: storage; Owner: -
+--
+
+CREATE TRIGGER protect_bucket_control_insert BEFORE INSERT ON storage.buckets FOR EACH ROW EXECUTE FUNCTION storage.protect_bucket_control_columns('service_role');
+
+
+--
+-- Name: buckets protect_bucket_control_update; Type: TRIGGER; Schema: storage; Owner: -
+--
+
+CREATE TRIGGER protect_bucket_control_update BEFORE UPDATE OF lifecycle_configuration, lifecycle_configuration_generation ON storage.buckets FOR EACH ROW EXECUTE FUNCTION storage.protect_bucket_control_columns();
+
+
+--
+-- Name: buckets protect_bucket_control_update_role; Type: TRIGGER; Schema: storage; Owner: -
+--
+
+CREATE TRIGGER protect_bucket_control_update_role AFTER UPDATE OF lifecycle_configuration, lifecycle_configuration_generation ON storage.buckets FOR EACH ROW EXECUTE FUNCTION storage.enforce_bucket_lifecycle_service_role('service_role');
+
+
+--
 -- Name: buckets protect_buckets_delete; Type: TRIGGER; Schema: storage; Owner: -
 --
 
@@ -11582,6 +12954,30 @@ ALTER TABLE ONLY auth.mfa_challenges
 
 ALTER TABLE ONLY auth.mfa_factors
     ADD CONSTRAINT mfa_factors_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: mfa_recovery_code_sets mfa_recovery_code_sets_mfa_factor_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_code_sets
+    ADD CONSTRAINT mfa_recovery_code_sets_mfa_factor_id_fkey FOREIGN KEY (mfa_factor_id) REFERENCES auth.mfa_factors(id) ON DELETE CASCADE;
+
+
+--
+-- Name: mfa_recovery_code_sets mfa_recovery_code_sets_user_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_code_sets
+    ADD CONSTRAINT mfa_recovery_code_sets_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: mfa_recovery_codes mfa_recovery_codes_mfa_recovery_code_set_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.mfa_recovery_codes
+    ADD CONSTRAINT mfa_recovery_codes_mfa_recovery_code_set_id_fkey FOREIGN KEY (mfa_recovery_code_set_id) REFERENCES auth.mfa_recovery_code_sets(id) ON DELETE CASCADE;
 
 
 --
@@ -11654,6 +13050,30 @@ ALTER TABLE ONLY auth.saml_relay_states
 
 ALTER TABLE ONLY auth.saml_relay_states
     ADD CONSTRAINT saml_relay_states_sso_provider_id_fkey FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: scim_tokens scim_tokens_sso_provider_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.scim_tokens
+    ADD CONSTRAINT scim_tokens_sso_provider_id_fkey FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: scim_users scim_users_sso_provider_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.scim_users
+    ADD CONSTRAINT scim_users_sso_provider_id_fkey FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: scim_users scim_users_user_id_fkey; Type: FK CONSTRAINT; Schema: auth; Owner: -
+--
+
+ALTER TABLE ONLY auth.scim_users
+    ADD CONSTRAINT scim_users_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE SET NULL;
 
 
 --
@@ -11737,11 +13157,35 @@ ALTER TABLE ONLY public.device_tokens
 
 
 --
+-- Name: marketing_assets marketing_assets_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_assets
+    ADD CONSTRAINT marketing_assets_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.marketing_runs(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: marketing_posts marketing_posts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_posts
+    ADD CONSTRAINT marketing_posts_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.marketing_runs(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: notification_events notification_events_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.notification_events
     ADD CONSTRAINT notification_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: podcast_episodes podcast_episodes_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.podcast_episodes
+    ADD CONSTRAINT podcast_episodes_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.marketing_runs(id) ON DELETE SET NULL;
 
 
 --
@@ -12677,6 +14121,45 @@ CREATE POLICY market_insights_service_all ON public.market_insights TO service_r
 
 
 --
+-- Name: marketing_assets; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.marketing_assets ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: marketing_assets marketing_assets_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY marketing_assets_service_all ON public.marketing_assets TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: marketing_posts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.marketing_posts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: marketing_posts marketing_posts_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY marketing_posts_service_all ON public.marketing_posts TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: marketing_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.marketing_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: marketing_runs marketing_runs_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY marketing_runs_service_all ON public.marketing_runs TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: moat_intel_audit; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12780,6 +14263,19 @@ CREATE POLICY plan_credits_public_read ON public.plan_credits FOR SELECT TO auth
 --
 
 CREATE POLICY plan_credits_service_all ON public.plan_credits TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: podcast_episodes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.podcast_episodes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: podcast_episodes podcast_episodes_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY podcast_episodes_service_all ON public.podcast_episodes TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -13345,6 +14841,20 @@ CREATE POLICY journey_images_service_write ON storage.objects TO service_role US
 --
 
 CREATE POLICY journey_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'journey-media'::text)) WITH CHECK ((bucket_id = 'journey-media'::text));
+
+
+--
+-- Name: objects marketing_media_public_read; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY marketing_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'marketing-media'::text));
+
+
+--
+-- Name: objects marketing_media_service_write; Type: POLICY; Schema: storage; Owner: -
+--
+
+CREATE POLICY marketing_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'marketing-media'::text)) WITH CHECK ((bucket_id = 'marketing-media'::text));
 
 
 --
@@ -14040,14 +15550,6 @@ GRANT ALL ON FUNCTION public.add_chat_tokens(p_user_id uuid, p_day date, p_token
 
 
 --
--- Name: FUNCTION add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.add_credit_transaction(p_user_id uuid, p_delta integer, p_reason text, p_ref_id text, p_balance_after integer) TO service_role;
-
-
---
 -- Name: FUNCTION add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone); Type: ACL; Schema: public; Owner: -
 --
 
@@ -14603,6 +16105,22 @@ GRANT ALL ON TABLE auth.mfa_factors TO dashboard_user;
 
 
 --
+-- Name: TABLE mfa_recovery_code_sets; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.mfa_recovery_code_sets TO postgres;
+GRANT ALL ON TABLE auth.mfa_recovery_code_sets TO dashboard_user;
+
+
+--
+-- Name: TABLE mfa_recovery_codes; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.mfa_recovery_codes TO postgres;
+GRANT ALL ON TABLE auth.mfa_recovery_codes TO dashboard_user;
+
+
+--
 -- Name: TABLE oauth_authorizations; Type: ACL; Schema: auth; Owner: -
 --
 
@@ -14683,6 +16201,22 @@ GRANT ALL ON TABLE auth.saml_relay_states TO dashboard_user;
 --
 
 GRANT SELECT ON TABLE auth.schema_migrations TO postgres WITH GRANT OPTION;
+
+
+--
+-- Name: TABLE scim_tokens; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.scim_tokens TO postgres;
+GRANT ALL ON TABLE auth.scim_tokens TO dashboard_user;
+
+
+--
+-- Name: TABLE scim_users; Type: ACL; Schema: auth; Owner: -
+--
+
+GRANT ALL ON TABLE auth.scim_users TO postgres;
+GRANT ALL ON TABLE auth.scim_users TO dashboard_user;
 
 
 --
@@ -15167,6 +16701,27 @@ GRANT ALL ON TABLE public.market_insights TO service_role;
 
 
 --
+-- Name: TABLE marketing_assets; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.marketing_assets TO service_role;
+
+
+--
+-- Name: TABLE marketing_posts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.marketing_posts TO service_role;
+
+
+--
+-- Name: TABLE marketing_runs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.marketing_runs TO service_role;
+
+
+--
 -- Name: TABLE moat_intel_audit; Type: ACL; Schema: public; Owner: -
 --
 
@@ -15210,6 +16765,13 @@ GRANT ALL ON TABLE public.notification_job_state TO service_role;
 GRANT SELECT ON TABLE public.plan_credits TO anon;
 GRANT SELECT ON TABLE public.plan_credits TO authenticated;
 GRANT ALL ON TABLE public.plan_credits TO service_role;
+
+
+--
+-- Name: TABLE podcast_episodes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.podcast_episodes TO service_role;
 
 
 --
@@ -15877,5 +17439,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict TAovLsjwjgmhyPJaKuPrgQhnG59v03cfh9nzukZBMOtF2074LjZGYTxwobRgKqk
+\unrestrict hGjGqpoMzzAHZqXMCzwM9GSTGkKFOKuMVgMJ51rpT1SauYYu1Hfoz4DoReU6Te1
 

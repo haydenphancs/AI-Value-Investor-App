@@ -28,6 +28,12 @@ struct AIMessageContent: View {
     /// which is the common case: stamping a price on every answer turns the chat into a
     /// meter, and the asking is the product.
     var credit: ChatTurnCostDTO? = nil
+    /// The model cut this answer at its output ceiling and the server's continuation did not
+    /// complete it (TestFlight 2026-09-16, E1: a MATIC answer ended at "For Polygon (MATIC),
+    /// the" and settled as a finished turn). Renders a "cut short" notice above the chips;
+    /// the way out is the server-sent "Continue your answer" chip, so the notice itself
+    /// carries no button — one CTA, not two. `false` on every complete or legacy message.
+    var truncated: Bool = false
 
     /// True while the thinking card is still "working" (reasoning/answer streaming, not yet done).
     private var thinkingActive: Bool {
@@ -69,6 +75,18 @@ struct AIMessageContent: View {
                         StreamingCaret()
                     }
                 }
+            }
+
+            // A cut answer says so — on EVERY render of that row, not only the latest one,
+            // because the half sentence stays in history. Sits between the body and the
+            // chips so the "Continue your answer" chip reads as its action.
+            if truncated, !isStreaming, !thinkingActive {
+                InlineRetryNotice(
+                    message: "This answer was cut short.",
+                    systemImage: "scissors",
+                    onRetry: nil
+                )
+                .accessibilityIdentifier("chat.answer.truncated")
             }
 
             // Follow-up suggestion chips — only under the latest, finished answer.

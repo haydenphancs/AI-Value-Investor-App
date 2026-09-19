@@ -518,9 +518,15 @@ class ChatContextResolver:
         price_str = (f" Price ${px} ({chg:+.2f}%) {_as_of_et()}."
                      if isinstance(chg, (int, float)) and math.isfinite(chg) else "")
         lead = f"The user is viewing the crypto detail screen for {detail.name} ({detail.symbol})." + price_str
+        # `crypto_profile` (the coin's description — origin, consensus, supply policy) sits
+        # AFTER `key_statistics_groups` / `performance_periods` / `snapshots` in the schema
+        # order, and those three can fill the 2800-char cap on their own, so the one block
+        # that answers "who maintains / how does it work" was the one most often starved
+        # (TestFlight 2026-09-16, E5). Emit it first; the numbers still follow.
         dump = _flatten_for_grounding(
             self._as_dict(detail), _DUMP_CAP,
             skip_top=("symbol", "name", "current_price", "price_change_percent"),
+            priority_top=("crypto_profile",),
         )
         return lead + ("\nScreen data the user can see:\n" + dump if dump else "")
 

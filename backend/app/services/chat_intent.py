@@ -78,6 +78,30 @@ _MASK_PATTERNS = (
     r"trim(?:med|ming|s)?\s+(?:costs?|guidance|jobs|staff|workforce|its)",
     # in-app action, not a trade
     r"add(?:s|ed|ing)?\s+to\s+(?:the\s+|my\s+|your\s+)?watchlist",
+    # ACCESS / VENUE questions — "where can I buy DOGE?", "how do I invest in SPY?",
+    # "which exchanges list SOL?" ask HOW an asset is reached, not WHETHER to buy it.
+    # The FRAME ("can I") + VERB ("buy") read as trade intent, so the TestFlight
+    # "where can I buy DOGE?" turn got the advice refusal AND the trade disclaimer
+    # (2026-09-16, E4). The mask removes the FRAME and, via the lookahead, KEEPS the
+    # verb: "where can I buy DOGE, should I?" still trips on its own frame, and
+    # "where can I buy DOGE, is it a good buy?" on the standalone. "How much should I
+    # invest" is untouched — "much" sits between "how" and the auxiliary.
+    # No `you`: `would you buy…` is the advisory frame `_FRAME_RE` exists to catch. And a
+    # DECISION TAIL in the same clause keeps the frame — "how do I sell before it drops?",
+    # "how do I buy the dip?", "where do I buy in, now or after earnings?" are timing
+    # questions wearing access words, and they keep their disclaimer.
+    r"\b(?:where|how)\s+(?:can|could|do|does|would)\s+(?:i|we|one|someone)\s+"
+    r"(?=(?:buy|purchase|get|trade|invest|acquire|access|sell|own|hold)\b)"
+    r"(?![^?.!\n]{0,80}\b(?:before|after|now|today|tonight|tomorrow|dip|dips|drops?|falls?|"
+    r"crash(?:es)?|profits?|gains?|losses|tranches?|earnings|calls?|puts?|position|split|"
+    r"vs\.?|versus|or\s+wait|timing|when|at\s+what\s+price|at\s+this\s+price)\b)",
+    r"\b(?:where|how)\s+to\s+(?=(?:buy|purchase|invest|get|trade|access|sell)\b)"
+    r"(?![^?.!\n]{0,80}\b(?:before|after|now|today|tonight|tomorrow|dip|dips|drops?|falls?|"
+    r"crash(?:es)?|profits?|gains?|losses|tranches?|earnings|calls?|puts?|position|split|"
+    r"vs\.?|versus|or\s+wait|timing|when|at\s+what\s+price|at\s+this\s+price)\b)",
+    r"\bwhich\s+(?:exchanges?|platforms?|brokers?|brokerages?|apps?|venues?)\b",
+    r"\b(?:on\s+)?what\s+(?:exchanges?|platforms?|brokers?|apps?)\b",
+    r"\bwhere\s+(?:is|are|can|could)\s+\S+\s+(?:be\s+)?(?:listed|traded|available|bought|purchased)\b",
 )
 _MASK_RE = re.compile("|".join(_MASK_PATTERNS), re.IGNORECASE)
 

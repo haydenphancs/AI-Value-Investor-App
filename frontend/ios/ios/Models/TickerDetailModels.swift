@@ -634,7 +634,9 @@ struct TickerAISuggestion: Identifiable {
     static let defaultSuggestions: [TickerAISuggestion] = [
         TickerAISuggestion(text: "What's the P/E ratio?"),
         TickerAISuggestion(text: "Why does it move?"),
-        TickerAISuggestion(text: "Should I buy?"),
+        // Was "Should I buy?" — the one question the advice boundary declines, offered by
+        // the app itself (TestFlight 2026-09-16, E3). Outlook is answerable as scenarios.
+        TickerAISuggestion(text: "What's the outlook?"),
         TickerAISuggestion(text: "Is revenue growing?")
     ]
 }

@@ -499,6 +499,44 @@ async def test_crypto_dumps_snapshots_and_profile(resolver, monkeypatch):
         assert v in block, v
 
 
+@pytest.mark.asyncio
+async def test_crypto_profile_survives_a_stats_heavy_payload(resolver, monkeypatch):
+    """E5 (TestFlight 2026-09-16): `crypto_profile` sits after the key statistics,
+    performance periods and snapshots in schema order; a coin with a full set of those
+    filled the 2800-char cap before the description was reached, so "Who maintains
+    DOGE?" was answered from a grounding block that never mentioned the coin's origin.
+    The profile is now emitted first. (Mutation: drop `priority_top=` → the description
+    is absent and this fails.)"""
+    stats = [_Obj(title=f"Group {g}", statistics=[
+        _Obj(label=f"Statistic number {g}-{i}", value=f"{g * 100 + i:,} units of something")
+        for i in range(12)
+    ]) for g in range(6)]
+    perf = [_Obj(period=f"P{i}", change_percent=float(i), label=f"Period label {i}") for i in range(12)]
+    snaps = [_Obj(category=f"Category {i}", paragraphs=["x" * 380, "y" * 380]) for i in range(6)]
+    detail = _Obj(
+        name="Dogecoin", symbol="DOGE", current_price=0.09, price_change_percent=3.3,
+        key_statistics_groups=stats, performance_periods=perf, snapshots=snaps,
+        crypto_profile=_Obj(
+            description="Dogecoin started as a joke in 2013; maintained by the Dogecoin Core developers.",
+            consensus_mechanism="Proof of Work",
+        ),
+    )
+
+    class _Svc:
+        async def get_crypto_detail(self, s):
+            return detail
+
+    import app.services.crypto_service as cs
+    monkeypatch.setattr(cs, "get_crypto_service", lambda: _Svc())
+    block = await resolver.resolve("CRYPTO", "doge", None)
+    assert block is not None
+    assert "maintained by the Dogecoin Core developers" in block
+    # …and it comes BEFORE the first statistic, not after the cap has been spent.
+    assert block.index("Dogecoin Core developers") < block.index("Statistic number 0-0")
+    # The numbers are not lost either — the cap still holds the leading stats.
+    assert "Statistic number 0-0" in block
+
+
 # ── INDEX ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

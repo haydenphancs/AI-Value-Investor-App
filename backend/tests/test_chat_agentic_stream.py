@@ -469,11 +469,13 @@ async def test_stream_synthesis_degrades_to_specialist_answer_when_merge_fails()
     class _G:
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
                                  system_instruction=None, max_rounds=4, model_name=None,
-                                 usage_tag=None, max_output_tokens=None):
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             yield ("answer", "valuation view: looks cheap")
 
         async def stream_text(self, prompt, system_instruction=None, model_name=None,
-                              usage_tag=None, max_output_tokens=None):
+                              usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             raise RuntimeError("quota circuit open (resource_exhausted)")
             yield  # pragma: no cover — makes this an async generator
 
@@ -642,11 +644,13 @@ async def test_stream_synthesis_clean_but_empty_merge_uses_specialist_answer():
     class _G:
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
                                  system_instruction=None, max_rounds=4, model_name=None,
-                                 usage_tag=None, max_output_tokens=None):
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             yield ("answer", "fundamentals view: solid balance sheet")
 
         async def stream_text(self, prompt, system_instruction=None, model_name=None,
-                              usage_tag=None, max_output_tokens=None):
+                              usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             # Clean completion, but ONLY a thought — never an answer token.
             yield ("thought", "weighing the two lenses…")
 
@@ -674,7 +678,8 @@ async def test_stream_synthesis_all_specialists_fail_falls_back_to_general():
 
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
                                  system_instruction=None, max_rounds=4, model_name=None,
-                                 usage_tag=None, max_output_tokens=None):
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             self.calls += 1
             n = self.calls
             if n <= 2:                       # the two specialist runs → only a thought → empty answer
@@ -700,14 +705,16 @@ def _synth_svc(per_specialist, merge):
     class _G:
         async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
                                  system_instruction=None, max_rounds=4, model_name=None,
-                                 usage_tag=None, max_output_tokens=None):
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             for ev in per_specialist(system_instruction):
                 if isinstance(ev, Exception):
                     raise ev
                 yield ev
 
         async def stream_text(self, prompt, system_instruction=None, model_name=None,
-                              usage_tag=None, max_output_tokens=None):
+                              usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
             for ev in merge():
                 if isinstance(ev, Exception):
                     raise ev
@@ -781,3 +788,64 @@ async def test_a_merge_that_dies_before_any_text_still_serves_the_top_specialist
     events = [ev async for ev in svc.stream_synthesis(_PREP, "q", _ROUTE2, tools=[], tool_handlers={}, signals=signals)]
     assert signals == {"degraded": "unmerged"}
     assert [p for k, p in events if k == "answer"] == ["a view"]
+
+
+@pytest.mark.asyncio
+async def test_stream_synthesis_salvage_carries_the_specialists_finish_marker():
+    """Review finding (2026-09-19): `_run` collected only answer/tool events, so when the
+    merge produced nothing the salvaged specialist text — itself CUT by MAX_TOKENS —
+    reached the endpoint as a plain answer: charged in full, never marked, never
+    continued. The marker now rides behind the salvaged text."""
+    from app.services.chat_service import ChatService
+
+    class _G:
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
+            yield ("answer", "fundamentals view: solid balance sheet but the")
+            yield ("finish", "MAX_TOKENS")
+
+        async def stream_text(self, prompt, system_instruction=None, model_name=None,
+                              usage_tag=None, max_output_tokens=None,
+                              thinking_budget=None):
+            yield ("thought", "weighing the two lenses…")   # clean-but-empty merge
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    prep = {"system_instruction": "sys", "prompt": "p"}
+    route = {"specialists": ["valuation", "fundamentals"],
+             "labels": ["Valuation", "Fundamentals"], "mode": "synthesize"}
+    signals: dict = {}
+    events = [ev async for ev in svc.stream_synthesis(prep, "is it a buy?", route, tools=[],
+                                                      tool_handlers={}, signals=signals)]
+    kinds = [k for k, _ in events]
+    assert ("answer", "fundamentals view: solid balance sheet but the") in events
+    assert events[-1] == ("finish", "MAX_TOKENS"), events[-3:]
+    assert kinds.index("finish") > kinds.index("answer"), "the marker follows the salvaged text"
+    assert signals["degraded"] == "unmerged"
+
+
+@pytest.mark.asyncio
+async def test_stream_synthesis_salvage_of_a_clean_specialist_carries_no_marker():
+    from app.services.chat_service import ChatService
+
+    class _G:
+        async def stream_agentic(self, prompt, tools=None, tool_handlers=None,
+                                 system_instruction=None, max_rounds=4, model_name=None,
+                                 usage_tag=None, max_output_tokens=None,
+                                 thinking_budget=None):
+            yield ("answer", "fundamentals view: solid balance sheet.")
+
+        async def stream_text(self, prompt, system_instruction=None, model_name=None,
+                              usage_tag=None, max_output_tokens=None,
+                              thinking_budget=None):
+            yield ("thought", "…")
+
+    svc = object.__new__(ChatService)
+    svc.gemini = _G()
+    prep = {"system_instruction": "sys", "prompt": "p"}
+    route = {"specialists": ["valuation", "fundamentals"],
+             "labels": ["Valuation", "Fundamentals"], "mode": "synthesize"}
+    events = [ev async for ev in svc.stream_synthesis(prep, "q", route, tools=[], tool_handlers={})]
+    assert "finish" not in [k for k, _ in events]

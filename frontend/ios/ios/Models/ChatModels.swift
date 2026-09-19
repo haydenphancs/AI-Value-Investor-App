@@ -204,7 +204,8 @@ struct ChatHistoryGroup: Identifiable {
 // MARK: - Sample Data
 extension SuggestionChip {
     static let sampleData: [SuggestionChip] = [
-        SuggestionChip(text: "Should I buy #AAPL?", type: .question),
+        // Was "Should I buy #AAPL?" — a dead-end chip the app itself offered (E3).
+        SuggestionChip(text: "What's the outlook for #AAPL?", type: .question),
         SuggestionChip(text: "#Tech Stocks", type: .hashtag),
         SuggestionChip(text: "#Crypto", type: .hashtag),
         SuggestionChip(text: "What does this chart mean?", type: .question),
@@ -213,7 +214,7 @@ extension SuggestionChip {
 
     /// Starter chips for a book chat, derived from that book's own cores.
     ///
-    /// `sampleData` above is stock-flavoured ("Should I buy #AAPL?"), which is the wrong
+    /// `sampleData` above is stock-flavoured ("What's the outlook for #AAPL?"), which is the wrong
     /// question set entirely on a Learn screen — and it was what an empty book chat showed.
     /// Derived from the authored cores rather than a second hand-maintained table, so a book
     /// whose guide changes cannot drift from its own chips.

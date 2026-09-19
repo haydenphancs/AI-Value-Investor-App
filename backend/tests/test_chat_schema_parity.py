@@ -67,6 +67,10 @@ _MESSAGE_ALL_KEYS = _MESSAGE_REQUIRED | {
     # Present ONLY on a free or refunded turn; absent on every legacy row and every
     # normally-charged one, so iOS decodes it Optional and renders no chip by default.
     "credit",
+    # `truncated` — True ONLY on an answer the model cut (MAX_TOKENS / SAFETY /
+    # RECITATION after real text) that no continuation completed; rich_content-backed,
+    # None on every legacy row and every complete turn. iOS decodes `Bool?`.
+    "truncated",
 }
 
 # iOS StockChartWidgetData / MarketOverviewWidgetData non-optional properties.
@@ -152,11 +156,17 @@ def test_legacy_session_row_has_null_context_fields():
 
 
 def test_session_list_shape():
+    """iOS ChatSessionListDTO = {sessions, total, has_more?}. `has_more` (E6 paging) is
+    Optional on both sides: an old build ignores it, a new build treats nil as "unknown"
+    and falls back to the page-length heuristic."""
     rows = [{"id": f"s{i}", "created_at": "2026-06-28T00:00:00.000000+00:00"} for i in range(3)]
     resp = ChatSessionListResponse(sessions=[_row_to_session(r) for r in rows], total=3)
     dumped = resp.model_dump()
-    assert set(dumped.keys()) == {"sessions", "total"}, "iOS ChatSessionListDTO = {sessions, total}"
+    assert set(dumped.keys()) == {"sessions", "total", "has_more"}
     assert dumped["total"] == 3 and len(dumped["sessions"]) == 3
+    assert dumped["has_more"] is None
+    paged = ChatSessionListResponse(sessions=[], total=0, has_more=True).model_dump()
+    assert paged["has_more"] is True
 
 
 # ── Messages ──────────────────────────────────────────────────────────────────
@@ -198,6 +208,25 @@ def test_worst_case_message_row_has_null_futuristic_fields():
     assert dumped["sources"] is None
     assert dumped["suggestions"] is None
     assert dumped["thinking"] is None
+    assert dumped["truncated"] is None
+
+
+@pytest.mark.parametrize("stored,expected", [
+    ({"truncated": True, "finish_reason": "MAX_TOKENS"}, True),
+    ({"truncated": False}, None),      # never False on the wire
+    ({"truncated": "yes"}, None),      # a non-bool never reads as cut
+    ({"truncated": 1}, None),
+    ({}, None),
+])
+def test_truncated_is_true_or_absent_never_false(stored, expected):
+    """iOS decodes `truncated` as `Bool?` and shows the "cut short" notice on `true`
+    only; anything that is not literally True must read as absent."""
+    row = {
+        "id": "m", "session_id": "s", "role": "assistant", "content": "half",
+        "created_at": "2026-07-09T00:00:00.000000+00:00",
+        "rich_content": {"thinking": {"stages": [], "elapsed_ms": 1}, **stored},
+    }
+    assert _row_to_message(row).model_dump()["truncated"] is expected
 
 
 def test_message_surfaces_thinking_sources_suggestions_from_rich_content():

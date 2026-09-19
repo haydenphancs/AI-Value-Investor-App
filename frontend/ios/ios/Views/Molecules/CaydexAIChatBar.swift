@@ -167,7 +167,7 @@ struct CaydexAISuggestionChip: View {
                 // With suggestions
                 CaydexAIChatBar(
                     inputText: $text,
-                    suggestions: ["What's the P/E ratio?", "Why does it move?", "Should I buy?"]
+                    suggestions: ["What's the P/E ratio?", "Why does it move?", "What's the outlook?"]
                 )
 
                 // Without suggestions

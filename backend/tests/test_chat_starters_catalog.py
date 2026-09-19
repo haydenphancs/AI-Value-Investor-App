@@ -155,3 +155,17 @@ def test_the_catalogue_scan_is_not_vacuous():
     import re
     pattern = re.compile(r"(?<![A-Za-z])(?:\$|#)?[A-Z]{2,5}(?![A-Za-z])")
     assert pattern.findall("Should I buy #AAPL?") == ["#AAPL"]
+
+
+def test_every_catalogue_question_is_one_cay_ai_will_answer():
+    """TestFlight 2026-09-16 (E3): "all suggestion question must have answer!" The chips
+    the app itself offers — global AND per-asset detail pools — must pass the same
+    answerable-scope filter the live follow-up chips do. "How do I invest in {symbol}?"
+    (index pool) read as trade intent until the access-phrasing mask landed."""
+    from app.services.chat_chip_filter import is_answerable_chip
+    rendered = list(_GLOBAL)
+    for scope, questions in _DETAIL.items():
+        rendered.extend(str(q).replace("{symbol}", "AAPL") for q in questions)
+    assert len(rendered) >= 100
+    offenders = [q for q in rendered if not is_answerable_chip(q)]
+    assert offenders == [], f"catalogue questions Cay AI would decline: {offenders}"

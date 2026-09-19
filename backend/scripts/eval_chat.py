@@ -53,7 +53,7 @@ from app.services.agents.chat_tools import build_chat_tool_declarations, build_c
 from app.services.agents.chat_guardrails import enforce_answer, scan_answer
 from app.services.chat_intent import is_trade_intent
 from app.services.chat_security import finalize_disclaimer
-from app.services.chat_service import ChatService
+from app.services.chat_service import ChatService, _chat_thinking_budget
 
 _GOLDEN = REPO / "backend" / "data" / "chat_eval_golden.json"
 _OUT_DIR = REPO / "backend" / "scripts" / "out"
@@ -150,6 +150,7 @@ async def _run_chat_stream(svc: ChatService, case: Dict[str, Any]) -> Dict[str, 
         async for kind, payload in svc.gemini.stream_agentic(
             prep["prompt"], tools=tools, tool_handlers=handlers,
             system_instruction=system_instruction, model_name=model, max_output_tokens=cap,
+            thinking_budget=_chat_thinking_budget(),
         ):
             if kind == "answer":
                 answer.append(payload)

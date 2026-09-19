@@ -34,14 +34,16 @@ from app.services.chat_security import (
     scan_input,
     finalize_disclaimer,
     strip_trailing_disclaimer,
+    neutralize_fences,
 )
 from app.core.security import trusted_client_ip
 from app.services.chat_budget_service import get_chat_budget_service, ChatBudgetUnavailable
 from app.services.credit_service import CreditService, CreditServiceUnavailable, refund_did_not_happen
-from app.integrations.gemini import GeminiTimeoutError
+from app.integrations.gemini import GeminiTimeoutError, _is_clean_finish, is_length_cut
 import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
 from app.services.chat_intent import is_trade_intent
+from app.services.chat_chip_filter import filter_answerable_chips
 from app.schemas.chat_starters import ChatStartersResponse
 from app.services.chat_starters_service import get_chat_starters_service
 from app.schemas.chat import (
@@ -856,8 +858,218 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+# Characters that end / begin a WORD at the join: a cut at a token boundary lands after
+# a complete word (Gemini's tokens carry their leading space), and the continuation's first
+# token arrives without one — "printing" + "more" read "printingmore" on the first live run.
+_JOIN_TAIL = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789)]:;,.!?%\"'")
+_JOIN_HEAD = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789([\"'*")
+_JOIN_MIN_OVERLAP = 12
+
+
+def _join_continuation(partial: str, continuation: str) -> str:
+    """Make a continuation read as one answer with the partial it follows.
+
+    Two deterministic repairs, both on the FIRST chunk only:
+      * a repeated tail — the model re-emitted the end of the partial before going on
+        ("…the supply is" + "the supply is uncapped") — is trimmed when at least
+        `_JOIN_MIN_OVERLAP` characters of the partial's tail equal the continuation's
+        head (case-insensitive; shorter overlaps are too often coincidence);
+      * a missing space at a word boundary is inserted when the partial ends in a
+        word/closing character and the continuation opens with a word/opening one.
+        A cut that landed mid-word gets a spurious space; a cut lands mid-word only
+        when the ceiling hit inside a multi-token word, which is the rare case.
+    Pure; never raises; an empty continuation comes back empty.
+    """
+    if not continuation:
+        return continuation
+    tail = partial.rstrip()
+    if tail:
+        limit = min(len(tail), len(continuation), 200)
+        for k in range(limit, _JOIN_MIN_OVERLAP - 1, -1):
+            if tail[-k:].lower() == continuation[:k].lower():
+                continuation = continuation[k:]
+                break
+    if not continuation:
+        return continuation
+    if partial and not partial[-1].isspace() and not continuation[0].isspace():
+        # "$13." + "49" and "13," + "000" are one number, not two words.
+        numeric_seam = partial[-1] in ".,:" and continuation[0].isdigit()
+        if partial[-1] in _JOIN_TAIL and continuation[0] in _JOIN_HEAD and not numeric_seam:
+            continuation = " " + continuation
+    return continuation
+
+
+async def _continue_cut_answer(
+    chat_service,
+    prep: dict,
+    partial: str,
+    *,
+    model_name: Optional[str],
+    max_output_tokens: int,
+    usage_tag: str,
+    signals: dict,
+):
+    """ONE continuation round for an answer the model CUT mid-sentence.
+
+    Yields ``("answer", text)`` chunks only — thoughts are dropped on purpose: the
+    thinking card has already settled by the time the answer text was cut, and a
+    second burst of `reasoning` frames would re-activate it under a half-written
+    bubble. The verdict lands in ``signals["continuation"]``:
+
+      * ``"clean"``  — text arrived and the round finished with STOP: the answer is
+                       complete, the turn is NOT truncated.
+      * ``"cut"``    — text arrived but this round hit the ceiling too (the finish
+                       reason is in ``signals["continuation_finish"]``): still truncated.
+      * ``"empty"``  — no answer text (thoughts only / safety-filtered): still truncated.
+      * ``"failed"`` — the call raised; logged, never re-raised, still truncated.
+
+    The prompt is the turn's own fenced prompt (history + RAG context + the user
+    message) plus the partial answer, fenced as DATA so nothing in it can close the
+    spotlight. It goes out on the tool-less instruction: the data was gathered in the
+    first round and a fresh tool round here would spend the budget the same way twice.
+    Never raises — the caller settles the turn from `signals` whatever happens here.
+    """
+    signals["continuation"] = "failed"
+    got_text = False
+    cut_again: Optional[str] = None
+    from app.services.chat_service import _chat_thinking_budget
+    prompt = (
+        f"{prep.get('prompt') or ''}\n\n"
+        "Your answer to the USER MESSAGE above was cut off by a length limit. What "
+        "reached the user so far is below, as data:\n"
+        "<<<PARTIAL_ANSWER>>>\n"
+        f"{neutralize_fences(partial)}\n"
+        "<<<END_PARTIAL_ANSWER>>>\n"
+        "Continue that answer from the exact point it stops. Do not repeat any word "
+        "already written, do not restart or summarise it, and add no preamble. If it "
+        "stopped in the middle of a word, write only the rest of that word first; "
+        "otherwise begin with the very next word. Finish the thought, then stop."
+    )
+    # The first chunk is buffered (briefly — this is the rare path) so the join with
+    # the partial can be repaired before anything reaches the bubble.
+    head: List[str] = []
+    head_len = 0
+    head_flushed = False
+    try:
+        async for kind, text in chat_service.gemini.stream_text(
+            prompt,
+            system_instruction=prep.get("system_instruction_no_tools") or prep.get("system_instruction"),
+            model_name=model_name,
+            max_output_tokens=max_output_tokens,
+            thinking_budget=_chat_thinking_budget(model_name),
+            usage_tag=usage_tag,
+        ):
+            if kind == "answer" and text:
+                if not head_flushed:
+                    head.append(text)
+                    head_len += len(text)
+                    if head_len < 120:
+                        continue
+                    joined = _join_continuation(partial, "".join(head))
+                    head_flushed = True
+                    if joined:
+                        # Whitespace is forwarded (it may be the space before the next
+                        # word) but does not count as a continuation on its own.
+                        got_text = got_text or bool(joined.strip())
+                        yield "answer", joined
+                    continue
+                got_text = got_text or bool(text.strip())
+                yield "answer", text
+            elif kind == "finish":
+                cut_again = str(text)
+        if not head_flushed and head:
+            joined = _join_continuation(partial, "".join(head))
+            head_flushed = True
+            if joined:
+                got_text = got_text or bool(joined.strip())
+                yield "answer", joined
+    except Exception as e:
+        logger.warning(
+            "Chat continuation round failed (%s: %s) for %s — keeping the turn truncated",
+            type(e).__name__, e, usage_tag,
+        )
+        signals["continuation"] = "failed"
+        return
+    if not got_text:
+        signals["continuation"] = "empty"
+    elif cut_again:
+        signals["continuation"] = "cut"
+        signals["continuation_finish"] = cut_again
+    else:
+        signals["continuation"] = "clean"
+
+
+def _session_has_card(supabase, session_id: str) -> Optional[bool]:
+    """Whether any persisted assistant row of this session already carries a card.
+
+    The once-per-session card (E7) is keyed on `message_count` — but a first turn whose
+    card fetch timed out (`_deterministic_widget` answers None and logs) persisted a
+    cardless row, and the count then kept every later turn cardless too (review
+    finding, 2026-09-19). On a later grounded turn this probe asks the rows instead:
+    no prior card → the next answer carries it. One small select, off the loop, only
+    on later turns of grounded sessions. None when the probe itself fails — the caller
+    then falls back to the count rule (no card) rather than guessing.
+    """
+    try:
+        result = (
+            supabase.table("chat_messages")
+            .select("id")
+            .eq("session_id", session_id)
+            .eq("role", "assistant")
+            .not_.is_("rich_content->widget", "null")
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as e:
+        logger.warning(
+            "chat card probe failed for session %s (%s: %s) — keeping the count rule",
+            session_id, type(e).__name__, e,
+        )
+        return None
+
+
+async def _should_attach_base_card(supabase, session_row: dict, session_id: str) -> bool:
+    """The card rule for BOTH doors: the first turn, or a later turn whose earlier
+    answers never managed to render one."""
+    if _is_first_turn(session_row):
+        return True
+    grounded = bool(session_row.get("stock_id") or session_row.get("reference_id"))
+    if not grounded:
+        return False
+    has_card = await asyncio.to_thread(_session_has_card, supabase, session_id)
+    if has_card is False:
+        logger.info("Chat: no card persisted yet for session %s — attaching it on this turn", session_id)
+        return True
+    return False
+
+
+def _is_first_turn(session_row: Optional[dict]) -> bool:
+    """True when no message has been persisted on this session yet.
+
+    Reads the trigger-maintained `message_count` (see `trg_chat_message_count`), which
+    both doors already use for the auto-title gate. Tolerant of the column arriving as
+    None / a string / garbage: anything that is not a positive integer reads as "first
+    turn", so a malformed row degrades to showing the card rather than never showing it.
+    """
+    try:
+        count = int((session_row or {}).get("message_count") or 0)
+    except (TypeError, ValueError):
+        return True
+    return count <= 0
+
+
+# The one follow-up chip a CUT answer gets instead of model-written suggestions. It is
+# a normal chip on the wire (`suggestions`), so a build that predates the `truncated`
+# flag still renders the way out; tapping it sends this text as the next user message,
+# and the model — which sees its own half answer in the conversation history — picks
+# up where it stopped. First person, under 60 chars, like every other chip.
+_CONTINUE_CHIP = "Continue your answer"
+
+
 def _rich_content_for_turn(
     thinking: dict, widgets: Optional[list], sources: Optional[list],
+    *, truncated: bool = False, finish_reason: Optional[str] = None,
 ) -> dict:
     """The `rich_content` blob BOTH doors persist, built in one place.
 
@@ -865,6 +1077,11 @@ def _rich_content_for_turn(
     it after a stream verdict rendered on the next history load as a bare bubble beside
     neighbours that all had a thinking card and source pills (F03-9 / F01-7). The
     `widget` key stays for old iOS builds; `widgets` is the list new ones read.
+
+    `truncated` marks an answer the model CUT (MAX_TOKENS / SAFETY / RECITATION after
+    real text) that no continuation completed. It is written only when true — a clean
+    turn's blob is byte-identical to before — and `_row_to_message` lifts it onto the
+    wire so a history reload shows the same "cut short" state the live turn did.
     """
     rich: dict = {"thinking": thinking}
     if widgets:
@@ -872,6 +1089,10 @@ def _rich_content_for_turn(
         rich["widget"] = widgets[0]
     if sources:
         rich["sources"] = sources
+    if truncated:
+        rich["truncated"] = True
+        if finish_reason:
+            rich["finish_reason"] = str(finish_reason)[:40]
     return rich
 
 
@@ -995,11 +1216,19 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
     # Futuristic-chat fields live in rich_content (no schema migration). Absent → None,
     # so legacy rows and old iOS builds decode unchanged.
     sources = rc.get("sources") if rc else None
-    suggestions = rc.get("suggestions") if rc else None
+    # Chips stored BEFORE the answerable-scope filter existed can still propose a question
+    # the chat declines; filtering on read keeps history honest without rewriting rows
+    # (the raw `rich_content` echo is untouched — iOS reads `suggestions`). Idempotent on
+    # the `done` frame, which was filtered at generation. The Continue chip passes.
+    stored_chips = rc.get("suggestions") if rc else None
+    suggestions = (filter_answerable_chips(stored_chips) or None) if stored_chips else None
     thinking = rc.get("thinking") if rc else None
     # Present only on a turn that was free or refunded, so a history reload re-shows the
     # chip. Absent on every legacy row and every normally-charged turn → None → no chip.
     credit = rc.get("credit") if rc else None
+    # Written only on a CUT answer (`_rich_content_for_turn`); `True` or None on the
+    # wire, never False, so legacy rows and old builds see nothing new.
+    truncated = True if (rc and rc.get("truncated") is True) else None
 
     # Replay strip. Rows persisted before the disclaimer became conditional carry the
     # line on EVERY answer, including "Hi". Rewriting `chat_messages` was rejected —
@@ -1027,6 +1256,7 @@ def _row_to_message(row: dict, *, strip_disclaimer: bool = False) -> ChatMessage
         suggestions=suggestions,
         thinking=thinking,
         credit=credit,
+        truncated=truncated,
         created_at=row["created_at"],
     )
 
@@ -1073,22 +1303,50 @@ async def list_chat_sessions(
     user: dict = Depends(get_chat_identity),  # per-INSTALL guest partition (migration 111)
     supabase: Client = Depends(get_supabase),
 ):
-    """List all chat sessions for the current user, newest first."""
-    result = (
-        supabase.table("chat_sessions")
-        .select(_SESSION_LIST_COLUMNS)
-        .eq("user_id", user["id"])
-        # No NULLS clause: `last_message_at` is NOT NULL DEFAULT now() (chat_sessions DDL),
-        # so `nullsfirst=False` bought nothing semantically and cost the planner the
-        # (user_id, last_message_at DESC) index — DESC defaults to NULLS FIRST, and a
-        # mismatched NULLS flag forces an explicit sort of the user's whole list per page.
-        .order("last_message_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
+    """One page of the current user's chat sessions, newest activity first.
 
-    sessions = [_row_to_session(r) for r in (result.data or [])]
-    return ChatSessionListResponse(sessions=sessions, total=len(sessions))
+    Fetches `limit + 1` rows so `has_more` is exact without a second COUNT query; the
+    client pages on it until every session is listed (E6). Off the event loop like the
+    other chat reads — a sync postgrest call on the single Railway worker stalls every
+    other request for a Supabase RTT.
+    """
+    def _fetch():
+        return (
+            supabase.table("chat_sessions")
+            .select(_SESSION_LIST_COLUMNS)
+            .eq("user_id", user["id"])
+            # No NULLS clause: `last_message_at` is NOT NULL DEFAULT now() (chat_sessions DDL),
+            # so `nullsfirst=False` bought nothing semantically and cost the planner the
+            # (user_id, last_message_at DESC) index — DESC defaults to NULLS FIRST, and a
+            # mismatched NULLS flag forces an explicit sort of the user's whole list per page.
+            .order("last_message_at", desc=True)
+            .range(offset, offset + limit)   # one extra row = the has_more probe
+            .execute()
+        )
+
+    try:
+        result = await asyncio.to_thread(_fetch)
+    except Exception as e:
+        # The bare select used to surface as a 500 with no body iOS could read, and the
+        # history panel then kept whatever list it last loaded with nothing telling the
+        # user it was stale (E6). Same contract as `_session_lookup_failed`: SYSTEM_BUSY
+        # (in the client's terminal set) with a step marker. WARNING for a datastore blip,
+        # ERROR (with the stack) for anything deterministic.
+        if is_transient_supabase_error(e):
+            logger.warning("chat_sessions list transient (%s: %s)", type(e).__name__, e)
+        else:
+            logger.error("chat_sessions list failed (%s: %s)", type(e).__name__, e, exc_info=True)
+        return make_error_response(
+            ErrorCode.SYSTEM_BUSY,
+            message=f"chat_sessions list failed: {type(e).__name__}: {e}"[:300],
+            user_message="Cay AI can't reach your chats right now. Please try again in a moment.",
+            details={"step": "chat_session_list"},
+        )
+
+    rows = list(result.data or [])
+    has_more = len(rows) > limit
+    sessions = [_row_to_session(r) for r in rows[:limit]]
+    return ChatSessionListResponse(sessions=sessions, total=len(sessions), has_more=has_more)
 
 
 @router.post("/sessions", response_model=ChatSessionResponse)
@@ -1213,7 +1471,7 @@ async def send_chat_message(
     # streaming endpoint's persist contract.
     delivered = False  # True once the answer is durably persisted → gates the finally refund
     try:
-        from app.services.chat_service import ChatService
+        from app.services.chat_service import ChatService, _chat_thinking_budget
 
         chat_service = ChatService()
 
@@ -1239,6 +1497,7 @@ async def send_chat_message(
         reader_lens = await _reader_lens_for_async(user)
 
         started = _time.monotonic()
+        attach_base_card = await _should_attach_base_card(supabase, session.data, session_id)
         try:
             ai_result = await asyncio.wait_for(
                 chat_service.generate_response(
@@ -1254,6 +1513,9 @@ async def send_chat_message(
                     # Owner-scoped grounding: lets TICKER_REPORT read THIS user's frozen
                     # report row instead of only the close-aligned shared cache.
                     user_id=user["id"],
+                    # The grounded asset's card once per session, on the first answer —
+                    # the same rule as the stream door (see `_should_attach_base_card`).
+                    attach_base_widget=attach_base_card,
                 ),
                 timeout=settings.CHAT_SEND_BUDGET_SECONDS,
             )
@@ -1353,15 +1615,24 @@ async def send_chat_message(
             "source_count": len(sources) if sources else 0,
             "elapsed_ms": int((_time.monotonic() - started) * 1000),
         }
+        # A cut answer (the model hit its ceiling after real text) is marked and gets the
+        # single "Continue" chip — persisted with the row so history replays the same
+        # state, and the identical shape the stream door writes for the same verdict.
+        truncated = bool(ai_result.get("truncated"))
+        rich_content = _rich_content_for_turn(
+            thinking_payload, [widget_payload] if widget_payload else None, sources,
+            truncated=truncated, finish_reason=ai_result.get("finish_reason"),
+        )
+        if truncated and is_length_cut(ai_result.get("finish_reason")):
+            # The way out of a LENGTH cut; a SAFETY / RECITATION stop gets no chip.
+            rich_content["suggestions"] = [_CONTINUE_CHIP]
         ai_msg: dict = {
             "session_id": session_id,
             "role": "assistant",
             "content": ai_result["content"],
             "citations": ai_result.get("citations"),
             "tokens_used": ai_result.get("tokens_used"),
-            "rich_content": _rich_content_for_turn(
-                thinking_payload, [widget_payload] if widget_payload else None, sources,
-            ),
+            "rich_content": rich_content,
             "created_at": (now + timedelta(milliseconds=1)).isoformat(),
         }
 
@@ -1533,6 +1804,16 @@ async def stream_chat_message(
     context_is_replayed = not req_ctx and bool(effective_context)
     session_type = sdata.get("session_type", "NORMAL")
     stock_id = sdata.get("stock_id")
+    # "First turn of this session" — the same trigger-maintained counter the auto-title
+    # keys on (`trg_chat_message_count` adds one per persisted row, both rows of a turn
+    # land in one insert, and this row was read before this turn's write). Drives the
+    # once-per-session price card (E7): the grounded asset's card is attached to the
+    # FIRST answer only and stays on screen; later one-line follow-ups no longer arrive
+    # under a full-height repeat of it. A first turn that failed to persist leaves the
+    # counter at 0, so the next attempt shows the card again — acceptable. A later turn
+    # whose earlier answers never rendered a card (a timed-out fetch) is treated as the
+    # first for the card's purposes — see `_session_has_card`.
+    first_turn = await _should_attach_base_card(supabase, sdata, session_id)
     user_message = msg
 
     # Non-delivery backstop for the stream: `_metered_stream`'s finally refunds this turn
@@ -1544,7 +1825,7 @@ async def stream_chat_message(
     async def event_gen():
         nonlocal delivered
         import time as _time
-        from app.services.chat_service import ChatService
+        from app.services.chat_service import ChatService, _chat_thinking_budget
         from app.integrations.gemini import (
             _is_quota_error,
             is_transient_gemini_error,
@@ -1584,6 +1865,9 @@ async def stream_chat_message(
         # Sink `stream_synthesis` writes a degradation reason into (an async generator
         # cannot return a value alongside yield). Read once the turn is persisted.
         stream_signals: dict = {}
+        # The model that served the answer (single mode picks it via `select_model`);
+        # a continuation round reuses it. None → the client default.
+        answer_model: Optional[str] = None
 
         # The model streams REAL reasoning: stream_text tags each chunk as ("thought"|"answer", text).
         # Thoughts → the thinking card (`reasoning` frames), answer → the bubble (`token` frames).
@@ -1716,13 +2000,25 @@ async def stream_chat_message(
                 if name in allowed
             }
 
-            # Start with the deterministic base widget (so an asset-detail chat always shows its
-            # chart); agentic tool calls add more, deduped by (widget_type, ticker).
+            # Start with the deterministic base widget on the FIRST turn only (so an
+            # asset-detail chat shows its chart once, under the first answer, where it
+            # stays on screen); agentic tool calls add more, deduped by (widget_type,
+            # ticker). On later turns of a grounded session the screen asset's key is
+            # pre-seeded into the dedup set, so a tool card for the SAME asset is skipped
+            # too — the tester's "only show the chart at the first question" — while a
+            # tool card for a different ticker still attaches. The LIVE QUOTE line in the
+            # instruction is untouched: the prose keeps its numbers either way.
             seen_widgets: set = set()
             base_widget = prep.get("widget")
             if base_widget:
-                widgets.append(base_widget)
                 seen_widgets.add(widget_key(base_widget))
+                if first_turn:
+                    widgets.append(base_widget)
+                else:
+                    logger.info(
+                        "Chat stream: base card %s skipped on a later turn of session %s",
+                        widget_key(base_widget), session_id,
+                    )
 
             # Single mode: one specialist streams its focused agentic answer. Synthesize mode: several
             # specialists run in parallel + a merged answer streams (their widgets arrive as
@@ -1800,6 +2096,10 @@ async def stream_chat_message(
                         if prep.get("is_deep_dive")
                         else settings.CHAT_MAX_OUTPUT_TOKENS
                     ),
+                    # The ceiling above bounds thoughts + answer TOGETHER; without this
+                    # the model spent 1150 of 1200 thinking and the answer got 40 tokens.
+                    # Resolved per model: the cheap route must not have thinking switched ON.
+                    thinking_budget=_chat_thinking_budget(answer_model),
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
@@ -1856,12 +2156,82 @@ async def stream_chat_message(
                     # real text had streamed. It used to end cleanly: charged in full, and
                     # for a deep dive cached for every user for 24 h with its last sentence
                     # missing. Marked degraded → refunded, never cached.
-                    if payload and not stream_signals.get("degraded"):
-                        logger.warning(
-                            "Chat stream: answer cut by finish_reason=%s for session %s — "
-                            "settling as degraded", payload, session_id,
-                        )
-                        stream_signals["degraded"] = "truncated"
+                    #
+                    # The reason is recorded on its own key as well: `degraded` is
+                    # first-wins (a `partial_specialists` turn keeps that label for the
+                    # ledger), but the truncation MARK on the wire and the continuation
+                    # below key off `finish_reason`, so a cut that lands on an already
+                    # degraded turn is still continued and still marked.
+                    if payload:
+                        stream_signals["finish_reason"] = str(payload)
+                        if not stream_signals.get("degraded"):
+                            logger.warning(
+                                "Chat stream: answer cut by finish_reason=%s for session %s — "
+                                "settling as degraded", payload, session_id,
+                            )
+                            stream_signals["degraded"] = "truncated"
+
+            # ── Auto-continue a cut answer (E1) ──────────────────────────────
+            # One continuation round, streamed into the SAME turn, so the user reads a
+            # complete answer without a tap. Only after real answer text (an empty cut is
+            # the "empty stream result" path below), never on a cached replay (nothing
+            # was generated, nothing can be continued), and guarded so that NOTHING it
+            # does can reach the full-regenerate fallback in the except below — a
+            # failed continuation must leave the partial answer in place, not discard it.
+            if (
+                is_length_cut(stream_signals.get("finish_reason"))
+                and answer_parts
+                and getattr(settings, "CHAT_AUTO_CONTINUE_ENABLED", True)
+                and not prep.get("deep_dive_cached")
+                and not replayed_warm
+            ):
+                cont_signals: dict = {}
+                try:
+                    async for kind, payload in _with_keepalive(
+                        _continue_cut_answer(
+                            chat_service, prep, "".join(answer_parts),
+                            model_name=answer_model,
+                            max_output_tokens=(
+                                settings.CHAT_DEEP_DIVE_MAX_OUTPUT_TOKENS
+                                if prep.get("is_deep_dive")
+                                else settings.CHAT_MAX_OUTPUT_TOKENS
+                            ),
+                            usage_tag=f"{session_id}:continue",
+                            signals=cont_signals,
+                        ),
+                        deadline=started + _stream_budget_seconds(),
+                    ):
+                        if kind == "keepalive":
+                            yield ": keepalive\n\n"
+                        elif kind == "answer":
+                            answer_parts.append(payload)
+                            yield _sse("token", {"delta": payload})
+                except Exception as e:
+                    # A deadline (`GeminiTimeoutError` from the keepalive wrapper) or
+                    # anything the helper did not swallow: the partial answer stands.
+                    logger.warning(
+                        "Chat continuation abandoned (%s: %s) for session %s — turn stays truncated",
+                        type(e).__name__, e, session_id,
+                    )
+                    cont_signals["continuation"] = "failed"
+                verdict = cont_signals.get("continuation", "failed")
+                if verdict == "clean":
+                    logger.info(
+                        "Chat stream: cut answer completed by a continuation round for session %s",
+                        session_id,
+                    )
+                    stream_signals["continued"] = True
+                    stream_signals.pop("finish_reason", None)
+                    if stream_signals.get("degraded") == "truncated":
+                        stream_signals.pop("degraded", None)
+                else:
+                    logger.warning(
+                        "Chat stream: continuation %s for session %s (finish=%s) — turn stays truncated",
+                        verdict, session_id,
+                        cont_signals.get("continuation_finish") or stream_signals.get("finish_reason"),
+                    )
+                    if cont_signals.get("continuation_finish"):
+                        stream_signals["finish_reason"] = cont_signals["continuation_finish"]
 
             content = "".join(answer_parts)
             reasoning_text = "".join(reasoning_parts)
@@ -1870,11 +2240,13 @@ async def stream_chat_message(
             if (
                 tool_calls_seen
                 and tool_calls_failed == tool_calls_seen
-                and not stream_signals.get("degraded")
+                and stream_signals.get("degraded") in (None, "truncated")
             ):
                 # Every tool the model called failed (FMP rate limit, timeouts): the answer
                 # has none of its live data. The non-streaming door already settles this
                 # shape as `no_tools`; without this the default door charged it in full.
+                # `no_tools` outranks `truncated` for the LEDGER label (the non-stream door
+                # sets it first-wins in that order); the truncation MARK is separate.
                 logger.warning(
                     "Chat stream: all %d tool call(s) failed for session %s — settling as degraded",
                     tool_calls_seen, session_id,
@@ -1924,6 +2296,8 @@ async def stream_chat_message(
                     # differently would be visible to the user as a personality change.
                     reader_lens=reader_lens,
                     user_id=user["id"],
+                    # Same once-per-session card rule as the stream it replaces.
+                    attach_base_widget=first_turn,
                 ))
                 # The fallback is one awaited call with tools inside it — nothing reaches
                 # the client until it returns, so heartbeat it the same way as the pump —
@@ -1967,6 +2341,13 @@ async def stream_chat_message(
                 # what settlement must see — the identical result the non-streaming door refunds.
                 stream_signals.pop("degraded", None)
                 fallback_degraded = ai_result.get("degraded")
+                # …and the aborted stream's cut marker: the fallback answer is a new
+                # generation. Its OWN cut (the non-stream door reads `finish_reason` too)
+                # is what the truncation mark below must reflect.
+                stream_signals.pop("finish_reason", None)
+                stream_signals.pop("continued", None)
+                if ai_result.get("truncated"):
+                    stream_signals["finish_reason"] = str(ai_result.get("finish_reason") or "MAX_TOKENS")
                 if streamed_any:
                     # Discard any partial tokens before the full answer replaces them.
                     yield _sse("reset", {})
@@ -2045,6 +2426,15 @@ async def stream_chat_message(
             "source_count": len(sources) if sources else 0,
             "elapsed_ms": elapsed_ms,
         }
+        # The answer the user is reading is INCOMPLETE: the model cut it and no
+        # continuation finished it (`finish_reason` is cleared by a clean continuation
+        # and re-set by the fallback's own verdict). Derived from the reason, not from
+        # `degraded`, which is first-wins and may carry another label for the ledger.
+        truncated = bool(stream_signals.get("finish_reason"))
+        # The Continue chip is the way out of a LENGTH cut only. A SAFETY / RECITATION
+        # stop is marked and refunded like any cut, but re-asking the model to resume a
+        # blocked passage is a dead end — such a turn gets no chips at all.
+        continuable = truncated and is_length_cut(stream_signals.get("finish_reason"))
 
         # Persist the turn FIRST — BEFORE the best-effort follow-up-suggestions call below. That
         # call can park for minutes on a throttled Gemini (retry × 90s timeout); the user has
@@ -2055,7 +2445,14 @@ async def stream_chat_message(
             # rich_content carries the widget + futuristic-chat fields (thinking / sources /
             # suggestions) in one JSONB column — no schema migration. Suggestions are added AFTER
             # this durable write (below), so they can never block or drop it.
-            rich_content: dict = _rich_content_for_turn(thinking_payload, widgets, sources)
+            rich_content: dict = _rich_content_for_turn(
+                thinking_payload, widgets, sources,
+                truncated=truncated, finish_reason=stream_signals.get("finish_reason"),
+            )
+            if continuable:
+                # Known before the write, so it rides the ATOMIC insert like the non-stream
+                # door's — not the later best-effort update a disconnect can skip.
+                rich_content["suggestions"] = [_CONTINUE_CHIP]
 
             # Persist the user + assistant rows TOGETHER in ONE insert so the turn is atomic: a
             # failing assistant write can never leave an orphaned user row for the client's
@@ -2173,7 +2570,15 @@ async def stream_chat_message(
             str(x).strip() for x in ((warmed or {}).get("suggestions") or []) if str(x).strip()
         ] if (replayed_warm and not used_fallback) else []
         try:
-            if warm_suggestions:
+            if truncated:
+                # A cut answer gets at most ONE chip — the way out — and no model call:
+                # chips written off a half sentence proposed follow-ups to an answer the
+                # user never got, and burnt a flash-lite call doing it. The chip is a
+                # normal suggestion on the wire, so builds that predate `truncated`
+                # render it too. Already persisted with the row (above); a SAFETY /
+                # RECITATION cut gets none.
+                suggestions = [_CONTINUE_CHIP] if continuable else None
+            elif warm_suggestions:
                 # The warm job generates and stores the chips with the answer; paying a
                 # live suggestions call on a replay was the one Gemini call the warm path
                 # could have saved for free and did not.
@@ -2241,15 +2646,18 @@ async def stream_chat_message(
                 # Reflect them in the terminal `done` message + persist so a reload shows the chips.
                 rich_content["suggestions"] = suggestions
                 assistant_row["rich_content"] = rich_content
-                try:
-                    supabase.table("chat_messages").update(
-                        {"rich_content": rich_content}
-                    ).eq("id", assistant_row["id"]).execute()
-                except Exception as e:
-                    logger.warning(
-                        "Chat suggestions persist failed (%s: %s) — chips shown live only",
-                        type(e).__name__, e,
-                    )
+                if not continuable:
+                    # The Continue chip already rode the atomic insert; only model /
+                    # warm chips need the follow-up write.
+                    try:
+                        supabase.table("chat_messages").update(
+                            {"rich_content": rich_content}
+                        ).eq("id", assistant_row["id"]).execute()
+                    except Exception as e:
+                        logger.warning(
+                            "Chat suggestions persist failed (%s: %s) — chips shown live only",
+                            type(e).__name__, e,
+                        )
         except Exception as e:
             logger.warning("Chat suggestions step failed (%s: %s) — skipping", type(e).__name__, e)
             suggestions = None

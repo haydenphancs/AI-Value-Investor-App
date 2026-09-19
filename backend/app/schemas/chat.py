@@ -182,6 +182,12 @@ class MarketOverviewWidget(BaseModel):
     advancing: int = 0
     declining: int = 0
     macro_indicators: List[MarketOverviewMacroItem] = []
+    # The index the card was built for (`^GSPC`, `^IXIC`, …). Gives the card an IDENTITY
+    # for `chat_tools.widget_key` — every overview card used to key as `market_overview:`
+    # so, on an index chat, a tool card for a DIFFERENT index was deduped against the
+    # screen's own (review finding, 2026-09-19). Optional and unread by iOS, which
+    # decodes only the fields it knows.
+    symbol: Optional[str] = None
 
 
 # ── Chat Message / Session Response Schemas ─────────────────────────
@@ -231,6 +237,13 @@ class ChatMessageResponse(BaseModel):
     suggestions: Optional[List[str]] = None
     thinking: Optional[Dict[str, Any]] = None
     credit: Optional[Dict[str, Any]] = None
+    #  • truncated   — True ONLY when the model cut this answer (MAX_TOKENS / SAFETY /
+    #                   RECITATION after real text) and no continuation completed it.
+    #                   Backed by `rich_content.truncated` (no migration); absent → None on
+    #                   every legacy row and every complete turn, so old iOS builds decode
+    #                   unchanged. iOS renders a "cut short" notice; the `suggestions` list
+    #                   then carries the single "Continue your answer" chip.
+    truncated: Optional[bool] = None
     created_at: str
 
 
@@ -249,9 +262,18 @@ class ChatSessionResponse(BaseModel):
 
 
 class ChatSessionListResponse(BaseModel):
-    """Response for GET /chat/sessions — list of user sessions."""
+    """Response for GET /chat/sessions — one PAGE of the user's sessions.
+
+    `total` is the page length (its historical meaning; iOS decodes it as non-optional
+    Int, so it stays). `has_more` says whether another page exists at `offset + limit`
+    — the client walks pages until it is false so the history panel lists EVERY
+    session (TestFlight 2026-09-16, E6: the account had grown past the single 50-row
+    page the app fetched, and the oldest chats silently fell off the list). Optional
+    on the wire so older builds decode unchanged; they simply keep showing one page.
+    """
     sessions: List[ChatSessionResponse]
     total: int
+    has_more: Optional[bool] = None
 
 
 class ChatHistoryResponse(BaseModel):

@@ -570,6 +570,21 @@ def _is_clean_finish(reason: Optional[str]) -> bool:
     return str(reason or "").upper() in _CLEAN_FINISH
 
 
+_LENGTH_FINISH = ("MAX_TOKENS", "FINISH_REASON_MAX_TOKENS")
+
+
+def is_length_cut(reason: Optional[str]) -> bool:
+    """Whether a cut was the OUTPUT CEILING — the one kind a continuation can finish.
+
+    A SAFETY / RECITATION / OTHER stop is a cut too (`_is_clean_finish` is False), but
+    asking the model to "continue from the exact point it stops" past a safety or
+    recitation block is a wasted capped round with a false premise, and a "Continue
+    your answer" chip after it is a dead end. The chat door continues, and offers the
+    chip, only for these.
+    """
+    return str(reason or "").upper() in _LENGTH_FINISH
+
+
 def _cacheable_answer(result: Dict[str, Any]) -> bool:
     """Only a COMPLETE answer is worth an hour in the response cache.
 
@@ -679,6 +694,7 @@ def _log_gemini_usage(
     call_site: str,
     model: str,
     tag: Optional[str] = None,
+    finish: Optional[str] = None,
 ) -> None:
     """Emit ONE greppable line per Gemini call. Best-effort, never raises.
 
@@ -686,6 +702,11 @@ def _log_gemini_usage(
     were served from the prefix cache at a 75% discount. A persistent 0 means
     the stable prefix is not being reused (too short, or something volatile —
     a price, a timestamp, a session id — is polluting the front of the request).
+
+    `finish` is the candidate's finish reason (STOP / MAX_TOKENS / SAFETY / …) so a
+    cut answer can be found in the logs next to the `thoughts_tok` that caused it —
+    the TestFlight "answer cut off" report was diagnosed from exactly that pairing,
+    and before this field the reason had to be inferred from the token arithmetic.
     """
     try:
         prompt = usage.get("prompt") or 0
@@ -693,10 +714,11 @@ def _log_gemini_usage(
         cached_pct = round(100.0 * cached / prompt, 1) if prompt > 0 else 0.0
         logger.info(
             "GEMINI_USAGE call_site=%s model=%s tag=%s prompt_tok=%s cached_tok=%s "
-            "cached_pct=%s output_tok=%s thoughts_tok=%s total_tok=%s",
+            "cached_pct=%s output_tok=%s thoughts_tok=%s total_tok=%s finish=%s",
             call_site, model, tag or "-",
             usage.get("prompt"), usage.get("cached"), cached_pct,
             usage.get("output"), usage.get("thoughts"), usage.get("total"),
+            finish or "-",
         )
     except Exception as e:  # pragma: no cover — telemetry must never break a call
         logger.warning("GEMINI_USAGE log failed (%s: %s)", type(e).__name__, e)
@@ -747,6 +769,20 @@ def _thinking_config(budget: Optional[int]) -> Optional[Any]:
     disables thinking; a positive value is a ceiling in tokens.
     """
     return None if budget is None else types.ThinkingConfig(thinking_budget=budget)
+
+
+def _stream_thinking_config(budget: Optional[int]) -> Any:
+    """The STREAMING twin of `_thinking_config`: always asks for thought summaries.
+
+    The two chat stream methods render `include_thoughts=True` parts as the thinking
+    card, so they cannot use `_thinking_config` (which omits the flag and would blank
+    the card). `None` keeps today's request byte-identical (thoughts on, no ceiling —
+    the rollback value); `0` disables thinking, which also empties the card; a
+    positive value is the ceiling. Encoded here once so both methods stay identical.
+    """
+    if budget is None:
+        return types.ThinkingConfig(include_thoughts=True)
+    return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
 
 
 def truncate_tool_result(result: Any, budget: Optional[int] = None) -> Any:
@@ -1007,6 +1043,7 @@ class GeminiClient:
         model_name: Optional[str] = None,
         usage_tag: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
+        thinking_budget: Optional[int] = None,
     ):
         """Yield ``(kind, text)`` chunks as Gemini generates.
 
@@ -1015,6 +1052,11 @@ class GeminiClient:
         each streamed part carries a `.thought` flag we branch on — no more prompt-hack
         separator. Raises immediately if the quota circuit is open; propagates the first SDK
         error so the caller can surface an `error` event; the client HTTP timeout guards a hung read.
+
+        `thinking_budget` caps the private reasoning pass (see `_stream_thinking_config`).
+        It matters because `max_output_tokens` bounds THOUGHTS + ANSWER together: with
+        no ceiling a 1150-token thought left a 1200-token chat turn 40 tokens for the
+        visible answer, which then ended mid-sentence with `finish=MAX_TOKENS`.
         """
         if _quota_circuit.is_open():
             raise GeminiQuotaError(
@@ -1031,17 +1073,19 @@ class GeminiClient:
         config = self._config(
             system_instruction=system_instruction,
             max_output_tokens=max_output_tokens,
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
+            thinking_config=_stream_thinking_config(thinking_budget),
         )
         resolved_model = model_name or self.model_name
         usage = _StreamUsage()
+        # Bound BEFORE the try: the `finally` logs it, and a request that raises
+        # before the first chunk would otherwise NameError inside the logger.
+        finish: Optional[str] = None
         try:
             stream = await self._client.aio.models.generate_content_stream(
                 model=resolved_model,
                 contents=prompt,
                 config=config,
             )
-            finish: Optional[str] = None
             answered = False
             async for chunk in stream:
                 usage.observe(chunk)
@@ -1080,6 +1124,7 @@ class GeminiClient:
             # that cost money without delivering an answer.
             _log_gemini_usage(
                 usage.totals(), call_site="stream_text", model=resolved_model, tag=usage_tag,
+                finish=finish,
             )
 
     # ── Context caching (Stage-B narratives) ──────────────────────────
@@ -1431,6 +1476,7 @@ class GeminiClient:
         system_instruction: Optional[str] = None,
         model_name: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
+        thinking_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Generate a response using Gemini Function Calling (single-round).
@@ -1446,11 +1492,15 @@ class GeminiClient:
                 receives the function-call args dict and returns a dict.
             system_instruction: Optional system instruction.
             model_name: Optional model override.
+            thinking_budget: Optional thinking ceiling (`_thinking_config` semantics;
+                None = attach nothing). The chat door passes its own budget because
+                `max_output_tokens` bounds thoughts + answer together.
         """
         model = model_name or self.model_name
         config = self._config(
             system_instruction=system_instruction, tools=tools,
             max_output_tokens=max_output_tokens,
+            thinking_config=_thinking_config(thinking_budget),
         )
         try:
             response = await self._generate_content_retried(
@@ -1500,9 +1550,13 @@ class GeminiClient:
                     model=model, contents=history, config=config,
                     what="generate_with_tools tool follow-up",
                 )
-                _log_gemini_usage(_response_usage(response), call_site="generate_with_tools", model=model)
+                _log_gemini_usage(
+                    _response_usage(response), call_site="generate_with_tools", model=model,
+                    finish=_response_finish(response),
+                )
                 _log_gemini_usage(
                     _response_usage(follow_up), call_site="generate_with_tools:follow_up", model=model,
+                    finish=_response_finish(follow_up),
                 )
                 text = _response_text(follow_up)
                 if not text and _has_function_call(follow_up):
@@ -1523,11 +1577,13 @@ class GeminiClient:
                         config=self._config(
                             system_instruction=system_instruction, tools=None,
                             max_output_tokens=max_output_tokens,
+                            thinking_config=_thinking_config(thinking_budget),
                         ),
                         what="generate_with_tools final answer",
                     )
                     _log_gemini_usage(
                         _response_usage(final), call_site="generate_with_tools:final", model=model,
+                        finish=_response_finish(final),
                     )
                     follow_up = final
                     text = _response_text(follow_up)
@@ -1541,7 +1597,10 @@ class GeminiClient:
                 }
 
             # No function call — return normal text response.
-            _log_gemini_usage(_response_usage(response), call_site="generate_with_tools", model=model)
+            _log_gemini_usage(
+                _response_usage(response), call_site="generate_with_tools", model=model,
+                finish=_response_finish(response),
+            )
             return {
                 "text": _response_text(response),
                 "model": self.model_name,
@@ -1607,6 +1666,7 @@ class GeminiClient:
         model_name: Optional[str] = None,
         usage_tag: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
+        thinking_budget: Optional[int] = None,
     ):
         """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
         mid-stream (manual FC), while reasoning + answer stream throughout.
@@ -1615,6 +1675,14 @@ class GeminiClient:
           * ("thought", str) — a reasoning summary chunk (→ the thinking card)
           * ("answer", str)  — an answer text chunk (→ the message bubble)
           * ("tool", {"name","args","result"}) — AFTER a tool ran (→ tool_step + widget extraction)
+          * ("finish", str)  — LAST, only when the answer was CUT (MAX_TOKENS / SAFETY /
+            RECITATION) after real answer text streamed; the caller must not settle
+            that turn as complete.
+
+        `thinking_budget` caps the per-round reasoning pass (`_stream_thinking_config`).
+        `max_output_tokens` bounds thoughts + answer together, so an unbounded pass can
+        leave the visible answer no room: the prod turn behind the TestFlight "cut off"
+        report spent 1150 of a 1200 ceiling thinking and streamed 40 answer tokens.
 
         client.aio.chats auto-preserves the model's turns (incl. thought signatures) across rounds;
         we only feed tool responses back. Bounded by max_rounds, with a final answer round if the
@@ -1631,7 +1699,7 @@ class GeminiClient:
             system_instruction=system_instruction,
             tools=tools,
             max_output_tokens=max_output_tokens,
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
+            thinking_config=_stream_thinking_config(thinking_budget),
         )
         # Manual function calling — we run handlers ourselves (AFC-while-streaming is buggy upstream).
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
@@ -1746,6 +1814,7 @@ class GeminiClient:
             # exception all land here, and all three spent tokens.
             _log_gemini_usage(
                 usage.totals(), call_site="stream_agentic", model=resolved_model, tag=usage_tag,
+                finish=finish,
             )
 
 

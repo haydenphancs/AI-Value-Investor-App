@@ -50,15 +50,37 @@ struct ChatHistoryView: View {
         !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// The unfiltered list failed to load and there is nothing to show: the full-height
+    /// failed state. Every other failed shape (a stale list, a no-match search over a
+    /// stale list) keeps its content and gets the notice above it instead.
+    private var showsFailedState: Bool {
+        historyGroups.isEmpty && loadFailed && !isSearching
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            // A refresh that failed AFTER a list was loaded used to be invisible: the
+            // failed state only renders when the list is empty, so the stale list stood
+            // in for the truth (TestFlight 2026-09-16, E6). Keep the content — stale
+            // beats blank — and say so above it, with the retry. Above the branch, not
+            // inside the list arm, so a search that hides every row still shows it.
+            if loadFailed && !isLoading && !showsFailedState {
+                InlineRetryNotice(
+                    message: "Couldn\u{2019}t refresh your chats. This list may be out of date.",
+                    onRetry: onRetry
+                )
+                .padding(.horizontal, AppSpacing.lg)
+                .padding(.top, AppSpacing.sm)
+                .accessibilityIdentifier("chat.history.staleNotice")
+            }
             if isLoading && historyGroups.isEmpty {
                 Spacer()
                 ProgressView()
                     .tint(AppColors.primaryBlue)
                 Spacer()
-            } else if historyGroups.isEmpty && loadFailed {
+            } else if showsFailedState {
                 // A FAILURE is not an empty account — say so, and offer a way out.
+                // (A no-match SEARCH during a failed refresh is still "No matches".)
                 failedState
             } else if historyGroups.isEmpty {
                 emptyState

@@ -95,7 +95,8 @@ struct ChatMessageRow: View {
             suggestions: message.suggestions,
             showFollowUps: isLast,
             onFollowUpTap: onFollowUpTap,
-            credit: message.credit
+            credit: message.credit,
+            truncated: message.truncated
         )
     }
 }

@@ -629,12 +629,49 @@ class Settings(BaseSettings):
     # real answers land around 150 tokens. An 8192 ceiling on a 150-token brief only
     # ever binds when something has gone wrong (a loop, a runaway list), so this is a
     # blast-radius cap, not a style control: it should never fire on a healthy turn.
-    CHAT_MAX_OUTPUT_TOKENS: int = 1200
+    #
+    # ⚠️ It DID fire on healthy turns while it was 1200, because Gemini's
+    # `max_output_tokens` bounds THOUGHTS + ANSWER together and chat thinking was
+    # unbounded. Prod log for the TestFlight "answer cut off mid-sentence" report
+    # (2026-09-16, a CRYPTO turn, `cap=1200`): `thoughts_tok=1150 output_tok=40` —
+    # the model spent 1150 of the 1200 on private reasoning and the visible answer
+    # got 40 tokens before MAX_TOKENS. Two things fixed that, and both are needed:
+    # the ceiling below leaves room for a full brief AFTER a capped thinking pass,
+    # and `CHAT_THINKING_BUDGET` bounds the pass so it cannot grow into the answer's
+    # share again. A healthy answer is still ~150 tokens; this remains a blast-radius
+    # cap on a runaway list, sized so that it never binds on thinking.
+    CHAT_MAX_OUTPUT_TOKENS: int = 2048
+
+    # Thinking ceiling for every CHAT model call (stream_agentic / stream_text /
+    # generate_with_tools / generate_text on the chat path). Same semantics as the
+    # three REPORT_*_THINKING_BUDGET knobs above: a positive value is the ceiling in
+    # tokens; a NEGATIVE value restores the model's own default (mapped to None by
+    # `chat_service._chat_thinking_budget()`, reproducing the pre-change code path);
+    # 0 disables thinking — which also BLANKS the thinking card, because the
+    # streamed `include_thoughts=True` summaries are what that card renders, so
+    # 0 is a cost lever with a visible product cost. 1024 is the shipped ceiling:
+    # under the 2048 output cap it guarantees at least half the budget to the
+    # visible answer, and the prod turn above (1150 thought tokens) would have
+    # finished inside it with room to spare.
+    CHAT_THINKING_BUDGET: int = 1024
+
+    # When a streamed chat answer is still cut by MAX_TOKENS after the caps above
+    # (the model was mid-sentence when the ceiling hit), the stream door runs ONE
+    # continuation round — same system instruction, the partial answer fenced as
+    # data, "continue from the exact point it stops" — and streams the rest into the
+    # SAME turn, so the user reads a complete answer without a tap. A continuation
+    # that is itself cut, empty, or fails leaves the turn marked truncated: refunded,
+    # `truncated=true` on the wire, and a "Continue your answer" chip instead of the
+    # usual follow-ups. MAX_TOKENS only (`gemini.is_length_cut`): a SAFETY / RECITATION
+    # stop is marked and refunded but neither continued nor given the chip — asking the
+    # model to resume a blocked passage is a dead end. Rollback switch only; the cut
+    # handling stays on when OFF.
+    CHAT_AUTO_CONTINUE_ENABLED: bool = True
 
     # The "AI Analyst" / deep-dive turn is the one chat answer that is DELIBERATELY long: a
     # verdict line, 4-5 titled sections and a "what to watch" list (see
-    # `ChatService._DEEP_DIVE_STYLE`). The 1200 ceiling above assumes the brevity directive,
-    # and it is not a style control — so under it the brief was cut off MID-SENTENCE, leaving
+    # `ChatService._DEEP_DIVE_STYLE`). The ordinary ceiling above assumes the brevity directive,
+    # and it is not a style control — so under it (1200 at the time) the brief was cut off MID-SENTENCE, leaving
     # a dangling `**` rendered as literal asterisks. Measured on a live SPY tap: 683 output
     # tokens went to the agentic round's thinking + tool calls before the prose even started,
     # so the answer had no room left.

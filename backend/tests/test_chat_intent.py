@@ -218,3 +218,90 @@ def test_masked_span_cannot_supply_the_verb():
     """
     assert is_trade_intent("Should I be worried about short interest?") is False
     assert is_trade_intent("Should I be worried, or should I sell?") is True
+
+
+# ── ACCESS / VENUE questions are logistics, not advice (TestFlight 2026-09-16, E4) ──
+# "where can I buy DOGE?" read as FRAME `can I` + VERB `buy` and got the advice refusal
+# plus the trade disclaimer. The mask removes the access frame but keeps the verb, so a
+# compound question still classifies on its own trade half.
+
+ACCESS = [
+    "where can I buy DOGE?",
+    "Where can I buy Dogecoin?",
+    "Where do I buy Bitcoin?",
+    "how do I buy ETH",
+    "how to buy gold",
+    "How to invest in the S&P 500?",
+    "which exchanges list SOL?",
+    "Which platforms offer XRP?",
+    "on which platform can I trade XRP",
+    "what exchanges is DOGE on?",
+    "where is TSLA listed?",
+    "where is DOGE traded?",
+    "where can DOGE be bought?",
+    "How do I invest in the S&P 500?",
+    "how do I get exposure to oil?",
+    "how does one buy treasury bonds?",
+    "How could someone buy shares?",
+    "where can I sell my old shares?",
+    "how do I access the pre-market?",
+]
+
+# The verb survives the mask: a trade question hiding behind an access frame still trips.
+ACCESS_WITH_A_TRADE_HALF = [
+    "where can I buy DOGE, is it a good buy?",
+    "where can I buy DOGE, should I?",
+    "where can I buy DOGE and should I buy now?",
+    "how do I buy ETH — is it worth buying at these levels?",
+    "how do I sell my shares?",          # `my shares` is the advisory frame
+    "Can I buy DOGE on Coinbase?",       # no where/how: the plain frame + verb, kept as-is
+    # review corpus (2026-09-19): `would you` is advice by definition, and a DECISION
+    # TAIL in the clause keeps the frame — timing questions wearing access words
+    "would you buy DOGE?",
+    "where would you buy DOGE?",
+    "how do I buy the dip?",
+    "how do I sell before it drops?",
+    "where do I buy in, now or after earnings?",
+    "how do I buy DOGE at this price?",
+    "how can I buy before the split?",
+    "how do I get in now?",
+]
+
+
+@pytest.mark.parametrize("question", ACCESS)
+def test_access_question_is_not_trade_intent(question):
+    assert is_trade_intent(question) is False, question
+
+
+@pytest.mark.parametrize("question", ACCESS_WITH_A_TRADE_HALF)
+def test_an_access_frame_cannot_hide_a_trade_question(question):
+    assert is_trade_intent(question) is True, question
+
+
+def test_access_table_is_populated():
+    assert len(ACCESS) >= 12
+
+
+def test_how_much_should_i_is_not_an_access_frame():
+    """`much` sits between `how` and the auxiliary, so the sizing question keeps its frame."""
+    assert is_trade_intent("how much should I invest in DOGE?") is True
+    assert is_trade_intent("How much do I buy?") is True
+
+
+def test_every_bundled_starter_template_is_answerable_as_intent():
+    """The catalogue's detail templates render as chips the app itself offers; none may
+    read as a trade question the answer would then decline. "How do I invest in
+    {symbol}?" (index pool) did until the access mask."""
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "data" / "chat_starters.json"
+    data = json.loads(path.read_text())
+    pools = data.get("detail") or data.get("pools") or {}
+    rendered = []
+    if isinstance(pools, dict):
+        for scope, qs in pools.items():
+            for q in qs or []:
+                rendered.append(str(q).replace("{symbol}", "AAPL"))
+    assert rendered, f"no detail templates found in {path.name}: {list(data)[:8]}"
+    tripping = [q for q in rendered if is_trade_intent(q)]
+    assert tripping == [], tripping

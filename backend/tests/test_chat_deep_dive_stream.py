@@ -128,9 +128,10 @@ def test_a_deep_dive_gets_a_larger_output_ceiling():
     """Found on a live SPY tap, not in review: under the ordinary 1200-token cap the brief was
     cut off MID-SENTENCE, leaving a dangling `**` that rendered as literal asterisks.
 
-    `gemini-2.5-flash` counts THINKING in `output_tok`, and the agentic round spent 683 of the
-    budget on thinking + tool calls before the prose began. A format directive the token budget
-    cannot hold is worse than no directive — it produces a confidently truncated answer.
+    Thinking competes with the answer for the same GENERATION ceiling (it is not counted in
+    `output_tok`), and the agentic round spent 683 of the budget on thinking + tool calls
+    before the prose began. A format directive the token budget cannot hold is worse than no
+    directive — it produces a confidently truncated answer.
     """
     from app.config import settings
     from app.services.chat_service import _chat_output_cap
@@ -142,10 +143,21 @@ def test_a_deep_dive_gets_a_larger_output_ceiling():
 
 
 def test_the_ordinary_ceiling_is_not_raised_for_everyone():
-    """The 1200 cap is a deliberate per-turn cost control (reports keep 8192, chat does not).
-    Raising it globally to fit one button would move the cost base of every turn."""
+    """The ordinary cap is a deliberate per-turn cost control (reports keep 8192, chat does
+    not). Raising it globally to fit one button would move the cost base of every turn.
+
+    It was 1200 until the TestFlight "answer cut off mid-sentence" report: Gemini's
+    `max_output_tokens` bounds THOUGHTS + ANSWER together, and the prod turn behind it
+    thought for 1150 tokens and streamed 40 (`GEMINI_USAGE … output_tok=40
+    thoughts_tok=1150`). 2048 leaves a full brief after a thinking pass that is now
+    itself bounded by `CHAT_THINKING_BUDGET`; it is still a fraction of the report cap.
+    """
     from app.config import settings
-    assert settings.CHAT_MAX_OUTPUT_TOKENS == 1200
+    assert settings.CHAT_MAX_OUTPUT_TOKENS == 2048
+    assert settings.CHAT_MAX_OUTPUT_TOKENS < settings.GEMINI_MAX_TOKENS
+    # The thinking ceiling must leave the visible answer at least half the budget —
+    # the arithmetic that makes the cap above hold.
+    assert 0 < settings.CHAT_THINKING_BUDGET <= settings.CHAT_MAX_OUTPUT_TOKENS // 2
 
 
 @pytest.mark.asyncio

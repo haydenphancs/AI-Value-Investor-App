@@ -48,10 +48,20 @@ class _Query:
         self.db, self.table, self.op, self.payload = db, table, "select", None
 
     def __getattr__(self, name):
-        # eq / neq / in_ / gte / lte / order / limit / range / single / maybe_single / is_
+        # eq / neq / in_ / gte / lte / order / limit / range / single / maybe_single
         def _chain(*a, **k):
             return self
         return _chain
+
+    # The E7 card probe: `.not_.is_("rich_content->widget", "null")` on chat_messages.
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, column, value):
+        if "widget" in str(column):
+            self.op = "select-card-probe"
+        return self
 
     def insert(self, rows):
         self.op, self.payload = "insert", rows
@@ -69,6 +79,10 @@ class _Query:
         self.db.calls.append((self.table, self.op, self.payload))
         if self.table == "chat_sessions" and self.op == "select":
             return _Result(dict(self.db.session_row))
+        if self.table == "chat_messages" and self.op == "select-card-probe":
+            # A prior assistant row with a card exists unless a test says otherwise —
+            # the common case for a later turn of a grounded session.
+            return _Result([{"id": "prior-card"}] if self.db.prior_card else [])
         if self.table == "chat_messages" and self.op == "insert":
             out = []
             for i, row in enumerate(self.payload if isinstance(self.payload, list) else [self.payload]):
@@ -83,6 +97,7 @@ class _FakeDB:
         self.session_row = session_row
         self.calls: List[tuple] = []
         self.inserted_messages: List[Dict[str, Any]] = []
+        self.prior_card = True   # a later grounded turn already has a card on file
 
     def table(self, name: str) -> _Query:
         return _Query(self, name)
@@ -142,6 +157,12 @@ def _events(*evs):
 
 
 class _FakeGemini:
+    # The continuation round (`stream_text`) a CUT answer triggers. Class-level knobs,
+    # reset by the harness: the events it streams, or whether it raises on first read.
+    continue_events: List[Any] = []
+    continue_raises: bool = False
+    continue_calls: List[Dict[str, Any]] = []
+
     def __init__(self, events):
         self._events = events
         self.stream_calls: List[Dict[str, Any]] = []
@@ -150,6 +171,17 @@ class _FakeGemini:
     def stream_agentic(self, prompt, **kwargs):
         self.stream_calls.append({"prompt": prompt, **kwargs})
         return _events(*self._events)()
+
+    def stream_text(self, prompt, **kwargs):
+        cls = type(self)
+        cls.continue_calls.append({"prompt": prompt, **kwargs})
+
+        async def _gen():
+            if cls.continue_raises:
+                raise RuntimeError("continuation exploded")
+            for e in cls.continue_events:
+                yield e
+        return _gen()
 
 
 class _FakeChatService:
@@ -172,6 +204,7 @@ class _FakeChatService:
 
     async def generate_response(self, **kw):
         self.fallback_calls += 1
+        self.fallback_kwargs = dict(kw)
         if type(self).fallback_result is None:
             raise RuntimeError("no fallback configured")
         return dict(type(self).fallback_result)
@@ -264,6 +297,9 @@ def harness(monkeypatch):
     _FakeChatService.fallback_result = None
     _FakeChatService.synthesis_signal = None
     _FakeChatService.synthesis_raises = False
+    _FakeGemini.continue_events = []
+    _FakeGemini.continue_raises = False
+    _FakeGemini.continue_calls = []
     _FakeChatService.events = [("thought", "Let me check."), ("answer", "Apple is "),
                                ("answer", "doing fine.")]
     monkeypatch.setattr(cs, "ChatService", _FakeChatService)
@@ -546,7 +582,11 @@ def test_a_tool_error_the_model_shaped_stays_charged(harness, result):
 
 def test_a_cut_answer_is_settled_as_degraded_and_never_cached(harness, monkeypatch):
     """MAX_TOKENS / SAFETY after real text used to end cleanly: charged in full and, for a
-    deep dive, cached for every user for 24 h with its last sentence missing."""
+    deep dive, cached for every user for 24 h with its last sentence missing.
+
+    With the continuation round yielding NOTHING (the harness default) the cut stands:
+    refunded, never cached — and now MARKED on the wire with the single Continue chip in
+    place of model-written follow-ups (E1)."""
     client, db, quota, _ = harness
     _FakeChatService.prep_overrides = {"is_deep_dive": True, "deep_dive_context": "ctx",
                                        "deep_dive_cached": None}
@@ -564,6 +604,249 @@ def test_a_cut_answer_is_settled_as_degraded_and_never_cached(harness, monkeypat
     assert writes == [], "a cut brief must never enter the shared cache"
     done = _parse_sse(r.text)[-1][1]["message"]
     assert done["content"].startswith("SPY is up 1.2%")
+    assert done["truncated"] is True
+    assert done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert _FakeChatService.instances[-1].suggestion_calls == 0, \
+        "no model-written chips off a half sentence"
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert assistant["rich_content"]["truncated"] is True
+    assert assistant["rich_content"]["finish_reason"] == "MAX_TOKENS"
+    # The continuation was attempted once, on the tool-less instruction, under the caps.
+    assert len(_FakeGemini.continue_calls) == 1
+    call = _FakeGemini.continue_calls[0]
+    assert "<<<PARTIAL_ANSWER>>>" in call["prompt"] and "SPY is up 1.2%" in call["prompt"]
+    assert call["max_output_tokens"] and "thinking_budget" in call
+    assert call["usage_tag"].endswith(":continue")
+
+
+# ── E1: a cut answer is continued in the same turn ───────────────────────────
+
+_CUT_EVENTS = [
+    ("thought", "Let me check."),
+    ("answer", "A cryptocurrency is deflationary if supply is capped. For Polygon (MATIC), the"),
+    ("finish", "MAX_TOKENS"),
+]
+
+
+def test_a_cut_answer_is_completed_by_one_continuation_round(harness, monkeypatch):
+    """The TestFlight MATIC turn: cut at "For Polygon (MATIC), the". The continuation
+    streams the rest into the SAME turn — complete answer, no refund, normal chips, no
+    truncation mark, and a deep dive is cacheable again."""
+    client, db, quota, _ = harness
+    _FakeChatService.prep_overrides = {"is_deep_dive": True, "deep_dive_context": "ctx",
+                                       "deep_dive_cached": None,
+                                       "system_instruction_no_tools": "SYS-NO-TOOLS"}
+    writes = []
+    monkeypatch.setattr(_FakeChatService, "_upsert_deep_dive_cache",
+                        lambda self, *a, **k: writes.append(a))
+    _FakeChatService.events = list(_CUT_EVENTS)
+    _FakeGemini.continue_events = [
+        ("thought", "Picking up where I stopped."),   # must NOT reach the client
+        ("answer", " supply is uncapped, so it is mildly inflationary."),
+    ]
+    db.session_row["stock_id"] = "MATIC"
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    done = frames[-1][1]["message"]
+    assert done["content"].startswith(
+        "A cryptocurrency is deflationary if supply is capped. For Polygon (MATIC), the "
+        "supply is uncapped, so it is mildly inflationary."
+    ), done["content"]
+    assert done.get("truncated") is None
+    assert quota.settled == [] and quota.delivered == 1, (quota.settled, quota.refunds)
+    assert done["suggestions"] == ["What about its margins?", "How does it compare to peers?"]
+    assert _FakeChatService.instances[-1].suggestion_calls == 1
+    assert len(writes) == 1, "a completed brief is cacheable again"
+    # The continuation's text arrived as ordinary token frames, after the cut point…
+    tokens = [d["delta"] for e, d in frames if e == "token"]
+    assert " supply is uncapped, so it is mildly inflationary." in tokens
+    # …and its thought never re-activated the thinking card.
+    reasoning = [d["delta"] for e, d in frames if e == "reasoning"]
+    assert "Picking up where I stopped." not in reasoning
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert "truncated" not in assistant["rich_content"]
+    assert "finish_reason" not in assistant["rich_content"]
+    call = _FakeGemini.continue_calls[0]
+    assert call["system_instruction"] == "SYS-NO-TOOLS", "the data was gathered in round one"
+
+
+def test_a_continuation_that_is_cut_again_keeps_the_turn_truncated(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_CUT_EVENTS)
+    _FakeGemini.continue_events = [("answer", " supply is"), ("finish", "MAX_TOKENS")]
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"].endswith("For Polygon (MATIC), the supply is"), "both fragments kept"
+    assert done["truncated"] is True
+    assert done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert quota.settled == ["chat_degraded_truncated"]
+    assert len(_FakeGemini.continue_calls) == 1, "at most one continuation per turn"
+
+
+def test_a_continuation_that_raises_keeps_the_partial_answer(harness):
+    """A failed continuation must never reach the full-regenerate fallback: the partial
+    answer the user is reading stands, marked, refunded."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_CUT_EVENTS)
+    _FakeGemini.continue_raises = True
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    assert "reset" not in [f[0] for f in frames], "no fallback ran"
+    assert _FakeChatService.instances[-1].fallback_calls == 0
+    done = frames[-1][1]["message"]
+    assert done["content"].endswith("For Polygon (MATIC), the")
+    assert done["truncated"] is True and done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert quota.settled == ["chat_degraded_truncated"]
+
+
+def test_a_continuation_with_only_thoughts_is_still_a_cut(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_CUT_EVENTS)
+    _FakeGemini.continue_events = [("thought", "Hmm."), ("answer", "   ")]
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True
+    assert quota.settled == ["chat_degraded_truncated"]
+
+
+def test_auto_continue_can_be_switched_off(harness, monkeypatch):
+    from app.config import settings
+    client, db, quota, _ = harness
+    monkeypatch.setattr(settings, "CHAT_AUTO_CONTINUE_ENABLED", False)
+    _FakeChatService.events = list(_CUT_EVENTS)
+    _FakeGemini.continue_events = [("answer", " never used")]
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.continue_calls == []
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True and done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert quota.settled == ["chat_degraded_truncated"]
+
+
+def test_a_clean_answer_never_runs_a_continuation_and_carries_no_mark(harness):
+    client, db, quota, _ = harness
+    _FakeGemini.continue_events = [("answer", " never used")]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.continue_calls == []
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done.get("truncated") is None
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert "truncated" not in assistant["rich_content"]
+    assert "finish_reason" not in assistant["rich_content"]
+
+
+def test_a_cut_on_an_already_degraded_synthesis_turn_is_still_marked(harness, monkeypatch):
+    """`degraded` is first-wins (the ledger keeps `partial_specialists`); the truncation
+    mark and the Continue chip key off the finish reason and must not be lost to it."""
+    client, db, quota, _ = harness
+    _route_synthesize(monkeypatch)
+    _FakeChatService.synthesis_signal = "partial_specialists"
+    _FakeChatService.events = [("answer", "Merged answer that stops mid"), ("finish", "MAX_TOKENS")]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert quota.settled == ["chat_degraded_partial_specialists"]
+    assert done["truncated"] is True
+    assert done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert len(_FakeGemini.continue_calls) == 1, "still continued"
+
+
+def test_a_cut_on_a_degraded_synthesis_turn_completed_by_continuation_keeps_its_ledger_label(harness, monkeypatch):
+    client, db, quota, _ = harness
+    _route_synthesize(monkeypatch)
+    _FakeChatService.synthesis_signal = "partial_specialists"
+    _FakeChatService.events = [("answer", "Merged answer that stops mid"), ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", "-sentence, then finishes.")]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done.get("truncated") is None
+    assert done["content"].endswith("mid-sentence, then finishes.")
+    assert quota.settled == ["chat_degraded_partial_specialists"], "the lens shortfall still refunds"
+
+
+def test_a_fallback_answer_that_was_cut_is_marked_and_gets_the_continue_chip(harness):
+    """The stream died, `generate_response` answered — and ITS answer was cut. The
+    non-stream door's verdict (`truncated` + `finish_reason` in the result) is what the
+    persisted row reflects; the aborted stream's own cut is discarded with its tokens."""
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Plain answer that stops mid", "tokens_used": 30,
+        "degraded": "truncated", "truncated": True, "finish_reason": "MAX_TOKENS",
+    }
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _boom()
+    try:
+        r = _post(client)
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"].startswith("Plain answer")
+    assert done["truncated"] is True and done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert quota.settled == ["chat_degraded_truncated"]
+    assert _FakeGemini.continue_calls == [], "a fallback answer is not continued on this door"
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert assistant["rich_content"]["finish_reason"] == "MAX_TOKENS"
+
+
+def test_a_healthy_fallback_after_a_cut_stream_carries_no_mark(harness):
+    """The aborted stream was cut, but the fallback answered cleanly: the stream's finish
+    reason must be dropped with its tokens, or a complete answer would read as cut."""
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Full healthy answer. " * 3, "tokens_used": 80}
+    async def _cut_then_die(*a, **k):
+        yield ("answer", "partial…")
+        yield ("finish", "MAX_TOKENS")
+        raise RuntimeError("stream died after the cut")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _cut_then_die()
+    try:
+        r = _post(client)
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done.get("truncated") is None
+    assert quota.settled == [], quota.settled
+
+
+def test_the_non_stream_door_marks_a_cut_answer_identically(harness):
+    """Same verdict, same row shape, same settlement label as the stream door."""
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Plain answer that stops mid", "tokens_used": 30,
+        "degraded": "truncated", "truncated": True, "finish_reason": "MAX_TOKENS",
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["truncated"] is True
+    assert body["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    assert quota.settled == ["chat_degraded_truncated"]
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    rich = assistant["rich_content"]
+    assert rich["truncated"] is True and rich["finish_reason"] == "MAX_TOKENS"
+    assert rich["suggestions"] == [chat_mod._CONTINUE_CHIP]
+
+
+def test_the_non_stream_door_leaves_a_clean_answer_unmarked(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30,
+                                        "finish_reason": "STOP"}
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert r.json().get("truncated") is None
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert "truncated" not in assistant["rich_content"]
 
 
 def test_a_partial_tool_failure_on_a_streamed_turn_stays_charged(harness):
@@ -1441,3 +1724,491 @@ def test_the_non_stream_door_persists_the_same_rich_content_shape_as_the_stream_
     assert rich["thinking"]["source_count"] == 1 and rich["thinking"]["stages"] == []
     assert isinstance(rich["thinking"]["elapsed_ms"], int)
     assert rich["widgets"] == [rich["widget"]]
+
+
+# ── E7: the grounded asset's card once per session ──────────────────────────
+# The tester: "It doesn't need to show the price chart for the second question. Only
+# show at the first question only." The base card was appended on EVERY streamed turn.
+
+_DOGE_CARD = {"widget_type": "stock_chart", "ticker": "DOGEUSD", "company_name": "Dogecoin",
+              "current_price": 0.09, "change": 0.0, "change_percent": 3.3, "day_high": 0.0,
+              "day_low": 0.0, "volume": 1, "avg_volume": 0, "historical_data": []}
+
+
+def _doge_session(db):
+    db.session_row.update({"session_type": "STOCK", "stock_id": "DOGE",
+                           "context_type": "CRYPTO", "reference_id": "DOGE"})
+
+
+def test_the_base_card_is_attached_on_the_first_turn(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 0
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    r = _post(client, message="Who maintains DOGE?")
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["DOGEUSD"]
+
+
+@pytest.mark.parametrize("count", [2, 4, "2", 10])
+def test_the_base_card_is_not_attached_on_a_later_turn(harness, count):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = count
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    r = _post(client, message="what is doge's market cap?")
+    assert r.status_code == 200, r.text
+    assert _done_widgets(r) == []
+    # The quote still reached the model: prep (which folds the LIVE QUOTE line into the
+    # instruction) ran exactly as before.
+    assert _FakeChatService.instances[-1].prep_calls, "prep must still build the card/quote line"
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert "widget" not in assistant["rich_content"], "history replays the same decision"
+
+
+@pytest.mark.parametrize("count", [None, "", "garbage", -1])
+def test_a_malformed_message_count_reads_as_a_first_turn(harness, count):
+    """Degrade to showing the card, never to never showing it."""
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = count
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    r = _post(client, message="Who maintains DOGE?")
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["DOGEUSD"]
+
+
+def test_a_tool_card_for_another_ticker_still_attaches_on_a_later_turn(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "BTCUSD"},
+                  "result": {**_DOGE_CARD, "ticker": "BTCUSD", "company_name": "Bitcoin"}}),
+        ("answer", "Bitcoin is larger."),
+    ]
+    r = _post(client, message="how does it compare to bitcoin?")
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["BTCUSD"]
+
+
+def test_a_tool_card_for_the_screen_asset_is_dropped_on_a_later_turn(harness):
+    """The model re-fetched the grounded coin's own chart on turn two: the card the
+    user already has must not come back under a one-line answer."""
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "DOGEUSD"},
+                  "result": dict(_DOGE_CARD)}),
+        ("answer", "Dogecoin's market cap is $13.49 billion."),
+    ]
+    r = _post(client, message="what is doge's market cap?")
+    assert r.status_code == 200, r.text
+    assert _done_widgets(r) == []
+
+
+def test_a_tool_card_for_the_screen_asset_on_the_first_turn_is_deduped_not_doubled(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 0
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "DOGEUSD"},
+                  "result": dict(_DOGE_CARD)}),
+        ("answer", "Dogecoin trades around nine cents."),
+    ]
+    r = _post(client, message="what's the price?")
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["DOGEUSD"]
+
+
+def test_an_ungrounded_session_keeps_every_tool_card(harness):
+    """No base card → nothing to suppress: a general chat that asks about AAPL twice
+    gets its tool card both times."""
+    client, db, quota, _ = harness
+    db.session_row["message_count"] = 6
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
+                  "result": {**_DOGE_CARD, "ticker": "AAPL", "company_name": "Apple"}}),
+        ("answer", "Apple is doing fine."),
+    ]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["AAPL"]
+
+
+def test_the_fallback_honours_the_first_turn_verdict(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _boom()
+    try:
+        r = _post(client, message="what is doge's market cap?")
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    assert _FakeChatService.instances[-1].fallback_kwargs["attach_base_widget"] is False
+
+
+def test_the_fallback_on_a_first_turn_asks_for_the_card(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 0
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+    async def _boom(*a, **k):
+        yield ("answer", "partial…")
+        raise RuntimeError("stream died")
+    orig = _FakeGemini.stream_agentic
+    _FakeGemini.stream_agentic = lambda self, prompt, **kw: _boom()
+    try:
+        r = _post(client, message="Who maintains DOGE?")
+    finally:
+        _FakeGemini.stream_agentic = orig
+    assert r.status_code == 200, r.text
+    assert _FakeChatService.instances[-1].fallback_kwargs["attach_base_widget"] is True
+
+
+@pytest.mark.parametrize("count,expected", [(0, True), (2, False), (None, True), ("x", True)])
+def test_the_non_stream_door_passes_the_same_first_turn_verdict(harness, count, expected):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = count
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert _FakeChatService.instances[-1].fallback_kwargs["attach_base_widget"] is expected
+
+
+# ── E6: the session LIST — error contract + has_more paging ──────────────────
+# The history panel fetched one `limit=50` page and the tester's account had grown past
+# it, so the oldest chats fell off the list with nothing saying so; a failed refresh
+# surfaced as a bare 500 the client could not read.
+
+def _list_db(base, rows):
+    class _ListDB(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_sessions":
+                captured = {}
+
+                def _range(lo, hi):
+                    captured["range"] = (lo, hi)
+                    return q
+
+                def _exec():
+                    self.calls.append(("chat_sessions", "select-list", captured.get("range")))
+                    lo, hi = captured.get("range", (0, len(rows)))
+                    return _Result(rows[lo:hi + 1])
+                q.range = _range
+                q.execute = _exec
+            return q
+    return _ListDB(base.session_row)
+
+
+def _session_rows(n):
+    return [{
+        "id": f"s-{i:03d}", "title": f"Chat {i}", "session_type": "NORMAL", "stock_id": None,
+        "context_type": None, "reference_id": None, "preview_message": None,
+        "message_count": 2, "is_saved": False,
+        "created_at": "2026-09-01T00:00:00+00:00", "last_message_at": f"2026-09-{1 + i % 28:02d}T00:00:00+00:00",
+    } for i in range(n)]
+
+
+def test_a_failed_session_list_returns_the_error_contract_not_a_500(harness):
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_sessions", _gateway_520())
+    r = client.get("/api/v1/chat/sessions?limit=50&offset=0")
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["error_code"] == "SYSTEM_BUSY"
+    assert body["details"]["step"] == "chat_session_list"
+    assert body["user_message"]
+
+
+def test_a_deterministic_session_list_failure_is_the_same_contract(harness, caplog):
+    import logging
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _raising_db(db, "chat_sessions", _pgrst("42P01"))
+    with caplog.at_level(logging.ERROR, logger="app.api.v1.endpoints.chat"):
+        r = client.get("/api/v1/chat/sessions")
+    assert r.status_code == 409 and r.json()["error_code"] == "SYSTEM_BUSY"
+    assert any("chat_sessions list failed" in rec.getMessage() for rec in caplog.records), \
+        "a deterministic failure is logged at ERROR with its type"
+
+
+@pytest.mark.parametrize("n,limit,offset,expect_len,expect_more", [
+    (57, 50, 0, 50, True),     # the tester's account: 57 sessions, one 50-row page
+    (57, 50, 50, 7, False),    # the second page closes the walk
+    (50, 50, 0, 50, False),    # exactly one page — no phantom next page
+    (0, 50, 0, 0, False),
+    (1, 50, 0, 1, False),
+    (3, 2, 0, 2, True),
+    (3, 2, 2, 1, False),
+    (3, 2, 4, 0, False),       # past the end
+])
+def test_session_list_pages_with_an_exact_has_more_probe(harness, n, limit, offset, expect_len, expect_more):
+    client, db, quota, _ = harness
+    app.dependency_overrides[get_supabase] = lambda: _list_db(db, _session_rows(n))
+    r = client.get(f"/api/v1/chat/sessions?limit={limit}&offset={offset}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["sessions"]) == expect_len
+    assert body["total"] == expect_len, "`total` keeps its page-length meaning for old builds"
+    assert body["has_more"] is expect_more
+    ids = [s["id"] for s in body["sessions"]]
+    assert ids == [f"s-{i:03d}" for i in range(offset, min(n, offset + limit))], "no row skipped or doubled"
+
+
+def test_the_probe_row_is_never_returned(harness):
+    """`limit + 1` rows are fetched; exactly `limit` may leave the server."""
+    client, db, quota, _ = harness
+    listdb = _list_db(db, _session_rows(12))
+    app.dependency_overrides[get_supabase] = lambda: listdb
+    r = client.get("/api/v1/chat/sessions?limit=5&offset=0")
+    assert len(r.json()["sessions"]) == 5
+    rng = [c for c in listdb.calls if c[1] == "select-list"][0][2]
+    assert rng == (0, 5), "range must ask for limit+1 rows (0..5 inclusive)"
+
+
+# ── E1: the join between a cut answer and its continuation ───────────────────
+# First live run under a forced cap: "printing" + "more" rendered "printingmore".
+
+@pytest.mark.parametrize("partial,cont,expected", [
+    ("a country printing", "more money", " more money"),          # word boundary → space
+    ("For Polygon (MATIC), the", " supply is uncapped", " supply is uncapped"),  # already spaced
+    ("ends with a period.", "Next sentence", " Next sentence"),
+    ("market cap is $13.", "49 billion", "49 billion"),           # a decimal seam is one number
+    ("about 13,", "000 coins", "000 coins"),
+    ("value of 13", ".49", ".49"),                                 # a digit + '.' is not a word edge
+    ("printing\n", "more", "more"),                                # partial ends in whitespace
+    ("printing", "\nmore", "\nmore"),                              # continuation opens with whitespace
+    ("**Proof of Work", "**: the miners", " **: the miners"),
+    ("", "anything", "anything"),
+    ("anything", "", ""),
+    ("the supply is uncapped, so it is", "the supply is uncapped, so it is mildly inflationary",
+     " mildly inflationary"),                                      # repeated tail trimmed (≥12 chars)
+    ("THE SUPPLY IS UNCAPPED", "the supply is uncapped and growing", " and growing"),  # case-insensitive
+    ("supply is", "supply is uncapped", " supply is uncapped"),   # 9-char overlap: too short to trust
+])
+def test_join_continuation_repairs_the_seam(partial, cont, expected):
+    assert chat_mod._join_continuation(partial, cont) == expected
+
+
+def test_join_continuation_mid_word_cut_is_the_accepted_cost():
+    """A ceiling that lands INSIDE a multi-token word gets a spurious space. Documented
+    rather than special-cased: cuts land at token boundaries and tokens carry their
+    leading space, so the word-end case is the common one and the prompt tells the
+    model to finish the word first."""
+    assert chat_mod._join_continuation("deflationa", "ry") == " ry"
+
+
+def test_the_continuation_is_joined_before_it_reaches_the_bubble(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("answer", "imagine a country printing"), ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", "more"), ("answer", " money every year.")]
+    r = _post(client, message="Is DOGE inflationary?")
+    assert r.status_code == 200, r.text
+    frames = _parse_sse(r.text)
+    done = frames[-1][1]["message"]
+    assert done["content"] == "imagine a country printing more money every year."
+    tokens = [d["delta"] for e, d in frames if e == "token"]
+    assert " more money every year." in tokens, "the first chunks are buffered and joined once"
+    assert quota.settled == []
+
+
+def test_a_repeated_tail_in_the_continuation_is_trimmed(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("answer", "Dogecoin has no supply cap, so it is"), ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", "no supply cap, so it is"), ("answer", " mildly inflationary.")]
+    r = _post(client, message="Is DOGE inflationary?")
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"] == "Dogecoin has no supply cap, so it is mildly inflationary."
+
+
+def test_a_short_continuation_that_never_fills_the_buffer_is_still_delivered(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("answer", "the answer is"), ("finish", "MAX_TOKENS")]
+    _FakeGemini.continue_events = [("answer", "yes.")]
+    r = _post(client, message="Is DOGE inflationary?")
+    assert r.status_code == 200, r.text
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["content"] == "the answer is yes."
+    assert done.get("truncated") is None
+
+
+# ── review findings (2026-09-19): a cut is continued and chipped ONLY when it was the
+# output ceiling; `no_tools` outranks `truncated` for the ledger; the chip rides the insert.
+
+@pytest.mark.parametrize("reason", ["SAFETY", "RECITATION", "OTHER", "FINISH_REASON_SAFETY"])
+def test_a_non_length_cut_is_marked_and_refunded_but_neither_continued_nor_chipped(harness, reason):
+    """Asking the model to resume a passage the safety / recitation filter stopped is a
+    wasted capped round with a false premise, and a Continue chip after it is a dead end
+    (the E3 rule). The turn is still marked and refunded like any cut."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("answer", "Some text the filter stopped"), ("finish", reason)]
+    _FakeGemini.continue_events = [("answer", " never used")]
+    r = _post(client, message="tell me about it")
+    assert r.status_code == 200, r.text
+    assert _FakeGemini.continue_calls == [], "no continuation past a non-length stop"
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True
+    assert done.get("suggestions") is None, "no Continue chip, and no model chips off a half answer"
+    assert _FakeChatService.instances[-1].suggestion_calls == 0
+    assert quota.settled == ["chat_degraded_truncated"]
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert assistant["rich_content"]["finish_reason"] == reason
+    assert "suggestions" not in assistant["rich_content"]
+
+
+def test_the_non_stream_door_gives_a_safety_cut_no_continue_chip(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.fallback_result = {
+        "content": "Some text the filter stopped", "tokens_used": 30,
+        "degraded": "truncated", "truncated": True, "finish_reason": "SAFETY",
+    }
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert r.json()["truncated"] is True and r.json().get("suggestions") is None
+    assert quota.settled == ["chat_degraded_truncated"]
+
+
+def test_the_continue_chip_rides_the_atomic_insert_on_the_stream_door(harness):
+    """Known before the write, so a disconnect after the insert cannot leave a cut row
+    with no way out — the same shape the non-stream door persists."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = list(_CUT_EVENTS)          # continuation yields nothing → still cut
+    r = _post(client, message="Is MATIC inflationary?")
+    assert r.status_code == 200, r.text
+    assistant = [m for m in db.inserted_messages if m.get("role") == "assistant"][0]
+    assert assistant["rich_content"]["suggestions"] == [chat_mod._CONTINUE_CHIP]
+    updates = [c for c in db.calls if c[0] == "chat_messages" and c[1] == "update"
+               and isinstance(c[2], dict) and "suggestions" in (c[2].get("rich_content") or {})]
+    assert updates == [], "no follow-up write for a chip that was already inserted"
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+
+
+def test_every_tool_failing_outranks_the_truncation_label_for_the_ledger(harness):
+    """The non-stream door labels an all-tools-failed answer `no_tools` first-wins; the
+    stream door's `finish` handler used to claim the slot first, so the same shape was
+    refunded under a different reason per door. The truncation MARK is unaffected."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
+                  "result": {"error": "timed_out", "tool": "get_stock_chart_data", "upstream": True}}),
+        ("answer", "Apple is doing fine, from memory, but the"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_degraded_no_tools"]
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done["truncated"] is True and done["suggestions"] == [chat_mod._CONTINUE_CHIP]
+
+
+def test_every_tool_failing_still_refunds_when_the_continuation_completes(harness):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [
+        ("tool", {"name": "get_stock_chart_data", "args": {"ticker": "AAPL"},
+                  "result": {"error": "timed_out", "tool": "get_stock_chart_data", "upstream": True}}),
+        ("answer", "Apple is doing fine, from memory, but the"),
+        ("finish", "MAX_TOKENS"),
+    ]
+    _FakeGemini.continue_events = [("answer", " chart could not be fetched.")]
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert quota.settled == ["chat_degraded_no_tools"], "none of its live data, whatever the length"
+    done = _parse_sse(r.text)[-1][1]["message"]
+    assert done.get("truncated") is None
+
+
+def test_the_answer_model_is_handed_to_the_thinking_budget_resolver(harness, monkeypatch):
+    """The cheap route (`CHAT_CHEAP_MODEL`) does not think unless a budget is attached, so
+    the flagship's ceiling must not be forwarded to it."""
+    from app.config import settings
+    import app.services.agents.chat_router as router
+    client, db, quota, _ = harness
+    monkeypatch.setattr(router, "select_model", lambda *a, **k: settings.CHAT_CHEAP_MODEL)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    call = _FakeChatService.instances[-1].gemini.stream_calls[-1]
+    assert call["model_name"] == settings.CHAT_CHEAP_MODEL
+    assert call["thinking_budget"] is None
+
+
+# ── review finding (2026-09-19): a first-turn card fetch that failed must not leave the
+# session cardless forever — a later turn asks the rows, not the counter.
+
+def test_a_later_turn_gets_the_card_when_no_earlier_answer_rendered_one(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    db.prior_card = False                      # turn 1's fetch timed out: cardless row
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    r = _post(client, message="what is doge's market cap?")
+    assert r.status_code == 200, r.text
+    assert [w["ticker"] for w in _done_widgets(r)] == ["DOGEUSD"]
+    assert any(c[1] == "select-card-probe" for c in db.calls), "the rows were asked"
+
+
+def test_the_card_probe_is_skipped_on_the_first_turn_and_on_ungrounded_sessions(harness):
+    client, db, quota, _ = harness
+    db.session_row["message_count"] = 4        # ungrounded (no stock_id / reference_id)
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert not any(c[1] == "select-card-probe" for c in db.calls)
+    db.calls.clear()
+    _doge_session(db)
+    db.session_row["message_count"] = 0
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+    r = _post(client, message="Who maintains DOGE?")
+    assert r.status_code == 200, r.text
+    assert not any(c[1] == "select-card-probe" for c in db.calls), "the counter already answers"
+
+
+def test_a_failing_card_probe_falls_back_to_the_count_rule(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    _FakeChatService.prep_overrides = {"widget": dict(_DOGE_CARD), "asset_type": "CRYPTO"}
+
+    class _ProbeBoom(_FakeDB):
+        def table(self, name):
+            q = super().table(name)
+            if name == "chat_messages":
+                orig_is = q.is_
+
+                def _is(column, value):
+                    orig_is(column, value)
+                    if q.op == "select-card-probe":
+                        def _boom():
+                            raise RuntimeError("probe exploded")
+                        q.execute = _boom
+                    return q
+                q.is_ = _is
+            return q
+    boom = _ProbeBoom(db.session_row)
+    app.dependency_overrides[get_supabase] = lambda: boom
+    r = _post(client, message="what is doge's market cap?")
+    assert r.status_code == 200, r.text
+    assert _done_widgets(r) == [], "unknown → no card, never a guess"
+
+
+def test_the_non_stream_door_asks_the_rows_too(harness):
+    client, db, quota, _ = harness
+    _doge_session(db)
+    db.session_row["message_count"] = 2
+    db.prior_card = False
+    _FakeChatService.fallback_result = {"content": "Plain answer. " * 3, "tokens_used": 30}
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 200, r.text
+    assert _FakeChatService.instances[-1].fallback_kwargs["attach_base_widget"] is True

@@ -148,8 +148,10 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "Fetch the current quote + 30-day price history for a ticker. Call when the user asks "
         "about a specific stock's price, performance, chart, or how it's trading — including a "
         "DIFFERENT ticker than the current screen (e.g. a comparison). The result is rendered "
-        "to the user as an interactive price-chart card beneath your answer: never say charts "
-        "are unavailable, and do not call it twice for the same ticker in one turn."
+        "to the user as an interactive price-chart card beneath your answer — in a chat "
+        "grounded on that same asset the card appears once, under the first answer, and stays "
+        "on screen for the rest of the conversation: never say charts are unavailable, and do "
+        "not call it twice for the same ticker in one turn."
     ),
     "get_analyst_analysis": (
         "Fetch Wall Street analyst ratings, consensus, price targets, and recent "
@@ -193,8 +195,10 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
 TOOL_CAPABILITIES: Dict[str, str] = {
     "get_stock_chart_data": (
         "get_stock_chart_data for a ticker's live quote and 30-day price history — its result "
-        "is rendered to the user as an interactive price-chart card beneath your answer, so "
-        "never say charts are unavailable; describe what the card shows"
+        "is rendered to the user as an interactive price-chart card beneath your answer (for "
+        "the asset this chat is grounded on, the card shown under the first answer stays on "
+        "screen and is not repeated), so never say charts are unavailable; describe what the "
+        "card shows"
     ),
     "get_analyst_analysis": "get_analyst_analysis for Wall Street ratings, consensus and price targets",
     "get_sentiment_analysis": "get_sentiment_analysis for social and news mood on a ticker",
@@ -339,11 +343,93 @@ def capability_block(allowed: frozenset) -> str:
             "compare it with its sector and the market, and use the market news summary for "
             "the wider driver. "
         )
+    # "reason" here is the CAUSE of a price move — the WHY-question rule above. Written as
+    # "a reason a tool did not give you", the model generalised it to every fact a tool
+    # did not return and answered "Who maintains DOGE?" with "Caydex does not have
+    # information on who maintains DOGE" (TestFlight 2026-09-16, E5). Background facts
+    # are the model's own to answer (`ChatService._KNOWLEDGE_RULE`); the guard is on
+    # invented CAUSES, and on padding, only.
     text += (
-        "Never supply a reason a tool did not give you, and never pad an answer with a "
-        "guess — but never stop at 'I don't know' either. "
+        "Never invent a CAUSE for a price move that a tool did not give you, and never pad "
+        "an answer with a guess — but never stop at 'I don't know' either. "
     )
     return text
+
+
+# What a follow-up CHIP may ask — prose only (no tool identifiers: the chip prompt runs
+# with `tools_granted=False`, and `test_chat_capability_block` pins that such an
+# instruction names no tool). Read by `ChatService.generate_followup_suggestions` and
+# mirrored, deterministically, by `chat_chip_filter` — the prompt is the first line of
+# defence, the filter the one that cannot be talked out of it.
+#
+# Built from the GRANTED tool set, never from a fixed list: an INDEX chat has no
+# sentiment or quote tool and a COMMODITY chat has no chart, so a scope that advertised
+# "the mood in news and social chatter" there proposed exactly the dead-end chip this
+# block exists to prevent (review finding, 2026-09-19).
+_CHIP_SCOPE_BY_TOOL: Dict[str, str] = {
+    "get_stock_chart_data": "the live price, today's change, volume and market cap",
+    "get_ticker_news": "recent news",
+    "explain_price_move": "why the price moved",
+    "get_market_snapshot": "how the market and its sectors are doing",
+    "get_market_overview": "how the market and its sectors are doing, the index's level, valuation and breadth",
+    "get_sentiment_analysis": "the mood in news and social chatter",
+    "get_analyst_analysis": "analyst ratings and consensus",
+}
+_CHIP_SCOPE_ALWAYS = (
+    "what the asset is, its history, who created or maintains it and how it works; "
+    "where and how it can be bought (as availability, not advice); and the outlook framed "
+    "as scenarios, drivers and risks"
+)
+_CHIP_SCOPE_BY_ASSET_TYPE: Dict[str, str] = {
+    "STOCK": "the company's fundamentals, margins, growth, valuation multiples and financial history; ",
+    "NORMAL": "a company's fundamentals, margins, growth, valuation multiples and financial history; ",
+    "ETF": "the fund's expense ratio, holdings, sector mix and benchmark comparison; ",
+    "CRYPTO": "the coin's tokenomics, supply schedule, adoption, consensus and on-chain activity; ",
+    "INDEX": "the index's constituents, breadth, sector rotation and valuation; the level and today's move shown on screen; ",
+    "COMMODITY": "supply and demand, seasonality, geopolitics and the rates/inflation link; the price and move shown on screen; ",
+}
+_CHIP_FORBIDDEN = (
+    "NEVER propose: whether to buy, sell, hold or trade it ('should I…'); whether it suits "
+    "the user personally; a price prediction, price target or forecast ('will it go up', "
+    "'what will the price be'); portfolio sizing"
+)
+_CHIP_FORBIDDEN_ANALYST = "; analyst ratings, consensus or upgrades/downgrades"
+_CHIP_FORBIDDEN_TAIL = ". Cay AI declines those, and a chip the answer declines is a dead end."
+# A Learn chat (a book, a Money Moves article, a Journey lesson) is about an IDEA, not an
+# asset: the STOCK scope steered its chips to price and fundamentals on a lesson page.
+_LEARN_CONTEXT_TYPES = frozenset({"BOOK", "MONEY_MOVES_ARTICLE", "JOURNEY_LESSON"})
+_CHIP_SCOPE_LEARN = (
+    "ANSWERABLE SCOPE — propose ONLY questions Cay AI can answer, which are about: the "
+    "idea just discussed — what it means, how it works, how an investor applies it, a "
+    "worked example, the common mistakes, how it connects to related concepts, and where "
+    "the reader could go next in the material. "
+    + _CHIP_FORBIDDEN + _CHIP_FORBIDDEN_ANALYST + _CHIP_FORBIDDEN_TAIL + " "
+)
+
+
+def chip_scope_block(asset_type: Optional[str], context_type: Optional[str] = None) -> str:
+    """The ANSWERABLE SCOPE paragraph for the follow-up chip prompt.
+
+    The chip generator used to know nothing about what the chat could answer, so it
+    offered "where can I buy DOGE?" and "Who maintains DOGE?" and the next turn declined
+    both (TestFlight 2026-09-16, E3). Prose only — see the module comment above. The
+    data clauses follow the tools the asset class is actually granted (`tools_for_asset_type`,
+    licence-aware), so the scope never promises a number the answer cannot fetch; a Learn
+    context gets the concept scope instead of an asset one.
+    """
+    ctx = (context_type or "").strip().upper()
+    if ctx in _LEARN_CONTEXT_TYPES:
+        return _CHIP_SCOPE_LEARN
+    key = (asset_type or "NORMAL").strip().upper()
+    specific = _CHIP_SCOPE_BY_ASSET_TYPE.get(key, _CHIP_SCOPE_BY_ASSET_TYPE["NORMAL"])
+    allowed = tools_for_asset_type(key)
+    data_clauses = [_CHIP_SCOPE_BY_TOOL[name] for name in _TOOL_ORDER if name in allowed and name in _CHIP_SCOPE_BY_TOOL]
+    data = "; ".join(data_clauses)
+    forbidden = _CHIP_FORBIDDEN + ("" if "get_analyst_analysis" in allowed else _CHIP_FORBIDDEN_ANALYST) + _CHIP_FORBIDDEN_TAIL
+    return (
+        "ANSWERABLE SCOPE — propose ONLY questions Cay AI can answer, which are about: "
+        + specific + (data + "; " if data else "") + _CHIP_SCOPE_ALWAYS + ". " + forbidden + " "
+    )
 
 
 def _is_profiled_index(symbol: str) -> bool:

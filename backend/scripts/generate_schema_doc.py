@@ -103,12 +103,19 @@ EXPECTED: dict[str, int] = {
     #                                      164 (-43 public-read / *_select_all, +2 service),
     #                                      165 (-24 per-user), 168 (-22 on the dropped tables)
     # The dump now carries GRANT/REVOKE (576 statements); the parser ignores them.
-    "tables": 128,
-    "public": 93,
-    "fk": 23,
-    "policies": 102,   # 169 dropped the user_settings/device_tokens `*_own` policies (2026-09-12)
-    "rls": 93,
-    "functions": 42,
+    # Refreshed 2026-09-18 after applying 170 + 171 and re-dumping. Every delta accounted for:
+    #   +4 tables / +4 public / +4 rls / +4 policies / +3 fk -> 170: marketing_runs,
+    #                          marketing_assets, marketing_posts, podcast_episodes (each with
+    #                          one service_role policy; assets/posts/episodes carry a FK)
+    #   +4 tables (non-public) -> Supabase platform upgrade in the same window (realtime /
+    #                          storage internals; not ours, not curated)
+    #   -1 function            -> 171 dropped add_credit_transaction (the dead ledger door)
+    "tables": 136,
+    "public": 97,
+    "fk": 26,
+    "policies": 106,
+    "rls": 97,
+    "functions": 41,
     "enums": 14,
     "views": 1,
 }

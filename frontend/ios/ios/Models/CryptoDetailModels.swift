@@ -221,7 +221,10 @@ struct CryptoAISuggestion: Identifiable {
     static let defaultSuggestions: [CryptoAISuggestion] = [
         CryptoAISuggestion(text: "What is this coin?"),
         CryptoAISuggestion(text: "Tokenomics breakdown"),
-        CryptoAISuggestion(text: "Should I buy?"),
+        // Was "Should I buy?" — the one question the advice boundary declines, offered by
+        // the app itself (TestFlight 2026-09-16, E3: every suggested question must have
+        // an answer). Background questions are answerable now (the knowledge rule).
+        CryptoAISuggestion(text: "How does it work?"),
         CryptoAISuggestion(text: "What are the risks?")
     ]
 }

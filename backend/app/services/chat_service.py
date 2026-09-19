@@ -18,7 +18,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 
 from app.database import get_supabase
-from app.integrations.gemini import get_gemini_client
+from app.integrations.gemini import get_gemini_client, _is_clean_finish, is_length_cut
 from app.integrations.fmp import get_fmp_client
 from app.config import settings
 from app.schemas.chat import StockChartWidget, HistoricalDataPoint
@@ -38,9 +38,12 @@ from app.services.agents.chat_tools import (
     build_chat_tool_declarations,
     build_chat_tool_handlers,
     capability_block,
+    chip_scope_block,
     tools_for_asset_type,
     widget_from_tool_result,
+    widget_key,
 )
+from app.services.chat_chip_filter import filter_answerable_chips
 from app.services.chat_security import normalize_text, cap_prompt, neutralize_fences, sanitize_symbol
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
@@ -76,6 +79,28 @@ def _chat_output_cap(is_deep_dive: bool) -> int:
         if is_deep_dive
         else settings.CHAT_MAX_OUTPUT_TOKENS
     )
+
+
+def _chat_thinking_budget(model_name: Optional[str] = None) -> Optional[int]:
+    """Thinking ceiling for a chat model call, or None for the model default.
+
+    Same resolver shape as `narrative_prompts.narrative_thinking_budget`: a NEGATIVE
+    setting maps to None (attach no ceiling — the pre-change request, byte-identical),
+    `0` disables thinking, a positive value is the ceiling. It is a function rather
+    than a module constant so a test can monkeypatch `settings` and see the change.
+    Why chat needs one at all: `max_output_tokens` bounds thoughts + answer together,
+    and the prod turn behind the "answer cut off" TestFlight report thought for 1150
+    of its 1200 tokens (`GEMINI_USAGE … output_tok=40 thoughts_tok=1150`).
+
+    `model_name` matters for the CHEAP route: `gemini-2.5-flash-lite` does not think
+    unless a budget is attached, so a positive ceiling meant for the flagship would
+    switch thinking ON there — the opposite of a cap. The cheap model keeps None
+    (its own default: off) whatever the setting says.
+    """
+    if model_name and model_name == settings.CHAT_CHEAP_MODEL:
+        return None
+    value = settings.CHAT_THINKING_BUDGET
+    return None if value < 0 else int(value)
 
 
 def _day_range(
@@ -198,6 +223,7 @@ class ChatService:
         context_is_replayed: bool = False,
         reader_lens: Optional[str] = None,
         user_id: Optional[str] = None,
+        attach_base_widget: bool = True,
     ) -> Dict[str, Any]:
         """
         Generate AI response with RAG context retrieval and optional
@@ -208,6 +234,13 @@ class ChatService:
         server-side and used as the grounding block — so iOS no longer ships a
         big raw context string. Falls back to any client-sent ``context`` (BOOK,
         legacy) or none on a miss.
+
+        ``attach_base_widget`` is the endpoint's "first turn of the session" verdict.
+        A grounded asset chat renders its price card ONCE, on the first answer (the
+        card stays on screen; re-attaching it under every one-line follow-up was the
+        TestFlight "it doesn't need to show the price chart for the second question"
+        report). When False the screen-scoped card is not built and a tool card for
+        the SAME asset is dropped; a tool card for a different ticker still attaches.
         """
         # Screen-aware grounding (never raises; degrades to client context/None).
         context, _server_grounded, context_is_replayed, cache_safe = await self._resolve_grounding(
@@ -284,7 +317,10 @@ class ChatService:
             logger.info(f"Deep dive cache HIT for {stock_id}")
             # The stream door seeds the same hit with the screen-scoped widget; without it
             # the non-stream row persisted bare and history replayed it bare forever.
-            hit_widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
+            hit_widget = (
+                await self._deterministic_widget(asset_type, stock_id, reference_id)
+                if attach_base_widget else None
+            )
             out: Dict[str, Any] = {
                 "content": cached_report,
                 "citations": citations if citations else None,
@@ -321,15 +357,27 @@ class ChatService:
                 # the two STREAM methods, and the guard scanned only those, so it stayed
                 # green with the hole open. Reports keep 8192; chat does not.
                 max_output_tokens=_chat_output_cap(is_deep_dive),
+                thinking_budget=_chat_thinking_budget(),
             )
 
             # If a renderable tool ran, extract its card — from ANY of the parallel calls
             # (gemini-2.5 emits several in one turn; `tool_results[0]` was the news result
             # and the chart was dropped), through the same helper the stream path uses.
+            # On a later turn of a grounded session the screen asset's own card is
+            # skipped (it is already on screen from the first answer); another
+            # ticker's card still attaches.
+            screen_key = (
+                None if attach_base_widget
+                else self._screen_widget_key(asset_type, stock_id, reference_id)
+            )
             for raw in response.get("tool_results", []) or []:
-                widget = widget_from_tool_result(raw)
-                if widget is not None:
-                    break
+                candidate = widget_from_tool_result(raw)
+                if candidate is None:
+                    continue
+                if screen_key is not None and widget_key(candidate) == screen_key:
+                    continue
+                widget = candidate
+                break
 
         except Exception as e:
             logger.warning(
@@ -356,6 +404,7 @@ class ChatService:
                     tools_granted=False,
                 ),
                 max_output_tokens=_chat_output_cap(is_deep_dive),
+                thinking_budget=_chat_thinking_budget(),
             )
         else:
             # The round succeeded, but if EVERY tool the model called came back as an error
@@ -370,6 +419,24 @@ class ChatService:
 
         ai_text = response["text"]
 
+        # A non-STOP finish after real text is a CUT answer (MAX_TOKENS / SAFETY /
+        # RECITATION). The stream door has settled this shape as degraded since the
+        # finish marker landed; this door read `response["text"]` and nothing else, so
+        # the same cut went out here — and through the stream→non-stream FALLBACK —
+        # charged in full, cached for 24 h as a deep dive, and with follow-up chips
+        # written off a half sentence. `finish_reason` travels in the result so the
+        # endpoint can mark the row `truncated` and the two doors settle identically.
+        # `degraded` is first-wins (a `no_tools` turn stays `no_tools` for the ledger);
+        # the truncation MARK is derived from `finish_reason` independently.
+        finish_reason = response.get("finish_reason")
+        truncated = bool((ai_text or "").strip()) and not _is_clean_finish(finish_reason)
+        if truncated and not degraded:
+            logger.warning(
+                "Non-stream chat answer cut by finish_reason=%s for session %s — "
+                "settling as degraded", finish_reason, session_id,
+            )
+            degraded = "truncated"
+
         # Cache deep dive reports for 24 hours — never a DEGRADED one (a tool-less brief
         # replayed for 24 h as a hit is the "cached failure ≡ real answer" class), and off
         # the loop like the stream door's write.
@@ -377,7 +444,7 @@ class ChatService:
         # back): with the key now stable for 24 h, that would be served to every user.
         if (
             is_deep_dive and context and stock_id and len(ai_text) > 100
-            and not degraded
+            and not degraded and not truncated
             and self._deep_dive_cacheable(
                 cache_safe=cache_safe, history=history, reader_lens=reader_lens,
                 stock_id=stock_id, asset_type=asset_type, context_type=context_type,
@@ -392,7 +459,7 @@ class ChatService:
         # No tool widget (text-only question, or the FC round failed and degraded to plain text
         # above) → fall back to the deterministic screen-scoped widget, so an asset-detail chat
         # keeps its inline chart on this non-streaming path too (matching prepare_stream_generation).
-        if widget is None:
+        if widget is None and attach_base_widget:
             widget = await self._deterministic_widget(asset_type, stock_id, reference_id)
 
         result: Dict[str, Any] = {
@@ -400,9 +467,12 @@ class ChatService:
             "citations": citations if citations else None,
             "tokens_used": response.get("tokens_used"),
             "sources": sources if sources else None,
+            "finish_reason": finish_reason,
         }
         if degraded:
             result["degraded"] = degraded
+        if truncated:
+            result["truncated"] = True
         if widget:
             result["widget"] = widget
 
@@ -642,14 +712,23 @@ class ChatService:
         async def _run(key: str):
             sys = apply_specialist(prep["system_instruction"], key)
             texts, wgts, tool_events = [], [], []
+            finish: Optional[str] = None
             try:
                 async for kind, payload in self.gemini.stream_agentic(
                     prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                     system_instruction=sys, max_rounds=2,
                     max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
+                    thinking_budget=_chat_thinking_budget(),
                 ):
                     if kind == "answer":
                         texts.append(payload)
+                    elif kind == "finish":
+                        # The specialist's answer was CUT. Harmless when the merge runs
+                        # (its text is clipped to 1200 chars anyway) — but the salvage
+                        # below serves this text VERBATIM when the merge produces
+                        # nothing, and it used to arrive at the endpoint unmarked: a
+                        # cut answer, charged in full, never continued.
+                        finish = str(payload)
                     elif kind == "tool":
                         # Kept, and RE-YIELDED below. The specialists' tool events used to be
                         # consumed here (only the widget was extracted), so the endpoint's
@@ -663,7 +742,7 @@ class ChatService:
             except Exception as e:
                 logger.warning("Synthesis specialist %s failed: %s: %s", key, type(e).__name__, e)
             return {"label": get_specialist(key).label, "answer": "".join(texts).strip(),
-                    "widgets": wgts, "tool_events": tool_events}
+                    "widgets": wgts, "tool_events": tool_events, "finish": finish}
 
         results = await asyncio.gather(*[_run(k) for k in keys], return_exceptions=True)
         ran = [r for r in results if isinstance(r, dict)]
@@ -699,6 +778,7 @@ class ChatService:
                 prep["prompt"], tools=tools, tool_handlers=tool_handlers,
                 system_instruction=prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
+                thinking_budget=_chat_thinking_budget(),
             ):
                 yield ev
             return
@@ -730,6 +810,7 @@ class ChatService:
                 # No tools on this call → the instruction must claim none (see prep).
                 system_instruction=prep.get("system_instruction_no_tools") or prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
+                thinking_budget=_chat_thinking_budget(),
             ):
                 if kind == "answer" and text:
                     merge_yielded = True
@@ -759,6 +840,10 @@ class ChatService:
             if signals is not None:
                 signals["degraded"] = "unmerged"
             yield "answer", results[0]["answer"]
+            if results[0].get("finish"):
+                # The salvaged text is the specialist's own cut answer: hand the endpoint
+                # the same marker every other cut carries, so it is marked and continued.
+                yield "finish", results[0]["finish"]
 
     # Screen context_type → the human "source" label shown in the thinking card.
     # Mirrors the ChatContextResolver branches; identity-safe (server-authored strings).
@@ -884,38 +969,61 @@ class ChatService:
             system = self._build_system_instruction(
                 "NORMAL", None, asset_type=asset_type, tools_granted=False,
             )
+            # The chip generator knew nothing about what the chat can answer, so it offered
+            # "where can I buy DOGE?" and "Who maintains DOGE?" and the next turn declined
+            # both (TestFlight 2026-09-16, E3: "all suggestion question must have answer").
+            # The scope paragraph tells it; `filter_answerable_chips` below enforces it.
+            # Three candidates are requested so a dropped one still leaves two.
             prompt = (
-                "Given this question-and-answer, propose EXACTLY 2 short follow-up questions "
-                "the user is likely to ask next. Rules: each under 60 characters; specific to "
-                "the topic just discussed; phrased in first person as the user would type it; "
-                "no numbering, no quotes.\n\n"
+                chip_scope_block(asset_type, context_type) + "\n\n"
+                "Given this question-and-answer, propose 3 short follow-up questions the user "
+                "is likely to ask next, in the order you would offer them. Rules: each under "
+                "60 characters; specific to the topic just discussed; inside the ANSWERABLE "
+                "SCOPE above; phrased in first person as the user would type it; no numbering, "
+                "no quotes.\n\n"
                 f"USER ASKED:\n{user_message}\n\n"
                 f"CAY AI ANSWERED:\n{answer[:1500]}\n\n"
-                'Return ONLY JSON of the form {"suggestions": ["...", "..."]}.'
+                'Return ONLY JSON of the form {"suggestions": ["...", "...", "..."]}.'
             )
             result = await self.gemini.generate_json(
                 prompt, system_instruction=system, model_name=settings.CHAT_CHEAP_MODEL,
             )
             data = json.loads(result.get("text") or "{}")
             raw = data.get("suggestions") or []
-            # Dedup case-insensitively, preserving order: the model can echo the same question twice,
-            # and duplicate chips collide the iOS `ForEach(id: \.self)` (a dropped row + a warning)
-            # besides being poor UX.
-            out: List[str] = []
-            seen: set = set()
-            for s in raw:
-                if not isinstance(s, str):
-                    continue
-                t = s.strip()
-                if t and t.lower() not in seen:
-                    seen.add(t.lower())
-                    out.append(t)
-            return out[:2]
+            # Dedup case-insensitively, preserving order (duplicate chips collide the iOS
+            # `ForEach(id: \.self)`), drop anything the chat would decline, cap at two.
+            return filter_answerable_chips(raw, limit=2)
         except Exception as e:
             logger.warning(
                 "Follow-up suggestions failed (%s: %s) — skipping", type(e).__name__, e
             )
             return []
+
+    @staticmethod
+    def _screen_widget_key(
+        asset_type: str, stock_id: Optional[str], reference_id: Optional[str]
+    ) -> Optional[str]:
+        """The `widget_key` the screen-scoped card WOULD carry, without fetching it.
+
+        Mirrors `_deterministic_widget`'s symbol derivation exactly (first `|` segment,
+        upper-cased, CRYPTO canonicalised to the priced pair) and `chat_tools.widget_key`'s
+        shape, so a later turn of a grounded session can recognise a tool card for the
+        SAME asset and skip it. Pure; None when the screen has no card at all
+        (no symbol, COMMODITY, an unknown asset type).
+        """
+        try:
+            symbol = (stock_id or reference_id or "").split("|")[0].strip().upper()
+        except Exception:
+            return None
+        if not symbol:
+            return None
+        if asset_type == "INDEX":
+            return f"market_overview:{symbol}"
+        if asset_type == "CRYPTO":
+            symbol = canonical_stored_symbol(symbol, "crypto")
+        if asset_type in _QUOTED_WIDGET_ASSET_TYPES:
+            return f"stock_chart:{symbol}"
+        return None
 
     async def _deterministic_widget(
         self, asset_type: str, stock_id: Optional[str], reference_id: Optional[str]
@@ -1446,6 +1554,7 @@ class ChatService:
                 advancing=advancing,
                 declining=len(sectors) - advancing,
                 macro_indicators=macro_items,
+                symbol=(symbol or "").strip().upper() or None,
             )
             return widget.model_dump()
         except Exception as e:
@@ -1992,7 +2101,8 @@ class ChatService:
         ),
         "CRYPTO": (
             "\nAnswer as a crypto analyst — adoption, regulation, on-chain metrics, tokenomics, "
-            "market cycles. Use the provided numbers; keep it concise."
+            "market cycles. Use the provided numbers; keep it concise. When you know this "
+            "coin's origin, creators, maintainers and mechanics, explain them when asked."
         ),
         "ETF": (
             "\nAnswer as an ETF analyst — expense ratio, holdings, sector allocation, benchmark "
@@ -2038,6 +2148,55 @@ class ChatService:
         "estimate it, never carry a figure over from a different asset, and never present a "
         "market-wide number as if it belonged to this one specific asset. Prefer fewer, "
         "well-sourced points over broad coverage. "
+    )
+
+    # ── Answer-scope rules (TestFlight 2026-09-16, E2 / E4 / E5) ─────────────────
+    # Three dead-ends the tester hit, each a model behaviour no prompt line asked for:
+    # "I cannot predict what GOOGL will be like in 5 years" (E2), "I cannot advise you on
+    # where to buy DOGE, as Caydex is not a registered investment adviser" (E4), and
+    # "Caydex does not have information on who maintains DOGE" (E5). The model was
+    # over-generalising three real rules — the advice boundary, the analyst-data clause's
+    # "say plainly that Caydex does not have that data", and the capability block's "never
+    # supply a reason a tool did not give you" — onto questions they were never about.
+    # These three rules draw the line explicitly. They sit AFTER the disclaimer clause and
+    # BEFORE the shared ADVICE_BOUNDARY (which is left untouched: it is shared with every
+    # report persona and pinned by substring tests), are unconditional (every asset type,
+    # with or without tools), and contain NO tool identifiers — `test_chat_capability_block`
+    # asserts the instruction names exactly the granted tools.
+    _FORWARD_LOOKING_RULE = (
+        "\nOUTLOOK QUESTIONS: When asked what is next, what the future holds, where something "
+        "could be in a few years, or what could push it up or down, do NOT refuse and do NOT "
+        "say you cannot predict the future — and do not open with ANY caveat about predicting, "
+        "forecasting or uncertainty ('predicting the future is challenging, but…'): go straight "
+        "to the analysis. Never answer by restating numbers already given. Answer as an analyst "
+        "would: the trend to date from the data you have, the "
+        "durable drivers and the main risks, the plausible bull and bear scenarios with the "
+        "evidence behind each, and what would change the picture. Never give a price target, a "
+        "specific future price or return, or a date-bound forecast, and never present one "
+        "scenario as what will happen. "
+    )
+    _ACCESS_RULE = (
+        "\nACCESS QUESTIONS: 'Where can I buy X', 'how do I get exposure to X', 'which "
+        "exchanges list X' and 'how do I invest in X' ask HOW something is accessed, not "
+        "WHETHER to buy it — answer them, never decline them. Describe the venue types (a "
+        "brokerage account; a regulated crypto exchange or a mainstream brokerage app that "
+        "offers crypto; an ETF or index fund that tracks it; futures or commodity ETFs) and you "
+        "may name well-known regulated venues as examples (e.g. Coinbase, Kraken, Robinhood) — "
+        "as availability, never as a recommendation. Note what to compare (fees, custody, "
+        "regulation, regional availability) and do not say whether they should buy. "
+    )
+    _KNOWLEDGE_RULE = (
+        "\nWHAT YOU KNOW: Facts that change with the market — prices, changes, volumes, "
+        "ratings, targets, sentiment, today's news — come ONLY from the data provided or a "
+        "tool result; never recall or estimate them. Stable background facts — who founded or "
+        "maintains a project, how a protocol or index is built, a company's business model or "
+        "history, how a financial concept works — are yours to answer from general knowledge, "
+        "with a light 'as of my latest knowledge' hedge where it could have changed. Never "
+        "answer a background question with 'Caydex has no information about X'; missing data "
+        "is a reason to decline a specific number, never the whole question. If you genuinely "
+        "do not know a background fact — an obscure project, a detail you are unsure of — say "
+        "so plainly ('I don't have reliable background on X') and never invent a founder, a "
+        "date, a mechanism or a figure to fill the gap. "
     )
 
     def _build_system_instruction(
@@ -2129,6 +2288,11 @@ class ChatService:
             "it suits them personally. For every other question — a definition, a metric, "
             "a fundamentals, filing or news lookup, or small talk — write NO disclaimer, "
             "no closing caveat and no 'this is not financial advice' sentence at all."
+            # What the model may ANSWER (outlook, access, background knowledge) — see the
+            # constants' comment. Unconditional, before the boundary they narrow.
+            + self._FORWARD_LOOKING_RULE
+            + self._ACCESS_RULE
+            + self._KNOWLEDGE_RULE
             # Shared with every report persona (persona_config.ADVICE_BOUNDARY) so the
             # two surfaces cannot drift. Supersedes the inline buy/sell line that used
             # to sit here, and additionally covers suitability ("right for me?").

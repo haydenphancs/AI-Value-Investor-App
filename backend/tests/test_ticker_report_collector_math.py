@@ -46,6 +46,7 @@ from app.services.agents.ticker_report_data_collector import (
     _merge_macro_risk_factors,
     _overlay_ai_guidance,
     _safe_cagr,
+    GUIDANCE_UNKNOWN,
     compute_earnings_yield,
 )
 from app.services.sector_aggregates_service import (
@@ -3104,16 +3105,19 @@ def test_guidance_overlay_truncates_long_quote():
     assert len(rf["guidance_quote"]) == 280
 
 
-def test_guidance_overlay_invalid_status_falls_back_to_maintained():
-    """AI sometimes invents enum values like 'mixed' / 'cautious'. Those
-    must coerce to maintained — the iOS enum has only 3 valid cases."""
+def test_guidance_overlay_invalid_status_is_not_a_read():
+    """AI sometimes invents enum values like 'mixed' / 'cautious'. Those used to
+    coerce to "maintained"; an unrecognised answer is no read at all, so it is
+    "unknown" — the iOS enum has only 3 valid cases and hides the block on it."""
     rf = _rf_with_defaults()
     _overlay_ai_guidance(rf, {
         "management_guidance": "cautiously optimistic",
         "guidance_quote": "We are cautiously optimistic about the second half.",
         "guidance_speaker": "CEO",
     })
-    assert rf["management_guidance"] == "maintained"
+    assert rf["management_guidance"] == GUIDANCE_UNKNOWN
+    assert rf["guidance_quote"] is None
+    assert rf["guidance_speaker"] is None
 
 
 def test_guidance_overlay_normalizes_speaker():
@@ -3141,16 +3145,41 @@ def test_guidance_overlay_rejects_unknown_speaker():
     assert rf["guidance_speaker"] is None
 
 
-def test_guidance_overlay_no_op_when_ai_missing():
-    """Stage A may return null `revenue_forecast` (e.g. when the
-    transcript was unavailable). Overlay must be a no-op."""
+@pytest.mark.parametrize("ai_rf", [None, {}, {"guidance_quote": "x"}, "garbage", 7])
+def test_guidance_overlay_unknown_when_stage_a_gave_no_stance(ai_rf):
+    """Stage A may return a null / empty / keyless `revenue_forecast` even WITH a
+    transcript on file (a parse failure, a skipped key). Nothing read it, so the
+    stance is "unknown" — never the "maintained" the collector once seeded and the
+    old `return` here silently kept (review finding, 2026-09-19)."""
     rf = _rf_with_defaults()
-    snap = dict(rf)
-    _overlay_ai_guidance(rf, None)
-    assert rf == snap
-    _overlay_ai_guidance(rf, {})
-    assert rf["management_guidance"] == "maintained"
+    _overlay_ai_guidance(rf, ai_rf, transcript_available=True)
+    assert rf["management_guidance"] == GUIDANCE_UNKNOWN
     assert rf["guidance_quote"] is None
+    assert rf["guidance_speaker"] is None
+    assert rf["guidance_period"] is None
+
+
+def test_an_explicit_maintained_with_a_transcript_is_still_a_read():
+    rf = _rf_with_defaults()
+    _overlay_ai_guidance(rf, {"management_guidance": "Maintained"}, transcript_available=True)
+    assert rf["management_guidance"] == "maintained"
+
+
+def test_assemble_report_does_not_coerce_a_missing_stage_a_block():
+    """The call site used to pass `ai.get("revenue_forecast") or {}`, turning
+    "Stage A never answered" into "Stage A said nothing special" = maintained."""
+    import inspect
+    from app.services.agents import ticker_report_data_collector as mod
+    src = inspect.getsource(mod.TickerReportDataCollector.assemble_report)
+    call = src[src.index("_overlay_ai_guidance("):]
+    call = call[:call.index(")\n") + 1]
+    assert 'ai.get("revenue_forecast")' in call
+    assert 'or {}' not in call
+
+
+def test_stage_a_fallback_seeds_unknown_not_maintained():
+    from app.services.agents.narrative_prompts import stage_a_fallback
+    assert stage_a_fallback()["revenue_forecast"]["management_guidance"] == GUIDANCE_UNKNOWN
 
 
 def test_guidance_overlay_period_truncated_at_30_chars():
@@ -3164,6 +3193,75 @@ def test_guidance_overlay_period_truncated_at_30_chars():
         "guidance_period": "Fiscal Year 2026 ending December 31, 2026 inclusive",
     })
     assert len(rf["guidance_period"]) == 30
+
+
+# ── E1 (TestFlight 2026-09-16): no transcript → no stance, ever ─────────────
+#
+# "Earnings Call Transcripts" is off the Order Form, so `out.transcript` is ""
+# on every report. Stage A's "maintained otherwise" default then wrote a
+# confident MAINTAINED badge on every report — a constant, not a measurement.
+
+
+def _ai_raised() -> dict:
+    return {
+        "management_guidance": "raised",
+        "guidance_quote": "We are raising our full-year revenue outlook to $58-60B.",
+        "guidance_speaker": "CFO",
+        "guidance_period": "FY 2026",
+    }
+
+
+@pytest.mark.parametrize("ai_rf", [
+    _ai_raised(),                                   # a full, quoted "raised"
+    {"management_guidance": "lowered", "guidance_quote": "We are cutting guidance."},
+    {"management_guidance": "maintained"},          # the old default itself
+    {},                                             # empty AI dict
+    None,                                           # Stage A gave nothing
+    "garbage",                                      # wrong type
+])
+def test_no_transcript_means_unknown_whatever_the_ai_said(ai_rf):
+    rf = _rf_with_defaults()
+    _overlay_ai_guidance(rf, ai_rf, transcript_available=False)
+    assert rf["management_guidance"] == GUIDANCE_UNKNOWN == "unknown"
+    assert rf["guidance_quote"] is None
+    assert rf["guidance_speaker"] is None
+    assert rf["guidance_period"] is None
+
+
+def test_with_a_transcript_a_quoted_raise_still_lands():
+    """The gate is about the transcript, not the AI: same payload, transcript
+    present → the pre-existing behaviour is untouched."""
+    rf = _rf_with_defaults()
+    _overlay_ai_guidance(rf, _ai_raised(), transcript_available=True)
+    assert rf["management_guidance"] == "raised"
+    assert rf["guidance_speaker"] == "CFO"
+
+
+def test_transcript_available_defaults_to_true_for_existing_callers():
+    """Keyword-only with a True default so every existing call keeps its meaning."""
+    rf = _rf_with_defaults()
+    _overlay_ai_guidance(rf, _ai_raised())
+    assert rf["management_guidance"] == "raised"
+
+
+def test_the_collector_default_is_unknown_not_maintained():
+    """`_build_revenue_forecast_partial` used to seed "maintained" — a stance
+    the Stage A fallback path then shipped unread."""
+    result = _build_revenue_forecast_partial([], 10.0, 9.5)
+    assert result["management_guidance"] == GUIDANCE_UNKNOWN
+    assert result["guidance_quote"] is None
+
+
+def test_assemble_report_passes_the_transcript_gate():
+    """The call site must derive the gate from `out.transcript`, and a
+    whitespace-only transcript is no transcript."""
+    import inspect
+    from app.services.agents import ticker_report_data_collector as mod
+    src = inspect.getsource(mod.TickerReportDataCollector.assemble_report)
+    assert "_overlay_ai_guidance(" in src
+    call = src[src.index("_overlay_ai_guidance("):]
+    call = call[:call.index(")\n") + 1]
+    assert 'transcript_available=bool((out.transcript or "").strip())' in call, call
 
 
 def test_guidance_overlay_maintained_status_clears_attribution():

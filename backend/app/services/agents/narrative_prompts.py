@@ -984,6 +984,10 @@ def _revenue_forecast_insight_prompt(
     guidance = rf.get("management_guidance") or "maintained"
     guidance_quote = rf.get("guidance_quote")
     projections = rf.get("projections") or []
+    # "unknown" = nothing measured the stance (no earnings-call transcript on
+    # file). The card hides the badge, so the read must not narrate a stance
+    # the user cannot see — and must not narrate its absence either.
+    guidance_known = guidance in ("raised", "maintained", "lowered")
 
     # Compact the chart-visible projections so the model anchors on the same
     # numbers the user sees on the bars (no re-deriving arithmetic). Defensive
@@ -1031,7 +1035,20 @@ def _revenue_forecast_insight_prompt(
     )
 
     quote_line = (
-        f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"' if guidance_quote else ""
+        f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"'
+        if guidance_quote and guidance_known else ""
+    )
+    stance_line = (
+        f"MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)"
+        if guidance_known else
+        "MANAGEMENT GUIDANCE STANCE: not available — no earnings-call transcript on "
+        "file. Do not mention guidance at all (not raised, maintained, lowered, "
+        "nor that it is unavailable)."
+    )
+    trust_line = (
+        f"- How much to TRUST the curve: read the guidance stance ({guidance}) together with the EPS beat/miss track record — a raise backed by steady beats is credible; an ambitious forecast from a chronic misser is suspect."
+        if guidance_known else
+        "- How much to TRUST the curve: read the EPS beat/miss track record — steady beats back an accelerating curve; an ambitious forecast from a chronic misser is suspect."
     )
     # Cross-section coherence: the forward trajectory's WHY is sharpest when it
     # can name the actual revenue driver — so hand it the Revenue Engine's
@@ -1044,7 +1061,7 @@ def _revenue_forecast_insight_prompt(
     return f"""Write the Future Forecast insight — explain WHY the forward revenue and earnings trajectory looks the way it does.
 
 PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
-MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)
+{stance_line}
 EPS BEAT/MISS TRACK RECORD: {track_str}
 HISTORICAL TREND (for contrast): {hist_str}
 FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
@@ -1059,7 +1076,7 @@ LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
 - What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, tie the forward curve to it (e.g. "cloud, already +33% YoY, carries the forward curve"). Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
 - Whether the forward curve accelerates or decelerates — and how that reads against the recent ACTUAL trend (a sharp step-up vs history is a bolder claim than more of the same).
-- How much to TRUST the curve: read the guidance stance ({guidance}) together with the EPS beat/miss track record — a raise backed by steady beats is credible; an ambitious forecast from a chronic misser is suspect.
+{trust_line}
 Anchor on ONE concrete projected number; you may sharpen it against the track record or the historical trend. Do NOT just list the projections back."""
 
 
@@ -1291,18 +1308,131 @@ Say specifically WHAT to track and WHEN, and what would confirm improvement or d
 If there is genuinely nothing actionable to monitor, write the literal word: NULL"""
 
 
+def wall_street_has_analyst_coverage(ws: Dict[str, Any]) -> bool:
+    """Whether the Wall Street card shows ANY sell-side data — a target, a rating
+    distribution, or rating momentum. The same signal `ReportConsensusBar` gates its
+    analyst blocks on. False on every ticker while "Analyst Ratings & Price Targets"
+    is off the FMP Order Form (`analyst_service` returns zeros, not None)."""
+    if not isinstance(ws, dict):
+        return False
+    if ws.get("target_price"):
+        return True
+    keys = (
+        "analyst_strong_buy", "analyst_buy", "analyst_hold", "analyst_sell",
+        "analyst_strong_sell", "momentum_upgrades", "momentum_maintains",
+        "momentum_downgrades",
+    )
+    for key in keys:
+        n = ws.get(key)
+        if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0:
+            return True
+    return False
+
+
 # The Wall Street Consensus "Insight" — a big-picture synthesis across all three
 # sub-sections the user sees in that card: Analyst Price Target, Institutions
 # (FMP 13F flow), and Momentum (12-month analyst upgrades/maintains/downgrades).
+#
+# With NO analyst coverage the card shows only the price chart, the 13F flow and
+# (via the vitals) the DCF lens — so the prompt becomes an institutional-flow read
+# and never mentions analysts. It used to feed two "no coverage / none published"
+# lines plus "pivot the read to institutions", and the model dutifully opened every
+# uncovered report with "With no analyst consensus or price targets available…"
+# (TestFlight 2026-09-11, research_reports E3) — a sentence about a dataset that
+# will never be present.
 def _wall_street_insight_prompt(
     persona: PersonaConfig, evidence: str, shell: Dict[str, Any]
+) -> str:
+    ws = shell.get("wall_street_consensus") or {}
+    if not wall_street_has_analyst_coverage(ws):
+        return _institutional_flow_insight_prompt(persona, evidence, ws)
+    return _covered_wall_street_insight_prompt(persona, evidence, ws)
+
+
+def _dcf_measured(ws: Dict[str, Any]) -> bool:
+    """`valuation_status` defaults to "fair_value" with no DCF behind it; the
+    collector marks that with `dcf_measured=False` (absent on older reports, which
+    are read as measured — the pre-existing behaviour)."""
+    return ws.get("dcf_measured") is not False
+
+
+def _valuation_line_for(ws: Dict[str, Any]) -> str:
+    """DCF valuation lens — DISTINCT from the analyst-target upside."""
+    val_status = str(ws.get("valuation_status") or "").replace("_", " ")
+    disc = ws.get("discount_percent")
+    if val_status and _dcf_measured(ws):
+        disc_str = (
+            f", {disc:.0f}% below DCF fair value"
+            if isinstance(disc, (int, float)) and disc else ""
+        )
+        return (
+            f"DCF valuation (model-implied, distinct from the analyst target): "
+            f"{val_status}{disc_str}"
+        )
+    return "DCF valuation: n/a"
+
+
+def _institutions_line_for(ws: Dict[str, Any]) -> str:
+    """Institutions (13F net informative flow), as the card labels it."""
+    smart = ws.get("hedge_fund_smart_money") or {}
+    summ = (smart.get("summary") if isinstance(smart, dict) else None) or {}
+    net = summ.get("total_net_flow")
+    if isinstance(net, (int, float)) and net:
+        direction = "net buying" if summ.get("is_positive") else "net selling"
+        period = summ.get("period_description") or "recent quarters"
+        return (
+            f"Institutions (13F, {period}): {direction}, "
+            f"{net:+.1f}M shares net informative flow"
+        )
+    return "Institutions (13F): no institutional flow data"
+
+
+def _institutional_flow_insight_prompt(
+    persona: PersonaConfig, evidence: str, ws: Dict[str, Any]
+) -> str:
+    institutions_line = _institutions_line_for(ws)
+    # The DCF lens is a model value computed from the report's data; the card does
+    # not render it, and when no DCF exists there is nothing to reconcile against.
+    if _dcf_measured(ws) and ws.get("valuation_status"):
+        valuation_line = _valuation_line_for(ws).replace(
+            " (model-implied, distinct from the analyst target)", " (model-implied)"
+        )
+        context_block = (
+            "\nCONTEXT (a model valuation computed from the report's data — NOT a value on this "
+            "card; use it only to judge the positioning, and never as something the user is "
+            f"looking at):\n- {valuation_line}\n"
+        )
+        reconcile = "; then say whether the model valuation agrees or diverges with that positioning"
+    else:
+        context_block = ""
+        reconcile = ""
+    return f"""Write the Institutional Flow insight — what institutional (13F) positioning says about this stock.
+
+DISPLAYED VALUES (exactly what the user sees in the card):
+- {institutions_line}
+{context_block}
+EVIDENCE (for catalyst context only — financings, acquisitions, guidance changes):
+{evidence}
+
+{_style_block(persona)}
+{_length_brief(2, 45)}
+
+Lead with the institutional signal and cite its concrete number (the net shares){reconcile}. If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Give the verdict that ties them together — do NOT just restate the lines.
+
+{_displayed_values_grounding("DISPLAYED VALUES block")}
+The card shows the price chart and institutional (13F) flow ONLY. Do not mention analysts, analyst ratings, consensus, price targets, upgrades or downgrades — and do not say that any of them are unavailable, missing or lacking. Write as if that topic does not exist.
+
+If the data doesn't show a clear pattern, write the literal word: NULL"""
+
+
+def _covered_wall_street_insight_prompt(
+    persona: PersonaConfig, evidence: str, ws: Dict[str, Any]
 ) -> str:
     # Surface the EXACT values rendered in the Wall Street Consensus card so the
     # insight reflects what the user sees — not a re-derivation from the dense
     # evidence text. Mirrors the "cite displayed values" discipline used by the
     # Overall Assessment insight. All numbers are computed Python-side (the model
     # is bad at arithmetic); the prompt only synthesizes.
-    ws = shell.get("wall_street_consensus") or {}
 
     # ── Analyst Price Target (+ Python-computed analyst-target upside) ──
     cur = ws.get("current_price")
@@ -1356,33 +1486,10 @@ def _wall_street_insight_prompt(
         )
 
     # ── DCF valuation lens — DISTINCT from the analyst-target upside ────
-    val_status = str(ws.get("valuation_status") or "").replace("_", " ")
-    disc = ws.get("discount_percent")
-    if val_status:
-        disc_str = (
-            f", {disc:.0f}% below DCF fair value"
-            if isinstance(disc, (int, float)) and disc else ""
-        )
-        valuation_line = (
-            f"DCF valuation (model-implied, distinct from the analyst target): "
-            f"{val_status}{disc_str}"
-        )
-    else:
-        valuation_line = "DCF valuation: n/a"
+    valuation_line = _valuation_line_for(ws)
 
     # ── Institutions (13F net informative flow) ────────────────────────
-    smart = ws.get("hedge_fund_smart_money") or {}
-    summ = (smart.get("summary") if isinstance(smart, dict) else None) or {}
-    net = summ.get("total_net_flow")
-    if isinstance(net, (int, float)) and net:
-        direction = "net buying" if summ.get("is_positive") else "net selling"
-        period = summ.get("period_description") or "recent quarters"
-        institutions_line = (
-            f"Institutions (13F, {period}): {direction}, "
-            f"{net:+.1f}M shares net informative flow"
-        )
-    else:
-        institutions_line = "Institutions (13F): no institutional flow data"
+    institutions_line = _institutions_line_for(ws)
 
     # ── Analyst rating momentum (last 12 months) ───────────────────────
     up, maint, down = (
@@ -1859,7 +1966,8 @@ def stage_a_fallback() -> Dict[str, Any]:
             "weak_count": 0,
         },
         "revenue_forecast": {
-            "management_guidance": "maintained",
+            # Nothing read a transcript on the fallback path — never a stance.
+            "management_guidance": "unknown",
             "guidance_quote": None,
         },
         "insider_analysis": {
@@ -2013,7 +2121,8 @@ def _digest_forecast(report: Dict[str, Any]) -> List[str]:
         bits.append(f"revenue CAGR {cagr}%")
     if eps is not None:
         bits.append(f"EPS CAGR {eps}%")
-    if rf.get("management_guidance"):
+    # "unknown" (no transcript on file) is not a stance — the card hides it.
+    if rf.get("management_guidance") in ("raised", "maintained", "lowered"):
         bits.append(f"guidance {rf['management_guidance']}")
     if rf.get("beat_summary"):
         bits.append(str(rf["beat_summary"]).lower())  # "beat 6 of 8"
@@ -2196,7 +2305,9 @@ def _digest_wall_street(report: Dict[str, Any]) -> List[str]:
     out: List[str] = []
     ws = report.get("wall_street_consensus") or {}
     bits = []
-    if ws.get("rating"):
+    # `rating` defaults to "hold" from `_consensus_to_key(None)`; only a published
+    # one is a fact the executive summary may lean on.
+    if ws.get("rating") and wall_street_has_analyst_coverage(ws):
         bits.append(f"consensus {str(ws['rating']).replace('_', ' ')}")
     cur, tgt = ws.get("current_price"), ws.get("target_price")
     upside = None
@@ -2208,7 +2319,9 @@ def _digest_wall_street(report: Dict[str, Any]) -> List[str]:
     ups, tgts = _f_num(upside, "{:+.0f}"), _f_num(tgt, "{:.0f}")
     if ups is not None and tgts is not None:
         bits.append(f"target ${tgts} ({ups}% vs current)")
-    if ws.get("valuation_status"):
+    # Same class as the defaulted "hold": "fair_value" with no DCF behind it is
+    # not a verdict the executive summary may lean on.
+    if ws.get("valuation_status") and _dcf_measured(ws):
         bits.append(str(ws["valuation_status"]))
     up, down = ws.get("momentum_upgrades"), ws.get("momentum_downgrades")
     if isinstance(up, int) and isinstance(down, int) and (up or down):

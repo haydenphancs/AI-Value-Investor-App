@@ -359,68 +359,176 @@ struct ReportConsensusBar: View {
             let badgeGutter: CGFloat = 50  // badge frame width
             let badgeGap: CGFloat = 7      // breathing room between the pole and the badge text
             let badgeCenterX = leadingPadding + chartWidth + badgeGutter / 2 + badgeGap
-            let highY = yPosition(for: highTarget, in: geometry)
-            let avgY = yPosition(for: targetPrice, in: geometry)
-            let lowY = yPosition(for: lowTarget, in: geometry)
+            // The dots stay at their true price y. The badges are anchored so the
+            // COLOURED PERCENT — the value read as "the" label — sits level with its
+            // own dot, and are nudged apart when a short pole would stack them
+            // (TestFlight 2026-09-02, research_reports E4: centring the whole
+            // price-over-percent badge put every percent half a line BELOW its dot,
+            // butting against the next badge's price, so +61.0% read as the label
+            // of the $461.50 dot beneath it).
+            // Pair each badge with its dot's y and SORT by y before resolving, so the
+            // top badge always belongs to the top dot even on an inverted feed (a
+            // consensus above the "high" target): the resolver spreads outward by
+            // position, not by name, and an unsorted feed put a badge on the far side
+            // of the pole from its own dot (review finding, 2026-09-19).
+            let items: [(y: CGFloat, price: String, percent: String, color: Color)] = [
+                (yPosition(for: highTarget, in: geometry), formatTargetPrice(highTarget),
+                 consensus.formattedHighTargetPercent, AppColors.bullish),
+                (yPosition(for: targetPrice, in: geometry), formatTargetPrice(targetPrice),
+                 consensus.formattedAvgTargetPercent, AppColors.primaryBlue),
+                (yPosition(for: lowTarget, in: geometry), formatTargetPrice(lowTarget),
+                 consensus.formattedLowTargetPercent, AppColors.bearish),
+            ].sorted { $0.y < $1.y }
+            // `high` / `avg` / `low` here mean top / middle / bottom on screen.
+            let anchors = Self.resolvedBadgeAnchors(
+                high: items[0].y,
+                avg: items[1].y,
+                low: items[2].y,
+                minGap: badgeMinGap,
+                topInset: badgeTopInset,
+                bottomInset: badgeBottomInset,
+                height: geometry.size.height
+            )
 
             Group {
-                // High target badge - centered vertically with the point
-                targetBadge(
-                    price: formatTargetPrice(highTarget),
-                    percent: consensus.formattedHighTargetPercent,
-                    color: AppColors.bullish
-                )
-                .frame(width: badgeGutter, alignment: .leading)
-                .position(x: badgeCenterX, y: highY)
+                // Top badge — percent level with the top dot
+                targetBadge(price: items[0].price, percent: items[0].percent, color: items[0].color)
+                    .frame(width: badgeGutter, alignment: .leading)
+                    .position(x: badgeCenterX, y: anchors.high - badgeLineOffset)
 
-                // Average target badge - centered vertically with the point
-                targetBadge(
-                    price: formatTargetPrice(targetPrice),
-                    percent: consensus.formattedAvgTargetPercent,
-                    color: AppColors.primaryBlue
-                )
-                .frame(width: badgeGutter, alignment: .leading)
-                .position(x: badgeCenterX, y: avgY)
+                // Middle badge — percent level with the middle dot
+                targetBadge(price: items[1].price, percent: items[1].percent, color: items[1].color)
+                    .frame(width: badgeGutter, alignment: .leading)
+                    .position(x: badgeCenterX, y: anchors.avg - badgeLineOffset)
 
-                // Low target badge - centered vertically with the point
-                targetBadge(
-                    price: formatTargetPrice(lowTarget),
-                    percent: consensus.formattedLowTargetPercent,
-                    color: AppColors.bearish
-                )
-                .frame(width: badgeGutter, alignment: .leading)
-                .position(x: badgeCenterX, y: lowY)
+                // Bottom badge — percent level with the bottom dot
+                targetBadge(price: items[2].price, percent: items[2].percent, color: items[2].color)
+                    .frame(width: badgeGutter, alignment: .leading)
+                    .position(x: badgeCenterX, y: anchors.low - badgeLineOffset)
             }
         }
+    }
+
+    // MARK: Badge geometry
+
+    /// Spacing between the price line and the percent line inside a badge.
+    private static let badgeLineSpacing: CGFloat = 2
+
+    /// One badge text line, scaled the way `AppTypography.caption` (11pt) scales, so
+    /// the anchoring below stays true at every Dynamic Type size.
+    private var badgeLineHeight: CGFloat {
+        AppTypography.scaledSize(13, .caption2, maxScale: AppTypography.readingCap)
+    }
+
+    /// A badge is price OVER percent. `.position` places the badge's centre, and the
+    /// percent line's centre sits `(line + spacing) / 2` below that — so subtracting
+    /// this from the dot's y puts the PERCENT, not the badge, level with the dot.
+    private var badgeLineOffset: CGFloat {
+        (badgeLineHeight + Self.badgeLineSpacing) / 2
+    }
+
+    /// Two badges cannot share a vertical band: consecutive anchors need the full
+    /// badge height (two lines + spacing) plus 2pt of air.
+    private var badgeMinGap: CGFloat {
+        2 * badgeLineHeight + Self.badgeLineSpacing + 2
+    }
+
+    /// The highest anchor whose badge still starts inside the chart: the price line
+    /// (one line + spacing) sits above the percent, and half a line of the percent
+    /// itself sits above the anchor.
+    private var badgeTopInset: CGFloat {
+        1.5 * badgeLineHeight + Self.badgeLineSpacing
+    }
+
+    /// The lowest anchor whose percent line still ends inside the chart.
+    private var badgeBottomInset: CGFloat {
+        badgeLineHeight / 2
+    }
+
+    /// Where the three badges' PERCENT lines go, given the true dot positions.
+    ///
+    /// The average keeps its dot's y; the high badge is pushed up and the low badge
+    /// pushed down until each is at least `minGap` from its neighbour, then all three
+    /// are kept inside `[topInset, height - bottomInset]` — cascading the others when a
+    /// clamp would otherwise re-stack them. Pure and static so the maths is testable.
+    static func resolvedBadgeAnchors(
+        high: CGFloat, avg: CGFloat, low: CGFloat,
+        minGap: CGFloat, topInset: CGFloat, bottomInset: CGFloat, height: CGFloat
+    ) -> (high: CGFloat, avg: CGFloat, low: CGFloat) {
+        let top = topInset
+        let bottom = max(top, height - bottomInset)
+        let gap = max(0, minGap)
+
+        // Spread outward from the average (the dot the user reads first).
+        var h = min(high, avg - gap)
+        var a = avg
+        var l = max(low, avg + gap)
+
+        // Keep the high badge on the chart; if that pushes it down onto the
+        // average, the average and low give way beneath it.
+        if h < top {
+            h = top
+            a = max(a, h + gap)
+            l = max(l, a + gap)
+        }
+        // Same from the bottom edge, cascading upward.
+        if l > bottom {
+            l = bottom
+            a = min(a, l - gap)
+            h = min(h, a - gap)
+        }
+        // A chart too short for three badges cannot satisfy both edges; the top
+        // wins so the high badge is never cut off, and the rest is clamped.
+        h = min(max(h, top), bottom)
+        a = min(max(a, top), bottom)
+        l = min(max(l, top), bottom)
+        return (h, a, l)
     }
 
     /// Target price for the badges — shows cents only when the value actually
     /// has them ("$249.53"); whole numbers stay clean ("$400").
     private func formatTargetPrice(_ value: Double) -> String {
-        if value == value.rounded() {
+        // Four-digit targets drop their cents: "$5,800.50" does not fit the 50pt
+        // gutter and wrapped the badge to three lines, which broke the two-line
+        // anchoring below (review finding, 2026-09-19).
+        if value == value.rounded() || abs(value) >= 1000 {
             return String(format: "$%.0f", value)
         }
         return String(format: "$%.2f", value)
     }
 
+    /// Price OVER percent, each on exactly one line — the anchoring maths assumes it.
     private func targetBadge(price: String, percent: String, color: Color) -> some View {
         VStack(alignment: .center, spacing: 2) {
             Text(price)
                 .font(AppTypography.caption).fontWeight(.bold)
                 .foregroundColor(AppColors.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
 
             Text(percent)
                 .font(AppTypography.caption).fontWeight(.bold)
                 .foregroundColor(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
     }
 
+    /// Every element (line, current-price pill, pole, dots, badges) maps through this
+    /// one function. With analyst targets on the chart it maps into the plot rect
+    /// inset by the badge geometry — the 7 % headroom in `maxPrice` alone put the high
+    /// dot at y≈12 on the TER screenshot, above `badgeTopInset` (21.5), so the high
+    /// badge was always clamped below its dot and the cascade pushed the others down
+    /// (review finding, 2026-09-19). Without targets the full height is used.
     private func yPosition(for price: Double, in geometry: GeometryProxy) -> CGFloat {
         let priceRange = maxPrice - minPrice
-        guard priceRange > 0 else { return geometry.size.height / 2 }
+        let top: CGFloat = consensus.hasAnalystTargets ? badgeTopInset : 0
+        let bottom: CGFloat = consensus.hasAnalystTargets ? badgeBottomInset : 0
+        let plotHeight = max(geometry.size.height - top - bottom, 1)
+        guard priceRange > 0 else { return top + plotHeight / 2 }
 
         let normalizedValue = (price - minPrice) / priceRange
-        return geometry.size.height * (1 - normalizedValue)
+        return top + plotHeight * (1 - normalizedValue)
     }
 
     // MARK: - Momentum Section

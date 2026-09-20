@@ -988,3 +988,33 @@ async def test_the_timeout_and_failure_arms_are_bounded_too(resolver, caplog, mo
                     if r.name == "app.services.chat_context_resolver"]
         assert len(rendered) == 1
         assert "\n" not in rendered[0] and len(rendered[0]) < 500
+
+
+# ── E1 review (2026-09-19): unmeasured guidance never reaches Cay AI as visible data ──
+
+def test_unmeasured_guidance_is_stripped_from_the_report_dump():
+    from app.services.chat_context_resolver import _without_unmeasured_guidance
+    report = {"symbol": "TER", "revenue_forecast": {
+        "cagr": 12.0, "management_guidance": "unknown", "guidance_quote": None,
+        "guidance_speaker": None, "guidance_period": None, "projections": [],
+    }, "core_thesis": {"bull_case": ["x"]}}
+    out = _without_unmeasured_guidance(report)
+    rf = out["revenue_forecast"]
+    for key in ("management_guidance", "guidance_quote", "guidance_speaker", "guidance_period"):
+        assert key not in rf
+    assert rf["cagr"] == 12.0 and out["core_thesis"] == report["core_thesis"]
+    # The caller's dict is untouched (the report is frozen data).
+    assert report["revenue_forecast"]["management_guidance"] == "unknown"
+
+
+@pytest.mark.parametrize("stance", ["raised", "maintained", "lowered"])
+def test_a_read_stance_stays_in_the_report_dump(stance):
+    from app.services.chat_context_resolver import _without_unmeasured_guidance
+    report = {"revenue_forecast": {"management_guidance": stance, "guidance_quote": "We raise."}}
+    assert _without_unmeasured_guidance(report) is report
+
+
+@pytest.mark.parametrize("report", [None, "x", {}, {"revenue_forecast": None}, {"revenue_forecast": "x"}])
+def test_guidance_strip_tolerates_garbage(report):
+    from app.services.chat_context_resolver import _without_unmeasured_guidance
+    assert _without_unmeasured_guidance(report) == report

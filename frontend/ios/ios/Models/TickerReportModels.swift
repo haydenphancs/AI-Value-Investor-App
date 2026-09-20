@@ -499,7 +499,9 @@ struct EarningsTrackRecordPoint: Identifiable {
 struct ReportRevenueForecast {
     let cagr: Double                    // revenue growth percentage
     let epsGrowth: Double               // EPS growth percentage
-    let managementGuidance: ManagementGuidance
+    /// nil when nothing measured it (no earnings-call transcript on file) — the
+    /// Company Guidance block is hidden, never defaulted to a stance.
+    let managementGuidance: ManagementGuidance?
     let projections: [RevenueProjection]
     let guidanceQuote: String?
     // Attribution metadata for `guidanceQuote` (PR 6 — verbatim from

@@ -1681,3 +1681,23 @@ def test_wall_street_consensus_targets_null_without_analyst_coverage():
     assert consensus["high_target"] is None
     consensus["wall_street_insight"] = None
     WallStreetConsensusResponse.model_validate(consensus)
+
+
+def test_revenue_forecast_unknown_guidance_is_a_valid_wire_value():
+    """E1 (TestFlight 2026-09-16): "unknown" = no transcript was read. It rides the
+    SAME required `str` field so the shipped iOS build (required String, `.maintained`
+    fallback) keeps decoding; the new build hides the badge on it. A None here would
+    crash every older client on every new report."""
+    from app.services.agents.ticker_report_data_collector import GUIDANCE_UNKNOWN
+    rf = {
+        "cagr": 0.0, "eps_growth": 0.0,
+        "management_guidance": GUIDANCE_UNKNOWN,
+        "projections": [],
+        "guidance_quote": None, "guidance_speaker": None, "guidance_period": None,
+    }
+    model = RevenueForecastResponse.model_validate(rf)
+    assert model.management_guidance == "unknown"
+    assert isinstance(model.model_dump()["management_guidance"], str)
+    # The field is still required and still a string — the contract iOS decodes.
+    with pytest.raises(Exception):
+        RevenueForecastResponse.model_validate({**rf, "management_guidance": None})

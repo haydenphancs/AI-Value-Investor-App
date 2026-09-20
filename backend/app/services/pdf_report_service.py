@@ -137,6 +137,11 @@ def _persona_display(agent: dict) -> str:
     return name if last.lower() == "agent" else f"{last} Agent"
 
 
+def _guidance_for_pdf(value: Any) -> str:
+    """The three read stances pass through; "unknown", None or garbage → ""."""
+    return value if value in ("raised", "maintained", "lowered") else ""
+
+
 def _num(v: Any) -> Optional[float]:
     """Coerce to float, or None. NaN/Inf are treated as ABSENT, not as numbers.
 
@@ -602,7 +607,9 @@ def build_context(
         "forecast": {
             "cagr": _num(forecast.get("cagr")),
             "eps_growth": _num(forecast.get("eps_growth")),
-            "management_guidance": forecast.get("management_guidance") or "",
+            # "unknown" = no transcript was read; the template's `or "—"` dash is
+            # the honest cell, not a capitalised "Unknown" that reads like a stance.
+            "management_guidance": _guidance_for_pdf(forecast.get("management_guidance")),
             "projections": projections_table,
             "track_record": forecast.get("earnings_track_record") or [],
             "beat_summary": forecast.get("beat_summary") or "",

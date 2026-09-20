@@ -280,7 +280,10 @@ struct TimelinePricePointDTO: Codable {
 struct RevenueForecastDTO: Codable {
     let cagr: Double
     let epsGrowth: Double
-    let managementGuidance: String
+    /// "raised" | "maintained" | "lowered" — a read of the earnings-call transcript —
+    /// or "unknown" when none was on file. Optional so a row without the key still
+    /// decodes; `mapGuidance` turns anything but the three reads into nil.
+    let managementGuidance: String?
     let projections: [RevenueProjectionDTO]
     let guidanceQuote: String?
     let guidanceSpeaker: String?
@@ -1139,11 +1142,16 @@ extension TickerReportAPIResponse {
         }
     }
 
-    private static func mapGuidance(_ s: String) -> ManagementGuidance {
-        switch s.lowercased() {
+    /// nil = no stance was measured ("unknown", absent, or garbage). It used to fall
+    /// back to `.maintained`, which turned "no transcript on file" into a confident
+    /// MAINTAINED badge on every report once transcripts left the FMP licence
+    /// (TestFlight 2026-09-16, research_reports E1). Only an explicit read renders.
+    private static func mapGuidance(_ s: String?) -> ManagementGuidance? {
+        switch s?.lowercased() {
         case "raised": return .raised
         case "lowered": return .lowered
-        default: return .maintained
+        case "maintained": return .maintained
+        default: return nil
         }
     }
 

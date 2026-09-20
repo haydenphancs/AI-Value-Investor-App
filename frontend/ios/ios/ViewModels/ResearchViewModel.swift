@@ -525,6 +525,11 @@ class ResearchViewModel: ObservableObject {
             // 5 s for the rest of the process (~720/h), reminting every row's UUID each time.
             // The pass below re-inserts any row that is still genuinely stuck.
             locallyTimedOutReportIds.formIntersection(Set(backendReports.map(\.id)))
+            // Release client concurrency slots the SERVER has finished with: an id whose
+            // row is completed / failed, or no longer listed (deleted elsewhere). Slots
+            // held past the 300 s poll deadline (see the poll-timeout arm) end here, so
+            // the button's "N analyses are running" tracks the server, not the monitor.
+            releaseFinishedSlots(against: backendReports)
             self.reports = backendReports
                 .filter { !dismissedReportIds.contains($0.id) }
                 .map { AnalysisReport.from($0) }
@@ -593,6 +598,25 @@ class ResearchViewModel: ObservableObject {
 
     /// Poll the reports list every 5s while any report is in-flight.
     /// Called when the user switches to the Reports tab. Self-terminates
+    /// Drop every in-flight id whose server row is terminal ("completed" / "failed")
+    /// or absent from the raw list. "pending" and "processing" keep their slot.
+    private func releaseFinishedSlots(against backendReports: [BackendReportListItem]) {
+        guard !inFlightReportIds.isEmpty else { return }
+        let stillRunning = Set(
+            backendReports
+                .filter { $0.status == "pending" || $0.status == "processing" }
+                .map(\.id)
+        )
+        let finished = inFlightReportIds.subtracting(stillRunning)
+        for id in finished {
+            inFlightReportIds.remove(id)
+            liveProgress[id] = nil
+        }
+        if !finished.isEmpty {
+            print("🔓 ResearchVM: released \(finished.count) concurrency slot(s) the server finished with")
+        }
+    }
+
     /// once no processing/pending reports remain — no need to cancel
     /// manually in that case.
     func startReportsPolling() {
@@ -950,6 +974,16 @@ class ResearchViewModel: ObservableObject {
                                 "reason": .string(appError.analyticsCode),
                             ])
                             print("⏳ ResearchVM: client poll timed out — report continues on the server")
+                            // The run is STILL LIVE on the server and still counts against
+                            // its per-user cap, so it keeps its client slot too: the removal
+                            // at the top of this arm used to free it, re-enabling Generate
+                            // under a report that was still running — and the next tap met
+                            // the server's 409 alert (review finding, 2026-09-19). The list
+                            // poll releases the slot the moment the row leaves
+                            // pending/processing (`loadReports`).
+                            if let id = startedId {
+                                self.inFlightReportIds.insert(id)
+                            }
                             await self.loadReports()
                             self.startReportsPolling()
                         } else if case .timeout = appError {
@@ -1407,8 +1441,8 @@ class ResearchViewModel: ObservableObject {
     /// Number of reports this session currently has in flight.
     var activeGenerationCount: Int { inFlightReportIds.count }
 
-    /// True once the user hits the concurrency cap — the Generate button shows
-    /// a spinner and can't start another until one finishes.
+    /// True once the user hits the concurrency cap — the Generate button is
+    /// disabled under an at-cap notice and can't start another until one finishes.
     var isAtConcurrencyCap: Bool { activeGenerationCount >= maxConcurrentGenerations }
 
     /// Gate for STARTING a new generation: under the cap, a ticker chosen, and

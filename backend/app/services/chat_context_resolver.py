@@ -155,6 +155,28 @@ def _as_of_et() -> str:
 
 
 
+_GUIDANCE_READS = ("raised", "maintained", "lowered")
+
+
+def _without_unmeasured_guidance(report: Any) -> Any:
+    """The report dump is labelled "data the user can see". `management_guidance`
+    is "unknown" on every report while earnings-call transcripts are unlicensed,
+    and the card HIDES the block on that value — so the four guidance keys must not
+    reach Cay AI as visible data ("the report lists guidance as unknown"). Returns
+    the report untouched when a stance was actually read."""
+    if not isinstance(report, dict):
+        return report
+    rf = report.get("revenue_forecast")
+    if not isinstance(rf, dict) or rf.get("management_guidance") in _GUIDANCE_READS:
+        return report
+    trimmed = dict(rf)
+    for key in ("management_guidance", "guidance_quote", "guidance_speaker", "guidance_period"):
+        trimmed.pop(key, None)
+    out = dict(report)
+    out["revenue_forecast"] = trimmed
+    return out
+
+
 def _flatten_for_grounding(
     payload: Any, max_chars: int, str_cap: int = _STR_CAP, skip_top: Tuple[str, ...] = (),
     priority_top: Tuple[str, ...] = (),
@@ -407,7 +429,7 @@ class ChatContextResolver:
         # DUMP — every other section the user can see (thesis, fundamentals, revenue, moat, ownership,
         # Wall Street, macro, critical factors) minus the lead keys + the heavy chart/price arrays.
         dump = _flatten_for_grounding(
-            report, _DUMP_CAP,
+            _without_unmeasured_guidance(report), _DUMP_CAP,
             skip_top=("symbol", "company_name", "exchange", "agent", "quality_score",
                       "live_date", "price_close_date", "price_action", "executive_summary_text",
                       "disclaimer_text"),

@@ -13,8 +13,14 @@ struct GenerateAnalysisSection: View {
     /// showing a number the user doesn't actually have.
     let remainingCredits: Int?
     var isEnabled: Bool = true
-    var isLoading: Bool = false
+    /// This session has `activeCount` reports in flight and may not start another.
+    /// Rendered as a disabled button UNDER an explanation — the cap used to arrive
+    /// as a bare spinner (TestFlight 2026-08-27, research_reports E2).
+    var isAtCap: Bool = false
+    var activeCount: Int = 0
     var onGenerate: (() -> Void)?
+    /// "View progress" on the at-cap notice — the caller flips to the Reports tab.
+    var onViewProgress: (() -> Void)?
 
     var body: some View {
         VStack(spacing: AppSpacing.md) {
@@ -22,9 +28,23 @@ struct GenerateAnalysisSection: View {
             GenerateAnalysisButton(
                 cost: cost,
                 isEnabled: isEnabled,
-                isLoading: isLoading,
+                isAtCap: isAtCap,
                 onTap: onGenerate
             )
+
+            if isAtCap {
+                // Not a failure — `textMuted`, not `caution` (see the atom's note).
+                InlineRetryNotice(
+                    message: activeCount == 1
+                        ? "1 analysis is running — wait for it to finish to start another."
+                        : "\(activeCount) analyses are running — wait for one to finish to start another.",
+                    systemImage: "hourglass",
+                    iconColor: AppColors.textMuted,
+                    retryTitle: "View progress",
+                    onRetry: onViewProgress
+                )
+                .accessibilityIdentifier("research.generate.atCapNotice")
+            }
 
             // Credits remaining — omitted entirely when unknown.
             if let remainingCredits {
@@ -32,7 +52,6 @@ struct GenerateAnalysisSection: View {
             }
         }
         .padding(.horizontal, AppSpacing.lg)
-        
     }
 }
 
@@ -48,6 +67,15 @@ struct GenerateAnalysisSection: View {
             cost: .standard,
             remainingCredits: 3,
             isEnabled: false
+        )
+
+        GenerateAnalysisSection(
+            cost: .standard,
+            remainingCredits: 120,
+            isEnabled: false,
+            isAtCap: true,
+            activeCount: 4,
+            onViewProgress: {}
         )
     }
     .padding(.vertical)

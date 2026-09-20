@@ -387,8 +387,13 @@ struct ResearchViewWithBinding: View {
                     cost: viewModel.analysisCost,
                     remainingCredits: effectiveCreditBalance?.credits,
                     isEnabled: viewModel.canStartNewGeneration,
-                    isLoading: viewModel.isAtConcurrencyCap,
-                    onGenerate: handleGenerateAnalysis
+                    // The cap is its own state, not "loading": the button is disabled
+                    // under a notice that says why (E2). A cap reached from ANOTHER
+                    // device is not counted here and surfaces as the server's 409 alert.
+                    isAtCap: viewModel.isAtConcurrencyCap,
+                    activeCount: viewModel.activeGenerationCount,
+                    onGenerate: handleGenerateAnalysis,
+                    onViewProgress: { viewModel.selectedTab = .reports }
                 )
 
                 // What You'll Get Section

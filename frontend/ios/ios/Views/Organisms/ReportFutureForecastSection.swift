@@ -33,7 +33,12 @@ struct ReportFutureForecastSection: View {
                 ReportForecastChart(forecast: forecast)
             }
 
-            companyGuidance
+            // Only a measured stance renders. nil = no transcript was read (every
+            // report while the transcripts package is off the licence) — showing a
+            // badge there was showing a constant as data.
+            if let guidance = forecast.managementGuidance {
+                companyGuidance(guidance)
+            }
 
             // Earnings beat/miss track record — last reported quarters vs
             // estimate. Hidden when the backend produced no earnings data.
@@ -79,7 +84,7 @@ struct ReportFutureForecastSection: View {
     /// Management guidance badge + verbatim quote. Lifted out of
     /// ReportForecastChart so it shows under either chart (inline timeline or the
     /// legacy fallback).
-    private var companyGuidance: some View {
+    private func companyGuidance(_ guidance: ManagementGuidance) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.sm) {
                 Text("Company Guidance")
@@ -88,9 +93,9 @@ struct ReportFutureForecastSection: View {
             }
 
             ReportSentimentBadge(
-                text: forecast.managementGuidance.rawValue,
-                textColor: forecast.managementGuidance.color,
-                backgroundColor: forecast.managementGuidance.backgroundColor
+                text: guidance.rawValue,
+                textColor: guidance.color,
+                backgroundColor: guidance.backgroundColor
             )
 
             if let quote = forecast.guidanceQuote {

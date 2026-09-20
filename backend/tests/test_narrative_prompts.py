@@ -228,3 +228,75 @@ def test_executive_summary_verdicts_skip_the_fundamentals_line(monkeypatch):
     for line in ("MOAT: wide", "MACRO threat: high", "WALL STREET: buy 30/35", "HIDDEN SIGNALS"):
         assert line in block
     assert np_._VERDICTS_CHAR_CAP >= 2000, "sized to a fully populated digest (~1.8-2k chars)"
+
+
+# ── E1 (TestFlight 2026-09-16): an unmeasured guidance stance is not narrated ──
+#
+# "Earnings Call Transcripts" is off the FMP Order Form, so every report's
+# `management_guidance` is "unknown" (nothing read a transcript). The card hides
+# the badge; the Future Forecast insight must neither state a stance the user
+# cannot see nor narrate its absence.
+
+def _forecast_shell(guidance: str, quote=None) -> dict:
+    return {
+        "revenue_forecast": {
+            "cagr": 12.0, "eps_growth": 15.0,
+            "management_guidance": guidance,
+            "guidance_quote": quote,
+            "projections": [{"period": "2026", "revenue_label": "$5.1B",
+                             "revenue_yoy_pct": 61.0, "eps_label": "$6.20",
+                             "eps_yoy_pct": 40.0}],
+            "earnings_track_record": [{"surprise_percent": 5.2}],
+            "beat_summary": "Beat 10 of 10",
+            "annual_timeline": [],
+        },
+    }
+
+
+def test_unknown_guidance_is_not_a_stance_in_the_forecast_insight_prompt():
+    prompt = np_._revenue_forecast_insight_prompt(PERSONA, "EVIDENCE", _forecast_shell("unknown"))
+    assert "not available" in prompt
+    assert "Do not mention guidance" in prompt
+    # The old line "STANCE: maintained (raised / maintained / lowered)" and the
+    # old trust bullet "read the guidance stance (maintained)" are both gone.
+    assert "STANCE: maintained" not in prompt
+    assert "guidance stance (" not in prompt
+    assert "(raised / maintained / lowered)" not in prompt
+    # The track record still anchors the trust read.
+    assert "Beat 10 of 10" in prompt
+
+
+@pytest.mark.parametrize("guidance", ["raised", "maintained", "lowered"])
+def test_a_measured_stance_still_reaches_the_forecast_insight_prompt(guidance):
+    prompt = np_._revenue_forecast_insight_prompt(PERSONA, "EVIDENCE", _forecast_shell(guidance))
+    assert f"MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)" in prompt
+    assert f"read the guidance stance ({guidance})" in prompt
+    assert "not available" not in prompt
+
+
+def test_a_quote_never_rides_an_unknown_stance():
+    """Defensive: the overlay nulls the quote with the stance, but the prompt must
+    not resurrect one from a hand-edited or legacy row."""
+    prompt = np_._revenue_forecast_insight_prompt(
+        PERSONA, "EVIDENCE", _forecast_shell("unknown", quote="We are raising guidance."),
+    )
+    assert "MANAGEMENT GUIDANCE QUOTE" not in prompt
+
+
+@pytest.mark.parametrize("guidance,expected", [
+    ("raised", "guidance raised"),
+    ("maintained", "guidance maintained"),
+    ("unknown", None),
+    ("", None),
+    (None, None),
+])
+def test_the_forecast_digest_only_carries_a_measured_stance(guidance, expected):
+    lines = np_._digest_forecast({"revenue_forecast": {
+        "cagr": 12.0, "management_guidance": guidance, "beat_summary": "Beat 6 of 8",
+    }})
+    joined = " ".join(lines)
+    if expected is None:
+        assert "guidance" not in joined, joined
+    else:
+        assert expected in joined
+    assert "beat 6 of 8" in joined  # the rest of the digest is untouched

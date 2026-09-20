@@ -610,6 +610,22 @@ unless one of them is still live — a follower deleted while queued is still at
 "somebody is attached" alone used to run a full pipeline for nobody — and the pipeline ceiling
 is reported as `REPORT_TIMED_OUT` rather than as an FMP outage.
 
+**The client mirrors the per-user cap, and says so.** `ResearchViewModel.maxConcurrentGenerations`
+(4, pinned to the `MAX_CONCURRENT_REPORTS_PER_USER` code default by
+`test_ios_generate_button_cap_state.py` — an environment override is not mirrored by the client)
+counts the runs THIS session launched (`inFlightReportIds`); at the cap the Generate button is a
+plain disabled control under a notice ("4 analyses are running — wait for one to finish to start
+another", with a *View progress* link to the Reports tab). It is deliberately not a spinner: until
+2026-09-19 the cap was fed into the button's `isLoading`, so the fifth attempt met a disabled
+spinner with nothing explaining why (TestFlight 2026-08-27). The client never seeds that count from
+the reports list, so runs started on another device or in a previous app run count only on the
+server — that tap reaches `POST /research/generate` and gets the `409 TOO_MANY_CONCURRENT_REPORTS`
+alert with the server's own `user_message` (§6.1). A run that outlives the 300 s poll deadline keeps
+its client slot (the server is still counting it); the 5 s list poll releases the slot once the row is
+completed, failed or gone. What the design does NOT give a queued user is a position or ETA: past
+that deadline a report parked behind the agent semaphore simply reads "processing" until the list
+poll sees it land — a recorded product gap, not a defect.
+
 Since 2026-09-17 the local flag is also DRAINED: every successful list read intersects
 `locallyTimedOutReportIds` with the ids the server still lists (the list endpoint hides deleted
 rows, so a retried or bulk-deleted card's flag used to outlive it and keep the 5 s poll running for
@@ -644,6 +660,7 @@ that matters: two errors with the same HTTP status can need opposite handling (s
 | Forbidden | `AUTH_FORBIDDEN` (403) | no | not an auth failure — do not refresh, do not sign out |
 | Credits | `INSUFFICIENT_CREDITS` (**402**) | no | route to Buy Credits, not the paywall (§9b.7) |
 | Capacity | `SYSTEM_BUSY` (409) | no | show Retry — transient by construction and never burns credits (§5), but there is no automatic backoff loop |
+| Per-user cap | `TOO_MANY_CONCURRENT_REPORTS` (409) | no | show the server's `user_message` verbatim (it names the cap); pre-charge, so nothing to refund. Normally unreachable — the client disables Generate at its own mirrored cap (§5.4) — so seeing it means the runs were started elsewhere |
 | Not found | `TICKER_NOT_FOUND` | no | go back |
 | Validation | 422 | no | inline field error |
 | Rate limited | 429 + `Retry-After` | after the header's delay | show the wait |

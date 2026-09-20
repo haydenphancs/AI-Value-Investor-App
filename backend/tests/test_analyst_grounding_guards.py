@@ -257,11 +257,115 @@ _NO_COVERAGE_WS = {
 
 def test_the_insight_prompt_does_not_state_a_rating_nobody_published():
     """The target line already degraded honestly; the RATING line did not, and a stated rating
-    is the half the model quotes."""
+    is the half the model quotes. Since E3 (TestFlight 2026-09-11) the uncovered prompt
+    does not talk about analysts AT ALL — not a rating, not a target, and not their
+    absence, which the model was turning into "With no analyst consensus or price targets
+    available…" as the opening sentence of every report."""
     prompt = _insight_prompt(dict(_NO_COVERAGE_WS))
     assert "Consensus rating: hold" not in prompt
-    assert "none published" in prompt
-    assert "no analyst coverage" in prompt  # the target line, unchanged
+    for absent in ("none published", "no analyst coverage", "Analyst price target",
+                   "Consensus rating", "Analyst momentum", "upgrades /"):
+        assert absent not in prompt, absent
+    assert "Institutional Flow insight" in prompt
+    assert "Do not mention analysts" in prompt
+    assert "do not say that any of them are unavailable" in prompt
+    assert "Institutions (13F)" in prompt
+    # _NO_COVERAGE_WS carries the collector DEFAULT "fair_value" with no DCF flag →
+    # read as measured (legacy rows), so the lens rides along as CONTEXT — never as
+    # a "displayed value", because the card renders the price chart + 13F flow only.
+    assert "DCF valuation (model-implied)" in prompt
+    assert "distinct from the analyst target" not in prompt
+    displayed = prompt[prompt.index("DISPLAYED VALUES"):prompt.index("CONTEXT (a model valuation")]
+    assert "DCF" not in displayed
+    assert "Institutions (13F)" in displayed
+    assert "NOT a value on this card" in prompt
+
+
+def test_no_dcf_means_no_valuation_context_at_all():
+    """`valuation_status` defaults to "fair_value" when no DCF exists (ORCL's model is
+    negative → fair_value None). With `dcf_measured=False` the uncovered prompt must
+    not hand the model a verdict nobody computed, nor ask it to reconcile against one."""
+    prompt = _insight_prompt(dict(_NO_COVERAGE_WS, dcf_measured=False))
+    assert "CONTEXT" not in prompt
+    assert "DCF" not in prompt
+    assert "model valuation" not in prompt
+    assert "Institutions (13F)" in prompt
+
+
+def test_a_measured_dcf_is_context_not_a_displayed_value():
+    prompt = _insight_prompt(dict(_NO_COVERAGE_WS, dcf_measured=True,
+                                  valuation_status="overpriced", discount_percent=-40.0))
+    assert "CONTEXT (a model valuation" in prompt
+    assert "overpriced" in prompt
+    assert "agrees or diverges" in prompt
+
+
+def test_zero_momentum_alone_is_still_no_coverage():
+    """`analyst_service` returns zeros, not None, when the package is blocked — the 0/0/0
+    momentum line used to reach the model as if it were a measured quiet year."""
+    prompt = _insight_prompt(dict(_NO_COVERAGE_WS, momentum_upgrades=0,
+                                  momentum_maintains=0, momentum_downgrades=0))
+    assert "0 upgrades" not in prompt
+    assert "Institutional Flow insight" in prompt
+
+
+@pytest.mark.parametrize("field,value", [
+    ("target_price", 250.0),
+    ("analyst_buy", 12),
+    ("analyst_strong_sell", 1),
+    ("momentum_upgrades", 3),
+    ("momentum_maintains", 2),
+    ("momentum_downgrades", 1),
+])
+def test_any_sell_side_datum_selects_the_covered_prompt(field, value):
+    prompt = _insight_prompt(dict(_NO_COVERAGE_WS, **{field: value}))
+    assert "Wall Street Consensus insight" in prompt
+    assert "Institutional Flow insight" not in prompt
+
+
+def test_coverage_predicate_ignores_bools_and_garbage():
+    from app.services.agents.narrative_prompts import wall_street_has_analyst_coverage
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS)) is False
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS, analyst_buy=True)) is False
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS, analyst_buy="3")) is False
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS, analyst_buy=-2)) is False
+    assert wall_street_has_analyst_coverage(None) is False
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS, target_price=0.0)) is False
+    assert wall_street_has_analyst_coverage(dict(_NO_COVERAGE_WS, analyst_hold=1)) is True
+
+
+def test_the_executive_digest_drops_the_defaulted_hold():
+    """`_digest_wall_street` said "consensus hold" on every uncovered ticker because
+    `rating` defaults to "hold" from `_consensus_to_key(None)`."""
+    from app.services.agents.narrative_prompts import _digest_wall_street
+    uncovered = _digest_wall_street({"wall_street_consensus": dict(_NO_COVERAGE_WS)})
+    assert not any("consensus" in line for line in uncovered), uncovered
+    covered = _digest_wall_street({"wall_street_consensus": dict(
+        _NO_COVERAGE_WS, rating="buy", target_price=250.0, analyst_buy=20)})
+    assert any("consensus buy" in line for line in covered), covered
+
+
+def test_the_executive_digest_drops_the_defaulted_fair_value():
+    """Same class as the defaulted hold: no DCF → `valuation_status` is only its
+    "fair_value" default and must not read as a verdict."""
+    from app.services.agents.narrative_prompts import _digest_wall_street
+    none = _digest_wall_street({"wall_street_consensus": dict(_NO_COVERAGE_WS, dcf_measured=False)})
+    assert none == [], none
+    measured = _digest_wall_street({"wall_street_consensus": dict(
+        _NO_COVERAGE_WS, dcf_measured=True, valuation_status="underpriced")})
+    assert any("underpriced" in line for line in measured), measured
+    legacy = _digest_wall_street({"wall_street_consensus": dict(_NO_COVERAGE_WS)})  # no flag
+    assert any("fair_value" in line for line in legacy), legacy
+
+
+def test_the_collector_marks_whether_a_dcf_was_measured():
+    from app.services.agents.ticker_report_data_collector import _build_wall_street_sections
+    _, with_dcf = _build_wall_street_sections(None, None, 100.0, 120.0, [])
+    _, without = _build_wall_street_sections(None, None, 100.0, None, [])
+    _, no_price = _build_wall_street_sections(None, None, 0.0, 120.0, [])
+    assert with_dcf["dcf_measured"] is True
+    assert without["dcf_measured"] is False and without["valuation_status"] == "fair_value"
+    assert no_price["dcf_measured"] is False
 
 
 def test_the_insight_prompt_states_a_real_rating():

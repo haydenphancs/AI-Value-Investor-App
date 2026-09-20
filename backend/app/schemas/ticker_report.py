@@ -129,7 +129,12 @@ class TimelinePricePointResponse(BaseModel):
 class RevenueForecastResponse(BaseModel):
     cagr: float
     eps_growth: float
-    management_guidance: str  # "raised" | "maintained" | "lowered"
+    # "raised" | "maintained" | "lowered" — a READ of the latest earnings-call
+    # transcript — or "unknown" when no transcript was available to read (the
+    # transcripts package is off the Order Form, so that is every report today).
+    # Stays a plain str: iOS decodes it as a required String, and the new build
+    # hides the badge on anything but the three read values.
+    management_guidance: str
     projections: List[RevenueProjectionResponse]
     # ONE continuous yearly series (historical actuals is_forecast=False → ALL
     # forward estimates is_forecast=True, gapless) for the "Earnings Timeline"
@@ -416,6 +421,9 @@ class WallStreetConsensusResponse(BaseModel):
     high_target: Optional[float] = None
     valuation_status: str
     discount_percent: float
+    # False when no DCF value existed and `valuation_status` is only its default;
+    # absent on reports frozen before 2026-09-19. Optional: iOS ignores it.
+    dcf_measured: Optional[bool] = None
     # AI "Insight" — a big-picture synthesis across the whole Wall Street Consensus
     # card: analyst price targets + institutions (13F) + momentum. Written by the
     # Stage-B narrative pass. Optional/defaulted so legacy persisted reports (which

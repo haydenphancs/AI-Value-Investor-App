@@ -2005,8 +2005,12 @@ class TickerReportDataCollector:
         revenue_forecast["timeline_prices"] = _build_timeline_prices(
             out.historical, revenue_forecast.get("annual_timeline") or []
         )
-        ai_rf = ai.get("revenue_forecast") or {}
-        _overlay_ai_guidance(revenue_forecast, ai_rf)
+        # Pass Stage A's block through UNCOERCED: a missing / null block means Stage A
+        # never answered, and the overlay must record "unknown", not the safe default.
+        _overlay_ai_guidance(
+            revenue_forecast, ai.get("revenue_forecast"),
+            transcript_available=bool((out.transcript or "").strip()),
+        )
         # Earnings beat/miss track record (last ~6 reported quarters).
         _attach_earnings_track_record(revenue_forecast, out.earnings)
 
@@ -3518,6 +3522,11 @@ def _build_wall_street_sections(
     consensus_partial = {
         "rating": consensus_rating,
         "current_price": round(current_price, 2),
+        # `valuation_status` DEFAULTS to "fair_value" when there is no DCF at all
+        # (a loss-maker, a failed fetch). Readers that narrate the lens need to
+        # tell "measured, and at fair value" from "nothing measured" — the prompt
+        # and the executive digest used to read the default as a verdict.
+        "dcf_measured": fair_value is not None and current_price > 0,
         "target_price": round(target_price, 2) if has_analyst_targets else None,
         "low_target": round(low_target, 2) if has_analyst_targets else None,
         "high_target": round(high_target, 2) if has_analyst_targets else None,
@@ -4853,7 +4862,7 @@ def _build_revenue_forecast_partial(
     return {
         "cagr": revenue_cagr if revenue_cagr is not None else 0.0,
         "eps_growth": eps_cagr if eps_cagr is not None else 0.0,
-        "management_guidance": "maintained",  # AI overrides via Stage A
+        "management_guidance": GUIDANCE_UNKNOWN,  # Stage A overlay sets a read only when a transcript existed
         "projections": projections,
         # Full GAPLESS yearly series (historical actuals + ALL forward estimates
         # after the last reported year) for the "Earnings Timeline" sheet —
@@ -6771,17 +6780,33 @@ def _merge_macro_risk_factors(
 
 _VALID_GUIDANCE_STATUSES = ("raised", "maintained", "lowered")
 _VALID_GUIDANCE_SPEAKERS = ("CFO", "CEO", "IR")
+#: The stance when nothing could have measured it — no earnings-call transcript was
+#: available (the "Earnings Call Transcripts" package is not on the Order Form, so
+#: `get_earning_call_transcript` returns "" before any HTTP call), or Stage A never
+#: answered. Distinct from "maintained", which is a READ of a transcript that did not
+#: move guidance. Wire: still a string (iOS decodes `management_guidance` as a
+#: required String); the new iOS build hides the badge on it, older builds keep
+#: reading it through their `.maintained` fallback exactly as they did before.
+GUIDANCE_UNKNOWN = "unknown"
 
 
 def _overlay_ai_guidance(
     revenue_forecast: Dict[str, Any], ai_rf: Optional[Dict[str, Any]],
+    *, transcript_available: bool = True,
 ) -> None:
     """Mutate `revenue_forecast` in place with the AI-extracted guidance fields.
 
     Anti-fabrication rules (mirror the TAM overlay design):
-      1. Status defaults to "maintained" — the safe, low-information
-         answer. We only escalate to "raised"/"lowered" when AI provided
-         BOTH a non-default status AND a non-empty source quote.
+      0. No transcript → GUIDANCE_UNKNOWN and no attribution, whatever the AI
+         said. Stage A's rule "maintained otherwise (including when the
+         transcript wasn't supplied)" made every report carry a confident
+         "MAINTAINED" badge once transcripts left the licence (TestFlight
+         2026-09-16, research_reports E1) — a constant, not a measurement.
+      1. With a transcript, "maintained" is accepted only when the AI SAID it
+         (a read that did not move guidance); a missing block, a missing key
+         or an unrecognised value is GUIDANCE_UNKNOWN. We only escalate to
+         "raised"/"lowered" when AI provided BOTH that status AND a non-empty
+         source quote.
       2. `guidance_quote` is required for non-default status. Without
          it, the entire attribution payload is rejected — speaker /
          period drop to null and status falls back to "maintained".
@@ -6792,17 +6817,26 @@ def _overlay_ai_guidance(
       5. `guidance_period` is taken at face value (any short string)
          and capped at 30 chars.
     """
-    if not isinstance(ai_rf, dict):
-        # No AI output → keep collector defaults (maintained / nulls).
+    if not transcript_available:
+        revenue_forecast["management_guidance"] = GUIDANCE_UNKNOWN
+        revenue_forecast["guidance_quote"] = None
+        revenue_forecast["guidance_speaker"] = None
+        revenue_forecast["guidance_period"] = None
         return
 
-    raw_status = ai_rf.get("management_guidance")
-    status = (
-        raw_status.lower().strip()
-        if isinstance(raw_status, str) else "maintained"
-    )
+    raw_status = ai_rf.get("management_guidance") if isinstance(ai_rf, dict) else None
+    status = raw_status.lower().strip() if isinstance(raw_status, str) else ""
     if status not in _VALID_GUIDANCE_STATUSES:
-        status = "maintained"
+        # A transcript existed but Stage A gave no block, no status, or garbage —
+        # nothing READ it. "maintained" is the AI's answer, never ours. (Review
+        # finding, 2026-09-19: the old `return` here kept whatever the caller had
+        # seeded, and the call site had coerced a missing block to `{}`, so a Stage
+        # A that skipped the key shipped a MAINTAINED badge.)
+        revenue_forecast["management_guidance"] = GUIDANCE_UNKNOWN
+        revenue_forecast["guidance_quote"] = None
+        revenue_forecast["guidance_speaker"] = None
+        revenue_forecast["guidance_period"] = None
+        return
 
     raw_quote = ai_rf.get("guidance_quote")
     quote: Optional[str] = None

@@ -193,9 +193,13 @@ class Settings(BaseSettings):
     # have at most MAX_CONCURRENT_REPORTS_PER_USER reports in flight
     # (pending/processing) at once — e.g. 4 personas on one ticker, or 1
     # persona on 4 tickers. Enforced pre-charge in the /research/generate
-    # endpoint (no credits burned on rejection). MAX_CONCURRENT_AGENT_RUNS is
-    # a global ceiling for the optional defense-in-depth semaphore around the
-    # agent run (added now; wired only if Gemini/Railway load demands it).
+    # endpoint (no credits burned on rejection); iOS mirrors THIS CODE DEFAULT as
+    # `ResearchViewModel.maxConcurrentGenerations` (pinned by
+    # tests/test_ios_generate_button_cap_state.py — an env override on Railway
+    # is NOT mirrored by the client) and disables Generate under an at-cap notice. MAX_CONCURRENT_AGENT_RUNS is the global
+    # ceiling of the agent-run semaphore (`research_service._AGENT_SEMAPHORE`,
+    # wired since 2026-06-17 — it pins total Gemini/FMP load to the API tier;
+    # followers of a deduplicated same-(ticker, persona) run hold no slot).
     MAX_CONCURRENT_REPORTS_PER_USER: int = 4
     MAX_CONCURRENT_AGENT_RUNS: int = 8
 

@@ -226,3 +226,20 @@ def test_render_pdf_bytes_produces_pdf():
     from app.services.pdf_report_service import render_pdf_bytes
     pdf = render_pdf_bytes(render_html(build_context(_sample(), 196.0)))
     assert pdf[:4] == b"%PDF"
+
+
+def test_unknown_guidance_renders_as_a_dash_not_a_stance():
+    """E1: the PDF's Guidance cell used to print whatever string arrived, capitalised.
+    "unknown" is not a stance — it must fall to the template's "—"."""
+    from app.services.pdf_report_service import _guidance_for_pdf
+    assert _guidance_for_pdf("unknown") == ""
+    assert _guidance_for_pdf(None) == ""
+    assert _guidance_for_pdf("") == ""
+    assert _guidance_for_pdf("MAINTAINED") == ""     # not a wire value; never guess
+    for read in ("raised", "maintained", "lowered"):
+        assert _guidance_for_pdf(read) == read
+    sample = _sample()
+    sample["revenue_forecast"] = {"cagr": 10.0, "eps_growth": 12.0,
+                                  "management_guidance": "unknown", "projections": []}
+    ctx = build_context(sample, fair_value_estimate=196.0)
+    assert ctx["forecast"]["management_guidance"] == ""

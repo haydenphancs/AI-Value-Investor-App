@@ -50,7 +50,7 @@ from app.services.price_alert_engine import (
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
 from app.services.asset_class import uses_coingecko_price
-from app.services.price_service import price_source
+from app.services.price_service import price_source, session_change_percent
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +448,14 @@ class PriceAlertService:
                 armed=bool(rule.get("armed", True)),
                 last_price=rule.get("last_price"),
                 price=(quote or {}).get("price"),
-                change_percent=(quote or {}).get("changePercentage"),
+                # Session-aware, NOT the raw field. A `daily` percent_move rule keys its
+                # dedup on the ET date, and pre-market — before the ticker's first print
+                # — the batch row still carries YESTERDAY's whole-session change (the
+                # screener price is yesterday's close). Read raw, that re-fired the rule
+                # at 04:00 ET for a move that already fired the day before. A prior
+                # session's change reads as None here → `no_percent_reading` → hold.
+                # Price-level rules are untouched: `price` is the live price either way.
+                change_percent=session_change_percent(quote),
                 rearm_pct=settings.PRICE_ALERT_REARM_PCT,
             )
 

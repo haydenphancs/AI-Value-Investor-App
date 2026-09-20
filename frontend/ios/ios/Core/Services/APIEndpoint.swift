@@ -159,9 +159,11 @@ enum APIEndpoint: Sendable {
     case verifyPurchase(signedTransaction: String)
 
     // MARK: - Notifications / Price alerts
-    /// Inbox page. `before` is a KEYSET cursor (the previous page's last `createdAt`),
-    /// not an offset — rows arrive continuously at the head, so an offset page 2 would
-    /// repeat or skip whenever a notification landed between requests.
+    /// Inbox page. `before` is a KEYSET cursor — the previous page's `nextCursor`, an
+    /// opaque `<claimed_at>|<id>` echoed back verbatim — not an offset: rows arrive
+    /// continuously at the head, so an offset page 2 would repeat or skip whenever a
+    /// notification landed between requests. It travels as a query value, so
+    /// `APIClient.buildRequest` must encode a literal `+` (see the note there).
     case listNotifications(limit: Int, before: String?)
     /// `dedupKeys` addresses rows by the other half of the backend's
     /// `(user_id, dedup_key)` unique key. It exists for the notification's own

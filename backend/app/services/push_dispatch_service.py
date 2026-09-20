@@ -175,7 +175,10 @@ class Decision:
 
 
 class PushDispatchService:
-    RETENTION_DAYS = 30
+    # One quarter. Was 30 days; a value-investing audience runs on a quarterly
+    # cadence (earnings, 13F), so last quarter's alerts stay readable — decided with
+    # the tester after the inbox's page 2 was found unreachable (2026-09-20).
+    RETENTION_DAYS = 90
 
     # How many times a deferred row may be handed out by `claim_due_notifications` before
     # the flush stops retrying it. See `_requeue_or_fail`.
@@ -1575,7 +1578,7 @@ class PushDispatchService:
                     # `pending`, so an exception here used to leave it at `pending` forever:
                     # the claim RPC only ever selects `deferred`, nothing re-reads `pending`,
                     # and `mark_state` was never called. No push, no terminal state, and an
-                    # inbox row reading "pending" for the rest of its 30-day retention.
+                    # inbox row reading "pending" for the rest of its retention window.
                     outcome = await asyncio.to_thread(
                         self._requeue_or_fail, uid, key,
                         int(row.get("attempts") or 0), f"{type(e).__name__}: {e}",
@@ -1764,8 +1767,9 @@ class PushDispatchService:
         """Drop ledger rows older than the retention window. Best-effort.
 
         The window has to outlive BOTH the dedup horizon (one trading day today) and
-        what a user reasonably expects the in-app inbox to remember. 30 days serves
-        both; without a sweep this table grows one row per notification forever.
+        what a user reasonably expects the in-app inbox to remember. 90 days — one
+        quarter — serves both; without a sweep this table grows one row per
+        notification forever.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=self.RETENTION_DAYS)).isoformat()
         deleted = 0

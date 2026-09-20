@@ -19,7 +19,10 @@ of that pattern with none of the benefit — plus a stale unread badge after a m
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.schemas.notifications import (
@@ -54,6 +57,86 @@ class NotificationInboxUnavailable(Exception):
     notifications yet" over a database error is the kind of degradation nobody reports
     because it looks like the intended empty state.
     """
+
+
+class InvalidCursor(ValueError):
+    """`before` is not a cursor this service minted.
+
+    Distinct from `NotificationInboxUnavailable` on purpose: that one is 503 "try again",
+    this one is 400 "that request cannot succeed". Raised BEFORE any database call, and
+    never degraded to "serve page 1" — a first page answered as page 2 would re-append
+    the rows already on screen and, on the next scroll, do it again.
+    """
+
+
+# ── the keyset cursor: `<claimed_at>|<id>`, URL-safe by construction ─────────────
+#
+# The cursor crosses the wire as a QUERY-STRING VALUE and comes back the same way, and
+# that round trip broke page 2 for every TestFlight build (2026-09-11): the server minted
+# `2026-08-28T14:17:21.462+00:00|<uuid>`, iOS's `URLComponents` leaves a literal `+`
+# unencoded in a query value, and Starlette's form decoder turns `+` into a SPACE — so the
+# endpoint received `…21.462 00:00|<uuid>`, the raw interpolation below handed Postgres
+# `timestamptz '2026-08-28T14:17:21.462 00:00'`, and 22007 became a 503 toast: "Couldn't
+# load more notifications". Everything older than the first page was unreachable, which
+# the tester read as a two-week retention window.
+#
+# Two fixes, both needed. `mint_cursor` writes the stamp with a `Z` suffix — no `+`
+# anywhere, so an UNPATCHED client round-trips it intact. `parse_cursor` repairs the
+# space-for-plus mangling on the way in, so the cursors those clients already hold (and
+# the next page they request against an old server-minted cursor) work the moment this
+# deploys. The stamp is then re-emitted in the `+00:00` form for PostgREST, which
+# postgrest-py percent-encodes correctly (the `whale_service` keyset does the same).
+
+_CURSOR_SEP = "|"
+# A form decoder that ate the offset's "+" leaves " HH:MM" at the very end of the stamp.
+_MANGLED_OFFSET = re.compile(r" (\d{2}:\d{2})$")
+
+
+def mint_cursor(claimed_at: Any, row_id: Any) -> Optional[str]:
+    """`<UTC stamp with a Z>|<id>` for the last row of a page, or None if unusable."""
+    if claimed_at is None or row_id is None:
+        return None
+    try:
+        dt = _parse_stamp(str(claimed_at))
+    except ValueError:
+        logger.warning(
+            "notification inbox: cannot mint a cursor from claimed_at=%r — no next page",
+            claimed_at,
+        )
+        return None
+    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S.%f')}Z{_CURSOR_SEP}{row_id}"
+
+
+def parse_cursor(before: Any) -> Tuple[str, Optional[str]]:
+    """`before` → `(stamp for PostgREST, last_id or None)`. Raises `InvalidCursor`.
+
+    Accepts the three shapes in the wild: the `Z` form this service mints, the legacy
+    `+00:00` form older servers minted, and that legacy form with its `+` decoded to a
+    space by the client's un-encoded query. A stamp-only cursor (pre-composite builds)
+    is honoured with `last_id=None`. Anything else is refused before the database sees it.
+    """
+    raw = str(before or "").strip()
+    stamp, _, last_id = raw.partition(_CURSOR_SEP)
+    stamp = _MANGLED_OFFSET.sub(r"+\1", stamp.strip())
+    try:
+        dt = _parse_stamp(stamp)
+    except ValueError as e:
+        raise InvalidCursor(f"unreadable cursor stamp {stamp!r}") from e
+    last_id = last_id.strip()
+    if last_id:
+        try:
+            uuid.UUID(last_id)
+        except ValueError as e:
+            raise InvalidCursor(f"unreadable cursor id {last_id!r}") from e
+    return dt.isoformat(), (last_id or None)
+
+
+def _parse_stamp(stamp: str) -> datetime:
+    """An aware UTC datetime from an ISO stamp; naive is read as UTC. Raises ValueError."""
+    dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 class NotificationInboxService:
@@ -123,6 +206,8 @@ class NotificationInboxService:
         already applies.
         """
         size = max(1, min(int(limit or DEFAULT_PAGE), MAX_PAGE))
+        # Parsed OUTSIDE the try: a bad cursor is the caller's 400, not the database's 503.
+        cursor = parse_cursor(before) if before else None
         try:
             query = (
                 self.supabase.table(TABLE)
@@ -135,7 +220,7 @@ class NotificationInboxService:
                 .order("id", desc=True)
                 .limit(size + 1)          # +1 probes for a next page without a count
             )
-            if before:
+            if cursor:
                 # COMPOSITE keyset, matching the composite ORDER BY above.
                 #
                 # ⚠️ This used to be `.lt("claimed_at", before)` alone. The sort is
@@ -145,7 +230,7 @@ class NotificationInboxService:
                 # row of a page was therefore skipped on the next page: permanently
                 # unreachable through the list, while still counted as unread. A page
                 # boundary landing inside a fan-out is the common case, not a corner one.
-                stamp, _, last_id = str(before).partition("|")
+                stamp, last_id = cursor
                 if last_id:
                     query = query.or_(
                         f"claimed_at.lt.{stamp},"
@@ -173,9 +258,10 @@ class NotificationInboxService:
             # Derived from the raw row, not from `items` — a skipped malformed row would
             # otherwise stall the cursor and make the client re-request forever.
             # `claimed_at|id` — both halves of the sort key. Opaque to the client, which
-            # only ever echoes it back as `before`, so the format is ours to choose.
+            # only ever echoes it back as `before`, so the format is ours to choose — and
+            # it is chosen to survive an un-encoded query string (see `mint_cursor`).
             next_cursor=(
-                f"{_iso(rows[-1].get('claimed_at'))}|{rows[-1].get('id')}"
+                mint_cursor(rows[-1].get("claimed_at"), rows[-1].get("id"))
                 if has_more and rows and rows[-1].get("id")
                 else None
             ),

@@ -210,6 +210,75 @@ def parse_range_band(raw: Any) -> tuple[Optional[float], Optional[float]]:
     return (min(lo, hi), max(lo, hi))
 
 
+# ── Which session a change belongs to — for consumers that ACT on a move ─────
+#
+# A batch row's `change` / `changePercentage` is "the move of the most recent session
+# that has one", and `changeSession` (stamped by `PriceService._change_session`) says
+# WHICH session that is. Display surfaces (Home tiles, the widget, Top Movers) want the
+# prior session's move pre-market and label it "Fri close" from the stamp. Anything that
+# ACTS on a move as a live event — the Updates sweeper's price-move alert and catalyst,
+# the daily `percent_move` price alert — must not: at 04:03 ET on a Tuesday the screener
+# still carries Monday's close, so the row's change is Monday's whole session, and a
+# consumer that reads it as "today" mints a second alert for a move that already fired.
+#
+# Observed in production (TestFlight, 2026-09-15): `move:TER:2026-09-15` "TER -13.3%"
+# claimed at 08:03:56Z — Monday's full-day move, re-alerted at 4 AM Tuesday under a fresh
+# per-day dedup key, carrying Monday's cached "why it moved" text under Tuesday's title.
+#
+# Fail OPEN on a missing or unreadable stamp: crypto rows (a rolling 24h change from
+# CoinGecko, no session) and any older row shape carry none, and they keep today's
+# behaviour. A stamp in the FUTURE is treated as current — a clock skew, not a stale move.
+
+
+def _session_stamp_is_current(quote: Optional[Dict[str, Any]], now: Optional[datetime]) -> bool:
+    """True unless the row is stamped with a session BEFORE the current one."""
+    if not isinstance(quote, dict):
+        return True
+    raw = quote.get("changeSession")
+    if not raw:
+        return True
+    try:
+        stamped = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return True
+    return stamped >= session_trading_date(now)
+
+
+def session_change_percent(
+    quote: Optional[Dict[str, Any]], now: Optional[datetime] = None
+) -> Optional[float]:
+    """`changePercentage` ONLY when it describes the CURRENT session, else None.
+
+    None is the same signal a consumer already handles for "no usable quote this cycle":
+    the sweeper's notify/catalyst gates skip, and the percent-move alert holds with
+    `no_percent_reading`. A prior session's move is not a current move.
+    """
+    if not isinstance(quote, dict):
+        return None
+    if not _session_stamp_is_current(quote, now):
+        return None
+    return _finite(quote.get("changePercentage"))
+
+
+def current_session_quote(
+    quote: Dict[str, Any], now: Optional[datetime] = None
+) -> Dict[str, Any]:
+    """The row unchanged, or a COPY with its change fields blanked when they describe a
+    prior session. `price`, `previousClose` and the `changeSession` stamp are kept — the
+    price is still the live price, and the stamp still says why the change is gone.
+
+    The single choke point the sweeper applies to its batch, so the materiality gate,
+    the card prompt's "Price context" line and both alert gates all see the same thing.
+    """
+    if _session_stamp_is_current(quote, now):
+        return quote
+    out = dict(quote)
+    for key in ("change", "changePercentage", "changesPercentage"):
+        if key in out:
+            out[key] = None
+    return out
+
+
 class PriceService:
     """Quote-shaped prices from entitled endpoints. One instance per process."""
 

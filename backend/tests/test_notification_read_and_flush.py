@@ -14,7 +14,7 @@ things a user can hit and neither of them visible from a log.
    moves a row `deferred → pending`; an exception in the delivery was counted and logged
    and `mark_state` was never reached. Nothing re-reads `pending` — the RPC only ever
    selects `deferred` — so that notification could never be sent, never reached a terminal
-   state, and sat in the user's inbox reading "pending" for its whole 30-day retention.
+   state, and sat in the user's inbox reading "pending" for its whole retention window.
    Worse, two of the per-row calls sat OUTSIDE the guard, so one raising row stranded every
    remaining row in the batch the same way.
 """

@@ -343,6 +343,8 @@ documents/legal/fmp-dataset-drop-ranking.md
 documents/legal/fmp-16-datasets-build-or-free.md
 documents/legal/fmp-gap-build-vs-buy.md
 documents/legal/HANDOFF-fmp-phases-4-6.md
+documents/research/dcf-fair-value.md
+documents/research
 
 # Signed contracts / countersigned order forms. A signed FMP Order Form carries a signature
 # and the negotiated price; it belongs in App Store Connect, never in git.
@@ -403,4 +405,4 @@ backend/marketing/**/*.mp4
 backend/marketing/**/*.m4a
 backend/marketing/**/*.mp3
 backend/marketing/**/*.wav
-documents/research/dcf-fair-value.md
+

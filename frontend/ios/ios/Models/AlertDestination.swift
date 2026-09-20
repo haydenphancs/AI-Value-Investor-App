@@ -71,7 +71,7 @@ extension AlertDestination {
         // on the ticker from the inbox, which is exactly the bug this block was added to fix.
         //
         // The kind check stays as a fallback: rows written before the dispatcher emitted
-        // `route` are still in the 30-day retention window.
+        // `route` are still inside the inbox's retention window (90 days).
         let isReport = route["route"] == "report" || item.kind == "research_complete"
         if isReport, !symbol.isEmpty {
             out.append(AlertDestination(

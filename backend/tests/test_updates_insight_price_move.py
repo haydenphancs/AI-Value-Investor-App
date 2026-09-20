@@ -18,6 +18,7 @@ from app.services.updates_insight_sweeper import (
 )
 from app.services.updates_materiality import (
     ACTION_GENERATE,
+    ACTION_SKIP,
     BAND_EXTREME,
     BAND_NOTABLE,
     TIER_EXTREME,
@@ -366,3 +367,119 @@ def test_release_ignores_a_day_rollover_between_claim_and_release():
     assert s._claim_catalyst_budget(next_day, "MSFT")        # the ledger rolled
     s._release_catalyst_budget(NOW, "AAPL")                  # yesterday's unit
     assert s._catalyst_count == 1 and s._catalyst_scopes == {"MSFT"}
+
+
+# ── a prior session's move never buys a "today" search (TestFlight, 2026-09-15) ──
+#
+# Pre-market, before a ticker's first print, the batch row still carries YESTERDAY's
+# whole-session change (stamped `changeSession` = yesterday). A "today" search for it
+# would cache yesterday's cause under TODAY's key and serve it for a genuine
+# same-direction move later in the day — and it would spend a day-cap unit on nothing.
+
+@pytest.mark.asyncio
+async def test_no_search_and_no_unit_for_a_prior_session_move(stub):
+    s = _sweeper()
+    stale = {"changePercentage": -13.3, "changeSession": "2026-07-20", "price": 371.47}
+    assert await s._maybe_price_move("TER", _dec(TIER_EXTREME), NOW, stale) is None
+    assert stub.calls == 0, "spent a grounded search on yesterday's move"
+    assert "TER" not in s._catalyst_scopes and s._catalyst_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_current_session_move_still_searches(stub):
+    s = _sweeper()
+    live = {"changePercentage": -6.1, "changeSession": "2026-07-21", "price": 348.8}
+    pm = await s._maybe_price_move("TER", _dec(TIER_EXTREME), NOW, live)
+    assert pm is not None and pm["change_pct"] == -6.1
+    assert stub.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_row_still_searches(stub):
+    """Crypto and older shapes carry no stamp: fail open, as before."""
+    s = _sweeper()
+    assert await s._maybe_price_move("BTCUSD", _dec(TIER_EXTREME), NOW, {"changePercentage": 5.0}) is not None
+    assert stub.calls == 1
+
+
+# ── …and the SWEEP blanks such a row before the gate ever sees it ────────────────
+
+@pytest.mark.asyncio
+async def test_the_sweep_neutralises_prior_session_rows_at_the_choke_point(monkeypatch):
+    """`decide()` (the materiality gate), the card prompt's price line, the catalyst and
+    the alert all read the SAME `quotes_by_symbol`. The sweep blanks a prior-session
+    row's change fields once, there, so a pre-market pass cannot regenerate on
+    yesterday's band, describe yesterday's move as "the current session", or alert on it.
+    Dates are built against the real clock because `run_sweep` reads it."""
+    from app.services.news_cache_service import MARKET_SCOPE as MKT
+    from app.utils.market_hours import previous_trading_day, session_trading_date
+    from _price_fakes import PriceFromFMPFake
+
+    current = session_trading_date()
+    prior = previous_trading_day(current)
+
+    class _Stub(InsightSweeper):
+        def __init__(self):
+            self.supabase = None
+            self.fmp = self
+            self.price = PriceFromFMPFake(self.fmp)
+            self.vol = self
+            self.news = self
+            self.insights = self
+            self._catalyst_day = self._enrich_day = None
+            self._catalyst_count = self._enrich_count = 0
+            self._catalyst_scopes = set()
+
+        async def _universe(self):
+            return [MKT, "TER", "AAPL"]
+
+        def _company_names(self, scopes):
+            return {}
+
+        def _load_state(self, scopes):
+            return {}
+
+        def _record_skips(self, skips, now):
+            pass
+
+        async def get_batch_quotes_bulk(self, symbols):
+            return [
+                # Pre-market TER: price == yesterday's close, change = yesterday's session.
+                {"symbol": "TER", "price": 371.47, "change": -57.0, "changePercentage": -13.3,
+                 "changesPercentage": -13.3, "changeSession": prior.isoformat()},
+                # AAPL has printed: a live, current-session move.
+                {"symbol": "AAPL", "price": 230.0, "change": 2.3, "changePercentage": 1.0,
+                 "changesPercentage": 1.0, "changeSession": current.isoformat()},
+                # The index leg, current.
+                {"symbol": mod.MARKET_INDEX_SYMBOL, "price": 500.0, "change": -5.0,
+                 "changePercentage": -1.0, "changesPercentage": -1.0,
+                 "changeSession": current.isoformat()},
+            ]
+
+        async def get_sigmas_bulk(self, symbols):
+            return {}
+
+        def get_cached_bulk(self, scopes, limit):
+            return {s: [] for s in scopes}
+
+        async def mark_verified_current(self, scopes, market_active):
+            return None
+
+    seen = {}
+
+    def _recording_decide(**kwargs):
+        seen[kwargs["scope"]] = (kwargs.get("quote"), kwargs.get("market_change_percent"))
+        return Decision(action=ACTION_SKIP, reason="no_corpus")
+
+    monkeypatch.setattr(mod, "decide", _recording_decide)
+    monkeypatch.setattr(mod, "is_market_active", lambda: True)
+
+    await _Stub().run_sweep(refresh_news=False)
+
+    ter_quote, _ = seen["TER"]
+    assert ter_quote["changePercentage"] is None and ter_quote["change"] is None \
+        and ter_quote["changesPercentage"] is None, "yesterday's move reached the gate as today's"
+    assert ter_quote["price"] == 371.47 and ter_quote["changeSession"] == prior.isoformat()
+    aapl_quote, mkt = seen["AAPL"]
+    assert aapl_quote["changePercentage"] == 1.0, "a current-session row must pass through untouched"
+    assert mkt == -1.0, "the index leg (MWCB guard) must pass through untouched"

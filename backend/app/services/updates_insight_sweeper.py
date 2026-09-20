@@ -68,10 +68,13 @@ from app.services.updates_materiality import (
     Decision,
     daily_cap_for,
     decide,
-    finite,
 )
 from app.utils.market_hours import ET, is_market_active, session_phase
-from app.services.price_service import price_source
+from app.services.price_service import (
+    current_session_quote,
+    price_source,
+    session_change_percent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -455,7 +458,15 @@ class InsightSweeper:
         # `_maybe_price_move` guards the paid catalyst the same way (see its
         # "STALE σ-tier" comment). Notifying is a louder action than fetching an
         # explanation, so it gets at least the same gate.
-        cp = finite((quote or {}).get("changePercentage"))
+        #
+        # Session-aware (`session_change_percent`): a change stamped with a PRIOR
+        # session is None. Without this the 04:00 ET pre-market pass read yesterday's
+        # whole-session move off a row whose price was still yesterday's close, and —
+        # because the dedup key is per ET DAY — minted a second alert for a move that
+        # had already fired: TER -10.4% at 09:57 Monday, then "TER -13.3%" at 04:03
+        # Tuesday, both the same session (TestFlight, 2026-09-15). `run_sweep` blanks
+        # such rows before they reach here; this is the direct-call guard.
+        cp = session_change_percent(quote, now)
         if cp is None or round(cp, 2) == 0.0:
             return
         try:
@@ -483,15 +494,24 @@ class InsightSweeper:
             # exactly the question the alert raises, and it was already being computed
             # in this same sweep — then dropped on the floor at the call site.
             #
-            # The headline stays as the FALLBACK, because the catalyst is gated, day-
-            # capped and kill-switchable and legitimately yields None; a generic body
-            # beats no alert on a genuinely large move.
-            reason = ((price_move or {}).get("reason") or "").strip()
-            headline = reason or (card.get("headline") or "").strip()
-            if not headline:
-                # No honest body to send. Silence beats a notification that says
-                # nothing — the card is still on the Updates tab either way.
-                return
+            # ONLY a cited catalyst is a body. `price_catalyst_service` returns
+            # `catalyst_tag=None` when the web search found no company-specific driver
+            # (or found one it could not cite), and its `reason` is then the model's
+            # own prose about having found nothing — which shipped as an alert:
+            # "Current web sources for September 14, 2026, do not indicate a -10.4%
+            # move for Teradyne…" under the title "TER -13.3%". A body that denies the
+            # move the title announces is worse than no body. The prose still lands on
+            # the Updates card's "why it moved" row, where it is framed as a search
+            # result rather than as the alert itself.
+            #
+            # Otherwise the body is DETERMINISTIC and always true: the size and
+            # direction of the move (the fact the alert is about), plus either "no
+            # catalyst found" when the search ran, or a pointer to the ticker when no
+            # search was available this cycle (day cap / kill switch / quota breaker).
+            # The card headline is deliberately NOT a fallback any more — it is a
+            # synthesis of the news corpus, not of the move, and both production
+            # failures above came from attaching it to a price alert.
+            body = self._alert_body(scope, cp, price_move)
 
             await get_push_dispatch_service().notify_watchers(
                 ticker=scope,
@@ -514,7 +534,7 @@ class InsightSweeper:
                 # which the Activity detail screen shows in full — a slice at the sender made
                 # every stored catalyst exactly 180 characters, ending mid-word. The lock-screen
                 # bound is applied at the APNs boundary instead (`truncate_for_banner`).
-                body=headline,
+                body=body,
                 dedup_key=f"move:{scope}:{trading_date_et()}",
                 preference_key="notify_watchlist_changes",
                 # Routes the tap straight to this ticker (AppDelegate → deep link).
@@ -534,6 +554,26 @@ class InsightSweeper:
                 "Push notify failed for %s (%s: %s) — card was still generated",
                 scope, type(e).__name__, e,
             )
+
+    @staticmethod
+    def _alert_body(scope: str, cp: float, price_move: Optional[Dict[str, Any]]) -> str:
+        """The `ticker_move` alert text for a move of `cp` percent.
+
+        Three cases, none of which can contradict the title:
+          * a CITED catalyst (`catalyst_tag` set, non-empty reason) → its reason;
+          * the search ran and found no company-specific driver (`price_move` present,
+            no tag) → a neutral sentence that says so;
+          * no search this cycle (`price_move` None) → the move plus a pointer.
+        Pure, so the policy is testable without a dispatcher.
+        """
+        move = f"{'Up' if cp > 0 else 'Down'} {abs(cp):.1f}% in today's session"
+        if isinstance(price_move, dict):
+            tag = str(price_move.get("catalyst_tag") or "").strip()
+            reason = str(price_move.get("reason") or "").strip()
+            if tag and reason:
+                return reason
+            return f"{move} — no single company-specific catalyst found in current sources."
+        return f"{move}. Open {scope} for the latest coverage."
 
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
         """Give the claim back without recording a generation.
@@ -685,7 +725,12 @@ class InsightSweeper:
         # phantom "+0.0% move" and store a self-contradictory {tier:Unusual,
         # change_percent:0.0} card. A move that rounds to 0.00% is not worth
         # explaining.
-        cp = finite((quote or {}).get("changePercentage"))
+        #
+        # Session-aware: a change stamped with a PRIOR session (pre-market, before the
+        # first print) is None here too, so no paid "today" search runs for yesterday's
+        # move — that search would cache yesterday's cause under today's key and serve
+        # it for a genuine same-direction move later in the day.
+        cp = session_change_percent(quote, now)
         if cp is None or round(cp, 2) == 0.0:
             return None
         if not getattr(settings, "PRICE_CATALYST_AI_ENABLED", True):
@@ -812,11 +857,25 @@ class InsightSweeper:
         # 1. Quotes — ONE batch-quote call for the whole universe (plus the index).
         symbols = [s for s in scopes if s != MARKET_SCOPE] + [MARKET_INDEX_SYMBOL]
         quotes_by_symbol: Dict[str, Dict[str, Any]] = {}
+        prior_session = 0
         try:
             for row in await price_source(self).get_quotes_list(symbols):
                 sym = row.get("symbol")
-                if sym:
-                    quotes_by_symbol[str(sym).upper()] = row
+                if not sym:
+                    continue
+                # A change stamped with a PRIOR session is not a current move. Blanked
+                # HERE, once, so the materiality gate, the card prompt's price line, the
+                # catalyst gate and the alert gate all agree: pre-market, before a
+                # ticker's first print, the screener still carries yesterday's close and
+                # the row's change is yesterday's whole session. Read as "today" it
+                # re-tripped the gate at 04:03 ET and minted a second `ticker_move`
+                # alert for a move that fired the day before (TER, 2026-09-15). The
+                # price stays — it is still the live price; only the move is unknown
+                # until the session actually prints. Fails open when unstamped (crypto).
+                current = current_session_quote(row, now)
+                if current is not row:
+                    prior_session += 1
+                quotes_by_symbol[str(sym).upper()] = current
         except Exception as e:
             logger.warning(
                 "Insight sweep quote fetch failed (%s: %s) — continuing with "
@@ -1059,11 +1118,11 @@ class InsightSweeper:
 
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
-            "enriched=%d enrich_deferred=%d "
+            "enriched=%d enrich_deferred=%d prior_session=%d "
             "market=%s active=%s phase=%s reasons=%s",
             "news+price" if refresh_news else "price",
             len(scopes), generated, len(touches), dropped,
-            enriched_rows, enrich_deferred,
+            enriched_rows, enrich_deferred, prior_session,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )

@@ -655,6 +655,17 @@ actor APIClient {
         // Add query parameters
         if let queryParams = endpoint.queryParameters, !queryParams.isEmpty {
             components.queryItems = queryParams.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // `URLComponents` percent-encodes a query value with `urlQueryAllowed`, which
+            // KEEPS a literal `+` — and the backend's query parser (Starlette, form rules)
+            // decodes `+` as a SPACE. That mismatch broke the notification inbox's page 2 on
+            // every TestFlight build: the keyset cursor `…T14:17:21.462+00:00|<id>` reached
+            // the server as `…T14:17:21.462 00:00|<id>`, Postgres refused the timestamp, and
+            // the tab showed "Couldn't load more notifications" — everything older than the
+            // first page was unreachable. A typed `+` in a search query was silently a space
+            // for the same reason. Spaces are already `%20` at this point, so every `+` still
+            // in the encoded query is a literal one and must go out as `%2B`.
+            components.percentEncodedQuery = components.percentEncodedQuery?
+                .replacingOccurrences(of: "+", with: "%2B")
         }
 
         guard let url = components.url else {

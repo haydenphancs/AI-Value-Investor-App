@@ -75,6 +75,7 @@ from app.schemas.notifications import (
 )
 from app.services.notification_inbox_service import (
     DEFAULT_PAGE,
+    InvalidCursor,
     NotificationInboxUnavailable,
     get_notification_inbox_service,
 )
@@ -1552,10 +1553,12 @@ async def list_my_notifications(
 ):
     """Newest-first page of this user's notifications, plus the unread count.
 
-    `before` is a KEYSET cursor (the `created_at` of the last item on the previous
-    page), not an offset: rows arrive continuously at the head, so an offset page 2
-    would repeat or skip whenever a notification landed between requests.
+    `before` is a KEYSET cursor — the previous page's `next_cursor`, an opaque
+    `<claimed_at>|<id>` the client echoes back verbatim — not an offset: rows arrive
+    continuously at the head, so an offset page 2 would repeat or skip whenever a
+    notification landed between requests.
 
+    A cursor this service did not mint is 400 INVALID_INPUT, refused before any read.
     A read failure is 503 NOTIFICATIONS_UNAVAILABLE, never an empty 200 — an empty
     inbox and a broken inbox look identical to a user, and "No notifications yet"
     rendered over a database error is a failure nobody reports.
@@ -1564,6 +1567,12 @@ async def list_my_notifications(
         return await asyncio.to_thread(
             get_notification_inbox_service().list_for_user,
             user["id"], limit=limit, before=before,
+        )
+    except InvalidCursor as e:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid notification cursor: {e}",
+            user_message="We couldn't load more notifications. Pull to refresh.",
         )
     except NotificationInboxUnavailable as e:
         return make_error_response(

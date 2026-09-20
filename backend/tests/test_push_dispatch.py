@@ -13,6 +13,7 @@ No Supabase, no APNs — both are stubbed.
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -446,9 +447,95 @@ async def test_a_routine_drift_never_pushes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_empty_headline_never_pushes(monkeypatch):
-    """Silence beats a notification that says nothing — the card is on the Updates
-    tab either way."""
+async def test_the_card_headline_is_never_the_alert_body(monkeypatch):
+    """The headline is a synthesis of the news corpus, not of the move — both production
+    failures ("beats Q2 estimates" on an EPS miss, "Hydrogen Stocks Face Selloff" on a
+    +4% day) came from attaching it to a price alert. With no catalyst available the
+    body is the move itself plus a pointer; an empty headline changes nothing, and a
+    real Unusual/Extreme move on a watched stock is never silenced for lack of prose."""
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    for headline in ("   ", "NVDA beats Q2 estimates, raises outlook"):
+        calls.clear()
+        await _sweeper()._notify_watchers(
+            "NVDA", _Decision(TIER_EXTREME), {"headline": headline},
+            None, quote={"changePercentage": -9.0},
+        )
+        assert len(calls) == 1
+        assert calls[0]["body"] == "Down 9.0% in today's session. Open NVDA for the latest coverage."
+        assert "beats" not in calls[0]["body"]
+
+
+# ── the alert body never contradicts its title (TestFlight, 2026-09-15) ─────────
+#
+# The grounded search returns `catalyst_tag=None` when it found no company-specific
+# driver, and its `reason` is then the model's own prose about finding nothing. That
+# prose shipped as the body of "TER -13.3%": "Current web sources for September 14,
+# 2026, do not indicate a -10.4% move for Teradyne…" — an alert whose body denies the
+# move its title announces. Only a CITED catalyst is a body; everything else is a
+# deterministic sentence built from the move itself.
+
+def _body(cp, price_move, scope="TER"):
+    from app.services.updates_insight_sweeper import InsightSweeper
+
+    return InsightSweeper._alert_body(scope, cp, price_move)
+
+
+def test_a_cited_catalyst_is_the_body():
+    assert _body(-13.3, {"catalyst_tag": "Guidance Cut", "reason": "Teradyne cut its Q4 outlook."}) \
+        == "Teradyne cut its Q4 outlook."
+
+
+@pytest.mark.parametrize("tag", [None, "", "   "])
+def test_a_no_catalyst_answer_is_never_the_body(tag):
+    prose = "Current web sources for September 14, 2026, do not indicate a -10.4% move for Teradyne (TER) today."
+    body = _body(-13.3, {"catalyst_tag": tag, "reason": prose})
+    assert body == "Down 13.3% in today's session — no single company-specific catalyst found in current sources."
+    assert "do not indicate" not in body and "-10.4" not in body
+
+
+def test_a_tag_without_a_reason_degrades_to_the_neutral_sentence():
+    """A cited tag with an empty reason has nothing to quote; never an empty body."""
+    assert _body(4.2, {"catalyst_tag": "Analyst Upgrade", "reason": "  "}) \
+        == "Up 4.2% in today's session — no single company-specific catalyst found in current sources."
+
+
+def test_no_search_this_cycle_points_at_the_ticker():
+    assert _body(7.65, None, scope="INTC") == "Up 7.7% in today's session. Open INTC for the latest coverage."
+    assert _body(-0.06, None, scope="INTC") == "Down 0.1% in today's session. Open INTC for the latest coverage."
+
+
+@pytest.mark.parametrize("junk", ["string", 42, ["x"], {"reason": None, "catalyst_tag": None}])
+def test_a_malformed_price_move_never_raises(junk):
+    body = _body(-2.5, junk)
+    assert body.startswith("Down 2.5% in today's session")
+
+
+# ── a move belongs to its SESSION, not to the calendar day it was read on ────────
+#
+# Production, 2026-09-15: `move:TER:2026-09-14` "TER -10.4%" fired at 09:57 ET Monday and
+# was read nine minutes later; `move:TER:2026-09-15` "TER -13.3%" was minted at 04:03 ET
+# TUESDAY — the first pre-market pass, where the screener still carried Monday's close, so
+# the batch row's change was Monday's WHOLE session, correctly stamped
+# `changeSession = "2026-09-14"`, and the sweeper read it as Tuesday's move under a fresh
+# per-day dedup key. A cleared alert came back as "×2".
+
+_TUESDAY_0403_ET = datetime(2026, 9, 15, 8, 3, 56, tzinfo=timezone.utc)
+_TUESDAY_0935_ET = datetime(2026, 9, 15, 13, 35, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_a_prior_session_move_is_not_re_alerted_pre_market(monkeypatch):
     from app.services.updates_materiality import TIER_EXTREME
     import app.services.push_dispatch_service as pds
 
@@ -462,10 +549,58 @@ async def test_an_empty_headline_never_pushes(monkeypatch):
     monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
 
     await _sweeper()._notify_watchers(
-        "NVDA", _Decision(TIER_EXTREME), {"headline": "   "},
-        None, quote={"changePercentage": -9.0},
+        "TER", _Decision(TIER_EXTREME), {"headline": "h"}, _TUESDAY_0403_ET,
+        quote={"changePercentage": -13.3, "changeSession": "2026-09-14", "price": 371.47},
+        price_move={"catalyst_tag": None, "reason": "no clear catalyst"},
     )
-    assert calls == []
+    assert calls == [], "re-alerted Monday's move at 04:03 Tuesday"
+
+
+@pytest.mark.asyncio
+async def test_a_current_session_move_still_alerts(monkeypatch):
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "TER", _Decision(TIER_EXTREME), {"headline": "h"}, _TUESDAY_0935_ET,
+        quote={"changePercentage": -6.1, "changeSession": "2026-09-15", "price": 348.8},
+        price_move={"catalyst_tag": None, "reason": "no clear catalyst"},
+    )
+    assert len(calls) == 1
+    assert calls[0]["title"] == "TER -6.1%"
+    assert calls[0]["body"] == "Down 6.1% in today's session — no single company-specific catalyst found in current sources."
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_row_keeps_alerting(monkeypatch):
+    """Crypto rows (a rolling 24h change, no session) and older shapes carry no stamp —
+    they fail OPEN, exactly as before."""
+    from app.services.updates_materiality import TIER_EXTREME
+    import app.services.push_dispatch_service as pds
+
+    calls = []
+
+    class _Spy:
+        async def notify_watchers(self, **kw):
+            calls.append(kw)
+            return 1
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Spy())
+
+    await _sweeper()._notify_watchers(
+        "BTCUSD", _Decision(TIER_EXTREME), {"headline": "h"}, _TUESDAY_0403_ET,
+        quote={"changePercentage": 5.0},
+    )
+    assert len(calls) == 1
 
 
 # ── per-user daily volume cap ────────────────────────────────────────────────
@@ -740,3 +875,15 @@ def test_a_failed_profile_read_is_not_cached_as_not_an_etf():
     assert svc._is_etf("SPY") is False
     assert svc._is_etf("SPY") is False
     assert calls["n"] == 2, "a failed lookup was memoised — the error is now permanent"
+
+
+# ── inbox retention (TestFlight, 2026-09-11: "2 weeks only? How should we deal with that?") ──
+
+def test_the_inbox_keeps_one_quarter():
+    """It was never two weeks — 30 days, with page 2 unreachable behind a cursor bug.
+    Lengthened to 90 with the tester: a value-investing audience runs on a quarterly
+    cadence (earnings, 13F), so last quarter's alerts stay readable. The window must
+    also outlive the longest dedup horizon (one ET day), which it does by a margin."""
+    from app.services.push_dispatch_service import PushDispatchService
+
+    assert PushDispatchService.RETENTION_DAYS == 90

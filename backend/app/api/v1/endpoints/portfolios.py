@@ -1034,8 +1034,9 @@ async def get_portfolio_insights(
     supabase: Client = Depends(get_supabase),
 ):
     """Server-computed Portfolio Insights for ONE portfolio — the 0..100
-    diversification health score, sub-scores, breakdown allocations, and
-    nudges. Scores this portfolio's ``portfolio_items`` holdings joined with
+    diversification health score, sub-scores and breakdown allocations (no
+    nudges: ``message`` is a neutral descriptor; any hint is derived on the
+    client). Scores this portfolio's ``portfolio_items`` holdings joined with
     the metadata on the user's watchlist rows. Returns ``null`` when the
     portfolio has fewer than the minimum holdings for a meaningful score.
     """

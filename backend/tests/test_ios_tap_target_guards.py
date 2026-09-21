@@ -935,3 +935,125 @@ def test_the_row_shaped_scanner_is_not_vacuous():
     chip = '\n    HStack {\n        RoundedRectangle(cornerRadius: 8)\n            .fill(Color.red)\n        Spacer()\n    }\n    .padding(8)\n'
     assert not _fill_on_root(chip), "a nested chip's fill must not exempt the row"
     assert _fill_on_root('\n    HStack {\n        Text("x")\n    }\n    .background(Color.red)\n')
+
+
+# ── E5: the Sector / Size segments on the Diversification card ────────────────
+#
+# TestFlight 1.0 (6): "It's hard to touch to toggle them Sector/size." Each segment was a
+# Button whose label was an 11pt caption plus 4pt of vertical padding — a ~21pt hit frame
+# (the 3x screenshot shows a ~24pt track). The row-shaped sweep above SKIPS this label on
+# purpose: its root carries `.background(`, which `_fill_on_root` treats as a donated hit
+# region — correct for dead pixels, blind to HEIGHT. So this named, brace-bound guard is
+# the only thing that pins the fix, and it asserts the height token and modifier ORDER,
+# not mere membership: `.frame(minHeight:)` placed after `.background(` renders a short
+# pill inside a tall hit box (looks broken), and a `.contentShape` before the fill measures
+# the smaller frame. The height is `segmentMinHeight` — the same ~34pt the app's other
+# in-card selector (`RecentActivitiesTabSelector`: bodyEmphasis + 2 × AppSpacing.sm) comes
+# out at; the developer chose that over the 44pt HIG figure, which read as oversized.
+
+_DIVERSIFICATION = _REPO / "frontend/ios/ios/Views/Molecules/DiversificationCard.swift"
+_PICKER_DECL = "private var breakdownPicker"
+
+
+def _button_label_interior(src: str, button_at: int):
+    """Interior of the LAST closure of the Button starting at ``button_at`` (both
+    `Button(action:) { L }` and `Button { A } label: { L }` resolve to L), or None."""
+    pos, label = button_at, None
+    while True:
+        br = src.find("{", pos)
+        if br == -1:
+            break
+        if pos != button_at and not re.fullmatch(r"[\s)]*(label:)?\s*", src[pos:br]):
+            break
+        cl = _brace_close(src, br)
+        if cl is None:
+            break
+        label = (br, cl)
+        pos = cl + 1
+    return None if label is None else src[label[0] + 1:label[1]]
+
+
+def _breakdown_picker():
+    """(picker body, segment label interior), comment-stripped and brace-bound."""
+    src = _code(_DIVERSIFICATION)
+    assert _PICKER_DECL in src, "breakdownPicker was renamed — update this guard, do not delete it"
+    body = _decl_body(src, _PICKER_DECL)
+    m = _BUTTON_TOKEN.search(body)
+    assert m, "breakdownPicker no longer contains a Button"
+    label = _button_label_interior(body, m.start())
+    assert label, "could not bound the segment Button's label"
+    return body, label
+
+
+def _segment_reaches_minimum(label: str) -> bool:
+    """The one predicate the guard and its controls share."""
+    mods = _root_modifiers(label)
+    frames = [i for i, t in mods if t.startswith(".frame(") and "minHeight: Self.segmentMinHeight" in t]
+    fills = [i for i, t in mods if t.startswith(".background(")]
+    shapes = [i for i, t in mods if t == ".contentShape(Rectangle())"]
+    if not (frames and fills and shapes and mods):
+        return False
+    return (
+        min(frames) < min(fills)            # the fill spans the whole target
+        and shapes[-1] == mods[-1][0]       # the shape is the LAST root modifier
+        and _shape_is_effective(label)
+    )
+
+
+def test_the_sector_size_segments_reach_the_minimum_target():
+    body, label = _breakdown_picker()
+    assert _segment_reaches_minimum(label), (
+        "DiversificationCard.breakdownPicker: each segment label must be "
+        "`.frame(maxWidth: .infinity, minHeight: Self.segmentMinHeight)` BEFORE its "
+        "`.background(` and end with `.contentShape(Rectangle())` — the segments were ~21pt."
+    )
+    # The constant itself: the sibling selector's height, derived from the same tokens.
+    src = _code(_DIVERSIFICATION)
+    m = re.search(r"static let segmentMinHeight: CGFloat = 18 \+ 2 \* AppSpacing\.sm", src)
+    assert m, "segmentMinHeight must be the RecentActivitiesTabSelector height (18 + 2 × sm)"
+    sibling = _decl_body(_code(_REPO / "frontend/ios/ios/Views/Molecules/RecentActivitiesTabSelector.swift"), "var body: some View")
+    assert ".padding(.vertical, AppSpacing.sm)" in sibling and "AppTypography.bodyEmphasis" in sibling, (
+        "RecentActivitiesTabSelector changed height — re-derive segmentMinHeight with it"
+    )
+    assert ".buttonStyle(.plain)" in body, "a live 44pt segment without .plain paints a press highlight"
+    assert ".hitSlop(" not in body, "slop is a no-op on a Button — the frame must grow"
+    assert not re.search(r"\.frame\([^)]*\bheight:", label), "a fixed height clips Dynamic Type"
+    assert ".padding(.vertical, AppSpacing.xs)" not in label, "the old 4pt padding is back"
+
+
+def test_the_sector_size_guard_is_not_vacuous():
+    body, label = _breakdown_picker()
+
+    # 1. The app-wide sweep really does skip this label, so this guard is the only pin.
+    assert _fill_on_root(label)
+    assert not any(f.endswith("DiversificationCard.swift") for f, _, _ in _row_shaped_buttons())
+
+    # 2. The verbatim PRE-fix label fails the predicate.
+    pre_fix = (
+        '\n                    Text(option.rawValue)\n'
+        '                        .font(AppTypography.captionEmphasis)\n'
+        '                        .foregroundColor(isActive ? AppColors.textOnAccent : AppColors.textSecondary)\n'
+        '                        .frame(maxWidth: .infinity)\n'
+        '                        .padding(.vertical, AppSpacing.xs)\n'
+        '                        .background(isActive ? AppColors.primaryFill : Color.clear)\n'
+        '                        .cornerRadius(AppCornerRadius.medium)\n'
+    )
+    assert not _segment_reaches_minimum(pre_fix), "the pre-fix label must fail"
+
+    # 3. Three synthetic mutants of the FIXED shape, each a real way to get it wrong.
+    fixed = label
+    no_height = fixed.replace("minHeight: Self.segmentMinHeight", "minHeight: 0")
+    shape_first = re.sub(r"\n(\s*)\.contentShape\(Rectangle\(\)\)", "", fixed)
+    shape_first = shape_first.replace("\n                        .background(", "\n                        .contentShape(Rectangle())\n                        .background(", 1)
+    frame_line = re.search(r"\n\s*\.frame\(maxWidth: \.infinity, minHeight: Self\.segmentMinHeight\)", fixed).group(0)
+    frame_after_fill = fixed.replace(frame_line, "", 1).replace(
+        "\n                        .cornerRadius(", frame_line + "\n                        .cornerRadius(", 1)
+    assert _segment_reaches_minimum(fixed), "control: the fixed label passes"
+    assert not _segment_reaches_minimum(no_height), "minHeight removed must fail"
+    assert not _segment_reaches_minimum(shape_first), "shape before the fill must fail"
+    assert not _segment_reaches_minimum(frame_after_fill), "frame after the fill must fail"
+
+    # 4. Comment stripping bites: the comment beside the fix quotes every token.
+    raw = _DIVERSIFICATION.read_text()
+    assert "hard to hit" in raw, "the explanatory comment beside the fix moved"
+    assert "hard to hit" not in _code(_DIVERSIFICATION)

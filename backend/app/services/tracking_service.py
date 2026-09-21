@@ -25,6 +25,7 @@ from app.services.chart_helper import (
     _finite_or_none,
 )
 from app.services.asset_class import resolve_asset_class, symbol_trades_extended_hours
+from app.services._classification_common import is_placeholder_text
 from app.utils.postgrest_paging import fetch_all_rows
 from app.services.crypto_names import display_name_for_row
 from app.database import get_supabase
@@ -113,6 +114,41 @@ SPARKLINE_CACHE_TTL = 120
 # because the cache is only written at the end. Keyed by user; a joiner awaits the
 # leader's future and gets the same response (or the same WatchlistUnavailableError).
 _feed_inflight: Dict[str, asyncio.Future] = {}
+
+# Per-user WRITE generation, bumped by `invalidate_feed_cache`. A build captures the
+# generation it started under and `_feed_cache_set` refuses to pin a result from an
+# older one; a joiner that adopted such a leader rebuilds instead of returning it.
+#
+# Why the pop in `invalidate_feed_cache` alone was not enough: the iOS 30 s price timer
+# keeps a build running for as long as the Tracking tab is on screen — including while a
+# detail screen is pushed over it — so a star tap's POST/DELETE routinely lands while a
+# build that read the PRE-write watchlist is still in flight. That build then re-cached
+# the stale list for another 30 s, and the client's post-confirm reconcile read it: a row
+# the user had just removed came back, and a just-added one looked like an orphan to the
+# client's portfolio purge (the client marker protects the add; nothing protected the
+# remove).
+_feed_generation: Dict[str, int] = {}
+_feed_inflight_generation: Dict[str, int] = {}
+# One int per user who ever wrote; bounded so a long-lived process does not keep every
+# guest install that ever added a ticker. Evicting a user resets them to generation 0,
+# which only matters if a build for that user is in flight at that instant — those are
+# skipped.
+_FEED_GENERATION_MAX_ENTRIES = 10_000
+
+
+def _release_feed_inflight(user_id: str, future: "asyncio.Future") -> None:
+    """Drop the in-flight entry for *user_id* — but only if it is still OURS.
+
+    Identity-checked as defence in depth: a joiner that takes over after a cancelled
+    leader installs its own future, and a leader's late `finally` must never pop a
+    successor's entry (that would let a third caller start a duplicate fan-out and lose
+    the generation the successor recorded). Today the cancelled leader's `finally` runs
+    before the takeover, so the check is not observable through `get_tracking_feed`;
+    it is pinned directly.
+    """
+    if _feed_inflight.get(user_id) is future:
+        _feed_inflight.pop(user_id, None)
+        _feed_inflight_generation.pop(user_id, None)
 
 
 class _InflightLeaderCancelled(RuntimeError):
@@ -246,7 +282,17 @@ def _feed_cache_get(user_id: str) -> Optional[TrackingFeedResponse]:
     return value
 
 
-def _feed_cache_set(user_id: str, value: TrackingFeedResponse) -> None:
+def _feed_cache_set(
+    user_id: str, value: TrackingFeedResponse, generation: Optional[int] = None
+) -> None:
+    # A build that started BEFORE a watchlist write must not pin what it read. `None`
+    # (direct callers, tests) skips the check.
+    if generation is not None and generation != _feed_generation.get(user_id, 0):
+        logger.info(
+            "[Tracking] feed build for user %s predates a watchlist write (gen %d < %d) "
+            "— served, not cached", user_id, generation, _feed_generation.get(user_id, 0),
+        )
+        return
     # Move-to-end on write so the dict head is the least-recently-written, then evict from the
     # head past the cap. Mirrors `stock_overview_service._cache_set`. Expired entries are also
     # swept opportunistically here, because eviction on read alone never reclaims a key that
@@ -270,6 +316,14 @@ def _feed_cache_set(user_id: str, value: TrackingFeedResponse) -> None:
             )
 
 
+def _text_or_none(value: Any, *, iso_code: bool = False) -> Optional[str]:
+    """A stored/cached classification string, or None when it is a placeholder.
+    ``iso_code=True`` for `country` ("NA" is Namibia, not a placeholder)."""
+    if is_placeholder_text(value, iso_code=iso_code):
+        return None
+    return str(value).strip()
+
+
 def invalidate_feed_cache(user_id: str) -> None:
     """Drop a user's cached feed after a watchlist/portfolio membership write.
 
@@ -281,6 +335,16 @@ def invalidate_feed_cache(user_id: str) -> None:
     itself. The 30s price-refresh timer keeps the entry warm, so this is the
     common path, not a rare race.
     """
+    # Bump FIRST and unconditionally: the entry to defeat may not exist yet — it is the
+    # build in flight right now, which will try to write after this returns.
+    _feed_generation[user_id] = _feed_generation.pop(user_id, 0) + 1   # move-to-end
+    if len(_feed_generation) > _FEED_GENERATION_MAX_ENTRIES:
+        for stale in list(_feed_generation.keys()):
+            if len(_feed_generation) <= _FEED_GENERATION_MAX_ENTRIES:
+                break
+            if stale == user_id or stale in _feed_inflight:
+                continue
+            _feed_generation.pop(stale, None)
     if _feed_cache.pop(user_id, None) is not None:
         logger.debug("[Tracking] feed cache invalidated for user %s", user_id)
 
@@ -370,19 +434,31 @@ class TrackingService:
             leader = _feed_inflight.get(user_id)
             if leader is None:
                 break
+            leader_generation = _feed_inflight_generation.get(user_id)
             try:
                 # `shield`: a joiner that is itself cancelled must not cancel the shared
                 # build out from under the leader and every other joiner.
-                return await asyncio.shield(leader)
+                feed = await asyncio.shield(leader)
             except _InflightLeaderCancelled:
                 # The leader's client went away mid-build. Take over rather than fail.
                 continue
+            if (
+                leader_generation is not None
+                and leader_generation != _feed_generation.get(user_id, 0)
+            ):
+                # A watchlist write landed while that build ran, so its result predates
+                # it. The leader has not cached it (see `_feed_cache_set`) and has left
+                # `_feed_inflight` by now; loop back and build a current one.
+                continue
+            return feed
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
+        generation = _feed_generation.get(user_id, 0)
         _feed_inflight[user_id] = future
+        _feed_inflight_generation[user_id] = generation
         try:
-            feed = await self._build_tracking_feed(user_id)
+            feed = await self._build_tracking_feed(user_id, generation=generation)
             if not future.done():
                 future.set_result(feed)
             return feed
@@ -406,10 +482,16 @@ class TrackingService:
                 future.exception()
             raise
         finally:
-            _feed_inflight.pop(user_id, None)
+            _release_feed_inflight(user_id, future)
 
-    async def _build_tracking_feed(self, user_id: str) -> TrackingFeedResponse:
-        """One uncached build of the feed. Only ever entered via `get_tracking_feed`."""
+    async def _build_tracking_feed(
+        self, user_id: str, *, generation: Optional[int] = None
+    ) -> TrackingFeedResponse:
+        """One uncached build of the feed. Only ever entered via `get_tracking_feed`.
+
+        ``generation`` is the write generation the build started under; the cache write
+        at the end is skipped when a watchlist write bumped it meanwhile.
+        """
 
         # 1. Fetch user's watchlist from Supabase
         sb = get_supabase()
@@ -634,7 +716,10 @@ class TrackingService:
                         # holdings-add and lazy-enriched by PortfolioInsights).
                         # The FMP *quote* endpoint doesn't return these, so the
                         # old `quote.get(...)` fallback was always null.
-                        sector=item.get("sector"),
+                        # Normalised on READ as well: rows that already hold a placeholder
+                        # ("N/A") stay that way until migration 172 nulls them, and the
+                        # Assets rows must not show it meanwhile.
+                        sector=_text_or_none(item.get("sector")),
                         country=item.get("country"),
                         market_cap=market_cap_f if market_cap_f else None,
                         shares=_finite_or_none(shares),
@@ -653,6 +738,12 @@ class TrackingService:
                         company_name=item.get("company_name") or ticker,
                         price_known=False,
                         change_known=False,
+                        # The class is pure symbol/column logic and cannot be what failed
+                        # above. Without it this row went out as `asset_type: null`, iOS
+                        # defaulted it to "stock", and a stored 'etf'/'index'/'commodity'
+                        # row whose enrichment threw was pushed to the EQUITY screen on
+                        # that refresh — the E3 DOGE routing bug through a side door.
+                        asset_type=resolve_asset_class(ticker, item.get("asset_type")),
                     )
                 )
 
@@ -663,7 +754,7 @@ class TrackingService:
         # suppresses the retry the 30s client timer would otherwise perform.
         # Mirrors get_scanners' "empty, uncached → retries" posture.
         if quotes_map or not tickers:
-            _feed_cache_set(user_id, feed)
+            _feed_cache_set(user_id, feed, generation=generation)
         else:
             logger.warning(
                 "[Tracking] all %d quotes unresolved for user %s — serving degraded "
@@ -739,14 +830,20 @@ class TrackingService:
             prof = profiles.get(str(item["ticker"]).upper())
             if not prof:
                 continue
-            sector = str(prof.get("sector") or "").strip() or None
+            # Placeholder-aware, not just falsiness: `profile_json` has TWO writers —
+            # `stock_overview_service` stores its formatted dict, whose empty sector is the
+            # literal "N/A", and `whale_service` the raw FMP shape. "N/A" used to pass the
+            # old `or ""` test, land in `watchlist_items.sector`, and (because both healers
+            # test falsiness) could never be re-healed — it then rendered as a legend row
+            # named "N/A" on the Diversification card.
+            sector = _text_or_none(prof.get("sector"))
             if not sector:
                 continue
             patch: Dict[str, Any] = {"sector": sector}
             # Only fill country when it is genuinely absent — the column has a 'US'
             # default, so an existing value is real data and must not be overwritten.
             if not item.get("country"):
-                country = str(prof.get("country") or "").strip() or None
+                country = _text_or_none(prof.get("country"), iso_code=True)
                 if country:
                     patch["country"] = country
             item.update(patch)

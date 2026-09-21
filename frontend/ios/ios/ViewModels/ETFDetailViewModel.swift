@@ -446,6 +446,16 @@ class ETFDetailViewModel: ObservableObject {
                     )
                     print("✅ [ETFDetailVM] Added \(etfSymbol) to watchlist")
                 }
+
+                // The server holds the change now — tell Tracking, Home and Updates.
+                // Posted here, AFTER the request returned, and never on the optimistic flip
+                // above: the receivers refetch, and a refetch keyed to the flip can overtake
+                // the write and read the pre-toggle state (see
+                // `PortfolioStore.watchlistDidChangeNotification`).
+                PortfolioStore.announceWatchlistChange(
+                    ticker: etfSymbol, assetType: "etf",
+                    added: !wasInWatchlist, source: .detailStar
+                )
             } catch {
                 // Revert AND tell the user. The revert was always right; the silence was the
                 // bug — in a release build a star that fills in and empties again is

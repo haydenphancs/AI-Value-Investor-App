@@ -67,3 +67,28 @@ def test_portfolio_insights_schema_parity():
     assert isinstance(payload["total_value"], float)
     # Bars add up to the overall score.
     assert sum(s["points"] for s in payload["sub_scores"]) == payload["score"]
+
+
+def test_allocation_labels_are_never_placeholders_and_a_coin_is_a_named_slice():
+    """A label is the only thing iOS renders from an allocation; "N/A" reached the legend
+    once. `holdings_count` stays on the wire (older builds decode it as a required Int)."""
+    from app.services._classification_common import is_placeholder_text
+    from app.services.portfolio_insights_service import CRYPTO_BUCKET
+
+    res = score_holdings([
+        _h("ORCL", 12_000, sector="Technology", market_cap=400e9),
+        _h("SPY", 3_000, sector="N/A", market_cap=500e9),
+        PortfolioHoldingResponse(
+            id="DOGEUSD", ticker="DOGEUSD", company_name="Dogecoin", market_value=2_000,
+            shares=None, sector=None, asset_type="crypto", country="US", market_cap=None,
+        ),
+    ])
+    payload = res.model_dump()
+    assert set(payload.keys()) == EXPECTED_TOP_LEVEL
+    for field in ("sector_allocations", "marketcap_allocations"):
+        names = [a["name"] for a in payload[field]]
+        assert all(isinstance(n, str) and n for n in names)
+        assert not any(is_placeholder_text(n) for n in names), names
+        assert CRYPTO_BUCKET in names, names
+    assert payload["holdings_count"] == 3
+

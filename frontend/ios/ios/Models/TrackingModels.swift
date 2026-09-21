@@ -524,6 +524,14 @@ struct DiversificationScore: Identifiable {
     let subScores: [DiversificationSubScore]
     let sectorAllocations: [SectorAllocation]
     let marketcapAllocations: [SectorAllocation]
+    /// How many holdings the score was actually computed over — the server's
+    /// `holdings_count` (rows with a POSITIVE market value after pricing), or the
+    /// calculator's own count offline. Optional so a caller that cannot know it (the
+    /// preview sample) says nothing rather than "0": the coverage caption then falls back
+    /// to the client-side count and the small-book hint stays silent. The DTO always
+    /// decoded this field; it was dropped on the way to the UI model, which is why
+    /// "Based on N of M tickers" could count a holding the server had dropped.
+    let holdingsCount: Int?
 
     init(
         id: UUID = UUID(),
@@ -534,7 +542,8 @@ struct DiversificationScore: Identifiable {
         sectorCount: Int,
         subScores: [DiversificationSubScore] = [],
         sectorAllocations: [SectorAllocation] = [],
-        marketcapAllocations: [SectorAllocation] = []
+        marketcapAllocations: [SectorAllocation] = [],
+        holdingsCount: Int? = nil
     ) {
         self.id = id
         self.score = score
@@ -545,6 +554,7 @@ struct DiversificationScore: Identifiable {
         self.subScores = subScores
         self.sectorAllocations = sectorAllocations
         self.marketcapAllocations = marketcapAllocations
+        self.holdingsCount = holdingsCount
     }
 
     var progressValue: Double { Double(score) / 100.0 }
@@ -561,8 +571,9 @@ struct TrackingFeedResponse: Codable {
 
 // MARK: - Portfolio Insights DTO
 
-/// Response from GET /api/v1/tracking/portfolio-insights — the server-computed
-/// diversification health score, sub-scores, breakdown allocations, and nudges.
+/// Response from GET /api/v1/portfolios/{id}/insights — the server-computed
+/// diversification score, sub-scores and breakdown allocations. (No nudges: the
+/// server's `message` is a neutral descriptor; any hint is derived on the client.)
 struct PortfolioInsightsDTO: Codable {
     let score: Int
     let zone: String
@@ -595,7 +606,8 @@ struct PortfolioInsightsDTO: Codable {
             sectorCount: sectorCount,
             subScores: subScores.map { $0.toSubScore() },
             sectorAllocations: sectorAllocations.map { $0.toSectorAllocation() },
-            marketcapAllocations: marketcapAllocations.map { $0.toSectorAllocation() }
+            marketcapAllocations: marketcapAllocations.map { $0.toSectorAllocation() },
+            holdingsCount: holdingsCount
         )
     }
 }

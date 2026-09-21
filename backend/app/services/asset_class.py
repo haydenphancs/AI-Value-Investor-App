@@ -73,6 +73,28 @@ _ROUND_THE_CLOCK = frozenset({"crypto"})
 # detection, because the default is indistinguishable from a real stock.
 _TRUSTED_STORED_CLASSES = frozenset({"crypto", "commodity", "index", "etf"})
 
+# The wire vocabulary iOS switches on (`MarketTickerType`, `AssetDetailRouter`) and the
+# only values a WRITER may persist verbatim into `watchlist_items.asset_type`. Lives here,
+# beside the resolver, so `POST /watchlist` and `POST /tracking/holdings` cannot drift
+# apart — the holdings route used to write `request.asset_type or "Stock"`, which upserted
+# the capitalised column default OVER a migrated `'crypto'` / `'etf'` value.
+WIRE_CLASSES = frozenset({"stock", "etf", "index", "commodity", "crypto"})
+
+
+def stored_asset_type(symbol: Optional[str], declared: Optional[str]) -> Optional[str]:
+    """The `asset_type` a writer should persist for *symbol*, or None to OMIT the key.
+
+    A declared wire class is authoritative (lower-cased). Without one, the class is
+    derived from the symbol — and returned only when it is SPECIFIC: a derived
+    ``"stock"`` is the same information as the column default, and writing it on an
+    upsert would clobber a stored ``'crypto'``/``'etf'`` the row already carries.
+    """
+    normalized = (declared or "").strip().lower()
+    if normalized in WIRE_CLASSES:
+        return normalized
+    derived = resolve_asset_class(symbol, None)
+    return derived if derived != "stock" else None
+
 
 def detect_asset_class(
     symbol: Optional[str], *, include_aliases: bool = False, include_bare_coins: bool = False

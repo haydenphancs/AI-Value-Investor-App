@@ -57,9 +57,10 @@ class _SlowBuild:
         self.exc = exc
 
     # A callable INSTANCE on the class is not a descriptor, so no `self` is bound:
-    # the service calls it as `_build_tracking_feed(user_id)`.
-    async def __call__(self, user_id):
+    # the service calls it as `_build_tracking_feed(user_id, generation=...)`.
+    async def __call__(self, user_id, **kwargs):
         self.entries += 1
+        self.generations = getattr(self, "generations", []) + [kwargs.get("generation")]
         await self.release.wait()
         if self.exc is not None:
             raise self.exc
@@ -482,7 +483,7 @@ async def test_a_joinerless_feed_failure_is_not_reported_as_never_retrieved(monk
     unread and asyncio logged the traceback at ERROR, a second Sentry event per failed build."""
     svc = TrackingService()
 
-    async def _boom(self, user_id):
+    async def _boom(self, user_id, **kwargs):
         raise WatchlistUnavailableError("520 from the edge")
     monkeypatch.setattr(TrackingService, "_build_tracking_feed", _boom)
     loop = asyncio.get_running_loop()
@@ -497,3 +498,159 @@ async def test_a_joinerless_feed_failure_is_not_reported_as_never_retrieved(monk
         assert "u-1" not in ts._feed_inflight
     finally:
         loop.set_exception_handler(None)
+
+
+# ── 5. the write generation: a build that predates a watchlist write never pins ──
+#
+# The iOS 30 s price timer keeps a feed build running while a detail screen is pushed
+# over the Tracking tab, so a star tap's POST/DELETE routinely lands MID-build. That
+# build read the pre-write watchlist; `invalidate_feed_cache` popped an entry that did
+# not exist yet, and the build then cached the stale list for another 30 s — the
+# client's post-confirm reconcile read it, and the row the user had just removed came
+# back (tracking_watchlist_portfolio E1).
+
+
+@pytest.fixture(autouse=True)
+def _clean_generations():
+    ts._feed_generation.clear()
+    ts._feed_inflight_generation.clear()
+    yield
+    ts._feed_generation.clear()
+    ts._feed_inflight_generation.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_build_that_started_before_an_invalidation_does_not_re_pin_the_feed(monkeypatch):
+    result = TrackingFeedResponse()
+    release = asyncio.Event()
+    entries = []
+
+    async def _build(self, user_id, *, generation=None):
+        entries.append(generation)
+        await release.wait()
+        ts._feed_cache_set(user_id, result, generation=generation)   # what the real build does
+        return result
+
+    monkeypatch.setattr(TrackingService, "_build_tracking_feed", _build)
+    leader = asyncio.create_task(TrackingService().get_tracking_feed("u-gen"))
+    await asyncio.sleep(0)
+    assert entries == [0]
+    ts.invalidate_feed_cache("u-gen")          # the star's DELETE lands mid-build
+    release.set()
+    assert await leader is result, "the stale build is still SERVED to its caller"
+    assert ts._feed_cache_get("u-gen") is None, "…but never pinned for the next 30 s"
+
+
+@pytest.mark.asyncio
+async def test_a_build_that_saw_no_write_is_cached_as_before(monkeypatch):
+    result = TrackingFeedResponse()
+    release = asyncio.Event()
+
+    async def _build(self, user_id, *, generation=None):
+        await release.wait()
+        ts._feed_cache_set(user_id, result, generation=generation)
+        return result
+
+    monkeypatch.setattr(TrackingService, "_build_tracking_feed", _build)
+    leader = asyncio.create_task(TrackingService().get_tracking_feed("u-gen"))
+    await asyncio.sleep(0)
+    release.set()
+    await leader
+    assert ts._feed_cache_get("u-gen") is result, "control: the generation check must not block a clean build"
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_does_not_adopt_a_leader_that_predates_the_write(monkeypatch):
+    """The joiner awaited a build the write invalidated; it must rebuild, not return it."""
+    stale, fresh = TrackingFeedResponse(), TrackingFeedResponse()
+    release = asyncio.Event()
+    results = [stale, fresh]
+    entries = []
+
+    async def _build(self, user_id, *, generation=None):
+        entries.append(generation)
+        if len(entries) == 1:
+            await release.wait()
+        out = results[len(entries) - 1]
+        ts._feed_cache_set(user_id, out, generation=generation)
+        return out
+
+    monkeypatch.setattr(TrackingService, "_build_tracking_feed", _build)
+    leader = asyncio.create_task(TrackingService().get_tracking_feed("u-gen"))
+    await asyncio.sleep(0)
+    joiner = asyncio.create_task(TrackingService().get_tracking_feed("u-gen"))
+    await asyncio.sleep(0)
+    ts.invalidate_feed_cache("u-gen")
+    release.set()
+    got_leader, got_joiner = await asyncio.gather(leader, joiner)
+
+    assert got_leader is stale, "the leader serves what it built"
+    assert got_joiner is fresh, "the joiner rebuilt under the new generation instead of adopting the stale result"
+    assert entries == [0, 1], entries
+    assert ts._feed_cache_get("u-gen") is fresh
+
+
+def test_invalidate_bumps_only_that_users_generation():
+    ts.invalidate_feed_cache("u-a")
+    ts.invalidate_feed_cache("u-a")
+    assert ts._feed_generation == {"u-a": 2}
+    assert ts._feed_generation.get("u-b", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_leaders_late_finally_never_pops_a_successors_entry(monkeypatch):
+    """A leader whose client disconnected is superseded by a joiner that installs its
+    own future; the old leader's `finally` must leave that entry alone (identity check).
+    Driven through the real `get_tracking_feed`: cancel the leader while a joiner waits."""
+    release = asyncio.Event()
+    entries = []
+    result = TrackingFeedResponse()
+
+    async def _build(self, user_id, *, generation=None):
+        entries.append(generation)
+        await release.wait()
+        ts._feed_cache_set(user_id, result, generation=generation)
+        return result
+
+    monkeypatch.setattr(TrackingService, "_build_tracking_feed", _build)
+    leader = asyncio.create_task(TrackingService().get_tracking_feed("u-late"))
+    await asyncio.sleep(0)
+    joiner = asyncio.create_task(TrackingService().get_tracking_feed("u-late"))
+    await asyncio.sleep(0)
+    leader.cancel()
+    for _ in range(6):              # cancel → leader's finally → joiner wakes → takes over
+        await asyncio.sleep(0)
+    successor = ts._feed_inflight.get("u-late")
+    assert successor is not None, "the joiner must have become the leader"
+    release.set()
+    assert await joiner is result
+    assert "u-late" not in ts._feed_inflight and "u-late" not in ts._feed_inflight_generation
+    assert entries == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_release_only_pops_its_own_future():
+    """The identity check itself: a late release from a superseded leader is a no-op."""
+    loop = asyncio.get_running_loop()
+    mine, successor = loop.create_future(), loop.create_future()
+    ts._feed_inflight["u-rel"] = successor
+    ts._feed_inflight_generation["u-rel"] = 7
+    ts._release_feed_inflight("u-rel", mine)
+    assert ts._feed_inflight["u-rel"] is successor, "a superseded leader must not pop its successor"
+    assert ts._feed_inflight_generation["u-rel"] == 7
+    ts._release_feed_inflight("u-rel", successor)
+    assert "u-rel" not in ts._feed_inflight and "u-rel" not in ts._feed_inflight_generation
+
+
+def test_the_generation_table_is_bounded_and_spares_in_flight_users(monkeypatch):
+    monkeypatch.setattr(ts, "_FEED_GENERATION_MAX_ENTRIES", 3)
+    for u in ("a", "b", "c"):
+        ts.invalidate_feed_cache(u)
+    ts._feed_inflight["a"] = object()          # a build is running for "a"
+    ts.invalidate_feed_cache("d")              # 4th entry → evict the oldest that is not in flight
+    assert set(ts._feed_generation) == {"a", "c", "d"}, ts._feed_generation
+    assert ts._feed_generation["a"] == 1, "an in-flight user keeps its generation"
+    ts.invalidate_feed_cache("a")              # move-to-end + bump, no eviction needed
+    assert ts._feed_generation["a"] == 2
+    ts._feed_inflight.clear()
+

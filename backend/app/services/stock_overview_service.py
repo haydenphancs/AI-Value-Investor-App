@@ -1093,6 +1093,24 @@ class StockOverviewService:
         change_known = raw_change is not None or raw_pct is not None
         change = raw_change if raw_change is not None else 0.0
         change_pct = raw_pct if raw_pct is not None else 0.0
+        # The same refusal the fast-core path makes above (`get_overview_core`): a missing
+        # price is an upstream FAILURE, never a price of zero. `_fetch_fundamentals` folds
+        # every slice to `{}`/`[]` and `_get_volatile` folds a failed quote to `{}`, so a
+        # symbol FMP cannot serve at all — a bare coin ticker such as DOGE on the equity
+        # screen, or any unknown symbol — used to come out of here as a structurally valid
+        # HTTP 200 with `current_price: 0.0`, and iOS painted a "$0.00" page under the
+        # company's own ticker (TestFlight 1.0 (7)). Raising here reaches the endpoint's
+        # `upstream_error_response` (typed, retryable FMP_UNAVAILABLE), the detail screen
+        # then falls back to `/stocks/{t}` + `/quote`, both 404 for such a symbol, and shows
+        # its failure card with Retry. Same exception class as the core guard on purpose:
+        # at this layer "both empty" is indistinguishable from an FMP outage, so a 404
+        # "not found" would tell a user AAPL does not exist during a blip. Nothing is
+        # cached — the raise precedes `_cache_set` in `get_overview`.
+        if not price or price <= 0:
+            raise FMPUnavailableException(
+                f"No usable price for {ticker} in the full overview "
+                f"(quote={'ok' if quote else 'empty'}, profile={'ok' if profile else 'empty'})"
+            )
         company_name = profile.get("companyName") or quote.get("name") or ticker
 
         # Chart data: use volatile if available, else slice from historical

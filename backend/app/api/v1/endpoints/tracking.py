@@ -42,7 +42,13 @@ from app.schemas.tracking import (
     BulkHoldingUpdateItem,
 )
 from app.services._classification_common import classification_from_profile
-from app.services.asset_class import canonical_stored_symbol
+from app.services.asset_class import (
+    WIRE_CLASSES,
+    canonical_stored_symbol,
+    stored_asset_type,
+    uses_coingecko_price,
+)
+from app.services.crypto_names import crypto_display_name
 from app.services.portfolio_insights_service import PortfolioInsightsService
 from app.services.tracking_service import TrackingService, watchlist_is_full
 from app.utils.supabase_errors import is_transient_supabase_error
@@ -185,12 +191,22 @@ async def add_holding(
     classification: dict = {}
     current_price: Optional[float] = None
     try:
-        fmp = get_fmp_client()
-        profile = await fmp.get_company_profile(ticker)
-        if profile:
+        # A coin is priced by CoinGecko and has no FMP company profile — `profile?symbol=
+        # DOGEUSD` is crypto data outside the Order Form and never carries a sector. Same
+        # gate as `POST /watchlist`; before it, a pair-form coin still hit FMP's profile
+        # before its quote.
+        if uses_coingecko_price(ticker):
+            # `company_name` is NOT NULL on the row, and a coin has no profile to name it
+            # from — the same display-name map `POST /watchlist` uses.
             if not resolved_company_name:
-                resolved_company_name = profile.get("companyName") or None
-            classification = classification_from_profile(profile)
+                resolved_company_name = crypto_display_name(ticker) or ticker
+        else:
+            fmp = get_fmp_client()
+            profile = await fmp.get_company_profile(ticker)
+            if profile:
+                if not resolved_company_name:
+                    resolved_company_name = profile.get("companyName") or None
+                classification = classification_from_profile(profile)
         if request.shares is not None and request.market_value is None:
             quote = await price_source().get_quote(ticker)
             if quote and quote.get("price"):
@@ -202,10 +218,18 @@ async def add_holding(
         "user_id": user["id"],
         "ticker": ticker,
         "shares": request.shares,
-        "asset_type": request.asset_type or "Stock",
     }
     # Persist only resolved enrichment — an omitted key leaves the existing
     # column untouched on upsert (vs. clobbering it with None/'US').
+    #
+    # `asset_type` follows the same rule: a declared wire class, else a SPECIFIC derived
+    # class, else nothing. This used to write `request.asset_type or "Stock"`, so an
+    # undeclared holdings post for an existing ('DOGEUSD', 'crypto') row upserted the
+    # capitalised column default over the migrated value — the one writer that undid
+    # migration 160's backfill (routing survived only via the symbol-suffix rule).
+    asset_type = stored_asset_type(ticker, request.asset_type)
+    if asset_type is not None:
+        data["asset_type"] = asset_type
     if resolved_company_name is not None:
         data["company_name"] = resolved_company_name
     data.update(classification)
@@ -254,7 +278,18 @@ async def update_holding(
             )
         updates["market_value"] = request.market_value
     if request.asset_type is not None:
-        updates["asset_type"] = request.asset_type
+        # Same vocabulary as the insert: a client cannot persist "Crypto"/"Stock" verbatim.
+        # A declared value OUTSIDE the vocabulary is refused rather than dropped — dropping
+        # it answered "Nothing to update." to a request that did send a field.
+        declared = request.asset_type.strip().lower()
+        if declared not in WIRE_CLASSES:
+            return make_error_response(
+                ErrorCode.INVALID_INPUT,
+                message=f"`asset_type` must be one of {sorted(WIRE_CLASSES)}; got {request.asset_type!r}.",
+                user_message="That asset type isn't recognised.",
+                details={"accepted": ", ".join(sorted(WIRE_CLASSES))},
+            )
+        updates["asset_type"] = declared
 
     if not updates:
         return make_error_response(

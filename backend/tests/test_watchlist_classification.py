@@ -236,7 +236,12 @@ def test_backfill_is_a_noop_on_an_empty_watchlist():
     assert fake.writes == []
 
 
-@pytest.mark.parametrize("profile_json", [None, {}, {"sector": ""}, {"sector": "   "}])
+@pytest.mark.parametrize("profile_json", [
+    None, {}, {"sector": ""}, {"sector": "   "},
+    # The formatted profile `stock_overview_service` stores renders an empty sector as the
+    # literal "N/A"; the backfill used to persist it, and neither healer ever revisited it.
+    {"sector": "N/A"}, {"sector": "n/a"}, {"sector": "-"}, {"sector": "None"},
+])
 def test_backfill_leaves_the_row_null_when_the_cache_has_nothing_usable(profile_json):
     wl = [{"ticker": "XYZ", "user_id": "user-1", "sector": None}]
     fake = _run_backfill(wl, [{"ticker": "XYZ", "profile_json": profile_json}])
@@ -336,3 +341,57 @@ def test_backfill_deduplicates_tickers_before_querying():
 
     assert captured and len(captured[0]) == len(set(captured[0])) == 1
     assert all(item["sector"] == "Industrials" for item in wl)
+
+
+# ── placeholders (the "N/A" sector bucket, TestFlight 1.0 (8)) ────────────────
+
+from app.services._classification_common import PLACEHOLDER_TEXT, _clean_str, is_placeholder_text  # noqa: E402
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, True), ("", True), ("   ", True), ("N/A", True), (" n/a ", True), ("NA", True),
+    ("n.a.", True), ("None", True), ("null", True), ("NaN", True), ("-", True), ("\u2014", True),
+    ("Technology", False), ("Unknown", False), ("Other", False), (0, False),
+])
+def test_is_placeholder_text_table(value, expected):
+    assert is_placeholder_text(value) is expected
+
+
+def test_unknown_is_deliberately_not_a_placeholder():
+    """`portfolio_insights_service.UNKNOWN_CAP` is a size label the service EMITS."""
+    assert "unknown" not in PLACEHOLDER_TEXT
+
+
+@pytest.mark.parametrize("placeholder", ["N/A", "n/a", "-", "None", "null"])
+def test_placeholder_strings_are_treated_as_unknown_not_persisted(placeholder):
+    assert _clean_str(placeholder) is None
+    out = classification_from_profile({"sector": placeholder, "industry": placeholder,
+                                       "country": placeholder, "marketCap": 1e9})
+    assert out == {"market_cap": 1e9}, out
+
+
+def test_backfill_skips_a_placeholder_country_but_keeps_the_real_sector():
+    wl = [{"ticker": "XYZ", "user_id": "user-1", "sector": None, "country": None}]
+    fake = _run_backfill(wl, [{"ticker": "XYZ", "profile_json": {"sector": "Industrials", "country": "N/A"}}])
+    assert wl[0]["sector"] == "Industrials"
+    assert wl[0].get("country") is None
+    assert [w for w in fake.writes] and all("country" not in w[-1] for w in fake.writes), fake.writes
+
+
+def test_a_two_letter_country_code_is_never_a_placeholder():
+    """`country` holds ISO-3166 alpha-2 codes and "NA" is Namibia. The placeholder rule
+    for sector/industry must not swallow it — a Namibian listing would silently become 'US'."""
+    assert is_placeholder_text("NA") is True                     # for a sector, still unknown
+    assert is_placeholder_text("NA", iso_code=True) is False
+    assert is_placeholder_text("N/A", iso_code=True) is True     # a real placeholder still is
+    assert is_placeholder_text("", iso_code=True) is True
+    out = classification_from_profile({"sector": "NA", "country": "NA", "industry": "N/A"})
+    assert out == {"country": "NA"}, out
+
+
+def test_backfill_keeps_a_namibian_country_code():
+    wl = [{"ticker": "XYZ", "user_id": "user-1", "sector": None, "country": None}]
+    fake = _run_backfill(wl, [{"ticker": "XYZ", "profile_json": {"sector": "Energy", "country": "NA"}}])
+    assert wl[0]["sector"] == "Energy"
+    assert wl[0]["country"] == "NA"
+

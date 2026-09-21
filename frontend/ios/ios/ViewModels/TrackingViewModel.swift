@@ -93,6 +93,16 @@ class TrackingViewModel: ObservableObject {
     /// Pending coalesced activity re-fetch — see `reloadForFollowChange()`.
     private var activityReloadTask: Task<Void, Never>?
 
+    /// Pending coalesced reconcile after a watchlist change made elsewhere — see
+    /// `handleWatchlistChange(_:)`.
+    private var watchlistReloadTask: Task<Void, Never>?
+
+    /// `recentlyAddedTickers` markers this ViewModel inserted for detail-screen ADDs and
+    /// has not yet cleared. Cleared only after a load that could SEE the row: a marker
+    /// removed before that load lands would let `performLoad`'s purge treat the new
+    /// group member as an orphan.
+    private var watchlistMarkerQueue: [(portfolioId: String, ticker: String)] = []
+
     /// A tapped LOCKED Follow button → the plan sheet. Owned here rather than passed down
     /// as a closure because the button sits three list layers deep (section → flat/category
     /// list → card) in two different screens.
@@ -205,6 +215,21 @@ class TrackingViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // A star tapped on a detail screen (or a toggle in Updates › Manage Assets) changed
+        // the watchlist — and, through the backend's write-through, the active group.
+        // Observed HERE for the same reason as the follow signal above: the detail screen
+        // is pushed OVER this tab inside its own NavigationStack, `isActiveTab` never
+        // flips, `loadIfNeeded` is latched, and the 30 s timer reloads only the feed
+        // (never the portfolios) — so a removed row stayed until pull-to-refresh and an
+        // added one never appeared at all.
+        NotificationCenter.default.publisher(for: PortfolioStore.watchlistDidChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                guard let change = WatchlistChange(notification) else { return }
+                self?.handleWatchlistChange(change)
+            }
+            .store(in: &cancellables)
+
         // Republish whenever the portfolio store changes so filteredAssets,
         // filteredAlerts, and portfolioDiversificationScore re-render.
         self.portfolioStore.objectWillChange
@@ -250,6 +275,7 @@ class TrackingViewModel: ObservableObject {
     deinit {
         priceRefreshTask?.cancel()
         activityReloadTask?.cancel()
+        watchlistReloadTask?.cancel()
     }
 
     // MARK: - Computed Properties
@@ -491,10 +517,34 @@ class TrackingViewModel: ObservableObject {
     var portfolioInsightsCoverageNote: String? {
         guard let active = portfolioStore.activePortfolio,
               !active.items.isEmpty else { return nil }
-        let used = active.items.filter { $0.isHolding }.count
+        // Prefer what was SCORED. The client-side `isHolding` count includes a shares-only
+        // row the server could not price (stored value 0 → dropped before weighting), so
+        // "Based on 3 of 3" could sit over a score computed from two. Clamped to the local
+        // total: the score is the LAST server answer, and an in-tab removal shrinks
+        // `active.items` before the insights reload lands — "3 of 2" otherwise.
         let total = active.items.count
+        let used = min(
+            displayedDiversificationScore?.holdingsCount
+                ?? active.items.filter { $0.isHolding }.count,
+            total
+        )
         let noun = total == 1 ? "ticker" : "tickers"
         return "Based on \(used) of \(total) \(noun)"
+    }
+
+    /// The one-line hint under the Diversification verdict, or nil. Keyed on the SCORED
+    /// count (server online, calculator offline) so it can never disagree with the
+    /// coverage note above it; a score that carries no count says nothing.
+    var portfolioInsightsHint: String? {
+        guard let score = displayedDiversificationScore,
+              let scored = score.holdingsCount,
+              let active = portfolioStore.activePortfolio else { return nil }
+        // Same clamp as the coverage note: the scored count is the last server answer.
+        return DiversificationHint.make(
+            scoredHoldings: min(scored, active.items.count),
+            enteredTickers: enteredHoldingsCount,
+            totalTickers: active.items.count
+        )
     }
 
     /// How many of the active portfolio's tickers have shares or a dollar
@@ -836,6 +886,74 @@ class TrackingViewModel: ObservableObject {
         }
     }
 
+    /// A watchlist add/remove confirmed by the server somewhere other than this tab.
+    ///
+    /// Two halves, in this order:
+    ///   1. Patch locally so the list is right on THIS run-loop turn. A removal drops the
+    ///      row from `trackedAssets` (`filteredAssets` derives from it — the same line
+    ///      `removeAssetFromAll` uses). An add cannot be drawn yet (the feed row needs a
+    ///      quote and the group membership comes from `GET /portfolios`), so it marks the
+    ///      ticker in `recentlyAddedTickers` instead — which also fills the search sheet's
+    ///      star and, load-bearingly, keeps `performLoad`'s purge from deleting the freshly
+    ///      mirrored group member if the reconcile below reads a feed that predates the
+    ///      write (a build already in flight when the POST landed can do exactly that).
+    ///   2. Reconcile from the server, coalesced (300 ms, like `reloadForFollowChange`)
+    ///      and ordered STRICTLY BEHIND the write: any load already running may predate
+    ///      it, so it is awaited to completion first and a fresh one issued after —
+    ///      joining it would adopt the pre-toggle state. `loadData()` rather than
+    ///      `refresh()`: no pull-to-refresh spinner for a change the user did not make
+    ///      here. Markers are cleared only for the adds this particular load could see.
+    ///
+    /// Nothing to do before the first load — `loadIfNeeded` fetches fresh on activation,
+    /// and the server invalidated its feed cache on the write — UNLESS that first load is
+    /// in flight right now: it may have read the pre-write list (a star tapped on a
+    /// Home-pushed detail while Tracking's first load runs), so it is reconciled behind
+    /// like any other running load.
+    func handleWatchlistChange(_ change: WatchlistChange) {
+        // Own writes already reload this tab (`addTickerFromSearch` → `refresh()`,
+        // `removeAssetFromAll` patches + reloads); they post only for Home and Updates.
+        guard change.source != .tracking else { return }
+        guard hasLoadedOnce || loadTask != nil else { return }
+        let ticker = change.ticker.uppercased()
+
+        if change.added {
+            if let activeId = portfolioStore.activePortfolioId {
+                recentlyAddedTickers[activeId, default: []].insert(ticker)
+                watchlistMarkerQueue.append((portfolioId: activeId, ticker: ticker))
+            }
+        } else {
+            trackedAssets.removeAll { $0.ticker.uppercased() == ticker }
+            // Add-then-remove inside one debounce window: the pending add marker would
+            // otherwise keep `isOnWatchlist` true for a ticker that is gone.
+            for (portfolioId, _) in watchlistMarkerQueue where recentlyAddedTickers[portfolioId]?.contains(ticker) == true {
+                recentlyAddedTickers[portfolioId]?.remove(ticker)
+                if recentlyAddedTickers[portfolioId]?.isEmpty == true {
+                    recentlyAddedTickers.removeValue(forKey: portfolioId)
+                }
+            }
+            watchlistMarkerQueue.removeAll { $0.ticker == ticker }
+        }
+
+        watchlistReloadTask?.cancel()
+        watchlistReloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if let running = self.loadTask, !running.isCancelled {
+                await running.value
+            }
+            guard !Task.isCancelled else { return }
+            let mine = self.watchlistMarkerQueue
+            self.watchlistMarkerQueue.removeAll()
+            await self.loadData()
+            for (portfolioId, pending) in mine {
+                self.recentlyAddedTickers[portfolioId]?.remove(pending)
+                if self.recentlyAddedTickers[portfolioId]?.isEmpty == true {
+                    self.recentlyAddedTickers.removeValue(forKey: portfolioId)
+                }
+            }
+        }
+    }
+
     func refresh() async {
         isRefreshing = true
         await loadData()
@@ -871,6 +989,13 @@ class TrackingViewModel: ObservableObject {
         // Cleared so a later tab activation re-loads for the NEW identity rather than
         // treating the previous account's completed load as this one's.
         hasLoadedOnce = false
+        // A watchlist reconcile still debouncing would reload against the NEW identity;
+        // its markers (and any older ones — nothing cleared `recentlyAddedTickers` here
+        // before, so a marker could keep `isOnWatchlist` true across a sign-out) belong
+        // to the previous one.
+        watchlistReloadTask?.cancel()
+        watchlistMarkerQueue.removeAll()
+        recentlyAddedTickers.removeAll()
 
         // Fetch only if the user is actually looking at this tab. Clearing above resets
         // `hasLoadedOnce`, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -1039,6 +1164,13 @@ class TrackingViewModel: ObservableObject {
                     endpoint: .addToWatchlist(stockId: result.ticker, assetType: result.type)
                 )
                 print("[TrackingVM] ✅ Added \(symbol) to watchlist via search star")
+                // Home's watchlist section and Updates' chips are built from the active
+                // group server-side and observe nothing here; `symbol` is already the
+                // stored spelling. This tab ignores its own source.
+                PortfolioStore.announceWatchlistChange(
+                    ticker: symbol, assetType: result.type ?? "stock",
+                    added: true, source: .tracking
+                )
             } catch {
                 // Most common reason this fails is that the ticker is already
                 // on the master watchlist (409). That's fine — we still want
@@ -1080,6 +1212,10 @@ class TrackingViewModel: ObservableObject {
                     endpoint: .removeFromWatchlist(stockId: asset.ticker)
                 )
                 print("[TrackingVM] ✅ Removed \(asset.ticker) from watchlist + all portfolios")
+                PortfolioStore.announceWatchlistChange(
+                    ticker: asset.ticker, assetType: asset.assetType,
+                    added: false, source: .tracking
+                )
             } catch {
                 // The row was removed optimistically before this ran; without a signal the
                 // ticker silently returns on the next refresh.

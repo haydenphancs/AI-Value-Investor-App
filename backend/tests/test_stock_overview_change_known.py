@@ -23,6 +23,7 @@ import pytest
 
 from app.schemas.stock_overview import StockOverviewCoreResponse, StockOverviewResponse
 from app.services import stock_overview_service as sos
+from app.integrations.fmp import FMPUnavailableException
 from app.services.stock_overview_service import (
     StockOverviewService,
     _cache,
@@ -144,6 +145,75 @@ def test_full_overview_marks_an_unknown_day_change(monkeypatch, quote, profile, 
     assert math.isfinite(resp.price_change) and math.isfinite(resp.price_change_percent)
     if not known:
         assert resp.price_change == 0.0 and resp.price_change_percent == 0.0
+
+
+# ── The full builder refuses a symbol with no usable price ────────────────────
+#
+# TestFlight 1.0 (7): a bare coin ticker (DOGE) routed to the EQUITY screen and sat on its
+# skeleton. The routing half was fixed server-side (resolve_asset_class + migration 160),
+# but the equity pipeline itself had a second failure: `_fetch_fundamentals` folds every
+# FMP slice to `{}`/`[]` and `_get_volatile` folds a failed quote to `{}`, and
+# `_build_full_response` had no price guard — so any symbol FMP cannot serve came out as
+# HTTP 200 with `current_price: 0.0`, which iOS painted as a "$0.00" page. The fast-core
+# path had refused that since the "$0.00 header" incident; the full path now does too.
+
+
+@pytest.mark.parametrize("quote, profile", [
+    ({}, {}),                                    # both legs empty (FMP-unservable symbol)
+    ({"price": 0.0}, {}),                        # explicit zero, nothing behind it
+    ({"price": None}, {"price": 0}),             # null quote price, zero profile price
+    ({"price": -1.0}, {}),                       # negative is not a price either
+    ({"price": float("nan")}, {}),               # non-finite never becomes a price
+])
+def test_full_overview_refuses_a_symbol_with_no_usable_price(monkeypatch, quote, profile):
+    with pytest.raises(FMPUnavailableException) as exc:
+        _full(monkeypatch, quote, profile)
+    # The message names the ticker and which leg was empty — this is diagnosed from logs.
+    msg = str(exc.value)
+    assert "XYZ" in msg
+    assert ("quote=empty" if not quote else "quote=ok") in msg, msg
+    # `_full` seeds companyName/sector into the profile, so the profile leg reads "ok" here
+    # even for the "both legs empty" row — the genuinely empty case is pinned below.
+    assert "profile=ok" in msg, msg
+
+
+def test_full_overview_names_both_empty_legs_for_an_unservable_symbol(monkeypatch):
+    """The DOGE-on-the-equity-screen shape: FMP answered [] for the profile AND the quote
+    failed. Built without `_full`'s seeded profile keys so the diagnostic reads exactly
+    `quote=empty, profile=empty`."""
+    _cache.clear()
+    svc = StockOverviewService()
+    monkeypatch.setattr(sos, "get_sector_benchmark_lookup", lambda: _StubBenchmarkLookup())
+    with pytest.raises(FMPUnavailableException) as exc:
+        svc._build_full_response("DOGE", {"profile": {}}, {"quote": {}, "chart_data": []},
+                                 "1D", "5min", False)
+    assert "DOGE" in str(exc.value)
+    assert "quote=empty" in str(exc.value) and "profile=empty" in str(exc.value), str(exc.value)
+
+
+@pytest.mark.parametrize("quote, profile", [
+    ({}, {"price": 43.08}),                       # quote leg failed, the profile still prices it
+    ({"price": 43.08}, {}),                       # the normal case
+    ({"price": None}, {"price": 43.08}),          # null quote price, real profile price
+])
+def test_full_overview_still_serves_when_either_leg_prices_it(monkeypatch, quote, profile):
+    resp = _full(monkeypatch, quote, profile)
+    assert isinstance(resp, StockOverviewResponse)
+    assert resp.current_price == pytest.approx(43.08)
+
+
+def test_core_and_full_builders_share_the_no_price_guard():
+    """Both builders must refuse a zero price with the SAME retryable class. A 404
+    `TICKER_NOT_FOUND` here would be wrong: at this layer "both legs empty" is
+    indistinguishable from an FMP outage (every exception is folded before the builder
+    runs), and it would tell a user AAPL does not exist during a blip."""
+    import inspect
+    for fn in (StockOverviewService.get_overview_core, StockOverviewService._build_full_response):
+        code = inspect.getsource(fn)
+        guard_at = code.find("if not price or price <= 0:")
+        assert guard_at != -1, fn.__name__
+        assert "raise FMPUnavailableException(" in code[guard_at : guard_at + 400], fn.__name__
+        assert "TICKER_NOT_FOUND" not in code, fn.__name__
 
 
 def test_core_and_full_builders_agree_on_the_flag(monkeypatch):

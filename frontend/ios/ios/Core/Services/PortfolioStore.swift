@@ -70,6 +70,43 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
+    /// Posted once the SERVER has confirmed a watchlist add or remove — the star on the
+    /// five detail screens, Updates › Manage Assets, and Tracking's own search star / swipe
+    /// removal. Every subscriber that already reloads itself after its OWN mutation ignores
+    /// its own `source` (Tracking ignores `.tracking`, Updates `.updates`).
+    ///
+    /// Why a post-CONFIRM signal and not one fired on the optimistic flip: the receiver's
+    /// answer is a refetch, and a refetch keyed to the flip can overtake the POST/DELETE
+    /// still in flight, read the PRE-toggle state and revert the very change it was
+    /// meant to show (`WhaleService.followsDidChangeNotification` documents the same race
+    /// for follows). So the five stars post inside the request task's success branch.
+    ///
+    /// The TestFlight report behind it: unstar NVDA on its detail screen, pop back, and
+    /// the row was still in the Tracking list until a pull-to-refresh — nothing told
+    /// `TrackingViewModel`, whose load is latched on `hasLoadedOnce`, and Home / Updates
+    /// were stale for 60 s / the whole process respectively.
+    static let watchlistDidChangeNotification = Notification.Name(
+        "PortfolioStore.watchlistDidChange"
+    )
+
+    /// Post `watchlistDidChangeNotification` with a `WatchlistChange` payload.
+    ///
+    /// `ticker` must be the STORED spelling — the pair form (`BTCUSD`) for a coin, the
+    /// raw symbol otherwise — because the receivers match it against feed rows and
+    /// portfolio membership, both of which hold the stored form; a bare `BTC` would
+    /// match nothing (and names a different asset, the Grayscale ETF).
+    static func announceWatchlistChange(
+        ticker: String, assetType: String, added: Bool, source: WatchlistChange.Source
+    ) {
+        let change = WatchlistChange(
+            ticker: ticker.uppercased(), assetType: assetType, added: added, source: source
+        )
+        NotificationCenter.default.post(
+            name: watchlistDidChangeNotification, object: nil,
+            userInfo: [WatchlistChange.userInfoKey: change]
+        )
+    }
+
     var activePortfolio: Portfolio? {
         portfolios.first { $0.id == activePortfolioId }
     }
@@ -519,5 +556,44 @@ extension EnvironmentValues {
     var portfolioStore: PortfolioStore {
         get { self[PortfolioStoreKey.self] }
         set { self[PortfolioStoreKey.self] = newValue }
+    }
+}
+
+// MARK: - Watchlist change payload
+
+/// Payload of `PortfolioStore.watchlistDidChangeNotification`. File scope (not nested in
+/// the `@MainActor` store) so the `userInfo` value carries no actor isolation and every
+/// subscriber can read it from whatever context the notification lands on.
+struct WatchlistChange: Sendable, Equatable {
+    /// Where the mutation was made. Subscribers that already reload themselves after
+    /// their OWN mutation ignore their own source, or every toggle would fetch twice.
+    enum Source: String, Sendable {
+        case detailStar
+        case updates
+        case tracking
+    }
+
+    /// Stored spelling, uppercased (see `PortfolioStore.announceWatchlistChange`).
+    let ticker: String
+    let assetType: String
+    let added: Bool
+    let source: Source
+
+    static let userInfoKey = "change"
+
+    init(ticker: String, assetType: String, added: Bool, source: Source) {
+        self.ticker = ticker.uppercased()
+        self.assetType = assetType
+        self.added = added
+        self.source = source
+    }
+
+    /// The payload carried by a `watchlistDidChangeNotification`, or nil for any other
+    /// notification (or a malformed one).
+    init?(_ notification: Notification) {
+        guard let change = notification.userInfo?[Self.userInfoKey] as? WatchlistChange else {
+            return nil
+        }
+        self = change
     }
 }

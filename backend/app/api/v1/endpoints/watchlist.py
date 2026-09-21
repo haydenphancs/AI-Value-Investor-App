@@ -19,6 +19,7 @@ from app.integrations.fmp import get_fmp_client
 from app.services.tracking_service import invalidate_feed_cache, watchlist_is_full
 from app.services._classification_common import classification_from_profile
 from app.services.asset_class import (
+    WIRE_CLASSES,
     canonical_stored_symbol,
     resolve_asset_class,
     uses_coingecko_price,
@@ -35,8 +36,9 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
-# The wire vocabulary iOS switches on (`MarketTickerType`, `AssetDetailRouter`).
-_WIRE_CLASSES = frozenset({"stock", "etf", "index", "commodity", "crypto"})
+# The wire vocabulary iOS switches on (`MarketTickerType`, `AssetDetailRouter`). Hoisted to
+# `asset_class.WIRE_CLASSES` so the holdings route persists the same vocabulary.
+_WIRE_CLASSES = WIRE_CLASSES
 
 router = APIRouter()
 

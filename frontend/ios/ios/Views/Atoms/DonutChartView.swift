@@ -142,10 +142,18 @@ struct DonutChartLegendItem: View {
 
             Spacer(minLength: AppSpacing.sm)
 
-            Text(String(format: "%.0f%%", value))
+            Text(formattedValue)
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
         }
+    }
+
+    /// A listed segment always has positive weight (the server drops zero-value
+    /// holdings before allocating), so a slice that rounds to 0 is a REAL sliver, not
+    /// nothing — "0%" beside a coin the user knows they hold read as "not counted"
+    /// (TestFlight 1.0 (8)). Sub-half-percent slices say so instead.
+    private var formattedValue: String {
+        value < 0.5 ? "<1%" : String(format: "%.0f%%", value)
     }
 }
 

@@ -147,6 +147,18 @@ struct UpdatesView: View {
             ) { _ in
                 Task { await viewModel.reloadForActiveGroupChange() }
             }
+            // A star on a detail screen adds/removes a ticker the chip strip shows. Same
+            // latch problem as above, so the same answer. Manage Assets on THIS screen
+            // already reloads inline after its own request — its posts are skipped, or
+            // every toggle would fetch the tabs twice.
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: PortfolioStore.watchlistDidChangeNotification
+                )
+            ) { notification in
+                guard let change = WatchlistChange(notification), change.source != .updates else { return }
+                Task { await viewModel.reloadForWatchlistChange() }
+            }
             .onChange(of: viewModel.selectedTab) { oldValue, newValue in
                 if let newTab = newValue {
                     viewModel.selectTab(newTab)

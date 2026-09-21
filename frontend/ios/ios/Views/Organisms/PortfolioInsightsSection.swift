@@ -15,6 +15,8 @@ import SwiftUI
 struct PortfolioInsightsSection: View {
     let score: DiversificationScore?
     var coverageNote: String? = nil
+    /// See `DiversificationCard.hint`.
+    var hint: String? = nil
     /// Number of tickers the user has actually entered shares / dollars for.
     /// When this is between 1 and `minimumHoldings - 1` the score is nil (you
     /// can't diversify a single position), so we show an explanatory hint
@@ -51,7 +53,7 @@ struct PortfolioInsightsSection: View {
             collapsedHint
         } else if let score = score {
             VStack(alignment: .trailing, spacing: AppSpacing.xs) {
-                DiversificationCard(score: score, coverageNote: coverageNote)
+                DiversificationCard(score: score, coverageNote: coverageNote, hint: hint)
 
                 if onConfigureTapped != nil {
                     Button {
@@ -177,6 +179,8 @@ struct PortfolioInsightsSection: View {
     VStack(spacing: AppSpacing.xxl) {
         PortfolioInsightsSection(
             score: DiversificationScore.sampleData,
+            coverageNote: "Based on 2 of 3 tickers",
+            hint: DiversificationHint.make(scoredHoldings: 2, enteredTickers: 2, totalTickers: 3),
             isEnabled: .constant(true),
             onConfigureTapped: {}
         )

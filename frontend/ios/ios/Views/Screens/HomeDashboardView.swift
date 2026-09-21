@@ -132,6 +132,17 @@ struct HomeDashboardView: View {
         ) { _ in
             Task { await viewModel.load() }
         }
+        // A watchlist add/remove made elsewhere (a detail-screen star, Tracking, Updates ›
+        // Manage Assets) changes the watchlist section's rows; `loadIfStale` would sit on
+        // the previous list for up to a minute. Reloaded behind any in-flight load when
+        // visible, marked stale when hidden — see `reloadForWatchlistChange`.
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: PortfolioStore.watchlistDidChangeNotification
+            )
+        ) { _ in
+            Task { await viewModel.reloadForWatchlistChange(isActiveTab: isActiveTab) }
+        }
         // Home is where this matters most: it has NO root NavigationStack, so every destination
         // here is modal and the ticker screen is routinely two covers deep (theme → ticker,
         // signals → ticker, search → ticker). Clearing these roots unwinds the whole nest —

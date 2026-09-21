@@ -170,7 +170,12 @@ class AddHoldingRequest(BaseModel):
     company_name: Optional[str] = None
     shares: Optional[float] = None
     market_value: Optional[float] = None
-    asset_type: Optional[str] = "Stock"
+    # `None`, like `AddToWatchlistRequest`: an undeclared class means "resolve from the
+    # symbol" on BOTH writers. The old `"Stock"` default silently DECLARED every holdings
+    # post a security, so a bare "DOGE" posted here stayed bare (the listed security) while
+    # the same symbol posted to `POST /watchlist` became the coin — two spellings of one
+    # holding, the ambiguity migration 160 removed.
+    asset_type: Optional[str] = None
 
 
 class UpdateHoldingRequest(BaseModel):
@@ -247,8 +252,8 @@ class PortfolioInsightsResponse(BaseModel):
     """Server-computed Portfolio Insights payload.
 
     Null when the user has fewer than the minimum holdings for a meaningful
-    score. ``score`` (0..100) is the SUM of the sub-score points; the four
-    dimensions (position / sector / concentration / market-cap) each contribute
+    score. ``score`` (0..100) is the SUM of the sub-score points; the three
+    dimensions (position / sector / market-cap) each contribute
     additive points. ``effective_holdings`` (1 / HHI) is an intuitive caption.
     """
 

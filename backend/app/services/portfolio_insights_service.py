@@ -14,7 +14,8 @@ the bars add up to the overall score:
 
   position   — per-ticker weight balance (normalized HHI; this already captures
                single-name concentration, so there is no separate one)
-  sector     — spread across the GICS sectors held
+  sector     — spread across the GICS sectors held (coins form one "Crypto" bucket;
+               a placeholder sector such as "N/A" folds into "Other", never its own)
   marketcap  — mega / large / mid / small mix (its budget folds into the other
                two when no market-cap data is available)
 
@@ -35,6 +36,7 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.services._classification_common import is_placeholder_text
 from app.services.asset_class import resolve_asset_class
 from app.integrations.fmp import get_fmp_client
 from app.schemas.tracking import (
@@ -123,6 +125,57 @@ def _cap_bucket(market_cap: Optional[float]) -> Optional[str]:
     return "Small Cap"
 
 
+# Bucket labels. `CRYPTO_BUCKET` names a coin's slice in BOTH donuts; `OTHER_SECTOR` is
+# where a missing or placeholder sector lands; `UNKNOWN_CAP` is an equity with no cap
+# (deliberately NOT in `PLACEHOLDER_TEXT` — it is a label we emit, never a value we read).
+CRYPTO_BUCKET = "Crypto"
+OTHER_SECTOR = "Other"
+UNKNOWN_CAP = "Unknown"
+
+
+def _is_crypto(h: PortfolioHoldingResponse) -> bool:
+    """A coin holding: the stored class says so, or the symbol is a pair form.
+
+    `resolve_asset_class` trusts a stored ``'crypto'`` and otherwise calls any long
+    ``*USD`` symbol crypto — which is also what an FX pair looks like, so the same
+    exclusion `uses_coingecko_price` carries applies here (an `EURUSD` row must not become
+    a "Crypto" slice). Never `include_bare_coins`: a bare ``BTC`` / ``LTC`` / ``SOL`` is
+    the LISTED security of that name after migration 160.
+    """
+    from app.integrations.fmp_entitlements import _is_fx_pair
+
+    ticker = str(h.ticker or "").strip().upper()
+    if resolve_asset_class(ticker, h.asset_type) != "crypto":
+        return False
+    return not _is_fx_pair(ticker)
+
+
+def _sector_bucket(h: PortfolioHoldingResponse) -> str:
+    """The Sector-donut bucket for one holding.
+
+    Before this existed the string ``"N/A"`` — persisted by the feed's backfill from
+    `stock_overview_service`'s formatted profile — passed the caller's truthiness test and
+    became a bucket named "N/A" beside "Other", so the card drew a legend row reading
+    "N/A 0%" and `sector_count` / the sector HHI counted one sector too many. A coin has no
+    GICS sector and used to fall into "Other" (the TestFlight 1.0 (8) report: "I have
+    crypto, but it doesn't reflect in here").
+    """
+    if _is_crypto(h):
+        return CRYPTO_BUCKET
+    if is_placeholder_text(h.sector):
+        return OTHER_SECTOR
+    return _normalize_sector(str(h.sector).strip())
+
+
+def _size_bucket(h: PortfolioHoldingResponse) -> str:
+    """The Size-donut bucket. A coin's market cap is not an equity size factor and the
+    stored cap is NULL for it anyway (migration 160), so it gets its own named slice
+    rather than "Unknown"."""
+    if _is_crypto(h):
+        return CRYPTO_BUCKET
+    return _cap_bucket(h.market_cap) or UNKNOWN_CAP
+
+
 def _zone(ratio_0_100: int) -> str:
     """Color band for a 0..100 quality ratio (points / max_points)."""
     if ratio_0_100 >= 70:
@@ -194,8 +247,7 @@ def score_holdings(
     position_q = normalized_hhi_score(weights, n)
 
     sector_group = _weighted_group(
-        [(_normalize_sector(h.sector) if h.sector else "Other", w)
-         for h, w in zip(holdings, weights)]
+        [(_sector_bucket(h), w) for h, w in zip(holdings, weights)]
     )
     sector_q = normalized_hhi_score(list(sector_group.values()), len(sector_group))
 
@@ -203,6 +255,12 @@ def score_holdings(
     cap_group: Dict[str, float] = {}
     known_cap_weight = 0.0
     for h, w in zip(holdings, weights):
+        # A coin never enters the equity size mix — even if a cap is ever stored for it,
+        # "Mega Cap" is not what Bitcoin's dominance means. Same rule the iOS offline
+        # mirror (`DiversificationCalculator`) applies, and it has to: the Tracking feed
+        # hands that mirror CoinGecko's cap for a coin.
+        if _is_crypto(h):
+            continue
         bucket = _cap_bucket(h.market_cap)
         if bucket:
             cap_group[bucket] = cap_group.get(bucket, 0.0) + w
@@ -249,8 +307,7 @@ def score_holdings(
     sector_allocations = _allocations(sector_group)
     marketcap_allocations = _allocations(
         _weighted_group(
-            [(_cap_bucket(h.market_cap) or "Unknown", w)
-             for h, w in zip(holdings, weights)]
+            [(_size_bucket(h), w) for h, w in zip(holdings, weights)]
         )
     )
 
@@ -478,15 +535,17 @@ class PortfolioInsightsService:
                 continue
 
             update: dict = {}
-            if not row.get("sector") and profile.get("sector"):
-                row["sector"] = profile["sector"]
-                update["sector"] = profile["sector"]
-            if not row.get("industry") and profile.get("industry"):
-                row["industry"] = profile["industry"]
-                update["industry"] = profile["industry"]
-            if not row.get("country") and profile.get("country"):
-                row["country"] = profile["country"]
-                update["country"] = profile["country"]
+            # Placeholder-aware on WRITE, like `classification_from_profile`: FMP has served
+            # the string "N/A" for these, and persisting it here made a bucket named "N/A"
+            # that neither healer would ever revisit (both test falsiness).
+            for column in ("sector", "industry", "country"):
+                if row.get(column):
+                    continue
+                value = profile.get(column)
+                if is_placeholder_text(value, iso_code=(column == "country")):
+                    continue
+                row[column] = str(value).strip()
+                update[column] = str(value).strip()
             if row.get("market_cap") is None:
                 mc = profile.get("marketCap") or profile.get("mktCap")
                 if mc:

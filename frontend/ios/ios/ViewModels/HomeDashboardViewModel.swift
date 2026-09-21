@@ -131,6 +131,23 @@ final class HomeDashboardViewModel: ObservableObject {
     /// `/home/dashboard` three times.
     private var loadTask: Task<Void, Never>?
 
+    /// A watchlist row was added or removed elsewhere (a detail-screen star, Tracking,
+    /// Updates). Visible tab → reload ORDERED BEHIND any load already running: `load()`
+    /// joins a running load, and one started before the write (the 60 s tick keeps them
+    /// going while a detail cover sits over Home) would hand back the pre-toggle list.
+    /// Hidden tab → just void the freshness stamp so `loadIfStale` fetches on the next
+    /// activation, instead of spending a dashboard fetch nobody is looking at.
+    func reloadForWatchlistChange(isActiveTab: Bool) async {
+        guard isActiveTab else {
+            lastLoadedAt = nil
+            return
+        }
+        if let running = loadTask, !running.isCancelled {
+            await running.value
+        }
+        await load()
+    }
+
     func load() async {
         if let running = loadTask, !running.isCancelled {
             await running.value

@@ -466,6 +466,7 @@ struct AssetsTabContent: View {
                 PortfolioInsightsSection(
                     score: viewModel.displayedDiversificationScore,
                     coverageNote: viewModel.portfolioInsightsCoverageNote,
+                    hint: viewModel.portfolioInsightsHint,
                     enteredHoldingsCount: viewModel.enteredHoldingsCount,
                     isEnabled: $viewModel.isInsightsEnabled,
                     onConfigureTapped: { viewModel.openPortfolioConfigSheet() }
@@ -1427,6 +1428,11 @@ struct AddAssetSheet: View {
                     endpoint: .addToWatchlist(stockId: result.ticker, assetType: result.type)
                 )
                 print("[AddAsset] ✅ Added \(result.ticker) to watchlist")
+                // For Home and Updates (this sheet's owner reloads Tracking via onAssetAdded).
+                PortfolioStore.announceWatchlistChange(
+                    ticker: symbol, assetType: result.type ?? "stock",
+                    added: true, source: .tracking
+                )
                 // Watchlist add succeeded — also push the ticker into the
                 // active portfolio so the user sees it immediately. A failure
                 // here IS user-visible (the ticker is on the watchlist but not

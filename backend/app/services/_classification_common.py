@@ -18,15 +18,48 @@ without thinking about it.
 
 from typing import Any, Dict, Mapping, Optional
 
-__all__ = ["classification_from_profile"]
+__all__ = ["classification_from_profile", "is_placeholder_text", "PLACEHOLDER_TEXT"]
+
+# Strings that MEAN "unknown" and must never be stored or bucketed as a value. FMP sends
+# "" / "  " for an unknown sector; our own `stock_overview_service._build_sector_industry`
+# renders an empty sector as the literal "N/A" for the detail screen, and that string
+# travelled through `company_profile_cache.profile_json` into `watchlist_items.sector` via
+# the feed's backfill — where the Diversification card then drew a legend row named "N/A"
+# (TestFlight 1.0 (8)) and `score_holdings` counted it as a sector of its own.
+#
+# ⚠️ Not "unknown": `portfolio_insights_service` legitimately emits an "Unknown" size
+# bucket for a holding without a market cap, and FMP never sends that word for a sector.
+PLACEHOLDER_TEXT = frozenset({
+    "", "n/a", "na", "n.a.", "none", "null", "nan", "-", "\u2014", "\u2013",
+})
 
 
-def _clean_str(value: Any) -> Optional[str]:
-    """Trimmed non-empty string, else None. FMP sends "" and "  " for unknowns."""
+# `country` is an ISO-3166 alpha-2 code, and "NA" is Namibia. The placeholder rule for that
+# column must not swallow it — so the two-letter spellings are exempt there.
+_ISO_CODE_LOOKALIKES = frozenset({"na"})
+
+
+def is_placeholder_text(value: Any, *, iso_code: bool = False) -> bool:
+    """True when *value* is absent or one of the strings that mean "unknown".
+
+    ``iso_code=True`` for a column that holds ISO-3166 alpha-2 codes (`country`): the
+    two-letter placeholder spellings are real codes there ("NA" = Namibia).
+    """
     if value is None:
+        return True
+    text = str(value).strip().lower()
+    if iso_code and text in _ISO_CODE_LOOKALIKES:
+        return False
+    return text in PLACEHOLDER_TEXT
+
+
+def _clean_str(value: Any, *, iso_code: bool = False) -> Optional[str]:
+    """Trimmed non-placeholder string, else None. FMP sends "" and "  " for unknowns, and
+    a formatted profile can carry "N/A" — the omission rule (module docstring) applies to
+    both: a placeholder country is omitted and the column's 'US' default applies."""
+    if is_placeholder_text(value, iso_code=iso_code):
         return None
-    text = str(value).strip()
-    return text or None
+    return str(value).strip()
 
 
 def _clean_float(value: Any) -> Optional[float]:
@@ -63,7 +96,7 @@ def classification_from_profile(profile: Optional[Mapping[str, Any]]) -> Dict[st
         out["sector"] = sector
     if (industry := _clean_str(profile.get("industry"))) is not None:
         out["industry"] = industry
-    if (country := _clean_str(profile.get("country"))) is not None:
+    if (country := _clean_str(profile.get("country"), iso_code=True)) is not None:
         out["country"] = country
 
     # `marketCap` on /stable, `mktCap` on the legacy shape — some cached rows still

@@ -246,6 +246,14 @@ final class UpdatesViewModel: ObservableObject {
         hasLoadedOnce = true
     }
 
+    /// A watchlist row was added or removed elsewhere. Only when this tab has already
+    /// loaded — `loadIfNeeded` fetches fresh on the first activation, and the chips are not
+    /// worth a tabs+feed fetch for a tab nobody has opened.
+    func reloadForWatchlistChange() async {
+        guard hasLoadedOnce else { return }
+        await reloadForActiveGroupChange()
+    }
+
     func reloadForActiveGroupChange() async {
         await loadTabs()
         // `loadTabs` re-points `selectedTab` at a scope the new group actually contains
@@ -286,6 +294,15 @@ final class UpdatesViewModel: ObservableObject {
         do {
             try await apiClient.request(endpoint: .addToWatchlist(stockId: ticker, assetType: assetType))
             print("✅ UpdatesVM: Added \(ticker) to watchlist")
+            // Tracking and Home are stale otherwise (the backend also mirrored the ticker
+            // into the active group). Post-confirm, with the STORED spelling — a coin is
+            // stored as the pair. This screen ignores its own source below.
+            let wireClass = (assetType ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            PortfolioStore.announceWatchlistChange(
+                ticker: wireClass == "crypto" ? CryptoSymbol.pair(ticker) : ticker,
+                assetType: wireClass.isEmpty ? MarketTickerType.resolve(nil, symbol: ticker).rawValue : wireClass,
+                added: true, source: .updates
+            )
             await loadTabs()
         } catch {
             let appError = AppError.from(error)
@@ -299,6 +316,12 @@ final class UpdatesViewModel: ObservableObject {
         do {
             try await apiClient.request(endpoint: .removeFromWatchlist(stockId: ticker))
             print("✅ UpdatesVM: Removed \(ticker) from watchlist")
+            // The tab scope IS the stored spelling (it came from the watchlist), so it is
+            // the right key for Tracking's row match. Post-confirm; own source ignored.
+            PortfolioStore.announceWatchlistChange(
+                ticker: ticker, assetType: MarketTickerType.resolve(nil, symbol: ticker).rawValue,
+                added: false, source: .updates
+            )
             feedCache.removeValue(forKey: ticker)
             await loadTabs()
             // The removed tab may have been the selected one.

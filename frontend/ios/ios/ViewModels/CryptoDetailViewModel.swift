@@ -45,6 +45,14 @@ class CryptoDetailViewModel: ObservableObject {
     @Published var sentimentAnalysisData: SentimentAnalysisData?
     @Published var isSentimentLoading: Bool = false
     @Published var technicalAnalysisData: TechnicalAnalysisData?
+    /// False until the technical request has RETURNED — success or failure. The view used
+    /// to pass a literal `true`, so the Analysis tab showed no card and no shimmer while
+    /// the request was in flight and stayed blank forever on failure.
+    @Published var isTechnicalLoaded: Bool = false
+    /// Set only when the fetch failed. Mirrors `IndexDetailViewModel`: a blank tab reads as
+    /// a broken app, not as absent data, and offered no way back.
+    @Published var technicalUnavailableMessage: String?
+    @Published var technicalIsRetryable: Bool = false
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
     @Published var isLoading: Bool = false
@@ -252,6 +260,11 @@ class CryptoDetailViewModel: ObservableObject {
 
             // Refresh news + analysis data (includes TA gauge)
             self.technicalAnalysisDetailData = nil  // reset so detail refetches
+            // BOTH, together. Clearing only the message left every branch of the Analysis
+            // tab false (no data, loaded, no message) for the whole news+analysis refresh:
+            // the Technical card vanished with no shimmer instead of showing one.
+            self.technicalUnavailableMessage = nil
+            self.isTechnicalLoaded = false
             await fetchCryptoNews()
             await fetchCryptoAnalysis()
         } catch {
@@ -902,10 +915,38 @@ class CryptoDetailViewModel: ObservableObject {
                 responseType: TechnicalAnalysisDTO.self
             )
             self.technicalAnalysisData = dto.toDisplayModel()
+            self.isTechnicalLoaded = true
+            self.technicalUnavailableMessage = nil
             print("✅ [CryptoDetail] Got technical analysis for \(cryptoSymbol) — gauge: \(dto.gaugeValue)")
         } catch {
             print("⚠️ [CryptoDetail] Technical analysis failed for \(cryptoSymbol): \(error)")
+            // No sampleData fallback (a fabricated gauge is financial misinformation and
+            // leaks into Cay AI context). Loaded-with-nothing, and say why — the same split
+            // as IndexDetailViewModel: a 404 is permanent for the asset, anything else
+            // is worth a Try Again.
+            self.technicalAnalysisData = nil
+            self.isTechnicalLoaded = true
+            // Routed through `AppError.from` (ios-swiftui.md), like CommodityDetailViewModel.
+            // A 409 `FMP_NOT_ENTITLED` (a FRED-backed asset has no OHLCV to compute on)
+            // arrives as `.businessError`, NOT `.notFound`, and maps to `.featureUnavailable`
+            // — permanent. The `.notFound`-only test showed a Try Again that could never
+            // succeed.
+            switch AppError.from(error) {
+            case .featureUnavailable, .notFound:
+                self.technicalUnavailableMessage =
+                    "Technical analysis isn\u{2019}t available for this asset."
+                self.technicalIsRetryable = false
+            default:
+                self.technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
+                self.technicalIsRetryable = true
+            }
         }
+    }
+
+    func retryTechnicalAnalysis() async {
+        isTechnicalLoaded = false
+        technicalUnavailableMessage = nil
+        await fetchCryptoTechnicalAnalysis()
     }
 
     // MARK: - Contextual Chat Context

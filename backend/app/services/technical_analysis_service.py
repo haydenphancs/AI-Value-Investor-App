@@ -111,6 +111,17 @@ _cache: Dict[str, Tuple[float, Any]] = {}
 _CACHE_TTL = 43_200  # 12 hours in seconds
 _CACHE_TTL_CRYPTO = 14_400  # 4 hours — crypto is 24/7 and more volatile
 
+# Calendar days of daily history fetched for the FMP (equity / proxy) path. Sized for the
+# WEEKLY frame, not the daily one: SMA/EMA(200) on weekly bars needs 200 weeks. 1500 days
+# ≈ 1,035 trading rows ≈ 214 W-FRI bars. It was 600 (≈ 86 weekly bars), which left weekly
+# SMA/EMA(100) and (200) uncomputable for EVERY ticker — emitted as null, classified
+# Neutral and counted, so a stock's "7 of 18" weekly carried four dead rows and the weekly
+# extremes were capped at [0.111, 0.889]. One FMP call either way; only the payload grows.
+# Crypto is capped by CoinGecko Basic at 730 days (`crypto_service._history_days_cap`):
+# ~104 W-SUN bars, so weekly (100) is computable there and (200) is not — those rows are
+# listed with a null value and excluded from the count (see `_compute_timeframe_signal`).
+_HISTORY_DAYS = 1500
+
 # NOTE: there is deliberately no TOTAL_INDICATORS constant. The indicator count is
 # per-frame (see `computed_total` in _compute_signals) because a source without
 # intraday high/low ships fewer rows, and a constant denominator both miscounts them
@@ -218,9 +229,13 @@ def _gauge_to_signal(gauge_value: float) -> TechnicalSignal:
 def _count_summary(
     indicators: Union[List[MovingAverageIndicator], List[OscillatorIndicator]],
 ) -> IndicatorSummary:
-    buy = sum(1 for i in indicators if i.signal == IndicatorSignal.BUY)
-    sell = sum(1 for i in indicators if i.signal == IndicatorSignal.SELL)
-    neutral = sum(1 for i in indicators if i.signal == IndicatorSignal.NEUTRAL)
+    """Buy / Neutral / Sell counts over the rows that were COMPUTED. A row with a null
+    value (not enough history) is listed but not counted — the same rule as the gauge
+    in `_compute_timeframe_signal`, so the sheet's badges and the card's "N of M" agree."""
+    computed = [i for i in indicators if i.value is not None]
+    buy = sum(1 for i in computed if i.signal == IndicatorSignal.BUY)
+    sell = sum(1 for i in computed if i.signal == IndicatorSignal.SELL)
+    neutral = sum(1 for i in computed if i.signal == IndicatorSignal.NEUTRAL)
     return IndicatorSummary(buy_count=buy, neutral_count=neutral, sell_count=sell)
 
 
@@ -326,6 +341,14 @@ class TechnicalAnalysisService:
         if cached is not None:
             return cached
 
+        # Same shield as `get_analysis`: N sheets opened at once build ONE response.
+        return await _deduped(
+            f"ta_detail:build:{ticker}", lambda: self._build_analysis_detail(ticker, is_crypto)
+        )
+
+    async def _build_analysis_detail(
+        self, ticker: str, is_crypto: bool
+    ) -> TechnicalAnalysisDetailResponse:
         df_daily = await self._fetch_daily_ohlcv(ticker)
         df_weekly = self._daily_to_weekly(df_daily, is_crypto=is_crypto)
 
@@ -374,9 +397,10 @@ class TechnicalAnalysisService:
         return df
 
     async def _fetch_daily_ohlcv_uncached(self, ticker: str) -> pd.DataFrame:
-        """Fetch ~600 calendar days of daily OHLCV and return as DataFrame."""
+        """Fetch `_HISTORY_DAYS` calendar days of daily OHLCV (the CoinGecko cap for a coin)
+        and return as DataFrame. See `_HISTORY_DAYS` for why the window is weekly-sized."""
         to_date = datetime.utcnow().strftime("%Y-%m-%d")
-        from_date = (datetime.utcnow() - timedelta(days=600)).strftime("%Y-%m-%d")
+        from_date = (datetime.utcnow() - timedelta(days=_HISTORY_DAYS)).strftime("%Y-%m-%d")
 
         # ── Source gate ──────────────────────────────────────────────────────────
         # FMP 402s every `…USD` crypto pair, so crypto history comes from CoinGecko. The
@@ -402,7 +426,12 @@ class TechnicalAnalysisService:
                 if base.endswith(suffix) and len(base) > len(suffix):
                     base = base[: -len(suffix)]
                     break
-            days = min(600, max(1, int(settings.CRYPTO_HISTORY_YEARS) * 365))
+            # The full plan cap (730 on CoinGecko Basic), not a 600 literal: the weekly
+            # frame needs every bar it can get (104 W-SUN bars → weekly SMA/EMA(100) is
+            # computable; 200 is not, and is listed as null). It is also the exact key
+            # (`cg:hist:<BASE>:730:d`) the crypto detail screen already caches, so the
+            # two share one `/market_chart` call instead of making two.
+            days = get_crypto_service()._history_days_cap()
             # Through `crypto_service._cg_history`, not the client directly: that is the
             # 1 h daily memo + `_inflight` dedup + "unresolved id → serve once, never
             # cache" rule the detail screen already relies on. Going around it cost a
@@ -502,7 +531,21 @@ class TechnicalAnalysisService:
         List[MovingAverageIndicator],
         List[OscillatorIndicator],
     ]:
-        """Compute all 18 indicators, classify signals, return result + lists."""
+        """Compute the indicators, classify signals, return result + lists.
+
+        Up to 18 rows: 10 moving averages + 8 oscillators. Two things shrink what is
+        COUNTED, and they are deliberately different shapes:
+
+        * a source with no intraday high/low (CoinGecko) cannot compute five oscillators
+          at all — those rows are DROPPED (13 ship for a coin);
+        * a frame too short for an indicator's window (weekly SMA/EMA(200) on ~104 crypto
+          bars; anything on a days-old listing) yields `value=None` — those rows are KEPT
+          in the lists so the sheet shows which indicator needs more history, rendered
+          "—" by iOS, classified Neutral, and EXCLUDED from `total_indicators`, the
+          summary counts and the gauge. Counting them was the same defect as the old
+          constant-18 denominator: phantom neutrals that capped the reachable verdicts
+          and padded "N of M". A frame with nothing computable is "0 of 0" and HOLD.
+        """
         close = df["close"]
         high = df["high"]
         low = df["low"]
@@ -556,7 +599,12 @@ class TechnicalAnalysisService:
             stoch_rsi = ta_lib.momentum.StochRSIIndicator(
                 close, window=14, smooth1=3, smooth2=3
             )
-            stochrsi_k = _safe_float(stoch_rsi.stochrsi_k().iloc[-1])
+            # `ta` returns StochRSI on a 0–1 scale; the classifier (and RSI beside it,
+            # and the iOS sample data) are 0–100. Un-scaled, every reading fell under
+            # the `< 20 → BUY` gate — StochRSI was "Buy" on every asset, both frames,
+            # including a 0.99 (= 99, textbook overbought) shown as "0.99 Buy".
+            _k = stoch_rsi.stochrsi_k().iloc[-1]
+            stochrsi_k = _safe_float(_k * 100 if _k is not None else _k)
 
         # MACD
         macd_line: Optional[float] = None
@@ -669,13 +717,19 @@ class TechnicalAnalysisService:
         # STRONG BUY or STRONG SELL however unanimous the real signals were. Every crypto
         # verdict would sit systematically closer to neutral, and "N of 18" would count
         # rows that were never shipped.
-        all_signals = [m.signal for m in ma_list] + [o.signal for o in osc_list]
-        computed_total = len(all_signals) or 1
+        # Only rows that were actually COMPUTED count. A null value is "needs more
+        # history", not "neutral" — see the method docstring. `computed_total` is the
+        # honest denominator; `denominator` keeps the division alive when it is 0.
+        all_signals = [
+            i.signal for i in (*ma_list, *osc_list) if i.value is not None
+        ]
+        computed_total = len(all_signals)
+        denominator = computed_total or 1
         buy_count = sum(1 for s in all_signals if s == IndicatorSignal.BUY)
         sell_count = sum(1 for s in all_signals if s == IndicatorSignal.SELL)
         neutral_count = computed_total - buy_count - sell_count
         gauge_value = min(
-            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * computed_total))
+            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * denominator))
         )
         signal = _gauge_to_signal(gauge_value)
 
@@ -897,27 +951,39 @@ class TechnicalAnalysisService:
 
     @staticmethod
     def _compute_fibonacci(df: pd.DataFrame) -> FibonacciRetracementData:
-        """Fibonacci retracement from 52-week high/low."""
-        lookback = min(len(df), 252)
-        window = df.tail(lookback)
+        """Fibonacci retracement between the 52-week swing high and swing low.
 
+        The window is 365 CALENDAR days off the index, not the last 252 rows: 252 rows
+        is 52 weeks of trading days on an equity but only ~36 weeks on a 7-day crypto
+        series, and the card is labelled "52-Week".
+
+        Intraday high/low when the source has them (FMP); otherwise the CLOSING swing
+        high/low (CoinGecko is close-only), labelled as such. A retracement drawn
+        between closing extremes is an accepted convention — what is NOT acceptable is
+        the old fallback `high = low = last close`, which put the same price on all
+        seven rows: a fully drawn card of identical levels. That, and a flat window
+        (`diff <= 0`), still emit NO levels.
+        """
+        if isinstance(df.index, pd.DatetimeIndex) and len(df):
+            window = df[df.index >= df.index[-1] - pd.Timedelta(days=365)]
+        else:
+            window = df.tail(min(len(df), 252))
+
+        basis = "52-Week Levels"
         # high/low can be all-NaN (df is dropna'd on close only) → float(NaN) poisons
         # the REQUIRED FibonacciLevel.value → 500.
         high = _safe_float(window["high"].max())
         low = _safe_float(window["low"].min())
         if high is None or low is None:
-            # ⚠️ Emit NO levels rather than a flat retracement.
-            #
-            # This used to fall back to `high = low = last close`, which makes `diff` 0
-            # and every one of the seven levels the SAME price — a fully-drawn Fibonacci
-            # card in which 0.0%, 38.2% and 100% are identical. That is not a degraded
-            # chart, it is a fabricated one. `levels` is a plain list on both sides, so an
-            # empty one is decodable by every shipped build and renders nothing.
+            high = _safe_float(window["close"].max())
+            low = _safe_float(window["close"].min())
+            basis = "52-Week Levels · closing prices"
+        if high is None or low is None or high - low <= 0:
             logger.info(
-                "Fibonacci retracement unavailable — no intraday high/low in this "
+                "Fibonacci retracement unavailable — no usable 52-week range in this "
                 "price source; emitting no levels rather than a flat retracement"
             )
-            return FibonacciRetracementData(timeframe="52-Week Levels", levels=[])
+            return FibonacciRetracementData(timeframe=basis, levels=[])
         diff = high - low
 
         fib_ratios = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
@@ -932,7 +998,7 @@ class TechnicalAnalysisService:
             for ratio, label in zip(fib_ratios, fib_labels)
         ]
 
-        return FibonacciRetracementData(timeframe="52-Week Levels", levels=levels)
+        return FibonacciRetracementData(timeframe=basis, levels=levels)
 
     def _compute_support_resistance(
         self, df: pd.DataFrame

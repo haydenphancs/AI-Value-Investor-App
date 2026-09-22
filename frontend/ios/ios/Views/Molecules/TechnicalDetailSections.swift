@@ -27,7 +27,8 @@ struct MovingAveragesSection: View {
                     TechnicalIndicatorRow(
                         name: indicator.name,
                         value: indicator.formattedValue,
-                        signal: indicator.signal
+                        signal: indicator.signal,
+                        isComputed: indicator.value != nil
                     )
 
                     if indicator.id != indicators.last?.id {
@@ -60,7 +61,8 @@ struct OscillatorsSection: View {
                     TechnicalIndicatorRow(
                         name: indicator.name,
                         value: indicator.formattedValue,
-                        signal: indicator.signal
+                        signal: indicator.signal,
+                        isComputed: indicator.value != nil
                     )
 
                     if indicator.id != indicators.last?.id {
@@ -73,6 +75,23 @@ struct OscillatorsSection: View {
     }
 }
 
+// MARK: - Empty level note
+/// What a level card says when the backend sent no levels. It used to render a bare
+/// title (developer, 2026-09-21: *"check fibonacci retracement? i don't see any"*): the
+/// crypto price source has no intraday high/low, so classic pivots — and the support /
+/// resistance derived from them — cannot be computed honestly. Say so.
+struct TechnicalLevelsUnavailableNote: View {
+    var reason: String = "Needs intraday high/low, which this asset\u{2019}s price source doesn\u{2019}t provide."
+
+    var body: some View {
+        Text(reason)
+            .font(AppTypography.caption)
+            .foregroundColor(AppColors.textMuted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, AppSpacing.sm)
+    }
+}
+
 // MARK: - Pivot Points Section
 struct PivotPointsSection: View {
     let pivotData: PivotPointsData
@@ -80,6 +99,9 @@ struct PivotPointsSection: View {
     var body: some View {
         TechnicalSectionCard(title: "Pivot Points", subtitle: pivotData.method) {
             VStack(spacing: 0) {
+                if pivotData.levels.isEmpty {
+                    TechnicalLevelsUnavailableNote()
+                }
                 ForEach(pivotData.levels) { level in
                     PivotPointRow(
                         name: level.name,
@@ -196,6 +218,13 @@ struct FibonacciRetracementSection: View {
     var body: some View {
         TechnicalSectionCard(title: "Fibonacci Retracement", subtitle: fibData.timeframe) {
             VStack(spacing: 0) {
+                if fibData.levels.isEmpty {
+                    // Drawn from closing extremes when there is no intraday range, so an
+                    // empty card now means a flat or too-short 52-week window.
+                    TechnicalLevelsUnavailableNote(
+                        reason: "Not enough 52-week price range to draw a retracement."
+                    )
+                }
                 ForEach(fibData.levels) { level in
                     FibonacciLevelRow(
                         percentage: level.percentage,
@@ -220,7 +249,11 @@ struct SupportResistanceSection: View {
     var body: some View {
         TechnicalSectionCard(title: "Key Support & Resistance") {
             VStack(spacing: AppSpacing.md) {
+                if srData.resistanceLevels.isEmpty && srData.supportLevels.isEmpty {
+                    TechnicalLevelsUnavailableNote()
+                }
                 // Resistance levels
+                if !srData.resistanceLevels.isEmpty {
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Resistance Levels")
                         .font(AppTypography.caption)
@@ -238,6 +271,7 @@ struct SupportResistanceSection: View {
                                 .overlay(AppColors.cardBackgroundLight)
                         }
                     }
+                }
                 }
 
                 // Current price
@@ -259,6 +293,7 @@ struct SupportResistanceSection: View {
                 .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.medium)  // nested in a card: light edge free, dark separates by surface
 
                 // Support levels
+                if !srData.supportLevels.isEmpty {
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("Support Levels")
                         .font(AppTypography.caption)
@@ -276,6 +311,7 @@ struct SupportResistanceSection: View {
                                 .overlay(AppColors.cardBackgroundLight)
                         }
                     }
+                }
                 }
             }
         }

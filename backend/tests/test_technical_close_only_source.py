@@ -10,8 +10,9 @@ the adversarial review found this breaks four ways — three of them silently:
   2. MFI degraded via `_safe_float(NaN) or 50.0` → a confident "Neutral 50" that was
      never measured. Now flagged with `money_flow_index_known`.
   3. Fibonacci fell back to `high = low = last close` → seven IDENTICAL levels, a
-     fully-drawn card that is pure fabrication. Now emits no levels
-     (`test_analysis_tab_guards.py::test_fibonacci_all_nan_high_low_emits_no_levels`).
+     fully-drawn card that is pure fabrication. Now drawn between the 52-week CLOSING
+     extremes and labelled so; a flat window emits no levels
+     (`test_analysis_tab_guards.py::test_fibonacci_without_high_low_is_drawn_from_closing_extremes_and_says_so`).
   4. 🔴 The gauge denominator was the constant 18. Dropping five indicators while
      dividing by 18 leaves five phantom neutrals in the count AND caps the reachable
      range at [0.139, 0.861] — so crypto could **never** read STRONG BUY or STRONG
@@ -67,6 +68,15 @@ def _falling(n: int = 300):
     return np.linspace(400.0, 100.0, n)
 
 
+def _wavy(closes):
+    """A wave on the ramp. On a PERFECTLY linear series RSI is constant, so StochRSI's
+    (rsi − min)/(max − min) is 0/0 → NaN → a null row, which is "not computable" and
+    is excluded from the count. Real prices are never linear; the pins that count rows
+    use this shape so every one of the 18 / 13 is actually computed."""
+    n = len(closes)
+    return closes + 4.0 * np.sin(np.arange(n) * 0.5)
+
+
 # ── 1. The five high/low indicators are dropped, not faked ───────────────────
 
 def test_close_only_source_omits_exactly_the_high_low_indicators():
@@ -86,7 +96,7 @@ def test_close_only_source_omits_exactly_the_high_low_indicators():
 def test_full_ohlcv_source_still_ships_all_eighteen():
     """The equity path must be completely unaffected by the crypto degrade."""
     svc = object.__new__(TechnicalAnalysisService)
-    result, _, mas, oscs = svc._compute_timeframe_signal(_frame(_rising(), high_low=True))
+    result, _, mas, oscs = svc._compute_timeframe_signal(_frame(_wavy(_rising()), high_low=True))
     names = {o.name for o in oscs}
 
     assert NEEDS_HIGH_LOW <= names, f"equity path lost: {NEEDS_HIGH_LOW - names}"
@@ -98,19 +108,22 @@ def test_full_ohlcv_source_still_ships_all_eighteen():
 # ── 2. The gauge denominator is the count actually shipped ───────────────────
 
 def test_total_indicators_matches_the_rows_actually_shipped():
-    """iOS renders `total_indicators` verbatim as "N of M indicators"."""
+    """iOS renders `total_indicators` verbatim as "N of M indicators". The count is the
+    rows with a COMPUTED value; on a full-length frame that is every row shipped."""
     svc = object.__new__(TechnicalAnalysisService)
     for high_low in (True, False):
         result, _, mas, oscs = svc._compute_timeframe_signal(
-            _frame(_rising(), high_low=high_low)
+            _frame(_wavy(_rising()), high_low=high_low)
         )
+        computed = [i for i in (*mas, *oscs) if i.value is not None]
+        assert len(computed) == len(mas) + len(oscs), "a 300-row frame left a row uncomputed"
         assert result.total_indicators == len(mas) + len(oscs), (
             f"high_low={high_low}: wire says {result.total_indicators} but "
             f"{len(mas) + len(oscs)} rows were shipped"
         )
     # And the close-only frame really is the smaller one (anti-vacuity).
-    r_hl, *_ = svc._compute_timeframe_signal(_frame(_rising(), high_low=True))
-    r_co, *_ = svc._compute_timeframe_signal(_frame(_rising(), high_low=False))
+    r_hl, *_ = svc._compute_timeframe_signal(_frame(_wavy(_rising()), high_low=True))
+    r_co, *_ = svc._compute_timeframe_signal(_frame(_wavy(_rising()), high_low=False))
     assert r_co.total_indicators == 13 and r_hl.total_indicators == 18
 
 
@@ -135,13 +148,18 @@ def test_extreme_verdicts_are_reachable_on_a_close_only_source(closes, expected)
 
     Both STRONG bands sit outside that range, so under the old code a unanimous
     close-only set could not produce either verdict — every crypto reading was
-    pulled toward neutral. A monotonic ramp makes every computable indicator agree.
+    pulled toward neutral. A monotonic ramp makes every computable MA agree; RSI
+    saturates against it (100 on the way up is a Sell, 0 on the way down a Buy), and
+    StochRSI is undefined on a constant RSI — a null row, listed but not counted.
     """
     svc = object.__new__(TechnicalAnalysisService)
-    result, gauge, _, _ = svc._compute_timeframe_signal(_frame(closes, high_low=False))
+    result, gauge, mas, oscs = svc._compute_timeframe_signal(_frame(closes, high_low=False))
     assert result.signal == expected, f"gauge={gauge:.3f} gave {result.signal}"
     # Explicitly outside the old reachable band.
     assert gauge > 0.861 or gauge < 0.139
+    stochrsi = next(o for o in oscs if o.name == "StochRSI(14)")
+    assert stochrsi.value is None and result.total_indicators == 12, (
+        "the undefined StochRSI row must be listed and excluded, not counted as Neutral")
 
 
 def test_gauge_stays_within_zero_and_one_for_both_sources():

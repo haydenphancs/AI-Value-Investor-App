@@ -379,6 +379,11 @@ struct TickerDetailView: View {
                 onSentimentMoreTap: viewModel.handleSentimentMore,
                 onTechnicalDetailTap: {
                     showTechnicalAnalysisDetail = true
+                },
+                technicalUnavailableMessage: viewModel.technicalUnavailableMessage,
+                technicalIsRetryable: viewModel.technicalIsRetryable,
+                onRetryTechnical: {
+                    Task { await viewModel.retryTechnicalAnalysis() }
                 }
             )
             // Prefetch the indicator readings (RSI, MACD, Stoch, MA levels) so the

@@ -29,6 +29,13 @@ struct TickerAnalysisContent: View {
     var onAnalystActionsTap: (() -> Void)?
     var onSentimentMoreTap: (() -> Void)?
     var onTechnicalDetailTap: (() -> Void)?
+    /// Set by the view model when the technical fetch FAILED. Without this branch the
+    /// card simply vanished: a transient blip looked identical to an unsupported asset
+    /// and offered no way back (the Index/Commodity screens had the branch; the stock
+    /// and crypto screens, which share this view, did not).
+    var technicalUnavailableMessage: String? = nil
+    var technicalIsRetryable: Bool = false
+    var onRetryTechnical: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: AppSpacing.lg) {
@@ -103,6 +110,16 @@ struct TickerAnalysisContent: View {
                 )
             } else if !isTechnicalLoaded {
                 analysisSectionPlaceholder(height: 180)
+            } else if let message = technicalUnavailableMessage {
+                // Loaded, nothing to show, and the reason. Mirrors IndexDetailView.
+                if technicalIsRetryable, let retry = onRetryTechnical {
+                    InlineRetryNotice(message: message, onRetry: retry)
+                } else {
+                    // Permanent for this asset — a Try Again would promise something
+                    // that can never succeed.
+                    ChartUnavailableView(message: message)
+                        .frame(height: 180)
+                }
             }
 
             // Bottom spacing for AI bar

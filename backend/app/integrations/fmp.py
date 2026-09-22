@@ -1256,16 +1256,27 @@ class FMPClient:
         ticker: Optional[str] = None,
         limit: int = 10,
         page: int = 0,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get crypto news from FMP (stable API: news/crypto).
 
         Uses the dedicated crypto news endpoint which properly filters
         by crypto symbols (BTCUSD, ETHUSD, etc.).
+
+        `from_date` / `to_date` (YYYY-MM-DD) window the feed exactly as they do on
+        `get_stock_news` — measured 2026-09-21: a 7-day window on ETHUSD pages 250 + 51
+        rows and then empty, while an un-windowed call returns the newest 250 whatever
+        their age. FMP caps a page at 250 rows (`limit=1000` comes back as 250).
         """
         params: Dict[str, Any] = {"limit": limit, "page": page}
         if ticker:
             params["symbols"] = ticker.upper()
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
 
         try:
             return await self._make_request("news/crypto", params=params)

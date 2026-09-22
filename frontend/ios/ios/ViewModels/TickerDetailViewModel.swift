@@ -37,6 +37,11 @@ class TickerDetailViewModel: ObservableObject {
     @Published var holdersData: HoldersData?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
+    /// Set only when the technical fetch failed — the card used to simply vanish, so a
+    /// transient blip looked identical to an unsupported asset and offered no way back.
+    /// Same split as IndexDetailViewModel: a 404 is permanent, anything else retryable.
+    @Published var technicalUnavailableMessage: String?
+    @Published var technicalIsRetryable: Bool = false
     /// False until the Financials task group settles, so the tab can show a
     /// skeleton instead of six indistinguishable blank cards.
     @Published var isFinancialsLoaded: Bool = false
@@ -539,6 +544,8 @@ class TickerDetailViewModel: ObservableObject {
         case ratings(AnalystRatingsData?)
         case sentiment(SentimentAnalysisData?)
         case technical(TechnicalAnalysisData?)
+        /// The technical fetch failed: the message to show and whether a retry can help.
+        case technicalFailed(message: String, retryable: Bool)
     }
 
     private func fetchChartEvents(_ ticker: String) async {
@@ -695,7 +702,21 @@ class TickerDetailViewModel: ObservableObject {
                     return await .technical(dto.toDisplayModel())
                 } catch {
                     print("⚠️ TickerDetailVM: Technical analysis failed for \(ticker): \(error)")
-                    return .technical(nil)
+                    // `AppError.from`, not a bare `.notFound` test: a 409 FMP_NOT_ENTITLED
+                    // (bare CL / NG resolve to a FRED daily print with no OHLCV) arrives as
+                    // `.businessError` and maps to `.featureUnavailable` — permanent, so a
+                    // Try Again would promise something that can never succeed.
+                    switch AppError.from(error) {
+                    case .featureUnavailable, .notFound:
+                        return .technicalFailed(
+                            message: "Technical analysis isn\u{2019}t available for this asset.",
+                            retryable: false
+                        )
+                    default:
+                        return .technicalFailed(
+                            message: "Couldn\u{2019}t load technical analysis.", retryable: true
+                        )
+                    }
                 }
             }
 
@@ -710,10 +731,39 @@ class TickerDetailViewModel: ObservableObject {
                     self.isSentimentLoaded = true
                 case .technical(let data):
                     self.technicalAnalysisData = data
+                    self.technicalUnavailableMessage = nil
+                    self.isTechnicalLoaded = true
+                case .technicalFailed(let message, let retryable):
+                    self.technicalAnalysisData = nil
+                    self.technicalUnavailableMessage = message
+                    self.technicalIsRetryable = retryable
                     self.isTechnicalLoaded = true
                 }
             }
         }
+    }
+
+    /// Re-runs ONLY the technical arm after a failure (the ratings and sentiment arms are
+    /// untouched), mirroring IndexDetailViewModel.retryTechnicalAnalysis.
+    func retryTechnicalAnalysis() async {
+        isTechnicalLoaded = false
+        technicalUnavailableMessage = nil
+        do {
+            let dto = try await stockRepository.getTechnicalAnalysis(ticker: tickerSymbol)
+            technicalAnalysisData = dto.toDisplayModel()
+        } catch {
+            print("⚠️ TickerDetailVM: Technical analysis retry failed for \(tickerSymbol): \(error)")
+            technicalAnalysisData = nil
+            switch AppError.from(error) {
+            case .featureUnavailable, .notFound:
+                technicalUnavailableMessage = "Technical analysis isn\u{2019}t available for this asset."
+                technicalIsRetryable = false
+            default:
+                technicalUnavailableMessage = "Couldn\u{2019}t load technical analysis."
+                technicalIsRetryable = true
+            }
+        }
+        isTechnicalLoaded = true
     }
 
     func fetchTechnicalAnalysisDetail() {

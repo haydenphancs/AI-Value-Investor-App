@@ -1,0 +1,203 @@
+"""Source-scan guards for the Technical Analysis card on the crypto and stock screens.
+
+Developer audit (2026-09-21): the crypto Analysis tab passed `isTechnicalLoaded: true` as a
+LITERAL — no shimmer while the request was in flight, a blank tab forever on failure — and
+never prefetched the detail (every first "Details" tap spun). The gauge printed "Hold" over
+a step row that says "Neutral". Both screens dropped the card silently on failure while the
+Index/Commodity screens had a message and a retry. And the Fear & Greed card was retitled
+"Crypto Market".
+
+Comments are stripped and every scan is brace-bound to the declaration it checks
+(`.claude/rules/testing.md` §3); the explanatory comments beside each fix name the very
+tokens these tests look for.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+_IOS = Path(__file__).resolve().parents[2] / "frontend/ios/ios"
+_CRYPTO_VIEW = _IOS / "Views/Screens/CryptoDetailView.swift"
+_STOCK_VIEW = _IOS / "Views/Screens/TickerDetailView.swift"
+_CRYPTO_VM = _IOS / "ViewModels/CryptoDetailViewModel.swift"
+_STOCK_VM = _IOS / "ViewModels/TickerDetailViewModel.swift"
+_CONTENT = _IOS / "Views/Organisms/TickerAnalysisContent.swift"
+_MODELS = _IOS / "Models/TickerDetailModels.swift"
+_METER = _IOS / "Views/Molecules/TechnicalMeter.swift"
+_BADGE = _IOS / "Views/Atoms/TechnicalSignalBadge.swift"
+_FEAR_GREED = _IOS / "Views/Organisms/CryptoFearGreedSection.swift"
+
+
+def _read(path: Path) -> str:
+    if not path.exists():
+        pytest.fail(f"expected file is missing: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _strip_comments(src: str) -> str:
+    out = []
+    for line in src.splitlines():
+        if line.strip().startswith("//"):
+            continue
+        out.append(re.sub(r"\s//.*$", "", line))
+    return "\n".join(out)
+
+
+def _decl_block(src: str, header: str) -> str:
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found — this scan has drifted"
+    open_brace = src.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return _strip_comments(src[open_brace:i + 1])
+    pytest.fail(f"unbalanced braces after {header!r}")
+
+
+def _call_block(src: str, header: str) -> str:
+    """The parenthesised argument list of a call, comments stripped."""
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found — this scan has drifted"
+    open_paren = src.index("(", start)
+    depth = 0
+    for i in range(open_paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return _strip_comments(src[open_paren:i + 1])
+    pytest.fail(f"unbalanced parens after {header!r}")
+
+
+# ── the crypto tab is honest about loading and failure ──────────────────────
+
+
+def test_the_crypto_analysis_tab_passes_the_view_models_loaded_flag():
+    call = _call_block(_read(_CRYPTO_VIEW), "TickerAnalysisContent(")
+    assert "isTechnicalLoaded: viewModel.isTechnicalLoaded" in call, (
+        "CryptoDetailView must pass the view model's flag")
+    assert "isTechnicalLoaded: true" not in call, (
+        "a literal `true` hides the shimmer and leaves the tab blank on failure")
+
+
+@pytest.mark.parametrize("view", [_CRYPTO_VIEW, _STOCK_VIEW])
+def test_both_screens_wire_the_failure_message_and_retry(view):
+    call = _call_block(_read(view), "TickerAnalysisContent(")
+    assert "technicalUnavailableMessage: viewModel.technicalUnavailableMessage" in call, view.name
+    assert "technicalIsRetryable: viewModel.technicalIsRetryable" in call, view.name
+    assert "viewModel.retryTechnicalAnalysis()" in call, view.name
+
+
+@pytest.mark.parametrize("view", [_CRYPTO_VIEW, _STOCK_VIEW])
+def test_both_analysis_tabs_prefetch_the_detail(view):
+    body = _decl_block(_read(view), "private var tabContent: some View")
+    analysis = body[body.index("case .analysis:") + len("case .analysis:"):]
+    nxt = analysis.find("case .")
+    analysis = analysis[:nxt] if nxt != -1 else analysis
+    assert ".onAppear { viewModel.fetchTechnicalAnalysisDetail() }" in analysis, (
+        f"{view.name}: the Analysis tab no longer prefetches the technical detail")
+
+
+@pytest.mark.parametrize("vm", [_CRYPTO_VM, _STOCK_VM])
+def test_both_view_models_expose_the_failure_state(vm):
+    src = _strip_comments(_read(vm))
+    assert "@Published var isTechnicalLoaded" in src, vm.name
+    assert "@Published var technicalUnavailableMessage: String?" in src, vm.name
+    assert "@Published var technicalIsRetryable: Bool" in src, vm.name
+    retry = _decl_block(_read(vm), "func retryTechnicalAnalysis() async")
+    assert "isTechnicalLoaded = false" in retry and "technicalUnavailableMessage = nil" in retry
+
+
+def test_the_crypto_fetch_sets_loaded_on_both_outcomes():
+    fn = _decl_block(_read(_CRYPTO_VM), "private func fetchCryptoTechnicalAnalysis() async")
+    assert fn.count("self.isTechnicalLoaded = true") == 2, "success AND failure must mark loaded"
+    assert "sampleData" not in fn, "a fabricated gauge is financial misinformation"
+    assert "technicalIsRetryable = false" in fn and "technicalIsRetryable = true" in fn
+
+
+@pytest.mark.parametrize("vm", [_CRYPTO_VM, _STOCK_VM])
+def test_permanent_failures_are_classified_through_app_error(vm):
+    """A 409 `FMP_NOT_ENTITLED` (a FRED-backed asset has no OHLCV) arrives as
+    `.businessError`, never `.notFound` — the bare `.notFound` test offered a Try Again
+    that could never succeed. `CommodityDetailViewModel` had the fix; these two did not."""
+    src = _strip_comments(_read(vm))
+    assert "case .featureUnavailable, .notFound:" in src, vm.name
+    assert "if case APIError.notFound = error" not in src, (
+        f"{vm.name}: the bare notFound test is back — it misses FMP_NOT_ENTITLED")
+    assert src.count("switch AppError.from(error)") >= 1, vm.name
+
+
+def test_a_crypto_refresh_shows_the_shimmer_again():
+    """`refresh()` clearing only the message left every branch false — no data, loaded,
+    no message — so the Technical card VANISHED for the whole refresh instead of
+    showing a placeholder."""
+    fn = _decl_block(_read(_CRYPTO_VM), "func refresh() async")
+    i = fn.index("technicalUnavailableMessage = nil")
+    assert "isTechnicalLoaded = false" in fn[i:i + 200], (
+        "refresh must reset the loaded flag with the message, not instead of it")
+
+
+def test_the_shared_content_renders_the_failure_branch():
+    body = _decl_block(_read(_CONTENT), "var body: some View")
+    i = body.index("if let technicalData = technicalAnalysisData")
+    section = body[i:i + 900]
+    assert "else if !isTechnicalLoaded" in section
+    assert "else if let message = technicalUnavailableMessage" in section, (
+        "the card must say why it is missing instead of vanishing")
+    assert "InlineRetryNotice(message: message, onRetry: retry)" in section
+    assert "ChartUnavailableView(message: message)" in section
+
+
+# ── labels ───────────────────────────────────────────────────────────────────
+
+
+def test_hold_displays_as_neutral_and_the_meter_uses_it():
+    enum = _decl_block(_read(_MODELS), "enum TechnicalSignal: String")
+    name = _decl_block(enum, "var displayName: String")
+    assert 'case .hold: return "Neutral"' in name
+    assert 'case hold = "Hold"' in enum, "the wire value must stay 'Hold' for decoding"
+    meter = _strip_comments(_read(_METER))
+    assert "label: signal.displayName" in meter
+    assert "label: signal.rawValue" not in meter, "the meter prints the wire value again"
+
+
+def test_zero_indicators_reads_as_not_enough_history():
+    struct_block = _decl_block(_read(_MODELS), "struct TechnicalIndicatorResult: Codable")
+    fn = _decl_block(struct_block, "var formattedCount: String")
+    assert 'guard totalIndicators > 0 else { return "Not enough history" }' in fn
+
+
+def test_the_signal_badge_is_a_labelled_button():
+    body = _decl_block(_read(_BADGE), "var body: some View")
+    assert ".accessibilityAddTraits(" in body and ".isButton" in body
+    assert ".accessibilityLabel(" in body and "signal.displayName" in body
+
+
+# ── the Fear & Greed title ────────────────────────────────────────────────────
+
+
+def test_the_fear_greed_card_is_titled_crypto_market():
+    src = _strip_comments(_read(_FEAR_GREED))
+    assert 'Text("Crypto Market")' in src
+    assert "Crypto Market Sentiment" not in src
+
+
+# ── anti-vacuity ─────────────────────────────────────────────────────────────
+
+
+def test_the_scans_are_not_vacuous():
+    raw = _read(_CRYPTO_VIEW)
+    # The fix's own comment names the literal; the stripped call must not.
+    assert "isTechnicalLoaded: true" in raw or "literal `true`" in raw
+    assert "isTechnicalLoaded: true" not in _call_block(raw, "TickerAnalysisContent(")
+    # The call block is bounded: it ends before the `.onAppear` modifier.
+    call = _call_block(raw, "TickerAnalysisContent(")
+    assert ".onAppear" not in call
+    meter_raw = _read(_METER)
+    assert len(_strip_comments(meter_raw)) > 300

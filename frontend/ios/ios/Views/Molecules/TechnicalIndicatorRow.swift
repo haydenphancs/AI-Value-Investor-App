@@ -11,6 +11,10 @@ struct TechnicalIndicatorRow: View {
     let name: String
     let value: String
     let signal: IndicatorSignal
+    /// False when the backend sent no value (not enough history — weekly SMA(200) on a
+    /// two-year coin series). The row stays, so the sheet names what is missing, but a
+    /// "Neutral" badge beside a "—" reads as a verdict; the badge becomes a muted "—" too.
+    var isComputed: Bool = true
 
     var body: some View {
         HStack {
@@ -22,10 +26,18 @@ struct TechnicalIndicatorRow: View {
 
             Text(value)
                 .font(AppTypography.label)
-                .foregroundColor(AppColors.textPrimary)
+                .foregroundColor(isComputed ? AppColors.textPrimary : AppColors.textMuted)
 
-            IndicatorSignalBadge(signal: signal)
-                .frame(width: 60, alignment: .trailing)
+            if isComputed {
+                IndicatorSignalBadge(signal: signal)
+                    .frame(width: 60, alignment: .trailing)
+            } else {
+                Text("—")
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .frame(width: 60, alignment: .trailing)
+                    .accessibilityLabel("\(name): not enough history")
+            }
         }
         .padding(.vertical, AppSpacing.sm)
     }

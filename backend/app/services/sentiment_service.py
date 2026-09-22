@@ -69,6 +69,17 @@ _CACHE_TTL = 900  # 15 minutes
 # How often to re-fetch from FMP and refresh the DB cache
 _DB_REFRESH_TTL = 14400  # 4 hours
 
+# The 7-day window the "Last 7D" toggle reads. A cached article set is only a HIT when it
+# reaches this far back (see `_load_from_db`).
+_NEWS_WINDOW_DAYS = 7
+# FMP caps a news page at 250 rows whatever `limit` says (measured 2026-09-21: limit=1000
+# returned 250). Two pages cover ~12 days of ETH-grade coverage; the cap bounds the cost.
+_NEWS_PAGE_SIZE = 250
+_NEWS_MAX_PAGES = 2
+# How long a ticker's OWN 14-day fetch counts as done (`_own_fetch_at`). Matches the
+# `cached_at` freshness rule, so the two cannot disagree.
+_OWN_FETCH_TTL = _DB_REFRESH_TTL
+
 
 def _looks_like_timestamp(value: Any) -> bool:
     """True when `value` is a string Postgres will accept for a `timestamptz`.
@@ -193,6 +204,30 @@ class SentimentService:
     def __init__(self):
         self.fmp: FMPClient = get_fmp_client()
         self.supabase = get_supabase()
+        # ticker → monotonic stamp of the last time THIS service pulled its own 14-day
+        # window. See `_load_from_db`: coverage alone cannot be the rule, because the
+        # fetch is capped at `_NEWS_MAX_PAGES` and a busy ticker's newest 500 articles
+        # do not reach back 7 days — the set would be judged "truncated" forever and
+        # every uncached request would refetch.
+        self._own_fetch_at: Dict[str, float] = {}
+
+    def _own_fetch_map(self) -> Dict[str, float]:
+        """The memo, created on demand.
+
+        `setdefault` rather than a plain attribute read because this service is built with
+        `__new__` in a dozen test doubles (and `__init__` reaches for the FMP client and
+        Supabase, which the hermetic suite forbids). A missing attribute inside
+        `_fetch_news`'s try/except would be swallowed as a FETCH FAILURE — the marker that
+        suppresses caching — so the memo must never be able to raise.
+        """
+        return self.__dict__.setdefault("_own_fetch_at", {})
+
+    def _note_own_fetch(self, ticker: str) -> None:
+        self._own_fetch_map()[ticker.upper()] = time.monotonic()
+
+    def _fetched_own_window(self, ticker: str) -> bool:
+        stamp = self._own_fetch_map().get(ticker.upper())
+        return stamp is not None and (time.monotonic() - stamp) < _OWN_FETCH_TTL
 
     async def get_sentiment(
         self, ticker: str, social_ticker: Optional[str] = None,
@@ -497,6 +532,41 @@ class SentimentService:
                             f"(age={age})"
                         )
                         return None
+                # Fresh is not the same as COMPLETE. `NewsCacheService` (News tab, Updates
+                # sweeper) writes its own 50-row page into this table every few hours — the
+                # chat tool writes 8 — and `cleanup_expired_cache` prunes anything older
+                # than 6 h, so for a heavily covered ticker the table held ~50 rows all
+                # younger than a day, `cached_at` was always fresh, this method never
+                # fetched its own 14-day set, and the 24h and 7d windows scored the SAME
+                # articles ("Last 7D" changed nothing; ETH: 58 rows, oldest 16.8 h).
+                #
+                # ⚠️ Coverage alone CANNOT be the rule. `_fetch_news` is capped at
+                # `_NEWS_MAX_PAGES` × `_NEWS_PAGE_SIZE` = 500 rows, and a ticker publishing
+                # ~190 articles a day (BTC, measured) spans only ~2.6 days in 500 — so its
+                # own freshly-persisted set would be judged "truncated" too, and every
+                # request past the 15-min result cache would refetch, forever. The second
+                # clause is therefore "and we have not already pulled our own window for
+                # this ticker recently": FMP has no more to give until that memo expires.
+                oldest = min(
+                    (to_utc_instant(r.get("published_at") or "") for r in result.data
+                     if to_utc_instant(r.get("published_at") or "") is not None),
+                    default=None,
+                )
+                window_start = datetime.now(timezone.utc) - timedelta(days=_NEWS_WINDOW_DAYS)
+                covers_window = oldest is not None and oldest <= window_start
+                if not covers_window and not self._fetched_own_window(ticker):
+                    oldest_age_h = (
+                        (datetime.now(timezone.utc) - oldest).total_seconds() / 3600
+                        if oldest is not None else None
+                    )
+                    logger.info(
+                        "DB cache TRUNCATED for %s: %d rows, oldest %s h old — a cached "
+                        "page, not the %d-day window; fetching",
+                        ticker, len(result.data),
+                        f"{oldest_age_h:.1f}" if oldest_age_h is not None else "?",
+                        _NEWS_WINDOW_DAYS,
+                    )
+                    return None
 
             # Convert DB rows to article-like dicts for scoring
             articles = []
@@ -635,28 +705,67 @@ class SentimentService:
         Returns raw (unfiltered) articles. Filtering by ticker
         is done after all parallel fetches complete so we can
         use the company name from the price/quote data.
+
+        Both asset classes get the same 14-day window and up to `_NEWS_MAX_PAGES` pages.
+        The crypto branch used to ask for `limit=1000` with NO window — FMP capped that at
+        the newest 250 rows whatever their age, so a coin's "7 days" was however far back
+        250 articles reached (under a day for ETH/BTC). Page 1 is only requested when page
+        0 came back full AND still younger than the window; a page-1 failure keeps page 0.
         """
         try:
             now = datetime.now(timezone.utc)
             from_date = (now - timedelta(days=14)).strftime("%Y-%m-%d")
             to_date = now.strftime("%Y-%m-%d")
+            window_start = now - timedelta(days=14)
 
-            if is_crypto:
-                articles = await self.fmp.get_crypto_news(
-                    ticker=ticker, limit=1000,
-                )
-            else:
-                articles = await self.fmp.get_stock_news(
-                    ticker=ticker, limit=1000,
+            async def _page(page: int):
+                if is_crypto:
+                    return await self.fmp.get_crypto_news(
+                        ticker=ticker, limit=_NEWS_PAGE_SIZE, page=page,
+                        from_date=from_date, to_date=to_date,
+                    )
+                return await self.fmp.get_stock_news(
+                    ticker=ticker, limit=_NEWS_PAGE_SIZE, page=page,
                     from_date=from_date, to_date=to_date,
                 )
+
+            articles = await _page(0)
+            if not getattr(articles, "fetch_failed", False):
+                # Our own window has been pulled for this ticker — see `_load_from_db`.
+                # Stamped on the FETCH, not on the persist: the write is fire-and-forget
+                # and a lost upsert must not re-arm the refetch loop.
+                self._note_own_fetch(ticker)
             if getattr(articles, "fetch_failed", False):
                 # Keep the marker. `articles if articles else []` rebuilt a PLAIN `[]`
                 # from an `EmptyAfterFailure`, so a 503'd feed scored as a measured
                 # "0 articles, ▲0 =0 ▼0" — and, because the price arm was measured, the
                 # whole reading was CACHED for 15 min (see `get_sentiment`).
                 return articles
-            return articles if articles else []
+            articles = list(articles) if articles else []
+
+            for page in range(1, _NEWS_MAX_PAGES):
+                last = articles[-_NEWS_PAGE_SIZE:] if articles else []
+                if len(last) < _NEWS_PAGE_SIZE:
+                    break                       # the previous page was not full: done
+                oldest = min(
+                    (to_utc_instant(a.get("publishedDate") or "") for a in last
+                     if to_utc_instant(a.get("publishedDate") or "") is not None),
+                    default=None,
+                )
+                if oldest is not None and oldest <= window_start:
+                    break                       # already reaches the window
+                try:
+                    more = await _page(page)
+                except Exception as e:
+                    logger.warning(
+                        "FMP news page %d failed for %s, keeping %d rows: %s: %s",
+                        page, ticker, len(articles), type(e).__name__, e,
+                    )
+                    break
+                if getattr(more, "fetch_failed", False) or not more:
+                    break
+                articles.extend(more)
+            return articles
         except Exception as e:
             # A RAISE is a failed fetch too: `get_stock_news` re-raises rate-limit and
             # auth errors (the plan-wide minute budget being exhausted is routine) rather

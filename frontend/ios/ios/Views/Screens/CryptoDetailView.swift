@@ -328,15 +328,27 @@ struct CryptoDetailView: View {
                 isAnalystLoaded: true,
                 isFearGreedLoaded: !viewModel.isFearGreedLoading,
                 isSentimentLoaded: !viewModel.isSentimentLoading,
-                isTechnicalLoaded: true,
+                // The view model's flag, never a literal `true`: that literal hid the
+                // shimmer while the request was in flight and left the tab blank on
+                // failure — no card, no message, no retry.
+                isTechnicalLoaded: viewModel.isTechnicalLoaded,
                 selectedMomentumPeriod: $viewModel.selectedMomentumPeriod,
                 selectedSentimentTimeframe: $viewModel.selectedSentimentTimeframe,
                 selectedFearGreedTimeframe: $viewModel.selectedFearGreedTimeframe,
                 onSentimentMoreTap: viewModel.handleSentimentMore,
                 onTechnicalDetailTap: {
                     showTechnicalAnalysisDetail = true
+                },
+                technicalUnavailableMessage: viewModel.technicalUnavailableMessage,
+                technicalIsRetryable: viewModel.technicalIsRetryable,
+                onRetryTechnical: {
+                    Task { await viewModel.retryTechnicalAnalysis() }
                 }
             )
+            // Prefetch the indicator readings so the first "Details" tap opens populated
+            // instead of on a spinner (parity with TickerDetailView; the view model's
+            // `nil && !loading` guard makes it a no-op once loaded).
+            .onAppear { viewModel.fetchTechnicalAnalysisDetail() }
         }
     }
 

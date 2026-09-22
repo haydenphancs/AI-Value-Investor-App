@@ -44,10 +44,15 @@ def test_gauge_all_neutral_is_hold_not_strong_sell():
     svc = object.__new__(TechnicalAnalysisService)
     # 5 rows → every indicator is gated out (len < window) → all NEUTRAL.
     df = _df([(10.0, 10.5, 9.5, 10.0, 1000.0)] * 5)
-    result, gauge, _, _ = svc._compute_timeframe_signal(df)
+    result, gauge, mas, oscs = svc._compute_timeframe_signal(df)
     assert gauge == 0.5                       # was 0.0 (buy-only ratio)
     assert result.signal == TechnicalSignal.HOLD   # was STRONG_SELL
-    assert result.matching_indicators == 18        # all 18 NEUTRAL agree with HOLD
+    # Uncomputable rows are listed (so the sheet names them) but NOT counted: this used
+    # to read "18 of 18 indicators" for a listing with five candles — eighteen phantom
+    # neutrals. Now it is "0 of 0"; iOS renders that as "Not enough history".
+    assert len(mas) + len(oscs) == 18 and all(i.value is None for i in (*mas, *oscs))
+    assert result.total_indicators == 0
+    assert result.matching_indicators == 0
 
 
 def test_gauge_uptrend_is_finite_and_bullish_biased():
@@ -99,29 +104,33 @@ def test_volume_analysis_all_nan_volume_is_finite():
 
 # ── Fibonacci: all-NaN high/low → NO levels (was: seven identical ones) ──────
 
-def test_fibonacci_all_nan_high_low_emits_no_levels():
-    """A source with no intraday range must not draw a retracement at all.
+def test_fibonacci_without_high_low_is_drawn_from_closing_extremes_and_says_so():
+    """A source with no intraday range draws the retracement between the 52-week CLOSING
+    high and low, and labels the basis — never the flat fabrication.
 
-    ⚠️ The contract here got STRICTER, and this test was rewritten with it. It used
-    to assert `fib.levels and all(isfinite(...))`, pinning a fallback of
-    `high = low = last close`. That is finite — the original JSON-safety intent,
-    which still holds below — but it makes `diff` zero, so all seven levels are the
-    SAME price: a fully-drawn Fibonacci card in which 0.0%, 38.2% and 100% coincide.
-    That is a fabricated chart, not a degraded one, and it is exactly what a
-    close-only crypto history (CoinGecko `market_chart`) would render.
-
-    Emitting nothing is the honest degrade: `levels` is a plain list on both sides,
-    so an empty one decodes in every shipped iOS build and draws no card.
+    History of this pin: the original fallback was `high = low = last close`, which put
+    the same price on all seven rows (a fully drawn card of identical levels — fabricated,
+    not degraded). The second contract emitted NO levels for a close-only source, which
+    left every coin's Fibonacci card as a bare title ("i don't see any for both daily and
+    weekly" — developer, 2026-09-21). A retracement between closing swing extremes is an
+    accepted convention, so that is the third contract; the flat case still emits nothing.
     """
     svc = object.__new__(TechnicalAnalysisService)
     df = _df([(10.0, np.nan, np.nan, 10.0 + i, 1000.0) for i in range(30)])
     fib = svc._compute_fibonacci(df)
+    assert len(fib.levels) == 7
+    values = [l.value for l in fib.levels]
+    assert all(math.isfinite(v) for v in values)
+    assert len(set(values)) == 7, "seven identical levels is the fabrication this replaces"
+    assert values[0] == 39.0 and values[-1] == 10.0, "0% is the closing high, 100% the closing low"
+    assert fib.timeframe == "52-Week Levels · closing prices"
+
+
+def test_fibonacci_on_a_flat_close_only_series_emits_no_levels():
+    svc = object.__new__(TechnicalAnalysisService)
+    df = _df([(10.0, np.nan, np.nan, 10.0, 1000.0) for _ in range(30)])
+    fib = svc._compute_fibonacci(df)
     assert fib.levels == []
-    # The original intent, preserved: nothing non-finite can reach the wire.
-    assert all(math.isfinite(l.value) for l in fib.levels)
-    # The label must not change shape with data availability — same string as the
-    # populated branch, so the card never renders under a different heading.
-    assert fib.timeframe == "52-Week Levels"
 
 
 def test_fibonacci_with_real_high_low_still_draws_seven_distinct_levels():

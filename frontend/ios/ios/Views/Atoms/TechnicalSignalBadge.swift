@@ -35,6 +35,12 @@ struct TechnicalSignalBadge: View {
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
                 .stroke(isSelected ? AppColors.borderStrong : Color.clear, lineWidth: 2)
         )
+        // The badge is tapped through an `onTapGesture` on the meter, so VoiceOver saw two
+        // unlabeled text runs and no control. One element, a button, and the signal the
+        // visual badge never prints ("Daily Signal, Buy, 12 of 13 indicators").
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title), \(signal.displayName), \(indicatorCount)")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 

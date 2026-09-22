@@ -125,7 +125,7 @@ struct TechnicalGauge: View {
     let gaugeValue: Double
 
     var body: some View {
-        MeterGauge(label: signal.rawValue, labelColor: signal.color, gaugeValue: gaugeValue)
+        MeterGauge(label: signal.displayName, labelColor: signal.color, gaugeValue: gaugeValue)
     }
 }
 

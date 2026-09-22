@@ -44,7 +44,7 @@ struct CryptoFearGreedSection: View {
                 Spacer()
                 VStack(spacing: AppSpacing.lg) {
                     VStack(spacing: AppSpacing.xs) {
-                        Text("Crypto Market Sentiment")
+                        Text("Crypto Market")
                             .font(AppTypography.bodySmallEmphasis)
                             .foregroundColor(AppColors.textPrimary)
 

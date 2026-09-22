@@ -1633,6 +1633,16 @@ enum TechnicalSignal: String, CaseIterable, Codable {
     case buy = "Buy"
     case strongBuy = "Strong Buy"
 
+    /// What the meter prints. The wire value for the middle band is "Hold", but the
+    /// 1–5 step row under the gauge has always said "Neutral" — the same state read
+    /// two ways on one card. Decoding keeps the raw value; display uses this.
+    var displayName: String {
+        switch self {
+        case .hold: return "Neutral"
+        default: return rawValue
+        }
+    }
+
     var color: Color {
         switch self {
         case .strongSell:
@@ -1672,7 +1682,10 @@ struct TechnicalIndicatorResult: Codable {
     }
 
     var formattedCount: String {
-        "\(matchingIndicators) of \(totalIndicators) indicators"
+        // A frame with nothing computable (a days-old listing) is "0 of 0" on the wire —
+        // an honest number that reads as a bug. Name the reason instead.
+        guard totalIndicators > 0 else { return "Not enough history" }
+        return "\(matchingIndicators) of \(totalIndicators) indicators"
     }
 }
 

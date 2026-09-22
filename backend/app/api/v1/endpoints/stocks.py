@@ -1335,7 +1335,9 @@ async def get_technical_analysis(ticker: str):
     """
     Get technical analysis gauge data for a ticker.
 
-    Computes 18 technical indicators (10 moving averages + 8 oscillators)
+    Computes up to 18 technical indicators (10 moving averages + 8 oscillators;
+    13 for a coin, whose CoinGecko history has no high/low — the five range oscillators
+    are omitted, never fabricated)
     on both daily and weekly timeframes, producing a 0-1 gauge value
     and signal (Strong Sell to Strong Buy).
     """

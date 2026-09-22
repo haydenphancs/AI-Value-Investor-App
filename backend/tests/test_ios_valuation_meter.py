@@ -111,7 +111,9 @@ def test_the_meter_reuses_the_technical_gauge_and_the_overviews_rating():
     tech = _code(_TECH_METER)
     assert "struct MeterGauge" in tech
     wrapper = _decl(tech, "struct TechnicalGauge")
-    assert "MeterGauge(label: signal.rawValue, labelColor: signal.color, gaugeValue: gaugeValue)" in wrapper
+    # `displayName`, not `rawValue`: the wire value for the middle band is "Hold" while the
+    # step row says "Neutral" (test_ios_technical_card_guards pins the mapping).
+    assert "MeterGauge(label: signal.displayName, labelColor: signal.color, gaugeValue: gaugeValue)" in wrapper
     meter = _decl(_code(_METER), "struct ValuationMeter")
     assert "MeterGauge(" in meter and "TechnicalLevelIndicatorsRow(" in meter
     assert 'static let scaleLabels = ["Expensive", "Pricey", "Fair", "Cheap", "Bargain"]' in meter

@@ -52,6 +52,39 @@ import SwiftUI
 /// participate in layout at all, so the scroll view's frame never changes and there is nothing
 /// to jump. The in-scroll copy keeps its space and simply scrolls up behind the (opaque) pinned
 /// copy.
+///
+/// ## Why the content is pinned to the viewport width
+///
+/// TestFlight, build 1.0 (8), ETH → Overview: *"I don't want it move the whole thing like this."*
+/// The screenshot shows every child of this scroll view — chart, axis labels, range strip, the
+/// tab bar and its divider, Key Statistics, Performance — translated ~73pt to the right as one
+/// unit, a page-background gutter down the left edge and the right edge cut off, while the
+/// header above and the AI bar below sit where they belong. That is the signature of a vertical
+/// `ScrollView` whose content is WIDER than its viewport: the eager `VStack` takes the width of
+/// its widest child, centres every normal-width child inside that (+half the overflow), and the
+/// backing `UIScrollView` gets a `contentSize.width > bounds.width`, so a sideways drag anywhere
+/// on the page drags the whole page.
+///
+/// No child in the tree reports a width above the viewport at default type, and the shift could
+/// not be reproduced on the simulator, so the offender is environmental (iOS 26.6.x) and
+/// intermittent. The guarantee is structural instead: `.frame(minWidth: 0, maxWidth: .infinity)`
+/// on the stack reports exactly the PROPOSED width — a flexible frame's size is
+/// `clamp(proposal, min ?? child, max ?? child)`, so with `minWidth: 0` the proposal wins — and
+/// an over-wide child then overflows symmetrically and is clipped by the scroll view while its
+/// siblings never move, and the content can never be dragged sideways.
+///
+/// Two shapes that look equivalent and are not, both measured with a synthetic 600pt child:
+///
+/// - `.frame(maxWidth: .infinity)` alone: `min` defaults to the CHILD's width, so the frame
+///   reports 632pt and nothing is clamped. Worse, the scroll view then reports that width
+///   upward and the whole screen — header and AI bar included — shifts.
+/// - `.containerRelativeFrame(.horizontal)`: pins the content to the container's size, but the
+///   container's size is the scroll view's, which (see above) follows the content's natural
+///   width — a feedback pair that never settles. Measured: 100% main-thread CPU in
+///   `GraphHost.flushTransactions → _FlexFrameLayout.sizeThatFits` from the first frame of the
+///   screen, the same family as the Home-feed hang.
+///
+/// Pinned by `backend/tests/test_ios_detail_layout_guards.py`.
 struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
 
     /// Lifted so the screen can swap its nav-bar title for the price once the tabs pin. Written
@@ -83,6 +116,11 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
     /// chart differ per asset class, and the skeleton is a different height again.
     @State private var aboveTabsHeight: CGFloat = 0
 
+    /// The scroll content's natural width, i.e. the width of its WIDEST child. Read only to
+    /// name an over-wide child in DEBUG; the frame below keeps it from ever affecting layout.
+    @State private var contentNaturalWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             // EAGER. See the type comment — do not reintroduce LazyVStack here.
@@ -101,6 +139,23 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
 
                 content
             }
+            // Measures the stack's NATURAL width (a `VStack` is as wide as its widest child),
+            // which the container-relative frame below deliberately does not constrain. A
+            // width is a property of the content and stays valid after culling, like the
+            // height preference above.
+            .background(
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: ContentNaturalWidthPreferenceKey.self,
+                        value: geometry.size.width
+                    )
+                }
+            )
+            // Exactly the proposed (viewport) width, whatever the children report. See the
+            // type comment: this is what stops the whole page from being dragged sideways.
+            // `minWidth: 0` is load-bearing — see the type comment for why the max-only form
+            // does nothing here and why `containerRelativeFrame` must not replace it.
+            .frame(minWidth: 0, maxWidth: .infinity)
         }
         // Draws over the scrolled content; contributes NO layout. This is what replaces
         // `pinnedViews` without moving the scroll view's frame.
@@ -112,6 +167,12 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
         .onPreferenceChange(AboveTabsHeightPreferenceKey.self) { height in
             if height > 0, height != aboveTabsHeight {
                 aboveTabsHeight = height
+            }
+        }
+        .onPreferenceChange(ContentNaturalWidthPreferenceKey.self) { width in
+            if width > 0, width != contentNaturalWidth {
+                contentNaturalWidth = width
+                reportOverWideContent()
             }
         }
         // The pin is derived from the SCROLL OFFSET, never from the tab bar's own geometry.
@@ -132,9 +193,34 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
                 isTabBarPinned = shouldPin
             }
         }
+        // The viewport width, for the DEBUG over-wide report only. Separate from the pin
+        // read above so the pin keeps firing on every frame with the cheapest possible value.
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.containerSize.width
+        } action: { _, width in
+            if width > 0, width != containerWidth {
+                containerWidth = width
+                reportOverWideContent()
+            }
+        }
         .refreshable {
             await onRefresh()
         }
+    }
+
+    /// Names an over-wide child while a developer is looking. Nothing on the page depends on
+    /// it: the container-relative frame has already kept the overflow from moving anything.
+    /// Prints only when the pair changes, so a steady state costs one line, not one per frame.
+    private func reportOverWideContent() {
+        #if DEBUG
+        guard containerWidth > 0, contentNaturalWidth > containerWidth + 0.5 else { return }
+        print(
+            "⚠️ [DetailScrollContainer] scroll content is \(Int(contentNaturalWidth.rounded()))pt wide in a "
+            + "\(Int(containerWidth.rounded()))pt viewport — a child reports "
+            + "\(Int((contentNaturalWidth - containerWidth).rounded()))pt more than it was offered. "
+            + "The page stays pinned; find that child."
+        )
+        #endif
     }
 
     /// Rendered twice — once in the scroll content (so it scrolls away) and once in the overlay
@@ -159,6 +245,15 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
 /// valid after SwiftUI stops updating the reader, whereas a scroll-relative position silently
 /// freezes the moment its view leaves the rendered band.
 struct AboveTabsHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// The scroll content's natural width — what its widest child reports. Compared against the
+/// viewport in DEBUG to name a child that overflows; never used for layout.
+struct ContentNaturalWidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())

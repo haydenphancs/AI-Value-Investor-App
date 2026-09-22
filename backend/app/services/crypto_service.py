@@ -16,7 +16,7 @@ import json
 import logging
 import math
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
@@ -781,6 +781,79 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     return ((end - start) / start) * 100
 
 
+def _row_date(row: Any) -> Optional[date_type]:
+    """The calendar date of a history row, or None when it cannot be read.
+
+    Accepts the two shapes in play: CoinGecko rows carry ``YYYY-MM-DD``; FMP rows may carry a
+    full ``YYYY-MM-DD HH:MM:SS`` stamp. Only the first ten characters are the date.
+    """
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("date")
+    if not isinstance(raw, str) or len(raw) < 10:
+        return None
+    try:
+        return datetime.fromisoformat(raw[:10]).date()
+    except ValueError:
+        return None
+
+
+def _compute_return_by_date(
+    prices: List[Dict], days_back: int, *, max_gap_days: int = 7
+) -> Optional[float]:
+    """% return over the last ``days_back`` CALENDAR days, anchored on dates, not positions.
+
+    ``_compute_return`` counts rows back from the end and refuses unless ``len > days_back``.
+    That is the right guard for the 1M/1Y rows, where the 730-day series has hundreds of rows of
+    slack, but it makes a "2 Years" row impossible to show reliably: CoinGecko's ``days=730``
+    daily series bucketed by ET date is 731 rows only while the trailing live point sits on its
+    own ET date (20:00-24:00 ET it collapses into the midnight print, leaving 730), and any
+    single missing day drops it to 730 as well. Positional maths would show the tile for part of
+    the day and hide it for the rest. So this row is anchored on the calendar instead:
+
+    * ``end`` is the last row (today's live point on CoinGecko, the last close on FMP);
+    * ``target`` is ``end.date - days_back``;
+    * ``start`` is the FIRST row on or after ``target`` — a gap on the target date itself
+      moves to the next available print, never back.
+
+    It returns None, so the caller OMITS the row, when the series does not actually reach the
+    window: a coin younger than the window would otherwise show its since-inception return under
+    a "2 Years" label, the exact mislabel the All-Time row was cured of. ``max_gap_days`` is the
+    tolerance for that reach (a weekend-plus-holiday gap on a trading-day series is 4 days).
+    Also None on fewer than two rows, an unreadable date, or a non-finite / zero close — a NaN
+    here serialises as an invalid JSON token and crashes the whole detail screen on iOS.
+
+    Rows are expected oldest-first (every caller sorts) but are scanned, not indexed, so a
+    row order surprise degrades to None rather than a wrong number.
+    """
+    if not prices or len(prices) < 2 or days_back <= 0:
+        return None
+    from app.services.chart_helper import _finite_or_none
+
+    end_row = prices[-1]
+    end_date = _row_date(end_row)
+    if end_date is None:
+        return None
+    target = end_date - timedelta(days=days_back)
+    start_row = None
+    start_date = None
+    for row in prices[:-1]:
+        d = _row_date(row)
+        if d is None or d < target or d > end_date:
+            continue
+        if start_date is None or d < start_date:
+            start_row, start_date = row, d
+    if start_row is None or start_date is None:
+        return None
+    if (start_date - target).days > max_gap_days:
+        return None
+    start = _finite_or_none(start_row.get("close") or start_row.get("adjClose"))
+    end = _finite_or_none(end_row.get("close") or end_row.get("adjClose"))
+    if not start or not end or start == 0:
+        return None
+    return ((end - start) / start) * 100
+
+
 def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
     if not prices or len(prices) < 2:
         return None
@@ -839,7 +912,7 @@ class CryptoService:
     def _history_days_cap() -> int:
         """The furthest back any crypto surface may look, in days.
 
-        ONE source for every long-horizon decision — chart ranges, the 3Y/5Y/10Y/All-Time
+        ONE source for every long-horizon decision — chart ranges, the 2Y/3Y/5Y/10Y/All-Time
         performance rows, the benchmark CAGR window. Scattering `365 * N` literals is how
         a 15-year assumption survived into a 2-year world.
         """
@@ -1590,6 +1663,19 @@ class CryptoService:
         if one_year_return is None:
             one_year_return = _compute_return(historical, 365)
         ytd_return = _compute_ytd_return(historical)
+        # "2 Years" is the one row the 730-day source CAN express in full, and the one row
+        # positional maths cannot show reliably (see `_compute_return_by_date`). Gated on the
+        # plan cap like every other horizon: a shorter cap must omit it, not mislabel it.
+        # `max_gap_days=3`: a daily series that really reaches two years starts 0-2 days after
+        # the target (the ET-bucketed midnight print lands on the previous day), so three
+        # covers a missing print without letting a coin listed 723-729 days ago show its
+        # since-inception return as "2 Years". The S&P leg keeps the 7-day default — a
+        # holiday weekend on a trading-day series is a 4-day gap.
+        two_year_return = (
+            _compute_return_by_date(historical, 365 * 2, max_gap_days=3)
+            if self._history_days_cap() >= 365 * 2
+            else None
+        )
         three_year_return = (
             _compute_return(historical, 365 * 3)
             if len(historical) > 365 * 3
@@ -1629,6 +1715,7 @@ class CryptoService:
         # ── Step 3b: Fetch benchmark data ────────────────────────
         # Altcoins benchmark vs BTC; BTC benchmarks vs S&P 500
         bench_1m = bench_ytd = bench_1y = bench_3y = bench_5y = bench_10y = bench_all = None
+        bench_2y = None
         spy_hist = []
         btc_hist = []
         if symbol == "BTC":
@@ -1660,6 +1747,13 @@ class CryptoService:
                 bench_1m = _compute_return(spy_hist, 21)
                 bench_ytd = _compute_ytd_return(spy_hist)
                 bench_1y = _compute_return(spy_hist, 252)
+                # Calendar-anchored, like the coin's own row: the SPY window holds ~504
+                # trading rows, so a positional 252*2 would flicker with the holiday count.
+                bench_2y = (
+                    _compute_return_by_date(spy_hist, 365 * 2)
+                    if self._history_days_cap() >= 365 * 2
+                    else None
+                )
                 bench_3y = _compute_return(spy_hist, 252 * 3) if len(spy_hist) > 252 * 3 else None
                 bench_5y = _compute_return(spy_hist, 252 * 5) if len(spy_hist) > 252 * 5 else None
                 bench_10y = _compute_return(spy_hist, 252 * 10) if len(spy_hist) > 252 * 10 else None
@@ -1736,6 +1830,11 @@ class CryptoService:
                 if bench_1y is None:
                     bench_1y = _compute_return(btc_hist, 365)
                 bench_ytd = _compute_ytd_return(btc_hist)
+                bench_2y = (
+                    _compute_return_by_date(btc_hist, 365 * 2, max_gap_days=3)
+                    if self._history_days_cap() >= 365 * 2
+                    else None
+                )
                 bench_3y = _compute_return(btc_hist, 365 * 3) if len(btc_hist) > 365 * 3 else None
                 bench_5y = _compute_return(btc_hist, 365 * 5) if len(btc_hist) > 365 * 5 else None
                 bench_10y = _compute_return(btc_hist, 365 * 10) if len(btc_hist) > 365 * 10 else None
@@ -1838,6 +1937,7 @@ class CryptoService:
             one_month=one_month_return,
             ytd=ytd_return,
             one_year=one_year_return,
+            two_year=two_year_return,
             three_year=three_year_return,
             five_year=five_year_return,
             ten_year=ten_year_return,
@@ -1845,6 +1945,7 @@ class CryptoService:
             bench_1m=bench_1m,
             bench_ytd=bench_ytd,
             bench_1y=bench_1y,
+            bench_2y=bench_2y,
             bench_3y=bench_3y,
             bench_5y=bench_5y,
             bench_10y=bench_10y,
@@ -2308,12 +2409,22 @@ class CryptoService:
         bench_1m, bench_ytd, bench_1y, bench_3y, bench_5y,
         bench_10y=None, bench_all_time,
         benchmark_label, symbol=None,
+        two_year=None, bench_2y=None,
     ) -> List[PerformancePeriodResponse]:
+        """The Performance card's rows, in display order; a None asset value OMITS its row.
+
+        "2 Years" sits between "1 Year" and "3 Years". It is the only row anchored on calendar
+        dates (`_compute_return_by_date`), because it is the only one whose window equals the
+        730-day source: positional maths would make it flicker with the row count. The
+        3Y/5Y/10Y rows stay wired to the plan cap (`CRYPTO_HISTORY_YEARS`) and light up on
+        their own if it is ever raised — they are dormant, not dead.
+        """
         periods = []
         entries = [
             ("1 Month", one_month, bench_1m),
             ("YTD", ytd, bench_ytd),
             ("1 Year", one_year, bench_1y),
+            ("2 Years", two_year, bench_2y),
             ("3 Years", three_year, bench_3y),
             ("5 Years", five_year, bench_5y),
         ]

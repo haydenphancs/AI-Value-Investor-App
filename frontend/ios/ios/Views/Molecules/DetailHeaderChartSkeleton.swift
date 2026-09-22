@@ -86,7 +86,12 @@ struct DetailHeaderChartSkeleton: View {
                 .frame(height: 180)
                 .padding(.top, AppSpacing.sm)
 
-            // Range-selector pills.
+            // Range-selector pills. Seven fixed 34pt capsules are 286pt of rigid width, and
+            // the navigation push proposes a RAMP of widths (measured 284 → 402pt) to the
+            // incoming screen for a few frames — so for those frames this row was the widest
+            // thing in the detail scroll content and reported it upward. The real range strip
+            // is a horizontal ScrollView and never does that; this clamps the placeholder to
+            // its proposal the same way (`minWidth: 0` is what makes a flexible frame clamp).
             HStack(spacing: 8) {
                 ForEach(0..<7, id: \.self) { _ in
                     Capsule()
@@ -94,6 +99,8 @@ struct DetailHeaderChartSkeleton: View {
                         .frame(width: 34, height: 24)
                 }
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
         }
         .shimmer()
     }

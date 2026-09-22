@@ -14,8 +14,19 @@ struct TickerDetailPerformanceSection: View {
     /// detail screens already holds its own symbol, so this costs nothing to thread.
     var symbol: String = ""
 
-    // Grid columns - 3 columns layout
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: AppSpacing.sm), count: 3)
+    /// Three columns, except that a card holding EXACTLY four tiles lays out 2×2.
+    ///
+    /// The crypto card gained a "2 Years" tile (TestFlight, build 1.0 (9), BNB: *"We have 2 year
+    /// for bitcoin right? Add 2 year also"*), and four tiles in a three-column grid wrap to 3 + 1
+    /// with a lone tile on the second row. The rule is by COUNT, not asset class, so it also
+    /// covers the other four-tile cards: a 3-5-year-old equity, ETF or index (1M / YTD / 1Y / 3Y —
+    /// the backends omit 5Y below 1261 rows and 10Y below 2521) and a commodity with 6-12 months
+    /// of history (1M / 3M / 6M / YTD). Six tiles stay 3×2, five 3+2, eight 3+3+2, and a coin
+    /// younger than two years keeps its three in one row.
+    private var columns: [GridItem] {
+        let count = periods.count == 4 ? 2 : 3
+        return Array(repeating: GridItem(.flexible(), spacing: AppSpacing.sm), count: count)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {

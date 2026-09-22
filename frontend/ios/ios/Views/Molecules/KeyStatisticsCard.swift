@@ -30,6 +30,14 @@ struct KeyStatisticsCard: View {
         }
         .padding(AppSpacing.lg)
         .frame(width: 160)
+        // Stretches to the tallest card in the row, so a four-row group sits in a card the
+        // same height as its five-row neighbour with its rows pinned to the TOP (the default
+        // `.center` would float them to the middle — the TestFlight defect in mirror image).
+        // Only takes effect when the row proposes a definite height; `KeyStatisticsCarousel`
+        // arranges that. `width:` belongs to the other `frame` overload, hence two calls.
+        // Placed BEFORE `.cardSurface`, which paints exactly the frame it is attached to —
+        // after it, the fill would stay content-sized and only the hit area would grow.
+        .frame(maxHeight: .infinity, alignment: .top)
         .cardSurface(AppColors.cardBackgroundNested, cornerRadius: AppCornerRadius.large)
     }
 

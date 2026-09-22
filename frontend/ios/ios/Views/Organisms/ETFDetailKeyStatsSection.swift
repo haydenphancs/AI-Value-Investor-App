@@ -19,25 +19,9 @@ struct ETFDetailKeyStatsSection: View {
                 .foregroundColor(AppColors.textPrimary)
                 .padding(.horizontal, AppSpacing.lg)
 
-            // Horizontal scrolling cards (reuses KeyStatisticsCard)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(Array(statisticsGroups.enumerated()), id: \.element.id) { index, group in
-                        HStack(spacing: 0) {
-                            KeyStatisticsCard(statistics: group.statistics)
-
-                            // Vertical divider between cards (except for last)
-                            if index < statisticsGroups.count - 1 {
-                                Rectangle()
-                                    .fill(AppColors.cardBackgroundLight)
-                                    .frame(width: 1)
-                                    .padding(.vertical, AppSpacing.lg)
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, AppSpacing.lg)
-            }
+            // The card row. Shared by every detail screen — equal-height, top-aligned cards
+            // live in KeyStatisticsCarousel, not here.
+            KeyStatisticsCarousel(statisticsGroups: statisticsGroups)
         }
         .padding(.top, AppSpacing.md)
         .padding(.bottom, AppSpacing.sm)

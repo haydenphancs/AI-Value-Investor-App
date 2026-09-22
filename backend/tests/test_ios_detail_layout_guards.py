@@ -312,3 +312,192 @@ def test_the_layout_scans_are_not_vacuous():
     # And the files are real views, not stubs.
     for path in (_CONTAINER, _BACKSWIPE):
         assert len(_strip_comments(_read(path))) > 400, f"{path.name} is too small to be real"
+
+
+# ── 6. The scroll content is pinned to the viewport width ──────────────
+#
+# TestFlight, build 1.0 (8), ETH → Overview: *"I don't want it move the whole thing like this."*
+# Every child of the container's scroll view — chart, range strip, tab bar, Key Statistics,
+# Performance — was translated ~73pt to the right as one unit, with a page-background gutter on
+# the left and the right edge cut off; the header above and the AI bar below did not move. That
+# is a vertical ScrollView whose content is WIDER than its viewport: the eager VStack takes the
+# width of its widest child, centres the normal-width children (+half the overflow) and the
+# UIScrollView gets a contentSize.width > bounds.width, so the whole page drags sideways. The
+# offender could not be reproduced (iOS 26.6.x, intermittent); the guarantee is structural.
+#
+# ⚠️ Two look-alikes, both measured with a synthetic 600pt child and both wrong:
+#   - `.frame(maxWidth: .infinity)` — a flexible frame reports `clamp(proposal, min ?? child,
+#     max ?? child)`, so with no `minWidth` the CHILD's width wins and nothing is clamped (and the
+#     scroll view then reports that width upward: the whole screen shifted, header included).
+#   - `.containerRelativeFrame(.horizontal)` — pins the content to the container's size, but the
+#     container's size follows the content's natural width; the pair never settles. Measured as
+#     100% main-thread CPU from the first frame of the screen (`GraphHost.flushTransactions →
+#     _FlexFrameLayout.sizeThatFits`), the Home-feed hang's family.
+# Only `.frame(minWidth: 0, maxWidth: .infinity)` clamps to the proposal without feedback. The
+# container's comments name all three, hence the stripping.
+
+_MOLECULES = _IOS / "Views/Molecules"
+_CAROUSEL = _MOLECULES / "KeyStatisticsCarousel.swift"
+_KEY_STATS_CARD = _MOLECULES / "KeyStatisticsCard.swift"
+_PERFORMANCE = _ORGANISMS / "TickerDetailPerformanceSection.swift"
+
+# Ticker's section is what Index and Commodity render too; ETF and Crypto keep their own.
+_KEY_STATS_SECTIONS = [
+    "TickerDetailKeyStatsSection.swift",
+    "ETFDetailKeyStatsSection.swift",
+    "CryptoDetailKeyStatsSection.swift",
+]
+
+
+_CLAMP = ".frame(minWidth: 0, maxWidth: .infinity)"
+
+
+def test_the_scroll_content_is_container_relative_in_width():
+    """Brace-bound on BOTH ends: the frame has to be a modifier on the eager stack, inside the
+    ScrollView's closure. A plain `stack < frame < overlay` ordering passed with the frame moved
+    onto the ScrollView itself (the ScrollView's closing brace also sits between the two), and
+    that placement sizes the scroll VIEW, not its content — the page drags sideways again."""
+    body = _decl_block(_read(_CONTAINER), "var body: some View")
+    scroll = _decl_block(body, "ScrollView(showsIndicators: false)")   # the trailing closure only
+    stack = _decl_block(scroll, "VStack(spacing: 0)")                   # the eager stack's block
+    after_stack = scroll[scroll.index(stack) + len(stack):]
+
+    assert _CLAMP not in stack, "the clamping frame is on a CHILD of the stack, not on the stack"
+    assert _CLAMP in after_stack, (
+        "DetailScrollContainer no longer pins its scroll content to the viewport width: the "
+        "clamping frame must be a modifier on the eager stack, inside the ScrollView closure. On "
+        "the ScrollView itself it constrains nothing — a child that reports a width above the "
+        "viewport centres every sibling and makes the whole page draggable sideways again, on "
+        "all five detail screens.")
+    assert _CLAMP not in body.replace(scroll, ""), (
+        "a second clamping frame outside the ScrollView closure — the one that matters is the "
+        "one on the content; a copy on the ScrollView hides a move")
+    assert ".frame(maxWidth: .infinity)" not in scroll, (
+        "a max-only flexible frame on the scroll content does not clamp an over-wide child; "
+        "it reports the child's width")
+    assert "containerRelativeFrame" not in body, (
+        "`.containerRelativeFrame` is back on the scroll content. It reads the container's size "
+        "while the container's size follows the content's natural width — measured as a "
+        "100%-CPU layout loop from the first frame of the screen. Use the minWidth: 0 frame.")
+
+
+def test_the_loading_skeleton_range_strip_cannot_widen_the_content():
+    """Seven rigid 34pt capsules are 286pt (+32 padding) of minimum width. The navigation push
+    proposes a RAMP of widths (measured 284 → 402pt) to the incoming screen for a few frames,
+    so this placeholder was the over-wide child on every push — the clamp above hides it, but
+    the DEBUG report would name it on every screen and bury a real offender."""
+    skeleton = _read(_IOS / "Views/Molecules/DetailHeaderChartSkeleton.swift")
+    stripped = _strip_comments(skeleton)
+    row = stripped.find("ForEach(0..<7, id: \\.self)")
+    assert row != -1, "the skeleton's seven-capsule range strip is gone — this scan has drifted"
+    tail = stripped[row:row + 500]
+    clamp = tail.find(".frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)")
+    assert clamp != -1, "the skeleton range strip is no longer clamped to its proposal"
+    assert ".clipped()" in tail[clamp:], "the clamped strip must clip, or the capsules paint past the frame"
+
+
+def test_the_over_wide_report_is_debug_only_and_never_lays_out():
+    """The natural-width probe exists to NAME an offender while a developer is looking. It must
+    stay a diagnostic: a `#if DEBUG` print, off the layout path."""
+    raw = _read(_CONTAINER)
+    report = _decl_block(raw, "private func reportOverWideContent()")
+    assert "#if DEBUG" in report and "#endif" in report, "the over-wide report must be DEBUG-only"
+    assert "print(" in report
+    body = _decl_block(raw, "var body: some View")
+    # Emitter AND consumer, both inside `body` — the PreferenceKey struct alone would satisfy a
+    # whole-file scan after the probe was deleted from the scroll content.
+    assert "key: ContentNaturalWidthPreferenceKey.self" in body, (
+        "the natural-width probe is gone from the scroll content")
+    assert ".onPreferenceChange(ContentNaturalWidthPreferenceKey.self)" in body, (
+        "nothing reads the natural-width preference any more")
+    assert "reportOverWideContent()" in body, "the report is no longer called from the body"
+    assert ".frame(width: contentNaturalWidth" not in body and ".frame(width: containerWidth" not in body, (
+        "the measured widths must never feed a frame — that would turn a diagnostic into layout")
+
+
+# ── 7. Key Statistics cards are equal-height and top-aligned ──────────
+#
+# Same ETH screenshot, second defect: the four-row supply card floated to the vertical middle of
+# the five-row price card. Three byte-identical sections (Ticker — also Index and Commodity —,
+# ETF, Crypto) each had two nested `HStack(spacing: 0)` with the default `.center` alignment.
+# The developer's follow-up widened it: *"i need all cards in here that have the same height.
+# check other like tickerdetailview crypto, or etf,... to fix too."* One carousel now serves
+# all five screens; the stretch needs BOTH the card's `maxHeight: .infinity` frame and a
+# definite row height from `.fixedSize(horizontal: false, vertical: true)` — a stack only
+# re-proposes its height to its children when it has one.
+
+
+@pytest.mark.parametrize("section", _KEY_STATS_SECTIONS)
+def test_every_key_stats_section_renders_the_shared_carousel(section):
+    body = _decl_block(_read(_ORGANISMS / section), "var body: some View")
+    assert "KeyStatisticsCarousel(statisticsGroups:" in body, (
+        f"{section}: no longer renders KeyStatisticsCarousel — a private copy of the card row "
+        f"is how three screens carried the same misalignment")
+    assert "HStack(spacing: 0)" not in body and "ScrollView(.horizontal" not in body, (
+        f"{section}: the card row is back inline; keep it in the shared carousel")
+
+
+def test_the_carousel_rows_are_top_aligned_with_a_definite_height():
+    body = _decl_block(_read(_CAROUSEL), "var body: some View")
+    assert "ScrollView(.horizontal, showsIndicators: false)" in body, "the carousel no longer scrolls"
+    assert "KeyStatisticsCard(statistics:" in body, "the carousel no longer renders the cards"
+    assert body.count("HStack(alignment: .top, spacing: 0)") == 2, (
+        "both the outer row and the per-group pair must be top-aligned; the default `.center` "
+        "floats a shorter card to the middle of its neighbour")
+    assert "HStack(spacing: 0)" not in body, "a centre-aligned HStack is back in the carousel"
+    assert ".fixedSize(horizontal: false, vertical: true)" in body, (
+        "without a definite row height the cards keep their ideal heights and only top-align — "
+        "the developer asked for equal heights")
+
+
+def test_the_card_stretches_to_the_row_with_its_rows_at_the_top():
+    body = _decl_block(_read(_KEY_STATS_CARD), "var body: some View")
+    width = body.find(".frame(width: 160)")
+    stretch = body.find(".frame(maxHeight: .infinity, alignment: .top)")
+    surface = body.find(".cardSurface(AppColors.cardBackgroundNested")
+    assert width != -1, "the 160pt card width is gone — this scan has drifted"
+    assert stretch != -1, (
+        "KeyStatisticsCard no longer stretches to the row height with its rows pinned to the "
+        "top. `maxHeight: .infinity` alone would centre a four-row body in a five-row card.")
+    assert surface != -1, "the nested-card fill is gone (AppColors.cardBackgroundNested is the rule)"
+    assert stretch < surface, (
+        "the stretch frame must precede .cardSurface — the surface paints exactly the frame it "
+        "is attached to, so after it the fill stays content-sized and only the hit area grows")
+
+
+# ── 8. Four Performance tiles lay out 2×2 ─────────────────────────────
+
+
+def test_four_performance_tiles_use_two_columns():
+    """TestFlight, build 1.0 (9), BNB: *"We have 2 year for bitcoin right? Add 2 year also"* —
+    the crypto card gained a fourth tile, which a three-column grid wraps to 3 + 1."""
+    src = _strip_comments(_read(_PERFORMANCE))
+    columns = _decl_block(_read(_PERFORMANCE), "private var columns: [GridItem]")
+    assert "periods.count == 4 ? 2 : 3" in columns, (
+        "the Performance grid no longer lays four tiles out 2×2. The rule is by COUNT, not asset "
+        "class: a coin with its 2 Years row, but equally a 3-5-year-old equity/ETF/index "
+        "(1M/YTD/1Y/3Y) or a commodity with 6-12 months of history (1M/3M/6M/YTD); six tiles "
+        "stay 3×2, five 3+2, eight 3+3+2, three in one row")
+    assert "GridItem(.flexible(), spacing: AppSpacing.sm)" in columns
+    assert "private let columns" not in src, "the column count is a stored constant again"
+    body = _decl_block(_read(_PERFORMANCE), "var body: some View")
+    assert "LazyVGrid(columns: columns" in body, "the grid no longer reads the derived columns"
+
+
+def test_the_width_and_carousel_scans_are_not_vacuous():
+    raw = _read(_CONTAINER)
+    # The container's comments name both rejected alternatives; the scan must not see them.
+    assert ".frame(maxWidth: .infinity)" in raw, "the container lost its explanatory comment"
+    assert "containerRelativeFrame" in raw, "the container lost the hang explanation"
+    body = _decl_block(raw, "var body: some View")
+    assert ".frame(maxWidth: .infinity)" not in body and "containerRelativeFrame" not in body
+    # The ScrollView closure is a proper sub-block of the body (bounding bites on both ends).
+    scroll = _decl_block(body, "ScrollView(showsIndicators: false)")
+    assert len(scroll) < len(body) and ".overlay(alignment: .top)" not in scroll
+    assert _CLAMP in scroll
+    # The carousel's comments name the defect token; the body scan must not see it.
+    carousel_raw = _read(_CAROUSEL)
+    assert "HStack(spacing: 0)" in carousel_raw, "the carousel lost its explanatory comment"
+    assert "HStack(spacing: 0)" not in _decl_block(carousel_raw, "var body: some View")
+    for section in _KEY_STATS_SECTIONS:
+        assert len(_strip_comments(_read(_ORGANISMS / section))) > 300, f"{section} is a stub"

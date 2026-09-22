@@ -30,6 +30,7 @@ from app.schemas.sentiment import (
     MarketMoodLevel,
     SentimentAnalysisResponse,
 )
+from app.services.coingecko_adapter import crypto_base_symbol
 from app.services.social_mentions_service import get_social_mentions_service
 
 logger = logging.getLogger(__name__)
@@ -204,8 +205,18 @@ class SentimentService:
             # Apple rows persisted under `ticker=""` and read back as some other company's
             # mood. A blank ticker is a caller bug, never a market-wide request.
             raise ValueError("sentiment requires a ticker")
-        # For crypto: FMP uses "ETHUSD" but ApeWisdom uses "ETH"
-        social_key = (social_ticker or ticker).upper()
+        # For crypto: FMP uses "ETHUSD"; the endpoints hand over the bare base ("ETH") as
+        # `social_ticker`, and the social service applies ApeWisdom's own key for a coin
+        # ("ETH.X") from `is_crypto` — see `social_mentions_service.apewisdom_key`. A crypto
+        # caller that passes only the pair gets the ONE pair→base strip here (`USDT` before
+        # `USD`, and never on a base that merely ends in USD — `TUSD` stays `TUSD`); the
+        # social service never strips, so the strip happens exactly once on every path.
+        if social_ticker:
+            social_key = social_ticker.upper()
+        elif is_crypto:
+            social_key = crypto_base_symbol(ticker)
+        else:
+            social_key = ticker
         # `is_crypto` is REQUEST state and is threaded down as a parameter. It used to be
         # stashed on `self` — and `get_sentiment_service()` returns a process-wide
         # SINGLETON, so a concurrent request overwrote it between the write here and the
@@ -227,12 +238,12 @@ class SentimentService:
         # time for the initial cache build. Subsequent calls are instant.
         async def _social_24h():
             return await asyncio.wait_for(
-                social_svc.get_mentions_24h(social_key), timeout=45
+                social_svc.get_mentions_24h(social_key, is_crypto=is_crypto), timeout=45
             )
 
         async def _social_7d():
             return await asyncio.wait_for(
-                social_svc.get_mentions_7d(social_key), timeout=45
+                social_svc.get_mentions_7d(social_key, is_crypto=is_crypto), timeout=45
             )
 
         # Parallel fetch: news + price + historical + social (24h + 7d)

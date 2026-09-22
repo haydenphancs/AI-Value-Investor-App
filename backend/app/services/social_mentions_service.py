@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.apewisdom import (
+    crypto_ticker,
     get_all_mentions,
     get_ticker_mentions,
     is_cache_populated,
@@ -21,6 +22,25 @@ from app.integrations.apewisdom import (
 from app.utils.supabase_errors import retry_idempotent_async
 
 logger = logging.getLogger(__name__)
+
+
+def apewisdom_key(ticker: str, *, is_crypto: bool) -> str:
+    """The key a ticker is stored under — in the ApeWisdom cache AND in
+    `social_mentions_history`, which is written from that cache verbatim.
+
+    Stocks are bare (`AAPL`). Coins carry ApeWisdom's `.X` suffix on the BASE symbol
+    (`ETH.X`). `ticker` IS the base: every caller strips the pair's quote currency exactly
+    once before it gets here (`crypto.py` → `_normalize_crypto_symbol`, chat → its trailing
+    `USD` strip, `sentiment_service.get_sentiment` → `crypto_base_symbol` when no
+    `social_ticker` is given). This helper must NOT strip again — a stablecoin's base
+    itself ends in `USD` (`TUSD`, `PYUSD`, `FDUSD`), and a second strip turned it into
+    `T.X`, the same populated-cache miss this key exists to prevent.
+    `is_crypto` is REQUEST state (a stock that shares a coin's name — `COIN`, `LINK` — is a
+    different row), so it is a parameter, never something inferred from the symbol.
+    """
+    if is_crypto:
+        return crypto_ticker(ticker)
+    return str(ticker or "").strip().upper()
 
 
 def _int_or_zero(value: Any) -> int:
@@ -140,7 +160,7 @@ class SocialMentionsService:
     # ── 24h lookups (fast, from ApeWisdom cache) ──────────────────
 
     async def get_mentions_24h(
-        self, ticker: str
+        self, ticker: str, *, is_crypto: bool = False
     ) -> Tuple[int, int, bool]:
         """
         Get 24h mention counts for a ticker.
@@ -153,14 +173,19 @@ class SocialMentionsService:
         (0, 0), and the response published the fabricated zero as a measured count.
         Uses ApeWisdom in-memory cache (fast); falls back to the latest DB row, off the
         event loop.
+
+        `is_crypto` selects the key (`apewisdom_key`): a coin lives under `ETH.X`, and a
+        lookup of the bare `ETH` on a populated cache is — correctly — a real zero. That is
+        exactly how every coin read "Reddit data unavailable" for months: right semantics,
+        wrong key. The flag is required, not inferred, because `COIN`/`LINK` are also stocks.
         """
-        ticker = ticker.upper()
+        key = apewisdom_key(ticker, is_crypto=is_crypto)
 
         # Try ApeWisdom cache first
-        data = await get_ticker_mentions(ticker)
+        data = await get_ticker_mentions(key)
         if data is not None:
             return data["mentions"], data["mentions_24h_ago"], True
-        if is_cache_populated(ticker):
+        if is_cache_populated(key):
             # Both filters have landed and the ticker is not on either list: Reddit is
             # not talking about it TODAY, and that is the answer. The DB fallback below
             # must not run here — it would serve the latest snapshot row (up to 30 days
@@ -181,14 +206,14 @@ class SocialMentionsService:
             result = await asyncio.to_thread(
                 lambda: self.supabase.table("social_mentions_history")
                 .select("mentions, snapshot_date")
-                .eq("ticker", ticker)
+                .eq("ticker", key)
                 .order("snapshot_date", desc=True)
                 .limit(2)
                 .execute()
             )
         except Exception as e:
             logger.warning(
-                f"DB fallback for 24h mentions failed for {ticker}: {type(e).__name__}: {e}"
+                f"DB fallback for 24h mentions failed for {key}: {type(e).__name__}: {e}"
             )
             return 0, 0, False
 
@@ -206,7 +231,7 @@ class SocialMentionsService:
     # ── 7d lookups (from DB history) ──────────────────────────────
 
     async def get_mentions_7d(
-        self, ticker: str
+        self, ticker: str, *, is_crypto: bool = False
     ) -> Tuple[int, int, bool]:
         """
         Get 7-day mention counts for a ticker.
@@ -217,8 +242,11 @@ class SocialMentionsService:
         `known` is False only when the query FAILED (the 42501 of 2026-09-11 answered
         every ticker "0 mentions this week" for months); a successful empty query — the
         first-week warm-up, a ticker nobody mentions — is a real (0, 0, True).
+
+        The rows are keyed exactly as ApeWisdom serves them (`ETH.X` for a coin), so the
+        same `apewisdom_key` selects them — see `get_mentions_24h`.
         """
-        ticker = ticker.upper()
+        key = apewisdom_key(ticker, is_crypto=is_crypto)
 
         try:
             today = date.today()
@@ -229,14 +257,14 @@ class SocialMentionsService:
                 cur = (
                     self.supabase.table("social_mentions_history")
                     .select("mentions")
-                    .eq("ticker", ticker)
+                    .eq("ticker", key)
                     .gte("snapshot_date", week_ago)
                     .execute()
                 )
                 prev = (
                     self.supabase.table("social_mentions_history")
                     .select("mentions")
-                    .eq("ticker", ticker)
+                    .eq("ticker", key)
                     .gte("snapshot_date", two_weeks_ago)
                     .lt("snapshot_date", week_ago)
                     .execute()
@@ -254,7 +282,7 @@ class SocialMentionsService:
 
         except Exception as e:
             logger.warning(
-                f"7d mentions query failed for {ticker}: {type(e).__name__}: {e}"
+                f"7d mentions query failed for {key}: {type(e).__name__}: {e}"
             )
             return 0, 0, False
 

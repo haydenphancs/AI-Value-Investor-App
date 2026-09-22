@@ -442,10 +442,10 @@ async def test_get_sentiment_publishes_unknown_for_a_failed_7d_arm(monkeypatch):
     monkeypatch.setattr(svc, "_fetch_historical_prices", _hist)
 
     class _Social:
-        async def get_mentions_24h(self, t):
+        async def get_mentions_24h(self, t, **kw):
             return (40, 30, True)
 
-        async def get_mentions_7d(self, t):
+        async def get_mentions_7d(self, t, **kw):
             raise RuntimeError("permission denied for table social_mentions_history")
 
     monkeypatch.setattr(ss, "get_social_mentions_service", lambda: _Social())

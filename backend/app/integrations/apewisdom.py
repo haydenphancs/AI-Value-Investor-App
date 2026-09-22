@@ -7,6 +7,19 @@ Rate-limit-safe: pages fetched with 2s delays, stocks and crypto staggered.
 Two-tier access:
   1. In-memory cache (30-min TTL) for fast per-ticker lookups
   2. Paginated API fetch when cache expires
+
+TICKER CONVENTION (measured against the public API, 2026-09-21)
+---------------------------------------------------------------
+`all-stocks` rows carry the bare ticker (`META`, `AMD`, `SPY`). `all-crypto` rows carry the
+base symbol with a `.X` suffix — EVERY one of the 155 rows: `BTC.X` (198 mentions), `ETH.X`
+(70), `BNB.X`, `SOL.X`. The cache and the daily `social_mentions_history` snapshot store the
+key exactly as served, so a coin is looked up as `crypto_ticker("ETH")` == `"ETH.X"`, never
+as the app's bare base. Every crypto reader used the bare base for months, and because a
+miss on a populated cache is — by design — a REAL zero ("Reddit is not talking about it"),
+each coin's Sentiment card rendered "Reddit data unavailable" with `known=True`. The flag
+semantics were right; the key was wrong. Do not strip the suffix at parse time to "fix" it:
+the snapshot table already holds `.X` rows, and a storage-key change would zero the 7-day
+sums for a week and double-write the history.
 """
 
 import asyncio
@@ -32,6 +45,18 @@ _HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
 }
+
+# The suffix ApeWisdom's `all-crypto` filter puts on every coin (see the module docstring).
+CRYPTO_TICKER_SUFFIX = ".X"
+
+
+def crypto_ticker(base: str) -> str:
+    """ApeWisdom's key for a coin: `ETH` → `ETH.X`. Idempotent, so a key that already carries
+    the suffix passes through; empty in, empty out. Pure — touches no cache."""
+    s = str(base or "").strip().upper()
+    if not s or s.endswith(CRYPTO_TICKER_SUFFIX):
+        return s
+    return s + CRYPTO_TICKER_SUFFIX
 
 # ── In-memory cache ──────────────────────────────────────────────
 # Keyed by ticker (uppercase), value is dict with mentions data.
@@ -266,7 +291,8 @@ async def refresh_cache() -> Dict[str, Dict[str, Any]]:
                     "will retry in %ds" % _PARTIAL_RETRY_SECONDS if previous or kept
                     else "cache for this class stays cold",
                 )
-        # Merge into cache (stocks take priority on collision)
+        # Merge into cache (stocks take priority on collision — moot in practice, since
+        # every crypto key carries `.X` and no stock key does; kept as the tie-break).
         merged = {**parts["all-crypto"], **parts["all-stocks"]}
         _cache = merged
         if stocks is not None and crypto is not None:

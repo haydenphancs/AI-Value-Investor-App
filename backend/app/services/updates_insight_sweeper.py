@@ -1,15 +1,20 @@
 """
 Updates-screen AI Insight sweeper.
 
-Runs inside the FastAPI lifespan (registered in ``app/main.py``). Two passes on
-different cadences, both gated on ``is_market_active()``:
+Runs inside the FastAPI lifespan (registered in ``app/main.py``). Three passes:
 
-  * PRICE pass  (every 5 min)  — one ``batch-quote`` call for the whole universe,
-    then re-evaluate the materiality gate for every scope. Catches a big move
-    before any headline lands.
-  * NEWS pass   (every 15 min) — force-refresh recent articles from FMP into
-    ``ticker_news_cache`` (bypassing its 6h read TTL), then re-evaluate. Catches
-    a breaking story.
+  * PRICE pass  (every 5 min, while ``is_market_active()``)  — one ``batch-quote``
+    call for the whole universe, then re-evaluate the materiality gate for every
+    scope. Catches a big move before any headline lands.
+  * NEWS pass   (every 15 min, while ``is_market_active()``) — force-refresh recent
+    articles from FMP into ``ticker_news_cache`` (bypassing its 6h read TTL), then
+    re-evaluate. Catches a breaking story.
+  * CRYPTO pass (every 30 min, while the market is CLOSED) — the same sweep
+    restricted to the coins in the universe, news refresh included. Coins trade
+    and make news around the clock; before this pass a coin's card was frozen
+    from Friday 20:00 ET to Monday 04:00 ET while its timeline stayed fresh
+    (TestFlight, ETH, 2026-09-02). Runs with closed-market semantics (1h
+    cooldown, 4h soft TTL) so it can never trip ``is_stale``.
 
 WHY A BACKGROUND SWEEPER RATHER THAN A REQUEST-TIME GATE
 --------------------------------------------------------
@@ -25,12 +30,19 @@ SPEND CEILINGS (defence in depth)
 ---------------------------------
   per-scope cooldown  (updates_materiality.COOLDOWN_*)
   per-scope daily cap (updates_materiality.daily_cap_for — 16 for the market
-                      scope, 6 per ticker; enforced BOTH in the pure gate and,
+                      scope and for a ticker inside its EARNINGS WINDOW
+                      (earnings_window_service, D-1..D+2), 10 per ticker
+                      otherwise; enforced BOTH in the pure gate and,
                       authoritatively, by `claim_updates_insight_scope`. Feed
-                      both from `daily_cap_for` or the DB silently overrules
-                      the gate.)
+                      both from `daily_cap_for` with the SAME `earnings_window`
+                      or the DB silently overrules the gate.)
+  per-scope attempt cap (updates_materiality.attempt_cap_for — the daily cap plus
+                      a failure allowance; derived, so it can never sit below the
+                      success ceiling it is meant to protect)
   pre-market reserve  (updates_materiality.premarket_cap_for — keeps two thirds
-                      of the allowance for 09:30-16:00 ET)
+                      of the allowance for the rest of the trading day, 09:30-
+                      20:00 ET; also holds in the small hours before a session,
+                      where the crypto pass runs)
   per-cycle cap       (_PER_CYCLE_REGEN_CAP, priority-ordered by move size)
   concurrency         (_GEN_CONCURRENCY)
   durable global cap  (_GLOBAL_DAILY_CAP, enforced in Postgres)
@@ -41,13 +53,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
-from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
+from app.services.coingecko_adapter import crypto_base_symbol
+from app.services.crypto_names import display_name_for_row
+from app.services.earnings_window_service import symbols_in_earnings_window
+from app.services.news_cache_service import (
+    MARKET_SCOPE,
+    get_news_cache_service,
+    is_crypto_scope,
+)
 from app.services.news_insight_service import (
     INSIGHT_MODEL,
     get_news_insight_service,
@@ -61,11 +82,10 @@ from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
     BAND_EXTREME,
-    PER_SCOPE_ATTEMPT_CAP,
-    PER_SCOPE_DAILY_CAP,
     TIER_EXTREME,
     TIER_UNUSUAL,
     Decision,
+    attempt_cap_for,
     daily_cap_for,
     decide,
 )
@@ -126,6 +146,20 @@ _CATALYST_DAILY_CAP = 30
 # band) — precisely the population most prone to violent moves — is not silently
 # denied a catalyst that an established ticker with the same move would get.
 _CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
+
+# Skip reasons after which the card is "as current as policy allows": the sweeper
+# HAS evaluated the scope and no later cycle will regenerate it until a KNOWN
+# boundary — the ET day roll for `daily_cap` / `attempt_cap`, the 09:30 bell for
+# `premarket_reserved` (which the crypto pass can now trip from midnight, so a coin
+# could otherwise read "checking for updates" for the whole pre-market). Re-stamping
+# them (`mark_verified_current`) is what stops such a scope promising a refresh that
+# policy has already ruled out (TestFlight, ORCL 2026-09-11: capped at 10:46 ET,
+# "checking" at 12:46). `cooldown` is deliberately ABSENT: that scope WILL
+# regenerate within 15 minutes, so the flag is telling the truth there. `no_corpus`
+# / `mwcb_market_only` / `gate_error` are not verdicts about the card at all.
+_VERIFIED_CURRENT_REASONS = frozenset({
+    "fingerprint_unchanged", "daily_cap", "attempt_cap", "premarket_reserved",
+})
 
 # ── Proactive per-article enrichment (news pass) ──────────────────────
 # After building each scope's windowed corpus for the card, the news pass also
@@ -198,9 +232,12 @@ class InsightSweeper:
 
         ``watchlist_items`` is the right source because it is where the universe
         itself comes from (``get_top_watchlist_tickers``), so a swept ticker always
-        has a row. Rows repeat per watcher; the dict comprehension collapses them.
-        Never raises: a missing name degrades the filter to symbol + tag order,
-        which is exactly the pre-existing behaviour.
+        has a row. Rows repeat per watcher; the first REAL name wins — a stored
+        name that merely echoes the symbol (``"ETHUSD"``, from rows starred before
+        the coin-name fix) is replaced by the coin's name or skipped, because a
+        symbol as a "name" produced a variant nothing could match and starved the
+        corpus to empty. Never raises: a missing name degrades the filter to
+        symbol + tag order, which is exactly the pre-existing behaviour.
         """
         symbols = [s for s in scopes if s != MARKET_SCOPE]
         if not symbols:
@@ -222,9 +259,22 @@ class InsightSweeper:
         names: Dict[str, str] = {}
         for row in (result.data or []):
             ticker = str(row.get("ticker") or "").strip().upper()
-            name = str(row.get("company_name") or "").strip()
-            if ticker and name:
-                names.setdefault(ticker, name)
+            if not ticker:
+                continue
+            # A symbol is not a name. Rows starred before the coin-name fix
+            # (2026-09-11) persisted the ticker itself as `company_name`
+            # ("ETHUSD"), and `setdefault` took whichever watcher's row came
+            # first — so `company_name_variants` became ["ethusd"], nothing in
+            # any headline matched, the coin's whole corpus filtered to EMPTY
+            # and the card was never generated. `display_name_for_row` swaps a
+            # coin's echo for its real name; an equity echo is skipped outright
+            # so another watcher's real name can win.
+            name = display_name_for_row(
+                ticker, str(row.get("company_name") or "").strip()
+            )
+            if not name or name.upper() in {ticker, crypto_base_symbol(ticker)}:
+                continue
+            names.setdefault(ticker, name)
         return names
 
     # ── State ─────────────────────────────────────────────────────────
@@ -278,7 +328,13 @@ class InsightSweeper:
                 len(rows), type(e).__name__, e,
             )
 
-    def _claim(self, scope: str, now: datetime, is_market_scope: bool) -> bool:
+    def _claim(
+        self,
+        scope: str,
+        now: datetime,
+        is_market_scope: bool,
+        earnings_window: bool = False,
+    ) -> bool:
         """Atomically claim the right to generate ``scope``'s card.
 
         Delegates to a single Postgres statement (`claim_updates_insight_scope`,
@@ -294,7 +350,8 @@ class InsightSweeper:
         logged and no state row written — so the scope re-tripped every 5 minutes
         forever, burning a per-cycle admission slot each time, and the one
         diagnostic that explained the freeze (`last_skip_reason = 'daily_cap'`)
-        disappeared. The two ceilings must be fed from the same function.
+        disappeared. The two ceilings must be fed from the same function — and
+        with the same ``earnings_window``, which is why it is threaded here.
 
         This CANNOT be done client-side. Read-then-write has an ABA bug that
         silently defeats the daily cap: another instance can complete a whole
@@ -315,6 +372,8 @@ class InsightSweeper:
         # generation + an under-counted daily cap. (The sweep-start `now` is still
         # used for gate consistency elsewhere; the claim clock must be real-time.)
         claim_now = datetime.now(timezone.utc)
+        daily_cap = daily_cap_for(is_market_scope, earnings_window=earnings_window)
+        attempt_cap = attempt_cap_for(is_market_scope, earnings_window=earnings_window)
         try:
             result = self.supabase.rpc(
                 "claim_updates_insight_scope",
@@ -322,8 +381,8 @@ class InsightSweeper:
                     "p_scope": scope,
                     "p_now": claim_now.isoformat(),
                     "p_stale_seconds": _CLAIM_STALE_SECONDS,
-                    "p_attempt_cap": PER_SCOPE_ATTEMPT_CAP,
-                    "p_daily_cap": daily_cap_for(is_market_scope),
+                    "p_attempt_cap": attempt_cap,
+                    "p_daily_cap": daily_cap,
                 },
             ).execute()
             granted = result.data
@@ -338,9 +397,10 @@ class InsightSweeper:
                 # the line the second is invisible — no state row is written on
                 # this path either.
                 logger.info(
-                    "Insight claim denied for %s (daily_cap=%d attempt_cap=%d) — "
-                    "already at ceiling, or claimed by another instance",
-                    scope, daily_cap_for(is_market_scope), PER_SCOPE_ATTEMPT_CAP,
+                    "Insight claim denied for %s (daily_cap=%d attempt_cap=%d "
+                    "earnings_window=%s) — already at ceiling, or claimed by "
+                    "another instance",
+                    scope, daily_cap, attempt_cap, earnings_window,
                 )
             return granted
         except Exception as e:
@@ -843,19 +903,34 @@ class InsightSweeper:
 
     # ── The sweep ─────────────────────────────────────────────────────
 
-    async def run_sweep(self, refresh_news: bool) -> Dict[str, int]:
-        """One pass. ``refresh_news=True`` also force-pulls recent FMP articles."""
+    async def run_sweep(
+        self, refresh_news: bool, *, crypto_only: bool = False
+    ) -> Dict[str, int]:
+        """One pass. ``refresh_news=True`` also force-pulls recent FMP articles.
+
+        ``crypto_only=True`` is the off-hours pass: the same sweep over just the
+        coins in the universe. No MARKET scope, no equities, no index leg (so
+        ``market_change`` is None and the equity-only MWCB guard is inert), no
+        earnings lookup. Everything else — closed cooldown and TTLs, CoinGecko
+        quotes, crypto-routed news refresh, claims, budgets, catalysts — is the
+        ordinary machinery reading ``is_market_active() == False``.
+        """
         now = datetime.now(timezone.utc)
         market_active = is_market_active()
         # Read ONCE per sweep so every scope in this pass is judged against the
         # same session, even if the pass straddles the 09:30 bell.
         phase = session_phase(now)
         scopes = await self._universe()
+        if crypto_only:
+            scopes = [s for s in scopes if is_crypto_scope(s)]
         if not scopes:
             return {}
 
-        # 1. Quotes — ONE batch-quote call for the whole universe (plus the index).
-        symbols = [s for s in scopes if s != MARKET_SCOPE] + [MARKET_INDEX_SYMBOL]
+        # 1. Quotes — ONE batch-quote call for the whole universe (plus the index,
+        #    which the crypto pass has no use for: SPY does not print at 02:00).
+        symbols = [s for s in scopes if s != MARKET_SCOPE]
+        if not crypto_only:
+            symbols.append(MARKET_INDEX_SYMBOL)
         quotes_by_symbol: Dict[str, Dict[str, Any]] = {}
         prior_session = 0
         try:
@@ -890,6 +965,22 @@ class InsightSweeper:
         #     fixed band for that scope. get_sigmas_bulk never raises into the sweep.
         sigmas = await self.vol.get_sigmas_bulk(symbols)
 
+        # 1c. Earnings window — which tickers get the market-sized daily cap this
+        #     ET day. ONE licensed calendar call per day, cached in the service;
+        #     best-effort (an empty set boosts nobody). Through THIS sweeper's
+        #     client, never the singleton: the suite's sweep stubs carry no client,
+        #     and the hermetic guard fails the whole session on a real call.
+        earnings_scopes: frozenset = frozenset()
+        if not crypto_only:
+            try:
+                earnings_scopes = await symbols_in_earnings_window(now, fmp=self.fmp)
+            except Exception as e:
+                logger.warning(
+                    "Earnings window unavailable this sweep (%s: %s) — no cap boost",
+                    type(e).__name__, e,
+                )
+        boosted = sum(1 for s in scopes if s in earnings_scopes)
+
         # 2. News — force-refresh so a story that broke minutes ago is visible.
         #    The 6h read TTL on ticker_news_cache would otherwise hide it.
         if refresh_news:
@@ -897,14 +988,17 @@ class InsightSweeper:
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
-        # Bound every scope's corpus to its DYNAMIC window (prefer 24h, fall back to
-        # 48h only when the scope has no news in 24h) via the shared selector. The
-        # window is applied HERE, before both the materiality fingerprint (via
-        # `decide`) and generation (via `generate_and_store`), so the card content
-        # matches the badge the endpoint derives from the SAME selector: a scope
-        # with fresh news summarises just the 24h corpus and is badged "24h". A
-        # scope with no news in 48h yields an empty corpus → `no_corpus` → the
-        # deterministic "Latest headlines" fallback, not an over-claiming AI card.
+        # Bound every scope's corpus to its DYNAMIC window (24h when it holds at
+        # least MIN_CORPUS_ARTICLES stories about the scope, else widened to 48h —
+        # and across a closed market to 72/96h — whenever widening adds articles)
+        # via the shared selector. The window is applied HERE, before both the
+        # materiality fingerprint (via `decide`) and generation (via
+        # `generate_and_store`), so the card content matches the badge the
+        # endpoint derives from the SAME selector: a well-covered scope summarises
+        # just the 24h corpus and is badged "24h"; a thin one is badged with the
+        # span it was really summarised over. A scope with no news in the widest
+        # window yields an empty corpus → `no_corpus` → the deterministic "Latest
+        # headlines" fallback, not an over-claiming AI card.
         #
         # `scope=` opts each TICKER corpus into the subject filter, so a sector wrap led
         # by two peers can no longer be the sole input for this ticker's card. MARKET
@@ -949,6 +1043,7 @@ class InsightSweeper:
                     else sigmas.get(scope)
                 ),
                 session_phase=phase,
+                earnings_window=scope in earnings_scopes,
             )
             reasons[decision.reason] += 1
             if decision.action == ACTION_GENERATE:
@@ -963,8 +1058,11 @@ class InsightSweeper:
         # A scope we just re-verified as unchanged is NOT stale — the card is
         # provably still correct. Extend its freshness so the UI doesn't flip to
         # "Catching up…" on every quiet ticker. Costs one batched UPDATE, no LLM.
+        # A scope CAPPED for the day (or reserved until the bell) was checked too
+        # and is final until a known boundary, so it is stamped as well (see
+        # _VERIFIED_CURRENT_REASONS).
         verified = [
-            scope for scope, d in skips if d.reason == "fingerprint_unchanged"
+            scope for scope, d in skips if d.reason in _VERIFIED_CURRENT_REASONS
         ]
         await self.insights.mark_verified_current(verified, market_active)
 
@@ -1004,7 +1102,7 @@ class InsightSweeper:
                 # producing a single card.
                 is_market = scope == MARKET_SCOPE
                 if not await asyncio.to_thread(
-                    self._claim, scope, now, is_market
+                    self._claim, scope, now, is_market, scope in earnings_scopes
                 ):
                     return False
                 if not await asyncio.to_thread(self._consume_global_budget, now):
@@ -1118,11 +1216,11 @@ class InsightSweeper:
 
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
-            "enriched=%d enrich_deferred=%d prior_session=%d "
+            "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
             "market=%s active=%s phase=%s reasons=%s",
-            "news+price" if refresh_news else "price",
+            ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
-            enriched_rows, enrich_deferred, prior_session,
+            enriched_rows, enrich_deferred, prior_session, boosted,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )
@@ -1130,6 +1228,7 @@ class InsightSweeper:
             "scopes": len(scopes), "generated": generated,
             "touched": len(touches), "deferred": dropped,
             "enriched": enriched_rows, "enrich_deferred": enrich_deferred,
+            "earnings_boosted": boosted,
         }
 
     async def _refresh_news(self, scopes: List[str]) -> None:
@@ -1174,26 +1273,67 @@ def get_insight_sweeper() -> InsightSweeper:
 
 PRICE_INTERVAL_SECONDS = 300      # 5 min
 NEWS_EVERY_N_CYCLES = 3           # => news refresh every 15 min
+# While the market is closed the loop still ticks every 5 min; the crypto-only
+# pass runs on every tick that is at least this long after the previous one.
+# 30 min, not 5: coins get the CLOSED cooldown (1h) anyway, so a faster tick
+# would spend FMP calls on corpora that cannot regenerate yet.
+CRYPTO_OFF_HOURS_INTERVAL_SECONDS = 1800
+
+
+@dataclass
+class _LoopState:
+    """What the loop carries between ticks. A dataclass so a test can drive
+    `_run_one_tick` directly instead of sleeping through the schedule."""
+    cycle: int = 0
+    # `time.monotonic()` of the last crypto pass START. -inf ⇒ the first tick
+    # after boot that finds the market closed runs one immediately.
+    last_crypto_pass: float = float("-inf")
+
+
+async def _run_one_tick(
+    sweeper: InsightSweeper, state: _LoopState, *, market_active: bool, monotonic: float
+) -> Optional[str]:
+    """One iteration of the loop body. Returns which pass ran ("market" /
+    "crypto") or None when idle. Exceptions propagate to the loop's handler."""
+    if market_active:
+        await sweeper.run_sweep(refresh_news=(state.cycle % NEWS_EVERY_N_CYCLES == 0))
+        state.cycle += 1
+        return "market"
+    if monotonic - state.last_crypto_pass >= CRYPTO_OFF_HOURS_INTERVAL_SECONDS:
+        # Stamped BEFORE the sweep: a slow or raising pass must not re-trigger on
+        # the very next 5-minute tick.
+        state.last_crypto_pass = monotonic
+        await sweeper.run_sweep(refresh_news=True, crypto_only=True)
+        return "crypto"
+    logger.debug("Insight sweeper idle — market closed")
+    return None
 
 
 async def run_insight_sweeper_loop() -> None:
-    """Lifespan task. Cancelled on shutdown by ``app/main.py``."""
+    """Lifespan task. Cancelled on shutdown by ``app/main.py``.
+
+    Ticks every ~5 min. While the market is active that is the price/news
+    sweep; while it is closed every 30th minute is the crypto-only pass and the
+    other ticks are idle. The equity cycle counter does not advance on a crypto
+    pass, so the news cadence resumes exactly where it left off at 04:00 ET.
+    """
     # Stagger behind the existing 30/45/120s pre-warmers so startup isn't a
     # thundering herd against FMP.
     await asyncio.sleep(150)
     sweeper = get_insight_sweeper()
-    cycle = 0
+    state = _LoopState()
     logger.info(
-        "Insight sweeper started (price=%ds, news every %d cycles, model=%s)",
-        PRICE_INTERVAL_SECONDS, NEWS_EVERY_N_CYCLES, INSIGHT_MODEL,
+        "Insight sweeper started (price=%ds, news every %d cycles, crypto off-hours "
+        "every %ds, model=%s)",
+        PRICE_INTERVAL_SECONDS, NEWS_EVERY_N_CYCLES, CRYPTO_OFF_HOURS_INTERVAL_SECONDS,
+        INSIGHT_MODEL,
     )
     while True:
         try:
-            if is_market_active():
-                await sweeper.run_sweep(refresh_news=(cycle % NEWS_EVERY_N_CYCLES == 0))
-                cycle += 1
-            else:
-                logger.debug("Insight sweeper idle — market closed")
+            await _run_one_tick(
+                sweeper, state,
+                market_active=is_market_active(), monotonic=time.monotonic(),
+            )
         except asyncio.CancelledError:
             logger.info("Insight sweeper cancelled")
             raise

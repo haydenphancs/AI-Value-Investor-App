@@ -23,6 +23,7 @@ from app.services.updates_materiality import (
     PER_SCOPE_ATTEMPT_CAP,
     PER_SCOPE_DAILY_CAP,
     PER_SCOPE_DAILY_CAP_MARKET,
+    attempt_cap_for,
     daily_cap_for,
 )
 from _price_fakes import PriceFromFMPFake
@@ -88,15 +89,46 @@ def test_ticker_scope_claims_against_the_ticker_cap(rpc):
 
 
 @pytest.mark.parametrize("is_market", [True, False])
-def test_the_claim_cap_is_exactly_what_the_gate_used(rpc, is_market):
-    """The load-bearing invariant: both ceilings come from one function.
+@pytest.mark.parametrize("boost", [True, False])
+def test_the_claim_cap_is_exactly_what_the_gate_used(rpc, is_market, boost):
+    """The load-bearing invariant: both ceilings come from one function, with
+    the SAME `earnings_window`.
 
     If these ever diverge, the gate says GENERATE and the database says no,
     which is invisible from the state row.
     """
     sweeper = _StubSweeper(rpc)
-    sweeper._claim("X", NOW, is_market_scope=is_market)
-    assert rpc.last_params["p_daily_cap"] == daily_cap_for(is_market)
+    sweeper._claim("X", NOW, is_market_scope=is_market, earnings_window=boost)
+    assert rpc.last_params["p_daily_cap"] == daily_cap_for(is_market, earnings_window=boost)
+    assert rpc.last_params["p_attempt_cap"] == attempt_cap_for(is_market, earnings_window=boost)
+
+
+def test_a_boosted_ticker_claims_against_the_market_sized_cap(rpc):
+    sweeper = _StubSweeper(rpc)
+    assert sweeper._claim("ORCL", NOW, is_market_scope=False, earnings_window=True) is True
+    assert rpc.last_params["p_daily_cap"] == PER_SCOPE_DAILY_CAP_MARKET
+    assert rpc.last_params["p_attempt_cap"] == attempt_cap_for(False, earnings_window=True)
+    # The boost defaults OFF at the claim, exactly as at the gate.
+    sweeper._claim("ORCL", NOW, is_market_scope=False)
+    assert rpc.last_params["p_daily_cap"] == PER_SCOPE_DAILY_CAP
+
+
+def test_the_market_claim_attempt_cap_is_above_its_daily_cap(rpc):
+    """The live 2026-09-18 bug: `p_attempt_cap` (10) sat BELOW `p_daily_cap` (16),
+    so the RPC held the market card at ten successes and the state row read
+    `attempt_cap` with regen_count_today == attempts_today == 10."""
+    sweeper = _StubSweeper(rpc)
+    sweeper._claim(MARKET_SCOPE, NOW, is_market_scope=True)
+    assert rpc.last_params["p_attempt_cap"] > rpc.last_params["p_daily_cap"]
+    assert rpc.last_params["p_daily_cap"] == PER_SCOPE_DAILY_CAP_MARKET
+
+
+def test_a_denied_boosted_claim_logs_the_boosted_cap(caplog):
+    sweeper = _StubSweeper(_RecordingRPC(granted=False))
+    with caplog.at_level("INFO", logger="app.services.updates_insight_sweeper"):
+        assert sweeper._claim("ORCL", NOW, is_market_scope=False, earnings_window=True) is False
+    assert f"daily_cap={PER_SCOPE_DAILY_CAP_MARKET}" in caplog.text
+    assert "earnings_window=True" in caplog.text
 
 
 def test_claim_sends_the_attempt_cap_and_a_fresh_aware_timestamp(rpc):

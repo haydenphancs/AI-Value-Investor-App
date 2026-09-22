@@ -1943,7 +1943,7 @@ Migration 089 exists because two of these were mixed once already.
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s, `session_phase() != "closed"` | 1 batch-quote/cycle | none — the dedup key is the lock |
 | profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared `signals_v3` cache) | dedup key `profile_match:{day}:{user_id}` |
-| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`), when the σ-scored move lands in a catalyst tier and the quote is usable; body = the grounded catalyst, else the card headline | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
+| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a catalyst tier and the quote is usable; body = the grounded catalyst, else the card headline | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
 Report-ready is placed AFTER the conditional completion write and AFTER the
@@ -1953,8 +1953,9 @@ Report-ready is placed AFTER the conditional completion write and AFTER the
 
 A notification inside the window is claimed and parked (`push_state='deferred'`,
 `deliver_after`), so the in-app inbox has it immediately and only the buzz waits. A
-dedicated **24/7** loop flushes it — not the Updates sweeper, which is gated on
-`is_market_active()` and would be asleep when a European user's 07:00 arrives.
+dedicated **24/7** loop flushes it — not the Updates sweeper, whose full pass is gated
+on `is_market_active()` and would be asleep when a European user's 07:00 arrives (its
+crypto-only off-hours pass sweeps coins every 30 min; it flushes nothing).
 Cross-instance safety via `claim_due_notifications` + `FOR UPDATE SKIP LOCKED`. Rows
 parked past `NOTIFICATION_MAX_DEFER_HOURS` are failed, not sent: a 14-hour-late
 "AAPL moved 8%" is misinformation.

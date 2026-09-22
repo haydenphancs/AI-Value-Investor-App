@@ -114,7 +114,8 @@ class AIInsightCardResponse(BaseModel):
     sentiment: str = "Neutral"
     # Provenance shown in the badge — just the window, e.g. "24h". The endpoint
     # OVERWRITES this with the window `select_recent_corpus` actually chose, so the
-    # live values are "24h" (fresh news), "48h", or — only when the market was shut
+    # live values are "24h" (at least MIN_CORPUS_ARTICLES stories in the last day),
+    # "48h" (a thin day widened to yesterday), or — only when the market was shut
     # long enough to explain the gap — "72h"/"96h". The "· AI Summary" suffix was
     # dropped: the ✨ Insights label and the AI-styled badge already signal AI.
     #

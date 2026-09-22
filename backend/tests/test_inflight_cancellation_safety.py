@@ -120,6 +120,15 @@ _INFLIGHT_MODULES = [
     # `account_auth_methods` RPC on the `GET /users/me` path, which runs on every session
     # restore — so a cold cache with several restores in flight would fan out one RPC each.
     "auth_methods_service.py",
+    # Added 2026-09-20 with the Insights earnings-window cap boost: ONE market-wide
+    # `earnings-calendar` call per ET day PER PROCESS, behind a future keyed on the
+    # ET date so a second in-process caller during the fetch joins it rather than
+    # firing another (a future cannot dedup across Railway instances — each makes
+    # its own single daily call). The joiner is shielded; the leader resolves the
+    # future on every exit, including cancellation (`fut.cancel()` in the
+    # BaseException arm), and `test_earnings_window_service.py` proves both at
+    # runtime.
+    "earnings_window_service.py",
 ]
 
 

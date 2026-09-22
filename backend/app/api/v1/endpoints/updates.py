@@ -53,12 +53,14 @@ from app.schemas.updates import (
     UpdatesTabResponse,
     UpdatesTabsResponse,
 )
+from app.services.crypto_names import crypto_display_name
 from app.services.news_cache_service import (
     MARKET_SCOPE,
     get_news_cache_service,
     is_crypto_scope,
 )
 from app.services.news_insight_service import (
+    cited_window_floor,
     select_recent_corpus,
     get_news_insight_service,
 )
@@ -318,9 +320,12 @@ async def get_updates_feed(
         if scope == MARKET_SCOPE:
             feed = await news.get_market_news(limit=limit, offset=offset)
         else:
-            # Crypto symbols must go to FMP's `news/crypto`; `news/stock` returns
-            # nothing for BTCUSD, so a crypto watchlist row would render a pill
-            # with a permanently empty feed.
+            # Crypto symbols go to FMP's `news/crypto`. Measured 2026-09-20: the
+            # two routes return the SAME rows for a pair symbol, so this is a
+            # contract choice (the crypto feed is the one documented to carry
+            # pairs), not a workaround — but the sweeper and the pre-warmer must
+            # route the same way, or one writer's rows would differ from the
+            # other's under the SAME cache key.
             feed = await news.get_ticker_news(
                 scope, limit=limit, is_crypto=is_crypto_scope(scope),
                 offset=offset,
@@ -364,6 +369,12 @@ async def get_updates_feed(
         subject_recent, subject_window = select_recent_corpus(
             raw_articles, now,
             scope=None if scope == MARKET_SCOPE else scope,
+            # A coin's name is a pure lookup, so it costs this hot path nothing;
+            # an equity's would be a DB read per feed load and stays None (the
+            # sweeper resolves it — the lead tag carries the badge for equities).
+            # GATED on is_crypto_scope: LINK / BTC / ATOM / ONE are listed
+            # securities whose tickers collide with coin names.
+            company_name=crypto_display_name(scope) if is_crypto_scope(scope) else None,
         )
         if feed_recent:
             try:
@@ -386,9 +397,11 @@ async def get_updates_feed(
                     # this ticker's story; a literal headline list asserts nothing.
                     card = insights.build_fallback_card(scope, feed_recent)
                 if card is not None:
-                    # AI card badge reflects the ACTUAL freshness window ("24h" if
-                    # the scope has news in the last 24h, else "48h"). The
-                    # deterministic fallback keeps its own "Latest headlines" label.
+                    # AI card badge reflects the ACTUAL freshness window: "24h" when
+                    # the scope has at least MIN_CORPUS_ARTICLES stories in the last
+                    # 24h, else the window the corpus had to widen to ("48h", or
+                    # 72/96h across a closed market). The deterministic fallback
+                    # keeps its own "Latest headlines" label.
                     #
                     # Measured over the SUBJECT corpus, because that is what the
                     # sweeper summarised. When that corpus is empty the card's own
@@ -399,7 +412,14 @@ async def get_updates_feed(
                     # "24h" over a brief written days ago, on the strength of peer
                     # articles that were never in it.
                     if card.get("ai_generated", True) and subject_recent:
-                        card = {**card, "badge": f"{subject_window}h"}
+                        # The recompute can under-claim once a thin day fills in:
+                        # a brief written over 48h (yesterday's story cited) must
+                        # not read "24h" because three fresh articles landed while
+                        # the sweeper was capped. The card's own sources are the
+                        # floor — see `cited_window_floor`.
+                        cited = cited_window_floor(card.get("sources"), raw_articles, now)
+                        window_hours = max(subject_window, cited or 0)
+                        card = {**card, "badge": f"{window_hours}h"}
                     insight = AIInsightCardResponse(**card)
             except Exception as e:
                 # An unavailable insight must never take down the timeline.

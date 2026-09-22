@@ -306,6 +306,19 @@ def test_market_scope_alone_skips_the_query_entirely():
 
 # ── 2b. …and the SWEEP actually passes them to the filter ────────────────────
 
+@pytest.fixture(autouse=True)
+def _fresh_earnings_singleton():
+    """`run_sweep` reaches the REAL earnings-window service through a stub client
+    that lacks `get_earnings_calendar`; it degrades correctly but stamps a 15-min
+    negative TTL on the process singleton with the real clock. Reset so no other
+    test inherits that clock."""
+    from app.services.earnings_window_service import get_earnings_window_service
+
+    get_earnings_window_service().reset()
+    yield
+    get_earnings_window_service().reset()
+
+
 class _SweepStub(InsightSweeper):
     """Enough of a sweeper to reach the corpus-windowing call and stop.
 
@@ -513,3 +526,228 @@ def test_page_two_never_carries_an_insight_card(monkeypatch):
         updates_endpoint.get_updates_feed(scope="PLUG", limit=50, offset=50)
     )
     assert resp.insight is None
+
+
+# ── 4. A symbol is not a name (the crypto echo) ──────────────────────────────
+#
+# Rows starred between the canonical-symbol change (2026-09-09) and the coin-name
+# fix (2026-09-11) persisted the ticker itself as `company_name` ("ETHUSD"). Live on
+# 2026-09-20 the ETHUSD watchers were split 'ETHUSD' ×1 / 'Ethereum' ×2, and
+# `setdefault` took whichever row Supabase returned first. With the echo as the
+# "name", `company_name_variants` was ["ethusd"], nothing in any headline matched,
+# and the coin's subject corpus filtered to EMPTY → `no_corpus` → no AI card.
+
+def test_a_symbol_echo_is_not_a_name_for_a_coin():
+    supabase = _Supabase([{"ticker": "ETHUSD", "company_name": "ETHUSD"}])
+    names = _StubSweeper(supabase)._company_names(["ETHUSD"])
+    assert names == {"ETHUSD": "Ethereum"}
+
+
+def test_a_bare_coin_echo_is_replaced_too():
+    supabase = _Supabase([{"ticker": "ETHUSD", "company_name": "ETH"}])
+    assert _StubSweeper(supabase)._company_names(["ETHUSD"]) == {"ETHUSD": "Ethereum"}
+
+
+def test_the_echo_row_does_not_win_the_setdefault_lottery():
+    """The echo comes FIRST from the database; the real name must still win."""
+    supabase = _Supabase([
+        {"ticker": "ETHUSD", "company_name": "ETHUSD"},
+        {"ticker": "ETHUSD", "company_name": "Ethereum"},
+    ])
+    assert _StubSweeper(supabase)._company_names(["ETHUSD"]) == {"ETHUSD": "Ethereum"}
+
+
+def test_an_equity_echo_is_skipped_and_a_later_watcher_wins():
+    supabase = _Supabase([
+        {"ticker": "AAPL", "company_name": "AAPL"},
+        {"ticker": "AAPL", "company_name": "Apple Inc."},
+    ])
+    assert _StubSweeper(supabase)._company_names(["AAPL"]) == {"AAPL": "Apple Inc."}
+    # Alone, an equity echo yields NO name — the filter degrades to symbol + tag
+    # order, exactly the pre-existing behaviour, rather than to a dead variant.
+    assert _StubSweeper(_Supabase([{"ticker": "AAPL", "company_name": "AAPL"}]))._company_names(["AAPL"]) == {}
+
+
+def test_a_real_stored_coin_name_is_trusted_as_is():
+    supabase = _Supabase([{"ticker": "ETHUSD", "company_name": "Ether"}])
+    assert _StubSweeper(supabase)._company_names(["ETHUSD"]) == {"ETHUSD": "Ether"}
+
+
+def test_an_unknown_coin_echo_yields_no_name():
+    supabase = _Supabase([{"ticker": "FOOUSD", "company_name": "FOOUSD"}])
+    assert _StubSweeper(supabase)._company_names(["FOOUSD"]) == {}
+
+
+def test_whitespace_and_case_do_not_disguise_an_echo():
+    supabase = _Supabase([{"ticker": "ethusd", "company_name": "  ethusd "}])
+    assert _StubSweeper(supabase)._company_names(["ETHUSD"]) == {"ETHUSD": "Ethereum"}
+
+
+# ── 5. The endpoint names a coin for its badge, and only a coin ──────────────
+
+def _record_endpoint_corpus_calls(monkeypatch, scope):
+    calls = []
+
+    def _recording(rows, now, **kwargs):
+        calls.append(kwargs)
+        return select_recent_corpus(rows, now, **kwargs)
+
+    monkeypatch.setattr(updates_endpoint, "select_recent_corpus", _recording)
+    monkeypatch.setattr(
+        updates_endpoint, "get_news_cache_service",
+        lambda: _NewsStub([_live_row("Ethereum ETF inflows top $1B", ["BTCUSD"])]),
+    )
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", lambda: _InsightsStub())
+    asyncio.run(updates_endpoint.get_updates_feed(scope=scope, limit=50, offset=0))
+    # The feed window (no kwargs) and the subject window (scope=...).
+    subject = [c for c in calls if c.get("scope") is not None]
+    return calls, subject
+
+
+def test_the_endpoint_passes_the_coin_name_into_the_subject_filter(monkeypatch):
+    calls, subject = _record_endpoint_corpus_calls(monkeypatch, "ETHUSD")
+    assert len(calls) == 2 and len(subject) == 1
+    assert subject[0] == {"scope": "ETHUSD", "company_name": "Ethereum"}
+
+
+def test_the_endpoint_names_no_equity(monkeypatch):
+    """A DB read per feed load was rejected for the hot path; equities stay None."""
+    _, subject = _record_endpoint_corpus_calls(monkeypatch, "AAPL")
+    assert subject == [{"scope": "AAPL", "company_name": None}]
+
+
+def test_a_listed_security_sharing_a_coin_ticker_is_not_named_after_the_coin(monkeypatch):
+    """LINK / BTC / ATOM are equities; `crypto_display_name("LINK")` is "Chainlink"."""
+    _, subject = _record_endpoint_corpus_calls(monkeypatch, "LINK")
+    assert subject == [{"scope": "LINK", "company_name": None}]
+
+
+def test_the_market_scope_is_never_subject_filtered(monkeypatch):
+    calls, subject = _record_endpoint_corpus_calls(monkeypatch, MARKET_SCOPE)
+    assert subject == []
+    assert all(c.get("scope") is None for c in calls)
+
+
+def test_a_crypto_ai_card_is_badged_from_articles_the_coin_name_admits(monkeypatch):
+    """End to end: three fresh rows that only the NAME admits (tagged BTCUSD, titled
+    'Ethereum …') make a well-covered 24h window for ETHUSD → badge "24h". Without
+    the name the subject corpus is empty and the badge would fall back to "48h"."""
+    articles = [
+        _live_row("Ethereum ETF inflows top $1B", ["BTCUSD"], hours_ago=1),
+        _live_row("Ethereum staking yield climbs", ["BTCUSD"], hours_ago=2),
+        _live_row("Ethereum gas fees hit a yearly low", ["BTCUSD"], hours_ago=3),
+    ]
+    now = datetime.now(timezone.utc)
+    assert select_recent_corpus(articles, now, scope="ETHUSD")[0] == [], "precondition"
+    assert len(select_recent_corpus(articles, now, scope="ETHUSD", company_name="Ethereum")[0]) == 3
+
+    class _HasCard(_InsightsStub):
+        async def get_cards(self, scopes):
+            return {"ETHUSD": {
+                "scope": "ETHUSD", "headline": "Ethereum rallies", "bullets": ["a", "b"],
+                "sentiment": "Bullish", "article_count": 3,
+                "generated_at": "2026-09-20T12:00:00Z", "is_stale": False,
+                "refreshing": False, "ai_generated": True, "trigger_reason": None,
+                "sources": [],
+            }}
+
+    monkeypatch.setattr(updates_endpoint, "get_news_cache_service", lambda: _NewsStub(articles))
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", _HasCard)
+    resp = asyncio.run(updates_endpoint.get_updates_feed(scope="ETHUSD", limit=50, offset=0))
+    assert resp.insight is not None and resp.insight.badge == "24h"
+
+
+# ── 6. The badge never under-claims what the card cites ──────────────────────
+
+def test_a_widened_card_keeps_its_48h_badge_after_the_day_fills_in(monkeypatch):
+    """The card was written over 48h (it cites yesterday's Invezz piece). Three fresh
+    articles then landed while the sweeper was capped. The recompute alone says
+    "24h"; the cited floor keeps the badge honest at "48h"."""
+    articles = [
+        _live_row("Plug Power lands a 5MW order", ["PLUG"], hours_ago=1),
+        _live_row("Plug Power stock forms a risky pattern", ["PLUG"], hours_ago=2),
+        _live_row("Plug Power hydrogen plant reaches nameplate", ["PLUG"], hours_ago=3),
+        _live_row("Plug Power cuts guidance", ["PLUG"], hours_ago=30),
+    ]
+    for i, a in enumerate(articles):
+        a["article_url"] = f"https://x/{i}"
+    now = datetime.now(timezone.utc)
+    assert select_recent_corpus(articles, now, scope="PLUG")[1] == 24, "precondition"
+
+    class _HasCard(_InsightsStub):
+        async def get_cards(self, scopes):
+            return {"PLUG": {
+                "scope": "PLUG", "headline": "Plug Power sees mixed demand",
+                "bullets": ["a", "b"], "sentiment": "Neutral", "article_count": 2,
+                "generated_at": "2026-09-11T02:00:00Z", "is_stale": False,
+                "refreshing": False, "ai_generated": True, "trigger_reason": None,
+                "sources": [{"title": "t", "url": "https://x/3"}, {"title": "t", "url": "https://x/2"}],
+            }}
+
+    monkeypatch.setattr(updates_endpoint, "get_news_cache_service", lambda: _NewsStub(articles))
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", _HasCard)
+    resp = asyncio.run(updates_endpoint.get_updates_feed(scope="PLUG", limit=50, offset=0))
+    assert resp.insight is not None and resp.insight.badge == "48h"
+
+
+def test_a_fresh_card_is_still_badged_24h(monkeypatch):
+    """Anti-vacuity for the floor: cited rows all inside 24h → the recompute stands."""
+    articles = [
+        _live_row("Plug Power lands a 5MW order", ["PLUG"], hours_ago=1),
+        _live_row("Plug Power stock forms a risky pattern", ["PLUG"], hours_ago=2),
+        _live_row("Plug Power hydrogen plant reaches nameplate", ["PLUG"], hours_ago=3),
+    ]
+    for i, a in enumerate(articles):
+        a["article_url"] = f"https://x/{i}"
+
+    class _HasCard(_InsightsStub):
+        async def get_cards(self, scopes):
+            return {"PLUG": {
+                "scope": "PLUG", "headline": "h", "bullets": ["a", "b"], "sentiment": "Neutral",
+                "article_count": 3, "generated_at": "2026-09-11T02:00:00Z", "is_stale": False,
+                "refreshing": False, "ai_generated": True, "trigger_reason": None,
+                "sources": [{"title": "t", "url": "https://x/0"}, {"title": "t", "url": "https://x/2"}],
+            }}
+
+    monkeypatch.setattr(updates_endpoint, "get_news_cache_service", lambda: _NewsStub(articles))
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", _HasCard)
+    resp = asyncio.run(updates_endpoint.get_updates_feed(scope="PLUG", limit=50, offset=0))
+    assert resp.insight is not None and resp.insight.badge == "24h"
+
+
+# ── 7. The fallback card's `refreshing` knows the crypto pass exists ─────────
+
+def _real_fallback_feed(monkeypatch, scope, market_active):
+    import app.services.news_insight_service as nis
+    from app.services.news_insight_service import NewsInsightService
+
+    class _RealFallback(NewsInsightService):
+        def __init__(self):
+            pass
+
+        async def get_cards(self, scopes):
+            return {}
+
+    monkeypatch.setattr(nis, "is_market_active", lambda: market_active)
+    monkeypatch.setattr(updates_endpoint, "get_news_insight_service", _RealFallback)
+    monkeypatch.setattr(
+        updates_endpoint, "get_news_cache_service",
+        lambda: _NewsStub([_live_row("Ethereum ETF inflows top $1B", ["ETHUSD"])]),
+    )
+    return asyncio.run(updates_endpoint.get_updates_feed(scope=scope, limit=50, offset=0))
+
+
+def test_a_cold_coin_fallback_promises_the_off_hours_pass(monkeypatch):
+    """Overnight, a coin with no AI card yet WILL get one from the crypto pass within
+    30 minutes, so the fallback may tell iOS to re-poll; an equity's promise cannot be
+    kept until the next session and stays False."""
+    coin = _real_fallback_feed(monkeypatch, "ETHUSD", market_active=False)
+    assert coin.insight is not None and coin.insight.ai_generated is False
+    assert coin.insight.refreshing is True
+    equity = _real_fallback_feed(monkeypatch, "AAPL", market_active=False)
+    assert equity.insight is not None and equity.insight.refreshing is False
+
+
+def test_the_fallback_still_promises_during_the_session(monkeypatch):
+    equity = _real_fallback_feed(monkeypatch, "AAPL", market_active=True)
+    assert equity.insight is not None and equity.insight.refreshing is True

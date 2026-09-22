@@ -90,10 +90,17 @@ def is_crypto_scope(scope: str) -> bool:
 
     FMP crypto symbols are quote-suffixed pairs (BTCUSD, ETHUSD). GCUSD / SIUSD
     are COMMODITY pairs (gold / silver), not crypto, and are excluded. Lives in
-    the service so the endpoint AND the background sweeper share ONE definition:
-    when the sweeper refreshed a crypto scope through the stock feed it wrote
-    zero rows, so the crypto Insight card never generated and crypto news aged
-    out at the 6h TTL between views.
+    the service so the endpoint, the background sweeper AND the pre-warmer share
+    ONE definition and route a coin the same way — they all write the SAME cache
+    key, so a writer on a different feed would replace the others' rows.
+
+    Measured 2026-09-20: `news/stock?symbols=ETHUSD` and `news/crypto?symbols=
+    ETHUSD` return the IDENTICAL 50 rows, so today the routing is a contract
+    choice (the crypto feed is the one documented to carry pairs), not a
+    workaround for an empty answer. The empty answer that DID happen (TestFlight
+    2026-09-02) came from a BARE key: `is_crypto_scope("ETH")` is False, and
+    `news/stock?symbols=ETH` is the Grayscale Ethereum ETF's thin feed — fixed by
+    storing the canonical pair (migration 160), not by this function.
     """
     s = (scope or "").upper()
     # Was a two-element literal `("GCUSD", "SIUSD")`, so CL/NG/HG/PL/PA **and every
@@ -1350,9 +1357,17 @@ Return a JSON array with one object per article in order. Each object must have:
         # Bloomberg Markets and Finance, Fox Business) to their YouTube upload, so
         # without this column the Insights card falls back to the URL host and
         # cites "youtube.com" instead of the broadcaster.
+        # `related_tickers` is load-bearing too: it is what `article_is_about`'s
+        # lead-tag rule reads. Until 2026-09-20 it was NOT projected here, so
+        # the sweeper's subject filter saw `tags == []` for every row — the rule
+        # documented as "near-tautological" never fired in the sweeper, every
+        # ticker's corpus leaned on its name appearing in the headline, and a
+        # coin (whose pair symbol never does) could only qualify by NAME. The
+        # endpoint's `_get_cached` is `select("*")`, so the two readers disagreed
+        # about the same rows. Pinned by tests/test_news_cache_bulk_projection.py.
         columns = (
             "id, ticker, external_id, headline, summary, sentiment, "
-            "ai_processed, published_at, article_url, source_name"
+            "ai_processed, published_at, article_url, source_name, related_tickers"
         )
         grouped: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -1454,11 +1469,11 @@ Return a JSON array with one object per article in order. Each object must have:
                 raw = await self._fetch_market_raw(limit, from_date=from_date)
                 fallback = None
             elif is_crypto_scope(scope):
-                # `news/stock` returns nothing for BTCUSD, so a crypto scope
-                # refreshed through the stock feed wrote zero rows — the sweeper
-                # never noticed breaking crypto news and the crypto Insight card
-                # never generated. `news/crypto` carries no from_date param; it
-                # returns the latest window, which is what the refresh needs.
+                # A coin goes to the crypto feed — the same route the endpoint's
+                # cold miss and the pre-warmer take, so every writer of this cache
+                # key sees the same rows (see `is_crypto_scope`). `news/crypto`
+                # carries no from_date param; it returns the latest window, which
+                # is what the refresh needs.
                 raw = await self.fmp.get_crypto_news(scope, limit=limit)
                 fallback = scope
             elif (_proxies := _commodity_news_proxies(scope)):
@@ -1674,7 +1689,13 @@ Return a JSON array with one object per article in order. Each object must have:
         batch_size = 5
         for i in range(0, len(tickers), batch_size):
             batch = tickers[i : i + batch_size]
-            tasks = [self.get_ticker_news(t, limit=50) for t in batch]
+            # Route a coin the way the endpoint and the sweeper do (`news/crypto`).
+            # Without this the pre-warmer was the one writer on the stock feed —
+            # seen live in the Railway log, `news/stock?symbols=ETHUSD` at 02:22Z.
+            tasks = [
+                self.get_ticker_news(t, limit=50, is_crypto=is_crypto_scope(t))
+                for t in batch
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for t, r in zip(batch, results):
                 if isinstance(r, Exception):

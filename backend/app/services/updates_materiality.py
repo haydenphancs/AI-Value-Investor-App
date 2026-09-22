@@ -52,7 +52,13 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 # Constants only — never the clock-reading `session_phase()` helper itself. The
 # caller injects the phase, exactly as it injects `now`, so this module stays
 # pure and exhaustively testable.
-from app.utils.market_hours import ET, SESSION_PREMARKET, SESSION_REGULAR
+from app.utils.market_hours import (
+    ET,
+    SESSION_CLOSED,
+    SESSION_PREMARKET,
+    SESSION_REGULAR,
+    is_trading_day,
+)
 # Volatility-relative tier vocabulary + the pure z→tier map, shared with the
 # report's "Recent Price Movement" section (single source of truth). This is a
 # PURE leaf module (stdlib only) so importing it keeps this gate pure/testable.
@@ -122,7 +128,10 @@ _MWCB_L1_PCT = 0.07
 # long enough that a stock oscillating around a band edge cannot bill us twice
 # a minute.
 COOLDOWN_SESSION_SECONDS = 900     # 15 min while the market is active
-COOLDOWN_CLOSED_SECONDS = 3600     # 60 min overnight / weekend
+# 60 min overnight / weekend. Live, not just the 04:00 straddle: the crypto-only
+# off-hours pass evaluates coins in `closed`, and this is what paces a coin whose
+# wire never stops to at most one regeneration an hour between sessions.
+COOLDOWN_CLOSED_SECONDS = 3600
 
 # Max-staleness floor for the MARKET card: even when the fingerprint is unchanged,
 # regenerate once the card is older than this so the default tab is never stale-
@@ -136,15 +145,34 @@ MAX_STALENESS_SECONDS = 3 * 3600   # 3h
 # Per-scope caps. `regen_count_today` counts SUCCESSES only; `attempts_today`
 # absorbs failures so a run of transient Gemini 429s cannot pin a scope for the
 # rest of the day.
-PER_SCOPE_DAILY_CAP = 6
+#
+# 6 → 10 on 2026-09-20. Measured live on an ORDINARY Friday (2026-09-18): ORCL,
+# BTCUSD, ETHUSD and SOLUSD all read `daily_cap` 6/6 by 10:23–10:59 ET — two in
+# pre-market plus four at the 15-minute session cooldown lands at ~10:30 for ANY
+# scope whose corpus churns every cycle, which is every actively-covered name.
+# The card then froze for the whole session (TestFlight: "Updated 2 hours ago" on
+# ORCL at 12:46). Ten buys those names roughly two more hours before the
+# earnings-window boost below takes over on the days that matter most.
+PER_SCOPE_DAILY_CAP = 10
 
 # The market card is read by every user on every visit — it backs the default
 # tab — and the general news wire never goes quiet, so it is the one scope where
-# 6/day is visibly too few. It is a single scope, so the extra spend is ~10
-# Flash-Lite calls a day in total, not per ticker.
+# the ticker cap is visibly too few. It is a single scope, so the extra spend is
+# ~10 Flash-Lite calls a day in total, not per ticker. ALSO the allowance a
+# ticker gets inside its earnings window (see `daily_cap_for`).
 PER_SCOPE_DAILY_CAP_MARKET = 16
 
-PER_SCOPE_ATTEMPT_CAP = 10
+# Failures a scope may absorb ON TOP of its success ceiling before the attempt
+# cap holds it for the day. The attempt cap is derived, never a flat number:
+# `PER_SCOPE_ATTEMPT_CAP = 10` sat BELOW the market's daily cap of 16, so
+# `__MARKET__` could never spend its allowance — measured live 2026-09-18:
+# `regen_count_today = 10`, `attempts_today = 10`, `last_skip_reason =
+# attempt_cap` at 10:38 ET, six cards short of the ceiling the constant above
+# promised. A cap that cannot be reached is not a cap; it is a smaller cap.
+PER_SCOPE_FAILURE_ALLOWANCE = 4
+# The ticker default, kept as a name for tests and back-compat only; every
+# production caller that knows the scope uses `attempt_cap_for`.
+PER_SCOPE_ATTEMPT_CAP = PER_SCOPE_DAILY_CAP + PER_SCOPE_FAILURE_ALLOWANCE
 
 # Share of a scope's daily allowance that may be spent BEFORE the opening bell.
 #
@@ -157,7 +185,10 @@ PER_SCOPE_ATTEMPT_CAP = 10
 #
 # Deliberately NOT applied to after-hours (16:00-20:00 ET): that window is when
 # earnings land, which is the single most material news event a ticker has all
-# quarter.
+# quarter. Since 2026-09-20 it IS applied to the small hours before 04:00 on a
+# trading day — the crypto-only off-hours pass evaluates coins in `closed`, and
+# without it a coin's wire could spend the whole allowance before the open —
+# and never on a weekend or holiday. See `reserve_applies`.
 #
 # This ceiling only measures the right thing because `regen_count_today` is
 # keyed on the ET TRADING DATE (see `_decide_inner`), which rolls at ET midnight
@@ -169,15 +200,78 @@ PER_SCOPE_ATTEMPT_CAP = 10
 PREMARKET_CAP_DIVISOR = 3
 
 
-def daily_cap_for(is_market_scope: bool) -> int:
-    """The per-scope success ceiling for one day."""
-    return PER_SCOPE_DAILY_CAP_MARKET if is_market_scope else PER_SCOPE_DAILY_CAP
+def daily_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
+    """The per-scope success ceiling for one day.
+
+    A ticker inside its EARNINGS WINDOW (an earnings date within D-1..D+2 of
+    today, resolved by `earnings_window_service`) gets the market-sized
+    allowance: that is the one week a quarter its wire looks like the market's.
+    TestFlight (ORCL, two days after its report): the card was two hours old and
+    frozen on `daily_cap` while eight fresh sources sat beneath it.
+
+    ⚠️ The daily cap is enforced TWICE — here (advisory, in `decide`) and
+    authoritatively by the `claim_updates_insight_scope` RPC (`p_daily_cap`).
+    Every caller MUST derive both numbers from this function with the SAME
+    `earnings_window`, or the DB silently overrules the gate and the scope
+    re-trips every cycle with nothing logged (the 6-vs-16 market incident).
+    """
+    if is_market_scope or earnings_window:
+        return PER_SCOPE_DAILY_CAP_MARKET
+    return PER_SCOPE_DAILY_CAP
 
 
-def premarket_cap_for(is_market_scope: bool) -> int:
+def attempt_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
+    """The per-scope ATTEMPT ceiling for one day: successes + a failure allowance.
+
+    Strictly above `daily_cap_for` for the same scope by construction, so the
+    attempt cap can only ever bind when generations have FAILED — the job it
+    exists for — and never silently shortens the success ceiling.
+    """
+    return daily_cap_for(is_market_scope, earnings_window=earnings_window) + (
+        PER_SCOPE_FAILURE_ALLOWANCE
+    )
+
+
+def premarket_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
     """The success ceiling that applies before 09:30 ET. Always >= 1 so a cold
     scope can still get its first card of the day in pre-market."""
-    return max(1, daily_cap_for(is_market_scope) // PREMARKET_CAP_DIVISOR)
+    return max(
+        1,
+        daily_cap_for(is_market_scope, earnings_window=earnings_window)
+        // PREMARKET_CAP_DIVISOR,
+    )
+
+
+def reserve_applies(now: datetime, session_phase: str) -> bool:
+    """Is the pre-market reserve in force right now?
+
+    The reserve keeps two thirds of a scope's daily allowance for the regular
+    session (09:30–20:00 ET) of a TRADING day. That is the overnight-into-morning
+    stretch BEFORE the bell: `premarket` (04:00–09:30) and, since the crypto-only
+    off-hours pass started evaluating scopes in `closed`, the small hours before
+    04:00 — a coin whose wire never stops could otherwise spend its whole
+    allowance between midnight and the open and read `daily_cap` all session.
+
+    NOT in force on a weekend or holiday (there is no session to reserve for;
+    the closed cooldown paces the spend instead) and NOT after the close on a
+    trading day (that is the earnings window — the most material news a ticker
+    has all quarter, and the allowance is already counted against today).
+
+    `session_phase` is the authority for `premarket` — the phase already means
+    "a trading day, before 09:30" — and the clock is consulted only to tell the
+    small hours of a trading day apart from the rest of `closed`. A naive `now`
+    is read as UTC, matching every other clock in this module.
+    """
+    if session_phase == SESSION_PREMARKET:
+        return True
+    if session_phase != SESSION_CLOSED:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local = now.astimezone(ET)
+    if not is_trading_day(local.date()):
+        return False
+    return (local.hour, local.minute) < (9, 30)
 
 
 # ── Decision ──────────────────────────────────────────────────────────
@@ -472,6 +566,7 @@ def decide(
     is_market_scope: bool,
     sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
+    earnings_window: bool = False,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
@@ -486,6 +581,7 @@ def decide(
             close_cycle_start=close_cycle_start, now=now, model=model,
             market_active=market_active, is_market_scope=is_market_scope,
             sigma_daily=sigma_daily, session_phase=session_phase,
+            earnings_window=earnings_window,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -509,6 +605,7 @@ def _decide_inner(
     is_market_scope: bool,
     sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
+    earnings_window: bool = False,
 ) -> Decision:
     state = state or {}
 
@@ -601,23 +698,27 @@ def _decide_inner(
     successes = int(state.get("regen_count_today") or 0) if same_day else 0
     attempts = int(state.get("attempts_today") or 0) if same_day else 0
 
-    if successes >= daily_cap_for(is_market_scope):
+    if successes >= daily_cap_for(is_market_scope, earnings_window=earnings_window):
         return Decision(
             action=ACTION_SKIP, reason="daily_cap",
             inputset_id=inputset_id, price_band=band,
         )
     # Reserve the bulk of the allowance for the regular session. Skipping here
     # is not a loss: the scope re-trips the moment the bell rings, and the
-    # articles that drove it are still in the corpus.
+    # articles that drove it are still in the corpus. `reserve_applies` covers
+    # pre-market AND the small hours before it on a trading day (the crypto
+    # off-hours pass evaluates coins in `closed`), never a weekend or holiday.
     if (
-        session_phase == SESSION_PREMARKET
-        and successes >= premarket_cap_for(is_market_scope)
+        reserve_applies(now, session_phase)
+        and successes >= premarket_cap_for(
+            is_market_scope, earnings_window=earnings_window
+        )
     ):
         return Decision(
             action=ACTION_SKIP, reason="premarket_reserved",
             inputset_id=inputset_id, price_band=band,
         )
-    if attempts >= PER_SCOPE_ATTEMPT_CAP:
+    if attempts >= attempt_cap_for(is_market_scope, earnings_window=earnings_window):
         return Decision(
             action=ACTION_SKIP, reason="attempt_cap",
             inputset_id=inputset_id, price_band=band,
@@ -664,7 +765,13 @@ def _decide_inner(
 __all__ = [
     "PROMPT_VERSION",
     "PER_SCOPE_DAILY_CAP",
+    "PER_SCOPE_DAILY_CAP_MARKET",
     "PER_SCOPE_ATTEMPT_CAP",
+    "PER_SCOPE_FAILURE_ALLOWANCE",
+    "daily_cap_for",
+    "attempt_cap_for",
+    "premarket_cap_for",
+    "reserve_applies",
     "COOLDOWN_SESSION_SECONDS",
     "COOLDOWN_CLOSED_SECONDS",
     "MAX_STALENESS_SECONDS",

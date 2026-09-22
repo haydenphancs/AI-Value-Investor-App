@@ -32,8 +32,11 @@ from app.services.updates_materiality import (
     TIER_NOTABLE,
     TIER_TYPICAL,
     TIER_UNUSUAL,
+    PER_SCOPE_FAILURE_ALLOWANCE,
+    attempt_cap_for,
     daily_cap_for,
     premarket_cap_for,
+    reserve_applies,
     canonical_band,
     classify_move,
     compute_inputset_id,
@@ -760,4 +763,153 @@ def test_missing_quote_does_not_fabricate_a_change_event():
 def test_unknown_band_on_a_cold_scope_still_generates():
     # The fallback must not block a genuine first generation.
     d = _decide(state=None, quote={})
+    assert d.action == ACTION_GENERATE
+
+
+# ── Earnings-window boost + the derived attempt cap (2026-09-20) ──────────────
+# Live on an ORDINARY Friday (2026-09-18): ORCL / BTCUSD / ETHUSD / SOLUSD were all
+# `daily_cap` 6/6 by ~10:30 ET, and `__MARKET__` was `attempt_cap` at 10:38 with
+# regen_count_today == attempts_today == 10 — the flat attempt cap (10) sat BELOW
+# the market's daily cap (16), so the market could never spend its allowance.
+
+from zoneinfo import ZoneInfo  # noqa: E402
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et(y, m, d, hh, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=_ET)
+
+
+def test_the_ticker_cap_was_raised_to_ten():
+    assert PER_SCOPE_DAILY_CAP == 10
+    assert PER_SCOPE_DAILY_CAP_MARKET == 16
+
+
+def test_the_earnings_window_raises_the_ticker_cap_to_the_market_cap():
+    assert daily_cap_for(False, earnings_window=True) == PER_SCOPE_DAILY_CAP_MARKET
+    assert daily_cap_for(True, earnings_window=True) == PER_SCOPE_DAILY_CAP_MARKET
+    # Defaults off: a caller that says nothing gets the ordinary cap.
+    assert daily_cap_for(False) == PER_SCOPE_DAILY_CAP
+    assert daily_cap_for(False, earnings_window=False) == PER_SCOPE_DAILY_CAP
+
+
+@pytest.mark.parametrize("is_market", [True, False])
+@pytest.mark.parametrize("boost", [True, False])
+def test_the_attempt_cap_is_always_above_the_daily_cap(is_market, boost):
+    """The whole point of deriving it: a cap that cannot be reached is a smaller cap."""
+    daily = daily_cap_for(is_market, earnings_window=boost)
+    attempts = attempt_cap_for(is_market, earnings_window=boost)
+    assert attempts == daily + PER_SCOPE_FAILURE_ALLOWANCE
+    assert attempts > daily
+    assert PER_SCOPE_FAILURE_ALLOWANCE >= 1
+
+
+def test_the_flat_attempt_cap_name_is_the_ticker_default():
+    assert PER_SCOPE_ATTEMPT_CAP == attempt_cap_for(False)
+
+
+def test_the_market_card_can_spend_its_whole_allowance_before_the_attempt_cap():
+    """The live bug: 10 successes == 10 attempts must NOT read `attempt_cap`."""
+    d = _decide(
+        scope="__MARKET__", is_market_scope=True, market_change_percent=0.1,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": 10, "attempts_today": 10,
+        },
+    )
+    assert d.action == ACTION_GENERATE
+    d = _decide(
+        scope="__MARKET__", is_market_scope=True, market_change_percent=0.1,
+        state={
+            "regen_day": NOW.date().isoformat(),
+            "regen_count_today": 16, "attempts_today": 16,
+        },
+    )
+    assert d.reason == "daily_cap"
+
+
+def test_a_boosted_ticker_is_not_capped_at_the_ticker_ceiling():
+    state = {"regen_day": NOW.date().isoformat(), "regen_count_today": PER_SCOPE_DAILY_CAP,
+             "attempts_today": PER_SCOPE_DAILY_CAP}
+    assert _decide(state=state).reason == "daily_cap"
+    assert _decide(state=state, earnings_window=True).action == ACTION_GENERATE
+    capped = {**state, "regen_count_today": PER_SCOPE_DAILY_CAP_MARKET,
+              "attempts_today": PER_SCOPE_DAILY_CAP_MARKET}
+    assert _decide(state=capped, earnings_window=True).reason == "daily_cap"
+
+
+def test_a_boosted_ticker_absorbs_failures_above_the_boosted_cap():
+    state = {"regen_day": NOW.date().isoformat(), "regen_count_today": 0,
+             "attempts_today": attempt_cap_for(False)}
+    assert _decide(state=state).reason == "attempt_cap"
+    assert _decide(state=state, earnings_window=True).action == ACTION_GENERATE
+    state["attempts_today"] = attempt_cap_for(False, earnings_window=True)
+    assert _decide(state=state, earnings_window=True).reason == "attempt_cap"
+
+
+def test_the_premarket_reserve_follows_the_boosted_cap():
+    assert premarket_cap_for(False, earnings_window=True) == PER_SCOPE_DAILY_CAP_MARKET // 3
+    state = {"regen_day": NOW.date().isoformat(), "regen_count_today": premarket_cap_for(False)}
+    assert _decide(state=state, session_phase=SESSION_PREMARKET).reason == "premarket_reserved"
+    assert _decide(state=state, session_phase=SESSION_PREMARKET, earnings_window=True).action == ACTION_GENERATE
+    state["regen_count_today"] = premarket_cap_for(False, earnings_window=True)
+    assert _decide(state=state, session_phase=SESSION_PREMARKET, earnings_window=True).reason == "premarket_reserved"
+
+
+def test_the_boost_defaults_off_in_decide():
+    """Anti-vacuity: nothing in `decide` may boost a ticker on its own."""
+    state = {"regen_day": NOW.date().isoformat(), "regen_count_today": PER_SCOPE_DAILY_CAP}
+    assert _decide(state=state).reason == "daily_cap"
+
+
+# ── The reserve also holds in the small hours of a trading day ───────────────
+# The crypto-only off-hours pass evaluates coins in `closed`; without this a coin's
+# wire could spend the whole allowance between midnight and 04:00 ET.
+
+
+@pytest.mark.parametrize(
+    "label,now,phase,expected",
+    [
+        ("weekday 02:00 ET closed", _et(2026, 9, 16, 2), SESSION_CLOSED, True),
+        ("weekday 03:59 ET closed", _et(2026, 9, 16, 3, 59), SESSION_CLOSED, True),
+        ("weekday 05:00 ET premarket", _et(2026, 9, 16, 5), SESSION_PREMARKET, True),
+        ("weekday 11:00 ET regular", _et(2026, 9, 16, 11), SESSION_REGULAR, False),
+        ("weekday 17:00 ET afterhours", _et(2026, 9, 16, 17), SESSION_AFTERHOURS, False),
+        ("weekday 21:00 ET closed (after the session)", _et(2026, 9, 16, 21), SESSION_CLOSED, False),
+        ("Saturday 10:00 ET", _et(2026, 9, 19, 10), SESSION_CLOSED, False),
+        ("Sunday 02:00 ET", _et(2026, 9, 20, 2), SESSION_CLOSED, False),
+        ("Labor Day 02:00 ET (holiday)", _et(2026, 9, 7, 2), SESSION_CLOSED, False),
+        # The phase is the authority for premarket even when the clock disagrees.
+        ("premarket phase, odd clock", _et(2026, 9, 16, 14), SESSION_PREMARKET, True),
+    ],
+)
+def test_reserve_applies_table(label, now, phase, expected):
+    assert reserve_applies(now, phase) is expected, label
+
+
+def test_reserve_applies_reads_a_naive_now_as_utc():
+    # 07:00Z on a Wednesday is 03:00 ET — small hours of a trading day.
+    naive = datetime(2026, 9, 16, 7, 0)
+    aware = datetime(2026, 9, 16, 7, 0, tzinfo=timezone.utc)
+    assert reserve_applies(naive, SESSION_CLOSED) is True
+    assert reserve_applies(aware, SESSION_CLOSED) is True
+    # Pin the 09:30 edge on the naive form too: 13:00Z is 09:00 ET (reserve holds),
+    # 13:31Z is 09:31 ET (it does not). Read as the host's local clock (the suite
+    # also runs under TZ=America/Denver) both would be mid-morning and wrong.
+    assert reserve_applies(datetime(2026, 9, 16, 13, 0), SESSION_CLOSED) is True     # 09:00 ET
+    assert reserve_applies(datetime(2026, 9, 16, 13, 31), SESSION_CLOSED) is False   # 09:31 ET
+
+
+def test_a_coin_cannot_spend_its_allowance_overnight_before_a_session():
+    """The gate, end to end: 02:00 ET on a trading day, in `closed`, at the reserve."""
+    now = _et(2026, 9, 16, 2)
+    state = {"regen_day": "2026-09-16", "regen_count_today": premarket_cap_for(False)}
+    d = _decide(scope="ETHUSD", now=now, market_active=False,
+                session_phase=SESSION_CLOSED, state=state)
+    assert d.reason == "premarket_reserved"
+    # Same count on a Sunday: no session to reserve for → the closed cooldown paces it.
+    d = _decide(scope="ETHUSD", now=_et(2026, 9, 20, 2), market_active=False,
+                session_phase=SESSION_CLOSED,
+                state={"regen_day": "2026-09-20", "regen_count_today": premarket_cap_for(False)})
     assert d.action == ACTION_GENERATE

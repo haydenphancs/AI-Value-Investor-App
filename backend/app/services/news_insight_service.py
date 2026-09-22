@@ -43,7 +43,10 @@ from app.config import settings
 from app.services.agents.persona_config import neutral_system_instruction
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
+from app.services.coingecko_adapter import crypto_base_symbol
+from app.services.crypto_names import crypto_display_name
 from app.services.market_news_quality import is_material_headline
+from app.services.news_cache_service import is_crypto_scope
 from app.services.ticker_report_cache import current_close_cycle_start
 from app.services.updates_materiality import PROMPT_VERSION, finite
 from app.utils.market_hours import is_market_active, last_completed_close
@@ -66,9 +69,11 @@ INSIGHT_MODEL: str = getattr(
 MAX_CORPUS_ARTICLES = 25
 
 # The corpus window is DYNAMIC: prefer the last PRIMARY_WINDOW_HOURS (24h) and
-# fall back to CORPUS_WINDOW_HOURS (48h) only when the scope has no news in the
-# last 24h. The chosen window drives the iOS badge ("24h"/"48h"), so a scope with
-# fresh news is honestly labelled "24h" rather than over-claiming a 48h lookback.
+# widen to CORPUS_WINDOW_HOURS (48h) when the 24h window is THIN — fewer than
+# MIN_CORPUS_ARTICLES articles about the scope — and the wider window actually
+# adds some. The chosen window drives the iOS badge ("24h"/"48h"), so a scope with
+# fresh news is honestly labelled "24h" rather than over-claiming a 48h lookback,
+# and a widened scope is labelled with the span it was really summarised over.
 # The sweeper bounds each scope's corpus to the SAME window before BOTH the
 # materiality fingerprint and generation (so the badge is literally true), and the
 # Updates endpoint uses it to decide whether to surface a card at all (no news in
@@ -76,14 +81,23 @@ MAX_CORPUS_ARTICLES = 25
 # change these constants there, not by hand.
 PRIMARY_WINDOW_HOURS = 24
 CORPUS_WINDOW_HOURS = 48
-# Third tier, used ONLY when 24h and 48h are both empty AND the market was shut
-# for long enough to explain it (see ``_closed_market_window_hours``). Without it
-# a quiet ticker whose last story was Friday has an empty 48h window every Monday
-# morning, and the endpoint's `if feed_recent:` gate renders NO card at all --
-# even though a perfectly good one is sitting unexpired in the cache, because the
-# 96h hard TTL below was raised for exactly this reason and the gate overrides it.
-# 96h is the same number and the same rationale as _HARD_TTL_*: it spans a
-# Thursday-close-to-Monday-open holiday weekend.
+# Below this many on-subject articles a window is THIN and the next tier is tried.
+# TestFlight (PLUG, 2026-09-11): a "24h · 1 source" card summarised one Zacks piece
+# while a second on-subject article from the previous morning sat in the timeline
+# directly beneath it, unused — because the 24h tier won the moment it was
+# non-empty. One article is not a roll-up. Widening only ever happens when the
+# wider window ADDS an article, so a lone fresh story still reads "24h · 1 source"
+# rather than claiming a span it did not need.
+MIN_CORPUS_ARTICLES = 3
+# Third tier, used ONLY when 24h and 48h are both THIN (or empty) AND the market
+# was shut for long enough to explain it (see ``_closed_market_window_hours``), and
+# only when it adds an article. Without it a quiet ticker whose last story was
+# Friday has an empty 48h window every Monday morning, and the endpoint's
+# `if feed_recent:` gate renders NO card at all -- even though a perfectly good one
+# is sitting unexpired in the cache, because the 96h hard TTL below was raised for
+# exactly this reason and the gate overrides it. 96h is the same number and the
+# same rationale as _HARD_TTL_*: it spans a Thursday-close-to-Monday-open holiday
+# weekend.
 MAX_WINDOW_HOURS = 96
 # Small tolerance for clock skew / same-minute stamping so a legitimately
 # just-published article isn't dropped, while genuinely future-dated rows are.
@@ -98,8 +112,9 @@ MAX_HEADLINE_CHARS = 160
 _MEM_TTL_SECONDS = 300               # Tier-1
 _SOFT_TTL_ACTIVE_SECONDS = 15 * 60   # flagged is_stale after this
 _SOFT_TTL_CLOSED_SECONDS = 4 * 3600
-# Hard expiry must span the longest gap between two sweeps, and the sweeper only
-# runs while `is_market_active()`. The longest real gap is a long weekend:
+# Hard expiry must span the longest gap between two sweeps, and the EQUITY sweep
+# only runs while `is_market_active()` (coins get a 30-minute off-hours pass, but
+# a card must survive without it). The longest real gap is a long weekend:
 # Friday 20:00 ET → Tuesday 04:00 ET ≈ 80 hours. A 12h hard TTL meant the card
 # written on Friday evening expired Saturday morning and EVERY scope — including
 # the default Market tab — served the non-AI fallback for the rest of the
@@ -294,11 +309,12 @@ class NewsInsightService:
 
             # `is_stale` means "the inputs may have moved on and the sweeper
             # has not caught up yet" — it is a statement about the SWEEPER,
-            # which only runs while `is_market_active()` (04:00–20:00 ET, see
-            # updates_insight_sweeper.run_insight_sweeper_loop).
+            # whose full pass only runs while `is_market_active()` (04:00–20:00
+            # ET, see updates_insight_sweeper.run_insight_sweeper_loop).
             #
-            # Outside that window nothing is sweeping and nothing will until the
-            # next session opens, so a soft-expired card is not behind anything:
+            # Outside that window only the crypto-only off-hours pass runs, and
+            # it stamps the CLOSED soft TTL (4h) — so its cards do not trip this
+            # flag either. A soft-expired card there is not behind anything:
             # it IS the latest view of the world. Reporting stale there is what
             # made every scope render "Catching up…" — replacing the card's
             # timestamp with a claim that a refresh was pending — for the whole
@@ -394,16 +410,20 @@ class NewsInsightService:
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "is_stale": False,
             # Tells iOS to poll shortly, because the sweeper will replace this
-            # with a real AI card within one cycle — which is only TRUE while
-            # the sweeper is running. It is gated on `is_market_active()`
-            # (updates_insight_sweeper.run_insight_sweeper_loop), so overnight
-            # and at weekends this promise cannot be kept: no cycle is coming
-            # until the next session opens. Asserting it anyway made iOS render
-            # a bare "Catching up…" for up to ~60 hours and fire two futile
-            # re-polls on every feed load. Same reasoning as `is_stale` above:
-            # both flags are statements about the SWEEPER, not about the card.
+            # with a real AI card within one cycle — which is only TRUE while a
+            # pass that covers THIS scope is running. The full pass is gated on
+            # `is_market_active()` (updates_insight_sweeper.run_insight_sweeper_loop),
+            # so overnight and at weekends an EQUITY's promise cannot be kept: no
+            # cycle is coming until the next session opens. Asserting it anyway
+            # made iOS render a bare "Catching up…" for up to ~60 hours and fire
+            # two futile re-polls on every feed load. A COIN is different: the
+            # crypto-only off-hours pass sweeps it every 30 minutes around the
+            # clock, so for a coin the promise holds at any hour. Same reasoning
+            # as `is_stale` above: both flags are statements about the SWEEPER,
+            # not about the card.
             "refreshing": (
-                is_market_active() if market_active is None else bool(market_active)
+                (is_market_active() if market_active is None else bool(market_active))
+                or is_crypto_scope(scope)
             ),
             "ai_generated": False,
             "trigger_reason": None,
@@ -653,7 +673,7 @@ class NewsInsightService:
     async def mark_verified_current(
         self, scopes: List[str], market_active: bool
     ) -> None:
-        """Extend soft expiry for cards the sweeper just re-verified as unchanged.
+        """Extend soft expiry for cards the sweeper just evaluated and will not redo.
 
         ``is_stale`` means "the sweeper hasn't checked this recently", NOT "the
         text is old". A card whose input fingerprint is unchanged is provably
@@ -661,6 +681,14 @@ class NewsInsightService:
         this, every quiet scope would flip to "Catching up…" 15 minutes after
         generation and stay there indefinitely, because the fingerprint skip
         path never re-stamped anything.
+
+        The sweeper also sends scopes it evaluated and CAPPED for the day
+        (`daily_cap` / `attempt_cap`) or reserved until the bell
+        (`premarket_reserved`) — `_VERIFIED_CURRENT_REASONS`. Those were checked
+        too; the decision not to regenerate is policy, and no later cycle will
+        reverse it before a known boundary. Leaving them un-stamped is what
+        made a busy ticker read "checking for updates" all afternoon (TestFlight,
+        ORCL 2026-09-11) — a promise of a refresh that could not come.
 
         One batched update, not one per scope.
         """
@@ -708,7 +736,7 @@ class NewsInsightService:
         telling. See ``_catalyst_block``.
         """
         is_market = scope.startswith("__")
-        subject = "the overall US stock market" if is_market else scope
+        subject = "the overall US stock market" if is_market else _prompt_subject(scope)
 
         # Fenced, like the enrichment prompt: headlines and summaries are third-party text
         # that feeds the Updates AI Insight card and `get_market_snapshot` — a planted
@@ -1190,6 +1218,59 @@ def company_name_variants(company_name: Optional[str]) -> List[str]:
     return variants
 
 
+# A crypto BASE symbol shorter than this is not tested against headline text: "OP",
+# "AR", "PI", "IO" are English, and a whole-token match on them inside the coin's
+# own feed would admit every peer story that happens to use the word. Three letters
+# is the floor because "ETH" / "BTC" / "SOL" / "XRP" are exactly the tokens
+# headlines print; the few 3-letter coins that are also words ("ONE", "APE") get the
+# same soft-OR treatment the equity rule already gives "F" / "BE" — a peer story
+# admitted from the coin's OWN feed, never a veto. The lead-tag alias has no floor:
+# a tag is a symbol by construction, never prose.
+_MIN_ALIAS_TITLE_CHARS = 3
+
+
+def _prompt_subject(scope: str) -> str:
+    """What the roll-up prompt calls the scope.
+
+    A coin is named ("Ethereum (ETH)"), not its pair symbol: told the subject was
+    "ETHUSD", the model wrote "ETHUSD Sees Technical Upgrades" and "ETHUSD is
+    trading near $2,500" — a quote-pair spelling no reader uses (seen live on the
+    ETH card, 2026-09-20). An equity keeps its ticker, which the articles already
+    name in prose. Pure; a pair whose base is not in the coin registry keeps the
+    symbol rather than guessing.
+    """
+    if not is_crypto_scope(scope):
+        return scope
+    name = crypto_display_name(scope)
+    base = crypto_base_symbol(scope)
+    if name and base and base != scope:
+        return f"{name} ({base})"
+    return name or scope
+
+
+def _scope_aliases(symbol: str) -> List[str]:
+    """The symbols an article may carry for ``symbol``: itself, plus the BASE for a coin.
+
+    ``ETHUSD`` / ``ETHUSDT`` → ``["ETHUSD", "ETH"]``; anything else → ``[symbol]``.
+    Crypto pairs ONLY, and only coins the registry KNOWS (``is_crypto_scope`` AND
+    ``crypto_display_name``): the ETF ticker ``USD`` and commodity pairs (``GCUSD``)
+    are never split, and neither is a 4-letter listed ticker or an FX pair that
+    merely satisfies the ``…USD`` suffix rule (``XUSD`` → an alias of ``X``, U.S.
+    Steel; ``EURUSD`` → ``EUR``) — so every non-coin scope behaves exactly as
+    before. Needed because the wire is inconsistent about which spelling is the
+    symbol: FMP tags the pair (``ETHUSD``), enrichment appends the bare coin
+    (``ETH``), and headlines print ``ETH`` when they print anything at all —
+    ``ETHUSD`` never appears in prose, so without the alias a coin scope could only
+    ever match on its NAME.
+    """
+    if not symbol or not is_crypto_scope(symbol) or crypto_display_name(symbol) is None:
+        return [symbol]
+    base = crypto_base_symbol(symbol)
+    if base and base != symbol:
+        return [symbol, base]
+    return [symbol]
+
+
 def article_is_about(
     row: Dict[str, Any], scope: str, company_name: Optional[str] = None
 ) -> bool:
@@ -1230,6 +1311,9 @@ def article_is_about(
     admit and froze those cards behind `fingerprint_unchanged`. The sweeper resolves it
     from `watchlist_items`; `tests/test_updates_insight_subject_wiring.py` asserts the
     call site, not just the lookup.
+
+    A COIN scope (``ETHUSD``) also answers to its base symbol (``ETH``) as a lead tag
+    and as a headline token — see `_scope_aliases`. Equities are unaffected.
     """
     if not isinstance(row, dict) or not scope:
         return False
@@ -1241,6 +1325,9 @@ def article_is_about(
         return False
 
     symbol = scope.strip().upper()
+    # A coin answers to its pair AND its base (see `_scope_aliases`); an equity only
+    # to itself. `aliases[0]` is always `symbol`.
+    aliases = _scope_aliases(symbol)
     tags = []
     related = row.get("related_tickers")
     if isinstance(related, list):
@@ -1276,7 +1363,14 @@ def article_is_about(
     # sweeper-discovered row had EMPTY FMP tags and enrichment filled them in Gemini's
     # (headline) order — which is how PLUG ended up third in its own feed. Tighten this
     # only against freshly measured tag data, not against the docstring's intuition.
-    if tags and tags[0] == symbol:
+    #
+    # ⚠️ That measurement was taken from `_get_cached` rows. The SWEEPER read
+    # (`get_cached_bulk`) did not project `related_tickers` until 2026-09-20, so for
+    # the sweeper `tags` was always `[]` and this rule never fired there — every
+    # ticker's card leaned on the title tests below, and a coin (whose pair symbol
+    # is never in a headline) could only qualify by NAME. Both readers now carry
+    # the column; `tests/test_news_cache_bulk_projection.py` pins it.
+    if tags and tags[0] in aliases:
         return True
 
     # A wrap names several companies; a story names one. Above the threshold we demand
@@ -1292,10 +1386,17 @@ def article_is_about(
     # letter. Lookarounds rather than `\b` because a symbol may start or end with a
     # non-word character (`^GSPC`, `BRK.B`), where `\b` asserts against the wrong side
     # and silently never matches.
-    if symbol and re.search(
-        rf"(?<![A-Za-z0-9]){re.escape(symbol.lower())}(?![A-Za-z0-9])", haystack
-    ):
-        return True
+    for alias in aliases:
+        if not alias:
+            continue
+        # The derived BASE of a coin is held to a length floor; the scope's own
+        # symbol is tested at any length, exactly as before.
+        if alias != symbol and len(alias) < _MIN_ALIAS_TITLE_CHARS:
+            continue
+        if re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(alias.lower())}(?![A-Za-z0-9])", haystack
+        ):
+            return True
 
     for variant in company_name_variants(company_name):
         if re.search(
@@ -1342,15 +1443,19 @@ def select_recent_corpus(
     scope: Optional[str] = None,
     company_name: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Pick the corpus window for a scope: prefer the last 24h, fall back to 48h.
+    """Pick the corpus window for a scope: 24h when it is well covered, else widen.
 
-    Returns ``(windowed_rows, window_hours)``. A scope WITH news in the last 24h
-    is summarised over just that window and badged "24h"; a scope whose freshest
-    news is 24–48h old uses the 48h window and is badged "48h". The two callers —
-    the sweeper (corpus for the fingerprint + generation) and the Updates endpoint
-    (show/hide + fallback + badge) — MUST both go through here so the badge always
-    matches the news the card actually summarises. An empty return (no news in
-    48h) means "no card".
+    Returns ``(windowed_rows, window_hours)``. A scope with at least
+    ``MIN_CORPUS_ARTICLES`` articles about it in the last 24h is summarised over
+    just that window and badged "24h". A THIN 24h window widens to 48h — and, only
+    across a market that was actually shut, to 72/96h — but each step is taken
+    only when it ADDS an article: a scope whose sole story is two hours old keeps
+    the narrow, literally-true "24h" rather than a wider badge that bought nothing.
+    The two callers — the sweeper (corpus for the fingerprint + generation) and the
+    Updates endpoint (show/hide + fallback + badge) — MUST both go through here so
+    the badge always matches the news the card actually summarises. An empty
+    return (no news in the widest window tried) means "no card"; the hours in that
+    case report the widest window tried, never a claim of freshness.
     """
     # SUBJECT FILTER BEFORE THE WINDOW, not after.
     #
@@ -1365,28 +1470,100 @@ def select_recent_corpus(
     if scope:
         rows = filter_to_subject(rows, scope, company_name)
 
+    # A naive `now` is read as UTC, like every other clock in this module. The
+    # window helper compares against aware row timestamps, so an un-normalised
+    # naive `now` would raise TypeError from inside the comparison.
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     upper = now + timedelta(hours=_FUTURE_SKEW_HOURS)
     primary = articles_within_window(
         rows, now - timedelta(hours=PRIMARY_WINDOW_HOURS), upper
     )
-    if primary:
+    if len(primary) >= MIN_CORPUS_ARTICLES:
         return primary, PRIMARY_WINDOW_HOURS
+    # Same rows, same upper bound, wider cutoff: `fallback` is a SUPERSET of
+    # `primary`, so equal lengths below mean equal sets.
     fallback = articles_within_window(
         rows, now - timedelta(hours=CORPUS_WINDOW_HOURS), upper
     )
-    if fallback:
+    if len(fallback) >= MIN_CORPUS_ARTICLES:
         return fallback, CORPUS_WINDOW_HOURS
 
-    # Both standard windows are empty. Stretch ONLY across a market that was
-    # actually shut -- a quiet ticker in a normal trading week keeps the 48h
-    # answer and therefore keeps getting no card, which is the honest outcome.
+    # Thin (or empty) at 48h too. Stretch ONLY across a market that was actually
+    # shut -- a quiet ticker in a normal trading week keeps the 48h answer -- and
+    # only when the stretch turns up an article the 48h window did not have.
     extended_hours = _closed_market_window_hours(now)
-    if extended_hours <= CORPUS_WINDOW_HOURS:
-        return [], CORPUS_WINDOW_HOURS
-    extended = articles_within_window(
-        rows, now - timedelta(hours=extended_hours), upper
-    )
-    return extended, extended_hours
+    if extended_hours > CORPUS_WINDOW_HOURS:
+        extended = articles_within_window(
+            rows, now - timedelta(hours=extended_hours), upper
+        )
+        if len(extended) > len(fallback):
+            return extended, extended_hours
+
+    # Nothing wider helped. Report the NARROWEST non-empty window: widening that
+    # added nothing must not widen the badge.
+    if primary and len(fallback) == len(primary):
+        return primary, PRIMARY_WINDOW_HOURS
+    if fallback:
+        return fallback, CORPUS_WINDOW_HOURS
+    # Empty everywhere: the hours say how far we looked (48 midweek, 72/96 when
+    # the tape was shut), which is what the endpoint's default badge falls back to.
+    return [], extended_hours
+
+
+# The badge vocabulary, narrowest first. `cited_window_floor` snaps an age to one.
+_STANDARD_WINDOWS = (PRIMARY_WINDOW_HOURS, CORPUS_WINDOW_HOURS, 72, MAX_WINDOW_HOURS)
+
+
+def cited_window_floor(
+    sources: Any, rows: Sequence[Dict[str, Any]], now: datetime
+) -> Optional[int]:
+    """The narrowest badge window that still contains every article the card CITES.
+
+    The card row stores no window; the endpoint re-derives the badge from the
+    CURRENT feed. Since a thin day now widens the corpus to 48h (or further across
+    a closed market), that recompute can UNDER-claim: a card written over 48h
+    (yesterday's story cited) is badged "24h" the moment three fresh articles land
+    while the sweeper is capped or cooling down. The card's `sources` are the
+    literal corpus inputs, so matching them back to the feed by URL recovers the
+    span the brief actually covers — exact whenever the corpus was widened (fewer
+    than MIN_CORPUS_ARTICLES rows lay inside 24h, so most cited rows are older).
+
+    Returns None when nothing can be matched (no sources, no URLs, none of them in
+    `rows`, undated rows) — the caller then keeps the recomputed window. A cited
+    row past MAX_WINDOW_HOURS snaps to the ceiling rather than a wider claim.
+    """
+    if not isinstance(sources, (list, tuple)) or not rows:
+        return None
+    urls = {
+        str(s.get("url")).strip()
+        for s in sources
+        if isinstance(s, dict) and str(s.get("url") or "").strip()
+    }
+    if not urls:
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    oldest_hours: Optional[float] = None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get("article_url") or r.get("url") or "").strip()
+        if not url or url not in urls:
+            continue
+        ts = _parse_ts(r.get("published_at"))
+        if ts is None:
+            continue
+        age = (now - ts).total_seconds() / 3600.0
+        if not math.isfinite(age):
+            continue
+        oldest_hours = age if oldest_hours is None else max(oldest_hours, age)
+    if oldest_hours is None:
+        return None
+    for window in _STANDARD_WINDOWS:
+        if oldest_hours <= window:
+            return window
+    return MAX_WINDOW_HOURS
 
 
 def _closed_market_window_hours(now: datetime) -> int:

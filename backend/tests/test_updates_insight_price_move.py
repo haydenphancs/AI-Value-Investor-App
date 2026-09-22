@@ -10,6 +10,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _fresh_earnings_singleton():
+    """`run_sweep` reaches the REAL earnings-window service through a stub client
+    that lacks `get_earnings_calendar`; it degrades correctly but stamps a 15-min
+    negative TTL on the process singleton with the real clock. Reset so no other
+    test inherits that clock."""
+    from app.services.earnings_window_service import get_earnings_window_service
+
+    get_earnings_window_service().reset()
+    yield
+    get_earnings_window_service().reset()
+
 from app.services import updates_insight_sweeper as mod
 from app.services.updates_insight_sweeper import (
     InsightSweeper,

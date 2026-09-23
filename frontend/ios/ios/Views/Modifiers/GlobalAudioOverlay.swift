@@ -13,9 +13,13 @@
 //       Immediately collapses to the top island on open (bottom stays clear for "Ask Cay AI").
 //   • Other cover screens      → `.globalAudioOverlay(token:, showBottomMiniPlayer: true)`
 //       (News / Trending / lists with no chat bar) — keeps the bottom mini player so audio persists.
-//   • Wiser reading screens    → `.globalAudioOverlay(token:, onNavigateToCore:)`
+//   • Wiser reading screens    → `.globalAudioOverlay(token:, readerHost:)`
 //       The screen renders its own bottom mini player ABOVE the chat bar and drives compact mode
 //       from chat-bar focus; this modifier just supplies the island + full-screen player + host.
+//
+//  The full-screen player's "Read" works on EVERY host: a Wiser reader showing the narrated book
+//  jumps in place (`readerHost`); any other host — including another book's screen — opens the
+//  narrated core in a reader cover presented from here (`narratedCoreReader(item:)`).
 //
 
 import SwiftUI
@@ -36,8 +40,12 @@ struct GlobalAudioOverlay: ViewModifier {
     var forceCompact: Bool = false
     /// Cover screens with no chat bar set this — render the bottom mini player when not compact.
     var showBottomMiniPlayer: Bool = false
-    /// Books pass their core-jump closure so the full-screen player's "Read" button works.
-    var onNavigateToCore: ((Int) -> Void)? = nil
+    /// Wiser reading screens pass the book they show and how to jump to one of its cores. Used
+    /// only when the NARRATED book is that book; otherwise Read opens a reader cover from here.
+    var readerHost: BookReaderHost? = nil
+
+    /// Read's target when this host can't jump in place (see `openNarratedCore`).
+    @State private var readerRoute: NarratedCoreRoute?
 
     func body(content: Content) -> some View {
         content
@@ -72,7 +80,7 @@ struct GlobalAudioOverlay: ViewModifier {
             // Full-screen now-playing
             .overlay {
                 if audioManager.showFullScreenPlayer {
-                    FullScreenAudioPlayer(onNavigateToCore: onNavigateToCore)
+                    FullScreenAudioPlayer(onNavigateToCore: openNarratedCore)
                         .transition(.move(edge: .bottom))
                         .zIndex(100)
                 }
@@ -96,6 +104,55 @@ struct GlobalAudioOverlay: ViewModifier {
                 // Release both forced-compact and chat-focus reasons keyed by this token.
                 audioManager.setCompactMode(false, reason: token)
             }
+            .narratedCoreReader(item: $readerRoute)
+    }
+
+    /// Same book → jump the reader already on screen. Anything else → present the narrated
+    /// book's reader. The two book screens used to receive a bare core number and apply it to
+    /// THEIR book, so with book A playing and book B open, Read opened core N of book B.
+    private func openNarratedCore(_ route: NarratedCoreRoute) {
+        if let host = readerHost, host.curriculumOrder == route.curriculumOrder {
+            host.openCore(route.coreNumber)
+        } else {
+            readerRoute = route
+        }
+    }
+}
+
+// MARK: - Book reader host
+
+/// A Wiser reading screen that can show a core of ITS book in place.
+struct BookReaderHost {
+    let curriculumOrder: Int
+    let openCore: (Int) -> Void
+}
+
+// MARK: - Narrated-core reader cover
+
+/// Presents `BookCoreDetailView` for a `NarratedCoreRoute` — the full-screen player's Read from a
+/// host that has no reader of that book on screen (a tab root, a news or article cover, another
+/// book). Item-based on purpose: `fullScreenCover(isPresented:)` silently fails to present when
+/// nested inside another cover (see `AIChatCoverModifier`), and most hosts ARE covers.
+private struct NarratedCoreReaderCover: ViewModifier {
+    @Environment(\.appState) private var appState
+    @Binding var route: NarratedCoreRoute?
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(item: $route) { route in
+            // Resolved again here, not captured: the route is a value, and the player only offers
+            // Read for a route the catalog resolves, so this `if` is a backstop, not a branch.
+            if let target = LibraryBook.narratedCore(for: route),
+               let chapter = target.chapter.getDetailContent(for: target.book) {
+                BookCoreDetailView(content: chapter, book: target.book, onFinishedBook: {
+                    self.route = nil
+                })
+                // A cover does not inherit these for free — same set `AlertDestinationCover` and
+                // `BookDetailView`'s own reader cover inject.
+                .environmentObject(AudioManager.shared)
+                .environment(appState)
+                .environment(\.appState, appState)
+            }
+        }
     }
 }
 
@@ -123,14 +180,20 @@ extension View {
         token: String,
         forceCompact: Bool = false,
         showBottomMiniPlayer: Bool = false,
-        onNavigateToCore: ((Int) -> Void)? = nil
+        readerHost: BookReaderHost? = nil
     ) -> some View {
         modifier(GlobalAudioOverlay(
             token: token,
             forceCompact: forceCompact,
             showBottomMiniPlayer: showBottomMiniPlayer,
-            onNavigateToCore: onNavigateToCore
+            readerHost: readerHost
         ))
+    }
+
+    /// Present the reader for the narrated core whenever `item` is set. Used by
+    /// `RootContainerView` (player expanded from a tab root) and by `GlobalAudioOverlay`.
+    func narratedCoreReader(item: Binding<NarratedCoreRoute?>) -> some View {
+        modifier(NarratedCoreReaderCover(route: item))
     }
 
 }

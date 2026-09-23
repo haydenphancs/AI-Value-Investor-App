@@ -48,6 +48,22 @@ struct AudioEpisode: Identifiable, Equatable {
     }
 }
 
+// MARK: - Narrated Core Route
+/// "Open the reader at the core the narration is in" — produced by the full-screen player's
+/// Read / Go to Text and resolved by whichever screen hosts the player.
+///
+/// A VALUE (book + core), not a closure over one screen's book: the host showing the player is
+/// often not the narrated book at all (a tab root, a news cover, another book's detail). The old
+/// `(Int) -> Void` core number let the Book screens open core N of THEIR book while a different
+/// book was playing, and was supplied by nobody else — so Read vanished on the root-hosted
+/// player (TestFlight 1.0(8)).
+struct NarratedCoreRoute: Identifiable, Equatable {
+    let curriculumOrder: Int
+    let coreNumber: Int
+
+    var id: String { "\(curriculumOrder)-\(coreNumber)" }
+}
+
 // MARK: - Audio Category
 enum AudioCategory: String, CaseIterable {
     case moneyMoves = "Money Moves"

@@ -200,7 +200,6 @@ struct MoneyMovesDetailView: View {
             // No invented engagement metrics. `stableCount` made the fake comment count
             // consistent across taps, which fixed the flicker but not the fabrication.
             viewCount: "",
-            commentCount: 0,
             isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
@@ -283,7 +282,6 @@ struct MoneyMovesDetailView: View {
             statistics: [
                 ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time")
             ],
-            comments: [],
             relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
         )
     }

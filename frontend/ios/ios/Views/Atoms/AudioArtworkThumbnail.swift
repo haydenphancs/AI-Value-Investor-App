@@ -91,6 +91,12 @@ struct AudioArtworkLarge: View {
             .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.extraLarge))
             .shadow(color: episode.artworkColors.first?.opacity(0.5) ?? .clear, radius: 30, y: 10)
         }
+        // The artwork's LAYOUT size is the artwork. The glow above is 1.4× that and is drawn
+        // outside this frame as decoration; letting it size the view made the full-screen player's
+        // column 392 + padding = 432pt wide on a 402pt screen (masked for months by lopsided
+        // padding) and ate ~112pt of height the player no longer has once it respects the
+        // safe area.
+        .frame(width: size, height: size)
         .onAppear {
             isAnimating = true
         }

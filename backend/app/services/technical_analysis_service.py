@@ -228,7 +228,24 @@ def _safe_float(v: Any) -> Optional[float]:
 
 
 def _safe_round(v: Optional[float], digits: int = 2) -> Optional[float]:
+    """Round a BOUNDED reading (RSI, Stoch, StochRSI, ADX, CCI, Williams %R — all on a
+    0-100 or ±100 scale, where 2 dp is right). A PRICE-scale value must use
+    `_safe_round_price` instead."""
     return round(v, digits) if v is not None else None
+
+
+def _safe_round_price(v: Optional[float]) -> Optional[float]:
+    """Round a price-scale indicator value with magnitude-aware precision, keeping None.
+
+    The moving averages ARE prices, and so are ATR and MACD (both in the asset's own
+    units). Through the flat `_safe_round` every one of them collapsed for a sub-dollar
+    coin: DOGE's weekly SMA(10) and SMA(20) both served 0.08 and its MACD served -0.01 —
+    four moving averages rounded onto two distinct values, which reads as a broken table.
+    (`_round_price` is the same rule the pivots, Fibonacci and S/R levels already use; it
+    substitutes a default for None, which an indicator row must not do — a null there means
+    "not enough history" and iOS renders it "—".)
+    """
+    return None if v is None else _round_price(v)
 
 
 # ── Gauge ↔ Signal mapper ───────────────────────────────────────
@@ -576,6 +593,18 @@ class TechnicalAnalysisService:
 
         Stocks use W-FRI (week ending Friday — US market convention).
         Crypto uses W-SUN (week ending Sunday — 24/7 market, no sessions).
+
+        ⚠️ A WEEK'S RANGE FALLS BACK TO ITS CLOSES, and uniformly. A coin's daily frame
+        carries a true high/low only for the ~30 sessions merged from `/ohlc`, which is
+        four or five weekly bars — and the five range indicators need fourteen, so the
+        whole weekly half of the card was dashes (a coin read "11 of 18" where an equity
+        read "18 of 18"). The week's own closes give every bucket a range: high = the
+        highest close in the week, low = the lowest. It is narrower than the true range —
+        an intraday spike that closed away is not in it — so it is applied to EVERY bucket
+        or none. Mixing bases inside one series is the thing to avoid: 14-week Stoch over
+        four true (wide) ranges and ten close-derived (narrow) ones reads the recent weeks
+        as calmer than they were. An equity frame has a true range on every bar and is
+        untouched.
         """
         rule = "W-SUN" if is_crypto else "W-FRI"
         weekly = (
@@ -591,6 +620,10 @@ class TechnicalAnalysisService:
             )
             .dropna(subset=["close"])
         )
+        if len(weekly) and (weekly["high"].isna().any() or weekly["low"].isna().any()):
+            closes = df["close"].resample(rule)
+            weekly["high"] = closes.max().reindex(weekly.index)
+            weekly["low"] = closes.min().reindex(weekly.index)
         return weekly
 
     # ── Indicator Computation & Signal Classification ──────────
@@ -654,7 +687,7 @@ class TechnicalAnalysisService:
             signal = self._classify_ma_signal(current_price, value)
             ma_list.append(
                 MovingAverageIndicator(
-                    name=name, value=_safe_round(value), signal=signal
+                    name=name, value=_safe_round_price(value), signal=signal
                 )
             )
 
@@ -742,7 +775,7 @@ class TechnicalAnalysisService:
             ),
             OscillatorIndicator(
                 name="MACD(12,26)",
-                value=_safe_round(macd_line),
+                value=_safe_round_price(macd_line),
                 signal=self._classify_macd(macd_line, macd_signal_val),
             ),
             OscillatorIndicator(
@@ -762,7 +795,7 @@ class TechnicalAnalysisService:
             ),
             OscillatorIndicator(
                 name="ATR(14)",
-                value=_safe_round(atr_val),
+                value=_safe_round_price(atr_val),
                 signal=IndicatorSignal.NEUTRAL,  # ATR is non-directional
             ),
         ]

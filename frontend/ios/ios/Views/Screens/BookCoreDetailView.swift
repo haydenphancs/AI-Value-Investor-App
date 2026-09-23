@@ -180,15 +180,23 @@ struct BookCoreDetailView: View {
     //
     // Entitlement-gated before anything else: `load()` starts BUFFERING, so a locked account
     // must not reach it, and must not spend a request resolving a URL it can't use either.
+    //
+    // ⚠️ Prepares only into an EMPTY player. `load()` tears down whatever is loaded, so with
+    // another book (or a Money Moves article) narrating — playing OR paused — opening this text
+    // to READ used to stop that narration and swap the mini player to this book. A merely
+    // prepared or finished episode reads as inactive and may still be replaced.
     private func ensureBookEpisodeLoaded() {
         guard LearnAudioEntitlement.shared.isUnlocked else { return }
         guard audioManager.currentEpisode?.id != currentAudioEpisode.id else { return }
+        guard !audioManager.hasActiveEpisode else { return }
         Task {
             // Prepare-only, so this one stays SILENT on failure by design: the user didn't ask
             // for anything, and the play sites resolve on demand. Nothing is lost but a warm
             // start. `try?` is deliberate here and banned at the two tap sites above.
             guard let episode = try? await book.playableAudioEpisode() else { return }
             guard audioManager.currentEpisode?.id != episode.id else { return }
+            // Re-checked after the await: the mini player can start audio while the URL resolves.
+            guard !audioManager.hasActiveEpisode else { return }
             // ⚠️ ONLY warm-start from a local mirror. `load()` → `preparePlayer()` starts
             // buffering, so on a cache miss this spent up to 45 MB of Storage egress for someone
             // who opened a core purely to READ — and it re-fired on every `.onAppear` and every
@@ -381,10 +389,14 @@ struct BookCoreDetailView: View {
         .overlay { bookFinaleOverlay }
         // Top status island + full-screen player + overlay-host registration (this screen is a
         // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
-        // the reading view to the core the narration is currently in.
-        .globalAudioOverlay(token: compactToken, onNavigateToCore: { coreNumber in
-            jumpReadingToCore(coreNumber)
-        })
+        // the reading view to the core the narration is currently in — for THIS book; another
+        // book's narration opens that book's reader via the modifier instead.
+        .globalAudioOverlay(token: compactToken, readerHost: BookReaderHost(
+            curriculumOrder: book.curriculumOrder,
+            openCore: { coreNumber in
+                jumpReadingToCore(coreNumber)
+            }
+        ))
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .onAppear {

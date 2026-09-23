@@ -166,11 +166,15 @@ struct BookDetailView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: audioManager.isCompactMode)
         }
         // Top status island + full-screen player + overlay-host registration (this screen is a
-        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" jumps
-        // the reading view to the core the narration is currently in.
-        .globalAudioOverlay(token: compactToken, onNavigateToCore: { coreNumber in
-            playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
-        })
+        // fullScreenCover above RootContainerView, whose own overlay would be hidden). "Read" opens
+        // the reading view at the core the narration is currently in — for THIS book; another
+        // book's narration opens that book's reader via the modifier instead.
+        .globalAudioOverlay(token: compactToken, readerHost: BookReaderHost(
+            curriculumOrder: book.curriculumOrder,
+            openCore: { coreNumber in
+                playerTargetCore = book.coreChapters.first(where: { $0.number == coreNumber })
+            }
+        ))
         .navigationBarHidden(true)
         .aiChatCover(isPresented: $showAIChat, viewModel: chatViewModel)
         .sheet(isPresented: $showShareSheet) {

@@ -127,19 +127,51 @@ def test_the_600_day_window_was_the_defect():
     assert _HISTORY_DAYS >= 1400
 
 
-def test_crypto_weekly_computes_the_100s_and_lists_the_200s_as_null():
+def test_crypto_weekly_ships_the_same_eighteen_rows_as_daily():
+    """A coin's weekly tab used to read "11 of 18" beside a daily "18 of 18": the five
+    range oscillators had no weekly high/low (the `/ohlc` merge covers ~4 weekly bars, they
+    need 14) and were dashed. The week's own closes now give every bucket a range, so the
+    only rows a coin cannot fill are the two 200-week averages — 200 weeks is 3.8 years and
+    CoinGecko Basic serves 2."""
     weekly = TechnicalAnalysisService._daily_to_weekly(_frame(_wavy_ramp(731), high_low=False), is_crypto=True)
     result, gauge, mas, oscs = _svc()._compute_timeframe_signal(weekly)
-    by_name = {m.name: m for m in mas}
-    for name in ("SMA(100)", "EMA(100)"):
-        assert by_name[name].value is not None, f"{name} must be computable on 104 weekly bars"
+    assert len(mas) == 10 and len(oscs) == 8, "the weekly tab ships all 18 rows"
+    by_name = {i.name: i for i in (*mas, *oscs)}
+    for name in ("SMA(100)", "EMA(100)", "Stoch(14,3)", "ADX(14)",
+                 "Williams %R", "CCI(14)", "ATR(14)"):
+        assert by_name[name].value is not None, f"{name} must compute on 104 weekly bars"
     for name in ("SMA(200)", "EMA(200)"):
         assert by_name[name].value is None, f"{name} cannot exist on 104 weekly bars"
         assert by_name[name].signal == IndicatorSignal.NEUTRAL
     # Listed (the sheet names them), not counted (the card is honest).
-    assert len(mas) == 10 and len(oscs) == 3
-    assert result.total_indicators == 11
+    assert result.total_indicators == 16
     assert result.total_indicators == sum(1 for i in (*mas, *oscs) if i.value is not None)
+
+
+def test_a_weekly_range_from_closes_is_applied_to_every_bucket_or_none():
+    """Mixed bases inside one series are the thing to avoid: 14-week Stoch over four true
+    (wide) ranges and ten close-derived (narrow) ones reads the recent weeks as calmer than
+    they were."""
+    df = _frame(_wavy_ramp(731), high_low=False)
+    # The last 30 sessions carry a true range, exactly as the `/ohlc` merge leaves them.
+    df.iloc[-30:, df.columns.get_loc("high")] = df["close"].iloc[-30:] + 50
+    df.iloc[-30:, df.columns.get_loc("low")] = df["close"].iloc[-30:] - 50
+    weekly = TechnicalAnalysisService._daily_to_weekly(df, is_crypto=True)
+    assert weekly["high"].notna().all() and weekly["low"].notna().all()
+    # Every bucket, including the recent ones, is on the close basis.
+    assert weekly["high"].iloc[-1] <= df["close"].iloc[-30:].max(), (
+        "a true 50-wide range leaked into the last bucket while older ones use closes")
+
+
+def test_an_equity_weekly_frame_keeps_its_true_range():
+    days = pd.date_range("2022-01-03", periods=800, freq="D")
+    trading = days[days.dayofweek < 5]
+    closes = _wavy_ramp(len(trading))
+    df = pd.DataFrame({"open": closes, "high": closes + 7, "low": closes - 7,
+                       "close": closes, "volume": 1e6}, index=trading)
+    weekly = TechnicalAnalysisService._daily_to_weekly(df)
+    # The true range is wider than any close in the bucket — proof it was not overwritten.
+    assert weekly["high"].iloc[-1] > weekly["close"].max() - 7 + 6
 
 
 def test_stock_weekly_computes_all_ten_moving_averages():

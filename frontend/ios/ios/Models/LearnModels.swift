@@ -382,6 +382,22 @@ struct BookDiscussion: Identifiable {
     }
 }
 
+// MARK: - Narrated core lookup
+extension LibraryBook {
+    /// The catalog book and core a narrated-core route points at, or nil when the catalog does not
+    /// know that book or core (the Read button is then hidden rather than opening a blank cover).
+    ///
+    /// Resolves through `sampleData`, a `static let`, so the returned book is the SAME instance
+    /// whose `audioEpisode` is playing: `BookCoreDetailView` matches the playing episode to its
+    /// book by id, and a freshly built `LibraryBook` would get a new UUID and lose the read-along.
+    static func narratedCore(for route: NarratedCoreRoute) -> (book: LibraryBook, chapter: BookCoreChapter)? {
+        guard let book = sampleData.first(where: { $0.curriculumOrder == route.curriculumOrder }),
+              let chapter = book.coreChapters.first(where: { $0.number == route.coreNumber })
+        else { return nil }
+        return (book, chapter)
+    }
+}
+
 // MARK: - Library Book (For Book Library/Curriculum View)
 struct LibraryBook: Identifiable {
     let id = UUID()

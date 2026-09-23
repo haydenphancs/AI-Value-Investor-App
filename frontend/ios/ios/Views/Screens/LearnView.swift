@@ -310,7 +310,6 @@ struct LearnContentView: View {
             // No invented engagement metrics. These were a fabricated learner count
             // and a RANDOM comment count, both presented to users as real.
             viewCount: "",
-            commentCount: 0,
             isBookmarked: false,
             hasAudioVersion: false,   // placeholder card: no narration audio (real articles carry audioUrl)
             heroGradientColors: gradientColors,
@@ -395,9 +394,6 @@ struct LearnContentView: View {
             statistics: [
                 ArticleStatistic(value: "\(move.estimatedMinutes)m", label: "Read Time")
             ],
-            // No invented reader comments. There is no comment feature to source them
-            // from, so any comment shown here is fiction presented as user content.
-            comments: [],
             relatedArticles: MoneyMoveArticle.sampleDigitalFinance.relatedArticles
         )
     }

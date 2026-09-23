@@ -263,7 +263,6 @@ struct MoneyMoveArticleDTO: Decodable {
 
     func toArticle(trustAudioFlag: Bool = false) -> MoneyMoveArticle {
         let published = resolvedPublishedAt
-        let mappedComments = (comments ?? []).map { $0.toComment() }
         return MoneyMoveArticle(
             slug: slug,
             title: title,
@@ -273,7 +272,6 @@ struct MoneyMoveArticleDTO: Decodable {
             publishedAt: published,
             readTimeMinutes: readTimeMinutes,
             viewCount: viewCount,
-            commentCount: commentCount ?? mappedComments.count,
             isBookmarked: false,
             // Trust the server's flag when it sends one; fall back to the URL only for the
             // bundled/offline blob, which carries no URLs at all. Deriving this purely from
@@ -288,7 +286,6 @@ struct MoneyMoveArticleDTO: Decodable {
             keyHighlights: keyHighlights.map { $0.toHighlight() },
             sections: sections.map { $0.toSection() },
             statistics: (statistics ?? []).map { $0.toStatistic() },
-            comments: mappedComments,
             relatedArticles: (relatedArticles ?? []).map { $0.toRelated() },
             audioUrl: audioUrl,
             audioDurationSeconds: audioDurationSeconds,
@@ -610,6 +607,14 @@ struct ArticleStatisticDTO: Decodable {
     }
 }
 
+/// A reader comment as authored in the content JSON. DECODED, NEVER RENDERED.
+///
+/// There is no comment backend, so every comment this could carry is authored fiction
+/// presented as user content — the comments UI was removed on 2026-09-22 (all six of its
+/// controls were dead: their callbacks were never supplied). The type stays so served rows
+/// that still carry `comments` keep decoding leniently: never make it, or the article's
+/// `comments` / `commentCount`, required (.claude/rules/learn-content.md). A real comment
+/// feature needs a backend and moderation first, not a revived view.
 struct ArticleCommentDTO: Decodable {
     let authorName: String
     let content: String
@@ -632,21 +637,6 @@ struct ArticleCommentDTO: Decodable {
         replyCount = c.flexibleInt(forKey: .replyCount)
         isVerified = (try? c.decodeIfPresent(Bool.self, forKey: .isVerified)) ?? nil
         hoursAgo = c.flexibleInt(forKey: .hoursAgo)
-    }
-
-    func toComment() -> ArticleComment {
-        let posted = Calendar.current.date(
-            byAdding: .hour, value: -(hoursAgo ?? 3), to: Date()
-        ) ?? Date()
-        return ArticleComment(
-            authorName: authorName,
-            authorAvatar: nil,
-            content: content,
-            postedAt: posted,
-            likeCount: likeCount ?? 0,
-            replyCount: replyCount ?? 0,
-            isVerified: isVerified ?? false
-        )
     }
 }
 

@@ -182,6 +182,18 @@ def test_zero_indicators_reads_as_not_enough_history():
     assert 'guard totalIndicators > 0 else { return "Not enough history" }' in fn
 
 
+def test_a_hold_does_not_claim_only_n_indicators_agree():
+    """`matchingIndicators` is "agreeing with the verdict", and a Hold has no direction —
+    the backend sends the NEUTRAL count. DOGE's weekly was 5 buy / 5 sell / 1 neutral (a
+    dead heat) and the badge read "1 of 11 indicators", which looks like a broken number."""
+    struct_block = _decl_block(_read(_MODELS), "struct TechnicalIndicatorResult: Codable")
+    fn = _decl_block(struct_block, "var formattedCount: String")
+    assert "guard signal == .hold else {" in fn, "a Hold must not use the agreement wording"
+    assert "matchingIndicators * 2 >= totalIndicators" in fn, (
+        "the majority test tells 'mostly neutral' apart from 'buys and sells cancel'")
+    assert 'neutral"' in fn and 'Mixed · ' in fn
+
+
 def test_the_signal_badge_is_a_labelled_button():
     body = _decl_block(_read(_BADGE), "var body: some View")
     assert ".accessibilityAddTraits(" in body and ".isButton" in body
@@ -204,6 +216,13 @@ def test_price_levels_are_formatted_magnitude_aware():
     assert "magnitude >= 0.0001 {" in body and "decimals = 6" in body
     assert "decimals = 10" in body
     assert 'guard isFinite else { return "—" }' in body, "a missing level is not 0.00"
+    # Trailing zeros are trimmed to a 2-dp floor: a bounded reading sitting at zero
+    # (Williams %R at the top of its range) printed "0.0000000000" without this.
+    assert 'text.hasSuffix("0")' in body and "> 3" in body, (
+        "the trailing-zero trim is gone — sub-dollar rows regain false precision")
+    # IEEE negative zero: Williams %R is -0.0 at the period high and printed "-0.00".
+    assert "let value = self == 0 ? 0 : self" in body
+    assert 'String(format: "%.\(decimals)f", value)' in body, "the normalised value is unused"
 
     models = _strip_comments(_read(_MODELS))
     for decl in ("struct PivotPointLevel", "struct FibonacciLevel",

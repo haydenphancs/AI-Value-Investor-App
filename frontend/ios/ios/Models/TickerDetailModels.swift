@@ -1681,11 +1681,25 @@ struct TechnicalIndicatorResult: Codable {
         case totalIndicators = "total_indicators"
     }
 
+    /// The badge under "Daily Signal" / "Weekly Signal".
+    ///
+    /// ⚠️ `matchingIndicators` means "agreeing with the verdict", and on a HOLD the verdict
+    /// has no direction — so the backend sends the NEUTRAL count there. Printed as "N of M
+    /// indicators" that reads as "only N of M agree": DOGE's weekly was 5 buy, 5 sell and
+    /// 1 neutral — a dead heat — and the badge said "1 of 11 indicators", which looks like
+    /// a broken number rather than a tie. A Hold now says what actually happened.
     var formattedCount: String {
         // A frame with nothing computable (a days-old listing) is "0 of 0" on the wire —
         // an honest number that reads as a bug. Name the reason instead.
         guard totalIndicators > 0 else { return "Not enough history" }
-        return "\(matchingIndicators) of \(totalIndicators) indicators"
+        guard signal == .hold else {
+            return "\(matchingIndicators) of \(totalIndicators) indicators"
+        }
+        // A Hold is either "most readings are neutral" or "buys and sells cancel". Only
+        // the neutral count is on the wire, so the majority test tells the two apart.
+        return matchingIndicators * 2 >= totalIndicators
+            ? "\(matchingIndicators) of \(totalIndicators) neutral"
+            : "Mixed · \(totalIndicators) indicators"
     }
 }
 

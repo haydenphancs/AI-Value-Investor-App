@@ -85,13 +85,15 @@ struct ReadingHighlightSegmentedText: View {
     let segments: [HighlightedTextSegment]
     let currentWordRange: NSRange
     let isReading: Bool
+    /// EVERY segment's colour, the author's `**word**` emphasis included. Developer decision
+    /// 2026-09-22 (TestFlight review): the emphasis used to render `accentCyan`, which left one
+    /// lone blue word on almost every Journey card ("real", "more", "curve"…) that read as a
+    /// link or a stray highlight rather than as emphasis. The `**` markup is still PARSED (the
+    /// segments and `isHighlighted` stay) because the read-along tokenization on both sides
+    /// strips it — only its colour is gone.
     var baseColor: Color = AppColors.textSecondary
-    /// The AUTHOR's emphasis — the `**word**` spans in the lesson markup.
-    var highlightColor: Color = AppColors.accentCyan
-    /// The word the narrator is on RIGHT NOW. Must not be `highlightColor`: painting both in
-    /// `accentCyan` made a second cyan word roam the paragraph during playback, indistinguishable
-    /// from the author's emphasis — which reads as a word being highlighted at random. Brightness
-    /// (secondary -> primary) carries the karaoke position without competing with the emphasis.
+    /// The word the narrator is on RIGHT NOW. Brightness (secondary -> primary) carries the
+    /// karaoke position; it is the only colour change left in the paragraph.
     var readingColor: Color = AppColors.textPrimary
     var font: Font = .system(size: 20, weight: .regular)
 
@@ -111,7 +113,7 @@ struct ReadingHighlightSegmentedText: View {
         if isReading && currentWordRange.length > 0 {
             buildHighlightedText()
         } else {
-            // Show base segmented text with original highlighting
+            // Show the plain paragraph
             buildBaseSegmentedText()
         }
     }
@@ -121,7 +123,7 @@ struct ReadingHighlightSegmentedText: View {
         
         for segment in segments {
             var portion = AttributedString(segment.text)
-            portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+            portion.foregroundColor = baseColor
             attributedString.append(portion)
         }
         
@@ -154,14 +156,14 @@ struct ReadingHighlightSegmentedText: View {
             let currentWordEnd = min(currentWordRange.location + currentWordRange.length, totalLength)
 
             if segmentEnd <= currentWordStart {
-                // Entire segment is before current word - use original coloring
+                // Entire segment is before current word
                 var portion = AttributedString(segment.text)
-                portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                portion.foregroundColor = baseColor
                 attributedString.append(portion)
             } else if currentPosition >= currentWordEnd {
-                // Segment is after current word - use original coloring
+                // Segment is after current word
                 var portion = AttributedString(segment.text)
-                portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                portion.foregroundColor = baseColor
                 attributedString.append(portion)
             } else {
                 // Segment contains the current word or is being spoken
@@ -175,15 +177,13 @@ struct ReadingHighlightSegmentedText: View {
                 if relativeCurrentWordStart > 0 {
                     let beforePortion = nsSegment.substring(to: relativeCurrentWordStart)
                     var portion = AttributedString(beforePortion)
-                    portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                    portion.foregroundColor = baseColor
                     attributedString.append(portion)
                 }
 
-                // Part 2: the word being spoken right now — `readingColor`, NOT `highlightColor`.
-                // These are two different meanings sharing one paragraph: `**real**` is the
-                // author saying "this matters", the karaoke word is the narrator saying "I am
-                // here". They were the same cyan, so every card showed an extra emphasised-looking
-                // word that moved with the audio.
+                // Part 2: the word being spoken right now — `readingColor`. (It was once the
+                // same cyan as the author's emphasis, so a second "emphasised" word roamed the
+                // paragraph with the audio; the emphasis colour has since been removed too.)
                 if relativeCurrentWordEnd > relativeCurrentWordStart {
                     let currentPortion = nsSegment.substring(with: NSRange(location: relativeCurrentWordStart, length: relativeCurrentWordEnd - relativeCurrentWordStart))
                     var portion = AttributedString(currentPortion)
@@ -195,7 +195,7 @@ struct ReadingHighlightSegmentedText: View {
                 if relativeCurrentWordEnd < segmentLength {
                     let afterPortion = nsSegment.substring(from: relativeCurrentWordEnd)
                     var portion = AttributedString(afterPortion)
-                    portion.foregroundColor = segment.isHighlighted ? highlightColor : baseColor
+                    portion.foregroundColor = baseColor
                     attributedString.append(portion)
                 }
             }

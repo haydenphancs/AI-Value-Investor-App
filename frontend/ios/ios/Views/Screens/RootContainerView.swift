@@ -10,6 +10,10 @@ import SwiftUI
 
 struct RootContainerView: View {
     @StateObject private var audioManager = AudioManager.shared
+    /// The full-screen player's Read target when it was expanded from a tab root. The reader opens
+    /// as a cover over the current tab and closing it returns there. TestFlight 1.0(8): this host
+    /// passed no handler, so Read vanished whenever the player was opened outside the book screens.
+    @State private var readerRoute: NarratedCoreRoute?
 
     var body: some View {
         ZStack {
@@ -63,10 +67,16 @@ struct RootContainerView: View {
 
             // Layer 3: Full Screen Player (modal overlay) — zIndex 100 so it covers the tab bar.
             if audioManager.showFullScreenPlayer {
-                FullScreenAudioPlayer()
+                FullScreenAudioPlayer(onNavigateToCore: { readerRoute = $0 })
                     .transition(.move(edge: .bottom))
                     .zIndex(100)
             }
+        }
+        .narratedCoreReader(item: $readerRoute)
+        // "AI Deep Research" from the reader's chat must not leave the reader over the tab it
+        // routed to — the same teardown every tab root runs for its own covers.
+        .onPresentationReset {
+            readerRoute = nil
         }
         .environmentObject(audioManager)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: audioManager.hasActiveEpisode)

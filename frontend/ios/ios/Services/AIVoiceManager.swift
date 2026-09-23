@@ -8,6 +8,7 @@
 
 import AVFoundation
 import Combine
+import os
 
 @MainActor
 class AIVoiceManager: NSObject, ObservableObject {
@@ -16,6 +17,12 @@ class AIVoiceManager: NSObject, ObservableObject {
     @Published var currentWordRange: NSRange = NSRange(location: 0, length: 0)
     @Published var currentWordIndex: Int = 0
     @Published var progress: Double = 0.0
+    /// Bumped each time narration is paused because the output route went away (headphones
+    /// unplugged). The lesson player treats it like the learner's own Pause — sticky for the
+    /// rest of the lesson — so the next card doesn't start talking out of the speaker.
+    @Published private(set) var routeLossPauseCount: Int = 0
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "journey-narration")
 
     // MARK: - Private Properties
     private var synthesizer: AVSpeechSynthesizer?
@@ -64,6 +71,21 @@ class AIVoiceManager: NSObject, ObservableObject {
     // `.ended` only resumes what the user was really listening to.
     private var wasPlayingBeforeInterruption = false
     private var isSessionActive = false
+
+    /// Bumped by every start (`playClip` / `speak`), `stop()` and pause. Async work that may
+    /// START audio later — the signed-URL refresh in `handleClipLoadFailed` — captures it and
+    /// bails if it moved: without that, a learner who paused or swiped while a clip was
+    /// failing to load got narration anyway, possibly the PREVIOUS card's clip over a silent
+    /// one, and its completion then auto-advanced the new card.
+    private var playbackGeneration = 0
+
+    /// True when this card's audio is loaded and merely paused, so `resume()` continues it in
+    /// place. False after `stop()` / a card change / a finished clip — where `resume()` would
+    /// instead replay `lastRequest`, which the lesson player must not rely on (it can belong
+    /// to the previous card).
+    var canResumeInPlace: Bool {
+        player != nil || synthesizer?.isPaused == true
+    }
 
     // MARK: - Singleton
     static let shared = AIVoiceManager()
@@ -164,7 +186,8 @@ class AIVoiceManager: NSObject, ObservableObject {
         case .began:
             // Only narration WE own counts — AudioManager's playback interruption is its own concern.
             wasPlayingBeforeInterruption = isPlaying && (player != nil || synthesizer?.isSpeaking == true)
-            if isPlaying { pause() }
+            // The ENGINE pause, not `pause()`: the user-facing one clears the latch just set.
+            if isPlaying { pauseEngine() }
         case .ended:
             // `.shouldResume` means "you MAY resume", not "you were playing" — require both, or a
             // lesson the user had paused would start talking on its own after a call.
@@ -180,9 +203,14 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     private func handleRouteChange(reason: AVAudioSession.RouteChangeReason) {
         // Headphones / Bluetooth pulled → pause rather than blast the lesson out of the speaker.
-        if reason == .oldDeviceUnavailable, isPlaying {
+        guard reason == .oldDeviceUnavailable else { return }
+        if isPlaying {
             pause()
         }
+        // Published even when nothing is playing: between clips (an auto-advance armed, an
+        // empty-text card) the NEXT card would otherwise start on the speaker. The lesson
+        // player treats it as the learner's pause.
+        routeLossPauseCount &+= 1
     }
 
     // MARK: - Public Methods
@@ -194,6 +222,7 @@ class AIVoiceManager: NSObject, ObservableObject {
         // Journey-only — Money Moves and book narration run through AudioManager, which
         // still consults LearnAudioEntitlement and is unaffected.
         AudioManager.shared.pauseForExternalAudio()   // see playClip
+        playbackGeneration &+= 1
         guard let synthesizer = synthesizer else { return }
 
         // Stop any current speech
@@ -233,6 +262,7 @@ class AIVoiceManager: NSObject, ObservableObject {
         // BOTH voices audible, with both read-along highlights tracking the
         // wrong audio and no visible control to stop the other stream.
         AudioManager.shared.pauseForExternalAudio()
+        playbackGeneration &+= 1
 
         // Stop anything currently playing
         synthesizer?.stopSpeaking(at: .immediate)
@@ -331,8 +361,19 @@ class AIVoiceManager: NSObject, ObservableObject {
         newPlayer.play()
     }
 
-    /// Pause the current speech (synth or clip)
+    /// Pause the current speech (synth or clip) — the USER's pause.
+    ///
+    /// Also drops the interruption latch: a learner who pauses during a phone call must not
+    /// have narration resume on its own when the call ends.
     func pause() {
+        wasPlayingBeforeInterruption = false
+        pauseEngine()
+    }
+
+    /// The pause itself, shared by the user's `pause()` and a system interruption (which must
+    /// KEEP its latch so `.ended` can resume what was actually playing).
+    private func pauseEngine() {
+        playbackGeneration &+= 1   // any in-flight async restart is now stale
         if player != nil {
             player?.pause()
         } else {
@@ -376,6 +417,10 @@ class AIVoiceManager: NSObject, ObservableObject {
 
     /// Stop speaking completely (synth or clip)
     func stop() {
+        playbackGeneration &+= 1   // any in-flight async restart is now stale
+        // A lesson closed (or a card changed) during a phone call must not start talking when
+        // the call ends: `.ended` → `resume()` would replay `lastRequest` from a closed lesson.
+        wasPlayingBeforeInterruption = false
         synthesizer?.stopSpeaking(at: .immediate)
         currentUtterance = nil   // state is reset synchronously below → drop the resulting didCancel
         teardownPlayer()
@@ -458,6 +503,16 @@ class AIVoiceManager: NSObject, ObservableObject {
             LearnAudioCache.shared.invalidate(failedURL)
         }
 
+        // Paused while the clip was still loading (`playClip` claims `isPlaying` before the item
+        // is ready, and a pause keeps the player). Falling back to speech — or re-signing and
+        // replaying — would start audio the learner just silenced. Drop the dead item instead;
+        // with no player left, the lesson's next Play restarts the card from a fresh load.
+        guard isPlaying else {
+            Self.log.warning("clip failed to load while paused; dropped without fallback")
+            teardownPlayer()
+            return
+        }
+
         // Only a REMOTE clip can be re-signed, and only once per clip — `didRetryClipRefresh`
         // is cleared in `playClip`, so a genuinely dead object degrades to speech instead of
         // looping, while a later expiry on a different clip still gets its own attempt.
@@ -472,8 +527,21 @@ class AIVoiceManager: NSObject, ObservableObject {
         didRetryClipRefresh = true
         print("[AIVoiceManager] clip failed to load; refreshing signed URL and retrying once")
         teardownPlayer()
+        let generation = playbackGeneration
         Task { @MainActor in
             await JourneyContentStore.shared.forceRefresh()
+            // The learner may have paused, swiped or closed the lesson during the refresh. Any of
+            // those bumps the generation; restarting now would talk over a card they left.
+            guard self.playbackGeneration == generation, self.isPlaying else {
+                // Nothing was replayed, so nothing will reach `.readyToPlay` to clear the one-shot
+                // budget — and the lesson still holds the EXPIRED URLs (its story content is built
+                // once per presentation). Without this, every later card's first failure skipped
+                // the refresh and fell straight to the system voice. Cannot loop: getting here
+                // needs a pause/stop/card change in between.
+                self.didRetryClipRefresh = false
+                Self.log.info("clip refresh finished after pause/stop; not restarting narration")
+                return
+            }
             guard let fresh = JourneyContentStore.shared.refreshedClipURL(matching: name) else {
                 // Nothing newer to play — degrade to speech, as before.
                 print("[AIVoiceManager] no re-signed clip URL available; falling back to speech")

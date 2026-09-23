@@ -27,8 +27,21 @@ struct LessonTopicCardView: View {
     @State private var dragOffset: CGFloat = 0
     @State private var didMarkCompleted = false
 
+    /// Sticky pause. Set by the learner's Pause (or a headphone unplug), cleared by their Play.
+    /// While set, a card change starts NO narration and NO auto-advance — the learner reads at
+    /// their own pace. TestFlight 1.0(8): Pause used to hold for one card only. Per
+    /// presentation on purpose: the next lesson starts voiced (developer decision 2026-09-22).
+    /// The rules live in `LessonNarrationPolicy` so they can be executed in CI.
+    @State private var narrationMuted = false
+
     // Timer for auto-advance after voice finishes
     @State private var autoAdvanceTimer: Timer?
+    /// An auto-advance is armed. Shown as "pause" so the learner can stop the lesson moving on.
+    @State private var advancePending = false
+    /// Identifies the armed timer. A Timer that has ALREADY fired can't be cancelled by
+    /// `invalidate()` (its callback is queued), so the callback checks it is still the current
+    /// one before touching `advancePending` or advancing.
+    @State private var autoAdvanceToken = 0
 
     var body: some View {
         GeometryReader { geometry in
@@ -53,39 +66,41 @@ struct LessonTopicCardView: View {
                     .padding(.top, AppSpacing.md)
                     .zIndex(99)
 
-                    // Card content with tap zones overlay
+                    // The card AND the narration controls share one layer, so the prev/next strips
+                    // run the full height below the progress bar. TestFlight 1.0(6): the strips
+                    // used to cover the text only, and taps beside the orb / pause button did
+                    // nothing. The pause button stays reachable because the centre 40% is a
+                    // Spacer, which is not hit-testable.
                     ZStack {
-                        cardContentView
-                        
-                        // Tap zones for navigation (only over content area)
-                        HStack(spacing: 0) {
-                            // Left tap zone - go back
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    goToPrevious()
+                        VStack(spacing: 0) {
+                            cardContentView
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                // VoiceOver can't use invisible strips; it gets named actions.
+                                // "Next card" only when there IS one — on the last card
+                                // `goToNext()` is a guarded no-op, the same reason the strips
+                                // are gone from the completion card.
+                                .accessibilityActions {
+                                    Button("Previous card") { goToPrevious() }
+                                    if currentIndex < storyContent.totalCards - 1 {
+                                        Button("Next card") { goToNext() }
+                                    }
                                 }
-                                .frame(width: geometry.size.width * 0.3)
 
-                            Spacer()
+                            // Bottom section with orb and controls (not on completion card)
+                            if !isCompletionCard {
+                                bottomControlsView
+                                    .padding(.bottom, AppSpacing.xxxl)
+                            }
+                        }
 
-                            // Right tap zone - go forward
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    goToNext()
-                                }
-                                .frame(width: geometry.size.width * 0.3)
+                        // No strips on the completion card: they sat ON TOP of its full-width
+                        // "Ask Cay AI about this" button, so its left third went back a card and
+                        // its right third did nothing. Swipe-back still works there.
+                        if !isCompletionCard {
+                            tapZones(width: geometry.size.width)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    // Bottom section with orb and controls (not on completion card)
-                    if !isCompletionCard {
-                        bottomControlsView
-                            .padding(.bottom, AppSpacing.xxxl)
-                            .zIndex(98)
-                    }
                 }
             }
             .gesture(
@@ -109,10 +124,18 @@ struct LessonTopicCardView: View {
             startReadingCurrentCard()
         }
         .onChange(of: voiceManager.progress) { _, newProgress in
-            // Sync card progress with voice progress
-            if !isCompletionCard {
+            // Sync card progress with voice progress. Not while muted: a silent card owns its
+            // segment, and the `stop()` of the card change zeroes `progress` — which would
+            // otherwise land after `startReadingCurrentCard` filled it.
+            if !isCompletionCard && !narrationMuted {
                 cardProgress = newProgress
             }
+        }
+        .onChange(of: voiceManager.routeLossPauseCount) { _, _ in
+            // Headphones pulled: the engine already paused. Make it the learner's pause, so the
+            // next card doesn't start talking out of the speaker.
+            narrationMuted = true
+            stopAutoAdvanceTimer()
         }
         // No `.learnAudioPaywall()` here. Journey narration is free on every tier, so
         // nothing inside this cover can raise `upgradeRequested` any more. The modifier is
@@ -220,6 +243,14 @@ struct LessonTopicCardView: View {
         }
     }
 
+    /// The glyph follows `LessonNarrationPolicy.showsPause`: pause while audio plays AND while
+    /// an auto-advance is armed, so the learner can always stop the lesson moving on.
+    private var showsPause: Bool {
+        LessonNarrationPolicy.showsPause(muted: narrationMuted,
+                                         isPlaying: voiceManager.isPlaying,
+                                         advancePending: advancePending)
+    }
+
     private var bottomControlsView: some View {
         VStack(spacing: AppSpacing.xl) {
             // AI Voice Orb - animated when speaking
@@ -234,12 +265,41 @@ struct LessonTopicCardView: View {
                         .fill(AppColors.textPrimary.opacity(0.1))
                         .frame(width: 44, height: 44)
 
-                    Image(systemName: voiceManager.isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: showsPause ? "pause.fill" : "play.fill")
                         .font(AppTypography.iconDefault).fontWeight(.semibold)
                         .foregroundColor(AppColors.textPrimary)
                 }
             }
+            .accessibilityLabel(showsPause ? "Pause narration" : "Play narration")
         }
+    }
+
+    /// Full-height prev/next strips (30% each side; the centre stays neutral for the pause
+    /// button). They reach the bottom screen edge — the tester's marks ran to it.
+    private func tapZones(width: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            // Left tap zone - go back
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    goToPrevious()
+                }
+                .frame(width: width * 0.3)
+
+            Spacer()
+
+            // Right tap zone - go forward
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    goToNext()
+                }
+                .frame(width: width * 0.3)
+        }
+        .ignoresSafeArea(edges: .bottom)
+        // Invisible strips over the text would steal VoiceOver's touch exploration; the card
+        // carries named "Previous card" / "Next card" actions instead.
+        .accessibilityHidden(true)
     }
 
     // MARK: - Voice Reading
@@ -275,6 +335,13 @@ struct LessonTopicCardView: View {
         // signed-out guests. `markLessonCompletedOnce()` above is untouched — completion is
         // driven by reaching the last card, not by audio.
 
+        // Sticky pause: a muted lesson stays silent and never advances on its own. Placed AFTER
+        // the completion bookkeeping, so a learner reading silently still completes the lesson.
+        guard LessonNarrationPolicy.cardStart(muted: narrationMuted) == .narrate else {
+            cardProgress = 1.0
+            return
+        }
+
         let textToRead = currentAudioText
         guard !textToRead.isEmpty else {
             cardProgress = 1.0
@@ -284,17 +351,25 @@ struct LessonTopicCardView: View {
 
         cardProgress = 0
 
+        // The engine's completion can arrive LATE (a failed clip load falls back to speech
+        // asynchronously), so it is honoured only for the card that started it and not while
+        // muted — otherwise a stale finish would advance the card the learner is reading.
+        let narratedIndex = currentIndex
+        let onFinished: () -> Void = { [self] in
+            guard LessonNarrationPolicy.shouldHonorCompletion(
+                muted: narrationMuted, currentIndex: currentIndex, narratedIndex: narratedIndex
+            ) else { return }
+            // Voice finished, wait a moment then auto-advance
+            scheduleAutoAdvance(delay: 1.5)
+        }
+
         // Prefer pre-recorded AI narration (Achird) when this card has a bundled clip;
         // otherwise fall back to on-device speech synthesis.
         if let clip = currentCard.audioClip, !clip.isEmpty {
-            voiceManager.playClip(named: clip, text: textToRead, readAlong: currentCard.readAlongWords) { [self] in
-                scheduleAutoAdvance(delay: 1.5)
-            }
+            voiceManager.playClip(named: clip, text: textToRead, readAlong: currentCard.readAlongWords,
+                                  onComplete: onFinished)
         } else {
-            voiceManager.speak(textToRead) { [self] in
-                // Voice finished, wait a moment then auto-advance
-                scheduleAutoAdvance(delay: 1.5)
-            }
+            voiceManager.speak(textToRead, onComplete: onFinished)
         }
     }
 
@@ -311,11 +386,19 @@ struct LessonTopicCardView: View {
         // A Timer that has ALREADY fired can't be cancelled by a later invalidate(): its callback is
         // queued. If the learner manually navigates in that window, the stale callback would advance
         // a SECOND time and skip a card (its narration never plays). Pin the source index and only
-        // advance if we're still on it.
+        // advance if we're still on it. The token does the same for a pause / re-arm in that window.
         let sourceIndex = currentIndex
+        autoAdvanceToken &+= 1
+        let token = autoAdvanceToken
+        advancePending = true
         autoAdvanceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
             Task { @MainActor in
-                guard currentIndex == sourceIndex else { return }   // manual nav already moved on
+                guard token == autoAdvanceToken else { return }   // cancelled or superseded
+                advancePending = false
+                autoAdvanceTimer = nil
+                guard LessonNarrationPolicy.shouldAutoAdvance(
+                    muted: narrationMuted, currentIndex: currentIndex, sourceIndex: sourceIndex
+                ) else { return }
                 if currentIndex < storyContent.totalCards - 1 {
                     goToNext()
                 }
@@ -326,6 +409,8 @@ struct LessonTopicCardView: View {
     private func stopAutoAdvanceTimer() {
         autoAdvanceTimer?.invalidate()
         autoAdvanceTimer = nil
+        autoAdvanceToken &+= 1   // a callback already queued is now stale
+        advancePending = false
     }
 
     // MARK: - Navigation
@@ -375,11 +460,29 @@ struct LessonTopicCardView: View {
 
     private func togglePlayPause() {
         // No paywall branch — Journey narration is free on every tier.
-        if voiceManager.isPlaying {
-            voiceManager.pause()
+        switch LessonNarrationPolicy.tap(muted: narrationMuted,
+                                         isPlaying: voiceManager.isPlaying,
+                                         advancePending: advancePending,
+                                         canResumeInPlace: voiceManager.canResumeInPlace) {
+        case .pause:
+            // Sticky for the rest of the lesson — card changes stay silent until Play.
+            narrationMuted = true
             stopAutoAdvanceTimer()
-        } else {
+            if voiceManager.isPlaying {
+                voiceManager.pause()
+            }
+        case .resumeInPlace:
+            // Every Play un-mutes FIRST — otherwise progress sync, the completion's auto-advance
+            // and every later card would stay silenced while this one plays.
+            narrationMuted = false
+            stopAutoAdvanceTimer()
             voiceManager.resume()
+        case .restartCard:
+            // Nothing of THIS card is held (a card change, a finished clip, a silent card):
+            // narrate it from the start. Never `resume()` here — with nothing loaded it replays
+            // the engine's last request, which can be the PREVIOUS card.
+            narrationMuted = false
+            startReadingCurrentCard()
         }
     }
 }

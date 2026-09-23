@@ -161,3 +161,40 @@ def test_pivots_and_support_resistance_exist_once_the_range_is_merged():
     assert len(sr.resistance_levels) == 3 and len(sr.support_levels) == 3
     # And they stay empty when the source has no range at all.
     assert svc._compute_pivot_points(_mixed_frame(300, 0)).levels == []
+
+
+# ── a sub-dollar coin's indicator values keep their precision ────────────────
+
+
+def test_price_scale_indicator_values_are_not_rounded_onto_two_decimals():
+    """DOGE trades near $0.10, so through the flat 2-dp rounder its weekly SMA(10) and
+    SMA(20) both served 0.08 and MACD served -0.01 — ten moving averages collapsed onto a
+    handful of values, which reads as a broken table. The MAs, ATR and MACD are all prices
+    in the asset's own units and take the magnitude-aware rule the pivots already use."""
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    closes = 0.10 + 0.004 * np.sin(np.arange(400) / 9.0) + np.linspace(0, 0.01, 400)
+    df = pd.DataFrame({"open": closes, "high": closes * 1.01, "low": closes * 0.99,
+                       "close": closes, "volume": 1e9}, index=idx)
+    _, _, mas, oscs = object.__new__(TechnicalAnalysisService)._compute_timeframe_signal(df)
+    values = [m.value for m in mas if m.value is not None]
+    assert len(values) >= 8
+    assert len(set(values)) >= 6, f"the averages collapsed onto {sorted(set(values))}"
+    assert all(v != round(v, 2) or abs(v) >= 1 for v in values if v not in (0.1, 0.11)), (
+        "a sub-dollar average kept only two decimals")
+    by_name = {o.name: o for o in oscs}
+    assert by_name["ATR(14)"].value not in (0.0, None), "ATR rounded away to zero"
+    assert by_name["MACD(12,26)"].value not in (0.0, None), "MACD rounded away to zero"
+    # Bounded readings stay on two decimals — 0-100 does not need six.
+    rsi = by_name["RSI(14)"].value
+    assert rsi is not None and rsi == round(rsi, 2)
+
+
+def test_an_equity_scale_value_still_rounds_to_two_decimals():
+    idx = pd.date_range("2024-01-01", periods=400, freq="D")
+    closes = 150 + np.linspace(0, 40, 400) + 3 * np.sin(np.arange(400) / 7.0)
+    df = pd.DataFrame({"open": closes, "high": closes + 1, "low": closes - 1,
+                       "close": closes, "volume": 1e6}, index=idx)
+    _, _, mas, _ = object.__new__(TechnicalAnalysisService)._compute_timeframe_signal(df)
+    for m in mas:
+        if m.value is not None:
+            assert m.value == round(m.value, 2), f"{m.name} gained noise decimals"

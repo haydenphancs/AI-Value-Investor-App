@@ -33,20 +33,11 @@ struct MoneyMoveArticleContent: View {
                 }
             }
 
-            // End-of-article completion toggle (above Comments). Tap to complete; tap again to
+            // End-of-article completion toggle. Tap to complete; tap again to
             // mark it unread. Finishing the narration also completes it.
             if !article.slug.isEmpty {
                 completionButton
                     .padding(.horizontal, AppSpacing.lg)
-            }
-
-            // Comments section
-            if !article.comments.isEmpty {
-                MoneyMoveArticleCommentsSection(
-                    comments: Array(article.comments.prefix(2)),
-                    totalCount: article.commentCount
-                )
-                .padding(.horizontal, AppSpacing.lg)
             }
 
             // Related articles

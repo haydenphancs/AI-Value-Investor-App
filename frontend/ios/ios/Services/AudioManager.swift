@@ -27,9 +27,8 @@ final class AudioManager: ObservableObject {
     /// indicator (the system audio surfaces only on the Lock Screen / Control Center there).
     @MainActor static var hasDynamicIsland: Bool {
         if let cached = _hasDynamicIsland { return cached }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let window = scenes.flatMap { $0.windows }.first { $0.isKeyWindow } ?? scenes.flatMap { $0.windows }.first
-        guard let top = window?.safeAreaInsets.top, top > 0 else { return false } // window not ready yet
+        let top = WindowMetrics.safeAreaInsets.top
+        guard top > 0 else { return false } // window not ready yet
         let result = top >= 51
         _hasDynamicIsland = result
         return result

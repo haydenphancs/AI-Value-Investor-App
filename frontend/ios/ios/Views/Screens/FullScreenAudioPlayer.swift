@@ -10,14 +10,21 @@ import SwiftUI
 
 struct FullScreenAudioPlayer: View {
     @EnvironmentObject private var audioManager: AudioManager
-    /// Book context: jump the reading view to the given core number. nil for non-book players.
-    var onNavigateToCore: ((Int) -> Void)? = nil
+    /// "Read" / "Go to Text": open the reader at the core the narration is in (book audio only).
+    /// Every host passes one — `RootContainerView` and `GlobalAudioOverlay`. It used to come only
+    /// from the two Book screens, so Read vanished whenever the player was expanded anywhere else
+    /// (TestFlight 1.0(8)). nil only in previews.
+    var onNavigateToCore: ((NarratedCoreRoute) -> Void)? = nil
 
     @State private var dragOffset: CGFloat = 0
     @State private var showSpeedPicker: Bool = false
     @State private var showSleepTimer: Bool = false
+    @State private var showShareSheet: Bool = false
 
     private let dismissThreshold: CGFloat = 150
+    /// The artwork's largest size. It shrinks below this when the column is short on height
+    /// (small phones, large Dynamic Type) — see `artworkSection`.
+    private let maxArtworkSize: CGFloat = 280
 
     /// The core the narration is currently inside (number + title), for book audio only.
     private var currentBookCore: (number: Int, title: String)? {
@@ -33,7 +40,23 @@ struct FullScreenAudioPlayer: View {
         return (n, title)
     }
 
+    /// Where Read goes — only when a host can open it AND the catalog knows the book and core,
+    /// so the button never opens a blank cover.
+    private var readerRoute: NarratedCoreRoute? {
+        guard onNavigateToCore != nil,
+              let order = audioManager.currentEpisode?.bookCurriculumOrder,
+              let core = currentBookCore else { return nil }
+        let route = NarratedCoreRoute(curriculumOrder: order, coreNumber: core.number)
+        return LibraryBook.narratedCore(for: route) == nil ? nil : route
+    }
+
     var body: some View {
+        // The WINDOW's insets, not `geometry.safeAreaInsets`. The GeometryReader below ignores the
+        // safe area so the player spans the whole window in every host (root overlay, and the
+        // `.overlay` inside a cover) and slides fully off-screen on collapse — and a GeometryReader
+        // that ignores the safe area reports ZERO insets. Reading those put the header inside the
+        // Dynamic Island band and the bottom row over the home indicator (TestFlight 1.0(8)).
+        let insets = WindowMetrics.safeAreaInsets
         GeometryReader { geometry in
             ZStack {
                 // Background gradient
@@ -50,12 +73,16 @@ struct FullScreenAudioPlayer: View {
                         currentCoreLabel(number: core.number, title: core.title)
                     }
 
-                    Spacer()
+                    // The two spacers yield first (priority -1) so the artwork keeps its size
+                    // until the column is genuinely short; then the artwork shrinks, never the text.
+                    Spacer(minLength: AppSpacing.sm)
+                        .layoutPriority(-1)
 
                     // Artwork
                     artworkSection
 
-                    Spacer()
+                    Spacer(minLength: AppSpacing.sm)
+                        .layoutPriority(-1)
 
                     // Title and info
                     titleSection
@@ -73,14 +100,13 @@ struct FullScreenAudioPlayer: View {
                         .padding(.top, AppSpacing.xxl)
 
                     Spacer()
-                        .frame(height: geometry.safeAreaInsets.bottom + AppSpacing.xl)
+                        .frame(height: insets.bottom + AppSpacing.xl)
                 }
-                .padding(.leading, AppSpacing.sm)
-                .padding(.trailing, AppSpacing.xxxl)
-                // Respect the top safe area for CONTENT while the whole view ignores it for the
-                // BACKGROUND — so the header clears the Dynamic Island in every host (root overlay,
-                // and the modifier's overlay on a cover where the host frame is safe-area-bounded).
-                .padding(.top, geometry.safeAreaInsets.top)
+                // Symmetric again. The old `.leading(sm)` / `.trailing(xxxl)` + the ellipsis's
+                // `offset(x: -7)` compensated for the artwork glow's 392pt layout frame, which made
+                // this column 432pt wide on a 402pt screen; the glow no longer takes layout space.
+                .padding(.horizontal, AppSpacing.sm)
+                .padding(.top, insets.top)
             }
             .offset(y: dragOffset)
             .gesture(
@@ -102,8 +128,8 @@ struct FullScreenAudioPlayer: View {
                     }
             )
         }
-        // Span the full window in every host so the gradient reaches all edges (the GeometryReader
-        // then reports the real safe-area insets used above for content padding).
+        // Span the full window in every host so the gradient reaches all edges. Content clears the
+        // status bar / home indicator through the window insets read above.
         .ignoresSafeArea()
         .sheet(isPresented: $showSpeedPicker) {
             PlaybackSpeedSheet()
@@ -115,6 +141,37 @@ struct FullScreenAudioPlayer: View {
                 .environmentObject(audioManager)
                 .presentationDetents([.height(400)])
         }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(items: shareItems)
+        }
+    }
+
+    // MARK: - Share
+
+    /// What Share sends: the episode's title and subtitle (for a book that is "by <author>" — the
+    /// Book screen's exact wording), the core being narrated, and the app link that
+    /// `ShareContent` appends. Was an empty action closure: a visible, dead button.
+    private var shareItems: [Any] {
+        ShareContent.items(shareBody)
+    }
+
+    private var shareBody: String {
+        guard let episode = audioManager.currentEpisode else { return "" }
+        var lines = [episode.title, episode.subtitle]
+        if let core = currentBookCore {
+            let coreTitle = core.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            lines.append(coreTitle.isEmpty ? "Core \(core.number)" : "Core \(core.number): \(coreTitle)")
+        }
+        return lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    /// Read / Go to Text: hand the route to the host, then get out of the way.
+    private func openReader(_ route: NarratedCoreRoute) {
+        onNavigateToCore?(route)
+        audioManager.collapsePlayer()
     }
 
     // MARK: - Background Gradient
@@ -140,12 +197,15 @@ struct FullScreenAudioPlayer: View {
 
     // MARK: - Header Section
     private var headerSection: some View {
-        VStack(spacing: AppSpacing.lg) {
+        // Tight on purpose (TestFlight 1.0(8): "the header is too close to my iPhone… we may
+        // reduce the height"): the block now starts below the status bar, so its own top gap and
+        // spacing were trimmed to keep the row just under it.
+        VStack(spacing: AppSpacing.sm) {
             // Drag indicator
             Capsule()
                 .fill(AppColors.textPrimary.opacity(0.3))
                 .frame(width: 36, height: 5)
-                .padding(.top, AppSpacing.md)
+                .padding(.top, AppSpacing.xs)
 
             // Header row
             HStack {
@@ -158,6 +218,7 @@ struct FullScreenAudioPlayer: View {
                         .foregroundColor(AppColors.textPrimary)
                         .frame(width: 44, height: 44)
                 }
+                .accessibilityLabel("Minimize player")
 
                 Spacer()
 
@@ -176,18 +237,46 @@ struct FullScreenAudioPlayer: View {
 
                 Spacer()
 
-                // More options
-                Button(action: {
-                    // Show more options menu
-                }) {
-                    Image(systemName: "ellipsis")
-                        .font(AppTypography.iconLarge).fontWeight(.semibold)
-                        .foregroundColor(AppColors.textPrimary)
-                        .frame(width: 44, height: 44)
-                }
-                .offset(x: -7)
+                // More options. Was an empty action closure.
+                moreOptionsMenu
             }
         }
+    }
+
+    /// Go to Text (book audio) · Share · Stop Playback. Go to Text and Share repeat the bottom row
+    /// on purpose; Stop Playback is the only one-step way to end audio from here (otherwise:
+    /// collapse, then the mini player's ✕ — which makes the same `stop()` call).
+    private var moreOptionsMenu: some View {
+        Menu {
+            if let route = readerRoute {
+                Button {
+                    openReader(route)
+                } label: {
+                    Label("Go to Text", systemImage: "book")
+                }
+            }
+
+            Button {
+                showShareSheet = true
+            } label: {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                audioManager.stop()
+            } label: {
+                Label("Stop Playback", systemImage: "stop.fill")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(AppTypography.iconLarge).fontWeight(.semibold)
+                .foregroundColor(AppColors.textPrimary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("More options")
     }
 
     // MARK: - Current Core Label (book narration)
@@ -209,14 +298,24 @@ struct FullScreenAudioPlayer: View {
     }
 
     // MARK: - Artwork Section
+    /// A flexible square, `maxArtworkSize` at most. With the safe area honoured the column has
+    /// ~96pt less height than before, so on short phones and at large Dynamic Type the artwork
+    /// shrinks instead of pushing the controls off-screen. `zIndex(-1)`: the glow is drawn outside
+    /// the artwork's frame and must pass UNDER the core title and book title, not over them.
     private var artworkSection: some View {
         Group {
             if let episode = audioManager.currentEpisode {
-                AudioArtworkLarge(episode: episode, size: 280)
-                    .scaleEffect(audioManager.isPlaying ? 1.0 : 0.95)
-                    .animation(.spring(response: 0.4), value: audioManager.isPlaying)
+                GeometryReader { box in
+                    AudioArtworkLarge(episode: episode, size: max(1, min(box.size.width, box.size.height)))
+                        .scaleEffect(audioManager.isPlaying ? 1.0 : 0.95)
+                        .animation(.spring(response: 0.4), value: audioManager.isPlaying)
+                        .frame(width: box.size.width, height: box.size.height)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: maxArtworkSize, maxHeight: maxArtworkSize)
             }
         }
+        .zIndex(-1)
     }
 
     // MARK: - Title Section
@@ -316,6 +415,8 @@ struct FullScreenAudioPlayer: View {
     }
 
     // MARK: - Secondary Controls
+    /// Speed · Read · Sleep · Share. Read sits between Speed and Sleep (TestFlight 1.0(8): "add a
+    /// back icon… between the speed icon and the sleep icon"); it is hidden for non-book audio.
     private var secondaryControlsSection: some View {
         HStack {
             // Playback speed
@@ -334,28 +435,11 @@ struct FullScreenAudioPlayer: View {
 
             Spacer()
 
-            // Sleep timer
-            Button(action: { showSleepTimer = true }) {
-                VStack(spacing: AppSpacing.xxs) {
-                    Image(systemName: audioManager.sleepTimer == .off ? "moon" : "moon.fill")
-                        .font(AppTypography.iconMedium).fontWeight(.medium)
-                        .foregroundColor(audioManager.sleepTimer == .off ? AppColors.textPrimary : AppColors.primaryBlue)
-                    Text("Sleep")
-                        .font(AppTypography.captionTiny).fontWeight(.medium)
-                        .foregroundColor(AppColors.textSecondary)
-                }
-                .frame(width: 56)
-            }
-            .buttonStyle(PlainButtonStyle())
-
-            Spacer()
-
-            // Go to the current core's reading view (book narration only) — replaces Queue.
-            // Snaps the reader to the core the audio is in; the read-along highlight resumes there.
-            if onNavigateToCore != nil, let core = currentBookCore {
+            // Go to the current core's reading view (book narration only). Snaps the reader to the
+            // core the audio is in; the read-along highlight resumes there.
+            if let route = readerRoute {
                 Button(action: {
-                    onNavigateToCore?(core.number)
-                    audioManager.collapsePlayer()
+                    openReader(route)
                 }) {
                     VStack(spacing: AppSpacing.xxs) {
                         Image(systemName: "book.fill")
@@ -372,9 +456,25 @@ struct FullScreenAudioPlayer: View {
                 Spacer()
             }
 
-            // Share
+            // Sleep timer
+            Button(action: { showSleepTimer = true }) {
+                VStack(spacing: AppSpacing.xxs) {
+                    Image(systemName: audioManager.sleepTimer == .off ? "moon" : "moon.fill")
+                        .font(AppTypography.iconMedium).fontWeight(.medium)
+                        .foregroundColor(audioManager.sleepTimer == .off ? AppColors.textPrimary : AppColors.primaryBlue)
+                    Text("Sleep")
+                        .font(AppTypography.captionTiny).fontWeight(.medium)
+                        .foregroundColor(AppColors.textSecondary)
+                }
+                .frame(width: 56)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            Spacer()
+
+            // Share. Was an empty action closure — a visible, dead button.
             Button(action: {
-                // Share action
+                showShareSheet = true
             }) {
                 VStack(spacing: AppSpacing.xxs) {
                     Image(systemName: "square.and.arrow.up")

@@ -21,7 +21,6 @@ struct MoneyMoveArticle: Identifiable {
     let publishedAt: Date
     let readTimeMinutes: Int
     let viewCount: String
-    let commentCount: Int
     let isBookmarked: Bool
     let hasAudioVersion: Bool
 
@@ -35,8 +34,9 @@ struct MoneyMoveArticle: Identifiable {
     let sections: [ArticleSection]
     let statistics: [ArticleStatistic]
 
-    // Engagement
-    let comments: [ArticleComment]
+    // Reader comments are deliberately absent. There is no comment backend, so any comment
+    // shown would be authored fiction presented as user content (`ArticleCommentDTO` still
+    // decodes the key, unrendered, so served content never breaks).
     let relatedArticles: [RelatedArticle]
 
     // Narration audio (Supabase Storage URL); nil until narration is generated.
@@ -228,30 +228,6 @@ enum StatisticTrend {
     }
 }
 
-// MARK: - Article Comment
-struct ArticleComment: Identifiable {
-    let id = UUID()
-    let authorName: String
-    let authorAvatar: String?
-    let content: String
-    let postedAt: Date
-    let likeCount: Int
-    let replyCount: Int
-    let isVerified: Bool
-
-    var timeAgo: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: postedAt, relativeTo: Date())
-    }
-
-    var avatarInitials: String {
-        let components = authorName.components(separatedBy: " ")
-        let initials = components.compactMap { $0.first }.prefix(2)
-        return String(initials).uppercased()
-    }
-}
-
 // MARK: - Related Article
 struct RelatedArticle: Identifiable {
     let id = UUID()
@@ -311,7 +287,6 @@ extension MoneyMoveArticle {
         publishedAt: Calendar.current.date(byAdding: .day, value: -3, to: Date())!,
         readTimeMinutes: 18,
         viewCount: "4.2M",
-        commentCount: 124,
         isBookmarked: false,
         hasAudioVersion: false,
         heroGradientColors: ["1E3A5F", "0D1B2A", "1B263B"],
@@ -397,26 +372,6 @@ extension MoneyMoveArticle {
             ArticleStatistic(value: "4.2M", label: "Daily Active Users", trend: .up, trendValue: "127%"),
             ArticleStatistic(value: "2,400+", label: "DeFi Protocols", trend: .up, trendValue: "89%")
         ],
-        comments: [
-            ArticleComment(
-                authorName: "Alex Johnson",
-                authorAvatar: nil,
-                content: "Excellent breakdown of the current DeFi landscape! The data on portfolio fragility suggests wealth creation through early adoption needs more critical analysis.",
-                postedAt: Calendar.current.date(byAdding: .hour, value: -5, to: Date())!,
-                likeCount: 47,
-                replyCount: 8,
-                isVerified: false
-            ),
-            ArticleComment(
-                authorName: "Maya Patel",
-                authorAvatar: nil,
-                content: "As a traditional banker transitioning to fintech, this article perfectly captures the challenges and opportunities we face. The embedded finance section was particularly insightful.",
-                postedAt: Calendar.current.date(byAdding: .hour, value: -12, to: Date())!,
-                likeCount: 32,
-                replyCount: 3,
-                isVerified: true
-            )
-        ],
         relatedArticles: [
             RelatedArticle(
                 title: "The FTX Collapse",
@@ -460,7 +415,6 @@ extension MoneyMoveArticle {
         publishedAt: Calendar.current.date(byAdding: .day, value: -3, to: Date())!,
         readTimeMinutes: 18,
         viewCount: "4.2M",
-        commentCount: 124,
         isBookmarked: false,
         hasAudioVersion: false,
         heroGradientColors: ["EA580C", "C2410C", "9A3412"], // Orange gradient for featured articles
@@ -545,26 +499,6 @@ extension MoneyMoveArticle {
             ArticleStatistic(value: "$180B", label: "Total Value Locked", trend: .up, trendValue: "340%"),
             ArticleStatistic(value: "4.2M", label: "Daily Active Users", trend: .up, trendValue: "127%"),
             ArticleStatistic(value: "2,400+", label: "DeFi Protocols", trend: .up, trendValue: "89%")
-        ],
-        comments: [
-            ArticleComment(
-                authorName: "Alex Johnson",
-                authorAvatar: nil,
-                content: "Excellent breakdown of the current DeFi landscape! The data on portfolio fragility suggests wealth creation through early adoption needs more critical analysis.",
-                postedAt: Calendar.current.date(byAdding: .hour, value: -5, to: Date())!,
-                likeCount: 47,
-                replyCount: 8,
-                isVerified: false
-            ),
-            ArticleComment(
-                authorName: "Maya Patel",
-                authorAvatar: nil,
-                content: "As a traditional banker transitioning to fintech, this article perfectly captures the challenges and opportunities we face. The embedded finance section was particularly insightful.",
-                postedAt: Calendar.current.date(byAdding: .hour, value: -12, to: Date())!,
-                likeCount: 32,
-                replyCount: 3,
-                isVerified: true
-            )
         ],
         relatedArticles: [
             RelatedArticle(

@@ -12,7 +12,10 @@ struct SentimentMetricsRow: View {
     let selectedTimeframe: SentimentTimeframe
 
     var body: some View {
-        HStack(spacing: AppSpacing.lg) {
+        // `.top` + a definite row height (`fixedSize`) + each card's `maxHeight: .infinity`:
+        // only the Social tile carries a source line, so without this trio the two tiles
+        // are different heights and the shorter one floats to the middle of the taller.
+        HStack(alignment: .top, spacing: AppSpacing.lg) {
             // Social Mentions
             //
             // THE `known` FLAG HAS TO BE PART OF THIS GATE. `socialDataAvailable` is
@@ -32,6 +35,7 @@ struct SentimentMetricsRow: View {
                 SentimentMetricCard(
                     iconName: "bubble.left.and.bubble.right.fill",
                     title: "Social Mentions",
+                    source: Self.socialSource,
                     value: sentimentData.formattedSocialMentions(for: selectedTimeframe),
                     change: sentimentData.formattedSocialChange(for: selectedTimeframe),
                     changeColor: sentimentData.socialChangeColor(for: selectedTimeframe),
@@ -46,6 +50,7 @@ struct SentimentMetricsRow: View {
                 SentimentMetricCard(
                     iconName: "bubble.left.and.bubble.right.fill",
                     title: "Social Mentions",
+                    source: Self.socialSource,
                     value: "N/A",
                     change: "Not tracked on Reddit",
                     changeColor: AppColors.textMuted,
@@ -59,6 +64,7 @@ struct SentimentMetricsRow: View {
             SentimentMetricCard(
                 iconName: "newspaper.fill",
                 title: "News Sentiment",
+                source: Self.newsSource,
                 value: sentimentData.formattedNewsArticles(for: selectedTimeframe),
                 change: sentimentData.formattedNewsChange(for: selectedTimeframe),
                 changeColor: sentimentData.newsChangeColor(for: selectedTimeframe),
@@ -66,13 +72,30 @@ struct SentimentMetricsRow: View {
                 changeFont: AppTypography.captionSmall
             )
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
+
+    /// Where each number comes from, named on the card — and the reason BOTH tiles carry
+    /// a line even though only one was asked for: with a source on one tile only, its
+    /// value sits a line lower than its neighbour's and the two stop reading as a pair.
+    ///
+    /// Social is Reddit mentions (r/wallstreetbets, r/stocks, r/investing and friends),
+    /// not X/StockTwits — worth stating, because "Social Mentions 69" otherwise reads as
+    /// all of social media.
+    private static let socialSource = "on Reddit"
+    /// News is the asset's own coverage across many publishers. Named by WHAT it is, never
+    /// by the data provider: the market-data licence does not permit naming them as a
+    /// source (`.claude/rules/marketing.md` §1).
+    private static let newsSource = "across news outlets"
 }
 
 // MARK: - Single Metric Card
 struct SentimentMetricCard: View {
     let iconName: String
     let title: String
+    /// Optional provenance line under the title, e.g. "on Reddit". Omitted where the
+    /// source may not be named.
+    var source: String? = nil
     let value: String
     let change: String
     let changeColor: Color
@@ -92,6 +115,16 @@ struct SentimentMetricCard: View {
                     .foregroundColor(AppColors.textSecondary)
             }
 
+            if let source {
+                Text(source)
+                    .font(AppTypography.captionSmall)
+                    .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .padding(.top, -AppSpacing.xs)
+                    .accessibilityLabel("Source: \(source)")
+            }
+
             Text(value)
                 .font(valueFont)
                 .fontWeight(.bold)
@@ -105,6 +138,9 @@ struct SentimentMetricCard: View {
         }
         .frame(maxWidth: .infinity)
         .padding(AppSpacing.md)
+        // Stretches to the taller tile (the row is `.top`-aligned with a definite height),
+        // so a source line on one card does not leave the other floating mid-row.
+        .frame(maxHeight: .infinity, alignment: .top)
         // No `.overlay` stroke: `cardBackgroundLight` and `cardBackgroundNested` share the
         // #252B3B dark arm, so it drew nothing there, and duplicated `cardEdge` in light.
         // `.cardSurface` already draws the edge in the mode that needs one.

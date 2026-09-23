@@ -117,6 +117,46 @@ def test_the_not_tracked_copy_still_exists_for_a_measured_zero():
     assert "Not tracked on Reddit" in src
 
 
+# ── the Social tile names its source (developer, 2026-09-22) ─────────────────
+
+
+def test_the_social_tile_names_reddit_as_its_source():
+    """"Social Mentions 69" reads as all of social media; the count is Reddit only
+    (ApeWisdom over r/wallstreetbets, r/stocks, r/investing …). Both branches — the
+    measured one and the "N/A / Not tracked" one — carry the line."""
+    row = _IOS / "Views" / "Molecules" / "SentimentMetricsRow.swift"
+    src = _strip(row.read_text(encoding="utf-8"))
+    assert 'private static let socialSource = "on Reddit"' in src
+    assert src.count("source: Self.socialSource") == 2, (
+        "both Social Mentions branches must name the source")
+
+
+def test_the_news_tile_names_what_it_reads_but_never_the_provider():
+    """Both tiles carry a source line — with one on a single tile its value sits a line
+    lower than its neighbour's. The News line names the KIND of source; naming the
+    market-data provider is forbidden by the licence (.claude/rules/marketing.md §1)."""
+    row = _IOS / "Views" / "Molecules" / "SentimentMetricsRow.swift"
+    src = _strip(row.read_text(encoding="utf-8"))
+    assert 'private static let newsSource = "across news outlets"' in src
+    assert "source: Self.newsSource" in src
+    for banned in ("FMP", "Financial Modeling", "financialmodelingprep"):
+        assert banned not in src, f"the News tile must not name the provider ({banned})"
+
+
+def test_the_two_metric_tiles_stay_equal_height():
+    """Only the Social tile carries a source line. Without the trio below, the shorter
+    News tile floats to the middle of the taller one — the Key Statistics defect again."""
+    row = _IOS / "Views" / "Molecules" / "SentimentMetricsRow.swift"
+    src = _strip(row.read_text(encoding="utf-8"))
+    assert "HStack(alignment: .top, spacing: AppSpacing.lg)" in src
+    assert ".fixedSize(horizontal: false, vertical: true)" in src
+    card = src[src.index("struct SentimentMetricCard"):]
+    stretch = card.find(".frame(maxHeight: .infinity, alignment: .top)")
+    surface = card.find(".cardSurface(")
+    assert stretch != -1 and stretch < surface, (
+        "the stretch frame must precede .cardSurface, which paints the frame it is on")
+
+
 
 # ── News Sentiment tile: a tie has no lean (TestFlight E6, build 1.0 (8)) ────
 #

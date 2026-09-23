@@ -998,6 +998,40 @@ class CryptoService:
         lows = [r["low"] for r in cached if r.get("low") and r["low"] > 0]
         return (max(highs) if highs else None), (min(lows) if lows else None)
 
+    async def _cg_recent_daily_ohlc(
+        self, symbol: str, days: int = 30
+    ) -> List[Dict[str, Any]]:
+        """Daily OHLC for the last `days`, aggregated from `/ohlc`'s 4-hour candles.
+
+        `market_chart` — the series every other crypto surface runs on — carries close and
+        volume only, which is why classic pivot points and the support/resistance derived
+        from them came back EMPTY on every coin ("i don't see any", TestFlight 2026-09-22).
+        `/ohlc?days=30` is six 4-hour candles per day, and each candle's high/low are true
+        intraday extremes over its bucket, so the daily bar built from them is a real
+        session range. One extra call per coin, cached with the 52-week band's TTL.
+
+        `days` is capped at 30 on purpose: CoinGecko switches to 4-DAY candles at 90, and
+        those cannot be bucketed into sessions. Returns `[]` on any failure — the caller
+        keeps its close-only frame and the levels stay honestly empty.
+        """
+        from app.services.coingecko_adapter import ohlc_to_daily_rows
+
+        days = max(1, min(int(days), 30))
+        key = f"cg:ohlcd:{symbol.upper()}:{days}"
+        cached = _cache_get(key, _CG_OHLC_TTL)
+        if cached is not None:
+            return cached
+        coin_id = await self.coingecko.resolve_coin_id(symbol)
+        if not coin_id:
+            return []
+        raw = await self.coingecko._make_request(
+            f"coins/{coin_id}/ohlc", params={"vs_currency": "usd", "days": days}
+        )
+        rows = ohlc_to_daily_rows(raw)
+        if rows:
+            _cache_set(key, rows)
+        return rows
+
     async def _cg_related_quotes(self, symbols: List[str]) -> List[Dict[str, Any]]:
         """Related-coin quotes, shaped exactly like `price_service` emits them.
 

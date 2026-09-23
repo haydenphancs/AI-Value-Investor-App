@@ -38,6 +38,7 @@ __all__ = [
     "epoch_ms_to_et",
     "market_chart_to_rows",
     "ohlc_to_rows",
+    "ohlc_to_daily_rows",
     "markets_rows_by_id",
     "crypto_base_symbol",
 ]
@@ -152,6 +153,33 @@ def ohlc_to_rows(payload: Any) -> List[Dict[str, Any]]:
         rows.append({"date": date, "open": o, "high": h, "low": low, "close": close})
     rows.sort(key=lambda r: r["date"])
     return rows
+
+
+def ohlc_to_daily_rows(payload: Any) -> List[Dict[str, Any]]:
+    """CoinGecko `/ohlc` candles → ONE OHLC row per ET date, oldest-first.
+
+    `/ohlc?days=30` is 4-hour candles (measured 2026-09-22: 180 of them, six per day), and
+    six 4-hour candles bucketed by ET date give that day's true open / high / low / close —
+    the intraday range `market_chart` cannot carry at all. This is what makes classic pivot
+    points, and the support/resistance derived from them, computable for a coin.
+
+    ⚠️ Only meaningful for a `days` value whose candles are FINER than a day: at `days >= 90`
+    CoinGecko switches to 4-DAY candles, and bucketing those by date would label a four-day
+    range as one session. `CoinGeckoClient.get_ohlc` enforces the range.
+    """
+    by_date: Dict[str, Dict[str, Any]] = {}
+    for row in ohlc_to_rows(payload):
+        date = row["date"]
+        cur = by_date.get(date)
+        if cur is None:
+            by_date[date] = dict(row)
+            continue
+        # open is the FIRST candle's, close the LAST — `ohlc_to_rows` sorted them.
+        for key, fn in (("high", max), ("low", min)):
+            a, b = cur.get(key), row.get(key)
+            cur[key] = fn(a, b) if a is not None and b is not None else (a if a is not None else b)
+        cur["close"] = row["close"]
+    return [by_date[d] for d in sorted(by_date)]
 
 
 def markets_rows_by_id(rows: Any) -> Dict[str, Dict[str, Any]]:

@@ -225,6 +225,13 @@ class TickerDetailViewModel: ObservableObject {
         isFinancialsLoaded = false
         isHoldersLoaded = false
         holdersError = nil
+        // BOTH technical flags, together. Clearing only the message would leave every
+        // branch of the Analysis tab false (no data, loaded, no message) and the card
+        // would vanish; leaving both would keep a stale "Try Again" live for the whole
+        // reload, and a tap on it races the reload that is already fetching the same
+        // thing. Same pairing as CryptoDetailViewModel.refresh().
+        isTechnicalLoaded = false
+        technicalUnavailableMessage = nil
 
         loadTask = Task { [weak self] in
             guard let self = self else { return }

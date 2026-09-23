@@ -79,6 +79,10 @@ _NEWS_MAX_PAGES = 2
 # How long a ticker's OWN 14-day fetch counts as done (`_own_fetch_at`). Matches the
 # `cached_at` freshness rule, so the two cannot disagree.
 _OWN_FETCH_TTL = _DB_REFRESH_TTL
+# Hard cap, for the reason `_CACHE_MAX_ENTRIES` exists above: the memo lives on the
+# process-wide singleton and `_fetched_own_window` only READS a stamp, so nothing ever
+# removes an expired one — every ticker ever viewed would stay for the life of the process.
+_OWN_FETCH_MAX_ENTRIES = 1024
 
 
 def _looks_like_timestamp(value: Any) -> bool:
@@ -223,7 +227,12 @@ class SentimentService:
         return self.__dict__.setdefault("_own_fetch_at", {})
 
     def _note_own_fetch(self, ticker: str) -> None:
-        self._own_fetch_map()[ticker.upper()] = time.monotonic()
+        memo = self._own_fetch_map()
+        memo.pop(ticker.upper(), None)          # re-insert so the order is by recency
+        memo[ticker.upper()] = time.monotonic()
+        if len(memo) > _OWN_FETCH_MAX_ENTRIES:
+            for stale in list(memo)[: len(memo) - _OWN_FETCH_MAX_ENTRIES]:
+                memo.pop(stale, None)
 
     def _fetched_own_window(self, ticker: str) -> bool:
         stamp = self._own_fetch_map().get(ticker.upper())

@@ -1792,7 +1792,8 @@ struct MovingAverageIndicator: Identifiable {
     /// 0 — the same rule the backend follows by sending null in the first place.
     var formattedValue: String {
         guard let value, value.isFinite else { return "—" }
-        return String(format: "%.2f", value)
+        // A moving average IS a price: `%.2f` printed DOGE's ten MAs as "0.10" ten times.
+        return value.asPriceLevel
     }
 }
 
@@ -1830,7 +1831,10 @@ struct OscillatorIndicator: Identifiable {
     /// 0 — the same rule the backend follows by sending null in the first place.
     var formattedValue: String {
         guard let value, value.isFinite else { return "—" }
-        return String(format: "%.2f", value)
+        // Bounded oscillators (RSI, Stoch, StochRSI, ADX, CCI, Williams %R) are ≥ 1 in
+        // practice and keep 2 dp; ATR and MACD are PRICE-scale and would otherwise read
+        // "0.00" on a sub-dollar coin.
+        return value.asPriceLevel
     }
 }
 
@@ -1856,8 +1860,10 @@ struct PivotPointLevel: Identifiable {
     let value: Double
     let levelType: PivotLevelType
 
+    /// Magnitude-aware: the backend already sends a sub-dollar asset's levels with 6 or 10
+    /// decimals, and `%.2f` collapsed DOGE's seven pivots into four values. See `asPriceLevel`.
     var formattedValue: String {
-        String(format: "%.2f", value)
+        value.asPriceLevel
     }
 
     /// NOTE: no "R"/"S" prefix is added here, deliberately. An audit flagged this as
@@ -2000,7 +2006,7 @@ struct FibonacciLevel: Identifiable {
     let isKey: Bool // High, Low markers
 
     var formattedValue: String {
-        String(format: "%.2f", value)
+        value.asPriceLevel
     }
 }
 
@@ -2054,7 +2060,7 @@ struct SupportResistanceData {
     let supportLevels: [SupportResistanceLevel]
 
     var formattedCurrentPrice: String {
-        String(format: "$%.2f", currentPrice)
+        currentPrice.asPriceLevelCurrency
     }
 }
 

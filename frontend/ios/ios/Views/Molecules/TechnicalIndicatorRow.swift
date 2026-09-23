@@ -160,7 +160,7 @@ struct SupportResistanceLevelRow: View {
 
             Spacer()
 
-            Text(String(format: "%.2f", value))
+            Text(value.asPriceLevel)
                 .font(AppTypography.label)
                 .foregroundColor(AppColors.textPrimary)
 

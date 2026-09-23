@@ -257,3 +257,63 @@ def test_fibonacci_on_an_equity_frame_still_uses_intraday_range():
     assert fib.timeframe == "52-Week Levels"
     window = df[df.index >= df.index[-1] - pd.Timedelta(days=365)]
     assert fib.levels[0].value == round(float(window["high"].max()), 2)
+
+
+# ── a verdict needs a quorum (review finding, 2026-09-22) ────────────────────
+
+
+@pytest.mark.parametrize("n", [10, 11, 12, 13])
+def test_a_two_indicator_sample_holds_instead_of_reading_strong(n):
+    """With 10–13 bars exactly SMA(10) and EMA(10) compute — every other indicator is
+    gated at 14/15/28/35 — so a unanimous two-row sample scored 0.5 + 2/(2·2) = 1.0 and
+    published "Strong Buy · 2 of 2", which the overall gauge then averaged into the
+    headline. A smaller sample must widen the uncertainty, not sharpen the verdict."""
+    svc = _svc()
+    for closes in (np.linspace(100, 140, n), np.linspace(140, 100, n)):
+        result, gauge, mas, oscs = svc._compute_timeframe_signal(_frame(closes, high_low=True))
+        computed = [i for i in (*mas, *oscs) if i.value is not None]
+        assert len(computed) < 5, "this test only means something below the quorum"
+        assert gauge == 0.5 and result.signal == TechnicalSignal.HOLD, (
+            f"{n} bars, {len(computed)} computed → {result.signal} at {gauge}")
+        assert result.total_indicators == len(computed), "the rows shipped are still reported"
+
+
+def test_the_quorum_floor_does_not_touch_a_full_frame():
+    """Anti-vacuity: a long frame still reaches the extremes."""
+    result, gauge, _, _ = _svc()._compute_timeframe_signal(
+        _frame(np.linspace(100, 400, 199), high_low=False)
+    )
+    assert result.total_indicators >= tas._MIN_GAUGE_INDICATORS
+    assert result.signal == TechnicalSignal.STRONG_BUY and gauge > 0.861
+
+
+def test_the_quorum_constant_is_pinned():
+    assert tas._MIN_GAUGE_INDICATORS == 5
+
+
+# ── OBV does not move with the fetch window ─────────────────────────────────
+
+
+def test_obv_is_accumulated_over_a_fixed_window_not_the_whole_fetch():
+    """OBV is cumulative from its first bar, so widening `_HISTORY_DAYS` rescaled it and
+    flipped the sign iOS paints bullish/bearish. Every other figure on the Volume card is
+    a rolling tail; this one has to be pinned too."""
+    rng = np.random.default_rng(3)
+    closes = 100.0 + np.cumsum(rng.normal(0, 1.5, 1400))
+    long_df = _frame(closes, high_low=True)
+    long_df["volume"] = rng.uniform(1e6, 5e6, len(closes))
+    short_df = long_df.tail(600).copy()          # the pre-change window
+    a = _svc()._compute_volume_analysis(long_df)
+    b = _svc()._compute_volume_analysis(short_df)
+    assert a.obv == pytest.approx(b.obv), "OBV still depends on how far back the fetch went"
+    assert tas._OBV_WINDOW_BARS == 252
+
+
+def test_obv_still_reads_the_recent_tail():
+    """Anti-vacuity: a rising tape accumulates positive OBV, a falling one negative."""
+    rng = np.random.default_rng(5)
+    for closes, positive in ((np.linspace(100, 200, 300), True), (np.linspace(200, 100, 300), False)):
+        df = _frame(closes, high_low=True)
+        df["volume"] = rng.uniform(1e6, 2e6, len(closes))
+        obv = _svc()._compute_volume_analysis(df).obv
+        assert (obv > 0) is positive, obv

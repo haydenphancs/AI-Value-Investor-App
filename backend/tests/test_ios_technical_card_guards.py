@@ -121,6 +121,15 @@ def test_the_crypto_fetch_sets_loaded_on_both_outcomes():
     assert "technicalIsRetryable = false" in fn and "technicalIsRetryable = true" in fn
 
 
+def test_a_reload_resets_both_technical_flags():
+    """`loadTickerData` reset neither: the card kept a stale "Try Again" through the whole
+    reload, and a tap on it raced the fetch already in flight."""
+    fn = _decl_block(_read(_STOCK_VM), "func loadTickerData(")
+    i = fn.index("isTechnicalLoaded = false")
+    assert "technicalUnavailableMessage = nil" in fn[i:i + 200], (
+        "both flags, together — one without the other hides the card or strands a retry")
+
+
 @pytest.mark.parametrize("vm", [_CRYPTO_VM, _STOCK_VM])
 def test_permanent_failures_are_classified_through_app_error(vm):
     """A 409 `FMP_NOT_ENTITLED` (a FRED-backed asset has no OHLCV) arrives as
@@ -177,6 +186,36 @@ def test_the_signal_badge_is_a_labelled_button():
     body = _decl_block(_read(_BADGE), "var body: some View")
     assert ".accessibilityAddTraits(" in body and ".isButton" in body
     assert ".accessibilityLabel(" in body and "signal.displayName" in body
+
+
+# ── price levels keep the decimals their magnitude needs ─────────────────────
+
+
+def test_price_levels_are_formatted_magnitude_aware():
+    """The backend already sends a sub-dollar asset's levels with 6 or 10 decimals
+    (`_round_price`, 2026-08-21); iOS threw them away with `%.2f`, so DOGE's seven pivots
+    rendered "0.12 / 0.11 / 0.11 / 0.10 / 0.09 / 0.08 / 0.08" — three pairs of identical
+    levels — and SHIB's whole table read 0.00."""
+    fmt = _read(_IOS / "Core/Utilities/PriceLevelFormat.swift")
+    body = _decl_block(fmt, "var asPriceLevel: String")
+    # The THRESHOLDS, not just the decimal counts: `magnitude >= 0` with 2 dp would keep
+    # every branch present and still print DOGE's pivots as "0.11".
+    assert "magnitude >= 1 {" in body and "decimals = 2" in body
+    assert "magnitude >= 0.0001 {" in body and "decimals = 6" in body
+    assert "decimals = 10" in body
+    assert 'guard isFinite else { return "—" }' in body, "a missing level is not 0.00"
+
+    models = _strip_comments(_read(_MODELS))
+    for decl in ("struct PivotPointLevel", "struct FibonacciLevel",
+                 "extension MovingAverageIndicator", "extension OscillatorIndicator"):
+        pass
+    # The four level/indicator formatters and the current price all route through it.
+    assert models.count("value.asPriceLevel") >= 4, (
+        "a level formatter is back on %.2f")
+    assert "currentPrice.asPriceLevelCurrency" in models
+    row = _strip_comments(_read(_IOS / "Views/Molecules/TechnicalIndicatorRow.swift"))
+    assert "Text(value.asPriceLevel)" in row, "the support/resistance row is back on %.2f"
+    assert 'String(format: "%.2f", value)' not in row
 
 
 # ── the Fear & Greed title ────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 import ta as ta_lib
 from fastapi import HTTPException
@@ -121,6 +122,25 @@ _CACHE_TTL_CRYPTO = 14_400  # 4 hours — crypto is 24/7 and more volatile
 # ~104 W-SUN bars, so weekly (100) is computable there and (200) is not — those rows are
 # listed with a null value and excluded from the count (see `_compute_timeframe_signal`).
 _HISTORY_DAYS = 1500
+
+# A verdict needs a QUORUM of computed indicators. With 10-13 bars exactly SMA(10) and
+# EMA(10) compute — every other indicator is gated at 14/15/28/35 — so a unanimous
+# two-row sample scored 0.5 + 2/(2·2) = 1.0 and published "Strong Buy · 2 of 2", which
+# `_build_analysis` then averaged into the headline verdict. That is the whole reason the
+# denominator is per-frame, turned against itself: a smaller sample must widen the
+# uncertainty, not sharpen the verdict. Below the floor the frame degrades exactly as an
+# empty one does (HOLD at the 0.5 midpoint); the rows themselves are still listed, and
+# `total_indicators` still reports what shipped. Reachable in production on the WEEKLY
+# frame of anything listed ~2-3 months ago, and on the daily frame of a new listing.
+_MIN_GAUGE_INDICATORS = 5
+
+# OBV is a CUMULATIVE sum seeded at the first bar of whatever frame it is handed, so its
+# level — and its sign, which iOS colours bullish/bearish — is a pure function of how far
+# back the fetch reached. Every other figure on the Volume card is a rolling tail or an
+# `iloc[-1]` and is window-invariant. Pinning the accumulation window keeps the reading
+# stable when `_HISTORY_DAYS` moves (widening it to 1500 flipped the sign on ~1 in 4
+# synthetic walks) and makes it comparable between a coin and an equity.
+_OBV_WINDOW_BARS = 252
 
 # NOTE: there is deliberately no TOTAL_INDICATORS constant. The indicator count is
 # per-frame (see `computed_total` in _compute_signals) because a source without
@@ -437,6 +457,38 @@ class TechnicalAnalysisService:
             # cache" rule the detail screen already relies on. Going around it cost a
             # second `/market_chart` per TA request on a 100k-calls/month budget.
             historical = await get_crypto_service()._cg_history(base, days)
+            # …and the RANGE for the recent sessions, which `market_chart` does not carry.
+            # Classic pivots need the previous bar's high/low/close, and the Key Support &
+            # Resistance card is derived from those pivots — so without this both came back
+            # empty on every coin ("i don't see any", TestFlight 2026-09-22). `/ohlc?days=30`
+            # is six 4-hour candles per day; bucketed by ET date they are a true session
+            # range. Best-effort: a failure leaves the close-only frame exactly as it was.
+            try:
+                daily_range = await get_crypto_service()._cg_recent_daily_ohlc(base)
+            except Exception as e:
+                logger.warning(
+                    "Recent OHLC unavailable for %s (%s: %s) — pivots and support/resistance "
+                    "will stay empty for this coin", ticker, type(e).__name__, e,
+                )
+                daily_range = []
+            if daily_range:
+                by_date = {r.get("date"): r for r in daily_range if r.get("date")}
+                filled = 0
+                for row in historical:
+                    src = by_date.get(row.get("date"))
+                    if not src:
+                        continue
+                    # Only the columns `market_chart` lacks. `close` and `volume` stay the
+                    # series every other crypto surface reads, so the chart, the header
+                    # price and the indicators cannot disagree over a rounding.
+                    for col in ("open", "high", "low"):
+                        if src.get(col) is not None:
+                            row[col] = src[col]
+                    filled += 1
+                logger.info(
+                    "Merged %d daily ranges into %s's %d-row close-only history",
+                    filled, ticker, len(historical),
+                )
         else:
             # 🔴 Route index / commodity screens through their PROXY before touching FMP.
             #
@@ -499,6 +551,26 @@ class TechnicalAnalysisService:
         return df[["open", "high", "low", "close", "volume"]]
 
     @staticmethod
+    def _range_tail(df: pd.DataFrame) -> pd.DataFrame:
+        """The longest CONTIGUOUS tail of bars that carry a high and a low.
+
+        A coin's frame is close-only except for the ~30 recent sessions merged from
+        `/ohlc` (see `_fetch_daily_ohlcv_uncached`), and the five range indicators must be
+        fed from those bars alone. Handing them the whole frame does not merely waste the
+        older rows: ADX and ATR are WILDER-smoothed, which carries a leading NaN all the
+        way to the last value, so both came back null on every coin even though 30 real
+        sessions were sitting there. Equity frames have a range on every bar, so this
+        returns the frame unchanged and nothing about those screens moves.
+        """
+        if "high" not in df or "low" not in df or df.empty:
+            return df.iloc[0:0]
+        valid = (df["high"].notna() & df["low"].notna()).to_numpy()
+        if not valid[-1]:
+            return df.iloc[0:0]
+        gaps = np.flatnonzero(~valid)
+        return df if gaps.size == 0 else df.iloc[gaps[-1] + 1:]
+
+    @staticmethod
     def _daily_to_weekly(df: pd.DataFrame, *, is_crypto: bool = False) -> pd.DataFrame:
         """Resample daily OHLCV into weekly bars.
 
@@ -553,7 +625,14 @@ class TechnicalAnalysisService:
         # A source with no intraday range leaves these all-NaN (see
         # `_fetch_daily_ohlcv_uncached`). `.notna().any()` rather than a column check:
         # the columns are always PRESENT, because their absence is a KeyError.
-        _has_high_low = bool(high.notna().any() and low.notna().any())
+        # The bars that carry a range — the whole frame for an equity, the merged tail for
+        # a coin. `_has_high_low` follows it, so a source with no range anywhere still
+        # drops the five range indicators rather than shipping five nulls.
+        range_df = self._range_tail(df)
+        range_high, range_low, range_close = (
+            range_df["high"], range_df["low"], range_df["close"],
+        ) if len(range_df) else (high, low, close)
+        _has_high_low = len(range_df) > 0
         current_price = float(close.iloc[-1])
 
         # ── Moving Averages (10) ─────────────────────────────
@@ -587,9 +666,9 @@ class TechnicalAnalysisService:
 
         # Stochastic
         stoch_k: Optional[float] = None
-        if len(df) >= 14:
+        if len(range_df) >= 14:
             stoch = ta_lib.momentum.StochasticOscillator(
-                high, low, close, window=14, smooth_window=3
+                range_high, range_low, range_close, window=14, smooth_window=3
             )
             stoch_k = _safe_float(stoch.stoch().iloc[-1])
 
@@ -620,30 +699,30 @@ class TechnicalAnalysisService:
         adx_val: Optional[float] = None
         plus_di: Optional[float] = None
         minus_di: Optional[float] = None
-        if len(df) >= 28:
-            adx_ind = ta_lib.trend.ADXIndicator(high, low, close, window=14)
+        if len(range_df) >= 28:
+            adx_ind = ta_lib.trend.ADXIndicator(range_high, range_low, range_close, window=14)
             adx_val = _safe_float(adx_ind.adx().iloc[-1])
             plus_di = _safe_float(adx_ind.adx_pos().iloc[-1])
             minus_di = _safe_float(adx_ind.adx_neg().iloc[-1])
 
         # Williams %R
         willr_val = _safe_float(
-            ta_lib.momentum.WilliamsRIndicator(high, low, close, lbp=14)
+            ta_lib.momentum.WilliamsRIndicator(range_high, range_low, range_close, lbp=14)
             .williams_r()
             .iloc[-1]
-        ) if len(df) >= 14 else None
+        ) if len(range_df) >= 14 else None
 
         # CCI
         cci_val = _safe_float(
-            ta_lib.trend.CCIIndicator(high, low, close, window=14).cci().iloc[-1]
-        ) if len(df) >= 14 else None
+            ta_lib.trend.CCIIndicator(range_high, range_low, range_close, window=14).cci().iloc[-1]
+        ) if len(range_df) >= 14 else None
 
         # ATR
         atr_val = _safe_float(
-            ta_lib.volatility.AverageTrueRange(high, low, close, window=14)
+            ta_lib.volatility.AverageTrueRange(range_high, range_low, range_close, window=14)
             .average_true_range()
             .iloc[-1]
-        ) if len(df) >= 14 else None
+        ) if len(range_df) >= 14 else None
 
         osc_list: List[OscillatorIndicator] = [
             OscillatorIndicator(
@@ -724,14 +803,24 @@ class TechnicalAnalysisService:
             i.signal for i in (*ma_list, *osc_list) if i.value is not None
         ]
         computed_total = len(all_signals)
-        denominator = computed_total or 1
         buy_count = sum(1 for s in all_signals if s == IndicatorSignal.BUY)
         sell_count = sum(1 for s in all_signals if s == IndicatorSignal.SELL)
         neutral_count = computed_total - buy_count - sell_count
-        gauge_value = min(
-            1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * denominator))
-        )
-        signal = _gauge_to_signal(gauge_value)
+        if computed_total < _MIN_GAUGE_INDICATORS:
+            # Too few readings to call it — see `_MIN_GAUGE_INDICATORS`.
+            if computed_total:
+                logger.info(
+                    "Technical analysis: only %d indicator(s) computable on a %d-bar "
+                    "frame — holding at the midpoint rather than scoring the sample",
+                    computed_total, len(df),
+                )
+            gauge_value = 0.5
+            signal = TechnicalSignal.HOLD
+        else:
+            gauge_value = min(
+                1.0, max(0.0, 0.5 + (buy_count - sell_count) / (2 * computed_total))
+            )
+            signal = _gauge_to_signal(gauge_value)
 
         # "N of 18 indicators" should reflect the count AGREEING with the verdict,
         # not always the buy_count.
@@ -915,9 +1004,12 @@ class TechnicalAnalysisService:
         else:
             trend = VolumeTrend.STABLE
 
-        # OBV
+        # OBV over a FIXED window (see `_OBV_WINDOW_BARS`), not the whole fetch: the sum
+        # is cumulative from its first bar, so a wider fetch silently rescales it and can
+        # flip the sign iOS paints bullish/bearish.
+        _obv_frame = df.tail(_OBV_WINDOW_BARS)
         obv_series = ta_lib.volume.OnBalanceVolumeIndicator(
-            df["close"], df["volume"]
+            _obv_frame["close"], _obv_frame["volume"]
         ).on_balance_volume()
         obv_val = _safe_float(obv_series.iloc[-1]) or 0.0
         obv_normalized = obv_val / 1_000_000  # in millions
@@ -970,10 +1062,21 @@ class TechnicalAnalysisService:
             window = df.tail(min(len(df), 252))
 
         basis = "52-Week Levels"
+        # ⚠️ The intraday range must COVER the window it is labelled with. A coin's frame
+        # carries real high/low for the last ~30 sessions only (merged from `/ohlc` so the
+        # pivots can exist); `window["high"].max()` over that is a 30-day high, and printing
+        # it as "52-Week" would be a fabricated number with a confident label. The first row
+        # of the window having a range is the test — an equity's whole frame has one.
+        _first = window.iloc[0] if len(window) else None
+        _range_covers_window = (
+            _first is not None
+            and _safe_float(_first.get("high")) is not None
+            and _safe_float(_first.get("low")) is not None
+        )
         # high/low can be all-NaN (df is dropna'd on close only) → float(NaN) poisons
         # the REQUIRED FibonacciLevel.value → 500.
-        high = _safe_float(window["high"].max())
-        low = _safe_float(window["low"].min())
+        high = _safe_float(window["high"].max()) if _range_covers_window else None
+        low = _safe_float(window["low"].min()) if _range_covers_window else None
         if high is None or low is None:
             high = _safe_float(window["close"].max())
             low = _safe_float(window["close"].min())

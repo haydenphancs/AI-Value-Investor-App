@@ -136,6 +136,39 @@ def test_after_our_own_fetch_a_short_set_is_a_hit_until_the_memo_expires(n, olde
     assert _svc(rows, own_fetch_ago=_OWN_FETCH_TTL + 60)._load_from_db("ETHUSD") is None
 
 
+def test_the_memo_is_bounded():
+    """It lives on the process-wide singleton and only `_note_own_fetch` ever writes, so
+    without a cap every ticker ever viewed stays for the life of the process."""
+    from app.services.sentiment_service import _OWN_FETCH_MAX_ENTRIES
+
+    svc = _svc([])
+    for i in range(_OWN_FETCH_MAX_ENTRIES + 50):
+        svc._note_own_fetch(f"T{i}")
+    memo = svc._own_fetch_map()
+    assert len(memo) <= _OWN_FETCH_MAX_ENTRIES
+    assert svc._fetched_own_window(f"T{_OWN_FETCH_MAX_ENTRIES + 49}"), "the newest survives"
+    assert not svc._fetched_own_window("T0"), "the oldest was evicted"
+
+
+def test_re_fetching_a_ticker_moves_it_to_the_newest_end():
+    """⚠️ Re-assigning an existing key does NOT move it in a dict — the entry keeps its
+    original insertion position, so eviction would drop a ticker that is fetched on every
+    request while sparing 1,023 one-off lookups. `_note_own_fetch` pops before writing."""
+    from app.services.sentiment_service import _OWN_FETCH_MAX_ENTRIES as CAP
+
+    svc = _svc([])
+    svc._note_own_fetch("ETHUSD")                       # oldest entry
+    for i in range(CAP - 200):
+        svc._note_own_fetch(f"T{i}")
+    svc._note_own_fetch("ETHUSD")                       # still present → must move
+    for i in range(400):                                # pushes the total past the cap
+        svc._note_own_fetch(f"U{i}")
+    memo = svc._own_fetch_map()
+    assert len(memo) <= CAP
+    assert svc._fetched_own_window("ETHUSD"), (
+        "the re-fetched ticker was evicted while one-off lookups survived")
+
+
 def test_the_memo_is_per_ticker():
     svc = _svc(_rows(58, oldest_hours=16.8), own_fetch_ago=60)
     assert svc._load_from_db("ETHUSD") is not None

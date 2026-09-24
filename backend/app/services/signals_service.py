@@ -1,6 +1,6 @@
 """
 Signals Service — builds the Home "App-Exclusive Signals" section
-(``HomeDashboardView``): three "signals you won't find on free trackers" cards.
+(``HomeDashboardView``): four "signals you won't find on free trackers" cards.
 
   • Congressional Buys   — most-bought tickers on Capitol Hill (distinct MEMBERS
                            who bought), windowed on the DISCLOSURE date (filings
@@ -12,6 +12,13 @@ Signals Service — builds the Home "App-Exclusive Signals" section
                            daily-hydrated Supabase whale tables (no FMP calls).
   • Earnings Shockers    — biggest EPS beats/misses vs the Street (signed
                            surprise %). Source: FMP ``earnings-calendar``.
+  • CEO Buys             — chief executives buying their OWN stock on the open
+                           market (Form 4 P-Purchase, common stock), ranked by total
+                           DOLLARS bought in the last 30 days of FILINGS (one CEO per
+                           company, so a buyer count would be degenerate). Source:
+                           FMP ``insider-trading/search`` with no symbol (market-wide,
+                           fail-closed pager), gated like Earnings Shockers (NASDAQ/
+                           NYSE/AMEX + $250M) plus a price-plausibility band.
 
 Contract (mirrors the Daily Scanners): the backend emits only ranked DATA rows +
 raw numbers; the iOS repository supplies the fixed per-card chrome and formats
@@ -26,20 +33,33 @@ Degradation (CLAUDE.md loud-failure rule): every branch degrades independently �
 one source failing → that card is ``None`` (iOS omits it), the others still
 render, the dashboard still returns 200. Nothing here ever raises to the caller
 (``get_signals`` swallows to empty; ``get_signals_guarded`` also bounds latency).
+
+A branch that FAILED (raised) is different from a branch that is honestly empty,
+and the cache treats them differently (developer decision 2026-09-23): a build in
+which any branch raised is kept in memory for only ``_SIGNALS_DEGRADED_TTL_SECONDS``
+and is NEVER written to the 24 h Supabase tier. Tier 2 is read before any rebuild,
+so a persisted partial build used to hide a transiently-failed card for up to a
+day. So a branch reports failure by RAISING; ``None`` means "nothing qualified".
 """
 
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 
 import re
 
 from app.utils.postgrest_paging import fetch_all_rows
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client, FMPClient
+from app.integrations.fmp import (
+    get_fmp_client,
+    FMPClient,
+    FMPNotEntitledException,
+    FMPUnavailableException,
+)
 from app.services.earnings_service import _compute_surprise
 # Reuse the dashboard's hardened primitives so signals fold class-share variants
 # (BRK.B ↔ BRK-B) and reject NaN/Inf exactly like the scanners do. NOTE: the
@@ -52,6 +72,13 @@ from app.services.home_dashboard_service import (
 from app.services._whale_common import (
     parse_congress_amount_bounds,
     format_amount_range,
+)
+from app.services._insider_common import (
+    ceo_role_label,
+    classify_insider_transaction,
+    is_ceo_role,
+    is_common_stock,
+    normalize_insider_name,
 )
 from app.schemas.home_dashboard import (
     SignalsGroupResponse,
@@ -71,11 +98,13 @@ logger = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────
 _SIGNALS_MEM_TTL_SECONDS = 2700          # 45 min in-memory freshness ceiling
 _SIGNALS_SUPABASE_TTL_HOURS = 24         # Tier-2 survives restart; sources daily/quarterly
-_SIGNALS_CACHE_KEY = "signals_v3"        # bump to invalidate stale rows on a semantics change —
-                                         # the old "signals_v2" row (magnitude-ranked earnings, OTC
-                                         # not gated, no names) lingers for its 24h TTL but is now
-                                         # ignored, so a redeploy serves the fresh exchange-gated,
-                                         # recency-first earnings immediately (self-healing).
+_SIGNALS_CACHE_KEY = "signals_v4"        # bump to invalidate stale rows on a semantics change —
+                                         # v4 (2026-09-23) added the `ceo` card: a v3 row validates
+                                         # (the field is optional) but would hide CEO Buys for up to
+                                         # its 24h TTL after a deploy. The old row is simply ignored.
+_SIGNALS_DEGRADED_TTL_SECONDS = 300      # a build where a branch RAISED: memory only, 5 min, never
+                                         # persisted — so the failed card comes back on the next
+                                         # rebuild instead of being pinned for 24h by Tier 2.
 _SIGNALS_TABLE = "signals_cache"
 _SIGNALS_BUILD_TIMEOUT_SECONDS = 8       # never let a cold build block the dashboard
 
@@ -106,7 +135,38 @@ _EARNINGS_QUOTE_CANDIDATES = 40          # over-fetch (was 25) so the exchange +
                                           # not starve the final list of real large-cap shockers.
 _EARNINGS_MIN_MARKET_CAP = 250_000_000   # $250M quality floor (parity with the scanner cards)
 
+# CEO Buys (home E2, 2026-09-23)
+_CEO_WINDOW_DAYS = 30                    # FILING-date window: the market learns of a buy when it is
+                                         # filed, the pager is ordered by filing date, and an amended
+                                         # 4/A re-files under the OLD trade date (parity with congress)
+_CEO_FUTURE_SKEW_DAYS = 2                # tolerate a filing dated slightly ahead (parity with congress)
+_CEO_MAX_FILING_LAG_DAYS = 30            # trade→filing lag beyond this = a late filing of an old trade,
+                                         # not "this month's" buying (Form 4 is due in 2 business days)
+_CEO_MIN_TICKER_DOLLARS = 100_000.0      # parity with smart_money_sender.MIN_INSIDER_AMOUNT: live, most
+                                         # CEO buys are token $5-20K director-style purchases
+_CEO_MAX_ROW_DOLLARS = 5_000_000_000.0   # GARBAGE bound only — a real ~$1B CEO open-market buy exists
+                                         # (Sep 2025). Unit errors are caught by three narrower
+                                         # checks: the price band (price), `securitiesOwned` (shares)
+                                         # and the market-cap share below (the product).
+_CEO_PRICE_BAND = 10.0                   # a row's PRICE must sit within ref/10 … ref*10 of the live
+                                         # quote (catches cents-for-dollars errors; it cannot see a
+                                         # wrong share count — the price is unchanged by one)
+_CEO_MAX_MCAP_SHARE = 0.10               # one row's dollars above 10% of the issuer's market cap is
+                                         # not a CEO buying stock on the open market; it is a unit error
+_CEO_QUOTE_CANDIDATES = 40               # over-fetch before the exchange + $250M gate (like earnings)
+_CEO_FETCH_PAGE_SIZE = 1000              # verified live: 1000 rows ≈ 14 days of market-wide P rows
+_CEO_FETCH_MAX_PAGES = 10                # 30 days ≈ 3 pages today; the cap RAISES (window uncovered)
+_CEO_DETAIL_PAGE_SIZE = 1000             # the per-ticker feed is EVERY insider's buys, not just the
+_CEO_DETAIL_MAX_PAGES = 5                # CEO's: 100 × 5 overflowed on a busy name and emptied the
+                                         # drill-down beside a card showing "$X bought" (review 2026-09-23)
+# Our ticker grammar after `_canonical_symbol` (BRK.B → BRK-B). ≤ 11 chars, inside the
+# drill-down endpoint's 12-char limit, so every card ticker is tappable.
+_CEO_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,6}(-[A-Z0-9]{1,3})?$")
+
 _BAD_SYMBOLS = {"", "--", "N/A", "NA", "NONE"}
+
+# The cards, in one place: `_build`'s gather, its failure set and the logs all come from this.
+_SIGNAL_STEPS: Tuple[str, ...] = ("congress", "whale", "earnings", "ceo")
 
 # Per-ticker drill-down (tap a signal ticker → who bought it). On-demand, so a
 # short in-memory tier + inflight dedup is enough (no Supabase tier).
@@ -416,6 +476,241 @@ def _earnings_quote_ok(quote: Any) -> bool:
     return market_cap is not None and market_cap >= _EARNINGS_MIN_MARKET_CAP
 
 
+# ── CEO Buys (pure; the drill-down reuses exactly the card's filters) ──────────
+
+
+class _CeoBuy(NamedTuple):
+    """One qualifying Form 4 line: a CEO's open-market purchase of common stock."""
+
+    symbol: str
+    reporter: str          # identity key: reportingCik, else the normalised name
+    name_raw: str
+    title_raw: str
+    filing_date: str       # YYYY-MM-DD (the window key)
+    transaction_date: str  # YYYY-MM-DD, or "" when FMP's is unparseable
+    shares: float
+    price: float
+    dollars: float
+    ownership: str         # "D" (direct) / "I" (indirect) / ""
+    form_type: str         # "4" or "4/A"
+
+
+def _ceo_reporter_key(row: Dict[str, Any]) -> str:
+    """Stable per-person identity: the SEC reporting CIK, else the normalised name.
+    ``""`` when neither identifies anyone (``normalize_insider_name`` answers "Insider")."""
+    cik = row.get("reportingCik")
+    if cik is not None and not isinstance(cik, bool):
+        text = str(cik).strip()
+        if text and text.lower() not in {"none", "null", "0"}:
+            return f"cik:{text}"
+    name = row.get("reportingName")
+    if isinstance(name, str) and name.strip():
+        normalized = normalize_insider_name(name).lower()
+        if normalized and normalized != "insider":
+            return f"name:{normalized}"
+    return ""
+
+
+def _extract_ceo_buys(
+    rows: Any, *, now: Optional[datetime] = None, window_days: int = _CEO_WINDOW_DAYS
+) -> List[_CeoBuy]:
+    """Filter FMP insider rows to CEO open-market common-stock buys filed in the window,
+    then de-duplicate. Pure — no network; every malformed row is skipped, never fatal.
+
+    Filters, in order: a dict; ``transactionType`` a P (open-market purchase); acquisition
+    ``A`` and a Form 4 when those fields are present; a usable ticker (``BRK.B`` folds to
+    ``BRK-B``); common/ordinary stock; a sitting CEO; finite shares > 0 and price > 0 with
+    a sane dollar product; a parseable FILING date inside ``[-skew, window]``; a trade date
+    (when parseable) no later than the filing + 1 day and no more than the lag bound before
+    it; an identifiable reporter.
+
+    De-duplication, per (symbol, reporter, trade date, ownership):
+      * an amendment SUPERSEDES: when a 4/A is present, only the rows of the most recently
+        filed amendment count — a corrected 4/A must replace the original, not add to it;
+      * the same (shares, price) line reported on two different filings counts once
+        (the earliest filing). Identical lines on ONE filing are distinct fills and all
+        count (FMP rows carry no line number; the pager already drops page-shift repeats).
+    """
+    if not isinstance(rows, list):
+        return []
+    now = now or datetime.now(timezone.utc)
+    kept: List[_CeoBuy] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tx = row.get("transactionType")
+        if not isinstance(tx, str) or classify_insider_transaction(tx) != "Informative Buy":
+            continue
+        acq = row.get("acquisitionOrDisposition")
+        if acq not in (None, "") and str(acq).strip().upper() != "A":
+            continue
+        form = row.get("formType")
+        form_type = str(form).strip().upper() if form not in (None, "") else "4"
+        if not form_type.startswith("4"):
+            continue
+        raw_symbol = row.get("symbol")
+        if not isinstance(raw_symbol, str):
+            continue
+        symbol = _canonical_symbol(raw_symbol.strip())
+        if symbol in _BAD_SYMBOLS or not _CEO_SYMBOL_RE.match(symbol):
+            continue
+        if not is_common_stock(row.get("securityName")):
+            continue
+        title = row.get("typeOfOwner")
+        if not is_ceo_role(title):
+            continue
+        shares = _finite_float(row.get("securitiesTransacted"))
+        price = _finite_float(row.get("price"))
+        if shares is None or price is None or shares <= 0 or price <= 0:
+            continue
+        # A purchase can never exceed the holding it produced (`securitiesOwned` is the
+        # post-transaction position). A larger figure is a share-count unit error — e.g. the
+        # holding typed into the shares column — which the PRICE band cannot see.
+        owned = _finite_float(row.get("securitiesOwned"))
+        if owned is not None and owned > 0 and shares > owned * 1.0001:
+            continue
+        dollars = _finite_float(shares * price)
+        if dollars is None or dollars > _CEO_MAX_ROW_DOLLARS:
+            continue
+        filed = _parse_iso_date(row.get("filingDate"))
+        if filed is None:
+            continue  # the window AND the pager key — no keep-everything fallback here
+        age = (now - filed).days
+        if not (-_CEO_FUTURE_SKEW_DAYS <= age <= window_days):
+            continue
+        traded = _parse_iso_date(row.get("transactionDate"))
+        if traded is not None:
+            if traded > filed + timedelta(days=1):
+                continue
+            if (filed - traded).days > _CEO_MAX_FILING_LAG_DAYS:
+                continue
+        reporter = _ceo_reporter_key(row)
+        if not reporter:
+            continue
+        own = row.get("directOrIndirect")
+        kept.append(_CeoBuy(
+            symbol=symbol,
+            reporter=reporter,
+            name_raw=str(row.get("reportingName") or ""),
+            title_raw=title,
+            filing_date=filed.strftime("%Y-%m-%d"),
+            transaction_date=traded.strftime("%Y-%m-%d") if traded else "",
+            shares=shares,
+            price=price,
+            dollars=dollars,
+            ownership=str(own).strip().upper() if isinstance(own, str) else "",
+            form_type=form_type,
+        ))
+
+    groups: Dict[Tuple[str, str, str, str], List[_CeoBuy]] = {}
+    for b in kept:
+        key = (b.symbol, b.reporter, b.transaction_date or b.filing_date, b.ownership)
+        groups.setdefault(key, []).append(b)
+
+    out: List[_CeoBuy] = []
+    for members in groups.values():
+        amendments = [b for b in members if "/A" in b.form_type]
+        if amendments:
+            latest = max(b.filing_date for b in amendments)
+            amended = [b for b in amendments if b.filing_date == latest]
+            originals = [b for b in members if "/A" not in b.form_type]
+            if len(amended) >= len(originals):
+                # A full restatement: the latest amendment replaces the day outright.
+                members = amended
+            else:
+                # A PARTIAL 4/A — an omitted line added, or one line corrected. Replacing
+                # the whole day would wipe the purchases it never restated, so drop only the
+                # original lines it corrects (same size at a new price, or same price at a
+                # new size) and keep the rest.
+                def _corrected(o: _CeoBuy) -> bool:
+                    return any(
+                        (round(a.shares, 4) == round(o.shares, 4))
+                        != (round(a.price, 4) == round(o.price, 4))
+                        for a in amended
+                    )
+                members = [o for o in originals if not _corrected(o)] + amended
+        by_line: Dict[Tuple[float, float], List[_CeoBuy]] = {}
+        for b in members:
+            by_line.setdefault((round(b.shares, 4), round(b.price, 4)), []).append(b)
+        for line in by_line.values():
+            first_filing = min(b.filing_date for b in line)
+            out.extend(b for b in line if b.filing_date == first_filing)
+    return out
+
+
+def _rank_ceo_buys(
+    buys: List[_CeoBuy],
+    *,
+    top_n: int = _SIGNAL_ROWS,
+    names: Optional[Dict[str, str]] = None,
+    min_ticker_dollars: float = _CEO_MIN_TICKER_DOLLARS,
+) -> Optional[SignalGroupResponse]:
+    """Σ dollars per ticker → the ranked card, or ``None`` when nothing clears the floor.
+
+    Order: total dollars desc, then the latest filing desc, then symbol asc (total
+    determinism). ``as_of_date`` is the latest filing over ALL ``buys`` — how fresh the
+    feed is, not just the leaders.
+    """
+    if not buys:
+        return None
+    totals: Dict[str, float] = {}
+    latest: Dict[str, str] = {}
+    for b in buys:
+        totals[b.symbol] = totals.get(b.symbol, 0.0) + b.dollars
+        if b.filing_date > latest.get(b.symbol, ""):
+            latest[b.symbol] = b.filing_date
+    qualifying = [
+        s for s, total in totals.items()
+        if math.isfinite(total) and total >= min_ticker_dollars
+    ]
+    qualifying.sort()
+    qualifying.sort(key=lambda s: latest[s], reverse=True)
+    qualifying.sort(key=lambda s: totals[s], reverse=True)
+    names = names or {}
+    entries = [
+        SignalRowResponse(
+            rank=i + 1,
+            symbol=sym,
+            name=names.get(sym, ""),
+            value=round(totals[sym], 2) + 0.0,
+        )
+        for i, sym in enumerate(qualifying[: max(0, top_n)])
+    ]
+    if not entries:
+        return None
+    return SignalGroupResponse(
+        kind="ceo", entries=entries, as_of_date=max(b.filing_date for b in buys)
+    )
+
+
+def _aggregate_ceo_buys(
+    rows: Any,
+    *,
+    now: Optional[datetime] = None,
+    window_days: int = _CEO_WINDOW_DAYS,
+    top_n: int = _SIGNAL_ROWS,
+) -> Optional[SignalGroupResponse]:
+    """The pure end-to-end aggregation (extract → de-dup → rank), before the quote gate."""
+    return _rank_ceo_buys(_extract_ceo_buys(rows, now=now, window_days=window_days), top_n=top_n)
+
+
+def _ceo_price_plausible(
+    row_price: Any, ref_price: Any, band: float = _CEO_PRICE_BAND
+) -> bool:
+    """Is a Form 4 line's price within ``ref/band … ref*band`` of the live quote?
+
+    ``True`` when there is no usable reference (missing / non-finite / ≤ 0) — an
+    unverifiable row is not evidence of a unit error. A non-finite row price is not
+    plausible."""
+    row = _finite_float(row_price)
+    if row is None or row <= 0:
+        return False
+    ref = _finite_float(ref_price)
+    if ref is None or ref <= 0:
+        return True
+    return ref / band <= row <= ref * band
+
+
 # ── Tier redaction (App-Exclusive Signals are Pro/Max — entitlements.signals_unlocked) ──
 
 _MASK_CHAR = "•"
@@ -484,22 +779,32 @@ def redact_signals(
     regression test (``test_signals_entitlement.py``) that asserts the input is intact
     after a call.
     """
-    return SignalsGroupResponse(
-        congress=_redact_group(groups.congress, tier_required),
-        whale=_redact_group(groups.whale, tier_required),
-        earnings=_redact_group(groups.earnings, tier_required),
-    )
+    # Every field of the model, not a hand-written list: a card added later cannot
+    # slip past the lock (test_signals_entitlement pins this against model_fields).
+    return SignalsGroupResponse(**{
+        field: _redact_group(getattr(groups, field), tier_required)
+        for field in SignalsGroupResponse.model_fields
+    })
+
+
+def _has_any_group(result: SignalsGroupResponse) -> bool:
+    """≥1 card present — iterates the model's fields so a new card is counted without
+    anyone remembering to add it here (the old check named the three by hand)."""
+    return any(getattr(result, f) is not None for f in SignalsGroupResponse.model_fields)
 
 
 # ── Service ─────────────────────────────────────────────────────────────
 
 
 class SignalsService:
-    """Builds the three App-Exclusive Signal cards from FMP + the whale registry."""
+    """Builds the four App-Exclusive Signal cards from FMP + the whale registry."""
 
     # Class-level so the cache/dedup are shared across requests (mirrors scanners).
     _cache: Dict[str, Tuple[float, SignalsGroupResponse]] = {}
     _inflight: Dict[str, asyncio.Future] = {}
+    # Keys whose in-memory entry came from a DEGRADED build (a branch raised): they use
+    # `_SIGNALS_DEGRADED_TTL_SECONDS` and were never written to Tier 2.
+    _degraded_keys: Set[str] = set()
     # Per-(kind, ticker) drill-down cache + dedup.
     _detail_cache: Dict[str, Tuple[float, SignalTickerDetailResponse]] = {}
     _detail_inflight: Dict[str, asyncio.Future] = {}
@@ -517,7 +822,12 @@ class SignalsService:
         background build — see ``get_signals_guarded`` — from leaking an exception).
         """
         cached = self._cache.get(_SIGNALS_CACHE_KEY)
-        if cached is not None and (time.time() - cached[0]) < _SIGNALS_MEM_TTL_SECONDS:
+        ttl = (
+            _SIGNALS_DEGRADED_TTL_SECONDS
+            if _SIGNALS_CACHE_KEY in self._degraded_keys
+            else _SIGNALS_MEM_TTL_SECONDS
+        )
+        if cached is not None and (time.time() - cached[0]) < ttl:
             logger.debug("Signals served from in-memory cache")
             return cached[1]
 
@@ -544,14 +854,26 @@ class SignalsService:
             if result is not None:
                 logger.debug("Signals served from Supabase cache")
                 self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
+                self._degraded_keys.discard(_SIGNALS_CACHE_KEY)
             else:
                 try:
-                    result = await self._build()
-                    # Cache/persist ONLY a build that produced ≥1 group — never pin a
-                    # transient triple-failure (all-None) for 45 min / 24 h.
-                    if result.congress or result.whale or result.earnings:
+                    result, failed = await self._build()
+                    # Cache ONLY a build that produced ≥1 group — never pin a transient
+                    # total failure (all-None). PERSIST only a build in which no branch
+                    # raised: Tier 2 is read before every rebuild, so a persisted partial
+                    # build would hide the failed card for up to 24 h.
+                    if _has_any_group(result):
                         self._cache[_SIGNALS_CACHE_KEY] = (time.time(), result)
-                        await asyncio.to_thread(self._write_supabase_cache, result)
+                        if failed:
+                            self._degraded_keys.add(_SIGNALS_CACHE_KEY)
+                            logger.warning(
+                                "Signals build DEGRADED (failed: %s) — serving the other "
+                                "cards from memory for %ds; NOT persisting to Tier 2",
+                                ", ".join(sorted(failed)), _SIGNALS_DEGRADED_TTL_SECONDS,
+                            )
+                        else:
+                            self._degraded_keys.discard(_SIGNALS_CACHE_KEY)
+                            await asyncio.to_thread(self._write_supabase_cache, result)
                 except Exception as exc:  # noqa: BLE001 — build failed → empty (not cached)
                     logger.warning(
                         "Signals build failed: %s: %s", type(exc).__name__, exc
@@ -593,29 +915,36 @@ class SignalsService:
             )
             return SignalsGroupResponse()
 
-    # ── Build (3 branches, degrade independently) ─────────────────────
+    # ── Build (4 branches, degrade independently) ─────────────────────
 
-    async def _build(self) -> SignalsGroupResponse:
-        congress, whale, earnings = await asyncio.gather(
-            self._build_congress(),
-            self._build_whale(),
-            self._build_earnings(),
-            return_exceptions=True,
+    async def _build(self) -> Tuple[SignalsGroupResponse, FrozenSet[str]]:
+        """Every card in parallel. Returns the groups AND the steps that RAISED.
+
+        ``None`` from a branch is an honest "nothing qualified"; an exception is a
+        failure — the card is omitted either way, but only a failure marks the build
+        degraded (``get_signals`` then refuses to persist it).
+        """
+        builders = {
+            "congress": self._build_congress,
+            "whale": self._build_whale,
+            "earnings": self._build_earnings,
+            "ceo": self._build_ceo,
+        }
+        results = await asyncio.gather(
+            *(builders[step]() for step in _SIGNAL_STEPS), return_exceptions=True
         )
-
-        def _unwrap(res: Any, step: str) -> Optional[SignalGroupResponse]:
+        groups: Dict[str, Optional[SignalGroupResponse]] = {}
+        failed: Set[str] = set()
+        for step, res in zip(_SIGNAL_STEPS, results):
             if isinstance(res, BaseException):
                 logger.warning(
                     "Signal %s failed: %s: %s", step, type(res).__name__, res
                 )
-                return None
-            return res
-
-        return SignalsGroupResponse(
-            congress=_unwrap(congress, "congress"),
-            whale=_unwrap(whale, "whale"),
-            earnings=_unwrap(earnings, "earnings"),
-        )
+                failed.add(step)
+                groups[step] = None
+            else:
+                groups[step] = res
+        return SignalsGroupResponse(**groups), frozenset(failed)
 
     async def _build_congress(self) -> Optional[SignalGroupResponse]:
         senate, house = await asyncio.gather(
@@ -636,7 +965,9 @@ class SignalsService:
                     "card rather than publishing an under-count",
                     label, type(res).__name__, res,
                 )
-                return None
+                # RAISE, not `return None`: an incomplete feed is a FAILURE, and the
+                # build must know it so it is not persisted to the 24 h tier.
+                raise res
         # Both methods self-swallow non-partial FMP errors → []. Empty is the
         # honest-empty case (no disclosures), not a failure.
         if not senate and not house:
@@ -711,7 +1042,9 @@ class SignalsService:
             logger.warning(
                 "Whale Accumulation query failed: %s: %s", type(exc).__name__, exc
             )
-            return None
+            # Re-raise so `_build` records a FAILURE (card omitted, build not persisted)
+            # rather than an honest "no fund is adding" `None`.
+            raise
 
     async def _build_earnings(self) -> Optional[SignalGroupResponse]:
         now = datetime.now(timezone.utc)
@@ -734,9 +1067,17 @@ class SignalsService:
         quotes = await price_source(self).get_quotes_list(symbols)
         qmap = {
             _canonical_symbol(q.get("symbol")): q
-            for q in quotes
+            for q in (quotes or [])
             if isinstance(q, dict) and q.get("symbol")
         }
+        if not qmap:
+            # Candidates exist but not ONE quote came back: a quote outage, not "no
+            # shocker cleared the floor". Returning None here would be persisted to the
+            # 24 h tier as an honest empty and hide the card for a day; raising marks
+            # the build degraded instead (mirrors _build_ceo).
+            raise FMPUnavailableException(
+                f"Earnings Shockers: no quotes returned for {len(symbols)} candidate(s)"
+            )
 
         kept: List[SignalRowResponse] = []
         for e in candidates.entries:  # already ranked freshest-first
@@ -765,6 +1106,92 @@ class SignalsService:
 
         return SignalGroupResponse(
             kind="earnings", entries=kept, as_of_date=candidates.as_of_date
+        )
+
+    async def _build_ceo(self) -> Optional[SignalGroupResponse]:
+        """CEO Buys: market-wide Form 4 CEO purchases → top tickers by dollars bought.
+
+        ``None`` = honestly nothing qualified (or the feed is not on the Order Form —
+        a permanent contract condition, not a retryable failure). Every other failure
+        RAISES so the build is marked degraded and not persisted.
+        """
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(days=_CEO_WINDOW_DAYS)).strftime("%Y-%m-%d")
+        try:
+            rows = await self.fmp.get_insider_trades_since(
+                since,
+                transaction_type="P-Purchase",
+                page_size=_CEO_FETCH_PAGE_SIZE,
+                max_pages=_CEO_FETCH_MAX_PAGES,
+            )
+        except FMPNotEntitledException as exc:
+            logger.warning("CEO Buys: insider feed not entitled (%s) — omitting card", exc)
+            return None
+
+        if not rows:
+            # Thirty days of market-wide open-market purchases is never empty (~2,000 rows
+            # live). An empty answer is an upstream problem — raise so the build is marked
+            # degraded instead of persisting "no CEO bought anything" for 24 h.
+            raise FMPUnavailableException(
+                "CEO Buys: the market-wide insider feed returned 0 rows for a 30-day window"
+            )
+
+        buys = _extract_ceo_buys(rows, now=now)
+        candidates = _rank_ceo_buys(buys, top_n=_CEO_QUOTE_CANDIDATES)
+        if candidates is None:
+            logger.info(
+                "CEO Buys: %d insider row(s), %d CEO buy(s), none clears $%.0fK — omitting card",
+                len(rows), len(buys), _CEO_MIN_TICKER_DOLLARS / 1000,
+            )
+            return None
+
+        symbols = [e.symbol for e in candidates.entries]
+        quotes = await price_source(self).get_quotes_list(symbols)
+        qmap = {
+            _canonical_symbol(q.get("symbol")): q
+            for q in (quotes or [])
+            if isinstance(q, dict) and q.get("symbol")
+        }
+        if not qmap:
+            # Candidates exist but not ONE quote came back: an outage, not "nothing
+            # qualified" — raise so the degraded build is not pinned for 24 h.
+            raise FMPUnavailableException(
+                f"CEO Buys: no quotes returned for {len(symbols)} candidate(s)"
+            )
+
+        gated = {sym: q for sym, q in qmap.items() if _earnings_quote_ok(q)}
+        kept: List[_CeoBuy] = []
+        implausible: List[str] = []
+        for b in buys:
+            quote = gated.get(b.symbol)
+            if quote is None:
+                continue
+            if not _ceo_price_plausible(b.price, quote.get("price")):
+                implausible.append(f"{b.symbol}@{b.price:g} vs {quote.get('price')}")
+                continue
+            market_cap = _finite_float(quote.get("marketCap"))
+            if market_cap is not None and market_cap > 0 and b.dollars > _CEO_MAX_MCAP_SHARE * market_cap:
+                implausible.append(f"{b.symbol} ${b.dollars:,.0f} vs cap ${market_cap:,.0f}")
+                continue
+            kept.append(b)
+        if implausible:
+            logger.warning(
+                "CEO Buys: dropped %d row(s) whose price is outside ×%g of the live quote, "
+                "or whose dollars exceed %d%% of the market cap (likely a unit error): %s",
+                len(implausible), _CEO_PRICE_BAND, int(_CEO_MAX_MCAP_SHARE * 100),
+                "; ".join(implausible[:10]),
+            )
+
+        names = {sym: str(q.get("name") or "") for sym, q in gated.items()}
+        final = _rank_ceo_buys(kept, top_n=_SIGNAL_ROWS, names=names)
+        if final is None:
+            logger.info(
+                "CEO Buys: no candidate cleared the exchange + $%dM floor — omitting card",
+                _EARNINGS_MIN_MARKET_CAP // 1_000_000,
+            )
+            return None
+        return SignalGroupResponse(
+            kind="ceo", entries=final.entries, as_of_date=candidates.as_of_date
         )
 
     # ── Supabase Tier-2 (best-effort) ─────────────────────────────────
@@ -826,7 +1253,7 @@ class SignalsService:
     async def get_ticker_detail(
         self, kind: str, ticker: str
     ) -> SignalTickerDetailResponse:
-        """WHO bought/added `ticker` behind the whale/congress signal, WHEN, HOW
+        """WHO bought/added `ticker` behind the whale/congress/ceo signal, WHEN, HOW
         MUCH. Cache-aside (10 min) + in-flight dedup. Never raises: any failure
         degrades to an empty holder list (iOS shows an honest empty state)."""
         kind = (kind or "").strip().lower()
@@ -888,6 +1315,8 @@ class SignalsService:
             holders, as_of = await asyncio.to_thread(self._detail_whale_rows, sym)
         elif kind == "congress":
             holders, as_of = await self._detail_congress_rows(sym)
+        elif kind == "ceo":
+            holders, as_of = await self._detail_ceo_rows(sym, ref_price=price, market_cap=market_cap)
         else:
             holders, as_of = [], None
 
@@ -1051,7 +1480,11 @@ class SignalsService:
                     "returning no rows rather than a short list",
                     sym, label, type(res).__name__, res,
                 )
-                return [], None
+                # RAISE, not `return [], None`: get_ticker_detail caches a normal
+                # return for the 10-min TTL, so a transient FMP failure would pin
+                # "no members bought" on screen. Raising yields an UNCACHED empty
+                # response and the next tap retries (same contract as whale / ceo).
+                raise res
         reg = await asyncio.to_thread(self._congress_registry_map)
         now = datetime.now(timezone.utc)
 
@@ -1106,6 +1539,73 @@ class SignalsService:
         entries.sort(key=lambda r: (r.disclosure_date or ""), reverse=True)
         as_of = max((r.disclosure_date for r in entries if r.disclosure_date), default=None)
         return entries[:_DETAIL_ROWS], as_of
+
+    async def _detail_ceo_rows(
+        self, sym: str, *, ref_price: Optional[float] = None, market_cap: Optional[float] = None
+    ) -> Tuple[List[SignalHolderResponse], Optional[str]]:
+        """The CEO purchases behind this ticker's CEO Buys row — the SAME filters and
+        price band as the card, so the rows add up to the card's dollar figure. One row
+        per (CEO, trade day), summed across that day's fills.
+
+        No try/except on purpose (the same contract as the whale and congress branches):
+        an FMP failure must propagate so ``get_ticker_detail`` returns an UNCACHED empty
+        response and the next tap retries. A genuine "no CEO buys" returns ``[]`` and is
+        legitimately cached.
+        """
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(days=_CEO_WINDOW_DAYS)).strftime("%Y-%m-%d")
+        rows = await self.fmp.get_insider_trades_since(
+            since,
+            transaction_type="P-Purchase",
+            symbol=sym,
+            page_size=_CEO_DETAIL_PAGE_SIZE,
+            max_pages=_CEO_DETAIL_MAX_PAGES,
+        )
+        candidates = [b for b in _extract_ceo_buys(rows, now=now) if b.symbol == sym]
+        price = _finite_float(ref_price)
+        cap = _finite_float(market_cap)
+        if candidates and (price is None or price <= 0):
+            # The profile header failed, but here the price is not decoration: it is the
+            # reference the card's plausibility band ran against. Use the card's own source;
+            # without ANY reference, raise (uncached) rather than list rows the card rejected.
+            quotes = await price_source(self).get_quotes_list([sym])
+            quote = next((q for q in quotes or [] if isinstance(q, dict)
+                          and _canonical_symbol(q.get("symbol")) == sym), None)
+            price = _finite_float(quote.get("price")) if quote else None
+            cap = cap if cap is not None else (_finite_float(quote.get("marketCap")) if quote else None)
+            if price is None or price <= 0:
+                raise FMPUnavailableException(
+                    f"CEO detail {sym}: no reference price for the plausibility band"
+                )
+        buys = [
+            b for b in candidates
+            if _ceo_price_plausible(b.price, price)
+            and not (cap is not None and cap > 0 and b.dollars > _CEO_MAX_MCAP_SHARE * cap)
+        ]
+        grouped: Dict[Tuple[str, str], List[_CeoBuy]] = {}
+        for b in buys:
+            grouped.setdefault((b.reporter, b.transaction_date or b.filing_date), []).append(b)
+
+        holders: List[SignalHolderResponse] = []
+        for (_, day), fills in grouped.items():
+            first = fills[0]
+            dollars = sum(b.dollars for b in fills)
+            shares = sum(b.shares for b in fills)
+            holders.append(SignalHolderResponse(
+                whale_id=None,
+                name=normalize_insider_name(first.name_raw),
+                subtitle=ceo_role_label(first.title_raw),
+                transaction_date=first.transaction_date or None,
+                disclosure_date=max(b.filing_date for b in fills),
+                amount_est=round(dollars, 2) + 0.0 if math.isfinite(dollars) else None,
+                shares=round(shares, 4) + 0.0 if math.isfinite(shares) else None,
+                action="BOUGHT",
+            ))
+        holders.sort(key=lambda h: h.name)
+        holders.sort(key=lambda h: -(h.amount_est or 0.0))
+        holders.sort(key=lambda h: h.transaction_date or h.disclosure_date or "", reverse=True)
+        as_of = max((b.filing_date for b in buys), default=None)
+        return holders[:_DETAIL_ROWS], as_of
 
     def _congress_registry_map(self) -> Dict[Tuple[str, str], str]:
         """(chamber, normalized-name) → whale_id for our tracked politicians (~8).

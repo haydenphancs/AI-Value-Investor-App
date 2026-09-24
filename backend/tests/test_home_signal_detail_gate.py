@@ -147,12 +147,30 @@ def test_a_paid_caller_still_gets_input_validation(monkeypatch):
     """The gate must not short-circuit the validators for the callers it lets through:
     an unsupported kind is INVALID_INPUT (400), not a service call with garbage — and the
     `valid` hint is a JOINED string, because iOS `AnyCodable` yields "" for a list."""
-    resp, svc = _call(monkeypatch, {"tier": TIER_PRO}, kind="insider")
+    # Not "insider": that is the natural name for a future all-insiders card, and a bogus
+    # kind must stay bogus for as long as this test lives.
+    resp, svc = _call(monkeypatch, {"tier": TIER_PRO}, kind="not-a-kind")
 
     body = _body(resp)
     assert resp.status_code == 400
     assert body["error_code"] == ErrorCode.INVALID_INPUT.value
-    assert body["details"]["valid"] == "congress, whale"
+    assert body["details"]["valid"] == "ceo, congress, whale"
+    assert svc.calls == []
+
+
+def test_a_paid_caller_reaches_the_ceo_drill_down(monkeypatch):
+    """CEO Buys (2026-09-23) is a drill-down kind: a paid caller is passed through to the
+    service with the kind intact, like whale/congress."""
+    resp, svc = _call(monkeypatch, {"tier": TIER_PRO}, kind="ceo")
+
+    assert isinstance(resp, SignalTickerDetailResponse)
+    assert svc.calls == [("ceo", _TICKER)]
+
+
+def test_a_free_caller_is_refused_the_ceo_drill_down(monkeypatch):
+    resp, svc = _call(monkeypatch, {"tier": TIER_FREE}, kind="ceo")
+
+    assert _body(resp)["error_code"] == ErrorCode.WHALE_FOLLOW_LOCKED.value
     assert svc.calls == []
 
 
@@ -201,7 +219,7 @@ def test_a_refused_call_never_reaches_the_service(monkeypatch):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"kind": "insider"}, {"ticker": ""}, {"ticker": "X" * 13}],
+    [{"kind": "not-a-kind"}, {"ticker": ""}, {"ticker": "X" * 13}],
     ids=["bogus-kind", "empty-ticker", "overlong-ticker"],
 )
 def test_the_paywall_is_the_first_thing_a_locked_caller_sees(monkeypatch, kwargs):

@@ -32,9 +32,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 logger = logging.getLogger(__name__)
 
-# Signal family → the `follow_signals` vocabulary entry that opts into it. `insiders` has
-# no signal card of its own (insider flow is its own sender), so it is absent here rather
-# than silently mapped onto something else.
+# Signal family → the `follow_signals` vocabulary entry that opts into it. The `ceo` card
+# (CEO Buys, 2026-09-23) is DELIBERATELY absent, and the family loops below name their
+# three families explicitly for the same reason: insider flow already has its own sender
+# (`smart_money_sender`), so mapping `ceo` onto `insiders` would notify the same Form 4
+# buy twice. Add it here only together with a dedup against that sender.
 SIGNAL_FAMILY_TO_FOLLOW: Dict[str, str] = {
     "whale": "whales",
     "congress": "congress",
@@ -126,7 +128,7 @@ def match_profile(
 ) -> List[Match]:
     """Signal rows this reader opted into, best first. PURE — never mutates `signals`.
 
-    ⚠️ `signals` is the SHARED, process-wide `signals_v3` cache object served to every
+    ⚠️ `signals` is the SHARED, process-wide signals cache object (`signals_service._SIGNALS_CACHE_KEY`) served to every
     user (`signals_service`). Mutating it here would corrupt the Home card for everyone,
     which is the same bug `redact_signals` carries a warning about. Everything below only
     reads.

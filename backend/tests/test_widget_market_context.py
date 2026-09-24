@@ -52,7 +52,7 @@ def _rows(**overrides):
 def test_the_band_carries_every_index_in_declared_order():
     mc = build_market_context(_rows(), _SECTORS, sector_available=True)
     assert [i.symbol for i in mc.indices] == [s for s, _ in _INDEX_SYMBOLS]
-    assert [i.label for i in mc.indices] == ["S&P 500 ETF", "Nasdaq Comp ETF", "Dow ETF"]
+    assert [i.label for i in mc.indices] == ["S&P 500 ETF", "Nasdaq ETF", "Dow ETF"]
 
 
 def test_the_label_comes_from_the_server_not_the_symbol():

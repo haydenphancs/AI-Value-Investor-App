@@ -110,7 +110,9 @@ logger = logging.getLogger(__name__)
 #     (~8.6%). Measured against the live key on 2026-09-09: 394 calls used month-to-date.
 _PULSE_SYMBOLS: List[Dict[str, str]] = [
     {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
-    {"symbol": "ONEQ", "name": "Nasdaq Composite ETF", "type": "etf"},
+    # "Nasdaq ETF", not "Nasdaq Composite ETF" (TestFlight 2026-09-23): still ONEQ, the
+    # Composite tracker — NOT QQQ, see above; the detail screen names the fund in full.
+    {"symbol": "ONEQ", "name": "Nasdaq ETF", "type": "etf"},
     {"symbol": "DIA", "name": "Dow Jones ETF", "type": "etf"},
     {"symbol": "IWM", "name": "Russell 2000 ETF", "type": "etf"},
     {"symbol": "GLD", "name": "Gold ETF", "type": "etf"},

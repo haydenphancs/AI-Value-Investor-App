@@ -73,7 +73,7 @@ struct LessonCard: View {
         HStack(spacing: AppSpacing.md) {
             LessonCard(lesson: Lesson(
                 title: "Compound Interest",
-                description: "Discover why Einstein called it the eighth wonder of the world.",
+                description: "See how earning returns on your returns makes savings snowball over time.",
                 durationMinutes: 3,
                 status: .completed
             ))

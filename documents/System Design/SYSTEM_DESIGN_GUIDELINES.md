@@ -294,7 +294,8 @@ sections in one call to minimize round-trips:
    the fund whose price they carry ("S&P 500 ETF", not "S&P 500" — SPY trades near
    $770 against an index near 6,600). Bitcoin returns with the CoinGecko move.
 2. **Daily Scanners** — movers / heavy-volume / short-interest leaderboards.
-3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers.
+3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers /
+   CEO buys (Pro-locked; a build in which any card raised is never persisted to Tier 2).
 4. **Emerging Frontiers themes** — editorial megatrend cards from the `trending_themes`
    Supabase table (server-editable → no app release), with a per-theme drill-down at
    `GET /home/themes/{slug}` → `ThemeDetailResponse`.
@@ -1840,7 +1841,7 @@ only on Pro/Max accounts, so no guest can own a row and the cascade remains the 
 
 ### 9c.5 Matching alerts create nothing per-user
 
-`profile_match` filters the shared `signals_v3` cache — no LLM, no new FMP calls, deterministic
+`profile_match` filters the shared signals cache (`_SIGNALS_CACHE_KEY`) — no LLM, no new FMP calls, deterministic
 copy. That is the shape *Lingley v. Seeking Alpha* protects: filtering generally-available content
 does not personalize it. The sender is tier-gated as **leak prevention, not packaging** (the Home
 card masks tickers for Free users, so an unfiltered alert would hand them what the paywall hides),
@@ -1942,7 +1943,7 @@ Migration 089 exists because two of these were mixed once already.
 | insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s, `session_phase() != "closed"` | 1 batch-quote/cycle | none — the dedup key is the lock |
-| profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared `signals_v3` cache) | dedup key `profile_match:{day}:{user_id}` |
+| profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | dedup key `profile_match:{day}:{user_id}` |
 | ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a catalyst tier and the quote is usable; body = the grounded catalyst, else the card headline | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
@@ -2019,8 +2020,8 @@ every renderer:
 - **The FMP Order Form is authenticated-display only** (§9.1, auth.md §1a). Exhibit A §3
   *Public External Display* was declined in writing, Agreement §1 makes "display and
   redistribution of any Data outside of Licensee Properties" a Non-Permitted Use, and ToS
-  §10.4 forbids even naming FMP as a source without consent. Both whale 13F rows and
-  congressional trades are FMP-relayed (`whale_service.py`, `signals_service.py`). So no FMP
+  §10.4 forbids even naming FMP as a source without consent. Whale 13F rows, congressional
+  trades and Form 4 insider rows are all FMP-relayed (`whale_service.py`, `signals_service.py`). So no FMP
   number, no FMP-relayed filing and no product footage showing live prices may reach a
   public post.
 - **EU MAR Art. 2(4) reaches a US brand feed.** For an instrument admitted to or traded on an
@@ -2202,6 +2203,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-09-16 | Marketing engine content is gated by the FMP licence and EU MAR BEFORE any tool choice: class A (educational, Caydex-owned) ships first, class C (EDGAR-direct filings) later, no class B in public | Public External Display was declined in writing and both 13F and congressional rows are FMP-relayed; MAR treats a named-ticker value opinion as a recommendation regardless of disclaimers | Buy Exhibit A §3 first; post FMP-derived "data of the day" content (the blueprint's own examples) |
 | 2026-09-17 | Marketing media worker is a SEPARATE Railway cron service holding no Supabase key; it reaches the ledger only through a token-gated internal API and Storage signed-upload URLs | Least privilege for an ML-heavy image; a scoped-role JWT cannot be minted (legacy JWT keys disabled, signing key revoked) | Same image as the web app with a different start command; worker with service_role; a scoped Postgres role behind a custom JWT |
 | 2026-09-17 | ffmpeg + libass + Pillow for video; Kokoro-82M for voice; Upload-Post for the audited platforms; direct X API; no Postiz, no n8n, no Remotion, no MMS_FA on the marketing path | Measured render cost ≈ $0.002/clip; Kokoro emits word timestamps natively; MMS_FA is CC-BY-NC; Postiz needs Temporal and removes no gate | Creatomate/JSON2Video; ElevenLabs; Postiz self-host; n8n |
+| 2026-09-23 | CEO Buys is the 4th App-Exclusive Signal: CEO/co-CEO open-market common-stock purchases, ranked by DOLLARS over 30 days of Form 4 FILINGS, from the symbol-less FMP insider feed through a fail-closed pager; any card that RAISES marks the build degraded (memory 5 min, never written to `signals_cache`) | TestFlight request ("Insider buys … CEO only?"). One CEO per company makes a buyer count degenerate. Tier 2 is read before every rebuild, so a persisted partial build hid a transiently failed card for up to a day; a fourth card with ~3 FMP pages + a quote batch raised those odds | All officers + directors ranked by buyer count (rejected by the owner: 10%-owner funds swamp dollars; name/scope decided as "CEO Buys"); FMP's insider "latest" feed (mixes every transaction type); reusing `get_insider_trading` (swallows every failure to `[]`, so an outage would read as "no CEO bought anything") |
 
 ---
 

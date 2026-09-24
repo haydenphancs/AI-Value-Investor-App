@@ -315,61 +315,42 @@ struct ReportsListSection: View {
     /// heals itself (launch / foreground / network-restored / backoff), and `requestSignIn`
     /// declines to prompt in this window, so any CTA here would be inert.
     private var reconnectingState: some View {
-        VStack(spacing: AppSpacing.md) {
-            ProgressView()
-                .controlSize(.large)
-
-            Text("Reconnecting…")
-                .font(AppTypography.headingSmall)
-                .foregroundColor(AppColors.textPrimary)
-
-            Text("Getting your analyses. This usually takes a moment.")
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, AppSpacing.xl)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, AppSpacing.xxxl)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Reconnecting. Getting your analyses.")
+        // Layout moved to `AccountGateEmptyState` (Home, Updates and both Tracking sub-tabs
+        // needed the same thing and each had grown its own version). The COPY stays here —
+        // "Getting your analyses" is this screen's promise, not a shared one — and so does
+        // the rule: `.reconnecting` carries no closure, so no Sign In button can be wired
+        // into it.
+        AccountGateEmptyState(
+            headline: "Reconnecting…",
+            subtitle: "Getting your analyses. This usually takes a moment.",
+            mode: .reconnecting
+        )
     }
 
     /// Reports live on an account, so a signed-out user genuinely has none to show. Saying
     /// "No analyses yet" here would be a lie by omission — their reports may exist, just not
     /// for this device.
+    @ViewBuilder
     private var signedOutState: some View {
-        VStack(spacing: AppSpacing.md) {
-            Image(systemName: "person.crop.circle.badge.checkmark")
-                .font(.system(size: 40))
-                .foregroundColor(AppColors.textMuted)
-
-            Text("Sign in to see your analyses")
-                .font(AppTypography.headingSmall)
-                .foregroundColor(AppColors.textPrimary)
-
-            Text("Your reports are saved to your account so they follow you across devices.")
-                .font(AppTypography.body)
-                .foregroundColor(AppColors.textSecondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, AppSpacing.xl)
-
-            if let onSignIn {
-                Button(action: onSignIn) {
-                    Text("Sign In")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .padding(.horizontal, AppSpacing.xl)
-                        .padding(.vertical, AppSpacing.md)
-                        .background(AppColors.primaryFill)
-                        .cornerRadius(AppCornerRadius.medium)
-                }
-                .buttonStyle(PlainButtonStyle())
-                .padding(.top, AppSpacing.xs)
-            }
+        // This layout is the one the TestFlight tester pointed at ("just the sign in button as
+        // in reports … apply for the rest"), so it now lives in `AccountGateEmptyState` and
+        // four other surfaces render it too. The copy stays here.
+        if let onSignIn {
+            AccountGateEmptyState(
+                headline: "Sign in to see your analyses",
+                subtitle: "Your reports are saved to your account so they follow you across devices.",
+                mode: .signedOut(onSignIn: onSignIn)
+            )
+        } else {
+            // No CTA supplied — say the same thing without offering a button that goes
+            // nowhere. `test_ios_no_dead_buttons.py` is the reason this is not just a Button
+            // with an empty closure.
+            AccountGateEmptyState(
+                headline: "Sign in to see your analyses",
+                subtitle: "Your reports are saved to your account so they follow you across devices.",
+                mode: .reconnecting
+            )
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, AppSpacing.xxxl)
     }
 
     /// True when the list is empty because of something the USER applied, not because

@@ -202,11 +202,8 @@ struct StudySchedule {
     }
 }
 
-// MARK: - Investor Quote
-struct InvestorQuote {
-    let text: String
-    let author: String
-}
+// `struct InvestorQuote` lives in InvestorQuoteModels.swift (it gained a source/year for the
+// brand cover's weekly quote); `.buffettQuote` below still backs the Journey card.
 
 // MARK: - Sample Data
 extension InvestorJourneyData {
@@ -214,7 +211,7 @@ extension InvestorJourneyData {
         let foundationLessons = [
             Lesson(
                 title: "Compound Interest",
-                description: "Discover why Einstein called it the eighth wonder of the world.",
+                description: "See how earning returns on your returns makes savings snowball over time.",
                 durationMinutes: 3,
                 status: .completed
             ),
@@ -427,9 +424,15 @@ extension StudySchedule {
 }
 
 extension InvestorQuote {
+    /// Verbatim from the 1991 Berkshire Hathaway letter ("Marketable Common Stocks") — the
+    /// same entry as week 34 of `weekly_investor_quotes.json`. It replaced a popular line that
+    /// appears in no Buffett letter or primary source; `test_learn_content_misattributions.py`
+    /// keeps this card and that entry in step.
     static let buffettQuote = InvestorQuote(
-        text: "The stock market is a device for transferring money from the impatient to the patient.",
-        author: "Warren Buffett"
+        text: "Our stay-put behavior reflects our view that the stock market serves as a relocation center at which money is moved from the active to the patient.",
+        author: "Warren Buffett",
+        source: "Berkshire Hathaway shareholder letter",
+        year: 1991
     )
 }
 

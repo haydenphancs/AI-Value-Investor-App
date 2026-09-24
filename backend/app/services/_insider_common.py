@@ -101,6 +101,110 @@ def classify_insider_transaction(tx_type: str) -> str:
     return "Uninformative Sell"
 
 
+# ── Form 4 row predicates (CEO Buys signal, home E2 2026-09-23) ────────
+#
+# FMP folds every role a reporting person holds into ONE `typeOfOwner` string, officer
+# title last: "director, officer: Chief Executive Officer", "director, 10 percent owner,
+# officer: President and CEO", "officer: CEO", "10 percent owner". There is no separate
+# title field. `ticker_report_data_collector._role_rank` is NOT reused here: it ranks
+# "President and CEO" as a president, and importing the agents collector is heavy.
+
+_CEO_RE = re.compile(r"\bceo\b|chief\s+executive", re.I)
+# Not the SITTING CEO: a former/retired/incoming one still files Form 4s for a while.
+_NOT_SITTING_RE = re.compile(
+    r"\b(?:former|retired|previous|past|emeritus|outgoing|elect)\b|\bex[-\s]?(?:ceo|chief)\b", re.I
+)
+# A title that CONTAINS "CEO" but is someone else's: "Chief of Staff to the CEO", "EVP, Office
+# of the CEO", "Deputy CEO", "Spouse of CEO". Adjacency on purpose: "Vice Chairman and CEO"
+# IS the CEO, "Vice CEO" is not.
+_SUBORDINATE_RE = re.compile(
+    r"\b(?:deputy|vice|assistant|associate|regional|divisional|division|segment)[\s-]+"
+    r"(?:ceo|chief\s+executive)\b"
+    r"|\b(?:to|of)\s+the\s+(?:ceo|chief\s+executive)\b|\bspouse\b",
+    re.I,
+)
+# The CEO of a SEGMENT or a subsidiary, not of the issuer: "CEO, Consumer & Community Banking",
+# "President & CEO of Subsidiary Bank", "Chief Executive Officer - Europe". "of the Company"
+# stays the company. A comma alone is fine ("CEO, President and Director").
+_SEGMENT_RE = re.compile(
+    r"(?:\bceo\b|chief\s+executive(?:\s+officer)?)\s*"
+    r"(?:[-–—:]\s*\w"
+    r"|,\s*(?:consumer|commercial|corporate|global|international|north\s+america|americas|europe"
+    r"|emea|asia|apac|wealth|retail|investment|banking|operations|division|segment|group|unit"
+    r"|business|subsidiary)\b"
+    r"|\s+of\s+(?!the\s+company\b|company\b)\w)",
+    re.I,
+)
+_COMMON_RE = re.compile(r"\bcommon\b|\bordinary\s+shares?\b", re.I)
+_NON_COMMON_RE = re.compile(
+    r"preferred|warrant|\bnotes?\b|debenture|\boptions?\b|\brights?\b|restricted stock unit",
+    re.I,
+)
+_ROLE_LABEL_MAX = 60
+
+
+def _officer_title(type_of_owner: str) -> str:
+    """The reporting person's OFFICER title, or ``""`` when they are not filing as an officer.
+
+    Only this text may make someone a CEO — never the free-text ``other:`` field on its own
+    ("director, other: Retired CEO" and "director, other: Spouse of CEO" are not the CEO).
+    Two live shapes (2026-09-23, 3,000 P rows): ``"…officer: <title>"`` for 498 of the 499
+    CEO-matching rows, and ``"director, officer, other: President & CEO"`` — the bare officer
+    FLAG with its title carried in ``other:`` — which is accepted.
+    """
+    low = type_of_owner.lower()
+    at = low.rfind("officer:")
+    if at >= 0:
+        title = type_of_owner[at + len("officer:"):]
+        cut = title.lower().find("other:")
+        if cut >= 0:
+            title = title[:cut]
+        return " ".join(title.split()).strip(" ,;")
+    roles = [part.strip() for part in low.split(",")]
+    if "officer" in roles:
+        other_at = low.rfind("other:")
+        if other_at >= 0:
+            return " ".join(type_of_owner[other_at + len("other:"):].split()).strip(" ,;")
+    return ""
+
+
+def is_ceo_role(type_of_owner: object) -> bool:
+    """True when a Form 4 ``typeOfOwner`` names the issuer's SITTING CEO / co-CEO.
+
+    Strings only — FMP has sent ``None`` and numbers here, and neither is a role. The match
+    runs on the officer title alone (see ``_officer_title``) and rejects former/incoming CEOs,
+    someone else's title that merely mentions the CEO, and segment/subsidiary CEOs.
+    """
+    if not isinstance(type_of_owner, str):
+        return False
+    title = _officer_title(type_of_owner)
+    return (
+        bool(title)
+        and bool(_CEO_RE.search(title))
+        and not _NOT_SITTING_RE.search(title)
+        and not _SUBORDINATE_RE.search(title)
+        and not _SEGMENT_RE.search(title)
+    )
+
+
+def ceo_role_label(type_of_owner: object) -> str:
+    """The officer title to show under a CEO's name ("Chief Executive Officer", "President
+    and CEO"), else ``"CEO"``."""
+    if isinstance(type_of_owner, str):
+        title = _officer_title(type_of_owner)
+        if title and _CEO_RE.search(title):
+            return title[:_ROLE_LABEL_MAX].rstrip()
+    return "CEO"
+
+
+def is_common_stock(security_name: object) -> bool:
+    """True for a common / ordinary share line — not preferred, warrants, notes,
+    options, rights or RSUs, which a "CEO bought the stock" headline must not count."""
+    if not isinstance(security_name, str):
+        return False
+    return bool(_COMMON_RE.search(security_name)) and not _NON_COMMON_RE.search(security_name)
+
+
 def is_informative(classification: str) -> bool:
     """True when the classification carries real insider-sentiment signal."""
     return classification in ("Informative Buy", "Informative Sell")

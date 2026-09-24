@@ -99,8 +99,9 @@ final class HomeRepository: HomeRepositoryProtocol {
     /// here at the mapping boundary and not in the view: the card stays dumb and renders
     /// whatever `name` it is handed.
     ///
-    /// Symbols also fit. The card is a fixed-width tile in a horizontal strip, so a long
-    /// company name truncates and several holdings can read as the same clipped prefix.
+    /// Symbols also fit. Every tile in a strip takes the width of the WIDEST
+    /// (`EqualWidthHStack`), so one long company name ("Oracle Corporation") would widen
+    /// every holding in the row; a symbol keeps the row at the 88pt floor.
     private static func mapWatchlistTile(_ dto: MarketPulseItemDTO) -> MarketPulseItem {
         let tile = mapPulse(dto)
         return MarketPulseItem(
@@ -353,7 +354,7 @@ final class HomeRepository: HomeRepositoryProtocol {
 
     // MARK: - App-Exclusive Signals mapping
 
-    /// Build the three signal cards. Like the scanners, the presentation chrome
+    /// Build the signal cards (four since CEO Buys). Like the scanners, the presentation chrome
     /// (title / subtitle / icon / accent) is FIXED per kind — matching the mock —
     /// so it's hardcoded here; the backend supplies only the ranked rows + raw
     /// numbers, which we format into the display strings per kind.
@@ -406,6 +407,24 @@ final class HomeRepository: HomeRepositoryProtocol {
                 accent: AppColors.accentYellow,
                 headline: { "\(formatSurprise($0.value)) surprise" },
                 leaderStat: { "\(formatSurprise($0.value)) EPS" }
+            ))
+        }
+
+        if let ceo = dto.ceo {
+            out.append(contentsOf: signal(
+                from: ceo,
+                kind: "ceo",
+                title: "CEO Buys",
+                // Chief executives' open-market purchases of their OWN company's common
+                // stock, last 30 days of Form 4 filings, ranked by dollars (one CEO per
+                // company, so a buyer count would always read "1").
+                subtitle: "CEOs buying their own stock",
+                iconSystemName: "briefcase.fill",
+                // A TEXT-role token (IconTile inks the glyph with it and tints its tile at
+                // 16%), and the one accent no other Home card uses.
+                accent: AppColors.alertPurple,
+                headline: { "\(SignalDollarFormat.compact($0.value)) bought" },
+                leaderStat: { SignalDollarFormat.compact($0.value) }
             ))
         }
 
@@ -529,7 +548,7 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         MarketPulseItem(name: "S&P 500 ETF", symbol: "SPY", type: .etf,
                         priceText: "765.96", changeText: "-0.55%", isPositive: false,
                         spark: spark([28, 24, 26, 18, 21, 13, 16, 8])),
-        MarketPulseItem(name: "Nasdaq Composite ETF", symbol: "ONEQ", type: .etf,
+        MarketPulseItem(name: "Nasdaq ETF", symbol: "ONEQ", type: .etf,
                         priceText: "104.12", changeText: "-0.33%", isPositive: false,
                         spark: spark([30, 27, 22, 24, 16, 18, 11, 6])),
         MarketPulseItem(name: "Dow Jones ETF", symbol: "DIA", type: .etf,
@@ -675,9 +694,23 @@ final class MockHomeRepository: HomeRepositoryProtocol {
                 SignalLeader(symbol: "NOW", companyName: "ServiceNow", stat: "+12% EPS"),
             ]
         ),
+        ExclusiveSignal(
+            kind: "ceo",
+            title: "CEO Buys",
+            subtitle: "CEOs buying their own stock",
+            iconSystemName: "briefcase.fill",
+            accent: AppColors.alertPurple,
+            topSymbol: "GME",
+            topStat: "$46.8M bought",
+            leaders: [
+                SignalLeader(symbol: "GME", companyName: "GameStop", stat: "$46.8M"),
+                SignalLeader(symbol: "FOX", companyName: "Fox", stat: "$10.3M"),
+                SignalLeader(symbol: "UBER", companyName: "Uber", stat: "$10M"),
+            ]
+        ),
     ]
 
-    /// The same three cards as a FREE caller receives them: the backend has already
+    /// The same four cards as a FREE caller receives them: the backend has already
     /// replaced each symbol with a bullet mask and withheld the leaders, so the preview
     /// exercises the real locked shape rather than a client-side approximation of it.
     static let lockedSignals: [ExclusiveSignal] = signals.map {

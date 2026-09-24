@@ -42,6 +42,21 @@ final class UpdatesViewModel: ObservableObject {
     @Published var watchlistError: String?
     @Published var showFilterSheet: Bool = false
 
+    /// The feed is empty because there is no account, not because the load broke. Kept as a
+    /// FLAG rather than folded into `error`, for the reason the whole pass exists: the moment
+    /// `AppError.signInRequired` is flattened to its `.message` the view can no longer tell
+    /// "you need an account" from "the network died", and renders the wrong affordance — here,
+    /// a "Try Again" button that re-fires a request `APIClient` refuses before it leaves the
+    /// device, forever.
+    ///
+    /// ⚠️ A SNAPSHOT taken during `loadFeed`, not a live read of auth. Anything that changes
+    /// the identity must re-run the load — `handleIdentityChange` does.
+    @Published private(set) var requiresSignIn: Bool = false
+
+    /// A credential is stored but not armed yet: "Reconnecting…", never the sign-in prompt
+    /// (auth.md §5).
+    @Published private(set) var isReconnecting: Bool = false
+
     // MARK: - Active group + plan gate
 
     /// Name of the active group the pills came from, so the Manage sheet can title itself
@@ -232,6 +247,10 @@ final class UpdatesViewModel: ObservableObject {
         // deferred for a hidden tab, but the previous account's data must not survive in this
         // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         hasLoadedOnce = false
+        // Cleared with it, ABOVE the gate: a latched "sign in" from a load that raced session
+        // restore is exactly what this reload exists to heal.
+        requiresSignIn = false
+        isReconnecting = false
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -395,6 +414,20 @@ final class UpdatesViewModel: ObservableObject {
     private func loadFeed(for tab: NewsFilterTab, force: Bool) async {
         let scope = tab.scope
 
+        // THREE outcomes, not two — decided in the `catch` below from the TYPED refusal, not
+        // from a pre-flight read of `auth.status`. Every Updates endpoint is
+        // `.signInRequired`, so an unarmed caller is refused by `APIClient.buildRequest`
+        // before any network I/O and arrives as `AppError.signInRequired`; this ViewModel used
+        // to flatten that into `error`, rendered by `errorState` as "Couldn't load the news"
+        // over a **Try Again** button that can never succeed.
+        //
+        // Deliberately NOT an up-front `guard AppActions.shared.isSignedIn`: on every signed-in
+        // cold launch the token is armed while `status` still reads `.restoring`, so that
+        // guard refuses a request that would have succeeded (see `HomeDashboardViewModel`).
+        // Routing the refusal through the normal path also means it goes through the
+        // `loadToken` bump below — an early return before that bump let a response already on
+        // the wire land afterwards and repopulate the list the gate had just cleared.
+
         // Dedup concurrent loads of the SAME scope. `loadTabs()` assigning
         // `selectedTab` fires the view's `.onChange` → `selectTab` → `loadFeed`,
         // which races the `loadFeed` in `loadInitialData`. The staleness token
@@ -435,6 +468,9 @@ final class UpdatesViewModel: ObservableObject {
             // this scope's own content or empty state. The non-cached path below
             // already clears it; the cached path must too.
             error = nil
+            // Same for the account gate: this scope has real rows to show.
+            requiresSignIn = false
+            isReconnecting = false
             allNewsArticles = cached.articles
             insightSummary = cached.insight
             loadedOffset = cached.offset
@@ -510,6 +546,8 @@ final class UpdatesViewModel: ObservableObject {
             // `loadMoreIfNeeded` already writes the cache in this order.
             feedCache[scope] = (articles, insightSummary, loadedOffset, hasMorePages)
             isLoading = false
+            requiresSignIn = false
+            isReconnecting = false
 
             print("""
             ✅ UpdatesVM: Loaded \(articles.count) articles for \(scope) \
@@ -534,7 +572,18 @@ final class UpdatesViewModel: ObservableObject {
                 return
             }
             let appError = AppError.from(error)
-            self.error = appError.message
+            // The account gate is decided HERE, from the typed refusal — see the note at the
+            // top of this function for why not from `auth.status`.
+            if case .signInRequired = appError {
+                let reconnecting = AppActions.shared.isRestoringSession
+                isReconnecting = reconnecting
+                requiresSignIn = !reconnecting
+                self.error = nil
+            } else {
+                self.error = appError.message
+                requiresSignIn = false
+                isReconnecting = false
+            }
             isLoading = false
             // NO sample-data fallback. Fabricated headlines here would render as
             // real market news.

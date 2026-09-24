@@ -13,7 +13,8 @@
 //  duplication (see the atom/molecule reuse rule in .claude/rules/ios-swiftui.md).
 //  The one difference is `spark`, which arrives empty here — a per-ticker intraday
 //  series would cost one API call each on the most-visited screen — and the card
-//  already renders without it.
+//  already renders without it. Laid out by the same `EqualWidthHStack`, so one long
+//  price widens the whole row, uniformly.
 //
 //  Hidden entirely when empty, unlike Market Pulse: that section keeps its header
 //  because "Markets Open/Closed" is still true when quotes fail, whereas an empty
@@ -62,7 +63,16 @@ struct YourWatchlistSection: View {
                     .padding(.horizontal, AppSpacing.lg)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
+                    // `EqualWidthHStack`, not `HStack`: every tile takes the width (and
+                    // height) of the widest. An HStack sized each tile to its own label
+                    // ("Nasdaq Composite ETF" stood out, TestFlight 2026-09-23; at larger text
+                    // "Russell 2000 ETF" / a six-figure BTC do too). Still content-derived,
+                    // so Dynamic Type grows the row instead of clipping it.
+                    // Per ROW, not shared with Market Pulse: the rows scroll
+                    // independently (a shared column only lines up at rest), and at
+                    // large text a shared width would stretch every short ticker tile
+                    // to "Russell 2000 ETF". At default size both rows land on 108pt.
+                    EqualWidthHStack(spacing: 10) {
                         ForEach(items) { item in
                             MarketPulseCard(item: item) { onTap?(item) }
                         }

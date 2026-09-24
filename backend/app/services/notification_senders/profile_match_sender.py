@@ -1,7 +1,7 @@
 """Alert readers when today's signals land in a topic or feed they follow.
 
 ZERO LLM AND ZERO NEW UPSTREAM CALLS. The signal rows come from the same global
-`signals_v3` payload the Home card already serves, and the sectors come from caches other
+signals payload (`_SIGNALS_CACHE_KEY`) the Home card already serves, and the sectors come from caches other
 features already populated (`watchlist_items`, `company_profile_cache`). The matching
 itself is a pure set intersection in `services/profile_match.py`.
 

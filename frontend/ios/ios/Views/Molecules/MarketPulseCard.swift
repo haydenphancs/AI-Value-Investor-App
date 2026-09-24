@@ -3,7 +3,8 @@
 //  ios
 //
 //  Molecule: one compact tile in the Home "Markets Open" pulse strip —
-//  name, price, mini sparkline, and change %.
+//  name, price, mini sparkline, and change %. Both strips that use it (Market Pulse,
+//  Holdings) lay tiles out with `EqualWidthHStack`, so a tile FILLS the cell it is given.
 //
 
 import SwiftUI
@@ -83,11 +84,20 @@ struct MarketPulseCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            // `minWidth`, not a hard `width`: the strip is a horizontal ScrollView that
-            // constrains nothing, so letting the tile grow means larger text costs a
-            // little scroll rather than shrinking every glyph. The scale factors above
-            // are the backstop for when it cannot grow.
-            .frame(minWidth: 88, alignment: .leading)
+            // `minWidth: 88` is a FLOOR, never a hard width: the strip is a horizontal
+            // ScrollView that constrains nothing, so larger text costs a little scroll
+            // rather than shrinking every glyph (the scale factors above are the backstop).
+            //
+            // `maxWidth`/`maxHeight: .infinity` make the tile take the WHOLE cell
+            // `EqualWidthHStack` gives it — the widest/tallest tile in the row — which is
+            // what makes every tile the same size (TestFlight 2026-09-23). A flexible frame
+            // reports clamp(proposed, min ?? child, max ?? child): with `minWidth` alone a
+            // tile with narrower content stays narrower than the cell. Tiles WITH a
+            // sparkline looked fine without it only because `SparklineView` is a
+            // GeometryReader that takes any width offered; Holdings tiles have no series.
+            // `.topLeading` keeps a shorter tile's text on the same lines as its
+            // neighbours. With no proposal (how the layout measures) both maxima are inert.
+            .frame(minWidth: 88, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
             .background(AppColors.cardBackground)
@@ -98,15 +108,24 @@ struct MarketPulseCard: View {
             // edge goes on as an overlay. `cardEdge` means light only; dark is
             // untouched, which is the look this screen already had.
             .cardBorder(cornerRadius: 12)
+            // A Button hit-tests what its label DRAWS; declare the shape so the whole
+            // tile stays tappable whatever the background becomes.
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
 }
 
 #Preview {
-    HStack(spacing: 10) {
+    // The tile fills whatever it is offered, so preview it in the layout that ships.
+    // The third tile has no sparkline: it must still match the others' height.
+    EqualWidthHStack(spacing: 10) {
         MarketPulseCard(item: MockHomeRepository.pulse[0])
         MarketPulseCard(item: MockHomeRepository.pulse[3])
+        MarketPulseCard(item: MarketPulseItem(
+            name: "ORCL", symbol: "ORCL", type: .stock,
+            priceText: "229.87", changeText: "+0.41%", isPositive: true, spark: []
+        ))
     }
     .padding()
     .background(AppColors.background)

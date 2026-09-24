@@ -194,9 +194,22 @@ struct ProfileAvatarView: View {
 ///
 /// If a light-appearance slogan asset is ever produced, revert the backdrop to
 /// `AppColors.background` and add the variant to the imageset — nothing else
-/// here needs to change.
+/// here needs to change (`BrandCoverQuote`'s fixed ink would then need the same revert).
+///
+/// QUOTE OF THE WEEK (TestFlight 1.0(6), 2026-09-23): beneath the slogan, one of 52 bundled,
+/// primary-sourced investor quotes, chosen by ISO week (`WeeklyQuotePicker`) so a given week
+/// shows the same quote every year. It is captured ONCE per presentation (`@State`), so a
+/// re-render after Monday 00:00 cannot swap the text while it is being read. A real investor's
+/// name now appears here, so this cover must stay out of App Store screenshots — launch with
+/// `SIMCTL_CHILD_CAYDEX_QUOTE_WEEK=off` (DEBUG) for a clean capture.
 struct CaydexSloganView: View {
     @Environment(\.dismiss) private var dismiss
+
+    @State private var quote: InvestorQuote?
+
+    init(quote: InvestorQuote? = BundledInvestorQuotes.quoteOfTheWeek()) {
+        _quote = State(initialValue: quote)
+    }
 
     /// Matches the baked background of the slogan artwork, so the image reads as
     /// full-bleed rather than as a pasted square.
@@ -207,11 +220,25 @@ struct CaydexSloganView: View {
             brandBackdrop
                 .ignoresSafeArea()
 
-            Image("CaydexSlogan")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .accessibilityIgnoresInvertColors()
-                .padding(.horizontal, AppSpacing.xxxl)
+            VStack(spacing: AppSpacing.lg) {
+                Image("CaydexSlogan")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .accessibilityIgnoresInvertColors()
+                    .accessibilityLabel("Caydex. Absorbing knowledge. Growing wealth.")
+
+                // Priority 1: the QUOTE takes its ideal height first and the square art
+                // takes what is left, so if space ever runs out (Bold Text, a raised type cap)
+                // the art gives way, never the words. At today's 1.4x reading cap a 180-char
+                // quote fits without shrinking the art on every supported iPhone.
+                if let quote {
+                    BrandCoverQuote(quote: quote)
+                        .layoutPriority(1)
+                }
+            }
+            .padding(.horizontal, AppSpacing.xxxl)
+            .padding(.vertical, AppSpacing.xxxl)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Close button
             VStack {
@@ -228,6 +255,7 @@ struct CaydexSloganView: View {
                             .foregroundStyle(AppColors.textOnAccent.opacity(0.65), AppColors.textOnAccent.opacity(0.15))
                     }
                     .buttonStyle(PlainButtonStyle())
+                    .accessibilityLabel("Close")
                 }
                 .padding(.horizontal, AppSpacing.lg)
                 .padding(.top, AppSpacing.lg)
@@ -247,6 +275,46 @@ struct CaydexSloganView: View {
     }
 }
 
+/// The weekly quote on the brand cover. FILE-PRIVATE on purpose: its fixed `textOnAccent` ink
+/// is only correct on `CaydexSloganView`'s permanently black backdrop — on an adaptive surface
+/// it would be white on white in light mode (the Journey card has its own `InvestorQuoteCard`).
+///
+/// `Text(verbatim:)`, not `Text("…")`: the latter is a `LocalizedStringKey` and renders
+/// Markdown, so a `*` or `_` inside a quotation would restyle it. The curly marks are added
+/// here; the JSON text carries none. No `lineLimit`/`minimumScaleFactor`: a quotation is
+/// never truncated or shrunk — the art above yields space instead (`layoutPriority`).
+/// Contrast on #000: quote 0.90 ≈ 16.8:1, author 0.75 ≈ 11.4:1, citation 0.55 ≈ 6.2:1.
+private struct BrandCoverQuote: View {
+    let quote: InvestorQuote
+
+    var body: some View {
+        VStack(spacing: AppSpacing.sm) {
+            Text(verbatim: "\u{201C}\(quote.text)\u{201D}")
+                .font(AppTypography.body)
+                .italic()
+                .foregroundStyle(AppColors.textOnAccent.opacity(0.9))
+                .lineSpacing(4)
+
+            VStack(spacing: AppSpacing.xxs) {
+                Text(verbatim: "\u{2014} \(quote.author)")
+                    .font(AppTypography.labelSmallEmphasis)
+                    .foregroundStyle(AppColors.textOnAccent.opacity(0.75))
+
+                if let citation = quote.citation {
+                    Text(verbatim: citation)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textOnAccent.opacity(0.55))
+                }
+            }
+        }
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(quote.accessibilityLabel)
+    }
+}
+
 #Preview {
     VStack {
         GlobalHeaderView()
@@ -259,4 +327,12 @@ struct CaydexSloganView: View {
 
 #Preview("Slogan") {
     CaydexSloganView()
+}
+
+#Preview("Slogan · longest quote") {
+    CaydexSloganView(quote: BundledInvestorQuotes.all.max { $0.text.count < $1.text.count })
+}
+
+#Preview("Slogan · no quote") {
+    CaydexSloganView(quote: nil)
 }

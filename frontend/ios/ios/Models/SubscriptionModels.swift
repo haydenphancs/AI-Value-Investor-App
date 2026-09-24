@@ -339,7 +339,7 @@ extension PlanFeature {
                 key: "signals",
                 title: "Signal tickers",
                 detail: paid
-                    ? "See the exact ticker behind every Congress, institutional and earnings signal, plus the investors driving it."
+                    ? "See the exact ticker behind every Congress, institutional, CEO and earnings signal, plus the investors driving it."
                     : "Free shows every App-Exclusive Signal and how many investors are moving — the ticker symbols stay hidden.",
                 symbol: validatedSymbol("antenna.radiowaves.left.and.right"),
                 accentKey: "signals",

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.integrations.fmp import FMPPartialPageException
 from app.schemas.signals_detail import (
     SignalHolderResponse,
     SignalTickerDetailResponse,
@@ -324,6 +325,84 @@ async def test_get_ticker_detail_degrades_on_fmp_error(monkeypatch):
     assert resp.symbol == "NVDA" and resp.holders == []   # degraded, not a 500
 
 
+class _FlakyCongressFMP(_FakeFMP):
+    """Either chamber can be made to raise; clearing the error models FMP recovering."""
+
+    def __init__(self, senate_exc=None, house_exc=None, **kw):
+        super().__init__(**kw)
+        self.senate_exc = senate_exc
+        self.house_exc = house_exc
+
+    async def get_senate_latest(self, limit=1000):
+        if self.senate_exc is not None:
+            raise self.senate_exc
+        return await super().get_senate_latest(limit)
+
+    async def get_house_latest(self, limit=1000):
+        if self.house_exc is not None:
+            raise self.house_exc
+        return await super().get_house_latest(limit)
+
+
+def _partial(endpoint):
+    return FMPPartialPageException("x", endpoint=endpoint, pages_total=4, pages_failed=1)
+
+
+@pytest.mark.parametrize("chamber", ["senate", "house"])
+@pytest.mark.asyncio
+async def test_congress_rows_reraise_on_an_incomplete_feed(monkeypatch, chamber):
+    # An incomplete chamber must PROPAGATE (not return `([], None)` normally), or
+    # get_ticker_detail caches the empty result for the 10-min TTL.
+    recent, _ = _congress_dates()
+    buy = {"symbol": "NVDA", "type": "Purchase", "disclosureDate": recent,
+           "firstName": "Nancy", "lastName": "Pelosi", "district": "CA"}
+    exc = _partial(f"{chamber}-latest")
+    s = _svc()
+    # The OTHER chamber is healthy and even has a buyer — a short list is still wrong.
+    s.fmp = _FlakyCongressFMP(
+        senate_exc=exc if chamber == "senate" else None,
+        house_exc=exc if chamber == "house" else None,
+        senate=[buy], house=[buy],
+    )
+    s.price = PriceFromFMPFake(s.fmp)
+    monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
+    with pytest.raises(FMPPartialPageException):
+        await s._detail_congress_rows("NVDA")
+
+
+@pytest.mark.asyncio
+async def test_a_congress_detail_failure_is_not_cached_and_the_next_tap_retries(monkeypatch):
+    recent, _ = _congress_dates()
+    senate = [{"symbol": "NVDA", "type": "Purchase", "disclosureDate": recent,
+               "firstName": "Nancy", "lastName": "Pelosi", "district": "CA",
+               "amount": "$1,001 - $15,000"}]
+    s = _svc()
+    fmp = _FlakyCongressFMP(house_exc=_partial("house-latest"), senate=senate, house=[])
+    s.fmp = fmp
+    s.price = PriceFromFMPFake(s.fmp)
+    monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
+
+    resp = await s.get_ticker_detail("congress", "NVDA")
+    assert resp.holders == []                                          # degraded, not a 500
+    assert "congress:NVDA" not in SignalsService._detail_cache, "a failure must not pin an empty screen"
+
+    fmp.house_exc = None                                               # FMP recovers
+    resp = await s.get_ticker_detail("congress", "nvda")
+    assert [h.name for h in resp.holders] == ["Nancy Pelosi"]           # retried, not pinned
+    assert "congress:NVDA" in SignalsService._detail_cache
+
+
+@pytest.mark.asyncio
+async def test_an_honest_empty_congress_detail_is_cached(monkeypatch):
+    s = _svc()
+    s.fmp = _FakeFMP(senate=[], house=[])
+    s.price = PriceFromFMPFake(s.fmp)
+    monkeypatch.setattr(s, "_congress_registry_map", lambda: {})
+    resp = await s.get_ticker_detail("congress", "NVDA")
+    assert resp.holders == []
+    assert "congress:NVDA" in SignalsService._detail_cache
+
+
 @pytest.mark.asyncio
 async def test_get_ticker_detail_unknown_kind_is_empty(monkeypatch):
     s = _svc()
@@ -357,7 +436,7 @@ def test_congress_role_formatting():
 _HOLDER_KEYS = {
     "whale_id", "name", "subtitle", "transaction_date", "disclosure_date",
     "allocation_percent", "allocation_change", "is_new_position", "amount_est",
-    "amount_range", "owner", "action",
+    "amount_range", "owner", "action", "shares",
 }
 _DETAIL_KEYS = {
     "symbol", "kind", "company_name", "price", "market_cap", "as_of_date", "holders",

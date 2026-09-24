@@ -944,8 +944,9 @@ async def _run_scanner_pre_warmer():
             _, is_open = _market_status()
             if is_open:  # regular US session only (9:30–4 ET, DST-aware)
                 await get_home_dashboard_service().get_scanners()
-                # App-Exclusive Signals ride along (congress/whale/earnings). Cheap:
-                # whale is Supabase-only, congress is 2 FMP calls, earnings is 1 —
+                # App-Exclusive Signals ride along (congress/whale/earnings/ceo). Cheap:
+                # whale is Supabase-only, congress is 2 FMP calls, earnings is 1 + a
+                # quote batch, CEO Buys ~3 pages of the insider feed + a quote batch —
                 # and get_signals() serves its own cache first (a no-op when warm).
                 await get_signals_service().get_signals()
                 # Emerging Frontiers themes ride along too — one batch-quote fan-out

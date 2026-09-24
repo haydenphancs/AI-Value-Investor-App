@@ -983,8 +983,52 @@ def _settle_raised_delete_claim(supabase: Client, user: dict, report_id: str):
 
 # ── List Personas ────────────────────────────────────────────────────────────
 
-# Hardcoded fallback that mirrors the iOS AnalysisPersona.allCases keys
-# (warren_buffett / cathie_wood / peter_lynch / bill_ackman / michael_burry).
+# The order the persona row renders in — Research's "Analysis Persona" cards, the Reports
+# filter chips and Settings → Default Analyst all follow the served list.
+#
+# ⚠️ Pinned HERE, in code, because the database cannot hold it. `agent_personas` has no ordering
+# column and `get_personas` used to carry no ORDER BY, so the list came back in Postgres HEAP
+# order — and an UPDATE writes the new row version at the end of the heap. Migration 155's
+# Growth Hunter rename did exactly that on 2026-08-29: Growth Hunter silently moved from third
+# to LAST (measured: buffett, wood, ackman, burry, lynch), with nobody having asked for it. Any
+# future UPDATE to any persona row would have reshuffled the screen again.
+#
+# Keep `_FALLBACK_PERSONAS` below and iOS `AnalysisPersona.allCases` in this same order — the
+# iOS list is what paints before this response lands, so a mismatch makes the cards visibly
+# jump. `tests/test_persona_display_order.py` fails the build if any of the three drift.
+_PERSONA_DISPLAY_ORDER: Tuple[str, ...] = (
+    "warren_buffett",   # The Quality Compounder
+    "peter_lynch",      # The Growth Hunter — second, right after Quality (developer, 2026-09-23)
+    "cathie_wood",      # The Disruption Seeker
+    "bill_ackman",      # The Activist Concentrator
+    "michael_burry",    # The Deep Value Skeptic
+)
+
+
+def _in_display_order(personas: List[dict]) -> List[dict]:
+    """`personas` sorted into `_PERSONA_DISPLAY_ORDER`.
+
+    A key the order does not know (a persona seeded before this constant is updated) goes
+    AFTER every known one, ordered by name and then key — deterministic, rather than wherever
+    Postgres happened to put its row. `sorted` is stable, so exact duplicates keep their
+    relative order. Missing or null `key`/`name` fields sort as unknown / empty rather than
+    raising: this runs on every Research-tab load, and a malformed row must not 500 the list.
+    """
+    rank = {key: i for i, key in enumerate(_PERSONA_DISPLAY_ORDER)}
+    unknown = len(rank)
+    return sorted(
+        personas,
+        key=lambda p: (
+            rank.get(p.get("key"), unknown),
+            str(p.get("name") or ""),
+            str(p.get("key") or ""),
+        ),
+    )
+
+
+# Hardcoded fallback that mirrors the iOS AnalysisPersona.allCases keys, in
+# `_PERSONA_DISPLAY_ORDER` (warren_buffett / peter_lynch / cathie_wood / bill_ackman /
+# michael_burry).
 # Returned when the agent_personas Supabase query fails so the iOS app keeps working
 # instead of falling back to its own offline defaults. Field names are
 # snake_case to match the iOS BackendPersona CodingKeys.
@@ -1003,19 +1047,6 @@ _FALLBACK_PERSONAS: List[dict] = [
         "is_active": True,
     },
     {
-        "id": "fallback-cathie_wood",
-        "key": "cathie_wood",
-        "name": "The Disruption Seeker",
-        "tagline": "Disruptive Innovation",
-        "description": (
-            "Emphasizes disruptive innovation, emerging technologies, and "
-            "high-growth potential companies that could reshape industries."
-        ),
-        "icon_name": "bolt.fill",
-        "accent_color": "A855F7",
-        "is_active": True,
-    },
-    {
         "id": "fallback-peter_lynch",
         "key": "peter_lynch",
         "name": "The Growth Hunter",
@@ -1026,6 +1057,19 @@ _FALLBACK_PERSONAS: List[dict] = [
         ),
         "icon_name": "chart.line.uptrend.xyaxis",
         "accent_color": "06B6D4",
+        "is_active": True,
+    },
+    {
+        "id": "fallback-cathie_wood",
+        "key": "cathie_wood",
+        "name": "The Disruption Seeker",
+        "tagline": "Disruptive Innovation",
+        "description": (
+            "Emphasizes disruptive innovation, emerging technologies, and "
+            "high-growth potential companies that could reshape industries."
+        ),
+        "icon_name": "bolt.fill",
+        "accent_color": "A855F7",
         "is_active": True,
     },
     {
@@ -1083,7 +1127,7 @@ async def get_personas(
         ).eq("is_active", True).execute()
 
         if result.data:
-            return result.data
+            return _in_display_order(result.data)
 
         # Table reachable but empty — log + serve fallback so iOS still
         # gets the five core personas. Common when production DB hasn't
@@ -1092,7 +1136,7 @@ async def get_personas(
             "agent_personas query returned no active rows — serving "
             "hardcoded fallback list. Seed the table to make this go away."
         )
-        return _FALLBACK_PERSONAS
+        return _in_display_order(_FALLBACK_PERSONAS)
 
     except Exception as e:
         # Verbose logging so Railway logs show the real cause (missing
@@ -1102,7 +1146,7 @@ async def get_personas(
             f"serving hardcoded fallback list",
             exc_info=True,
         )
-        return _FALLBACK_PERSONAS
+        return _in_display_order(_FALLBACK_PERSONAS)
 
 
 # ── Trending Analyses ────────────────────────────────────────────────────────

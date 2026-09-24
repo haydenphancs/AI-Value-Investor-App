@@ -31,7 +31,10 @@ from app.api.error_response import (
 )
 from app.services.entitlements import required_tier_for_whales, whale_detail_unlocked
 
-_VALID_SIGNAL_KINDS = {"whale", "congress"}
+# The signal cards that have a per-ticker drill-down. Earnings Shockers has none (its leaders
+# open the ticker screen). iOS mirrors this set as `ExclusiveSignal.drillDownKinds`, pinned
+# by tests/test_ios_signal_kinds_parity.py.
+_VALID_SIGNAL_KINDS = {"whale", "congress", "ceo"}
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +122,7 @@ async def get_signal_ticker_detail(
     user: dict = Depends(get_watchlist_identity),
 ):
     """Per-ticker drill-down for a Home signal card — WHO bought/added `ticker`,
-    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress}. The service degrades to an empty
+    WHEN, HOW MUCH. ``kind`` ∈ {whale, congress, ceo}. The service degrades to an empty
     holder list rather than failing; only an unexpected error surfaces a structured
     response.
 
@@ -127,7 +130,8 @@ async def get_signal_ticker_detail(
     signals redaction on `/dashboard` a curtain rather than a gate: the masked ticker was
     the only thing standing between a free caller and the full holder list, and a guessed
     symbol walked straight past it. It returns the same 13F/congress position detail the
-    whale profile withholds, so it takes the same gate.
+    whale profile withholds, so it takes the same gate (and the CEO list is the paid
+    ranking's own evidence, so it sits behind it too).
     """
     if not whale_detail_unlocked(user.get("tier")):
         return make_error_response(

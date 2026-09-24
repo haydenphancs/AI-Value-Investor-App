@@ -102,9 +102,10 @@ class ScannerGroupsResponse(BaseModel):
 
 
 # ── App-Exclusive Signals ──────────────────────────────────────────────
-# Three "signals you won't find on free trackers" cards: Congressional Buys
-# (most-bought on Capitol Hill), Whale Accumulation (13F funds adding), and
-# Earnings Shockers (biggest beats/misses). Same contract as the scanners: the
+# Four "signals you won't find on free trackers" cards: Congressional Buys
+# (most-bought on Capitol Hill), Whale Accumulation (13F funds adding), Earnings
+# Shockers (biggest beats/misses) and CEO Buys (chief executives' open-market
+# purchases of their own stock, 2026-09-23). Same contract as the scanners: the
 # backend sends only the ranked DATA rows + raw numbers; the iOS repository
 # supplies the fixed per-card chrome (title/icon/accent/subtitle) and formats
 # the display strings.
@@ -118,6 +119,9 @@ class SignalRowResponse(BaseModel):
       • congress → distinct-member count (how many members bought this ticker)
       • whale    → distinct-fund count (how many 13F funds are adding; deduped by CIK)
       • earnings → SIGNED EPS surprise % (beat is +, miss is −)
+      • ceo      → total USD bought (Σ shares × reported price) by the company's
+                   CEO(s): Form 4 open-market common-stock purchases FILED in the
+                   last 30 days
     """
 
     rank: int                       # 1-based, assigned by the service
@@ -130,12 +134,13 @@ class SignalGroupResponse(BaseModel):
     """One signal card: ranked drill-down entries. The headline (top ticker +
     its stat) is ``entries[0]`` — iOS derives it, mirroring ScannerGroupResponse."""
 
-    kind: str                                   # "congress" | "whale" | "earnings"
+    kind: str                                   # "congress" | "whale" | "earnings" | "ceo"
     entries: List[SignalRowResponse] = []
     # Card-level "as of" context (honest cadence — these sources are NOT live):
     #   • congress → latest DISCLOSURE date in the window (filings lag 30–45d)
     #   • whale    → whales.last_hydrated_at (quarterly 13F basis)
     #   • earnings → latest report date in the window
+    #   • ceo      → latest Form 4 FILING date among the qualifying buys
     as_of_date: Optional[str] = None
 
     # ── Tier gate (see services/entitlements.signals_unlocked) ────────────────
@@ -152,11 +157,18 @@ class SignalGroupResponse(BaseModel):
 
 
 class SignalsGroupResponse(BaseModel):
-    """The three App-Exclusive Signal cards. A null group → iOS omits that card."""
+    """The App-Exclusive Signal cards. A null group → iOS omits that card.
+
+    Additive-only: every group is Optional and defaulted, so an iOS build that predates
+    a card decodes the payload unchanged and simply never shows it. `ceo` is named for
+    what it holds (CEO purchases), which leaves `insider` free for a later all-insiders
+    card without renaming a shipped wire field.
+    """
 
     congress: Optional[SignalGroupResponse] = None
     whale: Optional[SignalGroupResponse] = None
     earnings: Optional[SignalGroupResponse] = None
+    ceo: Optional[SignalGroupResponse] = None
 
 
 # ── Emerging Frontiers (server-driven "Trending Themes") ───────────────

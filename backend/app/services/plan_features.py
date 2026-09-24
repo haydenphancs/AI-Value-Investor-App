@@ -191,7 +191,7 @@ def _signals_row(tier: str) -> Dict[str, Any]:
     """
     unlocked = entitlements.signals_unlocked(tier)
     detail = (
-        "See the exact ticker behind every Congress, institutional and earnings signal, "
+        "See the exact ticker behind every Congress, institutional, CEO and earnings signal, "
         "plus the investors driving it."
         if unlocked else
         "Free shows every App-Exclusive Signal and how many investors are moving — "

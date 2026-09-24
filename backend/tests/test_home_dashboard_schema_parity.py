@@ -106,7 +106,7 @@ def test_dashboard_response_keys_match_ios_dto():
     assert dumped["pulse"] == []  # empty strip is valid → iOS hides the section
     # Additive + defaulted: a response built without signals ships all-null groups
     # (iOS omits the whole section) rather than a decode-breaking absent key.
-    assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None}
+    assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None, "ceo": None}
     # Themes likewise defaults to an empty list → iOS hides the Emerging Frontiers section.
     assert dumped["themes"] == {"themes": []}
 

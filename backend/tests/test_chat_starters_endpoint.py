@@ -149,7 +149,7 @@ def test_the_service_never_reads_the_caller():
 
 
 def test_the_service_never_touches_the_pro_gated_signals():
-    """`signals_v3` tickers are masked PER REQUEST by `redact_signals()`.
+    """Signal-card tickers are masked PER REQUEST by `redact_signals()`.
 
     A globally cached body carrying one would show a Free user the ticker the paywall
     hides — the redaction happens after the gather in `get_dashboard`, never inside the

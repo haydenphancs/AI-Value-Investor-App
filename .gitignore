@@ -406,3 +406,16 @@ backend/marketing/**/*.m4a
 backend/marketing/**/*.mp3
 backend/marketing/**/*.wav
 
+
+# ── Paths purged from history on 2026-09-10 (GitHub Support ticket 4747129) ────
+# Every path the history rewrite removed must stay ignored, or one `git add -A` re-publishes it
+# and the purge has to be repeated (and GitHub asked to GC again).
+# Copyrighted source books — only the derived core*.txt summaries are tracked.
+documents/Books/**/*.pdf
+# Local PDF renders from the report-export experiments.
+backend/scripts/*.pdf
+# Unrelated coursework project (618 price-history CSVs + course PDFs); never belonged here.
+separate_project/
+
+# Microsoft Office owner/lock files (`~$name.docx`), written while a document is open.
+~$*

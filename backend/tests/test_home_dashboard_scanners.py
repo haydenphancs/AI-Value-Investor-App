@@ -125,7 +125,7 @@ _SIGNAL_ROW_KEYS = {"rank", "symbol", "name", "value"}
 _SIGNAL_GROUP_KEYS = {
     "kind", "entries", "as_of_date", "is_locked", "tier_required", "locked_count",
 }
-_SIGNAL_GROUPS_KEYS = {"congress", "whale", "earnings"}
+_SIGNAL_GROUPS_KEYS = {"congress", "whale", "earnings", "ceo"}
 
 
 def test_signal_row_keys_match_ios_dto():
@@ -142,7 +142,7 @@ def test_signal_group_and_groups_keys_match_ios_dto():
 
 def test_dashboard_default_signals_all_null():
     resp = HomeDashboardResponse(market_status_text="Markets Open", market_is_open=True, pulse=[])
-    assert resp.model_dump()["signals"] == {"congress": None, "whale": None, "earnings": None}
+    assert resp.model_dump()["signals"] == {"congress": None, "whale": None, "earnings": None, "ceo": None}
 
 
 def test_dashboard_validates_full_signals_payload():

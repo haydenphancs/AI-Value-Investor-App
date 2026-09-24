@@ -342,13 +342,33 @@ struct TrackingContentViewWithBinding: View {
                 )
             }
         }
-        // This tab is the most exposed of the four. Watchlist and portfolios are
-        // `.guestAllowed` and partitioned PER INSTALL, so a guest and an account hold
-        // genuinely DIFFERENT rows on the same device — and this screen had no reload
-        // trigger of any kind: it reads `isActiveTab` nowhere, and AppState's session-end
+        // This tab is the most exposed of the four. ⚠️ This note used to say watchlist and
+        // portfolios were `.guestAllowed` and partitioned per install. They are
+        // `.signInRequired` (`APIEndpoint.swift`), and have been since the account-only wall
+        // on 2026-09-07 — the per-install guest partition still exists in the database
+        // (auth.md §1a explains why it must not be deleted) but nothing writes to it from
+        // here any more. What survives unchanged is the reason for the reload below: this
+        // screen had no reload trigger of any kind — it reads `isActiveTab` nowhere, and
+        // AppState's session-end
         // teardown does not reach into ViewModels. Signing in or out left the previous
         // identity's holdings on screen until the user happened to pull-to-refresh.
         .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+        // Heals a gate that latched during session restore.
+        //
+        // `.reloadOnIdentityChange` deliberately does NOT fire on the launch hop
+        // `.restoring → .authenticated` (`AppState.identityGeneration` does not move — discovering
+        // an identity is not changing one), and `.task(id: isActiveTab)` has already run for the
+        // tab that is on screen at launch. So nothing re-ran the load that latched the gate, and
+        // the measured result was a whole tab visit of "Reconnecting…" AFTER `/users/me` had
+        // already answered 200.
+        //
+        // Narrow on purpose: it fires only when this surface is currently gated, so a healthy
+        // sign-in does not pay for a second load. Same trigger, and the same reasoning, as
+        // `AlertsTabContent`'s `onChange(of: appState.auth.status)`.
+        .onChange(of: appState.auth.status) { _, status in
+            guard status == .authenticated, viewModel.isAnySurfaceGated else { return }
+            Task { await viewModel.refresh() }
+        }
         // The first-visit load, which used to happen in `TrackingViewModel.init` — i.e. at
         // app launch, for every user, whether or not they ever opened this tab, and while
         // auth was still restoring. Same `.task(id: isActiveTab)` idiom as HomeDashboardView,
@@ -399,6 +419,8 @@ struct TrackingContentViewWithBinding: View {
 // MARK: - Assets Tab Content
 struct AssetsTabContent: View {
     @ObservedObject var viewModel: TrackingViewModel
+    /// Read for one thing: raising the sign-in prompt from the account-gate state below.
+    @Environment(\.appState) private var appState
 
     // Which custom header popup (portfolio switcher / sort+manage) is open.
     // Hosted here, above the list, via an anchor-preference overlay so the
@@ -428,7 +450,29 @@ struct AssetsTabContent: View {
                 // "we couldn't load it"), so the two states are told apart here:
                 // a load failure shows the AppError copy + Retry, a genuinely
                 // empty portfolio invites the user to add a ticker.
-                if viewModel.filteredAssets.isEmpty && viewModel.isLoading {
+                if viewModel.filteredAssets.isEmpty && viewModel.assetsIsReconnecting {
+                    // Checked BEFORE `requiresSignIn`, and before the skeleton: during a
+                    // restore we cannot prove the session, but we DO hold a credential, so
+                    // "sign in" would be a false statement (auth.md §5). Same branch order as
+                    // `ReportsListSection.body`.
+                    AccountGateEmptyState(
+                        headline: "Reconnecting…",
+                        subtitle: "Getting your watchlist and portfolio. This usually takes a moment.",
+                        mode: .reconnecting
+                    )
+                } else if viewModel.filteredAssets.isEmpty && viewModel.assetsRequiresSignIn {
+                    // NOT `AssetsPlaceholderCard`: signed out, that read "Couldn't load your
+                    // holdings / Sign in to use this feature." beside a Retry button that
+                    // re-fires a request `APIClient` refuses before it leaves the device.
+                    AccountGateEmptyState(
+                        headline: "Sign in to see your watchlist",
+                        subtitle: "Your tickers, portfolios and alerts are saved to your "
+                            + "account, so they follow you across devices.",
+                        mode: .signedOut(onSignIn: {
+                            appState.requestSignIn(for: "see your watchlist and portfolio")
+                        })
+                    )
+                } else if viewModel.filteredAssets.isEmpty && viewModel.isLoading {
                     // Loading is NOT "you own nothing". Before this branch existed, a user
                     // holding four tickers was told "No tickers yet — Add a ticker to start
                     // tracking prices" for the whole first load.
@@ -556,6 +600,26 @@ struct WhalesTabContent: View {
                     .padding(.vertical, AppSpacing.xxl)
                 }
 
+                // The account gate, checked BEFORE the roster error and with `isReconnecting`
+                // before `requiresSignIn` (auth.md §5). Only when there is genuinely nothing
+                // to show, for the same reason the error state below is gated that way.
+                if viewModel.allPopularWhales.isEmpty, viewModel.whalesIsReconnecting {
+                    AccountGateEmptyState(
+                        headline: "Reconnecting…",
+                        subtitle: "Getting the investors you follow. This usually takes a moment.",
+                        mode: .reconnecting
+                    )
+                } else if viewModel.allPopularWhales.isEmpty, viewModel.whalesRequiresSignIn {
+                    AccountGateEmptyState(
+                        headline: "Sign in to follow investors",
+                        subtitle: "The investors you follow, and the trades they file, are "
+                            + "tied to your account.",
+                        mode: .signedOut(onSignIn: {
+                            appState.requestSignIn(for: "follow investors")
+                        })
+                    )
+                }
+
                 // A roster load that failed outright. Rendered ABOVE Most Popular so it
                 // is visible without scrolling, and only when there is genuinely nothing
                 // to show — a stale-but-populated roster is better than an error banner
@@ -591,13 +655,19 @@ struct WhalesTabContent: View {
                 }
 
                 // 3. Most Popular Whales
-                MostPopularWhalesSection(
-                    heroWhales: viewModel.heroWhales,
-                    whales: viewModel.popularWhales,
-                    onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
-                    onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) },
-                    onMoreTapped: { viewModel.viewMorePopularWhales() }
-                )
+                // Hidden while the roster is gated. `MostPopularWhalesSection` draws its
+                // "Most Popular / See All" header unconditionally, so under the gate it rendered
+                // as a bare header over nothing — and "See All" opened a list the unarmed
+                // session could not load.
+                if !(viewModel.whalesRequiresSignIn || viewModel.whalesIsReconnecting) {
+                    MostPopularWhalesSection(
+                        heroWhales: viewModel.heroWhales,
+                        whales: viewModel.popularWhales,
+                        onFollowToggle: { whale in viewModel.toggleFollowWhale(whale) },
+                        onWhaleTapped: { whale in viewModel.viewWhaleProfile(whale) },
+                        onMoreTapped: { viewModel.viewMorePopularWhales() }
+                    )
+                }
 
                 // Bottom spacing
                 Spacer()

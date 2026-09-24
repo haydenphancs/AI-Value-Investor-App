@@ -280,11 +280,15 @@ async def test_build_degrades_per_branch():
     s._build_congress = boom          # type: ignore[assignment]
     s._build_whale = whale_ok         # type: ignore[assignment]
     s._build_earnings = earnings_none # type: ignore[assignment]
+    s._build_ceo = earnings_none      # type: ignore[assignment]  (else the real FMP call runs)
 
-    result = await s._build()
+    result, failed = await s._build()
     assert result.congress is None                       # raised → degraded, not fatal
     assert result.whale is not None and result.whale.entries[0].symbol == "MSFT"
     assert result.earnings is None
+    assert result.ceo is None
+    # Only the branch that RAISED is a failure; `None` is an honest empty.
+    assert failed == frozenset({"congress"})
 
 
 @pytest.mark.asyncio
@@ -295,12 +299,12 @@ async def test_all_none_build_is_not_cached(monkeypatch):
     monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
 
     async def empty_build():
-        return SignalsGroupResponse()
+        return SignalsGroupResponse(), frozenset()
 
     monkeypatch.setattr(s, "_build", empty_build)
 
     r = await s.get_signals()
-    assert r.congress is None and r.whale is None and r.earnings is None
+    assert r.congress is None and r.whale is None and r.earnings is None and r.ceo is None
     # A transient triple-failure must NOT be pinned → the next request retries.
     assert ssvc._SIGNALS_CACHE_KEY not in ssvc.SignalsService._cache
 
@@ -323,7 +327,7 @@ async def test_get_signals_dedups_concurrent_cold_builds(monkeypatch):
                 kind="congress",
                 entries=[SignalRowResponse(rank=1, symbol="NVDA", name="", value=3.0)],
             )
-        )
+        ), frozenset()
 
     monkeypatch.setattr(s, "_build", counting_build)
 
@@ -504,3 +508,107 @@ async def test_build_earnings_none_when_no_candidate_clears_floor():
     s.fmp = _FakeEarningsFMP(cal, quotes)  # type: ignore[assignment]
     s.price = PriceFromFMPFake(s.fmp)
     assert await s._build_earnings() is None
+
+
+# ── Earnings: a quote OUTAGE is a failure, not an honest empty ─────────
+#
+# `_build` persists a `None` branch to the 24 h `signals_cache` tier as "nothing
+# qualified", but keeps a RAISED branch in memory for 5 min only. So when the batch
+# quote returns nothing for every candidate, `_build_earnings` must raise — returning
+# None would hide Earnings Shockers for up to a day after the quote source recovers.
+
+
+class _CountingEarningsFMP(_FakeEarningsFMP):
+    def __init__(self, calendar, quotes, raw_quotes=None):
+        super().__init__(calendar, quotes)
+        self._raw_quotes = raw_quotes
+        self.quote_calls = 0
+
+    async def get_batch_quotes_bulk(self, symbols):
+        self.quote_calls += 1
+        if self._raw_quotes is not None:
+            return self._raw_quotes
+        return await super().get_batch_quotes_bulk(symbols)
+
+
+def _earnings_svc(fmp):
+    s = ssvc.SignalsService()
+    s.fmp = fmp  # type: ignore[assignment]
+    s.price = PriceFromFMPFake(s.fmp)
+    return s
+
+
+_SHOCKER_CAL = [
+    {"symbol": "BIG", "epsActual": 1.5, "epsEstimated": 1.0, "date": "2026-06-27"},   # +50%
+    {"symbol": "HUGE", "epsActual": 3.0, "epsEstimated": 1.0, "date": "2026-06-26"},  # +200%
+]
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_zero_quotes_is_an_outage_not_an_empty_card():
+    s = _earnings_svc(_CountingEarningsFMP(_SHOCKER_CAL, quotes={}))
+    with pytest.raises(ssvc.FMPUnavailableException, match="no quotes returned for 2 candidate"):
+        await s._build_earnings()
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_only_malformed_quote_rows_is_an_outage():
+    # Rows with no symbol (or not a dict) can't be mapped to any candidate — still
+    # "not one usable quote came back", so still a failure rather than an honest None.
+    fmp = _CountingEarningsFMP(_SHOCKER_CAL, quotes={}, raw_quotes=[None, "x", {"price": 10.0}, {"symbol": ""}])
+    with pytest.raises(ssvc.FMPUnavailableException):
+        await _earnings_svc(fmp)._build_earnings()
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_no_candidates_is_honest_none_without_quoting():
+    # An empty calendar (or nothing past the surprise threshold) is the honest empty:
+    # it must stay None and must not reach the quote call, let alone the outage raise.
+    for cal in ([], [{"symbol": "FLAT", "epsActual": 1.01, "epsEstimated": 1.0, "date": "2026-06-27"}]):
+        fmp = _CountingEarningsFMP(cal, quotes={})
+        assert await _earnings_svc(fmp)._build_earnings() is None
+        assert fmp.quote_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_build_earnings_partial_quotes_that_fail_the_gate_is_honest_none():
+    # SOME quotes came back and none clears the floor → the honest "no shocker" None,
+    # NOT the outage raise. The raise is reserved for zero usable quotes.
+    quotes = {"BIG": {"symbol": "BIG", "exchange": "NYSE", "marketCap": 10_000_000}}  # sub-floor; HUGE unquoted
+    assert await _earnings_svc(_CountingEarningsFMP(_SHOCKER_CAL, quotes))._build_earnings() is None
+
+
+@pytest.mark.asyncio
+async def test_earnings_quote_outage_degrades_the_build_and_is_never_persisted(monkeypatch):
+    ssvc.SignalsService._cache.clear()
+    ssvc.SignalsService._inflight.clear()
+    ssvc.SignalsService._degraded_keys.clear()
+    try:
+        s = _earnings_svc(_CountingEarningsFMP(_SHOCKER_CAL, quotes={}))
+        writes = []
+        monkeypatch.setattr(s, "_read_supabase_cache", lambda: None)
+        monkeypatch.setattr(s, "_write_supabase_cache", lambda r: writes.append(r))
+
+        async def congress_ok():
+            return SignalGroupResponse(
+                kind="congress",
+                entries=[SignalRowResponse(rank=1, symbol="NVDA", name="", value=3.0)],
+            )
+
+        async def none_():
+            return None
+
+        s._build_congress, s._build_whale, s._build_ceo = congress_ok, none_, none_  # type: ignore
+        # _build_earnings is the REAL method, fed an empty quote batch.
+
+        result, failed = await s._build()
+        assert failed == frozenset({"earnings"}) and result.earnings is None
+
+        r = await s.get_signals()
+        assert r.congress is not None and r.earnings is None
+        assert writes == [], "a quote outage must not be pinned to the 24 h tier"
+        assert ssvc._SIGNALS_CACHE_KEY in ssvc.SignalsService._degraded_keys
+    finally:
+        ssvc.SignalsService._cache.clear()
+        ssvc.SignalsService._inflight.clear()
+        ssvc.SignalsService._degraded_keys.clear()

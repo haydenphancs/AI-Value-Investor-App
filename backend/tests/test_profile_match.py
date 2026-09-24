@@ -5,7 +5,7 @@ needs no network, no Supabase and no LLM. That testability is the point of the d
 a generated match could not be pinned like this.
 
 The assertions that matter most:
-  * the shared `signals_v3` object is never mutated (it is served to every user);
+  * the shared signals cache object is never mutated (it is served to every user);
   * a style topic like "dividends" NEVER produces a match from sector data alone;
   * the copy stays informational — no suitability phrasing, checked against the very
     patterns `chat_guardrails` uses on the chat surface.
@@ -109,7 +109,7 @@ def test_style_topics_never_match_from_sector_data(topic):
 
 
 def test_the_shared_signals_payload_is_never_mutated():
-    """`signals_v3` is one process-wide object served to every user. The same hazard
+    """The signals cache is one process-wide object served to every user. The same hazard
     `redact_signals` carries a warning about."""
     signals = _signals()
     before = copy.deepcopy(signals)

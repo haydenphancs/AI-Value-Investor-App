@@ -96,7 +96,31 @@ struct UpdatesView: View {
                                 .padding(.vertical, AppSpacing.sm)
                             }
 
-                            if viewModel.isLoading && viewModel.groupedNews.isEmpty {
+                            // The account gate is checked BEFORE loading/error, and
+                            // `isReconnecting` before `requiresSignIn` — during a restore we
+                            // hold a credential, so "sign in" would be a false statement
+                            // (auth.md §5). Same branch order as `ReportsListSection.body`.
+                            //
+                            // This is what replaces `errorState`'s dead end: signed out, that
+                            // read "Couldn't load the news / Sign in to use this feature." over
+                            // a **Try Again** button re-firing a request `APIClient` refuses
+                            // before it leaves the device.
+                            if viewModel.isReconnecting {
+                                AccountGateEmptyState(
+                                    headline: "Reconnecting…",
+                                    subtitle: "Getting your news feed. This usually takes a moment.",
+                                    mode: .reconnecting
+                                )
+                            } else if viewModel.requiresSignIn {
+                                AccountGateEmptyState(
+                                    headline: "Sign in to see your news",
+                                    subtitle: "Your feed follows the tickers you track, so it "
+                                        + "lives on your account rather than on this device.",
+                                    mode: .signedOut(onSignIn: {
+                                        appState.requestSignIn(for: "see your news feed")
+                                    })
+                                )
+                            } else if viewModel.isLoading && viewModel.groupedNews.isEmpty {
                                 // Skeleton rows, not a blocking overlay: the old
                                 // full-screen LoadingOverlay swallowed taps
                                 // (including Back) — the same problem already
@@ -135,6 +159,23 @@ struct UpdatesView: View {
             // previous identity's news scopes and insight feed on screen until the app was
             // killed. `handleIdentityChange(isActiveTab:)` clears the latch, unlike every other path.
             .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+            // Heals a gate that latched during session restore.
+            //
+            // `.reloadOnIdentityChange` deliberately does NOT fire on the launch hop
+            // `.restoring → .authenticated` (`AppState.identityGeneration` does not move — discovering
+            // an identity is not changing one), and `.task(id: isActiveTab)` has already run for the
+            // tab that is on screen at launch. So nothing re-ran the load that latched the gate, and
+            // the measured result was a whole tab visit of "Reconnecting…" AFTER `/users/me` had
+            // already answered 200.
+            //
+            // Narrow on purpose: it fires only when this surface is currently gated, so a healthy
+            // sign-in does not pay for a second load. Same trigger, and the same reasoning, as
+            // `AlertsTabContent`'s `onChange(of: appState.auth.status)`.
+            .onChange(of: appState.auth.status) { _, status in
+                guard status == .authenticated,
+                      viewModel.requiresSignIn || viewModel.isReconnecting else { return }
+                Task { await viewModel.refresh() }
+            }
             // The active group changed on the Tracking tab. `loadIfNeeded()` cannot serve
             // this: it early-returns on `hasLoadedOnce`, which latches once and is never
             // reset, and this screen is opacity-mounted so the latch survives every tab

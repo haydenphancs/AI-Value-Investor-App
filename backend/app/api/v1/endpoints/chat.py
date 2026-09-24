@@ -1286,7 +1286,7 @@ async def get_chat_starters(
     service starts reading the caller.
 
     ⚠️ Related, and the reason App-Exclusive Signals are excluded from the composition:
-    `signals_v3` tickers are Pro-gated and `redact_signals()` masks them PER REQUEST. A
+    Signal-card tickers (the shared `_SIGNALS_CACHE_KEY` payload) are Pro-gated and `redact_signals()` masks them PER REQUEST. A
     globally cached set carrying one would show Free users the ticker the paywall hides.
 
     Never errors. Every live source is optional and every slot degrades to an evergreen

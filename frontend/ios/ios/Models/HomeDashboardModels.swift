@@ -164,8 +164,8 @@ struct SignalLeader: Identifiable, Hashable {
 /// One row in the glowing "App-Exclusive Signals" card.
 struct ExclusiveSignal: Identifiable {
     let id = UUID()
-    /// "congress" | "whale" | "earnings" — routes the leader tap (whale/congress
-    /// open the per-ticker detail; earnings opens TickerDetailView directly).
+    /// "congress" | "whale" | "earnings" | "ceo" — routes the leader tap (the
+    /// `drillDownKinds` open the per-ticker detail; earnings opens TickerDetailView).
     let kind: String
     let title: String
     let subtitle: String
@@ -185,6 +185,12 @@ struct ExclusiveSignal: Identifiable {
     var isLocked: Bool = false
     /// How many leaders are behind the lock — for upsell copy ("Unlock all 10").
     var lockedCount: Int = 0
+
+    /// The kinds whose leaders open `SignalTickerDetailView` (who bought, when, how
+    /// much). The single iOS copy of the backend's `_VALID_SIGNAL_KINDS` — a kind missing
+    /// here silently routes to the plain ticker screen, and one the backend lacks 400s.
+    /// Pinned both ways by `backend/tests/test_ios_signal_kinds_parity.py`.
+    static let drillDownKinds: Set<String> = ["whale", "congress", "ceo"]
 }
 
 // MARK: - Emerging Frontiers (Trending Themes)
@@ -373,7 +379,8 @@ struct ScannerGroupsDTO: Decodable {
 /// One ranked leader row in a signal card (raw numbers; the repository formats
 /// them per kind). `value` is polymorphic by the enclosing group's `kind`:
 /// congress → distinct-member count · whale → distinct-fund count · earnings →
-/// SIGNED EPS surprise % (beat +, miss −). All keys are already snake_case-safe
+/// SIGNED EPS surprise % (beat +, miss −) · ceo → total USD bought by the CEO(s)
+/// in the last 30 days of Form 4 filings. All keys are already snake_case-safe
 /// (single words), so no `CodingKeys` map is needed.
 struct SignalRowDTO: Decodable {
     let rank: Int
@@ -388,7 +395,7 @@ struct SignalRowDTO: Decodable {
 /// One signal card's data. The headline (top ticker + its stat) is `entries[0]`
 /// — the repository derives it, mirroring the scanner cards.
 struct SignalGroupDTO: Decodable {
-    let kind: String                // "congress" | "whale" | "earnings"
+    let kind: String                // "congress" | "whale" | "earnings" | "ceo"
     let entries: [SignalRowDTO]
     /// Card-level "as of" context (ISO `yyyy-MM-dd`) or nil. Optional → decode-safe.
     let asOfDate: String?
@@ -415,11 +422,15 @@ struct SignalGroupDTO: Decodable {
     }
 }
 
-/// The three App-Exclusive Signal cards. A null group → that card is omitted.
+/// The App-Exclusive Signal cards. A null (or absent) group → that card is omitted, so
+/// this build decodes an older backend that never sends `ceo`, and an older build
+/// ignores the key. Every group stays Optional — a required one would crash the whole
+/// dashboard decode the day its source degrades.
 struct SignalGroupsDTO: Decodable {
     let congress: SignalGroupDTO?
     let whale: SignalGroupDTO?
     let earnings: SignalGroupDTO?
+    let ceo: SignalGroupDTO?
 }
 
 // MARK: - Emerging Frontiers (Trending Theme) DTOs

@@ -8,6 +8,7 @@ NOTE: FMP deprecated all /api/v3 ("legacy") endpoints after August 31 2025.
 """
 
 import asyncio
+import json
 import httpx
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
@@ -30,6 +31,20 @@ def _normalize_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     if profile.get("mktCap") in (None, 0) and profile.get("marketCap") is not None:
         profile["mktCap"] = profile["marketCap"]
     return profile
+
+
+def _looks_like_iso_date(value: Any) -> bool:
+    """True for a ``YYYY-MM-DD…`` prefix that parses. Pagination stop rules compare the
+    10-char prefix as a string, so a malformed date must be ignored, not compared (a
+    stray ``"N/A"`` sorts after every real date and would never stop a walk; ``""``
+    sorts before and would stop it on page 0)."""
+    if not isinstance(value, str) or len(value) < 10:
+        return False
+    try:
+        datetime.strptime(value[:10], "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 
 from app.integrations.fmp_entitlements import (
@@ -2100,6 +2115,180 @@ class FMPClient:
         except Exception as e:
             logger.warning(f"Insider roster derivation failed for {ticker}: {e}")
             return []
+
+    # ── Market-wide insider trades (Form 4), fail-closed ────────────
+
+    async def get_insider_trades_since(
+        self,
+        since_date: str,
+        *,
+        transaction_type: Optional[str] = None,
+        symbol: Optional[str] = None,
+        page_size: int = 1000,
+        max_pages: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Insider (Form 4) rows filed on or after ``since_date``, newest-first.
+
+        ``insider-trading/search`` with NO ``symbol`` is the market-wide feed (verified
+        live 2026-09-23 against the Order Form's "10 Insider & Senate" package:
+        ``transactionType=P-Purchase&limit=1000`` → 200, ~14 days per page). With
+        ``symbol`` it is the per-ticker feed. The path is already entitled, so this adds
+        no manifest entry.
+
+        Why this is NOT ``get_insider_trading``: that method swallows every failure to
+        ``[]``, so an outage reads as "no insider bought anything" — and a card built on
+        it would publish, and cache, that false answer. This one FAILS CLOSED, the same
+        contract as ``_fetch_congress_pages``:
+
+          * page 0 raises                       → the typed exception propagates
+            (rate limit / auth / unavailable / not entitled / HTTP error);
+          * page 0 answers 403/404              → ``[]`` + WARNING (the documented
+            "endpoint not on this plan" case — raising would put every consumer into a
+            permanent degraded loop);
+          * any later page fails, or any page's body is not a list
+                                                → ``FMPPartialPageException`` carrying
+            the rows that did arrive (display only, never persist);
+          * ``max_pages`` exhausted while the oldest row is still inside the window
+                                                → WARNING + ``FMPPartialPageException``:
+            the tail is contiguous but the window is NOT covered, so a total built on it
+            would be an under-count;
+          * MARKET-WIDE only: a short or empty page (after page 0) while the oldest row is
+            still inside the window → ``FMPPartialPageException`` too. For one ticker a short
+            page is the normal end of its feed; for the whole market it means FMP served
+            fewer rows than asked (e.g. a silently lowered per-page cap), and returning would
+            publish a few days as "30 days".
+
+        Pages are walked SEQUENTIALLY because each stop decision needs the previous
+        page. The walk stops on an empty page, on a short page, or once a page's OLDEST
+        parseable ``filingDate`` predates ``since_date`` (the feed is ordered by filing
+        date, so that is the only field the bound is correct on). Rows older than
+        ``since_date`` on the last page are returned as-is — windowing is the service's
+        decision.
+
+        Page-shift repeats are dropped: new filings landing mid-walk push rows of a
+        newest-first feed down, so the head of page N+1 can repeat the tail of page N.
+        A row identical to one from an EARLIER page is that artefact and is skipped.
+        Identical rows WITHIN one page are kept — they are separate fills of the same
+        size and price on one filing (FMP rows carry no line number).
+
+        Args:
+            since_date: inclusive ``YYYY-MM-DD`` lower bound on ``filingDate``.
+            transaction_type: e.g. ``"P-Purchase"``; omitted when None.
+            symbol: a ticker for the per-ticker feed; None = market-wide.
+        """
+        try:
+            since = datetime.strptime(since_date, "%Y-%m-%d").date().isoformat()
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"since_date must be YYYY-MM-DD, got {since_date!r}") from e
+
+        endpoint = "insider-trading/search"
+        sym = symbol.strip().upper() if isinstance(symbol, str) and symbol.strip() else None
+        rows: List[Dict[str, Any]] = []
+        seen_before: set = set()   # row identities from EARLIER pages (see page-shift note)
+        pages_done = 0
+        for page in range(max(1, max_pages)):
+            params: Dict[str, Any] = {"page": page, "limit": page_size}
+            if transaction_type:
+                params["transactionType"] = transaction_type
+            if sym:
+                params["symbol"] = sym
+            try:
+                # A LITERAL path (not `endpoint`): test_fmp_entitlement_parity reads the
+                # call sites to prove every reachable FMP path is on the Order Form.
+                data = await self._make_request("insider-trading/search", params=params)
+            except httpx.HTTPStatusError as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if page == 0 and status in (403, 404):
+                    logger.warning(
+                        "%s unavailable (HTTP %s on page 0, symbol=%s) — returning empty",
+                        endpoint, status, sym or "market-wide",
+                    )
+                    return []
+                if page == 0:
+                    raise
+                raise FMPPartialPageException(
+                    f"{endpoint}: page {page} failed after {len(rows)} row(s) "
+                    f"({type(e).__name__}: {redact_secrets(e)}) — the window is INCOMPLETE",
+                    endpoint=endpoint, pages_total=page + 1, pages_failed=1, partial=rows,
+                ) from e
+            except Exception as e:  # noqa: BLE001 — typed on page 0, partial after
+                if page == 0:
+                    raise
+                raise FMPPartialPageException(
+                    f"{endpoint}: page {page} failed after {len(rows)} row(s) "
+                    f"({type(e).__name__}: {e}) — the window is INCOMPLETE",
+                    endpoint=endpoint, pages_total=page + 1, pages_failed=1, partial=rows,
+                ) from e
+
+            if not isinstance(data, list):
+                logger.warning(
+                    "%s page %d returned %s, expected list — counted as a lost page",
+                    endpoint, page, type(data).__name__,
+                )
+                raise FMPPartialPageException(
+                    f"{endpoint}: page {page} returned {type(data).__name__}, expected list",
+                    endpoint=endpoint, pages_total=page + 1, pages_failed=1, partial=rows,
+                )
+
+            pages_done = page + 1
+            if not data:
+                if sym is None and page > 0:
+                    # The previous market-wide page was FULL and still inside the window;
+                    # an empty next page means the feed stopped short, not that it ended.
+                    raise FMPPartialPageException(
+                        f"{endpoint}: market-wide page {page} was empty before reaching {since}",
+                        endpoint=endpoint, pages_total=page + 1, pages_failed=0, partial=rows,
+                    )
+                return rows
+            page_keys = []
+            for r in data:
+                if not isinstance(r, dict):
+                    continue
+                key = json.dumps(r, sort_keys=True, default=str)
+                if key in seen_before:
+                    continue
+                rows.append(r)
+                page_keys.append(key)
+            seen_before.update(page_keys)
+
+            filed = [
+                str(r.get("filingDate"))[:10]
+                for r in data
+                if isinstance(r, dict) and _looks_like_iso_date(r.get("filingDate"))
+            ]
+            if filed and min(filed) < since:
+                return rows
+            if len(data) < page_size:
+                if sym is None:
+                    # Market-wide, a short page whose oldest row is still INSIDE the window is
+                    # not the end of the feed (the whole market files far more than one page
+                    # per month): FMP served fewer rows than asked — e.g. a silently lowered
+                    # per-page cap, which `_fetch_congress_pages` records happening elsewhere.
+                    # Returning would publish a days-long sample as "30 days", so fail closed.
+                    logger.warning(
+                        "%s: market-wide page %d returned %d < %d rows with its oldest filing "
+                        "(%s) inside the window — FMP may have lowered its per-page cap",
+                        endpoint, page, len(data), page_size, min(filed) if filed else "n/a",
+                    )
+                    raise FMPPartialPageException(
+                        f"{endpoint}: short market-wide page {page} ({len(data)} < {page_size}) "
+                        f"did not reach {since}",
+                        endpoint=endpoint, pages_total=page + 1, pages_failed=0, partial=rows,
+                    )
+                return rows
+
+        oldest = min(
+            (str(r.get("filingDate"))[:10] for r in rows if _looks_like_iso_date(r.get("filingDate"))),
+            default="n/a",
+        )
+        logger.warning(
+            "%s: page cap %d hit; oldest filingDate seen %s is still >= since %s — window "
+            "NOT covered (symbol=%s)", endpoint, max_pages, oldest, since, sym or "market-wide",
+        )
+        raise FMPPartialPageException(
+            f"{endpoint}: {pages_done} page(s) did not reach {since} (oldest {oldest})",
+            endpoint=endpoint, pages_total=pages_done, pages_failed=0, partial=rows,
+        )
 
     # ── Congressional trading ────────────────────────────────────────
 

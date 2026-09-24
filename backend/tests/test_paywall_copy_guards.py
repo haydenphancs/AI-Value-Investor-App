@@ -386,3 +386,22 @@ def test_every_accent_the_backend_emits_is_mapped_client_side():
         )
     }
     assert served <= mapped, f"served accents are unmapped: {sorted(served - mapped)}"
+
+
+# ── 5. The signals row: backend copy == the Swift fallback (CEO Buys, 2026-09-23) ──────
+
+def _swift_ternary_strings(row: str) -> tuple[str, str]:
+    """The paid and free literals of `detail: paid ? "…" : "…"` inside one fallback row."""
+    m = re.search(r'detail:\s*paid\s*\?\s*"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"', row, re.S)
+    assert m, f"the signals fallback row no longer has the `paid ? … : …` detail shape:\n{row}"
+    return m.group(1), m.group(2)
+
+
+def test_signals_copy_matches_between_backend_and_swift_fallback():
+    """The paywall renders the backend row when it is reachable and the bundled Swift row
+    when it is not; the two used to be edited independently. Adding the CEO card changed
+    this sentence on both sides — pin that they stay identical, and that both name it."""
+    paid_swift, free_swift = _swift_ternary_strings(_fallback_row("signals"))
+    assert pf._signals_row("pro")["detail"] == paid_swift
+    assert pf._signals_row("free")["detail"] == free_swift
+    assert "CEO" in paid_swift, "the paid copy lists the signal families — CEO Buys is one"

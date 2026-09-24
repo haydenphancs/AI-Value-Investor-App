@@ -238,8 +238,14 @@ struct AnalysisPersona: Identifiable, Hashable {
         description: "A contrarian skeptic who hunts deeply undervalued, out-of-favor companies with a large margin of safety, scrutinizes the balance sheet for hidden risk, and is wary of hype, crowded trades, and expensive darlings."
     )
 
+    /// ⚠️ ORDER MATTERS: this is the display order of the persona row until
+    /// `GET /research/personas` lands, and the order of Settings → Default Analyst. It must
+    /// match the backend's `_PERSONA_DISPLAY_ORDER` (research.py), which is what the served list
+    /// is sorted by — a mismatch makes the cards visibly reshuffle when the fetch arrives.
+    /// Growth Hunter second, right after Quality Compounder (developer, 2026-09-23).
+    /// Pinned by `backend/tests/test_persona_display_order.py`.
     static let allCases: [AnalysisPersona] = [
-        .warrenBuffett, .cathieWood, .peterLynch, .billAckman, .michaelBurry
+        .warrenBuffett, .peterLynch, .cathieWood, .billAckman, .michaelBurry
     ]
 
     static let fallbacks: [AnalysisPersona] = allCases
@@ -353,9 +359,15 @@ struct AnalysisFeature: Identifiable {
             systemIconName: "shield.fill",
             iconColor: AppColors.primaryBlue
         ),
+        // Was "Insider & Wall Street" / "…and analyst consensus". Analyst price targets and
+        // grades are outside the FMP licence, so a report can no longer deliver a Wall Street
+        // consensus, and the card was promising one. Capital allocation replaces it because it IS
+        // in every report — the "Insider & Management" deep dive is exactly Insider Activity,
+        // Capital Allocation (dividends, buybacks, share count) and Key Management — and was the
+        // one part of that module this list never mentioned (developer, 2026-09-23).
         AnalysisFeature(
-            title: "Insider & Wall Street",
-            subtitle: "Insider activity, management quality, and analyst consensus",
+            title: "Insider & Capital Allocation",
+            subtitle: "Insider activity, buybacks and dividends, and key management",
             iconName: "icon_feature_whales",
             systemIconName: "person.2.fill",
             iconColor: AppColors.alertOrange

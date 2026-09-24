@@ -15,7 +15,7 @@ final class SignalTickerDetailViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    let kind: String        // "whale" | "congress"
+    let kind: String        // one of ExclusiveSignal.drillDownKinds ("whale" | "congress" | "ceo")
     let ticker: String
     private let apiClient: APIClient
 

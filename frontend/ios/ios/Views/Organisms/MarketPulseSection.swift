@@ -37,7 +37,12 @@ struct MarketPulseSection: View {
                     .padding(.horizontal, AppSpacing.lg)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
+                    // `EqualWidthHStack`, not `HStack`: every tile takes the width (and
+                    // height) of the widest. An HStack sized each tile to its own label
+                    // ("Nasdaq Composite ETF" stood out, TestFlight 2026-09-23; at larger text
+                    // "Russell 2000 ETF" / a six-figure BTC do too). Still content-derived,
+                    // so Dynamic Type grows the row instead of clipping it.
+                    EqualWidthHStack(spacing: 10) {
                         ForEach(items) { item in
                             MarketPulseCard(item: item) { onTap?(item) }
                         }

@@ -206,7 +206,7 @@ Real investor names: **Warren Buffett · Peter Lynch · Cathie Wood · Bill Ackm
 Charlie Munger · Ray Dalio · Michael Burry · Joel Greenblatt · Howard Marks · Morgan Housel ·
 Robert Kiyosaki** — and any other named individual.
 
-This is not only a copy rule; **five in-app surfaces would put one of these names into a captured
+This is not only a copy rule; **six in-app surfaces would put one of these names into a captured
 screenshot**:
 
 | Surface | Why |
@@ -216,6 +216,7 @@ screenshot**:
 | Wiser → Money Moves | an article is titled "Warren Buffett's Early Days" |
 | Tracking → Whales | lists six living investors by name with follow buttons |
 | Research → persona picker | check the rendered labels before shooting |
+| Brand cover (tap the header logo) | shows a weekly real-investor quote + attribution — capture with `SIMCTL_CHILD_CAYDEX_QUOTE_WEEK=off` |
 
 Decide the rename question (plan §7) **before** capturing screenshots, or you will shoot them twice.
 

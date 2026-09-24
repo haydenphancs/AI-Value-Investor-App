@@ -77,7 +77,7 @@ def _cache_set(key: str, value: Any) -> None:
 # measured proxy fidelity and why Bitcoin waits for Phase 5.
 DEFAULT_MARKET_TICKERS: List[Dict[str, str]] = [
     {"symbol": "SPY", "name": "S&P 500 ETF", "type": "etf"},
-    {"symbol": "ONEQ", "name": "Nasdaq Composite ETF", "type": "etf"},
+    {"symbol": "ONEQ", "name": "Nasdaq ETF", "type": "etf"},   # = _PULSE_SYMBOLS (2026-09-23)
     {"symbol": "DIA", "name": "Dow Jones ETF", "type": "etf"},
     {"symbol": "GLD", "name": "Gold ETF", "type": "etf"},
 ]

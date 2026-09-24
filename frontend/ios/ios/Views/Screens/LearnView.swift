@@ -115,6 +115,23 @@ struct LearnContentView: View {
             await MoneyMovesProgressStore.shared.hydrate()
             await bookmarks.hydrate()
         }
+        // Wiser was the ONLY one of the five tab roots without this. `.task(id: isActiveTab)`
+        // above covers a hydrate that merely raced session restore, but it cannot fire for
+        // someone already looking at this tab when the identity changes — and the Learn stores
+        // are the ones where that matters most, because they are device-global: `AppState`
+        // clears them on sign-out (auth.md §7), so without a re-hydrate the tab kept showing
+        // an emptied set of completions until the app was killed, and signing IN never pulled
+        // the new account's progress at all.
+        //
+        // Clearing is already owned by `AppState.discardDataForEndedSession()`; this only has
+        // to re-fetch, so it gates the whole body on the active tab.
+        .reloadOnIdentityChange { isActive in
+            guard isActive else { return }
+            await viewModel.prefetchMoneyMoves()
+            await JourneyProgressStore.shared.hydrate()
+            await MoneyMovesProgressStore.shared.hydrate()
+            await bookmarks.hydrate()
+        }
         // "Ask the Agent" book chat keeps its own VM + cover so a book-grounded session
         // never overwrites the general conversation `ContentView` owns.
         .aiChatCover(isPresented: $showBookChat, viewModel: bookChatViewModel)
@@ -139,6 +156,19 @@ struct LearnContentView: View {
                 // NOTE: unlike Home, this subtree DOES render AsyncImage (BookCoverImage, MoneyMoveCoverImage),
                 // so going eager fires those on entry. Bounded (~10 books, ~15 articles) and measured.
                 VStack(spacing: AppSpacing.xxl) {
+                    // Wiser is the only gated tab that does NOT go blank without an account:
+                    // the Books roster and the Journey roadmap are compiled-in, and Money Moves
+                    // falls back to its bundled JSON. So this is a NOTICE beside the content,
+                    // not `AccountGateEmptyState` in place of it — gating the page would delete
+                    // a feature that genuinely works.
+                    //
+                    // But the silence was its own bug: all five stores (`MoneyMovesContentStore`,
+                    // `JourneyContentStore`, `JourneyProgressStore`, `MoneyMovesProgressStore`,
+                    // `BookmarkStore`) swallow a refused `.signInRequired` into a `print`, so
+                    // completion ticks and bookmarks silently revert to device-local and the
+                    // screen says nothing. This says it.
+                    accountGateNotice
+
                     fullLearnDashboard
 
                     // Bottom padding for tab bar
@@ -148,6 +178,50 @@ struct LearnContentView: View {
             .refreshable {
                 await viewModel.refresh()
             }
+        }
+    }
+
+    // MARK: - Account gate
+
+    /// A notice when the session is not armed, and nothing at all when it is.
+    ///
+    /// Read LIVE from `appState.auth.status` rather than snapshotted during a load, which is
+    /// the opposite of what the other four tabs do — deliberately. Those snapshot because they
+    /// have a load to report on; here there is no single load to attach to (five independent
+    /// stores hydrate on their own schedule), and `AppState` is `@Observable`, so a live read
+    /// makes the notice disappear the moment the session heals with nothing to re-run.
+    ///
+    /// `.restoring` gets no button: `AppState.requestSignIn` declines to prompt while a restore
+    /// is pending, so it would do nothing (auth.md §5).
+    @ViewBuilder
+    private var accountGateNotice: some View {
+        switch appState.auth.status {
+        case .authenticated:
+            EmptyView()
+
+        case .restoring:
+            InlineRetryNotice(
+                message: "Reconnecting your account… Your progress is saved on this device "
+                    + "and will sync once you're back.",
+                systemImage: "arrow.clockwise",
+                iconColor: AppColors.textMuted
+            )
+            .padding(.horizontal, AppSpacing.lg)
+
+        case .unauthenticated, .unknown, .loading:
+            // Normally unreachable — the sign-in wall in `iosApp.swift` means a signed-out
+            // user never sees a tab. Kept because a mid-session credential death lands here
+            // for the frame before the root swaps, and because a notice that only exists in
+            // one reachable state rots the moment another one opens up.
+            InlineRetryNotice(
+                message: "Sign in to save your progress. Lessons you finish and articles you "
+                    + "bookmark are kept on your account, so they follow you across devices.",
+                systemImage: "person.crop.circle.badge.checkmark",
+                iconColor: AppColors.textMuted,
+                retryTitle: "Sign In",
+                onRetry: { appState.requestSignIn(for: "save your learning progress") }
+            )
+            .padding(.horizontal, AppSpacing.lg)
         }
     }
 

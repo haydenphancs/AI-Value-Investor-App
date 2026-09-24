@@ -128,7 +128,7 @@ MARKET_INDEX_SYMBOL = "SPY"
 # makes the honest relabel affordable here.
 _INDEX_SYMBOLS: List[Tuple[str, str]] = [
     (MARKET_INDEX_SYMBOL, "S&P 500 ETF"),
-    ("ONEQ", "Nasdaq Comp ETF"),
+    ("ONEQ", "Nasdaq ETF"),   # same label as the Home Market Pulse tile (2026-09-23)
     ("DIA", "Dow ETF"),
 ]
 

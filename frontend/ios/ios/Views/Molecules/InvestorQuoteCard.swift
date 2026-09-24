@@ -24,10 +24,19 @@ struct InvestorQuoteCard: View {
                 .multilineTextAlignment(.center)
                 .lineSpacing(4)
 
-            // Author
-            Text("— \(quote.author)")
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
+            // Author + primary source
+            VStack(spacing: AppSpacing.xs) {
+                Text("— \(quote.author)")
+                    .font(AppTypography.labelSmall)
+                    .foregroundColor(AppColors.textMuted)
+
+                if let citation = quote.citation {
+                    Text(verbatim: citation)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .multilineTextAlignment(.center)
+                }
+            }
         }
         .padding(AppSpacing.xxl)
         .frame(maxWidth: .infinity)
@@ -42,6 +51,9 @@ struct InvestorQuoteCard: View {
             )
         )
         .cornerRadius(AppCornerRadius.large)
+        // One VoiceOver element: quote, author and source, instead of four fragments.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(quote.accessibilityLabel)
     }
 }
 

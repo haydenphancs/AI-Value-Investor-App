@@ -11,7 +11,7 @@ Composes one ET day's suggestion chips from two halves:
 Two invariants govern everything here, and both are contract rather than preference:
 
 1. **The response is IMPERSONAL.** One cache entry serves every caller, so nothing may
-   depend on who asked — no watchlist, no tier, no holdings. ``signals_v3`` is excluded
+   depend on who asked — no watchlist, no tier, no holdings. The signals cache (``_SIGNALS_CACHE_KEY``) is excluded
    for exactly this reason: its tickers are Pro-gated and ``redact_signals()`` masks them
    per request, so a globally cached set carrying them would hand Free users the tickers
    the paywall hides. `test_chat_starters_endpoint.py` fails the build if this module

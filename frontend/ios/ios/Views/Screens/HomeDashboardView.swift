@@ -107,6 +107,23 @@ struct HomeDashboardView: View {
         // left the guest's watchlist on screen for the full 5-minute window — and signing out
         // left the previous account's watchlist for the next person to open the app.
         .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+        // Heals a gate that latched during session restore.
+        //
+        // `.reloadOnIdentityChange` deliberately does NOT fire on the launch hop
+        // `.restoring → .authenticated` (`AppState.identityGeneration` does not move — discovering
+        // an identity is not changing one), and `.task(id: isActiveTab)` has already run for the
+        // tab that is on screen at launch. So nothing re-ran the load that latched the gate, and
+        // the measured result was ~60 seconds of "Reconnecting…" AFTER `/users/me` had
+        // already answered 200.
+        //
+        // Narrow on purpose: it fires only when this surface is currently gated, so a healthy
+        // sign-in does not pay for a second load. Same trigger, and the same reasoning, as
+        // `AlertsTabContent`'s `onChange(of: appState.auth.status)`.
+        .onChange(of: appState.auth.status) { _, status in
+            guard status == .authenticated,
+                  viewModel.requiresSignIn || viewModel.isReconnecting else { return }
+            Task { await viewModel.load() }
+        }
         // Returning from the background is the other way a user arrives at hours
         // -old data. `scenePhase` is unused in this codebase; this is the
         // NotificationCenter idiom UpdatesView already uses.
@@ -292,7 +309,31 @@ struct HomeDashboardView: View {
             // Laziness buys nothing here — at most eight fixed sections, all built from
             // data already in memory, with no AsyncImage among them.
             VStack(spacing: AppSpacing.xl) {
-                if let errorMessage = viewModel.errorMessage {
+                // The account gate comes FIRST, and `isReconnecting` is checked before
+                // `requiresSignIn` — during a restore we cannot prove the session, but we DO
+                // hold a credential, so "sign in" would be a false statement (auth.md §5).
+                // Same branch order as `ReportsListSection.body`.
+                //
+                // This replaces what the TestFlight screenshot showed: `errorBanner` carrying
+                // "Sign in to use this feature." over a blank page, with no way to act on it.
+                // The banner below is left for genuine network/server failures, which is all it
+                // was ever meant to describe.
+                if viewModel.isReconnecting {
+                    AccountGateEmptyState(
+                        headline: "Reconnecting…",
+                        subtitle: "Getting your dashboard. This usually takes a moment.",
+                        mode: .reconnecting
+                    )
+                } else if viewModel.requiresSignIn {
+                    AccountGateEmptyState(
+                        headline: "Sign in to see your dashboard",
+                        subtitle: "Your watchlist, your markets and your signals are saved to "
+                            + "your account, so they follow you across devices.",
+                        mode: .signedOut(onSignIn: {
+                            appState.requestSignIn(for: "see your dashboard")
+                        })
+                    )
+                } else if let errorMessage = viewModel.errorMessage {
                     errorBanner(errorMessage)
                 }
 
@@ -463,9 +504,9 @@ struct HomeDashboardView: View {
     }
 
     private func openLeader(_ kind: String, _ leader: SignalLeader) {
-        // Whale & Congress → the per-ticker drill-down (who bought/added it).
+        // Whale, Congress & CEO Buys → the per-ticker drill-down (who bought/added it).
         // Earnings has no "who bought" list → open the ticker detail directly.
-        if kind == "whale" || kind == "congress" {
+        if ExclusiveSignal.drillDownKinds.contains(kind) {
             signalDetailTarget = SignalDetailTarget(kind: kind, symbol: leader.symbol)
         } else {
             presentStock(symbol: leader.symbol, name: leader.symbol)
@@ -487,7 +528,7 @@ struct HomeDashboardView: View {
 /// A tapped whale/congress signal ticker, presented as the per-ticker drill-down.
 private struct SignalDetailTarget: Identifiable {
     let id = UUID()
-    let kind: String        // "whale" | "congress"
+    let kind: String        // one of ExclusiveSignal.drillDownKinds
     let symbol: String
 }
 

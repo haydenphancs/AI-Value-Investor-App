@@ -63,6 +63,7 @@ def _groups(**kwargs) -> SignalsGroupResponse:
         congress=kwargs.get("congress", _group("congress")),
         whale=kwargs.get("whale", _group("whale")),
         earnings=kwargs.get("earnings", _group("earnings")),
+        ceo=kwargs.get("ceo", _group("ceo")),
     )
 
 
@@ -115,7 +116,7 @@ def test_locked_payload_carries_no_real_ticker_anywhere():
 
 def test_locked_groups_are_flagged_with_the_upgrade_target():
     redacted = redact_signals(_groups(), "pro")
-    for group in (redacted.congress, redacted.whale, redacted.earnings):
+    for group in (redacted.congress, redacted.whale, redacted.earnings, redacted.ceo):
         assert group is not None
         assert group.is_locked is True
         assert group.tier_required == "pro"
@@ -147,7 +148,34 @@ def test_card_chrome_survives():
     assert redacted.congress.kind == "congress"
     assert redacted.whale.kind == "whale"
     assert redacted.earnings.kind == "earnings"
+    assert redacted.ceo.kind == "ceo"
     assert redacted.congress.as_of_date == "2026-08-07"
+
+
+def test_redaction_covers_every_group_field():
+    """A card added to `SignalsGroupResponse` later must be locked too, not passed through
+    in clear. `redact_signals` iterates `model_fields` for exactly this reason; this pins
+    the outcome on every field, including ones that do not exist yet."""
+    full = SignalsGroupResponse(**{f: _group(f) for f in SignalsGroupResponse.model_fields})
+    redacted = redact_signals(full, "pro")
+    for field in SignalsGroupResponse.model_fields:
+        group = getattr(redacted, field)
+        assert group is not None and group.is_locked is True, field
+        assert len(group.entries) == 1 and group.entries[0].symbol.strip("•") == "", field
+    assert set(SignalsGroupResponse.model_fields) >= {"congress", "whale", "earnings", "ceo"}
+
+
+def test_ceo_dollar_value_survives_the_lock():
+    """The locked CEO card still reads "$46.8M bought" — the dollar total is the tease and
+    names no ticker, exactly like the congress member count."""
+    ceo = SignalGroupResponse(kind="ceo", entries=[
+        SignalRowResponse(rank=1, symbol="GME", name="GameStop Corp.", value=46_770_000.0),
+        SignalRowResponse(rank=2, symbol="FOX", name="Fox Corp", value=10_270_000.0),
+    ], as_of_date="2026-09-22")
+    redacted = redact_signals(_groups(ceo=ceo), "pro")
+    assert redacted.ceo.entries[0].value == 46_770_000.0
+    assert "GME" not in redacted.model_dump_json() and "GameStop" not in redacted.model_dump_json()
+    assert redacted.ceo.locked_count == 2
 
 
 # ── the shared-cache regression (P0) ─────────────────────────────────────────
@@ -196,6 +224,7 @@ def test_absent_groups_stay_absent():
     assert redacted.congress is None
     assert redacted.whale is None
     assert redacted.earnings is None
+    assert redacted.ceo is None
 
 
 def test_an_empty_group_is_not_flagged_as_locked():

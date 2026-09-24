@@ -150,12 +150,18 @@ the cache-aside two-tier pattern (in-memory dict + Supabase `*_cache` table + `_
 
 ### 2.3 Home dashboard signals
 
-`signals_service.py` powers three home cards:
+`signals_service.py` powers four home cards:
 - **Congressional Buys** — FMP senate/house-latest.
 - **Whale Accumulation** — tickers 13F funds are adding to (deduped by CIK), from the
   daily-hydrated Supabase whale tables (no FMP calls at read time).
 - **Earnings Shockers** — biggest EPS beats/misses vs Street (signed surprise %), FMP
   `earnings-calendar` via `_compute_surprise`.
+- **CEO Buys** (2026-09-23) — chief executives' open-market purchases of their own common
+  stock, ranked by total $ bought over the last 30 days of Form 4 FILINGS. FMP
+  `insider-trading/search?transactionType=P-Purchase` with no symbol (market-wide) via the
+  fail-closed `get_insider_trades_since`; gated like Earnings Shockers (NASDAQ/NYSE/AMEX +
+  $250M) plus a price-plausibility band; $100K per-ticker floor. Pro-locked like the others.
+  A build where any card RAISED is kept in memory 5 min and never written to `signals_cache`.
 
 ### 2.4 Hidden market signals (in-report)
 

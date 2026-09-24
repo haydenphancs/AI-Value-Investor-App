@@ -33,6 +33,19 @@ final class HomeDashboardViewModel: ObservableObject {
     /// message instead and the UI stays interactive.
     @Published private(set) var hasAttemptedLoad: Bool = false
 
+    /// The dashboard is empty because there is no account, not because the load broke.
+    ///
+    /// ⚠️ A SNAPSHOT taken during `performLoad()`, never a live read of auth — the same shape
+    /// (and the same trap) as `ResearchViewModel.requiresSignInForReports`. Anything that
+    /// changes the identity MUST re-run the load; `handleIdentityChange` and the
+    /// `.task(id: isActiveTab)` in `HomeDashboardView` are what do that.
+    @Published private(set) var requiresSignIn: Bool = false
+
+    /// A credential is stored but not armed yet. Renders as "Reconnecting…", NEVER as the
+    /// sign-in prompt: this user is signed in as far as they are concerned, and
+    /// `AppState.requestSignIn` declines to prompt in this window anyway (auth.md §5).
+    @Published private(set) var isReconnecting: Bool = false
+
     // MARK: - Dependencies
     private let repository: HomeRepositoryProtocol
 
@@ -113,6 +126,10 @@ final class HomeDashboardViewModel: ObservableObject {
         data = nil
         lastLoadedAt = nil
         errorMessage = nil
+        // Cleared with the rest, ABOVE the gate: a latched "sign in" left over from a load
+        // that raced session restore is exactly the state this reload exists to heal.
+        requiresSignIn = false
+        isReconnecting = false
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -172,16 +189,52 @@ final class HomeDashboardViewModel: ObservableObject {
     private func performLoad() async {
         isLoading = true
         errorMessage = nil
+
+        // THREE outcomes, not two — decided from the OUTCOME of the request, never from a
+        // pre-flight read of `auth.status`.
+        //
+        // `GET /home/dashboard` is `.signInRequired`, so an unarmed caller is refused by
+        // `APIClient.buildRequest` before any network I/O, and the refusal arrives TYPED as
+        // `AppError.signInRequired`. This ViewModel used to flatten that to its `.message` —
+        // the generic "Sign in to use this feature." — and paste it into the NETWORK-error
+        // banner. That is the TestFlight screenshot: an orange wifi-exclamation line over a
+        // blank page, with nothing to tap, shown to a signed-in user mid-restore.
+        //
+        // ⚠️ Why not `guard AppActions.shared.isSignedIn` up front, as `ResearchViewModel`
+        // does: `isSignedIn` is `status == .authenticated`, and on EVERY signed-in cold launch
+        // `primeStoredCredential` arms the token while the status still reads `.restoring`
+        // (AppState documents that ordering as load-bearing). Home is the tab on screen at
+        // launch, so that guard refused a request that would have succeeded and showed
+        // "Reconnecting…" instead of the dashboard — the adversarial review measured it, and
+        // the session-healed reload in `HomeDashboardView` was only hiding it. The refusal is
+        // APIClient's own answer to "is a token armed?"; asking anything else is a guess.
         do {
             data = try await repository.fetchHomeDashboard()
             lastLoadedAt = Date()
+            requiresSignIn = false
+            isReconnecting = false
         } catch {
             // Route through AppError like every other surface — a single
             // hardcoded string can't tell "you're offline" from "you're signed
             // out" from "we're rate-limited", and the user gets no actionable
             // hint. Existing data is deliberately kept on screen (stale beats
             // blank); only the banner changes.
-            errorMessage = AppError.from(error).message
+            let appError = AppError.from(error)
+            // Signed out and broken must not look alike: one wants a Sign In button, the other
+            // a retry, and a network-error banner over an auth refusal is the defect this whole
+            // pass is about. A refused load also drops `data` — nothing on screen can be
+            // refreshed while the token is unarmed. `lastLoadedAt` is deliberately NOT stamped
+            // here, or the staleness window would suppress the reload that heals the gate.
+            if case .signInRequired = appError {
+                data = nil
+                let reconnecting = AppActions.shared.isRestoringSession
+                isReconnecting = reconnecting
+                requiresSignIn = !reconnecting
+            } else {
+                errorMessage = appError.message
+                requiresSignIn = false
+                isReconnecting = false
+            }
             #if DEBUG
             print("❌ [HomeDashboardVM] load failed: \(type(of: error)): \(error)")
             #endif

@@ -3,7 +3,10 @@
 //  ios
 //
 //  Per-ticker drill-down for the Home "App-Exclusive Signals" cards (Whale
-//  Accumulation, Congressional Buys): WHO bought/added the ticker, WHEN, HOW MUCH.
+//  Accumulation, Congressional Buys, CEO Buys): WHO bought/added the ticker, WHEN,
+//  HOW MUCH. Every kind-dependent string below is a `switch` with an explicit case per
+//  kind — a new kind must never fall through into another kind's wording (before CEO
+//  Buys, anything that was not "whale" was worded as congress by an `else`).
 //  Decoded from `GET /api/v1/home/signals/{kind}/{ticker}` and mapped to a
 //  display model with pre-formatted strings the row renders directly.
 //
@@ -17,7 +20,7 @@ import SwiftUI
 
 struct SignalTickerDetailDTO: Decodable {
     let symbol: String
-    let kind: String                 // "whale" | "congress"
+    let kind: String                 // "whale" | "congress" | "ceo"
     let companyName: String
     let price: Double?
     let marketCap: Double?
@@ -35,19 +38,20 @@ struct SignalTickerDetailDTO: Decodable {
 struct SignalHolderDTO: Decodable {
     let whaleId: String?             // non-nil → in our registry → tappable profile
     let name: String
-    let subtitle: String             // whale: "13F fund" · congress: "Senator (KY)"
+    let subtitle: String             // whale: "13F fund" · congress: "Senator (KY)" · ceo: officer title
     let transactionDate: String?
     let disclosureDate: String?
     let allocationPercent: Double?
     let allocationChange: Double?
     let isNewPosition: Bool?
-    let amountEst: Double?           // 13F implied-price $ estimate
+    let amountEst: Double?           // whale: 13F implied-price $ ESTIMATE · ceo: EXACT shares × price
     let amountRange: String?         // congress filed range "$1,001 – $15,000"
     let owner: String?
+    let shares: Double?              // ceo: shares bought (the average price is amountEst ÷ shares)
     let action: String
 
     enum CodingKeys: String, CodingKey {
-        case name, subtitle, owner, action
+        case name, subtitle, owner, action, shares
         case whaleId = "whale_id"
         case transactionDate = "transaction_date"
         case disclosureDate = "disclosure_date"
@@ -74,6 +78,7 @@ struct SignalHolderDTO: Decodable {
         amountEst = try c.decodeIfPresent(Double.self, forKey: .amountEst)
         amountRange = try c.decodeIfPresent(String.self, forKey: .amountRange)
         owner = try c.decodeIfPresent(String.self, forKey: .owner)
+        shares = try c.decodeIfPresent(Double.self, forKey: .shares)
         action = try c.decodeIfPresent(String.self, forKey: .action) ?? "BOUGHT"
     }
 }
@@ -93,7 +98,7 @@ struct SignalHolder: Identifiable {
 
 struct SignalTickerDetail {
     let symbol: String
-    let kind: String                 // "whale" | "congress"
+    let kind: String                 // "whale" | "congress" | "ceo"
     let companyName: String
     let priceText: String            // "" when unavailable
     let marketCapText: String        // "45.2B Cap" or ""
@@ -101,12 +106,20 @@ struct SignalTickerDetail {
 
     var isEmpty: Bool { holders.isEmpty }
     /// Header sub-line under the ticker.
-    var subtitleLine: String { kind == "whale" ? "Funds accumulating" : "Members buying" }
+    var subtitleLine: String {
+        switch kind {
+        case "whale": return "Funds accumulating"
+        case "ceo": return "CEO open-market buys"
+        default: return "Members buying"
+        }
+    }
     /// Honest empty-state copy.
     var emptyText: String {
-        kind == "whale"
-            ? "No tracked funds are currently adding \(symbol)."
-            : "No congress members bought \(symbol) in the last 30 days."
+        switch kind {
+        case "whale": return "No tracked funds are currently adding \(symbol)."
+        case "ceo": return "No CEO open-market purchases of \(symbol) in the last 30 days."
+        default: return "No congress members bought \(symbol) in the last 30 days."
+        }
     }
 }
 
@@ -127,7 +140,8 @@ extension SignalTickerDetailDTO {
 
 extension SignalHolderDTO {
     func toDisplay(kind: String) -> SignalHolder {
-        if kind == "whale" {
+        switch kind {
+        case "whale":
             return SignalHolder(
                 whaleId: whaleId,
                 name: name,
@@ -140,7 +154,18 @@ extension SignalHolderDTO {
                 ),
                 secondaryText: SignalDetailFormat.whaleSecondary(amountEst)
             )
-        } else {
+        case "ceo":
+            // CEOs are never registry whales, so the row is never tappable. The dollar
+            // figure is EXACT (shares × the reported price), so no "~ … est." hedge.
+            return SignalHolder(
+                whaleId: nil,
+                name: name,
+                subtitle: subtitle,
+                dateText: SignalDetailFormat.insiderDate(traded: transactionDate, filed: disclosureDate),
+                primaryText: amountEst.map(SignalDollarFormat.compact) ?? "",
+                secondaryText: SignalDollarFormat.sharesAtPrice(shares: shares, amount: amountEst) ?? ""
+            )
+        default:
             return SignalHolder(
                 whaleId: whaleId,
                 name: name,
@@ -204,6 +229,14 @@ enum SignalDetailFormat {
     static func whaleDate(_ iso: String?) -> String {
         guard let d = shortDate(iso) else { return "" }
         return "Filed \(d)"
+    }
+
+    /// "Traded Sep 18 · Filed Sep 20" — a Form 4 is FILED, not "disclosed" like a PTR.
+    static func insiderDate(traded: String?, filed: String?) -> String {
+        var parts: [String] = []
+        if let t = shortDate(traded) { parts.append("Traded \(t)") }
+        if let f = shortDate(filed) { parts.append("Filed \(f)") }
+        return parts.joined(separator: " · ")
     }
 
     static func congressDate(traded: String?, disclosed: String?) -> String {

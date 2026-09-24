@@ -260,8 +260,13 @@ struct AlertsTabContent: View {
 
     /// Forward-looking digest items only: earnings dates and dated market events.
     ///
-    /// `GET /tracking/assets` is guest-allowed, so this is the one section with content
-    /// for a signed-out user.
+    /// ⚠️ This used to read "`GET /tracking/assets` is guest-allowed, so this is the one
+    /// section with content for a signed-out user." That stopped being true with the
+    /// account-only wall on 2026-09-07 — the route is `.signInRequired`
+    /// (`APIEndpoint.swift`), so an unarmed session gets nothing here either. The section
+    /// still shows only its `emptyMessage` in that window, which is the weakest of the three;
+    /// the other two carry the typed `.signedOut` / `.reconnecting` states below, and
+    /// `TrackingViewModel` now carries the same flags for the Assets sub-tab this reads from.
     @ViewBuilder
     private func upcomingSection() -> some View {
         AlertsEventsSection(

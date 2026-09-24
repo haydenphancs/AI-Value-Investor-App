@@ -129,6 +129,35 @@ class TrackingViewModel: ObservableObject {
     /// of the same screen simply printed to the console and gave up.
     @Published var whalesErrorMessage: String?
 
+    /// The Assets half is empty because its load was REFUSED for want of an armed credential,
+    /// not because it broke. Kept as a flag rather than folded into `assetsErrorMessage` for
+    /// the reason this whole pass exists — once `AppError.signInRequired` is flattened to its
+    /// `.message`, the view renders "Couldn't load your holdings" over a **Retry** button that
+    /// re-fires a request `APIClient` refuses before it leaves the device.
+    ///
+    /// ⚠️ ONE PAIR PER HALF, not one shared pair. A shared pair was tried and the review
+    /// caught it: `loadWhaleList` succeeding after the session healed cleared the flags the
+    /// ASSETS load had set, and since switching sub-tab fetches nothing, Assets then fell
+    /// through to "No tickers yet" about a portfolio that was never loaded. Each writer now
+    /// touches only its own half.
+    ///
+    /// ⚠️ Written from the OUTCOME of a load, never from a pre-flight `auth.status` read — see
+    /// `loadTrackingFeed` for why that read is wrong on every cold launch.
+    @Published private(set) var assetsRequiresSignIn: Bool = false
+    /// A credential is stored but not armed yet: "Reconnecting…", never the sign-in prompt
+    /// (auth.md §5).
+    @Published private(set) var assetsIsReconnecting: Bool = false
+
+    /// The Whales half's own pair. See `assetsRequiresSignIn` for why it is not shared.
+    @Published private(set) var whalesRequiresSignIn: Bool = false
+    @Published private(set) var whalesIsReconnecting: Bool = false
+
+    /// Either half is showing the account gate — what `TrackingView`'s session-healed trigger
+    /// keys on, so a heal reloads the screen if ANY part of it is waiting on the session.
+    var isAnySurfaceGated: Bool {
+        assetsRequiresSignIn || assetsIsReconnecting || whalesRequiresSignIn || whalesIsReconnecting
+    }
+
     // Sheet States
     @Published var showAddAssetSheet: Bool = false
     @Published var showSortSheet: Bool = false
@@ -693,6 +722,19 @@ class TrackingViewModel: ObservableObject {
 
     @discardableResult
     private func loadTrackingFeed() async -> Bool {
+        // THREE outcomes, not two — decided from the OUTCOME, never from a pre-flight read of
+        // `auth.status`.
+        //
+        // `GET /tracking/assets` is `.signInRequired`, so an unarmed caller is refused by
+        // `APIClient.buildRequest` BEFORE any network I/O and the refusal arrives typed, as
+        // `AppError.signInRequired`. That refusal is the one reliable signal, because it is
+        // APIClient's own answer to "is a token armed?". A pre-flight
+        // `guard AppActions.shared.isSignedIn` looks equivalent and is not: `isSignedIn` is
+        // `status == .authenticated`, and on EVERY signed-in cold launch `primeStoredCredential`
+        // arms the token while the status still reads `.restoring` (AppState documents that
+        // ordering as load-bearing). That guard therefore refused a request that would have
+        // succeeded, and showed "Reconnecting…" to a user whose token was already on the wire.
+        // Calling and classifying costs nothing extra — the refusal never leaves the device.
         do {
             let feed = try await apiClient.request(
                 endpoint: .getTrackingAssets,
@@ -701,6 +743,8 @@ class TrackingViewModel: ObservableObject {
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
             self.alerts = feed.alerts.map { $0.toAppAlert() }
             self.assetsErrorMessage = nil
+            self.assetsRequiresSignIn = false
+            self.assetsIsReconnecting = false
             print("[TrackingVM] ✅ Loaded \(feed.assets.count) assets, \(feed.alerts.count) alerts from API")
             return true
         } catch {
@@ -711,7 +755,23 @@ class TrackingViewModel: ObservableObject {
             // The backend now answers 503 WATCHLIST_UNAVAILABLE rather than a
             // successful empty feed when the datastore is unreadable, so this
             // branch is reached instead of a false success.
-            self.assetsErrorMessage = appError.message
+            //
+            // Signed out and broken must not look alike: one wants a Sign In button, the other
+            // a Retry. A REFUSED load also empties the list — nothing on screen can be
+            // refreshed while the token is unarmed, and what is there may belong to an identity
+            // that is no longer the armed one.
+            if case .signInRequired = appError {
+                self.trackedAssets = []
+                self.alerts = []
+                self.assetsErrorMessage = nil
+                let reconnecting = AppActions.shared.isRestoringSession
+                self.assetsIsReconnecting = reconnecting
+                self.assetsRequiresSignIn = !reconnecting
+            } else {
+                self.assetsErrorMessage = appError.message
+                self.assetsRequiresSignIn = false
+                self.assetsIsReconnecting = false
+            }
             // Do NOT seed fabricated sample prices/alerts here. Rendering a
             // fake $178.42 quote or a "$2.4B Warren Buffett bought" rollup as
             // if it were the user's real holdings/alerts is worse than an
@@ -737,6 +797,9 @@ class TrackingViewModel: ObservableObject {
     }
 
     private func loadWhaleList(retryCount: Int = 3) async {
+        // Same three outcomes as the assets half, decided the same way — from the typed
+        // refusal, not from a pre-flight `auth.status` read (see `loadTrackingFeed`).
+        //
         // Captured BEFORE the request. `WhaleService.reset()` bumps this on sign-out, so a
         // response that lands afterwards is refused rather than re-persisted into the
         // device-global follows key (auth.md §7).
@@ -777,11 +840,19 @@ class TrackingViewModel: ObservableObject {
                 )
 
                 self.whalesErrorMessage = nil
+                self.whalesRequiresSignIn = false
+                self.whalesIsReconnecting = false
                 print("[TrackingVM] ✅ Loaded \(allWhales.count) whales from API (\(trackedWhales.count) followed)")
                 return // success — exit loop
             } catch {
                 lastError = error
                 print("[TrackingVM] ❌ Whale list attempt \(attempt)/\(retryCount) failed: \(error)")
+                // A refusal for want of an armed token is DETERMINISTIC — the next attempt is
+                // refused identically, so retrying only spends the 1 s + 2 s sleeps below.
+                // That mattered: `TrackingView.onAppear` calls `retryWhaleListIfNeeded()`, so
+                // while the session was unarmed every appearance of the Whales sub-tab paid
+                // for three refusals and two sleeps.
+                if case .signInRequired = AppError.from(error) { break }
                 if attempt < retryCount {
                     // 1s then 2s. The old 2s+4s ran INSIDE the parallel load, so a whale
                     // outage stalled the entire Assets tab for six seconds before it
@@ -795,7 +866,26 @@ class TrackingViewModel: ObservableObject {
         // Never fall back to sample data (sample UUIDs cause 404s on profile fetch).
         // But SAY SO: an unexplained empty roster reads as "we track nobody".
         if let lastError {
-            self.whalesErrorMessage = AppError.from(lastError).message
+            let appError = AppError.from(lastError)
+            if case .signInRequired = appError {
+                // ALL FOUR roster arrays, as one unit — the four the success path writes. The
+                // first version cleared only `trackedWhales` and `allPopularWhales` (the one the
+                // gate is keyed on), so "Reconnecting…" rendered directly above the previous
+                // load's hero carousel and Most Popular cards, Follow buttons live. Three
+                // independent reviewers found that; clearing two of four is the bug.
+                self.trackedWhales = []
+                self.allPopularWhales = []
+                self.heroWhales = []
+                self.popularWhales = []
+                self.whalesErrorMessage = nil
+                let reconnecting = AppActions.shared.isRestoringSession
+                self.whalesIsReconnecting = reconnecting
+                self.whalesRequiresSignIn = !reconnecting
+            } else {
+                self.whalesErrorMessage = appError.message
+                self.whalesRequiresSignIn = false
+                self.whalesIsReconnecting = false
+            }
         }
         print("[TrackingVM] ⚠️ Whale list unavailable after \(retryCount) attempts. Pull to refresh to retry.")
     }
@@ -828,7 +918,16 @@ class TrackingViewModel: ObservableObject {
             print("[TrackingVM] ✅ Loaded \(activities.count) whale activity items from API")
         } catch {
             print("[TrackingVM] ❌ Whale activity failed: \(error)")
-            // No sample fallback — leave empty so UI shows empty state
+            // No sample fallback — leave empty so UI shows empty state.
+            //
+            // A REFUSED load (no armed token) does clear, though: this runs alongside
+            // `loadWhaleList`, and a stale Recent Trades timeline left in place rendered ABOVE
+            // that roster's account gate — "Reconnecting…" sandwiched under trades the screen
+            // can no longer refresh. The gate itself is owned by the roster load.
+            if case .signInRequired = AppError.from(error) {
+                self.allWhaleTrades = []
+                self.groupedWhaleTrades = []
+            }
         }
     }
 
@@ -976,6 +1075,12 @@ class TrackingViewModel: ObservableObject {
         // ViewModel waiting to be rendered (.claude/rules/auth.md §7).
         trackedAssets = []
         assetsErrorMessage = nil
+        // Cleared with the rest, ABOVE the gate: a latched "sign in" from a load that raced
+        // session restore is exactly what this reload exists to heal.
+        assetsRequiresSignIn = false
+        assetsIsReconnecting = false
+        whalesRequiresSignIn = false
+        whalesIsReconnecting = false
         // The whale surfaces are follow-derived and therefore IDENTITY-SCOPED. Nothing
         // cleared them, so after A signed out and B signed in on the same device, B saw
         // A's followed investors and A's Recent Trades timeline until the new load
@@ -986,6 +1091,12 @@ class TrackingViewModel: ObservableObject {
         allWhaleTrades = []
         groupedWhaleTrades = []
         whaleActivities = []
+        // The Most Popular roster too. It is market-wide, but every row carries the previous
+        // identity's `isFollowing`, so it rendered their Follow state for a hidden tab until
+        // the next activation reloaded it.
+        allPopularWhales = []
+        heroWhales = []
+        popularWhales = []
         // Cleared so a later tab activation re-loads for the NEW identity rather than
         // treating the previous account's completed load as this one's.
         hasLoadedOnce = false
@@ -1047,7 +1158,17 @@ class TrackingViewModel: ObservableObject {
     }
 
     /// Called when the Whales tab appears — retries loading if the list is still empty.
+    ///
+    /// ⚠️ The gate check is load-bearing, not tidiness. This fires on EVERY appearance of the
+    /// sub-tab, and its only other condition — "the roster is empty" — is permanently true
+    /// while the session is unarmed, so every appearance used to spend three refused requests
+    /// and two backoff sleeps. An empty roster BECAUSE it is gated has nothing a retry can fix;
+    /// `TrackingView`'s `onChange(of: appState.auth.status)` reloads it when the session heals.
+    ///
+    /// Keyed on the gate the last load RECORDED, not on `auth.status`: see `loadTrackingFeed`
+    /// for why a status read is wrong on every cold launch.
     func retryWhaleListIfNeeded() {
+        guard !whalesRequiresSignIn, !whalesIsReconnecting else { return }
         guard allPopularWhales.isEmpty, !isLoading else { return }
         retryWhaleList()
     }

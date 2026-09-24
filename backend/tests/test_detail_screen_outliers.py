@@ -2115,6 +2115,30 @@ def _fake_etf_fmp():
     return _FMP(), calls
 
 
+class _FakeCorporateActions:
+    """The `svc.corporate_actions` seam (`corporate_actions_source`), serving a quarterly
+    ex-dividend cadence.
+
+    `/dividends` is outside the FMP licence, so the pay frequency is derived from ex-dates,
+    and without this seam `corporate_actions_source(self)` falls through to the real
+    singleton — two live FMP history calls per build (`dividend-adjusted` + `/full`), and a
+    blocked build that silently read "—". Counted apart from the FMP fake's `calls`:
+    production reaches it through its own service and cache, not `svc.fmp`.
+    """
+
+    def __init__(self):
+        import datetime as _dt
+        today = _dt.date.today()
+        self.ex_dates = [(today - _dt.timedelta(days=30 + 91 * i)).isoformat()
+                         for i in range(8)]
+        self.calls = 0
+
+    async def get_ex_dividend_dates(self, symbol, from_date=None, to_date=None):
+        await asyncio.sleep(0)
+        self.calls += 1
+        return list(self.ex_dates)
+
+
 def _etf_svc(monkeypatch):
     """An ETFService with no __init__ (no FMP/Supabase) and no Gemini."""
     from app.services import etf_service as M
@@ -2124,6 +2148,7 @@ def _etf_svc(monkeypatch):
     svc = M.ETFService.__new__(M.ETFService)
     svc.fmp, calls = _fake_etf_fmp()
     svc.price = PriceFromFMPFake(svc.fmp)
+    svc.corporate_actions = _FakeCorporateActions()
 
     async def _hook(self, **kw):
         return kw.get("fallback") or "A low-cost way to own the whole S&P 500."
@@ -2362,7 +2387,7 @@ async def test_etf_side_endpoints_reuse_the_detail_fundamentals(monkeypatch):
     monkeypatch.setattr(type(svc), "_check_snapshot_cache", lambda self, s, c: None)
     monkeypatch.setattr(type(svc), "_upsert_snapshot_cache", lambda self, s, c, d: None)
 
-    await svc.get_etf_detail("SPY", chart_range="3M")
+    detail = await svc.get_etf_detail("SPY", chart_range="3M")
     baseline = dict(calls)
 
     divs = await svc.get_dividend_history("SPY")
@@ -2375,6 +2400,10 @@ async def test_etf_side_endpoints_reuse_the_detail_fundamentals(monkeypatch):
     # never by calling `get_dividend_history` (2026-09-11).
     assert calls["dividends"] == 0
     assert divs.symbol == "SPY"
+    # ...and that derivation really ran, on BOTH screens, and they agree (the detail card
+    # once said "Pays Quarterly" while this endpoint said "—").
+    assert svc.corporate_actions.calls == 2
+    assert detail.net_yield.pay_frequency == divs.pay_frequency == "Quarterly"
 
 
 @pytest.mark.asyncio

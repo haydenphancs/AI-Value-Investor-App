@@ -326,19 +326,30 @@ def test_the_request_path_caps_its_suspect_fan_out():
 
 
 def test_the_hydrator_still_caps_too():
-    """Mutation guard against 'consolidating' the cap onto one path only."""
-    import re
-    from pathlib import Path
+    """Mutation guard against 'consolidating' the cap onto one path only.
 
-    src = Path(__file__).resolve().parents[1] / "scripts" / "hydrate_whales.py"
-    code = "\n".join(
-        line for line in src.read_text().splitlines()
+    The hydrator used to slice its own suspect list. Since 2026-09-24 it runs the SAME
+    shared block as the request path (its inline copy was swapped for the call), so the
+    cap reaches it through `resolve_13f_split_adjustments` — pinned where the list is
+    built by `test_the_request_path_caps_its_suspect_fan_out` above, and end to end on the
+    hydrator by `test_hydrate_whales_splits_characterisation.py`
+    (`test_suspects_over_the_cap_keep_their_raw_diff`). Pin the call, brace-bound to
+    `_process_13f`, and that no private cap came back beside it.
+    """
+    import inspect
+
+    import scripts.hydrate_whales as hw
+
+    fn = "\n".join(
+        line for line in inspect.getsource(hw.WhaleHydrator._process_13f).splitlines()
         if not line.lstrip().startswith("#")
     )
-
-    assert re.search(r"suspects\s*=\s*suspects\[:\s*_MAX_SPLIT_LOOKUPS\s*\]", code)
-    assert "_MAX_SPLIT_LOOKUPS = 25" not in code, (
-        "the hydrator must import the shared cap, not redeclare it"
+    assert "await resolve_13f_split_adjustments(" in fn, (
+        "the nightly hydrator no longer runs the capped shared split block"
+    )
+    module = _strip(inspect.getsource(hw))      # docstrings AND comments: prose names it
+    assert "MAX_SPLIT_LOOKUPS" not in module, (
+        "the hydrator carries its own cap again — one cap, in the shared block"
     )
 
 
@@ -497,9 +508,11 @@ def test_a_failed_probe_arms_the_backstop_rather_than_clearing_it(path, fn):
     )
 
 
+# The shared split block both whale writers run: the request path, and — since its
+# inline twin was swapped for the call on 2026-09-24 — `scripts/hydrate_whales.py`, whose
+# delegation `test_the_hydrator_still_caps_too` pins.
 @pytest.mark.parametrize("path", [
-    "app/services/thirteen_f_splits.py",   # the whale request path's split block
-    "scripts/hydrate_whales.py",
+    "app/services/thirteen_f_splits.py",
 ])
 def test_a_per_ticker_probe_exception_also_fails_closed(path):
     """`gather(return_exceptions=True)` hands back the EXCEPTION OBJECT.
@@ -521,9 +534,11 @@ def test_a_per_ticker_probe_exception_also_fails_closed(path):
     ), f"{path}: a probe exception must arm the backstop, not clear it"
 
 
+# The shared split block both whale writers run: the request path, and — since its
+# inline twin was swapped for the call on 2026-09-24 — `scripts/hydrate_whales.py`, whose
+# delegation `test_the_hydrator_still_caps_too` pins.
 @pytest.mark.parametrize("path", [
-    "app/services/thirteen_f_splits.py",   # the whale request path's split block
-    "scripts/hydrate_whales.py",
+    "app/services/thirteen_f_splits.py",
 ])
 def test_the_gate_is_asked_about_the_diffed_period_not_the_fetch_window(path):
     """`window_for_range` adds a 10-day lead so a split on day one has a prior bar.

@@ -232,6 +232,12 @@ async def test_company_profile_write_runs_off_the_event_loop(monkeypatch):
         return []
     monkeypatch.setattr(svc, "_build_related_tickers", _no_related)
 
+    # Session Open / Day High / Day Low. With no intraday bars in `_fake_volatile` it falls
+    # back to an EOD `historical-price-eod/full` fetch on the REAL `svc.fmp`.
+    async def _no_session_ohl(ticker, volatile=None, chart_data=None):
+        return {}
+    monkeypatch.setattr(svc, "_get_session_ohl", _no_session_ohl)
+
     await svc.get_overview("AVGO", "1D", "5min", False)
 
     assert "thread" in seen, (

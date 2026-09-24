@@ -77,9 +77,35 @@ def test_a_bodiless_post_still_reaches_the_route():
     assert r.status_code != 411 and r.status_code != 413, r.status_code
 
 
-def test_a_normal_sized_write_is_not_capped():
+def test_a_normal_sized_write_is_not_capped(monkeypatch):
+    """The control for the 413/411 tests above: a normal body must reach the HANDLER.
+
+    `not in (411, 413)` alone is satisfied by any status at all, including the 503
+    `AUTH_UNAVAILABLE` the route answers when GoTrue is unreachable — which is exactly
+    what this test used to get, from a live sign-in attempt against production auth. The
+    auth client is stubbed to reject the password, so the only way to see
+    `AUTH_CREDENTIALS_INVALID` is for the body to pass the cap, parse, clear the limiters
+    and be handed to `sign_in_with_password` intact.
+    """
+    from app.database import get_auth_client, get_supabase
+
+    seen: list[dict] = []
+
+    def _sign_in_with_password(creds):
+        seen.append(creds)
+        raise RuntimeError("Invalid login credentials")
+
+    fake_auth = type("_Auth", (), {"auth": type("_GoTrue", (), {
+        "sign_in_with_password": staticmethod(_sign_in_with_password)})()})()
+    monkeypatch.setitem(main_mod.app.dependency_overrides, get_auth_client, lambda: fake_auth)
+    # Never reached on the rejected-credential branch; stubbed so resolving the dependency
+    # cannot build (or be handed) the real service-role client.
+    monkeypatch.setitem(main_mod.app.dependency_overrides, get_supabase, lambda: object())
+
     r = _client().post("/api/v1/auth/login", json={"email": "a@b.co", "password": "x" * 64})
-    assert r.status_code not in (411, 413), r.status_code
+    assert r.status_code == 401, (r.status_code, r.text[:200])
+    assert r.json()["error_code"] == "AUTH_CREDENTIALS_INVALID"
+    assert seen == [{"email": "a@b.co", "password": "x" * 64}], seen
 
 
 # ── the schema-level bounds behind the cap ───────────────────────────────────────

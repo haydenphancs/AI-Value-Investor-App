@@ -107,9 +107,10 @@ async def test_the_finding_replayed_first_leg_fails_second_succeeds(monkeypatch)
 
 
 @pytest.mark.parametrize("path, needle", [
-    # the whale request path's split block (extracted 2026-09-24)
+    # The shared 13F split block (extracted 2026-09-24). BOTH whale writers run it — the
+    # request path and, since its inline twin was swapped for the call the same day,
+    # `scripts/hydrate_whales.py` (see `test_the_hydrator_loop_arms_the_backstop_on_none`).
     ("app/services/thirteen_f_splits.py", r"if sl is None or isinstance\(sl, BaseException\):"),
-    ("scripts/hydrate_whales.py", r"if sl is None or isinstance\(sl, BaseException\):"),
     ("app/services/holders_service.py", r"split_lookup_failed = stock_splits is None"),
 ])
 def test_every_caller_treats_none_as_a_failed_lookup(path, needle):
@@ -200,16 +201,27 @@ def _arm_block(source_fn):
     return "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
 
 
+def _hydrator_13f():
+    import scripts.hydrate_whales as hw
+
+    return _arm_block(hw.WhaleHydrator._process_13f)
+
+
 def test_the_hydrator_loop_arms_the_backstop_on_none():
-    """The `scripts/hydrate_whales.py` twin, brace-bound like the whale_service one —
-    the `if` line alone was pinned before, so deleting the `.add(t)` inside it kept the
-    guard green while the batch writer went back to ratio-1.0-with-gate-cleared."""
+    """The `scripts/hydrate_whales.py` twin. It used to be an inline copy of the loop,
+    brace-bound here like the whale one (the `if` line alone was pinned before, so
+    deleting the `.add(t)` inside it kept the guard green). Since 2026-09-24 it CALLS the
+    shared block, whose loop `test_the_whale_loop_arms_the_backstop_on_none` brace-binds —
+    so pin that the call is made, that BOTH backstop outputs come from it, and that no
+    inline copy of the loop crept back in beside it."""
+    code = _hydrator_13f()
+    assert re.search(
+        r"split_ratios,\s*unclassified_tickers,\s*lookup_failed_tickers,?\s*\)\s*=\s*"
+        r"await resolve_13f_split_adjustments\(", code,
+    ), "the hydrator no longer takes its backstop from the shared split block"
     src = (Path(__file__).resolve().parents[1] / "scripts/hydrate_whales.py").read_text()
-    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
-    i = code.index("if sl is None or isinstance(sl, BaseException):")
-    j = code.index("continue", i)
-    assert "unclassified_tickers.add(t)" in code[i:j]
-    assert "lookup_failed_tickers.add(t)" in code[i:j], "the hydrator does not mark the snapshot degraded"
+    whole = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    assert "if sl is None" not in whole, "an inline copy of the split loop is back"
 
 
 def _whale_path_and_split_block():
@@ -221,9 +233,20 @@ def _whale_path_and_split_block():
             + _arm_block(resolve_13f_split_adjustments))
 
 
+def _hydrator_path_and_split_block():
+    """Same split as the whale writer: `_process_13f` owns the `raw_hash` arm, the shared
+    block owns the batch arm. Asserts the delegation first — otherwise the helper's text
+    alone would satisfy the batch-arm check for a hydrator that stopped calling it."""
+    from app.services.thirteen_f_splits import resolve_13f_split_adjustments
+
+    hyd = _hydrator_13f()
+    assert "await resolve_13f_split_adjustments(" in hyd, "the hydrator no longer runs the shared block"
+    return hyd + "\n" + _arm_block(resolve_13f_split_adjustments)
+
+
 @pytest.mark.parametrize("fn_src", [
     _whale_path_and_split_block,
-    lambda: (Path(__file__).resolve().parents[1] / "scripts/hydrate_whales.py").read_text(),
+    _hydrator_path_and_split_block,
 ])
 def test_both_writers_drop_the_hash_when_a_lookup_failed(fn_src):
     code = "\n".join(l for l in fn_src().splitlines() if not l.lstrip().startswith("#"))

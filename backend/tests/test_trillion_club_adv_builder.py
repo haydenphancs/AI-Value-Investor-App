@@ -1249,15 +1249,21 @@ def test_the_whale_end_to_end_scenarios_cover_every_branch():
 
 
 def test_every_name_hydrate_whales_imports_from_whale_service_still_exists():
-    """`scripts/hydrate_whales.py` imports split helpers BY NAME from `whale_service`; the
-    extraction moved them. Parsed, not imported (the script configures logging/env)."""
+    """`scripts/hydrate_whales.py` imports helpers BY NAME from `whale_service`; the
+    extraction moved the split block. Parsed, not imported (the script configures
+    logging/env).
+
+    The hydrator no longer imports `_split_ratio_in_window` / `WhaleService`: its inline
+    split block was swapped for `resolve_13f_split_adjustments` on 2026-09-24, so it
+    reaches the split helpers through `thirteen_f_splits` instead. The whale-service
+    aliases below stay pinned for the tests that still import them from there."""
     import ast
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "hydrate_whales.py"
     tree = ast.parse(script.read_text())
     names = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
              and n.module == "app.services.whale_service" for a in n.names]
-    assert "_split_ratio_in_window" in names and "WhaleService" in names, "anti-vacuity"
+    assert "_quarter_end_date" in names and "_find_previous_quarter" in names, "anti-vacuity"
     missing = [n for n in names if not hasattr(wsvc, n)]
     assert missing == []
     assert callable(WhaleService._suspicious_split_tickers)

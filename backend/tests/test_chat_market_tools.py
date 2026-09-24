@@ -1125,7 +1125,10 @@ def _movers_with_quotes(monkeypatch, quotes_result):
         async def _quotes(self, symbols):
             return dict(quotes_result)
     monkeypatch.setattr(wm.WidgetMoversService, "_quotes", _quotes)
-    monkeypatch.setattr("app.services.volatility_cache_service.get_volatility_cache_service",
+    # `widget_movers_service` imports this factory at MODULE level, so the binding it calls
+    # is its own — patching `volatility_cache_service` left the real σ read (a Supabase
+    # SELECT on `ticker_volatility_cache`) on the path.
+    monkeypatch.setattr(wm, "get_volatility_cache_service",
                         lambda: SimpleNamespace(get_sigmas_bulk=AsyncMock(return_value={})))
     monkeypatch.setattr("app.services.news_insight_service.get_news_insight_service",
                         lambda: SimpleNamespace(get_cards=AsyncMock(return_value={})))

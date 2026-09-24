@@ -762,9 +762,10 @@ def test_compact_row_guard_fires():
 
 
 # ── 7.6 Sentences stay out of FlowLayout ───────────────────────────────────────────
-# FlowLayout measures and places each child at its ONE-LINE width, so a sentence inside it never
-# wraps: "Small position · under 1% …" ran into the weight column, and "Listed since … — not on a
-# 13F yet" (279pt) ran past a 260pt card.
+# FlowLayout measured and placed each child at its ONE-LINE width until 2026-09-24, so a sentence
+# inside it never wrapped: "Small position · under 1% …" ran into the weight column, and "Listed
+# since … — not on a 13F yet" (279pt) ran past a 260pt card. The atom now caps a child at the row
+# width (pinned by test_ios_flow_layout_guards.py); sentences still get a line of their own.
 
 
 def flow_violations(src: str) -> List[str]:

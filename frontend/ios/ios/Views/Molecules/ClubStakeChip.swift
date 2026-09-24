@@ -17,9 +17,10 @@
 //  matters — and a Commitment names the source that disclosed it.
 //
 //  `ClubChipGroup` lays a stake's chips out: word chips flow, and a SENTENCE chip ("Listed since
-//  … — not on a 13F yet") gets its own line outside the flow. `FlowLayout` measures and places
-//  every child at its one-line width and never offers less, so a sentence inside it ran past a
-//  260pt card (279pt at the default text size) instead of wrapping to the two lines it asks for.
+//  … — not on a 13F yet") gets its own line outside the flow. Until 2026-09-24 `FlowLayout` laid
+//  every child out at its one-line width, so a sentence inside it ran past a 260pt card (279pt at
+//  the default text size) instead of wrapping to the two lines it asks for. The atom now caps a
+//  child at the row width; the sentence still gets its own line rather than sharing a row.
 //
 
 import SwiftUI

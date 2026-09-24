@@ -16,8 +16,12 @@
 //  Detents are `[.medium, .large]` rather than their `[.medium]` — a deliberate
 //  deviation, because this sheet carries five sections rather than three.
 //
-//  Wording is kept consistent with the existing 45-day-lag copy in
-//  `RecentTradesInfoSheet` and `SupportView`, so the app tells one story.
+//  The 13F facts match `TrillionClubInfoSheet`, so the app tells one story: a 13F is
+//  filed UP TO 45 days after the quarter (often sooner — never "always six weeks"), and
+//  it lists some non-stock securities (convertible notes, options), so "bonds never
+//  appear" is false. Do NOT copy that sheet's "we leave those out": the Trillion builder
+//  drops those rows, but `whale_service._build_holdings` merges them into this figure.
+//  Pinned by `backend/tests/test_ios_whale_contract.py`.
 //
 
 import SwiftUI
@@ -33,27 +37,28 @@ struct WhalePortfolioStatsInfoSheet: View {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     section(
                         title: "What the portfolio figure is",
-                        body: "It's the total value of this filer's U.S.-listed "
-                            + "stock positions as reported on their most recent SEC "
-                            + "Form 13F. It is not their net worth, and not the "
-                            + "firm's total assets under management."
+                        body: "It's the total value of the holdings this filer "
+                            + "reported on their most recent SEC Form 13F. It is not "
+                            + "their net worth, and not the firm's total assets under "
+                            + "management."
                     )
 
                     section(
                         title: "What a 13F leaves out",
-                        body: "Form 13F only covers U.S.-listed stocks. Bonds, cash, "
-                            + "private companies, real estate, foreign-listed holdings, "
-                            + "short positions and most derivatives never appear on "
+                        body: "Form 13F lists U.S.-listed stocks and some other "
+                            + "securities, such as convertible notes and options. "
+                            + "Private companies, shares listed only outside the U.S., "
+                            + "cash, real estate and short positions never appear on "
                             + "one — so the real portfolio is usually much larger than "
                             + "the figure shown here."
                     )
 
                     section(
                         title: asOfTitle,
-                        body: "13F filings are due 45 days after the quarter ends, so "
-                            + "the most recent positions anyone can see are always at "
-                            + "least six weeks old and may already have changed. That "
-                            + "delay is set by law, not by us."
+                        body: "A 13F is filed up to 45 days after the quarter ends, so "
+                            + "its positions are usually several weeks old when they "
+                            + "appear and may already have changed. That delay is set "
+                            + "by law, not by us."
                     )
 
                     section(title: returnTitle, body: returnBody)

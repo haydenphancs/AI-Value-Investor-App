@@ -311,9 +311,22 @@ async def test_round_the_clock_assets_are_live_while_wall_street_sleeps(monkeypa
     Crypto only since Phase 4: a commodity card is a NYSE Arca ETF (GLD) or an EIA daily
     print, and "Open" at 2am Sunday for GLD would be the same confidently wrong claim in
     the other direction — see `test_a_commodity_card_follows_the_equity_session`."""
+    from datetime import date, timedelta
+
+    from app.services.crypto_service import CryptoService
+
     monkeypatch.setattr(
         "app.services.home_dashboard_service._market_status", lambda: ("closed", False)
     )
+    # A coin's history never comes from `svc.fmp`: `fetch_chart_data` routes it to
+    # CoinGecko through the crypto service SINGLETON's `_cg_history`. Stubbing only the
+    # FMP fake left that leg live (and, blocked, the card degraded to "no chart"), so
+    # patch the class attribute — it covers the singleton whenever it was built.
+    today = date.today()
+    cg_rows = [{"date": (today - timedelta(days=d)).isoformat(), "close": 64000.0 + d,
+                "volume": 1.0e9} for d in (3, 2, 1)]
+    cg_history = AsyncMock(return_value=cg_rows)
+    monkeypatch.setattr(CryptoService, "_cg_history", cg_history)
     svc = _svc()
     svc.fmp = SimpleNamespace(
         get_stock_price_quote=AsyncMock(return_value={"name": "Bitcoin", "price": 64000.0,
@@ -324,6 +337,11 @@ async def test_round_the_clock_assets_are_live_while_wall_street_sleeps(monkeypa
     svc.price = PriceFromFMPFake(svc.fmp)
     widget = await svc._fetch_stock_widget_data(symbol)
     assert widget["is_market_open"] is True
+    # The card was built on the real crypto branch, chart included — not the degraded
+    # "history failed, render without a chart" fallback.
+    assert cg_history.await_args.args[0] == symbol[:-3]
+    assert [p["close"] for p in widget["historical_data"]] == [r["close"] for r in cg_rows]
+    svc.fmp.get_historical_prices.assert_not_awaited()
 
 
 @pytest.mark.asyncio

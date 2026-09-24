@@ -868,7 +868,7 @@ nonisolated enum ClubChip: Hashable, Identifiable, Sendable {
 
     /// A chip that is a short SENTENCE rather than a word. It is laid out on its own line,
     /// outside the flow of word chips, so it is offered the column's width and wraps
-    /// (`FlowLayout` measures every child at its one-line width and never offers less).
+    /// (`FlowLayout` measured every child at its one-line width until 2026-09-24).
     var isSentence: Bool {
         if case .listedSince = self { return true }
         return false

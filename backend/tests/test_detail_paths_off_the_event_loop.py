@@ -18,6 +18,7 @@ Thread IDENTITY, not a grep for `to_thread` — a source scan passes on a commen
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +60,14 @@ async def test_the_etf_side_endpoints_read_their_cache_off_the_loop(monkeypatch,
         return []
 
     monkeypatch.setattr(svc, "_get_history", _history, raising=False)
+
+    async def _ex_dividend_dates(symbol, from_date=None, to_date=None):
+        return []
+
+    # The `corporate_actions_source` seam. With `dividends: []` above, the dividends
+    # endpoint derives its pay frequency from ex-dates, and an unset seam falls through to
+    # the real singleton — two live FMP history calls.
+    svc.corporate_actions = SimpleNamespace(get_ex_dividend_dates=_ex_dividend_dates)
     loop_ident = threading.get_ident()
     try:
         await getattr(svc, method)("SPY")

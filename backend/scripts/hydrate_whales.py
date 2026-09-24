@@ -33,7 +33,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Set, Any, Dict, List, Optional, Tuple
+from typing import Set, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Ensure backend app package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -51,9 +51,7 @@ from app.integrations.fmp import (  # noqa: E402
 from app.integrations.gemini import GeminiClient  # noqa: E402
 from app.services.whale_service import (  # noqa: E402
     SIC_TO_SECTOR, SECTOR_COLORS, DEFAULT_SECTOR_COLOR, _map_sic_to_sector,
-    # Split detection is IMPORTED, never re-implemented. A second copy of this logic
-    # is what let the two 13F diff paths drift apart in the first place.
-    _quarter_end_date, _split_ratio_in_window,
+    _quarter_end_date,
     # Byte-identical clones lived here; `_find_previous_quarter` sits on the
     # quarter-selection path for BOTH 13F writers, and they upsert the same
     # `whale_trade_groups` row — so a one-sided fix would have made them pick
@@ -71,17 +69,13 @@ from app.services.whale_service import (  # noqa: E402
     # repeats on every run until FMP fixes the row.
     _finite_float,
 )
-from app.services.whale_service import WhaleService as _WhaleService  # noqa: E402
-
-# `_suspicious_split_tickers` is a @staticmethod on WhaleService; bind it to a plain
-# name so the call sites below read the same as the service's.
-_suspicious_split_tickers = _WhaleService._suspicious_split_tickers
-from app.services.corporate_actions_service import (
-    corporate_actions_source,
-    window_for_range,
-)
+from app.services.corporate_actions_service import corporate_actions_source  # noqa: E402
+# The 13F split block is CALLED, never re-implemented: the same helper
+# `whale_service._process_13f_path` and the Trillion-Dollar Club builder run. This
+# script carried its own inline copy until 2026-09-24, and a second copy of this logic is
+# what let the 13F diff paths drift apart in the first place (`_whale_common`).
+from app.services.thirteen_f_splits import resolve_13f_split_adjustments  # noqa: E402
 from app.services._whale_common import (  # noqa: E402
-    MAX_SPLIT_LOOKUPS as _MAX_SPLIT_LOOKUPS,
     SPLIT_SUPPRESS,
     restate_prev_shares_for_split,
     is_implausible_share_flow,
@@ -113,13 +107,38 @@ logger = logging.getLogger("hydrate_whales")
 
 FMP_SEMAPHORE = asyncio.Semaphore(5)
 
+
+class _ThrottledCorporateActions:
+    """The corporate-actions seam with every call AWAITED under the caller's throttle.
+
+    `resolve_13f_split_adjustments` fans out two calls per split suspect (up to
+    2 × MAX_SPLIT_LOOKUPS per whale), each a pair of price-series fetches on a cold cache.
+    The request path runs that unthrottled; this sweep walks EVERY whale and has always
+    bounded it with `FMP_SEMAPHORE`, like its other FMP reads — so it hands the shared
+    helper this wrapper rather than the bare seam.
+
+    The inner call is made EAGERLY and only its await is throttled — exactly what the
+    inline `_throttled(actions.get_split_rows(...))` did — so a seam that raises on the
+    call itself still lands in the helper's batch-level fail-closed arm.
+    """
+
+    __slots__ = ("_inner", "_throttle")
+
+    def __init__(self, inner: Any, throttle: Callable[[Awaitable[Any]], Awaitable[Any]]):
+        self._inner = inner
+        self._throttle = throttle
+
+    def get_split_rows(self, *args: Any, **kwargs: Any) -> Awaitable[Any]:
+        return self._throttle(self._inner.get_split_rows(*args, **kwargs))
+
+    def has_unclassified_adjustment(self, *args: Any, **kwargs: Any) -> Awaitable[Any]:
+        return self._throttle(self._inner.has_unclassified_adjustment(*args, **kwargs))
+
+
 # `YYYY-MM-DD` and `YYYY-Qn`. The second is deliberately strict so a congressional
 # snapshot's `YYYY-MM` period can never be mistaken for a 13F quarter.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _QUARTER_PERIOD_RE = re.compile(r"^\d{4}-Q[1-4]$")
-
-# Cap on per-whale /splits lookups. A filer whose entire book was restated would
-# otherwise fan out one unthrottled call per suspect ticker.
 
 # Restored: both of these were swept up by the block deletion that moved the congressional
 # hashing helpers into `app/services/_whale_common.py`. They sat on the two lines
@@ -506,107 +525,27 @@ class WhaleHydrator:
         # Build sectors from industry breakdown
         sectors = self._build_sectors_from_industry(industry_data)
 
-        # Detect splits BEFORE diffing. A 10:1 split leaves the position value roughly
-        # unchanged while the share count jumps 10x; without restatement that reads as a
-        # ~9x share purchase. Best-effort — a failure here just leaves `split_ratios`
-        # empty, i.e. exactly the previous behaviour.
-        split_ratios: Dict[str, float] = {}
-        unclassified_tickers: Set[str] = set()
-        # Armed by a lookup that FAILED (not by an adjustment the classifier saw and
-        # could not name). A snapshot built on it gets NO `raw_hash` — see the bottom of
-        # this method — so the next run re-derives instead of skipping "data unchanged".
-        lookup_failed_tickers: Set[str] = set()
-        # Bound BEFORE the try: the fail-closed handler reads it, and the very first
-        # statement inside can raise — which would turn a recoverable lookup failure into
-        # a NameError that aborts 13F processing entirely.
-        suspects: List[str] = []
-        try:
-            suspects = _suspicious_split_tickers(current_raw, prev_raw)
-            if suspects:
-                prev_end = (
-                    _quarter_end_date(
-                        int(prev_entry["year"]), int(prev_entry["quarter"])
-                    )
-                    if prev_entry
-                    else None
-                )
-                curr_end = _quarter_end_date(year, quarter)
-                # Capped: an entire restated book would otherwise fan out a lookup per
-                # suspect ticker with no bound at all. The cap matters MORE now, not less:
-                # a derived split costs two price-series calls instead of one /splits.
-                suspects = suspects[:_MAX_SPLIT_LOOKUPS]
-                from_date, to_date = window_for_range(prev_end, curr_end)
-                actions = corporate_actions_source(self)
-                split_lists = await asyncio.gather(
-                    *[
-                        _throttled(actions.get_split_rows(t, from_date, to_date))
-                        for t in suspects
-                    ],
-                    return_exceptions=True,
-                )
-                # `from_date` is the FETCH window, 10 days wider than the diffed period
-                # (`_WINDOW_LEAD_DAYS`). `_split_ratio_in_window` filters the RATIO back to
-                # `prev_end < d <= curr_end`; the gate must match, or an unnameable event
-                # in the previous quarter's last 10 days arms the magnitude backstop for
-                # this one. Mirrors `whale_service._process_13f_path`.
-                flag_results = await asyncio.gather(
-                    *[
-                        _throttled(
-                            actions.has_unclassified_adjustment(
-                                t, from_date, to_date,
-                                effective_from=prev_end, effective_to=curr_end,
-                            )
-                        )
-                        for t in suspects
-                    ],
-                    return_exceptions=True,
-                )
-                for t, flagged in zip(suspects, flag_results):
-                    # FAIL CLOSED — `gather(return_exceptions=True)` returns the exception
-                    # object, and `flagged is True` read that as "no corporate action".
-                    # The same derivation feeds `split_ratios`, so a ticker that failed
-                    # here usually gets no restatement either: exactly when a fabricated
-                    # BOUGHT would be written to `whale_trades` and alerted on.
-                    if flagged is True or isinstance(flagged, BaseException):
-                        if isinstance(flagged, BaseException):
-                            logger.warning(
-                                "  Unclassified-adjustment probe failed for %s "
-                                "(whale_id=%s cik=%s) (%s: %s) — arming the magnitude "
-                                "backstop (fail-closed)",
-                                t, whale_id, cik, type(flagged).__name__, flagged,
-                            )
-                            lookup_failed_tickers.add(t)
-                        unclassified_tickers.add(t)
-
-                for t, sl in zip(suspects, split_lists):
-                    if sl is None or isinstance(sl, BaseException):
-                        # FAIL CLOSED — mirrors `whale_service`: a degraded derivation
-                        # (`None`) means no restatement, so the backstop must be armed.
-                        logger.warning(
-                            "  Split lookup failed for %s (whale_id=%s cik=%s) (%s) — "
-                            "arming the magnitude backstop (fail-closed)",
-                            t, whale_id, cik,
-                            sl if sl is None else f"{type(sl).__name__}: {sl}",
-                        )
-                        unclassified_tickers.add(t)
-                        lookup_failed_tickers.add(t)
-                        continue
-                    r = _split_ratio_in_window(sl, prev_end, curr_end)
-                    if r and abs(r - 1.0) > 1e-9:
-                        split_ratios[t] = r
-        except Exception as e:
-            # FAIL CLOSED, same reasoning as the per-ticker arm: `split_ratios = {}` is
-            # the no-restatement state, which is precisely when a split renders as a
-            # purchase. Bounded to `suspects` — tickers whose counts already look like a
-            # share multiple.
-            logger.warning(
-                "  Split detection failed for CIK %s (%s: %s) — using the raw diff and "
-                "arming the magnitude backstop for all %d suspects (fail-closed)",
-                cik, type(e).__name__, e, len(suspects or []),
-            )
-            split_ratios = {}
-            unclassified_tickers = set(suspects or [])
-            lookup_failed_tickers = set(suspects or [])
+        # Split restatement inputs — the shared 13F split block
+        # (`thirteen_f_splits.resolve_13f_split_adjustments`, the same call
+        # `whale_service._process_13f_path` makes). FMP's 13F share counts are RAW, so a
+        # held-through 10:1 split otherwise reads as a ~9x purchase. It never raises for a
+        # lookup problem: a failed lookup arms the magnitude backstop
+        # (`unclassified_tickers`) AND lands in `lookup_failed_tickers`, which keeps
+        # `raw_hash` off the snapshot below. Pinned end to end by
+        # `tests/test_hydrate_whales_splits_characterisation.py`.
+        prev_end = (
+            _quarter_end_date(int(prev_entry["year"]), int(prev_entry["quarter"]))
+            if prev_entry
+            else None
+        )
+        curr_end = _quarter_end_date(year, quarter)
+        (
+            split_ratios, unclassified_tickers, lookup_failed_tickers,
+        ) = await resolve_13f_split_adjustments(
+            current_raw, prev_raw, prev_end, curr_end,
+            actions=_ThrottledCorporateActions(corporate_actions_source(self), _throttled),
+            log_ctx=f"whale_id={whale_id} cik={cik} period={period}",
+        )
 
         # Diff quarters for trade group
         trade_group = self._diff_quarters(

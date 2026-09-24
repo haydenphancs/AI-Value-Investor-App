@@ -99,8 +99,9 @@ struct ClubHoldingRow: View {
                     }
                 }
 
-                // A sentence, so OUTSIDE the flow: `FlowLayout` lays a child out at its one-line
-                // width, and this line then ran into the weight column at larger text sizes.
+                // A sentence, so OUTSIDE the flow, on its own line at the column's width. (Inside it,
+                // before `FlowLayout` capped children at the row width on 2026-09-24, this line was laid
+                // out at its one-line width and ran into the weight column at larger text sizes.)
                 if let small = position.smallText {
                     Text(small)
                         .font(AppTypography.caption)

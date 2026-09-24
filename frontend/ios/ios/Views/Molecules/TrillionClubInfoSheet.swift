@@ -14,8 +14,9 @@
 //
 //  Hand-written and static on purpose: nothing in this section is generated text. It follows
 //  the app's existing 13F explanations (`WhalePortfolioStatsInfoSheet`, `RecentTradesInfoSheet`)
-//  minus their advice-like lines — and states two facts more precisely than they do: a 13F is
-//  due WITHIN 45 days (filers often file sooner), and it lists some securities besides stocks.
+//  minus their advice-like lines, and states two facts precisely: a 13F is due WITHIN 45 days
+//  (filers often file sooner), and it lists some securities besides stocks. The whale sheet
+//  now uses the same wording — keep the two aligned.
 //  The membership sentence describes the backend rule in `services/trillion_club/rules.py`
 //  (JOIN_CLOSES = 10, LEAVE_CLOSES = 20) — change both together.
 //

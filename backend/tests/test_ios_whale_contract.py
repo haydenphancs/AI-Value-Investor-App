@@ -23,6 +23,7 @@ Mutation-tested by hand: each assertion was watched to go red against the pre-fi
 
 import re
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -37,6 +38,7 @@ FILES = {
     "profile_view": IOS / "Views/Screens/WhaleProfileView.swift",
     "tracking_view": IOS / "Views/Screens/TrackingView.swift",
     "app_error": IOS / "Core/Utilities/AppError.swift",
+    "stats_sheet": IOS / "Views/Molecules/WhalePortfolioStatsInfoSheet.swift",
 }
 
 
@@ -91,6 +93,7 @@ _BOUNDED = [
     ("profile_vm", r"class WhaleProfileViewModel\b"),
     ("tracking_view", r"struct FollowedWhalesRow\b"),
     ("dtos", r"struct LenientArray\b"),
+    ("stats_sheet", r"struct WhalePortfolioStatsInfoSheet\b"),
 ]
 
 
@@ -384,3 +387,147 @@ def test_the_stat_tiles_are_not_blanked_by_dormancy():
             f"WhalePortfolioStats must not gate its value on {token} — "
             "dormancy qualifies the number, it does not delete it"
         )
+
+
+# ── the portfolio-stats info sheet's 13F facts ───────────────────────────────
+# Per the SEC's Form 13F FAQ a 13F is filed UP TO 45 days after the quarter ends (filers
+# often file sooner), and the list of 13(f) securities includes some non-equity ones —
+# certain convertible notes and options. The sheet used to say positions are "always at
+# least six weeks old" and that bonds never appear on a 13F: both false.
+#
+# The wording matches `TrillionClubInfoSheet` (pinned in `test_ios_trillion_club_guards.py`
+# §7.9) EXCEPT that sheet's "we leave those out": the Trillion builder drops put/call and
+# PRN rows, but `whale_service._build_holdings` merges them into this figure, so the clause
+# would be false here — and so would defining the figure as "stock positions". If the whale
+# backend ever starts dropping those rows, change the copy AND this guard together.
+
+_SHEET_SECTION = re.compile(
+    r'section\(\s*title:\s*(?P<title>"__S\d+__"|\w+)\s*,\s*'
+    r'body:\s*(?P<body>"__S\d+__"(?:\s*\+\s*"__S\d+__")*)\s*\)'
+)
+
+# Matched per SENTENCE, after "U.S." is folded to "US" so its periods don't end one.
+_FALSE_13F_CLAIMS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(?:always|at least|no less than|never less than)\b[^.]*\b(?:six|6)[\s-]weeks?\b", re.I),
+     "positions called always / at least six weeks old (a 13F is filed UP TO 45 days after)"),
+    (re.compile(r"\bdue 45 days\b|\b45 days late\b|\bdelayed(?: by)? 45 days\b", re.I),
+     "45 days stated as a fixed delay instead of a deadline"),
+    (re.compile(r"\bonly (?:covers|lists|includes|reports|shows)\b[^.]*\bstocks?\b", re.I),
+     "a 13F called stocks-only (it lists some convertible notes and options)"),
+    (re.compile(r"\bbonds?\b[^.]*\bnever\b|\bnever\b[^.]*\bbonds?\b", re.I),
+     "bonds said never to appear (convertible notes do)"),
+    (re.compile(r"\bwe (?:leave|drop|exclude|remove|filter)\b", re.I),
+     "claims non-stock rows are left out — the whale figure keeps them"),
+]
+
+
+def _sheet_sections(raw: str) -> Dict[str, str]:
+    """title → body text of every `section(title:body:)` call in the sheet's struct.
+
+    Comments stripped, literals lifted by the scanner the Trillion guards use; imported
+    here rather than at module top so a break in the Trillion schema module can only
+    fail these tests, not the collection of every whale guard above. A non-literal title
+    (`asOfTitle`) is keyed by its identifier.
+    """
+    from test_trillion_club_schema_parity import scan_swift, type_body
+
+    code, strings = scan_swift(raw)
+    body = type_body(code, "WhalePortfolioStatsInfoSheet")
+    out: Dict[str, str] = {}
+    for m in _SHEET_SECTION.finditer(body):
+        title = m.group("title")
+        if title.startswith('"'):
+            title = strings[int(title[4:-3])]
+        out[title] = "".join(strings[int(i)] for i in re.findall(r'"__S(\d+)__"', m.group("body")))
+    return out
+
+
+def _sentences(text: str) -> List[str]:
+    return [s for s in re.split(r"(?<=[.!?])\s+", text.replace("U.S.", "US")) if s.strip()]
+
+
+def stats_sheet_13f_violations(raw: str) -> List[str]:
+    sections = _sheet_sections(raw)
+    figure = sections.get("What the portfolio figure is")
+    leaves_out = sections.get("What a 13F leaves out")
+    timing = sections.get("asOfTitle")
+    if figure is None or leaves_out is None or timing is None:
+        # Fail loudly: a renamed title must not quietly disarm every check below.
+        return [f"a 13F section is missing — scan drifted (found {sorted(sections)})"]
+
+    out: List[str] = []
+    for title, text in sections.items():
+        for sentence in _sentences(text):
+            out += [f"{title!r}: {label}" for rx, label in _FALSE_13F_CLAIMS if rx.search(sentence)]
+    if not re.search(r"\b(?:up to|within) 45 days\b", timing):
+        out.append("the filing lag is not stated as a deadline ('up to' / 'within' 45 days)")
+    if "convertible notes" not in leaves_out or not re.search(r"\boptions\b", leaves_out):
+        out.append("the sheet no longer says a 13F lists some securities besides stocks")
+    if re.search(r"\bstock (?:positions|holdings)\b|\bstocks? only\b|\bequit(?:y|ies)\b", figure, re.I):
+        out.append("the figure is defined as stock-only, but it includes option / convertible rows")
+    return out
+
+
+def _stats_sheet_raw() -> str:
+    p = FILES["stats_sheet"]
+    assert p.exists(), f"missing {p} — this guard is only meaningful if it reads real source"
+    return p.read_text(encoding="utf-8")
+
+
+def _swap_once(src: str, old: str, new: str) -> str:
+    assert src.count(old) == 1, f"mutation anchor {old!r} found {src.count(old)}× — the source drifted"
+    return src.replace(old, new)
+
+
+def test_stats_sheet_states_the_13f_facts_correctly():
+    assert stats_sheet_13f_violations(_stats_sheet_raw()) == []
+
+
+def test_stats_sheet_scan_ignores_comments():
+    """The file's header comment quotes both false claims; they must not count."""
+    raw = _stats_sheet_raw()
+    assert "six weeks" in raw and "bonds never" in raw, "anti-vacuity: the comment moved"
+    assert stats_sheet_13f_violations(raw) == []
+
+
+_OLD_TIMING = (
+    '"13F filings are due 45 days after the quarter ends, so "\n'
+    '                            + "the most recent positions anyone can see are always at "\n'
+    '                            + "least six weeks old and may already have changed. That "\n'
+    '                            + "delay is set by law, not by us."'
+)
+_NEW_TIMING = (
+    '"A 13F is filed up to 45 days after the quarter ends, so "\n'
+    '                            + "its positions are usually several weeks old when they "\n'
+    '                            + "appear and may already have changed. That delay is set "\n'
+    '                            + "by law, not by us."'
+)
+
+
+@pytest.mark.parametrize("old,new", [
+    # The pre-2026-09-24 timing paragraph, verbatim.
+    (_NEW_TIMING, _OLD_TIMING),
+    # "always … six weeks" alone, with the deadline wording kept.
+    ('"its positions are usually several weeks old when they "',
+     '"its positions are always at least six weeks old when they "'),
+    # The pre-2026-09-24 scope sentence, verbatim.
+    ('"Form 13F lists U.S.-listed stocks and some other "\n'
+     '                            + "securities, such as convertible notes and options. "',
+     '"Form 13F only covers U.S.-listed stocks. Bonds, cash, "\n'
+     '                            + "and other securities never appear. "'),
+    # Bonds put back on the never-appears list.
+    ('"cash, real estate and short positions never appear on "',
+     '"cash, bonds, real estate and short positions never appear on "'),
+    # The Trillion sheet's clause copied over — true there, false for this figure.
+    ('"securities, such as convertible notes and options. "',
+     '"securities, such as convertible notes and options — we leave those out. "'),
+    # Convertible notes dropped from the list.
+    ('"securities, such as convertible notes and options. "', '"securities, such as options. "'),
+    # The figure redefined as stock positions again.
+    ('"It\'s the total value of the holdings this filer "',
+     '"It\'s the total value of this filer\'s U.S.-listed stock positions, as "'),
+    # A renamed section title must fail, not disarm the guard.
+    ('title: "What a 13F leaves out"', 'title: "What 13F filings omit"'),
+])
+def test_stats_sheet_guard_fires(old, new):
+    assert stats_sheet_13f_violations(_swap_once(_stats_sheet_raw(), old, new))

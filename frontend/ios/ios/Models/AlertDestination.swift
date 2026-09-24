@@ -51,6 +51,41 @@ struct AlertDestination: Identifiable, Hashable {
 
 extension AlertDestination {
 
+    /// Whether a notification announces a finished REPORT.
+    ///
+    /// ONE rule, read by every place that treats a report differently — the destination list,
+    /// the direct open, and the Alerts row grouping — so no two of them can disagree about which
+    /// rows are reports.
+    ///
+    /// Honours the route the backend DECLARED (`route["route"] == "report"`, what the push payload
+    /// carries), with the kind as a fallback for rows written before the dispatcher emitted it.
+    /// `research_failed` is NOT a report: no report exists to open.
+    static func isReport(_ item: NotificationEventDTO) -> Bool {
+        item.route["route"] == "report" || item.kind == "research_complete"
+    }
+
+    /// Where a tap on this notification goes WITHOUT a detail screen first, or `nil` to show the
+    /// detail (every kind but one).
+    ///
+    /// WHY REPORTS SKIP THE DETAIL. The developer, 2026-09-23: *"for 'reports' only, it will open
+    /// the report right away, no need to open a screen."* A report alert's whole content is "your
+    /// analysis is ready"; the detail screen repeated that and put the report one tap further
+    /// away. Every other kind carries information worth reading first (a catalyst, a filing, an
+    /// earnings surprise), which is why the detail exists at all.
+    ///
+    /// Both doors — an Alerts row (`NotificationInboxSection`) and a tapped push (`ContentView`) —
+    /// call THIS, so a report can never open directly from one and via the detail from the other.
+    ///
+    /// Only when the report is reachable: no ticker means no report destination, so that row
+    /// falls back to the detail rather than to nothing.
+    static func directDestination(for item: NotificationEventDTO) -> AlertDestination? {
+        guard isReport(item) else { return nil }
+        return destinations(for: item).first { destination in
+            if case .report = destination.target { return true }
+            return false
+        }
+    }
+
     /// The destinations a notification row offers, in the order they should be shown.
     static func destinations(for item: NotificationEventDTO) -> [AlertDestination] {
         let route = item.route
@@ -72,8 +107,7 @@ extension AlertDestination {
         //
         // The kind check stays as a fallback: rows written before the dispatcher emitted
         // `route` are still inside the inbox's retention window (90 days).
-        let isReport = route["route"] == "report" || item.kind == "research_complete"
-        if isReport, !symbol.isEmpty {
+        if isReport(item), !symbol.isEmpty {
             out.append(AlertDestination(
                 label: "Read the full report",
                 systemImage: "doc.text",

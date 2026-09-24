@@ -11,12 +11,17 @@ app.main would double-start every lifespan loop.
 
 from __future__ import annotations
 
+import ast
 import functools
 import importlib.util
 import json
+import logging
+import os
 import re
+import shutil
+import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
@@ -45,16 +50,290 @@ def m():
 # ── standalone-ness ───────────────────────────────────────────────────────────
 
 
+#: gitignored, never deployed (Railway builds from git) — and a model/pip cache may hold
+#: third-party .py files that are not ours to police. Mirrors .gitignore EXACTLY: `out/`,
+#: `models/` and `.cache/` are anchored at the package root (`backend/marketing/models/`), while
+#: `__pycache__` and `.cache` are ignored at every depth. A NESTED `voice/models/` is tracked and
+#: ships in the image, so it must be scanned — skipping the name at any depth hid it.
+_ROOT_UNTRACKED = {"out", "models", ".cache"}
+_ANY_DEPTH_UNTRACKED = {"__pycache__", ".cache"}
+#: Calls that import by NAME: a literal target is checked like an import statement, anything
+#: else fails closed (it could not be checked).
+_NAME_IMPORTERS = {"import_module", "__import__", "run_module"}
+#: Calls that load code by PATH or from source text: the worker has no reason to, and a path
+#: can point straight at app/config.py — always a problem.
+_CODE_LOADERS = {"run_path", "spec_from_file_location", "spec_from_loader", "SourceFileLoader",
+                 "SourcelessFileLoader", "module_from_spec", "exec_module", "load_module"}
+_EVAL_BUILTINS = {"exec", "eval", "compile"}  # bare-name only: `re.compile` is fine
+#: A string that IS a dotted app module name (`"app.config"`) — belt-and-braces for a name
+#: handed to an importer indirectly. Bare `"app"` is not flagged: `Path("/") / "app"` is a path.
+_APP_DOTTED = re.compile(r"app(?:\.[A-Za-z_]\w*)+")
+
+
+def _untracked_dir(rel_dirs: tuple) -> bool:
+    """`rel_dirs`: the directory parts of a path relative to the package root."""
+    return bool(rel_dirs) and (rel_dirs[0] in _ROOT_UNTRACKED
+                               or bool(_ANY_DEPTH_UNTRACKED & set(rel_dirs)))
+
+
+def _worker_files(root: Path = _PKG) -> List[Path]:
+    return sorted(p for p in root.rglob("*.py")
+                  if not _untracked_dir(p.relative_to(root).parts[:-1]))
+
+
+def _copy_ignore(root: Path):
+    """`shutil.copytree` ignore callable with the same anchored rule (plus the root `assets/`,
+    which holds fonts, no code) — the copy must be what `COPY marketing/ marketing/` ships."""
+    def ignore(src: str, names: List[str]) -> set:
+        rel = Path(src).relative_to(root).parts
+        return {n for n in names if _untracked_dir(rel + (n,)) or (not rel and n == "assets")}
+    return ignore
+
+
+def _worker_module_of(path: Path, root: Path = _PKG):
+    parts = ["marketing", *path.relative_to(root).with_suffix("").parts]
+    is_pkg = parts[-1] == "__init__"
+    if is_pkg:
+        parts.pop()
+    return ".".join(parts), is_pkg
+
+
+def _terminal_name(func: ast.expr) -> str:
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _literal(node: ast.Call, pos: int, kw: str):
+    if len(node.args) > pos:
+        a = node.args[pos]
+        return a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
+    for k in node.keywords:
+        if k.arg == kw:
+            return k.value.value if isinstance(k.value, ast.Constant) and isinstance(k.value.value, str) else None
+    return None
+
+
+def worker_imports(src: str, module: str, is_pkg: bool = False):
+    """(imported dotted names, problems) for one worker source file — an AST scan, so a
+    comment or docstring can neither satisfy nor trip it, and an import nested in a function
+    (the package's lazy-import idiom) is seen like a top-level one. Self-contained on purpose:
+    the FMP boundary scanner in test_marketing_import_boundary.py enforces a different policy,
+    and a change there must not silently change this guard.
+
+    It replaced a line regex (`^\\s*(from|import)\\s+app[.\\s]`) that `importlib.import_module`,
+    `__import__`, `import os, app.x` and `import json; import app.x` all walked past.
+    Mutation-tested by hand (2026-09-23) on a scratch copy of main.py: each of those forms, the
+    same inside a stage function, a non-literal `import_module(n)` and a plain static import
+    turned the real-tree test red; the module-level ones also turn the fresh-interpreter test
+    below red."""
+    tree = ast.parse(src)
+    pkg = module.split(".") if is_pkg else module.split(".")[:-1]
+    imported: List[tuple] = []
+    problems: List[tuple] = []
+    aliases: Dict[str, str] = {}  # `from importlib import import_module as im` → im
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+
+    def resolve(level: int, target: str, base_pkg: List[str], line: int):
+        if level - 1 >= len(base_pkg):
+            problems.append((line, f"relative import (level {level}) beyond the top-level package"))
+            return None
+        base = base_pkg[: len(base_pkg) - (level - 1)]
+        return ".".join(base + ([target] if target else []))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported += [(node.lineno, a.name) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = resolve(node.level, node.module or "", pkg, node.lineno) if node.level else node.module
+            if base is None:
+                continue
+            imported.append((node.lineno, base))
+            for a in node.names:
+                if a.name != "*":
+                    imported.append((node.lineno, f"{base}.{a.name}"))
+                if a.name in _NAME_IMPORTERS | _CODE_LOADERS:
+                    aliases[a.asname or a.name] = a.name
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _APP_DOTTED.fullmatch(node.value):
+                problems.append((node.lineno, f"string {node.value!r} names an app module"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            raw = _terminal_name(node.func)
+            name = aliases.get(raw, raw)
+            if isinstance(node.func, ast.Name) and raw in _EVAL_BUILTINS:
+                problems.append((node.lineno, f"{raw}() runs source text"))
+            elif name in _CODE_LOADERS:
+                problems.append((node.lineno, f"{name}() loads code by path"))
+            elif name in _NAME_IMPORTERS:
+                target = _literal(node, 0, "name" if name != "run_module" else "mod_name")
+                if target is None:
+                    problems.append((node.lineno, f"dynamic {name}() with a non-literal target"))
+                    continue
+                if target.startswith("."):
+                    level = len(target) - len(target.lstrip("."))
+                    package = (_literal(node, 1, "package") or "").split(".")
+                    target = resolve(level, target.lstrip("."), [p for p in package if p], node.lineno)
+                    if target is None:
+                        continue
+                imported.append((node.lineno, target))
+            elif raw == "getattr" and (_literal(node, 1, "name") or "") in _NAME_IMPORTERS | _CODE_LOADERS:
+                problems.append((node.lineno, "an importer fetched by getattr"))
+        elif isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in call_funcs:
+            ref = _terminal_name(node)
+            if (ref in _NAME_IMPORTERS | _CODE_LOADERS or ref in aliases
+                    or (isinstance(node, ast.Name) and ref in _EVAL_BUILTINS)):
+                problems.append((node.lineno, f"{ref} referenced without a direct, checkable call"))
+    return imported, problems
+
+
+def _app_violations(imported, problems) -> List[str]:
+    bad = [f"{line}: imports {n}" for line, n in imported if n == "app" or n.startswith("app.")]
+    return bad + [f"{line}: {what}" for line, what in problems]
+
+
 def test_worker_package_imports_nothing_from_app():
-    files = sorted(_PKG.rglob("*.py"))
+    files = _worker_files()
     assert _SCRIPT in files and len(files) >= 2, files
+    seen_httpx = False
     for py in files:
-        src = re.sub(r'"""[\s\S]*?"""', "", py.read_text())
-        src = "\n".join(re.sub(r"#.*$", "", l) for l in src.splitlines())
-        assert not re.search(r"^\s*(from|import)\s+app[.\s]", src, re.M), (
-            f"{py.name}: the worker must stay importable without app.config "
+        module, is_pkg = _worker_module_of(py)
+        imported, problems = worker_imports(py.read_text(encoding="utf-8"), module, is_pkg)
+        assert _app_violations(imported, problems) == [], (
+            f"{py.relative_to(_PKG)}: the worker must stay importable without app.config "
             "(no SUPABASE_* in its container)"
         )
+        seen_httpx |= py == _SCRIPT and "httpx" in {n for _, n in imported}
+    assert seen_httpx  # anti-vacuity: the scan really parsed main.py's imports
+
+
+@pytest.mark.parametrize("src", [
+    "from app.schemas.marketing import RUN_STAGES",
+    "import app.config",
+    "import app",
+    "import app.config as cfg",
+    "import os, app.schemas.marketing",
+    "import json; import app.schemas.marketing",
+    "def stage():\n    from app.config import Settings\n",
+    "import importlib\n_cfg = importlib.import_module('app.schemas.marketing')",
+    "__import__('app.schemas.marketing')",
+    "def _h():\n    import importlib\n    return importlib.import_module('app.config')",
+    "from importlib import import_module as im\nim('app.config')",
+    "from importlib import import_module\nimport_module(name='app.main')",
+    "import importlib\nimportlib.import_module(some_name)",
+    "import importlib\nimportlib.import_module('.config', package='app')",
+    "import importlib\nf = importlib.import_module\nf('x')",
+    "import importlib\ngetattr(importlib, 'import_module')('x')",
+    "exec('import app.config')",
+    "eval(\"__import__('ap' + 'p')\")",
+    "run = exec\nrun('x = 1')",
+    "import runpy\nrunpy.run_module('app.main')",
+    "import runpy\nrunpy.run_path('/srv/backend/app/main.py')",
+    "import importlib.util\nimportlib.util.spec_from_file_location('c', '/srv/app/config.py')",
+    "from .. import app",
+    "target = 'app.config'",
+])
+def test_the_worker_scanner_flags(src):
+    imported, problems = worker_imports(src, "marketing.main")
+    assert _app_violations(imported, problems), src
+
+
+@pytest.mark.parametrize("src", [
+    "import httpx\nimport json",
+    "from . import helpers\nfrom .stages import voice",
+    '"""Never import app.config here; app.main would double-start the lifespan."""\n',
+    "# from app.config import Settings\nx = 1",
+    "import re\nP = re.compile(r'x')",
+    "FONTS = '/app/marketing/assets/fonts'",
+    "import importlib\nimportlib.import_module('marketing.helpers')",
+    "import apple\nimport application_helpers",
+    "import subprocess\nsubprocess.run(['ffmpeg', '-version'])",
+    "from pathlib import Path\nROOT = Path('/') / 'app'",
+])
+def test_the_worker_scanner_passes(src):
+    imported, problems = worker_imports(src, "marketing.main")
+    assert _app_violations(imported, problems) == [], (src, imported, problems)
+
+
+@pytest.mark.parametrize("src, name", [
+    ("import importlib\nimportlib.import_module(NAME)".replace("NAME", repr("app.config")), "app.config"),
+    ("__import__(NAME)".replace("NAME", repr("app.main")), "app.main"),
+    ("from importlib import import_module as im\nim(name=NAME)".replace("NAME", repr("app.x")), "app.x"),
+    ("import importlib\nimportlib.import_module('.config', package='app')", "app.config"),
+    ("import runpy\nrunpy.run_module(NAME)".replace("NAME", repr("app.main")), "app.main"),
+])
+def test_a_literal_dynamic_import_is_resolved_like_an_import_statement(src, name):
+    """Each form on its own branch — not only caught by the string belt."""
+    imported, _ = worker_imports(src, "marketing.main")
+    assert name in {n for _, n in imported}
+
+
+def test_the_worker_scanner_resolves_relative_imports_inside_the_package():
+    imported, problems = worker_imports("from . import a\nfrom .b import c", "marketing.main")
+    assert {"marketing.a", "marketing.b", "marketing.b.c"} <= {n for _, n in imported} and not problems
+    imported, _ = worker_imports("from . import a", "marketing", is_pkg=True)
+    assert "marketing.a" in {n for _, n in imported}
+
+
+def test_the_worker_package_imports_in_a_tree_without_app(tmp_path):
+    """The Docker layout: only `marketing/` exists. Importing the entrypoint in a fresh
+    interpreter there must work and load no `app` module, by any route — including one the
+    AST scan cannot see (a helper that imports app at module level)."""
+    shutil.copytree(_PKG, tmp_path / "marketing", ignore=_copy_ignore(_PKG))
+    code = (
+        "import importlib.util, json, sys\n"
+        "assert importlib.util.find_spec('app') is None, 'app is importable: the check is vacuous'\n"
+        "import marketing.main\n"
+        "print(json.dumps(sorted(sys.modules)))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update({"PYTHONDONTWRITEBYTECODE": "1", "MARKETING_LOG_LEVEL": "WARNING"})
+    proc = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True,
+                          text=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert "marketing.main" in loaded
+    assert [n for n in loaded if n == "app" or n.startswith("app.")] == []
+
+
+def test_the_untracked_rule_is_anchored_like_the_gitignore(tmp_path):
+    """A nested `models/` or `out/` package is tracked and deployed, so both guards must see it;
+    only the ROOT ones (and `__pycache__` / `.cache` anywhere) are skipped."""
+    root = tmp_path / "marketing"
+    files = {
+        "voice/models/kokoro_loader.py": True,   # nested: tracked, shipped, scanned
+        "render/out/helpers.py": True,
+        "models/hf_cache_module.py": False,      # root: gitignored model cache
+        "out/scratch.py": False,
+        ".cache/pip/x.py": False,
+        "voice/.cache/y.py": False,               # `.cache` is ignored at every depth
+        "voice/__pycache__/z.py": False,
+        "main.py": True,
+    }
+    for rel in files:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x = 1\n")
+    scanned = {p.relative_to(root).as_posix() for p in _worker_files(root)}
+    assert scanned == {rel for rel, keep in files.items() if keep}
+    copy = tmp_path / "copy"
+    shutil.copytree(root, copy, ignore=_copy_ignore(root))
+    copied = {p.relative_to(copy).as_posix() for p in copy.rglob("*.py")}
+    assert copied == scanned
+
+
+def test_a_nested_models_package_importing_app_is_flagged(tmp_path):
+    root = tmp_path / "marketing"
+    (root / "voice" / "models").mkdir(parents=True)
+    (root / "voice" / "models" / "loader.py").write_text(
+        "def load():\n    from app.config import settings\n    return settings\n")
+    problems = []
+    for path in _worker_files(root):
+        module, is_pkg = _worker_module_of(path, root)
+        imported, found = worker_imports(path.read_text(), module, is_pkg)
+        problems += _app_violations(imported, found)
+    assert problems, "a nested models/ package importing app.* went unseen"
 
 
 def test_worker_package_is_self_contained_for_docker():
@@ -119,6 +398,29 @@ def test_build_manifest_lists_fonts_and_tolerates_a_missing_dir(m, tmp_path):
     assert missing["fonts_error"] and "FileNotFoundError" in missing["fonts_error"]
 
 
+class _TickingDT(datetime):
+    """`datetime.now()` that moves an hour on every call — a clock read that leaks into the
+    manifest can then never hide inside one microsecond."""
+
+    calls = 0
+
+    @classmethod
+    def now(cls, tz=None):
+        cls.calls += 1
+        return datetime(2026, 9, 17, 16, 0, tzinfo=ET) + timedelta(hours=cls.calls)
+
+
+def test_build_manifest_is_a_pure_function_of_image_and_run(m, monkeypatch, tmp_path):
+    """The manifest bytes are content-addressed into a PUBLIC, immutable path: anything
+    volatile in them mints a new object + asset row on every re-claimed attempt."""
+    monkeypatch.setattr(m, "datetime", type("DT", (_TickingDT,), {"calls": 0}))
+    kw = dict(worker_version="v", run_date=datetime(2026, 9, 17).date(), dry_run=True,
+              ffmpeg="ffmpeg version 5.1.9", fonts_dir=str(tmp_path))
+    a, b = m.build_manifest(**kw), m.build_manifest(**kw)
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    assert "generated_at" not in a
+
+
 def test_sha256_hex(m):
     assert m.sha256_hex(b"") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -129,12 +431,31 @@ def test_sha256_hex(m):
 class FakeBackend:
     """Answers the internal API and the Storage signed-upload PUT; records every call."""
 
-    def __init__(self, *, claim_reason="claimed", claim_status_codes=None, complete_status=200):
+    _SCRIPT = {"hook": "h", "video_script": ["a line."], "cards": [], "carousel_slides": [],
+               "disclaimer_card": "Educational only. Caydex", "outlets": ["x"]}
+
+    def __init__(self, *, claim_reason="claimed", claim_status_codes=None, complete_status=200,
+                 script_states=None, script_http_status=None,
+                 script_error_code="MARKETING_SCRIPT_NOT_READY"):
+        # The day's-script kick-and-poll answers, in order; the last one repeats.
+        self.script_states: List[Dict[str, Any]] = list(script_states or [
+            {"status": "generating", "source_ref": "journey:mr_market", "template_id": "checklist"},
+            {"status": "accepted", "source_ref": "journey:mr_market", "template_id": "checklist",
+             "script": self._SCRIPT},
+        ])
+        self.patches: List[Dict[str, Any]] = []
         self.calls: List[tuple] = []
         self.claim_reason = claim_reason
         self.claim_status_codes = list(claim_status_codes or [])
         self.complete_status = complete_status
+        # A non-200 answered to EVERY script kick (a 4xx must not be retried).
+        self.script_http_status = script_http_status
+        self.script_error_code = script_error_code
         self.uploaded: Dict[str, bytes] = {}
+        # Asset rows by content-addressed path, like the real ledger: re-registering the bytes
+        # of a `ready` row returns it with upload=None (no second object, no second PUT).
+        self.assets: Dict[str, Dict[str, Any]] = {}
+        self.registered: List[Dict[str, Any]] = []
         self.claim_bodies: List[Dict[str, Any]] = []
         self.run = {"id": "run-1", "run_date": "2026-09-17", "status": "in_progress", "stage": "planned",
                     "content_class": "A", "attempts": 1, "dry_run": True, "timings": {}, "metadata": {}}
@@ -159,9 +480,17 @@ class FakeBackend:
                                              "reason": self.claim_reason, "run": self.run})
         if path.endswith("/assets") and request.method == "POST":
             body = json.loads(request.content)
-            asset = {"id": "asset-1", "run_id": "run-1", "kind": body["kind"], "content_type": "application/json",
-                     "storage_path": f"2026-09-17/{body['kind']}-{body['sha256'][:16]}.json",
-                     "sha256": body["sha256"], "status": "pending_upload"}
+            self.registered.append(body)
+            storage_path = f"{self.run['run_date']}/{body['kind']}-{body['sha256'][:16]}.{body['ext']}"
+            asset = self.assets.get(storage_path)
+            if asset is None:  # first registration wins, metadata included
+                asset = {"id": f"asset-{len(self.assets) + 1}", "run_id": "run-1", "kind": body["kind"],
+                         "content_type": "application/json", "storage_path": storage_path,
+                         "sha256": body["sha256"], "status": "pending_upload",
+                         "metadata": body.get("metadata") or {}}
+                self.assets[storage_path] = asset
+            if asset["status"] == "ready":
+                return httpx.Response(200, json={"asset": asset, "upload": None})
             return httpx.Response(200, json={"asset": asset, "upload": {
                 "method": "PUT", "url": f"https://sb.example/object/upload/sign/marketing-media/{asset['storage_path']}?token=t",
                 "token": "t", "bucket": "marketing-media", "path": asset["storage_path"],
@@ -169,11 +498,22 @@ class FakeBackend:
         if path.endswith("/complete"):
             if self.complete_status != 200:
                 return httpx.Response(self.complete_status, json={"error_code": "MARKETING", "message": "not in bucket"})
-            return httpx.Response(200, json={"asset": {"id": "asset-1", "run_id": "run-1", "kind": "manifest",
-                                                       "storage_path": "p", "content_type": "application/json",
-                                                       "sha256": "a" * 64, "status": "ready"}})
+            asset_id = path.rsplit("/", 2)[-2]
+            (asset,) = [a for a in self.assets.values() if a["id"] == asset_id]
+            asset["status"] = "ready"
+            return httpx.Response(200, json={"asset": asset})
+        if path.endswith("/script") and request.method == "POST":
+            if self.script_http_status is not None:
+                return httpx.Response(self.script_http_status,
+                                      json={"error_code": self.script_error_code, "message": "no"})
+            state = self.script_states.pop(0) if len(self.script_states) > 1 else self.script_states[0]
+            return httpx.Response(200, json=state)
         if request.method == "PATCH":
-            self.run.update({k: v for k, v in json.loads(request.content).items() if k in ("status", "stage")})
+            body = json.loads(request.content)
+            self.patches.append(body)
+            self.run.update({k: v for k, v in body.items() if k in ("status", "stage", "last_error")})
+            if body.get("metadata"):
+                self.run["metadata"] = {**self.run.get("metadata", {}), **body["metadata"]}
             return httpx.Response(200, json=self.run)
         return httpx.Response(404, json={"error_code": "NOT_FOUND", "message": path})
 
@@ -208,20 +548,29 @@ class _FastTime:
         return None
 
 
-def test_happy_path_claims_uploads_manifest_and_closes_the_run_as_skipped(m, monkeypatch, env):
+def test_happy_path_selects_polls_the_script_and_closes_phase2_honestly(m, monkeypatch, env):
     be = FakeBackend()
     _wire(m, monkeypatch, be)
     assert m.main() == 0
     tails = [(meth, p.rsplit("/", 1)[-1]) for meth, p in be.calls]
     assert tails[:2] == [("POST", "claim"), ("POST", "assets")]
     assert tails[2][0] == "PUT" and tails[2][1].startswith("manifest-") and tails[2][1].endswith(".json")
-    assert tails[3:] == [("POST", "complete"), ("PATCH", "run-1"), ("PATCH", "run-1")]
+    assert tails[3:] == [
+        ("POST", "complete"), ("PATCH", "run-1"),          # preflight
+        ("POST", "script"), ("PATCH", "run-1"),            # stage `selected` (the first kick)
+        ("POST", "script"), ("PATCH", "run-1"),            # stage `scripted` (poll → accepted)
+        ("PATCH", "run-1"),                                # close
+    ]
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["selected", "scripted"]
+    # Phase 2 has no media: the run must NOT claim media_ready.
     assert be.run["status"] == "skipped"
+    assert be.run["metadata"]["skip_reason"] == m.PHASE_CLOSE_REASON == "phase2_script_only"
     # The manifest that went up is real JSON describing the image.
     (body,) = be.uploaded.values()
     start, end = body.find(b"{"), body.rfind(b"}") + 1
     manifest = json.loads(body[start:end])
-    assert manifest["worker_version"] == "phase1" and manifest["run_date"] == "2026-09-17"
+    assert manifest["worker_version"] == "phase2" and manifest["run_date"] == "2026-09-17"
+    assert manifest["stages_implemented"] == ["selected", "scripted"]
     assert manifest["ffmpeg"].startswith("ffmpeg")
 
 
@@ -293,13 +642,66 @@ def test_persistent_5xx_gives_up_with_exit_1(m, monkeypatch, env):
     assert len(be.calls) == 3  # _HTTP_ATTEMPTS, then stop
 
 
-def test_a_stage_failure_is_recorded_on_the_run_and_exits_1(m, monkeypatch, env):
-    be = FakeBackend(complete_status=422)
+@pytest.mark.parametrize("status", [409, 422])
+def test_a_stage_failure_is_recorded_on_the_run_and_exits_1(m, monkeypatch, env, status):
+    """A 4xx is terminal for the stage — 409 (MARKETING_ASSET_MISSING / SCRIPT_NOT_READY) is
+    documented as "the worker must NOT retry the same call". The fake answers the SAME 4xx
+    every time, so a retrying client would show up as three `complete` calls."""
+    be = FakeBackend(complete_status=status)
     _wire(m, monkeypatch, be)
     assert m.main() == 1
     assert be.run["status"] == "failed"
-    # the failure PATCH carried the error text
-    assert [meth for meth, _ in be.calls][-1] == "PATCH"
+    tails = [(meth, p.rsplit("/", 1)[-1]) for meth, p in be.calls]
+    assert [t for t in tails if t[0] != "PUT"] == [
+        ("POST", "claim"), ("POST", "assets"), ("POST", "complete"), ("PATCH", "run-1"),
+    ], tails
+    assert sum(p.endswith("/complete") for _, p in be.calls) == 1
+    # the failure PATCH carried the error text — the status, not a retry-exhaustion message
+    last_error = be.patches[-1]["last_error"]
+    assert f"-> {status}" in last_error and "attempts" not in last_error
+
+
+@pytest.mark.parametrize("status", [401, 403, 409, 422])
+def test_a_4xx_on_claim_is_not_retried(m, monkeypatch, env, status):
+    be = FakeBackend(claim_status_codes=[status] * (m._HTTP_ATTEMPTS + 1))
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert len(be.calls) == 1, be.calls
+
+
+def test_a_4xx_on_the_script_kick_is_not_retried(m, monkeypatch, env):
+    be = FakeBackend(script_http_status=409)
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert sum(p.endswith("/script") for _, p in be.calls) == 1
+    assert be.run["status"] == "failed" and "-> 409" in be.patches[-1]["last_error"]
+
+
+def test_a_run_no_longer_held_exits_0_without_a_failure_write(m, monkeypatch, env, caplog):
+    """409 MARKETING_RUN_NOT_HELD: the run was closed or re-claimed under this tick. A failure
+    PATCH would be refused with the same 409 (and log a misleading "could not record failure"),
+    so the tick stops quietly — but loudly enough to be seen: one WARNING naming the run."""
+    be = FakeBackend(script_http_status=409, script_error_code="MARKETING_RUN_NOT_HELD")
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.WARNING, logger=m.logger.name):
+        assert m.main() == 0
+    assert sum(p.endswith("/script") for _, p in be.calls) == 1
+    assert not [p for p in be.patches if p.get("status") == "failed"], be.patches
+    assert any("no longer held" in r.getMessage() and "run-1" in r.getMessage()
+               for r in caplog.records if r.levelno == logging.WARNING)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_a_worker_api_error_carries_the_structured_code(m, monkeypatch, env):
+    be = FakeBackend(script_http_status=409, script_error_code="MARKETING_SCRIPT_NOT_READY")
+    _wire(m, monkeypatch, be)
+    client = m.BackendClient("https://backend.example", "tok")
+    try:
+        with pytest.raises(m.WorkerAPIError) as info:
+            client.kick_script("run-1")
+    finally:
+        client.close()
+    assert info.value.status == 409 and info.value.error_code == "MARKETING_SCRIPT_NOT_READY"
 
 
 def test_missing_env_is_exit_1_before_any_call(m, monkeypatch):
@@ -362,3 +764,275 @@ def test_railway_watch_patterns_are_repo_rooted():
     patterns = re.findall(r'"([^"]+)"', m_.group(1))
     assert patterns and all(p.startswith("/backend/") for p in patterns), patterns
     assert "cronSchedule" in body and "healthcheckPath" not in body
+
+
+# ── Phase 2: the day's script ─────────────────────────────────────────────────
+
+
+class _Clock:
+    """A clock that advances only when the worker sleeps, so a poll budget is testable."""
+
+    def __init__(self):
+        self.t = 1000.0
+        self.slept: List[float] = []
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.t += s
+
+
+def _closing_patch(be: FakeBackend) -> Dict[str, Any]:
+    return be.patches[-1]
+
+
+def test_rest_day_is_skipped_before_any_stage_checkpoint(m, monkeypatch, env):
+    be = FakeBackend(script_states=[{"status": "rest_day"}])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "rest_day"
+    assert not [p for p in be.patches if p.get("stage")]  # a skip is not a finished stage
+    assert sum(1 for _, p in be.calls if p.endswith("/script")) == 1
+
+
+def test_rejected_script_skips_the_day_with_a_reason(m, monkeypatch, env):
+    be = FakeBackend(script_states=[
+        {"status": "generating", "source_ref": "journey:x"},
+        {"status": "rejected", "source_ref": "journey:x", "reason": "content",
+         "violations": ["person_named"]},
+    ])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "content_rejected"
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["selected"]
+
+
+def test_deferred_writer_ends_the_tick_failed_for_the_next_one_to_resume(m, monkeypatch, env):
+    be = FakeBackend(script_states=[
+        {"status": "generating"}, {"status": "deferred", "retry_after_seconds": 1800},
+    ])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0  # a deferral is not an error of this tick
+    closing = _closing_patch(be)
+    assert closing["status"] == "failed" and closing["last_error"].startswith("deferred:")
+
+
+def test_poll_budget_is_bounded_and_ends_deferred(m, monkeypatch, env):
+    be = FakeBackend(script_states=[{"status": "generating"}])
+    _wire(m, monkeypatch, be)
+    clock = _Clock()
+    monkeypatch.setattr(m, "time", clock)
+    assert m.main() == 0
+    polls = sum(1 for _, p in be.calls if p.endswith("/script"))
+    assert 2 <= polls <= m.SCRIPT_POLL_BUDGET_SECONDS // m.SCRIPT_POLL_SECONDS + 2
+    assert all(s == m.SCRIPT_POLL_SECONDS for s in clock.slept)
+    assert _closing_patch(be)["status"] == "failed"
+
+
+def test_resume_after_selected_goes_straight_to_polling(m, monkeypatch, env):
+    be = FakeBackend(script_states=[{"status": "accepted", "script": FakeBackend._SCRIPT}])
+    be.run["stage"] = "selected"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["scripted"]
+    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+
+
+def test_resume_after_scripted_closes_without_kicking_again(m, monkeypatch, env):
+    """Phase 2 has no stage after `scripted`, so nothing needs the script and nothing re-kicks.
+    Once one exists, `run_pipeline` re-derives the script first — pinned by
+    test_a_stage_after_scripted_gets_the_script_on_a_fresh_run_and_on_every_resume."""
+    be = FakeBackend()
+    be.run["stage"] = "scripted"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert not any(p.endswith("/script") for _, p in be.calls)
+    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+
+
+def test_unexpected_script_status_fails_the_run_loudly(m, monkeypatch, env):
+    be = FakeBackend(script_states=[{"status": "selected"}, {"status": "banana"}])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert _closing_patch(be)["status"] == "failed"
+
+
+# ── a `rejected` day carries WHY (contract: the kick's `reason`) ───────────────
+
+
+@pytest.mark.parametrize("reason, skip_reason", [
+    ("content", "content_rejected"),
+    ("writer_unavailable", "writer_unavailable"),
+    ("empty_pool", "empty_pool"),
+    ("source_ineligible", "source_ineligible"),
+])
+@pytest.mark.parametrize("after_polling", [False, True])
+def test_the_rejection_reason_becomes_the_skip_reason(m, monkeypatch, env, caplog, reason,
+                                                       skip_reason, after_polling):
+    """A writer outage exhausts the generation cap too; recording that as `content_rejected`
+    pointed an operator at the prompts instead of the key or the model."""
+    import logging as _logging
+
+    rejected = {"status": "rejected", "source_ref": "money_moves:x", "reason": reason, "violations": []}
+    states = [{"status": "generating", "source_ref": "money_moves:x"}, rejected] if after_polling else [rejected]
+    be = FakeBackend(script_states=states)
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(_logging.INFO, logger="marketing_worker"):
+        assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == skip_reason
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == (["selected"] if after_polling else [])
+    recs = [r for r in caplog.records if "REJECTED" in r.getMessage()]
+    assert len(recs) == 1 and f"skip_reason={skip_reason}" in recs[0].getMessage()
+    expected = _logging.ERROR if reason in ("writer_unavailable", "empty_pool") else _logging.WARNING
+    assert recs[0].levelno == expected
+    assert not any("rejection reason" in r.getMessage() for r in caplog.records)
+
+
+def test_the_worker_maps_exactly_the_server_rejection_reasons(m):
+    """Duplicated on purpose (the worker imports nothing from app.*), like RUN_STAGES: a reason
+    the server adds must get a skip_reason here, or it is recorded as `content_rejected`."""
+    from app.schemas.marketing import SCRIPT_REJECT_REASONS
+
+    assert set(m.REJECTION_SKIP_REASONS) == set(SCRIPT_REJECT_REASONS)
+    assert m.REJECTION_SKIP_REASONS["content"] == m.DEFAULT_REJECTION_SKIP_REASON
+
+
+@pytest.mark.parametrize("reason, skip_reason", [
+    ("content", "content_rejected"), ("writer_unavailable", "writer_unavailable"),
+    ("empty_pool", "empty_pool"), ("source_ineligible", "source_ineligible"),
+])
+def test_the_reason_survives_the_real_wire_schema(m, monkeypatch, env, reason, skip_reason):
+    """The endpoint answers `ScriptKickResponse.model_validate(state)` under a response_model,
+    and pydantic DROPS an undeclared key — so a server that computes `reason` but whose schema
+    does not declare it would label every outage `content_rejected` again, silently."""
+    from app.schemas.marketing import ScriptKickResponse
+
+    body = ScriptKickResponse.model_validate(
+        {"status": "rejected", "source_ref": "money_moves:x", "reason": reason, "violations": []}
+    ).model_dump(mode="json")
+    be = FakeBackend(script_states=[body])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["metadata"]["skip_reason"] == skip_reason
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("reason", [_MISSING, None, "banana", "CONTENT", "", 7, {"x": 1}, ["content"],
+                                    "x" * 5000])
+def test_a_missing_or_unknown_rejection_reason_is_content_rejected_and_warned(m, monkeypatch, env,
+                                                                              caplog, reason):
+    """Backward compatible with a web service that sends no `reason`, never silent about it —
+    and a server string is never written to the ledger verbatim."""
+    import logging as _logging
+
+    rejected = {"status": "rejected", "source_ref": "journey:x", "violations": ["person_named"]}
+    if reason is not _MISSING:
+        rejected["reason"] = reason
+    be = FakeBackend(script_states=[rejected])
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(_logging.INFO, logger="marketing_worker"):
+        assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "content_rejected"
+    (warn,) = [r for r in caplog.records if "rejection reason" in r.getMessage()]
+    assert warn.levelno == _logging.WARNING
+    shown = None if reason is _MISSING else reason
+    assert repr(shown)[:60] in warn.getMessage() and len(warn.getMessage()) < 400
+
+
+# ── a resumed run re-derives what the stages it skipped produced ──────────────
+
+
+def _with_a_later_stage(m, monkeypatch) -> List[Any]:
+    """Append the Phase-3 `voiced` stage the way it will naturally be written: reading the
+    script the `scripted` stage produced out of ctx."""
+    seen: List[Any] = []
+
+    def stage_voice(api, run, ctx):
+        seen.append(ctx["script"])
+
+    monkeypatch.setattr(m, "MEDIA_STAGES", list(m.MEDIA_STAGES) + [("voiced", stage_voice)])
+    return seen
+
+
+@pytest.mark.parametrize("checkpoint, kicks", [("planned", 2), ("selected", 2), ("scripted", 1)])
+def test_a_stage_after_scripted_gets_the_script_on_a_fresh_run_and_on_every_resume(
+        m, monkeypatch, env, checkpoint, kicks):
+    """`ctx` is per-process and a resume SKIPS the stage that filled it: without re-deriving,
+    a resume from `scripted` KeyErrors in voice on every re-claim until the attempts run out,
+    with an accepted script sitting on the server."""
+    seen = _with_a_later_stage(m, monkeypatch)
+    be = FakeBackend()
+    be.run["stage"] = checkpoint
+    if checkpoint == "scripted":  # the kick is idempotent: an ACCEPTED row returns its script
+        be.script_states = [{"status": "accepted", "script": FakeBackend._SCRIPT}]
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert seen == [FakeBackend._SCRIPT]
+    assert sum(p.endswith("/script") for _, p in be.calls) == kicks
+    assert [p.get("stage") for p in be.patches if p.get("stage")][-1] == "voiced"
+    assert be.run["status"] == "skipped"
+
+
+@pytest.mark.parametrize("state", [
+    {"status": "generating"},
+    {"status": "deferred", "retry_after_seconds": 60},
+    {"status": "rejected", "reason": "content"},
+    {"status": "rest_day"},
+    {"status": "accepted"},
+    {"status": "accepted", "script": {}},
+])
+def test_past_the_checkpoint_anything_but_an_accepted_script_fails_loudly(m, monkeypatch, env, state):
+    """After `scripted` the script is accepted and immutable: another answer is an
+    inconsistency. Fail the tick — never re-enter the poll loop, never close the day skipped."""
+    seen = _with_a_later_stage(m, monkeypatch)
+    be = FakeBackend(script_states=[state])
+    be.run["stage"] = "scripted"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert seen == []
+    assert sum(p.endswith("/script") for _, p in be.calls) == 1  # no polling
+    closing = _closing_patch(be)
+    assert closing["status"] == "failed" and "past the `scripted` checkpoint" in closing["last_error"]
+    assert "skip_reason" not in be.run["metadata"]
+
+
+# ── the preflight manifest is content-addressed ───────────────────────────────
+
+
+def test_a_reclaimed_run_reuses_its_manifest_instead_of_minting_a_new_object(m, monkeypatch, env):
+    """Two ticks of one day (the first deferred, the second re-claimed) must register ONE
+    manifest path and PUT it ONCE — the public bucket is immutable and never pruned."""
+    monkeypatch.setattr(m, "datetime", type("DT", (_TickingDT,), {"calls": 0}))
+    be = FakeBackend(script_states=[{"status": "generating"}, {"status": "deferred", "retry_after_seconds": 1}])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0 and be.run["status"] == "failed"
+    be.run["status"] = "in_progress"  # the next hourly tick re-claims it
+    be.script_states = [{"status": "accepted", "script": FakeBackend._SCRIPT}]
+    assert m.main() == 0
+
+    manifests = [b for b in be.registered if b["kind"] == "manifest"]
+    assert len(manifests) == 2 and manifests[0]["sha256"] == manifests[1]["sha256"]
+    assert len(be.assets) == 1 and len(be.uploaded) == 1
+    assert sum(p.endswith("/complete") for _, p in be.calls) == 1  # tick 2 took the "already ready" branch
+    # the time is not lost — it rides in the (unhashed) asset metadata, first registration wins
+    (asset,) = be.assets.values()
+    assert asset["status"] == "ready" and asset["metadata"]["generated_at"].startswith("2026-09-17T")
+    assert manifests[0]["metadata"]["generated_at"] != manifests[1]["metadata"]["generated_at"]
+    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+
+
+def test_worker_deadlines_fit_inside_the_backend_stale_window(m):
+    """A live tick must never look abandoned to `decide_claim` (liveness = updated_at), and one
+    poll session must outlast a crashed generation's lease so the next kick can take over."""
+    from app.config import Settings
+    from app.services.marketing import script_service
+
+    stale = Settings.model_fields["MARKETING_RUN_STALE_SECONDS"].default
+    assert m.WORKER_DEADLINE_SECONDS < stale
+    assert m.SCRIPT_POLL_BUDGET_SECONDS <= m.WORKER_DEADLINE_SECONDS
+    assert m.SCRIPT_POLL_BUDGET_SECONDS > script_service.LEASE_SECONDS
+    assert m.SCRIPT_POLL_SECONDS < script_service.LEASE_SECONDS

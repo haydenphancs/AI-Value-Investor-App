@@ -102,7 +102,7 @@ final class PushNotificationManager {
     ///
     /// In memory only, unlike `pendingToken`: a tap is meaningful for this launch, not a day
     /// later. If the process dies before AppState exists there is nothing worth restoring.
-    private var pendingRoute: NotificationRoute?
+    private var pendingRoute: PushedNotification?
 
     /// Ask for notification permission; register for remote notifications on grant.
     /// Safe to call repeatedly — iOS only prompts once.
@@ -151,32 +151,20 @@ final class PushNotificationManager {
         }
     }
 
-    /// A notification was TAPPED. Hands the resolved destination to AppState; the Home
-    /// tab consumes it and presents the right screen.
-    ///
-    /// Both properties are set in lockstep: `pendingPushRoute` is the one that carries the
-    /// asset type (so a crypto alert opens the crypto screen), and `pendingPushTicker` is
-    /// kept so any existing reader keeps working.
-    func handleTap(route: NotificationRoute) {
+    /// A notification was TAPPED. Hands it to AppState, where `ContentView` presents its
+    /// DETAIL screen — the notification's own words first, the ticker only if the user then
+    /// chooses it. Never the destination directly: see `PushedNotification`.
+    func handleTap(_ pushed: PushedNotification) {
         // Park it if AppState is not wired yet — a cold launch FROM a tap gets here first.
         guard appState != nil else {
-            pendingRoute = route
+            pendingRoute = pushed
             return
         }
-        deliver(route)
+        deliver(pushed)
     }
 
-    private func deliver(_ route: NotificationRoute) {
-        appState?.pendingPushRoute = route
-        appState?.pendingPushTicker = route.symbol
-    }
-
-    /// Legacy entry point, kept so a caller that only has a symbol still works. Resolves
-    /// through the same router, which defaults the asset type to `.stock`.
-    func handleTap(ticker: String) {
-        handleTap(route: .ticker(
-            symbol: ticker.uppercased(), assetType: .stock, destination: .default
-        ))
+    private func deliver(_ pushed: PushedNotification) {
+        appState?.pendingPushNotification = pushed
     }
 
     /// Called by the AppDelegate with the raw APNs token.

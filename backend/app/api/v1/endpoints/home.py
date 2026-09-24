@@ -15,6 +15,7 @@ authenticated users also receive personalised research reports.
 from fastapi import APIRouter, Depends
 from typing import Optional
 import logging
+import re
 
 from app.dependencies import get_current_user_id, get_watchlist_identity
 from app.services.home_service import HomeService
@@ -24,17 +25,31 @@ from app.schemas.home import HomeFeedResponse
 from app.schemas.home_dashboard import HomeDashboardResponse
 from app.schemas.signals_detail import SignalTickerDetailResponse
 from app.schemas.themes_detail import ThemeDetailResponse
+# The schema stays at module scope (`response_model` needs it; it imports only pydantic). The
+# SERVICE is imported inside `get_trillion_club_detail`: an import-time defect there must cost
+# that one route a 503, not the /home router every Home request runs through.
+from app.schemas.trillion_club import TrillionClubDetailResponse
 from app.api.error_response import (
     error_response_from_exception,
     make_error_response,
     ErrorCode,
 )
-from app.services.entitlements import required_tier_for_whales, whale_detail_unlocked
+from app.services.entitlements import (
+    TIER_PRO,
+    required_tier_for_trillion_club_detail,
+    required_tier_for_whales,
+    trillion_club_detail_unlocked,
+    whale_detail_unlocked,
+)
 
 # The signal cards that have a per-ticker drill-down. Earnings Shockers has none (its leaders
 # open the ticker screen). iOS mirrors this set as `ExclusiveSignal.drillDownKinds`, pinned
 # by tests/test_ios_signal_kinds_parity.py.
 _VALID_SIGNAL_KINDS = {"whale", "congress", "ceo"}
+
+# The `trillion_club_companies.slug` CHECK, verbatim. Used with `fullmatch`: `re.match` with a
+# `$` anchor would accept a trailing newline (a `%0A` in the path).
+_TRILLION_CLUB_SLUG = re.compile(r"[a-z0-9-]{1,40}")
 
 logger = logging.getLogger(__name__)
 
@@ -195,5 +210,66 @@ async def get_theme_detail(slug: str):
             ErrorCode.THEME_NOT_FOUND,
             message=f"No active theme with slug {slug!r}",
             details={"slug": slug},
+        )
+    return detail
+
+
+@router.get("/trillion-club/{slug}", response_model=TrillionClubDetailResponse)
+async def get_trillion_club_detail(
+    slug: str,
+    # The users-row identity (like /dashboard and /signals): it carries `tier`, and a
+    # deleted account's still-valid JWT is refused. Sign-in itself is the ROUTER's
+    # dependency — the 13F rows are FMP-licensed data (auth.md §1a).
+    user: dict = Depends(get_watchlist_identity),
+):
+    """Trillion-Dollar Club Bets drill-down for one company: its card, 13F holdings and
+    quarter-over-quarter changes, every published stake, earlier quarters, and the other
+    members.
+
+    Free sees the top 3 holdings, the changed rows and the stakes, minus any 13F note naming
+    a withheld holding (`is_locked`, with `locked_holdings_count`, `locked_history_count` and
+    no history); Pro/Max see everything. The redaction is a
+    per-request COPY of the shared cached detail. A slug that is not a published club
+    member — or any slug while the feature is off or the section is hidden for stale
+    membership — is 404 TRILLION_CLUB_COMPANY_NOT_FOUND.
+    """
+    if not isinstance(slug, str) or not _TRILLION_CLUB_SLUG.fullmatch(slug):
+        shown = slug[:60] if isinstance(slug, str) else ""
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid Trillion-Dollar Club slug: {shown!r}",
+            details={"slug": shown},
+        )
+    tier = user.get("tier")
+    try:
+        # Function-local on purpose (see the module imports): an ImportError lands in the
+        # handler below as a typed, retryable 503 instead of failing the router's import.
+        from app.services.trillion_club_service import (
+            get_trillion_club_service,
+            redact_trillion_club_detail,
+        )
+
+        detail = await get_trillion_club_service().get_detail(slug)
+    except Exception as e:
+        logger.error(
+            "Trillion club detail failed (slug=%s user=%s): %s: %s",
+            slug, user.get("id"), type(e).__name__, e, exc_info=True,
+        )
+        # Typed and retryable: the only failure here is a READ (the service never calls
+        # FMP). The generic mapping would have said "The report failed to generate".
+        return make_error_response(
+            ErrorCode.TRILLION_CLUB_UNAVAILABLE,
+            message=f"trillion club detail read failed: {type(e).__name__}",
+            details={"slug": slug},
+        )
+    if detail is None:
+        return make_error_response(
+            ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND,
+            message=f"No published Trillion-Dollar Club member with slug {slug!r}",
+            details={"slug": slug},
+        )
+    if not trillion_club_detail_unlocked(tier):
+        detail = redact_trillion_club_detail(
+            detail, required_tier_for_trillion_club_detail(tier) or TIER_PRO
         )
     return detail

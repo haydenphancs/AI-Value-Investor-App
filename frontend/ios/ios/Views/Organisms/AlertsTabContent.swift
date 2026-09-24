@@ -168,6 +168,20 @@ struct AlertsTabContent: View {
             .environment(appState)
         }
         .alertDestinationCover($openedDestination)
+        // This view owns a sheet and a cover of its OWN — state no tab root can reach — so it
+        // clears them itself when something asks to be seen elsewhere. Without this, "AI Deep
+        // Research" on a ticker opened from an alert switched to Research BEHIND the cover (the
+        // modal-stack unwind the tab roots already do), and a push tap could not present its
+        // detail over an open alert.
+        //
+        // The parked choice FIRST: nil-ing `selectedNotification` runs the sheet's `onDismiss`,
+        // which would otherwise promote the parked destination into a cover mid-unwind — the
+        // same order the live Tracking root uses for `pendingAlertDestination`.
+        .onPresentationReset {
+            pendingDestination = nil
+            selectedNotification = nil
+            openedDestination = nil
+        }
         // auth.md §7 — this tab shows three lists of the CALLER'S OWN data on device-global
         // view models. Without this the next account to sign in on the phone inherits the
         // previous user's notifications and price rules.
@@ -464,7 +478,10 @@ struct AlertsTabContent: View {
                 NotificationInboxSection.rows(
                     viewModel: notifications,
                     items: items,
-                    selection: $selectedNotification
+                    selection: $selectedNotification,
+                    // A report row opens its report straight into the destination cover — no
+                    // detail sheet, so nothing to park and promote.
+                    openDirectly: $openedDestination
                 )
                 .padding(.horizontal, AppSpacing.lg)
             }

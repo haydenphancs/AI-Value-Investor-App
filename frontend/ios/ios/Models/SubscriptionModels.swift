@@ -471,6 +471,10 @@ enum PaywallContext: String, Sendable, CaseIterable {
     /// The Congress segment of a ticker's Holders tab (Pro/Max, 2026-09-17). Same paid
     /// floor and the same `signals` feature row as the Congress signal on Home.
     case congressHolders = "congress_holders"
+    /// A Trillion-Dollar Club company's full 13F holdings list and earlier quarters (Pro/Max,
+    /// backend `TRILLION_CLUB_DETAIL_UNLOCKED_TIERS` — the whale-detail floor). The cards, the
+    /// top 3 holdings, the latest changes and every disclosed stake stay free.
+    case trillionClub = "trillion_club"
 
     var headline: String {
         switch self {
@@ -482,6 +486,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleDetail:      return "See what they're actually holding"
         case .learnAudio:       return "Listen instead of reading"
         case .congressHolders:  return "See what Congress is trading"
+        case .trillionClub:     return "See every holding and every quarter"
         }
     }
 
@@ -506,6 +511,8 @@ enum PaywallContext: String, Sendable, CaseIterable {
             return "Narration and read-along for Money Moves and the book library. Investor Journey narration is already free on every plan."
         case .congressHolders:
             return "Insider and institutional flow stay free on every ticker. A plan adds congressional trades and the members behind them."
+        case .trillionClub:
+            return "You already see each company's largest holdings, its latest changes and its disclosed stakes. A plan adds the full holdings list and earlier quarters."
         }
     }
 
@@ -520,6 +527,9 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleDetail:           return "whale_detail"
         case .learnAudio:            return "learn_audio"
         case .congressHolders:       return "signals"
+        // Same paid floor and the same thing unlocked — a filer's full 13F holdings and its
+        // history — as the whale profile's Current Picks, so the same feature row.
+        case .trillionClub:          return "whale_detail"
         }
     }
 
@@ -533,6 +543,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleDetail:      return "chart.pie.fill"
         case .learnAudio:       return "headphones"
         case .congressHolders:  return "building.columns.fill"
+        case .trillionClub:     return "building.2.fill"
         }
     }
 
@@ -541,7 +552,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .general, .moreCredits: return AppColors.alertOrange
         case .updatesTickers:        return AppColors.primaryBlue
         case .signals, .congressHolders: return AppColors.accentCyan
-        case .whaleFollowLimit, .whaleDetail: return AppColors.alertPurple
+        case .whaleFollowLimit, .whaleDetail, .trillionClub: return AppColors.alertPurple
         case .learnAudio:            return AppColors.gain
         }
     }

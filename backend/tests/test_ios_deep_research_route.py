@@ -292,11 +292,38 @@ def test_home_clears_every_one_of_its_presentations():
         "selectedTicker",
         "signalDetailTarget",
         "themeDetailTarget",   # ← the reported chain
-        "pushRoute",
         "showSearch",
         "showProfile",
     ):
         assert state in body, f"HomeDashboardView's reset no longer clears {state}"
+
+
+def test_the_alerts_tab_takes_its_own_presentations_down():
+    """`AlertsTabContent` owns a sheet (a notification's detail) and a cover (the destination
+    chosen on it) in its OWN `@State`, which Tracking's root reset cannot reach. Without its own
+    reset, "AI Deep Research" on a ticker opened from an alert switched to Research BEHIND that
+    cover — the exact dead-button shape this file exists for.
+
+    The parked choice must go first: nil-ing `selectedNotification` runs the sheet's
+    `onDismiss`, which promotes `pendingDestination` into a cover mid-unwind."""
+    body = _decl_body(_code(_IOS / "Views/Organisms/AlertsTabContent.swift"), ".onPresentationReset")
+    for state in ("pendingDestination", "selectedNotification", "openedDestination"):
+        assert state in body, f"AlertsTabContent's reset no longer clears {state}"
+    assert body.index("pendingDestination") < body.index("selectedNotification"), (
+        "the parked destination is cleared AFTER the sheet, so its onDismiss re-presents the cover"
+    )
+
+
+def test_the_shell_takes_a_tapped_push_down_too():
+    """A tapped push's detail sheet and its destination cover are the SHELL's state, like the
+    chat cover — no tab root's reset reaches them. Same parked-choice-first order."""
+    body = _decl_body(_code(_CONTENT), ".onPresentationReset")
+    for state in ("isAIChatPresented", "pendingPushDestination", "pushDetail", "openedPushDestination"):
+        assert state in body, f"ContentView's reset no longer clears {state}"
+    assert body.index("pendingPushDestination") < body.index("pushDetail"), (
+        "the parked push destination is cleared AFTER the sheet, so its onDismiss re-presents "
+        "the cover mid-unwind"
+    )
 
 
 def test_tracking_reset_is_on_the_live_variant():

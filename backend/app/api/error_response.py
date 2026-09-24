@@ -47,6 +47,10 @@ class ErrorCode(str, Enum):
     # An Emerging Frontiers theme slug that isn't an active `trending_themes` row
     # (e.g. a card deleted between a dashboard load and the tap).
     THEME_NOT_FOUND = "THEME_NOT_FOUND"
+    # A Trillion-Dollar Club Bets slug that is not a published club member right now: the
+    # company left the club, was unpublished, or the section is off / hidden for stale
+    # membership (GET /home/trillion-club/{slug}).
+    TRILLION_CLUB_COMPANY_NOT_FOUND = "TRILLION_CLUB_COMPANY_NOT_FOUND"
 
     # ── Upstream services ────────────────────────────────────────────
     FMP_RATE_LIMITED = "FMP_RATE_LIMITED"
@@ -177,6 +181,10 @@ class ErrorCode(str, Enum):
     # user tapped is still legitimate.
     WHALE_PROFILE_UNAVAILABLE = "WHALE_PROFILE_UNAVAILABLE"
     WHALE_NOT_FOUND = "WHALE_NOT_FOUND"
+    # A Trillion-Dollar Club detail could not be READ (a Supabase blip). Retryable; distinct
+    # from TRILLION_CLUB_COMPANY_NOT_FOUND. Without it the generic mapping would have told
+    # the user "The report failed to generate" on a screen that generates nothing.
+    TRILLION_CLUB_UNAVAILABLE = "TRILLION_CLUB_UNAVAILABLE"
     # Terminal, NOT retryable. Ownership of an App Store transaction never moves, so this
     # condition can never clear — which is why it must not share a code with the retryable
     # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
@@ -268,7 +276,7 @@ class ErrorCode(str, Enum):
 
     # ── Marketing engine — WORKER-FACING ONLY (design doc §12) ─────────────────
     # Emitted by /api/v1/internal/marketing/*, whose only caller is the media worker
-    # (marketing/main.py). iOS never reaches those routes, so these three have NO
+    # (marketing/main.py). iOS never reaches those routes, so the MARKETING_* codes have NO
     # AppError branch on purpose — /list-error-codes will list them as unmapped; that is
     # correct, not drift. They exist so a ledger failure is legible in the worker's log and
     # in Sentry instead of arriving mislabelled as REPORT_GENERATION_FAILED (the classifier's
@@ -276,6 +284,17 @@ class ErrorCode(str, Enum):
     MARKETING_NOT_FOUND = "MARKETING_NOT_FOUND"          # run/asset id unknown — a worker bug
     MARKETING_ASSET_MISSING = "MARKETING_ASSET_MISSING"  # worker said uploaded; bucket says no
     MARKETING_LEDGER_ERROR = "MARKETING_LEDGER_ERROR"    # Supabase/Storage write or read failed
+    # create_posts before the run's script was ACCEPTED (or for an outlet the accepted script
+    # dropped). 409, not 503: retrying the same request cannot succeed until the writer is done.
+    MARKETING_SCRIPT_NOT_READY = "MARKETING_SCRIPT_NOT_READY"
+    # A per-run write (kick that would start writer spend, PATCH, asset, posts) on a run the
+    # caller does not hold: not `in_progress`, outside the today/yesterday ET window, or a
+    # claim gone stale. 409, never retried: the next claim decides what happens to the day.
+    MARKETING_RUN_NOT_HELD = "MARKETING_RUN_NOT_HELD"
+    # The worker asked for something the contract forbids (a platform/format pair the server
+    # does not record, a media post without its media, a stage moving backwards, a status the
+    # worker may not set). 422: the same request can never succeed.
+    MARKETING_REQUEST_INVALID = "MARKETING_REQUEST_INVALID"
 
 
 # Default user-facing copy per code. Endpoints can override per-call.
@@ -286,6 +305,15 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "The uploaded object could not be found in the media bucket; re-upload it."
     ),
     ErrorCode.MARKETING_LEDGER_ERROR: "The marketing ledger could not be updated; retry.",
+    ErrorCode.MARKETING_SCRIPT_NOT_READY: (
+        "The run has no accepted script for that outlet yet; finish the script stage first."
+    ),
+    ErrorCode.MARKETING_RUN_NOT_HELD: (
+        "The run is not held by a live claim; claim the day again before writing to it."
+    ),
+    ErrorCode.MARKETING_REQUEST_INVALID: (
+        "The marketing worker request breaks the internal API contract; it will not succeed on retry."
+    ),
     ErrorCode.EMAIL_NOT_CONFIRMED: (
         "Please confirm your email address first. Check your inbox for the "
         "confirmation link \u2014 including your spam folder."
@@ -301,6 +329,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ),
     ErrorCode.THEME_NOT_FOUND: (
         "That theme is no longer available."
+    ),
+    ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: (
+        "That company is no longer in the Trillion-Dollar Club section."
     ),
     ErrorCode.FMP_RATE_LIMITED: (
         "Market data is rate-limited right now. Please try again in a minute."
@@ -389,6 +420,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: (
         "We couldn't load this investor right now. Please try again shortly."
     ),
+    ErrorCode.TRILLION_CLUB_UNAVAILABLE: (
+        "We couldn't load this company's holdings right now. Please try again shortly."
+    ),
     ErrorCode.WHALE_NOT_FOUND: (
         "We couldn't find this investor. They may no longer be tracked."
     ),
@@ -469,6 +503,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.REPORT_ALREADY_COMPLETED: "refresh",
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
+    ErrorCode.TRILLION_CLUB_UNAVAILABLE: "retry",
     ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
     # left StoreKit redelivering the transaction on every launch forever.
@@ -505,7 +540,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.ACCOUNT_DELETE_INCOMPLETE: "retry_later",
     # NOT retry_later: retrying changes nothing until the user deletes an alert.
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: "fix_input",
-    # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND: there
+    # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND and
+    # TRILLION_CLUB_COMPANY_NOT_FOUND: there
     # is nothing for the user to do, and "none" is not one of the iOS `ErrorAction`
     # cases — it would decode as an unknown action rather than as no action.
     # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
@@ -531,6 +567,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.INVALID_PERSONA: 400,
     ErrorCode.INVALID_INPUT: 400,
     ErrorCode.THEME_NOT_FOUND: 404,
+    ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: 404,
     ErrorCode.FMP_RATE_LIMITED: 502,
     ErrorCode.FMP_UNAVAILABLE: 502,
     ErrorCode.FMP_NOT_ENTITLED: 409,
@@ -555,6 +592,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # isn't allowed this action on their plan (auth.md §2). 402 would also send iOS down the
     # top-up route, and no amount of credits unlocks a follow slot.
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: 503,
+    ErrorCode.TRILLION_CLUB_UNAVAILABLE: 503,
     ErrorCode.WHALE_NOT_FOUND: 404,
     ErrorCode.WHALE_FOLLOW_LOCKED: 403,
     # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of
@@ -634,6 +672,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.MARKETING_NOT_FOUND: 404,
     ErrorCode.MARKETING_ASSET_MISSING: 409,
     ErrorCode.MARKETING_LEDGER_ERROR: 503,
+    ErrorCode.MARKETING_SCRIPT_NOT_READY: 409,
+    ErrorCode.MARKETING_RUN_NOT_HELD: 409,
+    ErrorCode.MARKETING_REQUEST_INVALID: 422,
 }
 
 
@@ -763,6 +804,12 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # Matched by NAME ahead of every heuristic below: these are our own classes, their
     # messages mention buckets and paths, and the generic tail would call them
     # REPORT_GENERATION_FAILED. Order matters — the specific subclasses first.
+    if "marketingscriptnotready" in cls:
+        return ErrorCode.MARKETING_SCRIPT_NOT_READY, _DEFAULT_STATUS[ErrorCode.MARKETING_SCRIPT_NOT_READY]
+    if "marketingrunnotheld" in cls:
+        return ErrorCode.MARKETING_RUN_NOT_HELD, _DEFAULT_STATUS[ErrorCode.MARKETING_RUN_NOT_HELD]
+    if "marketingrequestinvalid" in cls:
+        return ErrorCode.MARKETING_REQUEST_INVALID, _DEFAULT_STATUS[ErrorCode.MARKETING_REQUEST_INVALID]
     if "marketingassetmissinginstorage" in cls:
         return ErrorCode.MARKETING_ASSET_MISSING, _DEFAULT_STATUS[ErrorCode.MARKETING_ASSET_MISSING]
     if "marketingrunnotfound" in cls or "marketingassetnotfound" in cls:

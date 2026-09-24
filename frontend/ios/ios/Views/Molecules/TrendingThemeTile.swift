@@ -10,8 +10,20 @@
 
 import SwiftUI
 
+/// Where a tile's hero bitmap comes from.
+enum ThemeHeroSource {
+    /// The tile loads its own image (`AsyncImage`). Fine for a single tile — previews,
+    /// one-off uses.
+    case remote
+    /// The caller already loaded the image — nil while loading or after a failure — and
+    /// shares ONE decoded bitmap across every tile showing it. The endless carousel draws each
+    /// theme several times, and an `AsyncImage` per tile would decode a full-size copy each.
+    case shared(UIImage?)
+}
+
 struct TrendingThemeTile: View {
     let theme: TrendingTheme
+    var hero: ThemeHeroSource = .remote
     var onTap: (() -> Void)? = nil
 
     /// Height of the full-bleed image band. With the ~46pt text band below, the
@@ -34,6 +46,7 @@ struct TrendingThemeTile: View {
             .cardBorder(cornerRadius: 15)
         }
         .buttonStyle(.plain)
+        .accessibilityValue(theme.trend.isEmpty ? "" : (theme.trendIsPositive ? "Up over the past month" : "Down over the past month"))
     }
 
     // MARK: - Image band (full-bleed hero across the top of the card)
@@ -95,14 +108,31 @@ struct TrendingThemeTile: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
 
-            Text(theme.count)
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textSecondary)
+            HStack(alignment: .center, spacing: 6) {
+                Text(theme.count)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textSecondary)
+                Spacer(minLength: 0)
+                trendLine
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 12)
+    }
+
+    /// The last month of the theme's current stocks, equal-weighted. A GRAPHIC token (a
+    /// stroke, never text); the non-colour direction cue comes from `isPositive`.
+    @ViewBuilder private var trendLine: some View {
+        if !theme.trend.isEmpty {
+            TintedSparkline(points: theme.trend,
+                            color: theme.trendIsPositive ? AppColors.gainGraphic : AppColors.lossGraphic,
+                            lineWidth: 1.5,
+                            isPositive: theme.trendIsPositive)
+                .frame(width: 44, height: 16)
+                .accessibilityHidden(true)
+        }
     }
 
     // MARK: - Card image (remote, with an accent-gradient fallback)
@@ -111,7 +141,13 @@ struct TrendingThemeTile: View {
     /// otherwise — nil/empty/loading/error — an accent gradient so the tile never
     /// shows an empty hole. Fills the image band, cover-cropped.
     @ViewBuilder private var themeImage: some View {
-        if let s = theme.imageUrl, s.hasPrefix("http"), let url = URL(string: s) {
+        if case .shared(let image) = hero {
+            if let image {
+                Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                accentFallback   // still loading, failed, or no valid URL
+            }
+        } else if let s = theme.imageUrl, s.hasPrefix("http"), let url = URL(string: s) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().aspectRatio(contentMode: .fill)

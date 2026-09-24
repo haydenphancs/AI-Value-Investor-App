@@ -31,7 +31,15 @@ from app.database import get_supabase
 from app.utils.period_labels import filing_period_display
 from app.services.corporate_actions_service import (
     corporate_actions_source,
-    window_for_range,
+)
+# The 13F split block lives in `thirteen_f_splits` (shared with the Trillion-Dollar Club
+# builder). The old private names stay importable from here: `scripts/hydrate_whales.py`
+# and the whale tests import `_split_ratio_in_window` / `_suspicious_split_tickers` from
+# this module.
+from app.services.thirteen_f_splits import (
+    resolve_13f_split_adjustments,
+    split_ratio_in_window as _split_ratio_in_window,
+    suspicious_split_tickers as _shared_suspicious_split_tickers,
 )
 from app.services._whale_common import (
     MAX_SPLIT_LOOKUPS as _MAX_SPLIT_LOOKUPS,
@@ -61,10 +69,6 @@ from app.services._whale_common import (
     dedupe_congress_trades,
     congressional_raw_hash,
 )
-
-# Smallest per-share price move (either direction) that reads like a split: 3:2 is
-# 1.5, 4:3 is 1.33, a 1:10 reverse is 0.1. See `_suspicious_split_tickers`.
-_SPLIT_PRICE_FACTOR = 1.3
 
 # A snapshot persisted WITHOUT `raw_hash` was built while a split lookup was failing
 # (see `_process_13f_path`). The in-app path serves it as-is for this long, then
@@ -1939,152 +1943,26 @@ class WhaleService:
         if not sector_data and fallback_sectors:
             sector_data = fallback_sectors
 
-        # Fetch stock-split ratios ONLY for tickers whose share count jumped
-        # like a split (value ~preserved) — bounds the lookup to the rare
-        # suspicious holdings instead of every position. Without this, a
-        # held-through-split position (e.g. a 10:1) fabricates a huge BOUGHT
-        # trade in the diff below.
-        #
-        # Splits no longer come from FMP `/splits`, which is outside the signed licence and
-        # answers 402 — so this whole block was silently yielding `{}` and the fabricated
-        # BOUGHT was live. `corporate_actions_service` derives them from the entitled
-        # adjusted-vs-raw price series instead, and returns FMP's own row shape so
-        # `_split_ratio_in_window` below is unchanged.
-        #
-        # ⚠️ A spin-off moves the same adjustment factor and changes NO share count, so the
-        # derivation classifies rather than just detecting: an unnameable factor comes back
-        # as no split at all, and `is_implausible_share_flow` in `_diff_quarters` is the
-        # backstop for the case it cannot name (an out-of-range reverse split).
-        #
-        # Best-effort refinement: never let a lookup failure abort 13F processing (which
-        # would degrade to a stale snapshot). Any error here just leaves split_ratios
-        # empty → the raw diff, same as before.
-        split_ratios: Dict[str, float] = {}
-        unclassified_tickers: Set[str] = set()
-        # True when the backstop was armed by a lookup that FAILED (429, outage, a
-        # degraded `None` derivation) rather than by an adjustment the classifier saw and
-        # could not name. The two arm the same backstop, but only the first is
-        # transient — and a snapshot built on it must not be stamped with a `raw_hash`,
-        # or the hydrator's "data unchanged" skip makes the withheld rows permanent.
-        lookup_failed_tickers: Set[str] = set()
-        # Bound BEFORE the try: the fail-closed handler reads it, and the very first
-        # statement inside can raise — which would turn a recoverable lookup failure into
-        # a NameError that aborts 13F processing entirely.
-        suspects: List[str] = []
-        try:
-            suspects = self._suspicious_split_tickers(current_raw, prev_raw)
-            if len(suspects) > _MAX_SPLIT_LOOKUPS:
-                # Capped, and this path needs it MORE than the nightly hydrator that
-                # already caps at the same number: `_diff_quarters` runs on a USER
-                # REQUEST, and every suspect costs two price-series fetches (a derived
-                # split reads `/full` and `/non-split-adjusted`). An entire restated book
-                # — a fund that changed custodian, so every position looks like a share
-                # multiple — would fan out unbounded FMP calls inside one request and
-                # burn the rate-limit budget the rest of the app shares.
-                #
-                # Suppression fails OPEN for the overflow: those tickers get the raw diff
-                # (what shipped before any of this existed), never a fabricated ratio.
-                logger.warning(
-                    "whale: %d split suspects for %s Q%s — capping lookups at %d; the "
-                    "remainder keep their raw share diff",
-                    len(suspects), year, quarter, _MAX_SPLIT_LOOKUPS,
-                )
-                suspects = suspects[:_MAX_SPLIT_LOOKUPS]
-            if suspects:
-                prev_end = (
-                    _quarter_end_date(int(prev["year"]), int(prev["quarter"]))
-                    if prev else None
-                )
-                curr_end = _quarter_end_date(year, quarter)
-                from_date, to_date = window_for_range(prev_end, curr_end)
-                actions = corporate_actions_source(self)
-                split_lists = await asyncio.gather(
-                    *[actions.get_split_rows(t, from_date, to_date) for t in suspects],
-                    return_exceptions=True,
-                )
-                # Which suspects carry an adjustment the classifier could NOT name (a
-                # spin-off, or a reverse split outside its range). Only those get the
-                # magnitude backstop below — see `has_unclassified_adjustment`. Shares the
-                # events cache with `get_split_rows`, so this costs no extra fetch.
-                #
-                # ⚠️ `from_date` is the FETCH window and is 10 days wider than the period
-                # being diffed (`_WINDOW_LEAD_DAYS`, so a split on the range's first
-                # trading day has a prior bar). The split RATIO is filtered back to
-                # `prev_end < d <= curr_end` by `_split_ratio_in_window`, and this gate
-                # has to match or it flags on the lead: an unnameable event in the
-                # PREVIOUS quarter's last 10 days — ~11% of every diff — armed the
-                # magnitude backstop for the current one, deleting real high-conviction
-                # 13F flow the ratio path had correctly ignored.
-                flag_results = await asyncio.gather(
-                    *[
-                        actions.has_unclassified_adjustment(
-                            t, from_date, to_date,
-                            effective_from=prev_end, effective_to=curr_end,
-                        )
-                        for t in suspects
-                    ],
-                    return_exceptions=True,
-                )
-                for t, flagged in zip(suspects, flag_results):
-                    # FAIL CLOSED on a per-ticker exception. `gather(return_exceptions=True)`
-                    # hands back the exception object, and `flagged is True` quietly read
-                    # that as "no corporate action" — "we could not check" encoded as "we
-                    # checked and there is nothing". The same derivation feeds
-                    # `split_ratios`, so a ticker that failed here usually has NO
-                    # restatement either: the one state where a fabricated
-                    # multi-million-dollar BOUGHT reaches `whale_trades` and user alerts.
-                    if flagged is True or isinstance(flagged, BaseException):
-                        if isinstance(flagged, BaseException):
-                            logger.warning(
-                                "whale: unclassified-adjustment probe failed for %s "
-                                "(whale_id=%s cik=%s period=%s-Q%s) (%s: %s) — arming the "
-                                "magnitude backstop (fail-closed)",
-                                t, whale_id, cik, year, quarter,
-                                type(flagged).__name__, flagged,
-                            )
-                            lookup_failed_tickers.add(t)
-                        unclassified_tickers.add(t)
-
-                for t, sl in zip(suspects, split_lists):
-                    if sl is None or isinstance(sl, BaseException):
-                        # FAIL CLOSED. `None` is a degraded derivation (see
-                        # `get_split_rows`); with no ratio there is no restatement, and
-                        # the gate above may have SUCCEEDED on a fresh re-derive and
-                        # cleared this ticker — the exact state that fabricates a split
-                        # as a purchase. Arm the backstop for it.
-                        logger.warning(
-                            "whale: split lookup failed for %s (whale_id=%s cik=%s "
-                            "period=%s-Q%s) (%s) — no restatement; arming the magnitude "
-                            "backstop (fail-closed)",
-                            t, whale_id, cik, year, quarter,
-                            sl if sl is None else f"{type(sl).__name__}: {sl}",
-                        )
-                        unclassified_tickers.add(t)
-                        lookup_failed_tickers.add(t)
-                        continue
-                    r = _split_ratio_in_window(sl, prev_end, curr_end)
-                    # Tolerance, not `!= 1.0`. The derived ratio is an exact rational so
-                    # 1.0 really is 1.0 today, but an exact float compare on a computed
-                    # quantity is one refactor away from restating a perfectly ordinary
-                    # quarter by 1.0000001.
-                    if r and abs(r - 1.0) > 1e-9:
-                        split_ratios[t] = r
-        except Exception as e:
-            # FAIL CLOSED for the whole batch, for the same reason as the per-ticker arm
-            # above: `split_ratios = {}` means NO restatement, so this is exactly the
-            # state that fabricates a split as a purchase. Zeroing the flags too disarmed
-            # the only remaining backstop. Every suspect is flagged instead — suspects are
-            # the tickers whose share counts already look like a share multiple, so the
-            # blast radius is bounded to them, and a withheld row is recoverable where a
-            # fabricated BOUGHT that feeds an alert is not.
-            logger.warning(
-                "whale: split adjustment failed for CIK %s (whale_id=%s) (%s: %s) — "
-                "arming the magnitude backstop for all %d suspects (fail-closed)",
-                cik, whale_id, type(e).__name__, e, len(suspects or []),
-            )
-            split_ratios = {}
-            unclassified_tickers = set(suspects or [])
-            lookup_failed_tickers = set(suspects or [])
+        # Split restatement inputs — the shared 13F split block (`thirteen_f_splits`,
+        # extracted verbatim; `tests/test_thirteen_f_splits_characterisation.py` pins this
+        # path's outputs). FMP's 13F share counts are RAW, so a held-through 10:1 split
+        # would otherwise fabricate a huge BOUGHT in the diff below. Splits are derived
+        # from the entitled price series via the `corporate_actions` seam, never from the
+        # 402 `/splits` endpoint. It never raises for a lookup problem: a failed lookup
+        # arms the magnitude backstop (`unclassified_tickers`) AND lands in
+        # `lookup_failed_tickers`, which keeps `raw_hash` off the snapshot below.
+        prev_end = (
+            _quarter_end_date(int(prev["year"]), int(prev["quarter"]))
+            if prev else None
+        )
+        curr_end = _quarter_end_date(year, quarter)
+        (
+            split_ratios, unclassified_tickers, lookup_failed_tickers,
+        ) = await resolve_13f_split_adjustments(
+            current_raw, prev_raw, prev_end, curr_end,
+            actions=corporate_actions_source(self),
+            log_ctx=f"whale_id={whale_id} cik={cik} period={year}-Q{quarter}",
+        )
 
         trade_group = self._diff_quarters(
             current_raw, prev_raw, filing_date, total_value, split_ratios,
@@ -2290,60 +2168,13 @@ class WhaleService:
     def _suspicious_split_tickers(
         current_raw: List[Dict], previous_raw: List[Dict]
     ) -> List[str]:
-        """Tickers whose share count jumped like a split — the only holdings
-        worth a FMP ``/splits`` lookup (keeps the calls bounded).
+        """Tickers whose share count jumped like a split — see
+        ``thirteen_f_splits.suspicious_split_tickers``, the single implementation.
 
-        A split moves shares up (or down, reverse-split) by a factor while the
-        per-share price moves INVERSELY by ~the same factor, so the position
-        VALUE is roughly preserved. A genuine large buy/sell instead changes the
-        value proportionally, leaving the price ~flat — so it won't be flagged
-        (and even a flagged ticker is only *confirmed* against real split data).
+        Kept as a staticmethod because ``scripts/hydrate_whales.py`` binds it by this name
+        and the whale tests call it here.
         """
-        def _map(raw: List[Dict]) -> Dict[str, Tuple[float, float]]:
-            m: Dict[str, Tuple[float, float]] = {}
-            for h in raw or []:
-                sym = (h.get("symbol") or h.get("tickercusip") or "").upper()
-                if not sym or sym == "--":
-                    continue
-                m[sym] = (
-                    _finite_float(h.get("value")),
-                    _finite_float(h.get("sharesNumber") or h.get("shares")),
-                )
-            return m
-
-        cur = _map(current_raw)
-        prev = _map(previous_raw)
-        # ⚠️ Flag on the implied PRICE ratio, not on "shares ≈ price". The holder's
-        # share ratio is split × real trade, while the per-share price (value ÷ shares)
-        # moves by the split alone — so requiring the two to agree within 35% only ever
-        # caught a holder who did NOTHING through the split. One who sold >26% (or
-        # bought >54%) across a 10:1 was never a suspect, never looked up, never
-        # restated: half a position sold rendered as a $4.0M BOUGHT. A quarter in which
-        # the per-share price moved by ≥30% either way is worth the (bounded, cached)
-        # lookup; the derived data then confirms or clears it.
-        #
-        # Ordered strongest-first so `_MAX_SPLIT_LOOKUPS` trims the price-only tail, not
-        # the rows where shares and price moved inversely together.
-        strong: List[str] = []
-        weak: List[str] = []
-        for sym in sorted(set(cur) & set(prev)):
-            cv, cs = cur[sym]
-            pv, ps = prev[sym]
-            if cs <= 0 or ps <= 0 or cv <= 0 or pv <= 0:
-                continue
-            cur_price = cv / cs
-            prev_price = pv / ps
-            if cur_price <= 0 or prev_price <= 0:
-                continue
-            price_ratio = prev_price / cur_price
-            if not (price_ratio >= _SPLIT_PRICE_FACTOR or price_ratio <= 1.0 / _SPLIT_PRICE_FACTOR):
-                continue  # the per-share price did not move like a split
-            share_ratio = cs / ps
-            if not (0.7 < share_ratio < 1.4) and abs(share_ratio - price_ratio) <= 0.35 * share_ratio:
-                strong.append(sym)      # shares and price moved inversely together
-            else:
-                weak.append(sym)        # price moved like a split; shares also traded
-        return strong + weak
+        return _shared_suspicious_split_tickers(current_raw, previous_raw)
 
     def _diff_quarters(
         self,
@@ -4144,35 +3975,7 @@ def _quarter_end_date(year: int, quarter: int) -> str:
     return f"{year}{_QUARTER_END.get(quarter, '-12-31')}"
 
 
-def _split_ratio_in_window(
-    splits: Optional[List[Dict]],
-    start_excl: Optional[str],
-    end_incl: Optional[str],
-) -> float:
-    """Product of FMP stock-split ratios with ``start_excl < date <= end_incl``.
-
-    FMP ``/splits`` rows carry ``date`` + ``numerator``/``denominator`` (10/1 =
-    10:1). Quarters with no split map to ``1.0``. Non-finite / non-positive
-    ratios are dropped (a NaN would silently disable the restatement).
-    """
-    if not splits or not end_incl:
-        return 1.0
-    ratio = 1.0
-    for s in splits:
-        d = str(s.get("date") or "")[:10]
-        num = s.get("numerator")
-        den = s.get("denominator")
-        if not d or not num or not den:
-            continue
-        try:
-            r = float(num) / float(den)
-        except (ValueError, ZeroDivisionError, TypeError):
-            continue
-        if not math.isfinite(r) or r <= 0:
-            continue
-        if (start_excl is None or start_excl < d) and d <= end_incl:
-            ratio *= r
-    return ratio
+# `_split_ratio_in_window` is imported from `thirteen_f_splits` (top of module).
 
 
 def _find_previous_quarter(

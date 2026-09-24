@@ -167,8 +167,9 @@ struct ExclusiveSignal: Identifiable {
     /// "congress" | "whale" | "earnings" | "ceo" — routes the leader tap (the
     /// `drillDownKinds` open the per-ticker detail; earnings opens TickerDetailView).
     let kind: String
+    /// The row's only label — there is no subtitle (it truncated on every row and was
+    /// removed, TestFlight 2026-09-23).
     let title: String
-    let subtitle: String
     let iconSystemName: String
     let accent: Color
     /// The headline ticker — or, when `isLocked`, the server's bullet MASK. The real
@@ -213,6 +214,57 @@ struct TrendingTheme: Identifiable {
     /// placeholder is drawn instead.
     let imageUrl: String?
     let accent: Color
+    /// The 1-month trend line (normalised, first point = 100); empty → no line drawn.
+    var trend: [Double] = []
+    /// Whether that month ended up (drives the line's colour + its non-colour cue).
+    var trendIsPositive: Bool = true
+    /// Day the monthly review last checked this list; the section header shows the
+    /// newest one once ("Updated Oct 1") — every theme is reviewed in the same run.
+    var reviewedOn: Date? = nil
+}
+
+/// The server's 1-month theme series → the points a trend line can draw.
+enum ThemeTrend {
+    /// Finite points only; fewer than two cannot draw a line, so none are returned.
+    static func points(_ raw: [Double]?) -> [Double] {
+        let finite = (raw ?? []).filter { $0.isFinite }
+        return finite.count >= 2 ? finite : []
+    }
+
+    /// The month's sign: the server's return when present, else the series' own ends.
+    static func isPositive(return1m: Double?, points raw: [Double]?) -> Bool {
+        if let r = return1m, r.isFinite { return r >= 0 }
+        let p = points(raw)
+        guard let first = p.first, let last = p.last else { return true }
+        return last >= first
+    }
+}
+
+/// "2026-10-01" ⇄ "Oct 1". A date-only wire value is parsed AND printed in UTC, so a
+/// reader west of Greenwich never sees the review dated the day before.
+enum ThemeReviewDate {
+    static func parse(_ iso: String?) -> Date? {
+        guard let iso, iso.count >= 10 else { return nil }
+        return parser.date(from: String(iso.prefix(10)))
+    }
+
+    static func short(_ date: Date) -> String { printer.string(from: date) }
+
+    private static let parser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let printer: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "MMM d"
+        return f
+    }()
 }
 
 // MARK: - Aggregate
@@ -237,6 +289,10 @@ struct HomeDashboardData {
     /// empty GROUP ("Crypto", just created) from a user with no tickers at all — both are an
     /// empty `watchlist`, and the section hides itself for the second.
     let watchlistIsGroup: Bool
+    /// "Trillion-Dollar Club Bets" (see `TrillionClubModels.swift`). Empty → the section hides.
+    /// Defaulted so a constructor that predates the section still compiles; both repositories
+    /// pass it explicitly (`HomeRepository.mapTrillionClub` / the mock).
+    var trillionClub: TrillionClubGroup = .empty
 }
 
 // MARK: - Live wire models (DTOs)
@@ -269,6 +325,10 @@ struct HomeDashboardResponseDTO: Decodable {
     /// Optional so a backend predating migration 126 decodes as "not a group" — which is
     /// exactly how that backend behaves.
     let watchlistIsGroup: Bool?
+    /// "Trillion-Dollar Club Bets" (migration 175). Optional for the same reason as the others,
+    /// AND its decoder cannot throw (`TrillionClubGroupDTO.init(from:)`): a malformed group
+    /// hides that one section instead of failing this whole decode.
+    let trillionClub: TrillionClubGroupDTO?
 
     enum CodingKeys: String, CodingKey {
         case marketStatusText = "market_status_text"
@@ -280,6 +340,7 @@ struct HomeDashboardResponseDTO: Decodable {
         case watchlist
         case watchlistTitle = "watchlist_title"
         case watchlistIsGroup = "watchlist_is_group"
+        case trillionClub = "trillion_club"
     }
 }
 
@@ -450,6 +511,16 @@ struct TrendingThemeDTO: Decodable {
     let tickerCount: Int
     /// Avg daily % over the resolvable tickers; nil → the tile hides the % badge.
     let changePercent: Double?
+    // Monthly rotation + daily insights (backend migration 174). ALL optional: an older
+    // backend, an un-migrated database, or a theme not reviewed yet simply omits them.
+    /// ISO date the monthly review last checked this list ("2026-10-01").
+    let updatedOn: String?
+    /// Stocks replaced in that review (0 = reviewed, nothing better found).
+    let changeCount: Int?
+    /// Equal-weight 1-month return of the current stocks, as a FRACTION (0.042 = +4.2%).
+    let return1m: Double?
+    /// Normalised 1-month index (first point = 100) for the tile's trend line.
+    let spark1m: [Double]?
 
     enum CodingKeys: String, CodingKey {
         case slug, title
@@ -457,6 +528,10 @@ struct TrendingThemeDTO: Decodable {
         case accentHex = "accent_hex"
         case tickerCount = "ticker_count"
         case changePercent = "change_percent"
+        case updatedOn = "updated_on"
+        case changeCount = "change_count"
+        case return1m = "return_1m"
+        case spark1m = "spark_1m"
     }
 }
 

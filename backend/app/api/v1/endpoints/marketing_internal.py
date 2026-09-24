@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header
@@ -41,6 +41,7 @@ from app.api.error_response import (
     ErrorCode,
     auth_error,
     error_response_from_exception,
+    make_error_response,
 )
 from app.config import settings
 from app.schemas.marketing import (
@@ -55,9 +56,15 @@ from app.schemas.marketing import (
     RunClaimRequest,
     RunClaimResponse,
     RunUpdateRequest,
+    ScriptKickResponse,
     SignedUpload,
 )
-from app.services.marketing.run_service import get_marketing_run_service
+from app.services.marketing.run_service import (
+    claim_window_ok,
+    get_marketing_run_service,
+    run_date_et,
+)
+from app.services.marketing.script_service import get_marketing_script_service
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +128,25 @@ def _log_ledger_failure(op: str, exc: BaseException, **ids: object) -> None:
         )
 
 
+# `claim_window_ok` (imported above) lives in run_service since the kick uses the same window to
+# decide whether a run is held: a claim for a date outside today/yesterday ET is refused here,
+# and a kick that would start writer spend for such a run is refused there.
+
+
 @router.post("/runs/claim", response_model=RunClaimResponse)
 async def claim_run(body: RunClaimRequest):
     """Claim (or re-claim) the run for one ET day. Never 409s: a run that cannot be claimed
     comes back with `claimed=false` and a `reason` the worker exits 0 on."""
+    requested = date.fromisoformat(body.run_date)
+    today = run_date_et()
+    if not claim_window_ok(requested, today):
+        logger.warning("marketing claim REFUSED outside the window run_date=%s today_et=%s",
+                       requested, today)
+        return make_error_response(
+            ErrorCode.INVALID_INPUT, status_code=422,
+            message=f"run_date {requested} is outside the claim window ({today - timedelta(days=1)}..{today} ET)",
+            details={"run_date": body.run_date, "today_et": today.isoformat()},
+        )
     svc = get_marketing_run_service()
     try:
         row, reason = await svc.claim_run(
@@ -144,21 +166,34 @@ async def claim_run(body: RunClaimRequest):
     )
 
 
+#: Fields the worker may NOT set, though the request schema still accepts them (wire
+#: compatibility with a pinned worker image). The selection is made and mirrored by the web
+#: side (`script_service`); a worker that could rewrite `source_ref` could point the writer at
+#: an excluded item.
+_SERVER_OWNED_RUN_FIELDS = ("content_class", "template_id", "source_ref")
+
+
 @router.patch("/runs/{run_id}", response_model=MarketingRun)
 async def update_run(run_id: str, body: RunUpdateRequest):
+    ignored = [f for f in _SERVER_OWNED_RUN_FIELDS if getattr(body, f) is not None]
+    if ignored:
+        logger.warning("marketing update_run: ignoring server-owned field(s) %s from the worker "
+                       "run_id=%s", ignored, run_id)
     svc = get_marketing_run_service()
     try:
+        # worker=True: only its own in_progress run, only WORKER_RUN_STATUSES, stage forward
+        # only, and no server-owned metadata key (claim_nonce) — see run_service.update_run. The
+        # worker retries this call, so a terminal PATCH whose effect is already there (its first
+        # response was lost) answers 200 with the row unchanged instead of 409.
         row = await svc.update_run(
             run_id,
             stage=body.stage,
             status=body.status,
-            content_class=body.content_class,
-            template_id=body.template_id,
-            source_ref=body.source_ref,
             last_error=body.last_error,
             timings=body.timings,
             metadata=body.metadata,
             finished=body.finished,
+            worker=True,
         )
     except Exception as e:
         _log_ledger_failure("update_run", e, run_id=run_id)
@@ -202,10 +237,24 @@ async def complete_asset(asset_id: str):
     return AssetCompleteResponse(asset=MarketingAsset.model_validate(row))
 
 
+@router.post("/runs/{run_id}/script", response_model=ScriptKickResponse)
+async def kick_script(run_id: str):
+    """Idempotent kick-and-poll for the day's script (see `script_service`). Answers at once —
+    the Gemini work runs in the background, never inside this request."""
+    svc = get_marketing_script_service()
+    try:
+        state = await svc.kick(run_id)
+    except Exception as e:
+        _log_ledger_failure("kick_script", e, run_id=run_id)
+        return error_response_from_exception(e, step="marketing_kick_script")
+    return ScriptKickResponse.model_validate(state)
+
+
 @router.post("/runs/{run_id}/posts", response_model=PostsCreateResponse)
 async def create_posts(run_id: str, body: PostsCreateRequest):
     """Record the day's outlets. Rows are born `pending_review` (or `approved` under
-    MARKETING_AUTO_PUBLISH); the publisher loop in the web lifespan does the rest."""
+    MARKETING_AUTO_PUBLISH, text-only); the publisher loop in the web lifespan does the rest.
+    Captions come from the run's accepted script, not from this request (`create_posts`)."""
     svc = get_marketing_run_service()
     try:
         rows = await svc.create_posts(run_id, [p.model_dump() for p in body.posts])

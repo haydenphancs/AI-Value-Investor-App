@@ -17,6 +17,7 @@ protocol NotificationRepositoryProtocol: Sendable {
     func markRead(ids: [String]) async throws -> MarkNotificationsReadDTO
     func markRead(dedupKeys: [String]) async throws -> MarkNotificationsReadDTO
     func markAllRead() async throws -> MarkNotificationsReadDTO
+    func fetchNotification(dedupKey: String) async throws -> NotificationEventDTO?
 
     func fetchPriceAlerts(ticker: String?) async throws -> PriceAlertListDTO
     func createPriceAlert(
@@ -71,6 +72,16 @@ struct NotificationRepository: NotificationRepositoryProtocol {
             endpoint: .markNotificationsRead(ids: [], dedupKeys: [], all: true),
             responseType: MarkNotificationsReadDTO.self
         )
+    }
+
+    /// The row behind a push, by the `dedup_key` its payload carried. `nil` = this account
+    /// has no such row (a push can outlive its row), which callers treat as "keep the pushed
+    /// copy" — not an error.
+    func fetchNotification(dedupKey: String) async throws -> NotificationEventDTO? {
+        try await apiClient.request(
+            endpoint: .lookupNotification(dedupKey: dedupKey),
+            responseType: NotificationLookupDTO.self
+        ).item
     }
 
     // MARK: - Price alerts

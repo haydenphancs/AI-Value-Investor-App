@@ -192,6 +192,20 @@ def test_the_refusal_carries_the_ios_error_contract(client):
     assert body.get("user_message"), "a refusal with no user_message reaches the UI as a blank alert"
 
 
+def test_the_trillion_club_detail_is_scanned_and_refuses_an_anonymous_caller(client):
+    """Anti-vacuity for one route: Trillion-Dollar Club Bets serves FMP-licensed 13F rows
+    (End-User Display Rights), and its router-level gate is the only thing standing in front
+    of them. The sweeps above cover it by prefix; this pins that the route is actually
+    discovered (a renamed path would silently drop out of both) and that the refusal is the
+    401 AUTH_REQUIRED contract, not a 404 that would read as "no such company"."""
+    path = "/api/v1/home/trillion-club/{slug}"
+    assert ("GET", path) in _api_routes()
+    assert ("GET", path) not in _OPEN
+    r = _call(client, "GET", path)
+    assert r.status_code == 401
+    assert r.json().get("error_code") == "AUTH_REQUIRED"
+
+
 def test_the_allow_list_has_no_stale_entries():
     """An entry naming a route that no longer exists is silent permission for a future route
     that happens to reuse the path."""

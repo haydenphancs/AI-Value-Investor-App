@@ -301,29 +301,101 @@ def test_scanner_card_title_cannot_be_squeezed_by_the_expand_animation():
             "keep Dynamic Type from reflowing it to four lines.\nchain was:\n" + chain)
 
 
+_AURA = _IOS / "Views/Atoms/CardAuraGlow.swift"
+_SIGNALS_MODEL = _IOS / "Models/HomeDashboardModels.swift"
+_HOME_REPO = _IOS / "Core/Repositories/HomeRepository.swift"
+
+
 def test_the_signals_card_does_not_shadow_its_own_content():
-    """`.shadow()` derives from the alpha of everything beneath it, so a shadow applied to the
-    CARD forces the entire section — title, badge, subtitle, every row — into an offscreen
-    layer. A row expanding resizes the section, so that layer is re-rasterized per frame for
-    an 18pt blur across a full-width card.
+    """The aura is a sibling BACKGROUND applied after the clip — never a shadow on the card.
 
-    Shadowing the background SHAPE instead rasterizes one rounded rectangle and leaves the
-    content out of the offscreen pass. Identical glow, nothing to re-raster.
+    Two shipped bugs pin the two halves:
 
-    (Honest note: an A/B on the simulator could not measure a difference — 1 direction-reversal
-    vs 0 in the stationary band. Offscreen raster cost is not comparable between a Mac GPU and
-    a phone, so this is kept as the strictly-cheaper form rather than a proven fix.)
+    * `.shadow()` derives from the alpha of everything beneath it, so a shadow on the CARD
+      renders the whole section — title, badge, every row — into an offscreen layer, and a row
+      expanding resizes the section and re-rasters it. So the card itself draws no shadow.
+    * This test used to REQUIRE the shadow on the fill shape inside `.background(...)`, before
+      `.clipShape`. The clip then cut the halo off: from 2026-08-27 the glow was invisible while
+      the comment said "same glow", and a tester reported it missing on 2026-09-23. A halo
+      lives outside the card's bounds, so it must be applied AFTER the clip.
     """
-    src = _strip_comments(_read(_SIGNALS_SECTION))
-    clip = src.find(".clipShape(")
+    body = _decl_block(_read(_SIGNALS_SECTION), "var body: some View")
+    clip = body.find(".clipShape(")
     assert clip != -1, "the signals card lost its clipShape — this scan has drifted"
-    assert ".shadow(" not in src[clip:], (
-        "a `.shadow` is applied AFTER `.clipShape` on the signals card, which shadows the "
-        "whole card's CONTENT and forces a full offscreen re-raster on every resize frame. "
-        "Put the shadow on the background shape instead.")
-    bg = src.find(".background(")
-    assert bg != -1 and ".shadow(" in src[bg:clip], (
-        "the glow is gone entirely — it should live on the background shape, not be deleted")
+    assert ".shadow(" not in body, (
+        "the signals card draws a `.shadow` of its own again. On the card it shadows the whole "
+        "section's CONTENT (offscreen re-raster on every resize); on the fill shape inside the "
+        "clip it is invisible. The halo is `CardAuraGlow`, a background after the clip.")
+    assert body.count("CardAuraGlow(") == 1, "the signals card should apply the aura exactly once"
+    aura = body.find("CardAuraGlow(")
+    assert aura > clip, (
+        "`CardAuraGlow` is applied BEFORE `.clipShape`, so the clip cuts the halo off and the "
+        "card has no visible glow — the exact regression reported from TestFlight.")
+    host = body.rfind(".background", 0, aura)
+    assert host > clip and body[host:aura].replace(" ", "") in (".background{", ".background("), (
+        "the aura must be the card's `.background` — a layer sized by its host — not a "
+        "container around the rows. A repeating glow on an ANCESTOR of the expandable rows "
+        "froze the main thread once.")
+
+
+def test_the_signals_aura_breathes_in_isolation():
+    """The pulse is back, under the conditions that make it safe.
+
+    The old breathing glow was removed because a `.repeatForever` on an ancestor of the rows,
+    entangled with the row's animated expand, hard-froze the main thread. The atom now:
+
+    * animates ONLY its own opacity, through the scoped `.animation(_:body:)` — `withAnimation`
+      would also capture any geometry change in the same update and could loop THAT forever;
+    * stops on a hidden tab (`isActiveTab` — tabs are opacity-mounted) and under Reduce Motion;
+    * has a finite animation for the not-breathing case, which is what ends the loop;
+    * does no per-frame body work (no TimelineView / GeometryReader) and never eats a tap.
+    """
+    atom = _decl_block(_read(_AURA), "struct CardAuraGlow: View")
+
+    assert ".shadow(" in atom, "the aura no longer draws a halo"
+    start = atom.find(".animation(")
+    assert start != -1, "the aura no longer animates"
+    end = atom.find(".onChange(", start)
+    assert end != -1, "scan drifted — expected the onChange gate after the animation"
+    window = atom[start:end]
+    assert "repeatForever(autoreverses: true)" in window, "the aura no longer breathes"
+    assert re.search(r"\)\s*\{\s*\w+\s+in\s+\w+\.opacity\(", window), (
+        "the breath is not a SCOPED `.animation(_:body:) { $0.opacity(...) }` any more — the "
+        "scoped form is what keeps the repeating animation off everything but the opacity")
+    assert "value:" not in window, "use the scoped body form, not `.animation(_:value:)`"
+    assert "breathing" in window and ".easeOut(" in window, (
+        "no finite animation for the not-breathing case — nothing can end the loop")
+
+    assert "@Environment(\\.isActiveTab)" in atom, "the aura is not gated on the tab being visible"
+    assert "@Environment(\\.accessibilityReduceMotion)" in atom, "the aura ignores Reduce Motion"
+    # ...and pauses while the card is scrolled off screen (Home is a non-lazy stack).
+    assert ".onScrollVisibilityChange(threshold:" in atom, "the aura breathes off screen"
+    gate = atom[end: atom.find("\n", end)]
+    assert "isActiveTab" in gate and "reduceMotion" in gate and "onScreen" in gate, (
+        f"the breathing gate must use BOTH the tab and Reduce Motion; it reads: {gate.strip()}")
+
+    for banned in ("withAnimation", "TimelineView", "GeometryReader", "drawingGroup"):
+        assert banned not in atom, f"the aura uses `{banned}` — see this test's docstring"
+    assert ".allowsHitTesting(false)" in atom, "the aura can intercept taps meant for the card"
+    assert ".accessibilityHidden(true)" in atom, "VoiceOver would land on a decorative layer"
+
+
+def test_signal_rows_have_no_subtitle():
+    """The tagline under each row title truncated on all four rows ("Most-bought on Ca…"),
+    so it was removed — from the view, the model and the mapping, so it cannot quietly come
+    back as a field someone renders again (TestFlight, 2026-09-23)."""
+    row = _decl_block(_read(_SIGNAL_ROW), "var body: some View")
+    assert "Text(signal.title)" in row, "scan drifted — the row no longer renders its title"
+    assert "subtitle" not in row, "the signal row renders a subtitle again"
+
+    model = _decl_block(_read(_SIGNALS_MODEL), "struct ExclusiveSignal: Identifiable")
+    assert "let title: String" in model, "scan drifted — this is not the ExclusiveSignal model"
+    assert "subtitle" not in model, "ExclusiveSignal carries a subtitle again"
+
+    for fn in ("private static func mapSignals(", "private static func signal("):
+        block = _decl_block(_read(_HOME_REPO), fn)
+        assert "ExclusiveSignal" in block or "signal(" in block, f"scan drifted — {fn}"
+        assert "subtitle" not in block, f"HomeRepository `{fn}` builds a signal subtitle again"
 
 
 def test_the_signals_expand_is_not_animated():

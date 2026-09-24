@@ -267,6 +267,51 @@ class NotificationInboxService:
             ),
         )
 
+    def get_by_dedup_key(
+        self, user_id: str, dedup_key: str
+    ) -> Optional[NotificationEventResponse]:
+        """One of this user's notifications, addressed by its `dedup_key`, or None.
+
+        WHY. A push tap now opens the notification's detail screen before anything else,
+        and the payload cannot carry what that screen exists to show: APNs gets the body
+        cut to `BANNER_BODY_LIMIT` (180 chars + "…") while the row keeps up to
+        `LEDGER_BODY_LIMIT`, and for a `ticker_move` the cut-off text IS the catalyst. The
+        payload carries no `notification_events.id` either — only `dedup_key`, the other
+        half of the `(user_id, dedup_key)` unique index — so that is the lookup key.
+
+        ⚠️ Scoped by `user_id` AND `dedup_key`. Keys are not secret and not unique across
+        users (`move:TER:2026-09-14` exists once per watcher), so the `user_id` filter is
+        the only thing that stops one account reading another's row; the service-role
+        client bypasses RLS (same wall as `mark_read`).
+
+        None means "no such row for this user" — a push can outlive its row (90-day
+        retention). A read failure raises `NotificationInboxUnavailable`, never None, so
+        the endpoint answers 503 rather than a confident "not found".
+        """
+        try:
+            rows = (
+                self.supabase.table(TABLE)
+                .select("id, kind, category, title, body, route, claimed_at, read_at, push_state")
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.error(
+                "notification inbox: lookup failed for user=%s dedup_key=%r (%s: %s)",
+                user_id, dedup_key, type(e).__name__, e, exc_info=True,
+            )
+            raise NotificationInboxUnavailable(str(e)) from e
+        if not rows:
+            logger.info(
+                "notification inbox: no row for user=%s dedup_key=%r", user_id, dedup_key,
+            )
+            return None
+        return self._to_response(rows[0])
+
     def unread_count(self, user_id: str) -> int:
         """Unread badge count, probe-capped.
 

@@ -669,10 +669,27 @@ def test_every_public_table_is_curated():
 # An entry here is a promise, not an exemption: once the migration is applied and
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
-# Empty, and that is the healthy steady state — both former entries (157
-# `market_close_snapshot`, 159 `corporate_action_cache`) are APPLIED and now appear in the
-# snapshot, so the real column-drift check below covers them again.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+# Empty is the healthy steady state — both former entries (157 `market_close_snapshot`,
+# 159 `corporate_action_cache`) are APPLIED and now appear in the snapshot, so the real
+# column-drift check below covers them again.
+#
+# 2026-09-23: migration 173 written, not yet applied. Remove both entries after the user
+# applies it and re-runs `scripts/dump_schema.sh` (the guard below goes red until you do).
+_PENDING_MIGRATION_TABLES: set[str] = {
+    "public.marketing_scripts",
+    "public.marketing_link_hits",
+    # 2026-09-23: migration 174 (Emerging Frontiers rotation + insights) written, not yet
+    # applied — same rule: remove these after the re-dump.
+    "public.theme_rotation_runs",
+    "public.theme_rotation_decisions",
+    "public.theme_relevance_cache",
+    "public.theme_daily_insights",
+    # 2026-09-24: migration 175 (Trillion-Dollar Club Bets) written, not yet applied —
+    # remove these three after the re-dump.
+    "public.trillion_club_companies",
+    "public.trillion_club_stakes",
+    "public.trillion_club_filings",
+}
 # 2026-09-18: 170's four tables (marketing_runs / marketing_assets / marketing_posts /
 # podcast_episodes) were applied and re-dumped, so they left the list — the guard below
 # went red the moment the snapshot carried them, exactly as designed.

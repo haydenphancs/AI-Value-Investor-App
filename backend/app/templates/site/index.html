@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Caydex</title>
+  <meta name="description" content="Caydex is a research and learning app for investors: plain-English company research, several analytical lenses on one business, and a narrated library on how markets and businesses work." />
+  <meta name="robots" content="index,follow" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#171B26" />
+  <link rel="icon" href="data:," />
+  {{SMART_BANNER}}
+  <!--
+    Static, code-authored page. No scripts, no external resources, no market data, no named
+    people, no return figures: tests/test_marketing_smart_link.py enforces all of it.
+  -->
+  <style>
+    :root {
+      --page: #171B26;
+      --card: #1E2330;
+      --edge: #2A3142;
+      --accent: #60A5FA;
+      --ink-on-accent: #171B26;
+      --text: #FFFFFF;
+      --text-2: #C3C9D6;
+      --text-3: #9AA3B5;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+    header.top { padding: 20px 0; }
+    .brand { font-weight: 700; font-size: 1.15rem; letter-spacing: .01em; color: var(--text); }
+    .brand .dot { color: var(--accent); }
+    .hero { padding: 48px 0 40px; }
+    .hero h1 {
+      margin: 0 0 12px;
+      font-size: clamp(2rem, 6vw, 3.25rem);
+      line-height: 1.12;
+      letter-spacing: -.02em;
+    }
+    .hero .lede { margin: 0 0 28px; max-width: 640px; font-size: 1.1rem; color: var(--text-2); }
+    .cta {
+      display: inline-block;
+      margin: 0;
+      padding: 12px 22px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--ink-on-accent);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    a.cta:hover, a.cta:focus-visible { filter: brightness(1.08); }
+    a.cta:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+    .cta-soon {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .cta-note { margin: 10px 0 0; font-size: .9rem; color: var(--text-3); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      padding: 8px 0 40px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--edge);
+      border-radius: 16px;
+      padding: 20px;
+    }
+    .card h2 { margin: 0 0 8px; font-size: 1.05rem; }
+    .card p { margin: 0; color: var(--text-2); }
+    .note {
+      background: var(--card);
+      border: 1px solid var(--edge);
+      border-radius: 16px;
+      padding: 20px;
+      margin: 0 0 40px;
+    }
+    .note h2 { margin: 0 0 8px; font-size: 1.05rem; }
+    .note p { margin: 0 0 8px; color: var(--text-2); }
+    .note p:last-child { margin-bottom: 0; }
+    footer {
+      border-top: 1px solid var(--edge);
+      padding: 24px 0 40px;
+      color: var(--text-3);
+      font-size: .9rem;
+    }
+    footer nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 12px; }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover, footer a:focus-visible { text-decoration: underline; }
+    footer .disclaimer { margin: 0; }
+    @media (max-width: 480px) {
+      .hero { padding: 28px 0 28px; }
+      .hero .lede { font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <span class="brand">Caydex<span class="dot">.</span></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="wrap">
+        <h1>Research, not hype.</h1>
+        <p class="lede">Caydex is a research and learning app for people who want to understand a
+          company before they form an opinion about it. It reads the filings, the fundamentals and
+          the news, then explains what it found in plain English. You decide what to do with it.</p>
+        {{APP_STORE_CTA}}
+      </div>
+    </section>
+
+    <section class="wrap" aria-label="What is inside">
+      <div class="grid">
+        <article class="card">
+          <h2>Company research, explained</h2>
+          <p>Research reports on a business's fundamentals, growth, profitability and financial
+            health, written in plain English so the reasoning is visible, not just a number.</p>
+        </article>
+        <article class="card">
+          <h2>Several lenses on one business</h2>
+          <p>Read the same company through a quality view, a growth view and a value view, and see
+            where they agree and where they do not.</p>
+        </article>
+        <article class="card">
+          <h2>What changed, and why</h2>
+          <p>When something moves at a company you follow, Caydex looks for the reason in the
+            filings and the news and writes up what it found.</p>
+        </article>
+        <article class="card">
+          <h2>Learn how markets work</h2>
+          <p>An education library of original lessons, study guides and articles on how markets and
+            businesses actually work, narrated with read-along highlighting.</p>
+        </article>
+        <article class="card">
+          <h2>Ask about any company</h2>
+          <p>A conversational assistant that answers questions about the company on screen, in as
+            much or as little depth as you want, and shows what it used.</p>
+        </article>
+        <article class="card">
+          <h2>Your list, your pace</h2>
+          <p>Watchlists, portfolios you enter yourself, and alerts about what you track, with a
+            switch for each kind of alert.</p>
+        </article>
+      </div>
+
+      <div class="note">
+        <h2>What Caydex is, and is not</h2>
+        <p>An information and education tool. It holds no funds, connects to no brokerage and
+          executes no trades.</p>
+        <p>Research and answers are written by AI, may contain errors, and are labelled as such.
+          Always check primary sources before making any decision.</p>
+        <p>A free account is required, and includes a monthly allowance of credits for AI research.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <nav aria-label="Legal">
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+        <a href="/support">Support</a>
+      </nav>
+      <p class="disclaimer">Caydex · Educational information only — not investment advice. Investing involves risk.</p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -171,6 +171,10 @@ enum APIEndpoint: Sendable {
     /// the dedup key, so this is the sole way a lock-screen tap can reach the right row.
     /// `ids` wins server-side if both are sent.
     case markNotificationsRead(ids: [String], dedupKeys: [String], all: Bool)
+    /// One notification by the `dedup_key` its push payload carried — what a PUSH TAP's
+    /// detail screen swaps in for the payload copy, whose body APNs got cut to 180 chars.
+    /// Travels as a query value, like the inbox cursor.
+    case lookupNotification(dedupKey: String)
     case listPriceAlerts(ticker: String?)
     case createPriceAlert(ticker: String, kind: String, threshold: Double, assetType: String, repeatMode: String)
     case updatePriceAlert(id: String, threshold: Double?, isActive: Bool?, repeatMode: String?)
@@ -377,6 +381,9 @@ enum APIEndpoint: Sendable {
     case getHomeDashboard
     case getSignalDetail(kind: String, ticker: String)
     case getThemeDetail(slug: String)
+    /// One Trillion-Dollar Club company's stakes (13F holdings + hand-kept stakes). The
+    /// server redacts the full holdings list and history for Free (`is_locked`).
+    case getTrillionClubDetail(slug: String)
 
     // MARK: - Learn / Investor Journey
     case getJourney
@@ -478,6 +485,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/users/me/notifications"
         case .markNotificationsRead:
             return "/api/v1/users/me/notifications/read"
+        case .lookupNotification:
+            return "/api/v1/users/me/notifications/lookup"
         case .listPriceAlerts, .createPriceAlert:
             return "/api/v1/alerts/price"
         case .updatePriceAlert(let id, _, _, _):
@@ -700,6 +709,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/home/signals/\(kind)/\(ticker)"
         case .getThemeDetail(let slug):
             return "/api/v1/home/themes/\(slug)"
+        case .getTrillionClubDetail(let slug):
+            return "/api/v1/home/trillion-club/\(slug)"
 
         // Learn / Investor Journey
         case .getJourney:
@@ -800,6 +811,9 @@ enum APIEndpoint: Sendable {
             // Omitted on the first page so that request line stays byte-identical.
             if let before, !before.isEmpty { q["before"] = before }
             return q
+
+        case .lookupNotification(let dedupKey):
+            return ["dedup_key": dedupKey]
 
         case .listCreditHistory(let limit, let before):
             var q = ["limit": String(limit)]
@@ -1190,6 +1204,9 @@ enum APIEndpoint: Sendable {
         case .getUpdatesFeed, .enrichUpdatesNews, .getUpdatesTabs,
              .getHomeFeed, .getHomeDashboard,
              .getThemeDetail,
+             // FMP-sourced 13F data + market caps: End-User Display Rights are
+             // authenticated-only (auth.md §1a), and the `/home` router requires a session.
+             .getTrillionClubDetail,
              .getPersonas, .getTrendingAnalyses:
             return .signInRequired
 
@@ -1313,7 +1330,7 @@ enum APIEndpoint: Sendable {
         // auth-only, so a guest inbox is empty by construction and a guest price alert is
         // a rule that can never fire. Both are "durable cross-device identity" by
         // auth.md §1a's tier test — the same tier as settings and devices.
-        case .listNotifications, .markNotificationsRead,
+        case .listNotifications, .markNotificationsRead, .lookupNotification,
              .listPriceAlerts, .createPriceAlert, .updatePriceAlert, .deletePriceAlert:
             return .signInRequired
 

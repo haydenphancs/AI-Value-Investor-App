@@ -147,12 +147,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return [.banner, .list, .badge, .sound]
     }
 
-    // The TAP. Without this, a notification that says "NVDA moved 8%" opened the app
-    // to whatever tab was last used — the alert's whole promise, unfulfilled at the
-    // moment of highest intent.
+    // The TAP — lock screen, Notification Center, a banner (app backgrounded, killed or in
+    // front), and the "View" action, which has no branch of its own. Without this, a
+    // notification that says "NVDA moved 8%" opened the app to whatever tab was last used.
+    //
+    // It opens the notification's DETAIL screen, never the ticker directly. The developer:
+    // "open the detail screen first, so they can read the content before they decide to go
+    // any further." So this hands over the notification ITSELF — title, body, delivery time
+    // and the payload keys — not just a destination; the destinations are offered on the
+    // detail screen, the same one Tracking → Alerts opens for its rows.
     //
     // Payload keys are set by the backend push dispatcher: `kind` names the notification
-    // type, `route`/`ticker`/`asset_type`/`report_id` name the destination.
+    // type, `route`/`ticker`/`asset_type`/`report_id` name the destination, `dedup_key` names
+    // the inbox row (the detail screen fetches it for the full body — APNs gets a 180-char cut).
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
@@ -176,16 +183,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             return
         }
 
-        let route = NotificationRoute(payload: info)
+        let notification = response.notification
+        let content = notification.request.content
         await MainActor.run {
+            let pushed = PushedNotification(
+                identifier: notification.request.identifier,
+                title: content.title,
+                body: content.body,
+                userInfo: content.userInfo,
+                deliveredAt: notification.date
+            )
             Analytics.shared.track(.pushOpened, [
                 "kind": .string(kindDimension(info)),
-                "route": .string(route.analyticsName),
+                "route": .string(NotificationRoute(payload: pushed.route).analyticsName),
             ])
-            // EVERY payload routes now, including one with no ticker — it lands in the
-            // inbox. Previously a payload without a `ticker` key was a silent no-op: the
-            // banner was tappable, the tap did nothing, and nothing was logged.
-            PushNotificationManager.shared.handleTap(route: route)
+            // EVERY payload opens its detail, including one with no ticker — that detail
+            // simply offers no destination rows. Previously a payload without a `ticker` key
+            // was a silent no-op: the banner was tappable, the tap did nothing, and nothing
+            // was logged.
+            PushNotificationManager.shared.handleTap(pushed)
         }
 
         // RECONCILE, never adopt — this is the phantom-badge fix.

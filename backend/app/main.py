@@ -29,6 +29,8 @@ from app.integrations.openfda import close_openfda_client
 from app.integrations.uspto import close_uspto_client
 from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
 from app.utils.supabase_async import sb_exec
+from app.services.marketing import smart_link
+from starlette.responses import Response as PlainResponse
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -438,12 +440,38 @@ async def lifespan(app: FastAPI):
         # cadence would leave a freshly promoted chip cold for most of its life.
         _spawn(_run_starter_warm_loop(), "starter_warm")
 
+        # Emerging Frontiers: the monthly theme-stock rotation (first US trading day, 18:30 ET)
+        # and the daily theme insights (18:15 ET). Both idle until THEME_ROTATION_ENABLED /
+        # THEME_INSIGHTS_ENABLED are set, which waits on migration 174 — see
+        # services/theme_rotation/scheduler.py for the claims that make each run exactly-once.
+        from app.services.theme_rotation.scheduler import (
+            run_theme_insights_loop,
+            run_theme_rotation_loop,
+        )
+        _spawn(run_theme_rotation_loop(), "theme_rotation")
+        _spawn(run_theme_insights_loop(), "theme_insights")
+
+        # Trillion-Dollar Club Bets: daily membership + 13F builds (07:00 ET) and the weekly
+        # re-hash / new-filer probe / discovery (Monday 08:00 ET). Both idle until
+        # TRILLION_CLUB_JOBS_ENABLED is set, which waits on migration 175 + its seed — see
+        # services/trillion_club/scheduler.py for the claim and the per-day attempt cap.
+        from app.services.trillion_club.scheduler import (
+            run_trillion_club_daily_loop,
+            run_trillion_club_weekly_loop,
+        )
+        _spawn(run_trillion_club_daily_loop(), "trillion_club_daily")
+        _spawn(run_trillion_club_weekly_loop(), "trillion_club_weekly")
+
         # Marketing-engine publisher (design doc §12). The web process is the ONLY holder of
         # the social-posting secrets; the media worker is a separate cron service that never
         # gets them. Interval loop, gated per cycle on MARKETING_ENABLED (default False), so
         # it costs one sleeping task until the engine is deliberately switched on.
         from app.services.marketing.publisher_service import run_marketing_publisher_loop
         _spawn(run_marketing_publisher_loop(), "marketing_publisher")
+        # `/go/{campaign}` counts in memory (no I/O on the request path); this flushes the
+        # counts to `increment_marketing_link_hits` (migration 173) every minute and once more,
+        # bounded, on shutdown.
+        _spawn(smart_link.run_link_hit_flush_loop(), "marketing_link_hits_flush")
 
     # Outside the else: this family is opt-in-able locally (see `run_notification_jobs`).
     if run_notification_jobs:
@@ -494,6 +522,17 @@ async def lifespan(app: FastAPI):
                     task.get_name(), type(result).__name__, result,
                 )
         logger.info("Stopped %d background tasks", len(pending))
+
+    # Marketing script generations are spawned per request (kick-and-poll), not by `_spawn`,
+    # so they are not in `background_tasks`. Cancel them here: each hands its run back
+    # (`status=selected`) so the next container takes it at once instead of waiting out the
+    # lease. Bounded — a hung write must not hold up the rest of the shutdown.
+    try:
+        from app.services.marketing.script_service import get_marketing_script_service
+
+        await get_marketing_script_service().shutdown(timeout=5.0)
+    except Exception as e:  # best effort: the lease expiry is the backstop
+        logger.warning("marketing script shutdown failed: %s: %s", type(e).__name__, e)
 
     # Close persistent HTTP clients.
     #
@@ -2164,13 +2203,72 @@ async def general_handler(request: Request, exc: Exception):
 app.include_router(api_router, prefix="/api/v1")
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    return {
-        "message": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "status": "online",
-    }
+# ── Public landing page + smart link (SYSTEM_DESIGN_GUIDELINES §12.6) ──────────
+#
+# `/` used to answer `{"message", "version", "status"}` JSON. Nothing consumed it (the deploy
+# gate is `/health/pdf`, liveness is `/health/live`), and it is what a person reaches from a
+# public post's link or a shared caydexinvest.com URL — so it is now a static, code-authored
+# landing page. Same file discipline as the legal pages: it lives under `backend/` because the
+# Docker build context is `backend/`.
+_SITE_DIR = Path(__file__).resolve().parents[0] / "templates" / "site"
+
+# Strict: the page has no script, no external resource and no form. Set on this response only
+# — the JSON API and the legal pages are unaffected.
+_LANDING_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+def _render_landing() -> HTMLResponse:
+    """Read the landing template per request (mirrors `_render_legal`) and fill its two
+    App Store slots via `smart_link.render_landing`, which escapes every dynamic value."""
+    path = _SITE_DIR / "index.html"
+    try:
+        template = path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.error(
+            "Landing page could not be read from %s: %s: %s", path, type(e).__name__, e,
+        )
+        raise StarletteHTTPException(status_code=404, detail="page is unavailable") from e
+    return HTMLResponse(
+        content=smart_link.render_landing(template),
+        headers={
+            "Content-Security-Policy": _LANDING_CSP,
+            "Cache-Control": "public, max-age=300",
+        },
+    )
+
+
+@app.api_route("/", methods=["GET", "HEAD"], tags=["Root"], include_in_schema=False)
+async def landing_page():
+    """Public landing page. Pre-launch: "Coming soon"; post-launch (MARKETING_APP_STORE_URL
+    set): an App Store button plus the Smart App Banner meta tag."""
+    return _render_landing()
+
+
+def _smart_link_redirect(request: Request, raw_campaign: str) -> PlainResponse:
+    """Explicit 302 (not RedirectResponse's 307), no body, no cookies, never cached.
+    The campaign is normalised to a constant before anything else sees it."""
+    campaign = smart_link.normalize_campaign(raw_campaign)
+    smart_link.record_hit(request, campaign)
+    return PlainResponse(
+        status_code=302,
+        headers={"Location": smart_link.destination(campaign), "Cache-Control": "no-store"},
+    )
+
+
+@app.api_route("/go/{campaign}", methods=["GET", "HEAD"], include_in_schema=False)
+async def smart_link_campaign(request: Request, campaign: str):
+    """The link every public post carries (`caydexinvest.com/go/<platform>`)."""
+    return _smart_link_redirect(request, campaign)
+
+
+@app.api_route("/go", methods=["GET", "HEAD"], include_in_schema=False)
+async def smart_link_bare(request: Request):
+    """Bare `/go` counts as campaign "other". A separate handler, so no query parameter can
+    ever stand in for the path segment."""
+    return _smart_link_redirect(request, "")
 
 
 @app.get("/health", tags=["Root"])

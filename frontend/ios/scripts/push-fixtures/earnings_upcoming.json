@@ -15,5 +15,6 @@
   "ticker": "MSFT",
   "asset_type": "stock",
   "tab": "financials",
+  "dedup_key": "earnings_upcoming:MSFT:2026-10-28",
   "Simulator Target Bundle": "com.phan.caydex"
 }

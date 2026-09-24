@@ -48,6 +48,19 @@ class NotificationListResponse(BaseModel):
     next_cursor: Optional[str] = None
 
 
+class NotificationLookupResponse(BaseModel):
+    """One notification addressed by its `dedup_key` — what a PUSH TAP opens.
+
+    `item` is null when this user has no such row (a push can outlive its row), which
+    is a normal answer rather than an error: the client already shows the pushed copy
+    and simply keeps it. Wrapping the row, instead of 404-ing on a miss, keeps "not
+    found" out of the error contract, where it would need an `ErrorCode` and an iOS
+    `AppError` arm for a case the client handles identically to any other miss.
+    """
+
+    item: Optional[NotificationEventResponse] = None
+
+
 class MarkReadRequest(BaseModel):
     """What to mark read. Empty selectors + `all=True` marks everything.
 

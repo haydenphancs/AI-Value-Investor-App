@@ -388,22 +388,6 @@ struct TrackingContentViewWithBinding: View {
             }
             await viewModel.loadIfNeeded()
         }
-        // A push tap that resolved to no detail screen lands on the Alerts segment.
-        //
-        // `ContentView` brings this tab forward and parks the target segment here, because the
-        // sub-tab lives in a `@StateObject` private to this screen and is unreachable from the
-        // push handler. Consume-and-clear, exactly as `HomeDashboardView` does for
-        // `pendingPushRoute`, so one tap opens one screen.
-        //
-        // `initial: true` is load-bearing: on a COLD launch from a tap the value is set before
-        // this view has ever rendered, and a plain `.onChange` only fires on a change AFTER
-        // first render — which is precisely the scenario the tap handler exists for. Warm
-        // taps would still work, so this would survive manual testing. DO NOT "clean it up".
-        .onChange(of: appState.pendingTrackingTab, initial: true) { _, pending in
-            guard let pending else { return }
-            viewModel.selectedTab = pending
-            appState.pendingTrackingTab = nil
-        }
     }
 
     // MARK: - Action Handlers

@@ -15,5 +15,6 @@
   "ticker": "BTC",
   "asset_type": "crypto",
   "alert_id": "22222222-2222-2222-2222-222222222222",
+  "dedup_key": "pa:22222222-2222-2222-2222-222222222222",
   "Simulator Target Bundle": "com.phan.caydex"
 }

@@ -1,0 +1,72 @@
+{
+ "_meta": {
+  "endpoint": "search-isin / search-cusip",
+  "note": "Test fixtures only - FMP-licensed data, never served from here.",
+  "source": "FMP /stable (read-only), fetched 2026-09-24 for the Trillion-Dollar Club tests"
+ },
+ "search_cusip": {
+  "29765A101": [
+   {
+    "companyName": "Ethos Technologies Inc.",
+    "cusip": "29765A101",
+    "marketCap": 1971337977.3,
+    "symbol": "LIFE"
+   }
+  ],
+  "84615Q103": [
+   {
+    "companyName": "Space Exploration Technologies Corp.",
+    "cusip": "84615Q103",
+    "marketCap": 1638798215846,
+    "symbol": "SPCX"
+   }
+  ],
+  "N97284108": [
+   {
+    "companyName": "Nebius Group N.V.",
+    "cusip": "N97284108",
+    "marketCap": 45698400000,
+    "symbol": "NBIS"
+   },
+   {
+    "companyName": "Yandex N.V.",
+    "cusip": "N97284108",
+    "marketCap": 6797281792,
+    "symbol": "YNDX"
+   }
+  ]
+ },
+ "search_isin": {
+  "NL0009805522": [
+   {
+    "isin": "NL0009805522",
+    "marketCap": 57544800000,
+    "name": "Nebius Group N.V.",
+    "symbol": "NBIS"
+   },
+   {
+    "isin": "NL0009805522",
+    "marketCap": 15135950282,
+    "name": "Yandex N.V.",
+    "symbol": "YNDX"
+   }
+  ],
+  "US29765A1016": [
+   {
+    "isin": "US29765A1016",
+    "marketCap": 2201094689,
+    "name": "Ethos Technologies Inc.",
+    "symbol": "LIFE"
+   }
+  ],
+  "US84615Q1031": [
+   {
+    "isin": "US84615Q1031",
+    "marketCap": 1937808744669,
+    "name": "Space Exploration Technologies Corp.",
+    "symbol": "SPCX"
+   }
+  ],
+  "USN972841084": []
+ }
+}

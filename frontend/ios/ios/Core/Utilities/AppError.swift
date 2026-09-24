@@ -664,6 +664,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "THEME_NOT_FOUND" {
                 return .notFound(resource: "theme")
             }
+            // A Trillion-Dollar Club card whose company left the club (or was unpublished)
+            // between the Home load and the tap → the same typed .notFound, whose `.goBack`
+            // action fits: retrying cannot bring the card back.
+            if code == "TRILLION_CLUB_COMPANY_NOT_FOUND" {
+                return .notFound(resource: "company")
+            }
+            // The detail could not be read (a backend blip, HTTP 503). Retryable, so it keeps
+            // the backend's own user_message through `.apiError` (suggestedAction .retry),
+            // exactly like WHALE_PROFILE_UNAVAILABLE.
+            if code == "TRILLION_CLUB_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
             // Chat message over the length ceiling (HTTP 400) → a typed validation
             // error (title "Invalid Input", .fixInput action) surfacing the backend's
             // specific message, per the "don't fall through to a generic" rule.

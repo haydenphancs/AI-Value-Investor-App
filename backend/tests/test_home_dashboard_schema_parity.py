@@ -45,6 +45,11 @@ from app.services.signals_service import (
     redact_signals,
 )
 from app.services import home_dashboard_service as hds
+from app.schemas.trillion_club import TrillionClubGroupResponse
+from app.services.trillion_club_service import (
+    TrillionClubService,
+    _GROUP_KEY as _TRILLION_CLUB_GROUP_KEY,
+)
 import time as _time
 from _price_fakes import PriceFromFMPFake
 
@@ -80,6 +85,9 @@ _RESPONSE_KEYS = {
     # `watchlist`, and iOS hides the section for the second. Without it, creating a new
     # list made the whole Home strip vanish with nothing to explain it.
     "watchlist_is_group",
+    # Trillion-Dollar Club Bets (2026-09-24). Defaulted to an EMPTY group, which iOS hides —
+    # the flag-off, unreadable and stale-membership cases all land here.
+    "trillion_club",
 }
 
 
@@ -109,6 +117,35 @@ def test_dashboard_response_keys_match_ios_dto():
     assert dumped["signals"] == {"congress": None, "whale": None, "earnings": None, "ceo": None}
     # Themes likewise defaults to an empty list → iOS hides the Emerging Frontiers section.
     assert dumped["themes"] == {"themes": []}
+    # Trillion-Dollar Club Bets: both lists present and empty (never an absent key) → hidden.
+    assert dumped["trillion_club"] == {"companies": [], "also_in_club": []}
+
+
+def test_trillion_club_group_validates_end_to_end_inside_the_dashboard():
+    """The worst-case card iOS must decode: a 13F card with every optional field absent, a
+    whale-link card, and a member listed without a card."""
+    resp = HomeDashboardResponse.model_validate({
+        "market_status_text": "Markets Closed",
+        "market_is_open": False,
+        "pulse": [],
+        "trillion_club": {
+            "companies": [
+                {"slug": "nvidia", "name": "NVIDIA", "card_kind": "thirteen_f"},
+                {"slug": "berkshire", "name": "Berkshire Hathaway", "card_kind": "whale_link",
+                 "whale_id": "w-1", "stakes": [{
+                     "investee_name": "Mitsubishi Corp", "kind": "non_us_listed",
+                     "as_of": "2025-12-31", "source_title": "Berkshire 2025 letter",
+                     "source_url": "https://www.berkshirehathaway.com/letters/2025ltr.pdf",
+                     "verified_on": "2026-09-01"}]},
+            ],
+            "also_in_club": [{"slug": "broadcom", "name": "Broadcom"}],
+        },
+    })
+    dumped = resp.model_dump()
+    card = dumped["trillion_club"]["companies"][0]
+    assert card["top_holdings"] == [] and card["stakes"] == [] and card["period"] is None
+    assert card["cap_is_manual"] is False
+    assert dumped["trillion_club"]["also_in_club"] == [{"slug": "broadcom", "name": "Broadcom"}]
 
 
 def test_locked_signals_payload_validates_end_to_end():
@@ -332,6 +369,16 @@ def _fresh_service() -> tuple[HomeDashboardService, _FakeFMP]:
     HomeDashboardService._themes_inflight.clear()
     HomeDashboardService._themes_cache.clear()
     HomeDashboardService._themes_cache[_THEMES_CACHE_KEY] = (_time.time(), ThemesGroupResponse())
+    # And the 6th branch (Trillion-Dollar Club Bets). The flag defaults off, which already
+    # means no reads; priming an empty group keeps these PULSE tests network-free even when
+    # the environment turns the flag on. Exercised in test_trillion_club_service.py.
+    TrillionClubService._inflight.clear()
+    TrillionClubService._detail_cache.clear()
+    TrillionClubService._group_cache.clear()
+    TrillionClubService._invalidated_at = 0.0
+    TrillionClubService._group_cache[_TRILLION_CLUB_GROUP_KEY] = (
+        _time.time(), TrillionClubGroupResponse()
+    )
     svc = HomeDashboardService()
     fake = _FakeFMP()
     svc.fmp = fake  # type: ignore[assignment]
@@ -356,6 +403,24 @@ async def test_build_returns_all_symbols_mapped_and_validated():
     # One quote + one intraday call per symbol.
     assert fake.quote_calls == _EXPECTED_PULSE_TILES
     assert fake.intraday_calls == len(_PULSE_SYMBOLS)  # crypto sparkline is not FMP
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_dashboard_carries_the_trillion_club_branch(monkeypatch, enabled):
+    """The 6th gather branch reaches the response — and the flag, not the cache, decides:
+    a group cached while the feature was on must not outlive switching it off."""
+    from app.config import settings
+    from app.schemas.trillion_club import ClubMemberBriefResponse
+
+    svc, _fake = _fresh_service()
+    group = TrillionClubGroupResponse(
+        also_in_club=[ClubMemberBriefResponse(slug="broadcom", name="Broadcom")]
+    )
+    TrillionClubService._group_cache[_TRILLION_CLUB_GROUP_KEY] = (_time.time(), group)
+    monkeypatch.setattr(settings, "TRILLION_CLUB_ENABLED", enabled)
+    resp = await svc.get_dashboard()
+    assert resp.trillion_club == (group if enabled else TrillionClubGroupResponse())
 
 
 @pytest.mark.asyncio

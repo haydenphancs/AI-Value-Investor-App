@@ -50,7 +50,7 @@ change one of those facts in the code, that test tells you this document needs a
 9c. [Personalized Explanations — Pedagogy, Never Analysis](#9c-personalized-explanations--pedagogy-never-analysis)
 10. [Known gaps and accepted trade-offs](#10-known-gaps-and-accepted-trade-offs)
 11. [Notification System](#11-notification-system-implemented-2026-08-08)
-12. [Marketing Content Engine](#12-marketing-content-engine-foundations-2026-09-17)
+12. [Marketing Content Engine](#12-marketing-content-engine)
 - [Appendix A: Where things live](#appendix-a-where-things-live)
 - [Appendix B: Decision Log](#appendix-b-decision-log)
 
@@ -285,8 +285,8 @@ Cache on success only. Never cache an exception.
 
 The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint,
 `GET /api/v1/home/dashboard` → `HomeDashboardResponse`, built top-to-bottom by
-`services/home_dashboard_service.py` (+ `services/signals_service.py`). Four
-sections in one call to minimize round-trips:
+`services/home_dashboard_service.py` (+ `services/signals_service.py` and
+`services/trillion_club_service.py`). Five sections in one call to minimize round-trips:
 
 1. **Market Pulse** — five entitled index/commodity ETFs (live quote + 1D intraday
    sparkline). Was indices + BTC + commodities directly; FMP 402s every `^` symbol and
@@ -296,12 +296,46 @@ sections in one call to minimize round-trips:
 2. **Daily Scanners** — movers / heavy-volume / short-interest leaderboards.
 3. **App-Exclusive Signals** — congress buys / whale accumulation / earnings shockers /
    CEO buys (Pro-locked; a build in which any card raised is never persisted to Tier 2).
-4. **Emerging Frontiers themes** — editorial megatrend cards from the `trending_themes`
+4. **Emerging Frontiers themes** — megatrend cards from the `trending_themes`
    Supabase table (server-editable → no app release), with a per-theme drill-down at
-   `GET /home/themes/{slug}` → `ThemeDetailResponse`.
+   `GET /home/themes/{slug}` → `ThemeDetailResponse`. Since migration 174 (2026-09-23)
+   two scheduled jobs keep them current (`services/theme_rotation/scheduler.py`, spawned
+   from the lifespan, off until `THEME_ROTATION_ENABLED` / `THEME_INSIGHTS_ENABLED`):
+   - **Monthly rotation** (first US trading day, 18:30 ET) re-scores every theme on
+     licensed data — revenue-segment exposure, seed-ETF holdings, size/liquidity, and 3-6
+     month performance as a 15-point tie-breaker — and changes at most 30% of a list
+     (a CEILING; relevance beats freshness). An AI check on the company's own description
+     gates newcomers; it never adds a stock on its own (its only lift is for a pre-revenue
+     pure play whose description already carries the theme's keywords). Two-strike
+     removals, rank buffers and one-for-one pairing keep lists stable; publishing is one
+     transaction (`publish_theme_rotation`) that refuses if a list, a block or the theme's
+     rotation switch was edited after the run read it, and never demotes a published
+     month. Exactly-once = the day-keyed `notification_job_state` claim + the month-keyed
+     `theme_rotation_runs` row; failed attempts spread over the 7-day window (one quick
+     retry, then one a day; a redeploy is not an attempt).
+   - **Daily insights** (18:15 ET) — equal-weight performance of the CURRENT stocks vs
+     an S&P 500 ETF and a dated "why it's moving" summary, written once per theme into
+     `theme_daily_insights` (cost does not scale with users). A publish recomputes the
+     changed themes the same evening, and the read path shows no numbers computed on a
+     different list than the one on screen.
+   Both surfaces are additive, Optional fields; with the tables missing or unreadable the
+   cards and detail render exactly as before.
+5. **Trillion-Dollar Club Bets** (migration 175, off until `TRILLION_CLUB_ENABLED`) — what the
+   companies worth $1T or more own in other companies, with a drill-down at
+   `GET /home/trillion-club/{slug}`. Two kinds of data, never mixed: U.S.-listed holdings
+   from a member's own SEC 13F (built daily by `services/trillion_club/`, stored per
+   (CIK, quarter) with every accession, because FMP folds 13F-HR/A amendments into the
+   original quarter), and hand-kept private / non-U.S. / off-13F stakes, each with a primary
+   source and dates (`trillion_club_stakes`; news-only rows can never be published).
+   Membership is a buffered rule on dated FMP market-cap closes (join after 10 straight
+   closes at or above $1T, leave after 20 below; owner overrides; hand-entered caps must be
+   forced). 13F ingestion is an owner opt-in per company (a bank's 13F is client assets).
+   The request path reads Supabase only; the section hides itself when membership is over a
+   week stale. Cards are free; the full holdings list and earlier quarters are Pro/Max
+   (copy-on-read redaction, like the signals). No notifications, no generated text.
 
 **Per-section degradation contract (load-bearing):** each section field defaults to
-an empty group (`scanners`/`signals`/`themes` default-empty; `pulse` may be `[]`), so
+an empty group (`scanners`/`signals`/`themes`/`trillion_club` default-empty; `pulse` may be `[]`), so
 a failed sub-build degrades ONLY its own section — the iOS views hide an empty section
 rather than erroring the whole screen. Every new Home DTO iOS decodes MUST keep this
 optional/defaulted shape (see the schema-parity tests). Each section has its own Tier-1
@@ -347,7 +381,7 @@ Account, and four independent copies drift the moment one of them spends.
 │   └─────────────┘  └─────────────┘  └───────────────┘  └───────────────────┘│
 │                                                                              │
 │   globals: isOnline · isLoading · currentError · toastMessage ·              │
-│            signInPrompt · pendingPushRoute · unreadNotificationCount         │
+│            signInPrompt · pendingPushNotification · unreadNotificationCount  │
 └──────────────────────────────────┬──────────────────────────────────────────┘
                                    │  @Environment(AppState.self)
            ┌───────────────────────┼───────────────────────┐
@@ -383,8 +417,9 @@ Sub-states owned by `AppState` (`Core/State/AppState.swift`): `auth` (`AuthState
 `accessToken`, not a bare `isLoggedIn`/`token` pair, because `.restoring` is a third state that
 renders as guest while holding a credential), `user` (`UserState`), `watchlist` (`WatchlistState`),
 `research` (`ResearchState`). Globals include `isOnline`, `isLoading`, `currentError`,
-`toastMessage`, `signInPrompt`, and the pending-route fields that carry a push tap into the
-navigation tree.
+`toastMessage`, `signInPrompt`, and the parked-intent fields that carry an action into the
+navigation tree — among them `pendingPushNotification`, a tapped push, which `ContentView` opens as
+the notification's DETAIL screen (the same one Tracking → Alerts opens), never as the ticker.
 
 There is no `StockState` and no `NewsState`; the error property is `currentError`, not `globalError`.
 
@@ -1875,7 +1910,7 @@ What follows is the set with no other home.
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
-| The marketing engine is foundations only | §12 ships the ledger (migration 170), the worker/publisher split, the internal API and a worker that proves the upload path and then closes its run as `skipped`. No content is selected, written, voiced, rendered or published yet; `PUBLISHERS` in `app/services/marketing/publisher_service.py` is an empty registry and the worker's `MEDIA_STAGES` list (`marketing/main.py`) is empty | Deliberate sequencing (Phases 2-7 of the approved plan). Every switch defaults OFF / dry-run, so the shipped half is inert until each is flipped. The tables are not yet in `database/schema_snapshot.sql`; after applying 170 and re-dumping, remove them from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py` and add them to `_CURATED_TABLES` in `tests/test_system_design_doc_parity.py` in the same change. |
+| The marketing engine writes but does not yet voice, render or publish | Phase 1 (2026-09-17) shipped the ledger, the worker/publisher split and the internal API; Phase 2 (2026-09-23, §12.5-12.6) added class-A content selection, the writer and its validators, the kick-and-poll script endpoint, server-authored captions in `create_posts`, the smart link and the landing page. `PUBLISHERS` in `app/services/marketing/publisher_service.py` is still an empty registry and the worker closes every scripted run `skipped` with `phase2_script_only` — no voice, video or post exists yet | Deliberate sequencing (Phases 3-7 of the approved plan). Every switch defaults OFF / dry-run. Migration 173 (`marketing_scripts`, `marketing_link_hits`) is applied (verified live 2026-09-24), but in its first form: the hardening review's columns (`run_date`, `content_rejections`, `reject_reason`) are in migration 176, written but not yet applied — until it is, every script kick fails with 42703, so apply 176 before deploying that web code. After the next re-dump, move the two tables out of `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`. The Railway worker service itself has not been created yet. |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -2005,12 +2040,15 @@ individually opt-out-able in-app, and frequency is capped per category.
 
 ---
 
-## 12. Marketing Content Engine (FOUNDATIONS 2026-09-17)
+## 12. Marketing Content Engine
 
 A zero-touch pipeline that turns Caydex-owned material into short vertical videos, text posts,
 a podcast feed and a blog, and publishes them on a schedule. Researched and planned 2026-09-16
-(62-agent verified feasibility study; the plan is the authority for Phases 2-8). What has
-SHIPPED is the foundation: the ledger, the process split, the worker API and the switches.
+(62-agent verified feasibility study; the plan is the authority for Phases 3-8). What has
+SHIPPED: the foundation — ledger, process split, worker API, switches (Phase 1, 2026-09-17) —
+and class-A content — selection, writer, validators, server-authored captions, the smart link
+and the landing page (Phase 2, 2026-09-23; §12.5-12.6). Nothing is voiced, rendered or
+published yet.
 
 ### 12.1 The content is gated by licence and regulation, not by tooling
 
@@ -2065,14 +2103,43 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   behind a custom JWT was the first design and was not pursued: with the legacy HS256 secret
   revoked (Appendix B, 2026-08-15) the backend holds no key that can sign a PostgREST JWT, and
   verifying a scoped-role design against Supabase's current signing-key model was out of
-  scope for Phase 1. Note the boundary is exact: the worker cannot post anything itself; with
-  `MARKETING_AUTO_PUBLISH` on, what it RECORDS is published after the server-side content
-  checks that Phases 2 and 7 add — until those land, keep the switch off.
+  scope for Phase 1. Note the boundary is exact: the worker cannot post anything itself, and
+  since Phase 2 it cannot choose the words either — `create_posts` takes the caption and title
+  from the run's ACCEPTED script (§12.5) and ignores the worker's, rejects assets that are not
+  `ready` assets of the same run, and births any post that carries media `pending_review`
+  whatever `MARKETING_AUTO_PUBLISH` says (the server cannot yet verify what a rendered video
+  says — Phase 7). The worker also may not set the run's selection fields (`source_ref`,
+  `template_id`, `content_class`), register copy-shaped assets, or claim a date outside
+  today/yesterday ET. Its authority over its own run is narrow and fenced (2026-09-24):
+  - a PATCH writes only an `in_progress` run, only the statuses `failed`, `skipped` and
+    `media_ready`, moves `stage` only to the observed or the requested value (never "any
+    stage ahead"), is fenced on the observed `attempts`, and may not write
+    `metadata.claim_nonce`. A terminal PATCH whose effect is already present (the same
+    status, and the same stage if one is named) answers 200 and writes nothing — the worker
+    retries a PATCH whose response was lost, so a 409 there logged a failure for a write
+    that had landed. Anything else on a run that is not `in_progress` answers 409
+    `MARKETING_RUN_NOT_HELD`; a malformed request is 422 `MARKETING_REQUEST_INVALID`.
+  - assets register only on an `in_progress` run, and an asset's kind and extension are
+    paired (`ASSET_KIND_EXTENSIONS` in `app/schemas/marketing.py`).
+  - `create_posts` accepts only the (platform, format) pairs of `POST_FORMATS_BY_PLATFORM`,
+    requires a `ready` asset of a matching kind for every media format, validates every
+    spec before inserting any (a 409 on the fifth post used to leave four behind), and
+    births only media-less text posts `approved` when auto-publish is on.
+  - the day's script is generated only for a HELD run — `in_progress`, dated today or
+    yesterday ET, claim touched within `MARKETING_RUN_STALE_SECONDS`; otherwise the kick
+    answers 409 `MARKETING_RUN_NOT_HELD` and spends nothing. The worker treats that code as
+    "the claim is gone": a WARNING and exit 0, no failure write.
 - **Nothing under `backend/marketing/` imports `app.*`.** `app.config.Settings` requires the
   Supabase variables the worker deliberately lacks, and importing `app.main` would start every
   lifespan loop a second time. The two halves are two directories on purpose:
   `app/services/marketing/` (web side, may import anything) and `backend/marketing/` (worker
-  side, the deployable). `tests/test_marketing_worker.py` scans every file of the latter.
+  side, the deployable). `tests/test_marketing_worker.py` enforces it twice: an AST scan of
+  every tracked file (import statements, `importlib`/`__import__`/`runpy` with literal targets,
+  failing closed on anything it cannot resolve, and on `exec`/`eval` or loading code by path)
+  and a fresh interpreter that imports a copy of the package with no `app` on the path. Its
+  skip rule mirrors `.gitignore` exactly: only the package-ROOT out, models and .cache
+  directories (and `__pycache__` anywhere) — a nested models package under, say, a voice
+  stage ships in the image, so it is scanned.
 - **The claim is a UNIQUE row, never a clock.** `marketing_runs.run_date` is unique; the INSERT
   is the claim (147's lesson). The cron is hourly so a slot Railway skipped (previous run
   still alive) or a container killed mid-stage is retried on the first tick after
@@ -2084,7 +2151,11 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   row is re-claimed with a compare-and-swap on the observed `attempts` value (which the
   re-claim increments — conditioning on `status` alone was a no-op), capped at
   `MARKETING_MAX_RUN_ATTEMPTS`; a per-process claim nonce lets a worker recognise its own
-  claim when the response was lost.
+  claim when the response was lost. A run that exhausts its attempts is closed `failed` once
+  (WARNING), and every claim — of any date — first sweeps runs abandoned OUTSIDE the claim
+  window (`planned`/`in_progress`, dated before yesterday ET, stale) to `failed` with the same
+  compare-and-swap: a run killed on its last in-window or resume tick is never claimed again,
+  so nothing else would ever close it.
 - **Publishing is claim-before-send**, the `PushDispatchService.claim_send` discipline (§11.1):
   dry-run is decided BEFORE the claim (a rehearsal touches no row), `approved → queued` is one
   conditional UPDATE, `idempotency_key` (`<run_date>:<platform>:<format>`) is the key the
@@ -2097,11 +2168,23 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
 
 ### 12.3 Storage
 
-`marketing-media` is a PUBLIC bucket on purpose (migration 170, mirroring 136/137): Meta and
-Upload-Post fetch the MP4 by URL, and podcast enclosures must be stable unsigned URLs —
-Spotify re-fetches an enclosure only when its path changes. Paths are content-addressed
+`marketing-media` is a PUBLIC bucket on purpose (migration 170): Meta and Upload-Post fetch
+the MP4 by URL, and podcast enclosures must be stable unsigned URLs — Spotify re-fetches an
+enclosure only when its path changes. Paths are content-addressed
 (`<run_date>/<kind>-<sha256[:16]>.<ext>`), immutable, and an asset is `ready` only after the
-API has HEAD-verified the object (`complete_asset`), never on the worker's word.
+API has HEAD-verified the object (`complete_asset`), never on the worker's word. That check is
+EXISTENCE only today: the declared size, content type and hash are not compared (Phase 4
+adds a storage-info check that deletes and fails on a mismatch). The worker's preflight
+manifest is content-addressed too — its generation time lives in the asset row's metadata —
+so a re-claimed attempt re-registers the same path instead of minting a new public object.
+
+Public means fetchable by URL, not LISTABLE: migration 170 had mirrored 136/137 and granted
+`anon`/`authenticated` a SELECT policy on the bucket, which migration 153 had already removed
+from every other public bucket because its only effect is the LIST API (public object URLs
+bypass RLS). Migration 173 drops it, so a rejected or not-yet-reviewed object is not
+enumerable, and narrows the bucket's MIME list to media + JSON — the least-trusted process in
+the engine can no longer host an HTML page under the brand. Drafts never live in the
+bucket at all (§12.5).
 
 ### 12.4 Tool decisions (why, briefly — the plan carries the evidence)
 
@@ -2112,6 +2195,176 @@ API has HEAD-verified the object (`complete_asset`), never on the worker's word.
 | Postiz on Railway for X | Direct X API v2 (pay-per-use, own-account OAuth 1.0a token). Postiz needs a Temporal stack since v2.12 and removes no platform gate. |
 | Upload-Post | Yes, for TikTok/YouTube/IG/FB/LinkedIn/Threads — the only sub-$50 route to public TikTok (audited client). Thin `httpx` integration; the official SDK is sync `requests`. |
 | n8n / Substack / Spotify upload | No: Python orchestrator; static blog; self-hosted RSS on an owned domain. |
+
+
+### 12.5 Class-A content: selection, writer, validators (Phase 2, 2026-09-23)
+
+**Source.** The pool is the bundled Learn corpus (`backend/data/money_moves.json`,
+`backend/data/journey_lessons.json`, byte-identical to the iOS bundle), read by
+`app/services/marketing/content_pool.py` — pure, cached, no Supabase at selection time. Each
+item is flattened (read-along arrays, `**bold**`, icons and EVERY quote block with its
+attribution removed) and split into sentences, and every sentence the OUTPUT compliance scan
+would reject is dropped before the writer sees it, so prompt, fact sheet and validator agree.
+Hand exclusions carry reasons (`EXCLUDED`): items built around a real investor, the one that
+names the model vendor, unsourced statistics, crypto promotion, the FMP-relayed 13F feature,
+misconduct stories centred on identifiable people, and the value-trap lesson whose subject IS a
+named company's valuation. The user's rule for Money Moves (2026-09-23): companies appear as
+historical case studies; no real person, share price, valuation, cheap/expensive, buy/sell or
+prediction, ever.
+
+**Cadence and rotation** (`app/services/marketing/selection.py`, pure): four posting days a week;
+posting days are numbered from a fixed epoch so rest days do not burn picks;
+`daily_rotation.pick_for_day` walks the pool in disjoint cycles; anything used by the last
+runs is skipped, because the rotation reshuffles whenever the pool changes. Five templates
+rotate independently (`case_story` is Money Moves only).
+
+**Writer** (`app/services/marketing/writer_service.py`, `app/services/marketing/writer_prompts.py`):
+one `generate_json` call with an UPPERCASE-typed schema, `gemini-2.5-flash`, thinking budget 0,
+system instruction built by `neutral_system_instruction`. One GENERATION is a draft plus ONE
+repair prompt that lists every violation with a fix hint. Every prompt carries a request line
+with the generation id, round and kind: `generate_json` caches clean answers for an hour keyed
+on the prompt, and without that nonce a rejected draft came straight back on the retry. The
+package is hook, script, cards, carousel slides and a caption BODY per platform — no hashtags,
+links, CTAs or disclaimers, which are code-owned (`app/services/marketing/post_copy.py`:
+publisher `Caydex`, never "Caydex Inc.", which does not exist; long disclaimer where there is
+room, short on X/Threads/Bluesky, a card for the end of every video; CTA per platform — TikTok
+and Instagram "Link in bio", X link-free unless `MARKETING_X_ALLOW_URLS`, everything else its
+own smart link; the composed caption must END with its disclaimer, fit the platform and carry no
+character the outlet's API refuses — YouTube titles and descriptions refuse `<` and `>` and the
+title is one line — checked on the cleaned composed text and never stripped at publish time).
+Validation is scoped: the shared parts must be clean; a failing caption drops only its outlet; a
+hook or caption with no word in it is `empty`. A rejected generation records EVERY round's
+violations, each tagged with its round. If the lease can no longer cover a call, a publishable
+draft already in hand is kept instead of spending a repair (§ kick-and-poll below).
+
+**Validators** (pure, FMP-free, linear-time over length-capped input — they run on the single
+uvicorn worker; every compiled pattern is swept for linearity by a test).
+`app/services/marketing/compliance.py` matches on an accent-free skeleton of the text (HTML
+entities decoded, disguised dots folded) and rejects:
+
+- **real people** — by name (App Store list, whale registry, investor-quote authors, corpus
+  executives, first names from `backend/data/given_names_en.txt` used as a name, a founder's
+  first name before a brand), by epithet ("a legendary investor"), by role ("Microsoft's CEO",
+  "its founder", "one man"; in Money Moves also a singular role or he/she), and hashtag
+  compactions;
+- **famous sayings** — 6-gram overlap with the vendored quotes, order-insensitive clause
+  overlap, curated signature phrases and chiastic shapes;
+- **class-B language** — a verdict, price move, record, "worth" claim, forecast or directive
+  about any company the sentence names, in BOTH modes. Companies come from the item's sheet and
+  from `backend/data/known_companies_en.txt`; an English-word brand (Apple, Target, Oracle)
+  counts as the company in a name position, or anywhere its sentence talks price or trading.
+  Money Moves posts additionally reject valuation vocabulary outright; a Journey sentence that
+  names a company runs the Money Moves rules. Market, index and fund forecasts and
+  buy/sell/hold directives are rejected in every mode;
+- **return claims** — percentages, spelled-out percentages, multiples, -fold and N-bagger in a
+  return context, and digit-free market caps and price records;
+- **promises and contradictions of the code-owned disclaimer** — "always recovers", "can't
+  lose", "guaranteed", calling the text advice, denying AI involvement, dismissing the fine
+  print. Every exemption is POSITIONAL: a negation, a warning or belief frame, a myth label or
+  a debunk frames only the claim's own clause or the sentence right after it ("Don't panic, the
+  market always recovers" and "Ignore the hype, compounding guarantees your money grows" are
+  promises); a yes/no question is exempt only when nothing but a debunk answers it, read across
+  fields (hook → first script line, card title → body); and NO frame licenses a promise about a
+  named company ("Myth: Apple stock always goes up." still talks about its share price);
+- banned phrases and misattributions, vendor/identity terms, brand, CTA, endorsement and
+  social-proof text, first person (quoted testimonials included; only a reader's quoted
+  self-question is exempt), links (any label + TLD, disguised dots), handles, markup,
+  hashtags and cashtags.
+
+`app/services/marketing/grounding.py` requires every number to match a fact-sheet number by
+value and unit, bound by its LOCAL context: the words either side of the draft number must meet
+the source's, subjects excluded, and an amount, percentage or multiple stated as a price, worth
+or return claim must be one the sheet states as such (a Money Moves sheet states none); a loss
+cannot come back as a profit. A YEAR binds more loosely — on any shared word including names,
+unless its clause's verb is a different kind of event — because a date cannot carry a price or
+value claim. Every capitalised token must be ordinary English (the corpus vocabulary plus the
+roots of Webster's 1934 dictionary, `backend/data/english_roots_web2.txt.gz`, copyright lapsed)
+or present in the item's fact sheet, and every company named must be one the sheet names.
+
+**Acceptance evidence.** Three adversarial review rounds (2026-09-24) confirmed 73, 49 and 38
+defects, most of them validator bypasses in natural phrasing — and in rounds two and three, a
+third of them were regressions introduced by the previous round's fixes, because relaxing a
+rule to stop over-blocking reopened a bypass it had closed. Each fix was proved against
+a vendored corpus of real writer drafts (`backend/tests/data/marketing_real_drafts_2026_09_24.json`):
+every honest line in it must pass, and a rule that rejects one is over-blocking — narrow the
+rule, never edit the fixture. The regex validators remain a denylist, so a human read of every
+eligible item (`backend/scripts/marketing_preview.py`, which writes nothing) is the acceptance
+gate, and `MARKETING_AUTO_PUBLISH` must stay off until a stronger gate exists — with it on, a
+media-less text post is born `approved` on the validators' word alone.
+
+**Kick-and-poll** (`app/services/marketing/script_service.py`,
+`POST /api/v1/internal/marketing/runs/{run_id}/script`). The worker cannot write copy, so it
+asks for the day's script with one idempotent call and polls it. The first kick selects (one
+INSERT, first write wins) and answers at once; the Gemini work runs in a background task that
+takes a LEASE on the row with a conditional UPDATE, refreshes it before every model call and
+writes its outcome fenced on its generation id — Railway overlaps old and new containers during
+a deploy, so only the database can arbitrate. States: `rest_day`, `generating`, `deferred`
+(Gemini failed; retry after 30 min), `accepted` (immutable; the worker gets hook, script, cards,
+slides and the disclaimer card — never captions), `rejected` (the day is skipped). Content
+outcomes are 200 bodies, never HTTP errors, so the worker's 5xx retry can never re-bill a
+rejection. Drafts live in `marketing_scripts.output` (migration 173) — not in the public
+bucket, not in `marketing_runs.metadata` (a non-atomic merge echoed on every call). Kill
+switch for writer spend: unset `MARKETING_WORKER_TOKEN` on the web service.
+
+The state machine's invariants (hardened 2026-09-24 by two adversarial review rounds):
+
+- **Two caps, and every count ends in a terminal state.** `MAX_GENERATIONS` (4) counts
+  generations the validators REJECTED (`content_rejections`); `MAX_WRITER_FAILURES` (4) counts
+  generations that ended with no verdict — a model error, a ledger blip, a crash, a
+  cancellation, an owner that died (`generations - content_rejections`). A writer outage
+  therefore never burns the day's content attempts, and the worst case is 7 generations
+  (≤14 flash calls) per run. A `rejected` body carries a `reason` — `content`,
+  `writer_unavailable`, `empty_pool`, `source_ineligible` — and only `content` is a compliance
+  verdict with violations; the worker records it as `metadata.skip_reason` (`content_rejected`,
+  `writer_unavailable`, …). Tokens spent by a generation that later failed are recorded too
+  (the writer attaches them to the exception it re-raises).
+- **The lease is sized from the real worst case and fenced on what was observed.**
+  `LEASE_SECONDS` = the longest one `generate_json` call can take with every retry budget
+  exhausted (572 s at defaults) + 60 s. The takeover and the cap-close compare-and-swaps fence
+  on the observed status, generation count, generation id AND `lease_until`, so a live owner
+  that just refreshed cannot be taken over. A cap reached under an expired lease is closed by
+  the next kick — found five times independently, a dead final owner used to leave the row
+  `generating` forever — but a lapsed lease whose owner is a live task in THIS process is left
+  alone for up to `OWNER_ALIVE_SECONDS` (3 × the lease), after which it counts as wedged. A
+  lease refresh retries a Supabase blip and, if every attempt fails, continues while the lease
+  it last wrote still covers a model call (the terminal write is fenced anyway) — a blip used
+  to throw away a paid, publishable draft.
+- **Every terminal write says whether it landed.** `WRITTEN`, `SUPERSEDED` or `LOST`; a retry
+  that matches nothing re-reads the row and counts it landed only if our generation id and
+  every field it wrote match. `accepted` and `rejected` are logged as such only when WRITTEN.
+  A cancelled acquire waits for its in-flight UPDATE to answer before handing the run back, so
+  a hand-back can never overtake the write it undoes.
+- **Selection's `recent` window reads `marketing_scripts` itself** (`run_date` + `source_ref`,
+  written in the same first-write-wins INSERT); the `source_ref` mirror on `marketing_runs` is
+  informational and heals itself on the next poll. Each generation grounds on the live bundle,
+  and the accepted row's `fact_sheet` is the sheet it was grounded on.
+
+### 12.6 Public surfaces: smart link and landing page
+
+`caydexinvest.com` IS this FastAPI app, so its root was the API's JSON status and the iOS share
+link (`AppInfo.downloadURL`) landed on it. `GET /` now serves a static, code-authored landing
+page (`app/templates/site/index.html`: no script, no external resource, a strict CSP, no
+market data, the disclaimer). `GET /go/{campaign}` is the smart link every CTA carries: a 302
+(never 307) to the landing page before launch and to `MARKETING_APP_STORE_URL` after it, with
+App Analytics `pt`/`ct`/`mt` appended once `MARKETING_APP_STORE_PROVIDER_TOKEN` is set.
+Campaigns outside the known platform list count as `other` and are never reflected into the
+Location header. Hits are counted in memory and flushed every 60 s through
+`increment_marketing_link_hits` into `marketing_link_hits.hits` — no database write on the
+request path of the single worker. Only a person's navigation is counted (the redirect is
+always served): not HEAD, not a prefetch, not a crawler or a native HTTP stack (the user agent
+must begin with the Mozilla or Opera product token; crawlers are denied by their own token, never by a
+bare platform name — the bare name is that platform's in-app browser), not anything the
+browser's Fetch Metadata marks as other than a top-level document navigation (absent headers
+still count), not past a per-address limit (20/min per IPv4 address or IPv6 /64, in the
+link's own limiter pool), and not past a PER-CAMPAIGN ceiling (600 counted hits/min per known
+campaign, 60 for `other`) — per campaign so a flood of junk `/go/<anything>` cannot suppress
+every real campaign's count. Delivery is at least once and at most twice per hit: a flush
+whose RPC may have committed (a read timeout, a gateway 5xx, SQLSTATE class 08) is re-sent
+once, and a second unknown outcome drops those hits with a log line; errors are classified by
+their structured code, never by message text. The table is therefore indicative — App Store
+Connect's `ct` data is the attribution record. Both routes are root routes, outside the licence gate
+(which scans `/api/v1` only), so `tests/test_marketing_smart_link.py` pins an explicit
+allow-list of every unauthenticated root route with its reason.
 
 ---
 
@@ -2146,8 +2399,9 @@ backend/
 │   ├── services/
 │   │   ├── agents/               # the multi-agent research pipeline
 │   │   │   └── book_voice_prompt.py   # per-book method voice for Learn BOOK chats
-│   │   └── marketing/            # WEB-side half of the marketing engine: ledger + publisher loop (§12)
-│   ├── templates/                # PDF (WeasyPrint)
+│   │   └── marketing/            # WEB-side half of the marketing engine: ledger, publisher loop,
+│   │                             #   content pool, selection, writer + validators, smart link (§12)
+│   ├── templates/                # PDF (WeasyPrint), legal pages, the landing page (site/)
 │   ├── utils/
 │   ├── config.py                 # NOT app/core/config.py
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
@@ -2202,6 +2456,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-08-27 | Report thinking budget capped at 0, both stages, separately configurable | Measured −66% cost/report; the failure mode is a clipped sentence, not a wrong number. The two post-assembly syntheses stay UNCAPPED | Model default (uncapped); a single shared setting |
 | 2026-09-16 | Marketing engine content is gated by the FMP licence and EU MAR BEFORE any tool choice: class A (educational, Caydex-owned) ships first, class C (EDGAR-direct filings) later, no class B in public | Public External Display was declined in writing and both 13F and congressional rows are FMP-relayed; MAR treats a named-ticker value opinion as a recommendation regardless of disclaimers | Buy Exhibit A §3 first; post FMP-derived "data of the day" content (the blueprint's own examples) |
 | 2026-09-17 | Marketing media worker is a SEPARATE Railway cron service holding no Supabase key; it reaches the ledger only through a token-gated internal API and Storage signed-upload URLs | Least privilege for an ML-heavy image; a scoped-role JWT cannot be minted (legacy JWT keys disabled, signing key revoked) | Same image as the web app with a different start command; worker with service_role; a scoped Postgres role behind a custom JWT |
+| 2026-09-23 | Marketing copy is written web-side and pulled by the worker (kick-and-poll), validated by code (people, class B, grounding, links, identity) before it is stored, and CAPTIONS are server-authored: `create_posts` ignores the worker's text | The worker is the least-trusted process and holds no Gemini key; a long synchronous Gemini request inside a 30 s client timeout was retried concurrently and cut by every deploy; an LLM cannot be trusted with a disclaimer, a URL or a name | Writer in the worker image; one long request per script; captions supplied by the worker |
+| 2026-09-23 | Pre-launch smart link lands on a static page served at `/`; public posts may name companies as historical case studies but never a person, a price, a valuation or a verdict | `caydexinvest.com` is the API itself and had no landing page; the user chose companies-as-examples over principle-only posts | Keep `/` as JSON and redirect elsewhere; strip every company name |
 | 2026-09-17 | ffmpeg + libass + Pillow for video; Kokoro-82M for voice; Upload-Post for the audited platforms; direct X API; no Postiz, no n8n, no Remotion, no MMS_FA on the marketing path | Measured render cost ≈ $0.002/clip; Kokoro emits word timestamps natively; MMS_FA is CC-BY-NC; Postiz needs Temporal and removes no gate | Creatomate/JSON2Video; ElevenLabs; Postiz self-host; n8n |
 | 2026-09-23 | CEO Buys is the 4th App-Exclusive Signal: CEO/co-CEO open-market common-stock purchases, ranked by DOLLARS over 30 days of Form 4 FILINGS, from the symbol-less FMP insider feed through a fail-closed pager; any card that RAISES marks the build degraded (memory 5 min, never written to `signals_cache`) | TestFlight request ("Insider buys … CEO only?"). One CEO per company makes a buyer count degenerate. Tier 2 is read before every rebuild, so a persisted partial build hid a transiently failed card for up to a day; a fourth card with ~3 FMP pages + a quote batch raised those odds | All officers + directors ranked by buyer count (rejected by the owner: 10%-owner funds swamp dollars; name/scope decided as "CEO Buys"); FMP's insider "latest" feed (mixes every transaction type); reusing `get_insider_trading` (swallows every failure to `[]`, so an outage would read as "no CEO bought anything") |
 

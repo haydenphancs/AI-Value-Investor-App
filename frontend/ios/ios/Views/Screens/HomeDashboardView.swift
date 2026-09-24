@@ -25,14 +25,6 @@ struct HomeDashboardView: View {
     @State private var showSearch = false
     @State private var showProfile = false
     @State private var selectedTicker: MarketTicker?
-    /// The destination a NOTIFICATION tap resolved to.
-    ///
-    /// Separate from `selectedTicker` (which Home's own tiles use) because a push route
-    /// carries a tab and a sub-tab, and `MarketTicker` has nowhere to put them — routing
-    /// through it silently dropped the deep link. This presents the SAME
-    /// `NotificationRouteDestination` the inbox rows use, so banner taps and in-app taps
-    /// cannot drift apart.
-    @State private var pushRoute: NotificationRouteBox?
     /// Which Daily Scanner cards are expanded. Owned here so a tap ANYWHERE outside a card
     /// (in the scroll content) collapses them.
     ///
@@ -46,6 +38,13 @@ struct HomeDashboardView: View {
     @State private var signalDetailTarget: SignalDetailTarget?
     /// A tapped Emerging Frontiers theme → its detail screen (hero + companies).
     @State private var themeDetailTarget: ThemeDetailTarget?
+    /// A tapped Trillion-Dollar Club card → that company's stakes.
+    @State private var trillionClubTarget: TrillionClubTarget?
+    /// "Open profile" on the club's investor-profile card (Berkshire) → its whale profile.
+    @State private var trillionClubProfileTarget: TrillionClubProfileLink?
+    /// The club section's ⓘ → its info sheet. Owned HERE, not by the section, so the
+    /// presentation reset below takes it down (a child-owned sheet escapes it).
+    @State private var showTrillionClubInfo = false
     /// A tapped LOCKED App-Exclusive Signals row → the plan sheet. Signals tickers are a
     /// Pro/Max surface (backend `entitlements.signals_unlocked`).
     @State private var showSignalsPaywall = false
@@ -168,7 +167,9 @@ struct HomeDashboardView: View {
             selectedTicker = nil
             signalDetailTarget = nil
             themeDetailTarget = nil
-            pushRoute = nil
+            trillionClubTarget = nil
+            trillionClubProfileTarget = nil
+            showTrillionClubInfo = false
             showSearch = false
             showProfile = false
             showSignalsPaywall = false
@@ -180,40 +181,6 @@ struct HomeDashboardView: View {
             ProfileView()
                 .environment(appState)
                 .environment(\.appState, appState)
-        }
-        .onChange(of: appState.pendingPushRoute, initial: true) {
-            // `initial: true` is load-bearing, not cosmetic. On a COLD launch from a
-            // notification tap, AppDelegate sets the pending route before this view
-            // has ever rendered — and a plain .onChange only fires on a CHANGE after
-            // first render, so the tap was silently dropped in exactly the scenario
-            // the tap handler exists for. Warm-foreground taps worked, which is why
-            // it would have survived manual testing. DO NOT "clean this up".
-            //
-            // Consume the tap: open the destination, then CLEAR it so the same tap
-            // can't re-present after the sheet is dismissed.
-            guard let route = appState.pendingPushRoute else { return }
-
-            // NOT OURS — leave it, and above all do NOT clear it. A route with no detail
-            // screen belongs to Tracking → Alerts, and `ContentView` owns switching to it.
-            // Clearing here would race that handler and drop the tap. See
-            // `NotificationRoute.needsAlertsFallback`.
-            guard !route.needsAlertsFallback else { return }
-
-            defer {
-                appState.pendingPushRoute = nil
-                appState.pendingPushTicker = nil
-            }
-            // ONE dispatcher for both doors. This used to be a second copy of the
-            // `MarketTickerType` switch in `NotificationRouteDestination`, and the two
-            // had already drifted: this one rebuilt the route as a `MarketTicker`, which
-            // has no tab field, so an insider alert that asked for Holders → Insiders
-            // arrived here and lost it. A forked copy of a router is how "taps from the
-            // inbox go to the right place but taps from the banner don't" happens.
-            pushRoute = NotificationRouteBox(route: route)
-        }
-        .fullScreenCover(item: $pushRoute) { box in
-            NotificationRouteDestination(route: box.route)
-                .environment(appState)
         }
         .fullScreenCover(item: $selectedTicker) { ticker in
             NavigationStack {
@@ -243,6 +210,28 @@ struct HomeDashboardView: View {
             NavigationStack {
                 ThemeDetailView(slug: target.slug)
             }
+        }
+        // Trillion-Dollar Club: a company's stakes, and the investor-profile link. BOTH
+        // spellings of AppState on both: the detail reads `AppState.self` (and presents
+        // PaywallView/WhaleProfileView, which read `\.appState`), and a cover inherits neither
+        // for free — the reason the Profile cover above carries both.
+        .fullScreenCover(item: $trillionClubTarget) { target in
+            NavigationStack {
+                TrillionClubDetailView(slug: target.slug)
+            }
+            .environment(appState)
+            .environment(\.appState, appState)
+        }
+        .fullScreenCover(item: $trillionClubProfileTarget) { target in
+            NavigationStack {
+                WhaleProfileView(whaleId: target.whaleId)
+            }
+            .environment(appState)
+            .environment(\.appState, appState)
+        }
+        // The members WITHOUT a card — never a detail's `otherMembers` (see TrillionClubInfoSheet).
+        .sheet(isPresented: $showTrillionClubInfo) {
+            TrillionClubInfoSheet(members: .withoutCard(viewModel.data?.trillionClub.alsoInClub ?? []))
         }
         // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes. Buying
         // credits would not reveal a single ticker here. Same choice as UpdatesView's
@@ -413,6 +402,20 @@ struct HomeDashboardView: View {
                         )
                     }
 
+                    // After Emerging Frontiers, above the disclaimer; hidden when the server
+                    // sent no cards (feature off, unreadable data, or stale membership).
+                    if !data.trillionClub.isEmpty {
+                        TrillionClubSection(
+                            group: data.trillionClub,
+                            onCompanyTap: { trillionClubTarget = TrillionClubTarget(slug: $0.slug) },
+                            onProfileTap: { company in
+                                guard let whaleId = company.whaleId else { return }
+                                trillionClubProfileTarget = TrillionClubProfileLink(whaleId: whaleId)
+                            },
+                            onInfoTap: { showTrillionClubInfo = true }
+                        )
+                    }
+
                     // Scanners and App-Exclusive Signals surface per-ticker signals, so
                     // the dashboard carries the notice + a route to the full disclaimers.
                     // INSIDE `if let data` on purpose: outside it, this rendered above the
@@ -536,6 +539,18 @@ private struct SignalDetailTarget: Identifiable {
 private struct ThemeDetailTarget: Identifiable {
     let id = UUID()
     let slug: String
+}
+
+/// A tapped Trillion-Dollar Club card, presented as that company's stakes.
+private struct TrillionClubTarget: Identifiable {
+    let id = UUID()
+    let slug: String
+}
+
+/// The club's investor-profile card → an existing whale profile.
+private struct TrillionClubProfileLink: Identifiable {
+    let id = UUID()
+    let whaleId: String
 }
 
 #Preview {

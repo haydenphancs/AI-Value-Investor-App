@@ -14,5 +14,6 @@
   "route": "ticker",
   "ticker": "GOOGL",
   "asset_type": "stock",
+  "dedup_key": "profile_match:2026-09-14:00000000-0000-0000-0000-000000000000",
   "Simulator Target Bundle": "com.phan.caydex"
 }

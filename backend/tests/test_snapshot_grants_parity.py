@@ -71,7 +71,9 @@ _CLIENT_ROLES = ("anon", "authenticated")
 _PENDING_SERVICE_ROLE_GRANTS: dict[str, str] = {}
 # Tables whose anon/authenticated grant a not-yet-dumped migration REVOKEs.
 # (169: ticker_news_cache / user_settings / device_tokens — landed, see above.)
-_PENDING_CLIENT_REVOKES: dict[str, str] = {}
+# 174 closes trending_themes' 081 read grant (its tickers become FMP-scored output). Delete
+# this entry once 174 is applied and the snapshot re-dumped.
+_PENDING_CLIENT_REVOKES: dict[str, str] = {"trending_themes": "174"}
 
 _RE_TABLE = re.compile(r"^CREATE TABLE (?:IF NOT EXISTS )?public\.([a-z0-9_]+)\s*\(", re.M)
 _RE_VIEW = re.compile(r"^CREATE (?:OR REPLACE )?VIEW public\.([a-z0-9_]+)\b", re.M)

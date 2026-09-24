@@ -28,8 +28,8 @@ import SwiftUI
 /// rendered inside a modal presentation.
 ///
 /// Every other caller gets this right — `HomeDashboardView`, `ThemeDetailView`,
-/// `SignalTickerDetailView`, `SearchView` and `NotificationRouteDestination` all give the ticker
-/// screen a presentation context with a stack of its own. Alerts was the only place that nested
+/// `SignalTickerDetailView` and `SearchView` all give the ticker screen a presentation context
+/// with a stack of its own. Alerts was the only place that nested
 /// it as a destination of another screen.
 ///
 /// ⚠️ THE `NavigationStack` INSIDE THE COVER IS THE WHOLE FIX. A cover starts a new presentation
@@ -38,8 +38,12 @@ import SwiftUI
 /// nothing — the search sheet closes and the screen just sits there. Deleting the stack would look
 /// harmless and reintroduce half the original bug.
 ///
-/// ⚠️ `NotificationRouteContent`, never `NotificationRouteDestination`. The latter brings its own
-/// stack and would double-stack inside the one written here.
+/// ⚠️ `NotificationRouteContent` has no stack of its own, on purpose — any stack-owning wrapper
+/// around it would double-stack inside the one written here. (There was one,
+/// `NotificationRouteDestination`; it was removed with the push path that skipped the detail.)
+///
+/// THREE owners use it, all with the same sheet → cover hand-off: `AlertsTabContent`
+/// (notification rows), `TrackingView` (digest cards) and `ContentView` (a TAPPED PUSH's detail).
 ///
 /// USAGE — on the view that owns the sheet, with the sheet's `onDismiss` doing the hand-off:
 ///
@@ -68,7 +72,7 @@ struct AlertDestinationCover: ViewModifier {
     /// The ONE five-way dispatch. Deliberately here rather than in the two detail screens that
     /// used to hold a copy each — a second copy of this switch is exactly the "taps from the
     /// inbox go to the right place but taps from the banner don't" drift that
-    /// `NotificationRouteDestination`'s own comment warns about.
+    /// `NotificationRouteContent`'s file header warns about.
     @ViewBuilder
     private func destinationView(_ destination: AlertDestination) -> some View {
         switch destination.target {

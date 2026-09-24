@@ -20,13 +20,33 @@ struct ThemeCompanyRow: View {
                 CompanyLogoView(ticker: company.ticker, size: 40)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(company.name)
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-                        .lineLimit(1)
-                    Text(company.ticker)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
+                    HStack(spacing: 6) {
+                        Text(company.name)
+                            .font(AppTypography.bodyEmphasis)
+                            .foregroundColor(AppColors.textPrimary)
+                            .lineLimit(1)
+                        if company.isNew {
+                            // Joined (or came back) in this month's review.
+                            Text("New")
+                                .font(AppTypography.captionEmphasis)
+                                .foregroundColor(AppColors.primaryBlue)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                // 0.08: text on its own tint — 0.14 measured 4.25:1 (light).
+                                .background(Capsule().fill(AppColors.primaryBlue.opacity(0.08)))
+                                .fixedSize()
+                        }
+                    }
+                    HStack(spacing: 4) {
+                        Text(company.ticker)
+                        if let role = company.roleLabel {
+                            Text("·")
+                            Text(role)
+                        }
+                    }
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .lineLimit(1)
                 }
 
                 Spacer(minLength: AppSpacing.sm)

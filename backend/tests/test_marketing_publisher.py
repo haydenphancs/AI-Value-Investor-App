@@ -17,12 +17,19 @@ class _Ledger:
         self.posts = {p["id"]: dict(p) for p in posts}
         self.marks = []
         self.fail_mark = False
+        self.claims = []
+        # ids another tick takes between OUR list and OUR claim: the conditional UPDATE finds
+        # them no longer `approved` and returns None.
+        self.lose_claim = set()
 
     async def list_posts(self, status, *, limit=50):
         return [dict(p) for p in self.posts.values() if p["status"] == status][:limit]
 
     async def claim_post(self, post_id):
+        self.claims.append(post_id)
         p = self.posts[post_id]
+        if post_id in self.lose_claim:
+            p["status"] = "queued"  # the other tick's UPDATE landed first
         if p["status"] != "approved":
             return None
         p["status"] = "queued"
@@ -121,11 +128,21 @@ async def test_ledger_failure_after_a_successful_publish_never_marks_failed(ledg
 
 @pytest.mark.asyncio
 async def test_a_post_claimed_by_another_tick_is_skipped(ledger, monkeypatch):
+    """The race itself: p1 is LISTED as approved, then another tick's conditional UPDATE lands
+    before ours, so `claim_post` returns None. That None is the only authority — publishing the
+    listed row anyway is exactly the double post this branch exists to stop."""
+    sent = []
+
     async def adapter(post):
+        sent.append(post["id"])
         return {"external_id": "x"}
 
     monkeypatch.setattr(pub, "PUBLISHERS", {"x": adapter})
-    ledger.posts["p1"]["status"] = "queued"   # someone else holds it… but list_posts filters approved
     ledger.posts["p2"]["metadata"] = {}
+    ledger.lose_claim = {"p1"}
     counters = await pub.publish_cycle()
-    assert counters["published"] == 1 and ledger.posts["p2"]["status"] == "published"
+    assert ledger.claims == ["p1", "p2"]           # p1 really reached the claim (not filtered first)
+    assert sent == ["p2"]                          # …and was never sent
+    assert [m[0] for m in ledger.marks] == ["p2"]  # no ledger write for the lost claim
+    assert counters["skipped"] == 1 and counters["published"] == 1
+    assert ledger.posts["p1"]["status"] == "queued" and ledger.posts["p2"]["status"] == "published"

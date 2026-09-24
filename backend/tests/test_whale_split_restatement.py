@@ -294,9 +294,22 @@ def test_the_request_path_caps_its_suspect_fan_out():
     import inspect
     import re
 
+    import app.services.thirteen_f_splits as tfs
     import app.services.whale_service as ws
 
-    src = inspect.getsource(ws.WhaleService._process_13f_path)
+    # The split block moved to `thirteen_f_splits.resolve_13f_split_adjustments`
+    # (2026-09-24, shared with the Trillion-Dollar Club builder). Pin BOTH halves: the
+    # whale request path must still call it, and the cap must live where the suspect list
+    # is built.
+    whale = "\n".join(
+        line for line in inspect.getsource(ws.WhaleService._process_13f_path).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "await resolve_13f_split_adjustments(" in whale, (
+        "the whale request path no longer runs the shared split block"
+    )
+
+    src = inspect.getsource(tfs.resolve_13f_split_adjustments)
     # Comments carry every token this greps for — strip them, or the assertion passes on
     # prose after the code is reverted (`.claude/rules/testing.md` §3).
     code = "\n".join(
@@ -451,6 +464,7 @@ def _gate_source(fn_name, module):
 
 @pytest.mark.parametrize("path, fn", [
     ("app/services/whale_service.py", "_process_13f_path"),
+    ("app/services/thirteen_f_splits.py", "resolve_13f_split_adjustments"),
     ("app/services/holders_service.py", "_build_holders"),
 ])
 def test_a_failed_probe_arms_the_backstop_rather_than_clearing_it(path, fn):
@@ -484,7 +498,7 @@ def test_a_failed_probe_arms_the_backstop_rather_than_clearing_it(path, fn):
 
 
 @pytest.mark.parametrize("path", [
-    "app/services/whale_service.py",
+    "app/services/thirteen_f_splits.py",   # the whale request path's split block
     "scripts/hydrate_whales.py",
 ])
 def test_a_per_ticker_probe_exception_also_fails_closed(path):
@@ -508,7 +522,7 @@ def test_a_per_ticker_probe_exception_also_fails_closed(path):
 
 
 @pytest.mark.parametrize("path", [
-    "app/services/whale_service.py",
+    "app/services/thirteen_f_splits.py",   # the whale request path's split block
     "scripts/hydrate_whales.py",
 ])
 def test_the_gate_is_asked_about_the_diffed_period_not_the_fetch_window(path):

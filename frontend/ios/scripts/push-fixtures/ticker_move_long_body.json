@@ -1,0 +1,19 @@
+{
+  "aps": {
+    "alert": {
+      "title": "TER -10.4%",
+      "body": "Teradyne fell after guiding third-quarter revenue below consensus, citing a slower recovery in its semiconductor test business and weaker mobile demand, while reiterating its full\u2026"
+    },
+    "sound": "default",
+    "thread-id": "watchlist",
+    "interruption-level": "active",
+    "category": "watchlist",
+    "badge": 2
+  },
+  "kind": "ticker_move",
+  "route": "ticker",
+  "ticker": "TER",
+  "asset_type": "stock",
+  "dedup_key": "move:TER:2026-09-14",
+  "Simulator Target Bundle": "com.phan.caydex"
+}

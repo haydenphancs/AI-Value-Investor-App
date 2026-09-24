@@ -19,11 +19,12 @@ number, with the hydration copy being the one that actually runs in production.
 
 import hashlib
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 # The 13F quarter helpers are the SINGLE source of truth for "which quarter should a
 # filer have filed by now" — `latest_filed_13f_quarter` already encodes the statutory
@@ -34,6 +35,8 @@ from app.utils.period_labels import (
     filing_period_display,
     latest_filed_13f_quarter,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Snapshot persistence guard ──────────────────────────────────────
@@ -481,6 +484,279 @@ def generate_trade_summary(
 def positions_word(n: int) -> str:
     """"position" / "positions" — a count of 1 must not read "1 positions"."""
     return "position" if n == 1 else "positions"
+
+
+# ── 13F position diff by CUSIP, share counts only (Trillion-Dollar Club) ─────────────
+#
+# The whale `_diff_quarters` copies answer "what did this INVESTOR trade" in dollars
+# (BOUGHT/SOLD). A company's 13F needs a different, stricter answer: which positions are
+# newly reported, gone, up or down in SHARES — never a dollar "trade", and never "bought":
+# most of Q2 2026's new rows were IPO conversions (SpaceX listed 2026-06-12 and appeared
+# at Alphabet, NVIDIA and AMD). The split machinery is REUSED from above, not copied:
+# `restate_prev_shares_for_split`, `SPLIT_SUPPRESS`, `is_implausible_share_flow`.
+
+_DIFF_CUSIP_RE = re.compile(r"^[0-9A-Z]{9}$")
+# Order the change rows are listed in (unchanged rows are counted, never listed).
+_DIFF_ROW_ORDER = (
+    "newly_reported", "increased", "decreased", "no_longer_reported", "corporate_action",
+)
+_DIFF_COMPARISONS = ("quarter", "first_filing", "gap")
+
+
+def _diff_finite(value: Any, *, positive: bool) -> Optional[float]:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):   # float(10**400) overflows: garbage
+        return None
+    if not math.isfinite(f):
+        return None
+    if positive and f <= 0:
+        return None
+    return f
+
+
+def _diff_iso_date(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and len(value) >= 10:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _diff_positions(rows: Optional[Sequence[Dict[str, Any]]], side: str) -> Dict[str, Dict[str, Any]]:
+    """Validated positions keyed by CUSIP. A row without a CUSIP or a positive, finite
+    share count cannot be compared and is skipped (logged). Duplicate CUSIPs — which the
+    builder's per-accession normalisation should already have merged — are summed."""
+    out: Dict[str, Dict[str, Any]] = {}
+    skipped = duplicates = 0
+    for r in rows or ():
+        if not isinstance(r, dict):
+            skipped += 1
+            continue
+        raw_cusip = r.get("cusip")
+        cusip = raw_cusip.strip().upper() if isinstance(raw_cusip, str) else ""
+        shares = _diff_finite(r.get("shares"), positive=True)
+        if not _DIFF_CUSIP_RE.match(cusip) or shares is None:
+            skipped += 1
+            continue
+        raw_symbol = r.get("symbol")
+        symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
+        entry = {
+            "cusip": cusip,
+            "symbol": symbol if symbol and symbol != "--" else None,
+            "name": (r.get("name") or "").strip() if isinstance(r.get("name"), str) else "",
+            "shares": shares,
+            "value": _diff_finite(r.get("value"), positive=False),
+            "weight": _diff_finite(r.get("weight"), positive=False),
+            "ipo_date": _diff_iso_date(r.get("ipo_date")),
+        }
+        seen = out.get(cusip)
+        if seen is None:
+            out[cusip] = entry
+            continue
+        duplicates += 1
+        seen["shares"] += shares
+        for k in ("value", "weight"):
+            if seen[k] is not None and entry[k] is not None:
+                seen[k] += entry[k]
+            else:
+                seen[k] = seen[k] if seen[k] is not None else entry[k]
+        seen["symbol"] = seen["symbol"] or entry["symbol"]
+        seen["name"] = seen["name"] or entry["name"]
+    if skipped:
+        logger.warning(
+            "diff_13f_positions: skipped %d %s row(s) with no CUSIP or no positive, finite "
+            "share count", skipped, side,
+        )
+    if duplicates:
+        logger.warning(
+            "diff_13f_positions: %d duplicate CUSIP row(s) in the %s filing were summed — "
+            "the caller should normalise per accession first", duplicates, side,
+        )
+    return out
+
+
+def _diff_split_ratio(split_ratios: Mapping[str, float], *symbols: Optional[str]) -> Optional[float]:
+    for s in symbols:
+        if not s:
+            continue
+        r = _diff_finite((split_ratios or {}).get(s), positive=True)
+        if r is not None and abs(r - 1.0) > 1e-9:
+            return r
+    return None
+
+
+def _diff_both(
+    c: Dict[str, Any], p: Dict[str, Any], split_ratios: Mapping[str, float],
+    unclassified: Set[str],
+) -> Tuple[str, float, Optional[float]]:
+    """``(change, prev_shares, share_change)`` for a position present in both quarters."""
+    prev_shares = p["shares"]
+    ratio = _diff_split_ratio(split_ratios, c["symbol"], p["symbol"])
+    if ratio is not None:
+        restated = restate_prev_shares_for_split(prev_shares, c["shares"], ratio)
+        if restated is SPLIT_SUPPRESS:
+            # The split and the real flow cannot be separated: say so, never guess.
+            return "corporate_action", prev_shares, None
+        prev_shares = restated
+    share_change = c["shares"] - prev_shares
+    flagged = any(s in (unclassified or set()) for s in (c["symbol"], p["symbol"]) if s)
+    if flagged and is_implausible_share_flow(share_change, c["shares"]):
+        return "corporate_action", prev_shares, None
+    # Under one share is fractional-share noise from a restated count (a 3:2 split of an
+    # odd holding), not a change — raw 13F counts are whole numbers.
+    if abs(share_change) < 1.0:
+        return "unchanged", prev_shares, 0.0
+    return ("increased" if share_change > 0 else "decreased"), prev_shares, share_change
+
+
+def diff_13f_positions(
+    curr: Sequence[Dict[str, Any]],
+    prev: Optional[Sequence[Dict[str, Any]]],
+    *,
+    split_ratios: Mapping[str, float],
+    unclassified: Set[str],
+    comparison: str,
+    prev_ipo_cutoff: Optional[date],
+    prev_period: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Quarter-over-quarter SHARE changes between two 13F filings, keyed by CUSIP.
+
+    ``curr`` / ``prev`` are normalised holdings (``cusip``, ``symbol``, ``name``,
+    ``shares``, ``value``, ``weight``, ``ipo_date``), one per CUSIP. ``split_ratios`` and
+    ``unclassified`` are SYMBOL-keyed (``thirteen_f_splits.resolve_13f_split_adjustments``)
+    and are looked up through each row's symbol. ``comparison`` is decided by the caller,
+    explicitly — ``"quarter"`` only when ``prev`` IS the adjacent quarter:
+
+    * ``"first_filing"`` / ``"gap"`` — nothing to compare: ``rows`` is ``[]`` and every
+      count is 0 (a non-adjacent quarter would book months of history as one change).
+      ⚠️ Those zeros mean NOT COMPARED, not "no changes". A reader must key off
+      ``comparison`` and show counts, per-holding change labels or "no share-count
+      changes" ONLY for ``"quarter"`` — a ``"gap"`` quarter rendered as "unchanged" is a
+      false statement about share counts that were never compared. ``prev_period`` is
+      whatever the caller passed for a gap (``None`` when it only knew that an older
+      filing exists), and always ``None`` for a first filing.
+    * ``"quarter"`` — every CUSIP is classified ``newly_reported`` (with ``newly_listed``
+      when its ``ipo_date`` is after ``prev_ipo_cutoff``, i.e. it went public after the
+      previous period ended; unknown ``ipo_date`` -> never ``newly_listed``),
+      ``no_longer_reported``, ``increased``, ``decreased``, ``unchanged`` or
+      ``corporate_action`` (a split the counts cannot be separated from, or an implausible
+      move next to an unclassified corporate action). A second pass joins a lone
+      "no longer reported" row and a lone "newly reported" row that share a symbol — a
+      CUSIP re-key, not an exit and an entry.
+
+    Returns the ``trillion_club_filings.changes`` object: ``comparison``, ``prev_period``,
+    ``counts`` (all six outcomes) and ``rows`` (never ``unchanged``). Raises ``ValueError``
+    for an unknown ``comparison`` or for ``"quarter"`` without a usable previous filing or
+    current filing — an empty side would book the whole book as new, or as gone.
+    """
+    if comparison not in _DIFF_COMPARISONS:
+        raise ValueError(f"diff_13f_positions: unknown comparison {comparison!r}")
+    counts = {k: 0 for k in (
+        "newly_reported", "increased", "decreased", "no_longer_reported", "unchanged",
+        "corporate_action",
+    )}
+    if comparison != "quarter":
+        return {
+            "comparison": comparison,
+            "prev_period": None if comparison == "first_filing" else prev_period,
+            "counts": counts,
+            "rows": [],
+        }
+
+    cur_pos = _diff_positions(curr, "current")
+    prev_pos = _diff_positions(prev, "previous")
+    if not cur_pos or not prev_pos:
+        raise ValueError(
+            "diff_13f_positions: comparison='quarter' needs usable positions on both sides "
+            f"(current={len(cur_pos)}, previous={len(prev_pos)}) — an empty side would "
+            "book the whole filing as newly reported or as no longer reported"
+        )
+
+    # outcome per CUSIP: (change, row-dict, sort value)
+    outcome: Dict[str, Tuple[str, Dict[str, Any], float]] = {}
+
+    def _row(c: Optional[Dict[str, Any]], p: Optional[Dict[str, Any]], change: str,
+             prev_shares: Optional[float], share_change: Optional[float]) -> Dict[str, Any]:
+        src = c or p
+        newly_listed = bool(
+            change == "newly_reported" and c is not None and c["ipo_date"] is not None
+            and prev_ipo_cutoff is not None and c["ipo_date"] > prev_ipo_cutoff
+        )
+        return {
+            "cusip": src["cusip"],
+            "symbol": (c and c["symbol"]) or (p and p["symbol"]) or None,
+            "name": (c and c["name"]) or (p and p["name"]) or "",
+            "change": change,
+            "newly_listed": newly_listed,
+            "shares": c["shares"] if c else None,
+            "prev_shares": prev_shares,
+            "share_change": share_change,
+            "value": c["value"] if c else None,
+            "weight": c["weight"] if c else None,
+        }
+
+    def _sort_value(c: Optional[Dict[str, Any]], p: Optional[Dict[str, Any]]) -> float:
+        for side in (c, p):
+            if side is not None and side["value"] is not None:
+                return side["value"]
+        return 0.0
+
+    for cusip in set(cur_pos) | set(prev_pos):
+        c, p = cur_pos.get(cusip), prev_pos.get(cusip)
+        if c is not None and p is not None:
+            change, prev_shares, share_change = _diff_both(c, p, split_ratios, unclassified)
+            outcome[cusip] = (change, _row(c, p, change, prev_shares, share_change), _sort_value(c, p))
+        elif c is not None:
+            outcome[cusip] = ("newly_reported", _row(c, None, "newly_reported", None, None), _sort_value(c, None))
+        else:
+            outcome[cusip] = ("no_longer_reported", _row(None, p, "no_longer_reported", p["shares"], None), _sort_value(None, p))
+
+    # Second pass: a CUSIP re-key (same symbol, one row gone, one row new) is one position.
+    new_by_sym: Dict[str, List[str]] = {}
+    gone_by_sym: Dict[str, List[str]] = {}
+    for cusip, (change, row, _v) in outcome.items():
+        if row["symbol"] and change == "newly_reported":
+            new_by_sym.setdefault(row["symbol"], []).append(cusip)
+        elif row["symbol"] and change == "no_longer_reported":
+            gone_by_sym.setdefault(row["symbol"], []).append(cusip)
+    for sym, new_cusips in new_by_sym.items():
+        gone_cusips = gone_by_sym.get(sym, [])
+        if len(new_cusips) != 1 or len(gone_cusips) != 1:
+            if gone_cusips:
+                logger.warning(
+                    "diff_13f_positions: symbol %s has %d new and %d gone CUSIP(s) — "
+                    "ambiguous, not joined as a re-key", sym, len(new_cusips), len(gone_cusips),
+                )
+            continue
+        nc, gc = new_cusips[0], gone_cusips[0]
+        c, p = cur_pos[nc], prev_pos[gc]
+        change, prev_shares, share_change = _diff_both(c, p, split_ratios, unclassified)
+        logger.info(
+            "diff_13f_positions: joined %s CUSIP re-key %s -> %s as %s", sym, gc, nc, change,
+        )
+        del outcome[gc]
+        outcome[nc] = (change, _row(c, p, change, prev_shares, share_change), _sort_value(c, p))
+
+    rows: List[Tuple[int, float, str, Dict[str, Any]]] = []
+    for cusip, (change, row, sort_value) in outcome.items():
+        counts[change] += 1
+        if change != "unchanged":
+            rows.append((_DIFF_ROW_ORDER.index(change), -sort_value, cusip, row))
+    rows.sort(key=lambda t: (t[0], t[1], t[2]))
+    return {
+        "comparison": comparison,
+        "prev_period": prev_period,
+        "counts": counts,
+        "rows": [r for *_k, r in rows],
+    }
 
 # ── 13F annual return (CAGR) ─────────────────────────────────────────
 #

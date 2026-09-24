@@ -17,6 +17,9 @@ struct ThemeDetailView: View {
 
     /// A tapped company row → the full TickerDetailView (same router as Home).
     @State private var selectedTicker: MarketTicker?
+    /// A tapped news headline → the in-app browser (never ejects to Safari).
+    @State private var browserLink: BrowserLink?
+    @State private var showMethodology = false
 
     init(slug: String) {
         _viewModel = StateObject(wrappedValue: ThemeDetailViewModel(slug: slug))
@@ -30,6 +33,8 @@ struct ThemeDetailView: View {
         }
         .navigationBarHidden(true)
         .task { await viewModel.load() }
+        .inAppBrowser(link: $browserLink)
+        .sheet(isPresented: $showMethodology) { ThemeMethodologySheet() }
         .fullScreenCover(item: $selectedTicker) { ticker in
             NavigationStack {
                 TickerDetailView(tickerSymbol: ticker.symbol)
@@ -52,6 +57,22 @@ struct ThemeDetailView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xl) {
                     hero(detail)
 
+                    // Monthly review + daily insights. Each block renders only when the
+                    // server sent it, so an older backend shows the screen as it was.
+                    if let insight = detail.insight {
+                        ThemeInsightCard(insight: insight, onTickerTap: openTicker)
+                            .padding(.horizontal, AppSpacing.lg)
+                    }
+                    if let performance = detail.performance {
+                        ThemePerformanceCard(performance: performance, accent: detail.chartAccent)
+                            .padding(.horizontal, AppSpacing.lg)
+                    }
+                    if detail.reviewedOn != nil || !detail.changes.isEmpty {
+                        ThemeChangesCard(reviewedOn: detail.reviewedOn, changes: detail.changes,
+                                         onTickerTap: openTicker)
+                            .padding(.horizontal, AppSpacing.lg)
+                    }
+
                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                         Text("Companies")
                             .font(AppTypography.heading)
@@ -65,6 +86,21 @@ struct ThemeDetailView: View {
                                 .padding(.horizontal, AppSpacing.lg)
                         }
                     }
+
+                    if !detail.news.isEmpty {
+                        VStack(alignment: .leading, spacing: AppSpacing.md) {
+                            Text("Latest news")
+                                .font(AppTypography.heading)
+                                .foregroundColor(AppColors.textPrimary)
+                            ThemeNewsList(items: detail.news) { url in
+                                openExternal(url, into: &browserLink, action: "open that article")
+                            }
+                        }
+                        .padding(.horizontal, AppSpacing.lg)
+                    }
+
+                    methodologyFooter
+                        .padding(.horizontal, AppSpacing.lg)
 
                     Spacer().frame(height: 40)
                 }
@@ -164,6 +200,29 @@ struct ThemeDetailView: View {
         )
     }
 
+    // MARK: - Methodology
+
+    private var methodologyFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { showMethodology = true } label: {
+                Label("How we pick these stocks", systemImage: "info.circle")
+                    .font(AppTypography.labelEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+            }
+            .buttonStyle(.plain)
+            Text("Informational only — not a recommendation to buy or sell any security.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func openTicker(_ symbol: String) {
+        selectedTicker = MarketTicker(name: symbol, symbol: symbol, type: .stock,
+                                      price: 0, changePercent: 0, sparklineData: [])
+    }
+
     // MARK: - Back button (floats over the hero)
 
     private var backButton: some View {
@@ -213,6 +272,54 @@ struct ThemeDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(AppSpacing.xl)
+    }
+}
+
+/// "How we pick these stocks" — the plain-language methodology behind every theme list.
+/// Static copy on purpose: it describes the rules in `services/theme_rotation`, and a
+/// change to those rules must change this text in the same release.
+private struct ThemeMethodologySheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let points: [String] = [
+        "Every month we re-check each theme's stocks against the strongest candidates.",
+        "What counts most is how much of a company's business is the theme — from its revenue by segment or its own business description — and whether the leading funds that track the theme hold it.",
+        "Size and trading volume matter too, and recent 3-6 month performance is only a small tie-breaker.",
+        "A company usually has to rank lower for two months in a row before it is replaced, the biggest names stay put, and at most about a third of a list can change in a month. Most months change only a few names, or none.",
+        "Performance is shown for the theme's current stocks, equal-weighted — it is not the record of an investable fund.",
+    ]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: AppSpacing.md) {
+                    ForEach(points, id: \.self) { point in
+                        HStack(alignment: .top, spacing: AppSpacing.sm) {
+                            Text("•").foregroundColor(AppColors.textMuted)
+                            Text(point)
+                                .foregroundColor(AppColors.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(AppTypography.bodySmall)
+                    }
+                    Text("Theme lists are for education and information only. They are not a recommendation to buy, sell or hold any security.")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                        .padding(.top, AppSpacing.sm)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(AppSpacing.lg)
+            }
+            .background(AppColors.background)
+            .navigationTitle("How we pick stocks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

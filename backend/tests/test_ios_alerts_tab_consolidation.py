@@ -156,29 +156,32 @@ def test_the_notification_rows_are_not_wrapped_in_a_child_view_struct():
     )
 
 
-# --------------------------------------------------------------------------- the push fallback
+# ------------------------------------------------------------------------------ the push tap
 
 
-def test_an_unroutable_push_has_exactly_one_owner():
-    """`ContentView` and `HomeDashboardView` both observe `pendingPushRoute`, and Home CLEARS it.
+def test_a_push_tap_has_exactly_one_owner():
+    """A tapped push is presented by the SHELL, `ContentView`, and by nothing else.
 
-    If Home consumed a fallback route, the clear would land before ContentView read it and the
-    tap would go nowhere. They partition the route space instead — this pins both halves.
+    It used to be split: `ContentView` picked the tab and `HomeDashboardView` presented the
+    ticker, and because Home CLEARED the value the two handlers had to partition the routes
+    (`needsAlertsFallback`) or one would clear it before the other read it and drop the tap.
+    The tap now opens the notification's DETAIL over whatever tab is showing — one observer,
+    one clearer, no partition to keep in sync.
     """
-    assert "needsAlertsFallback" in _read(_ROUTER), (
-        "the shared predicate is gone; a forked copy in each file drifts into 'some unroutable "
-        "taps land nowhere', which is silent"
-    )
-
     content = _read(_CONTENT)
-    assert "route.needsAlertsFallback" in content and "pendingTrackingTab = .alerts" in content, (
-        "ContentView no longer routes an unroutable push to the Alerts tab"
+    handler = _balanced(
+        content, ".onChange(of: appState.pendingPushNotification, initial: true) {"
     )
+    assert "appState.pendingPushNotification = nil" in handler, (
+        "ContentView no longer clears the tapped push, so a dismissed detail re-opens on the "
+        "next render"
+    )
+    assert "presentTappedPush(pushed)" in handler, "ContentView no longer presents the tapped push"
 
     home = _read(_HOME)
-    assert "guard !route.needsAlertsFallback else { return }" in home, (
-        "HomeDashboardView consumes fallback routes again and its `defer` clears them, racing "
-        "ContentView's handler and dropping the tap"
+    assert "pendingPushNotification" not in home and "pendingPushRoute" not in home, (
+        "HomeDashboardView observes the push tap again — two owners of one parked value race "
+        "each other's clear, which is how a tap went nowhere"
     )
     assert "showNotificationInbox" not in home, (
         "Home presents a standalone notification inbox again"
@@ -186,17 +189,12 @@ def test_an_unroutable_push_has_exactly_one_owner():
 
 
 def test_the_cold_launch_tap_still_survives():
-    """`.onChange` does not fire for a value set BEFORE first render, and a cold-launch tap sets
-    the route before any view exists. Warm taps work either way, so this never fails by hand."""
-    tracking = _read(_TRACKING)
-    consume = _balanced(
-        tracking, ".onChange(of: appState.pendingTrackingTab, initial: true) {"
-    )
-    assert "viewModel.selectedTab = pending" in consume, (
-        "the Tracking screen no longer selects the parked segment"
-    )
-    assert "appState.pendingTrackingTab = nil" in consume, (
-        "the parked segment is never cleared, so it re-fires on every later render"
+    """`.onChange` does not fire for a value set BEFORE first render, and a cold-launch tap parks
+    the notification before any view exists. Warm taps work either way, so this never fails by
+    hand."""
+    content = _read(_CONTENT)
+    assert ".onChange(of: appState.pendingPushNotification, initial: true)" in content, (
+        "the push handler lost `initial: true` — a tap that cold-launches the app is dropped"
     )
 
 
@@ -206,12 +204,12 @@ def test_the_cold_launch_tap_still_survives():
 def test_a_tap_that_arrives_before_appstate_is_parked_not_dropped():
     """Cold launch FROM a tap: `didReceive` fires before `iosApp`'s `.task` has run
     `configure(appState:)` — that task also `await`s `ServerEnvironmentManager.resolve()` first.
-    `appState?.pendingPushRoute = route` then wrote to nil and the app opened on Home with
+    `appState?.pendingPushRoute = route` (now `pendingPushNotification`) then wrote to nil and the app opened on Home with
     nothing logged. Observed live: the banner tap cold-launched the app and went nowhere."""
     src = _read(_PUSH_MGR)
-    handle = _balanced(src, "func handleTap(route: NotificationRoute) {")
-    assert "pendingRoute = route" in handle, (
-        "handleTap drops the route when AppState is not wired yet — the cold-launch path"
+    handle = _balanced(src, "func handleTap(_ pushed: PushedNotification) {")
+    assert "pendingRoute = pushed" in handle, (
+        "handleTap drops the tap when AppState is not wired yet — the cold-launch path"
     )
     configure = _balanced(src, "func configure(appState: AppState) {")
     assert "pendingRoute" in configure, (

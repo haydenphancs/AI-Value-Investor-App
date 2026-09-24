@@ -135,16 +135,22 @@ struct OnboardingView: View {
     private var welcomePage: some View {
         VStack(spacing: AppSpacing.lg) {
             Spacer()
-            Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 52))
-                .foregroundColor(AppColors.primaryBlue)
+            // The brand mark, not a stock SF Symbol. Through `CaydexLogoMark`, never the raw
+            // image asset: `CaydexLogo.png` is an OPAQUE #171B26 plate. That plate is
+            // exactly `AppColors.background`'s dark value — this page's background — so in
+            // dark mode the mark sits on the page with no visible tile, as on the splash; in
+            // light mode the atom clips it to the same icon badge the splash, sign-in and
+            // disclaimer screens (the one shown right before this) already use. 96pt is the
+            // App Lock hero size; the plate's own margin makes the glyph read at about the
+            // weight of the 52pt symbol it replaces.
+            CaydexLogoMark(size: 96)
 
-            Text("Research, not hype")
+            Text("Research - Not Hype")
                 .font(AppTypography.titleLarge)
                 .foregroundColor(AppColors.textPrimary)
                 .multilineTextAlignment(.center)
 
-            Text("Caydex reads the filings, the numbers and the news for you, then explains what it found in plain English.")
+            Text("The AI financial terminal for real investors!")
                 .font(AppTypography.body)
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)

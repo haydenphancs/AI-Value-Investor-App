@@ -16,5 +16,6 @@
   "asset_type": "stock",
   "tab": "holders",
   "section": "congress",
+  "dedup_key": "congress:NVDA:2026-09-10",
   "Simulator Target Bundle": "com.phan.caydex"
 }

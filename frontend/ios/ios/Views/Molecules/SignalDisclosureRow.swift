@@ -3,7 +3,7 @@
 //  ios
 //
 //  Molecule: one expandable row inside the "App-Exclusive Signals" card —
-//  icon tile, title/subtitle, a top pick, and a disclosure chevron that reveals
+//  icon tile, title, a top pick, and a disclosure chevron that reveals
 //  the top-leaders list.
 //
 
@@ -95,15 +95,13 @@ struct SignalDisclosureRow: View {
                     IconTile(systemName: signal.iconSystemName, accent: signal.accent,
                              size: 40, iconPointSize: 21)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(signal.title)
-                            .font(AppTypography.bodySmallEmphasis)
-                            .foregroundColor(AppColors.textPrimary)
-                        Text(signal.subtitle)
-                            .font(AppTypography.caption)
-                            .foregroundColor(AppColors.textSecondary)
-                            .lineLimit(1)
-                    }
+                    // Title only. A one-line tagline used to sit under it ("Most-bought on
+                    // Capitol Hill this month", …), but next to the icon and the trailing
+                    // ticker column it truncated on every row, so it was removed (TestFlight,
+                    // 2026-09-23). The title keeps its natural wrap ("Congressional / Buys").
+                    Text(signal.title)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
 
                     Spacer(minLength: 6)
 

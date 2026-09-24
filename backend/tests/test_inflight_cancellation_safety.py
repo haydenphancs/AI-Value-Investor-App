@@ -96,6 +96,17 @@ _INFLIGHT_MODULES = [
     # first caller to hit that deadline would cancel the build every other caller is joined
     # to, and the leader's `set_result` would then raise InvalidStateError.
     "chat_starters_service.py",
+    # Added 2026-09-23 with the Emerging Frontiers rotation + insights. The insights read is
+    # joined by every Home build and every theme detail; the fit verdict dedups concurrent
+    # checks of the same (ticker, theme) during a rotation run; the review read model is
+    # shared by the cards and the detail screen.
+    "theme_insights_service.py",
+    "theme_rotation/llm_gate.py",
+    "theme_rotation/read_model.py",
+    # Added 2026-09-24 with Trillion-Dollar Club Bets. The Home group is joined by every
+    # dashboard build behind a 6 s `wait_for`, so a joiner that gives up must not cancel the
+    # shared read; a cancelled leader hands its joiners `TrillionClubBuildCancelled`.
+    "trillion_club_service.py",
     # The 2026-08-07 audit named only the six above. The anti-vacuity check at the bottom of
     # this file found sixteen more already using the same shared-future dedup, which is the
     # whole reason that check exists.

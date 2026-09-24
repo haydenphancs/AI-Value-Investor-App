@@ -1,0 +1,290 @@
+# Known companies and consumer brands, one per line, AS WRITTEN (case is significant).
+#
+# Used by the marketing validators (app/services/marketing/compliance.py `company_mentions`,
+# grounding.py `_check_companies`). Two jobs:
+#   1. A company name that is ALSO an English word ("Apple", "Target", "Visa", "Oracle", "Coke")
+#      passes the grounding dictionary as ordinary vocabulary. Listed here, written capitalised in
+#      a name position, it is an ENTITY: it must be a company this item's fact sheet itself names.
+#   2. A sentence that names a company runs the full class-B scan in every mode (a Journey post
+#      has no named instrument by design; one that names a company gets the Money Moves rules),
+#      and the company is the instrument for the directive / verdict / forecast / price-move
+#      rows ("Buy NVIDIA", "Costco is a great investment", "AMD will keep climbing").
+#
+# Compiled by hand for this repository: every company the bundled Learn corpus names (all items,
+# eligible or not — `backend/data/money_moves.json`, `journey_lessons.json`) plus widely known
+# listed companies and consumer brands. Company names are facts, not copyrightable expression.
+#
+# Syntax:
+#   ~Name     an English word: a company only in a NAME position (mid-sentence capital,
+#             possessive, before stock/shares/Inc, or opening a sentence as the subject of a
+#             verb — "Apple has", never "Target a savings rate", "Chase returns", "Shell out").
+#   Name      not an English word (the grounding dictionary does not know it): any case.
+#   NAME      all capitals: matched exactly (IBM, AMD, TSMC).
+#   Two Words a multi-word name: matched when every word is written capitalised, in any position.
+#
+# Deliberately ABSENT: generic words a headline or a sector name capitalises ("Staples",
+# "Progressive", "Next", "Match", "Sea", "Grab", "Wise", "Booking", "Dow", "Nasdaq",
+# "Canon", "Unity", "Compass"), index names, regulators, and people (a founder's name is a
+# person, e.g. "Walt Disney" — the person rules own it).
+#
+# `tests/test_marketing_content_b_companies.py` pins the "~" marking against the grounding
+# dictionary, so an entry cannot silently be in the wrong class.
+
+# ── named by the Learn corpus ──
+Airbus
+Alameda Research
+AlexNet
+Amazon
+AMD
+~Apple
+Arthur Andersen
+Berkshire
+Berkshire Hathaway
+Boeing
+Bulgari
+ByteDance
+Celine
+Coca-Cola
+Costco
+~Craftsman
+Dior
+Disney
+Douyin
+Enron
+Facebook
+Fendi
+~Ford
+FTX
+GitHub
+GM
+Google
+Hennessy
+Home Depot
+Instagram
+Intel
+Kenmore
+Kmart
+Loewe
+Louis Vuitton
+Lowe
+LVMH
+~Marvel
+Mastercard
+Mellanox
+~Meta
+Meta Platforms
+Microsoft
+Moet
+Moet Hennessy
+Netflix
+NVIDIA
+Nvidia
+Pixar
+~Sears
+SoftBank
+Stanley Black & Decker
+Tesla
+Theranos
+~Tiffany
+Tiffany & Co
+TikTok
+Toyota
+TSMC
+~Visa
+Volkswagen
+WeChat
+WeWork
+
+# ── widely known listed companies and brands: English words ──
+~Adobe
+~Alphabet
+~Arm
+~Blockbuster
+~Block
+~Carnival
+~Caterpillar
+~Chase
+~Chevron
+~Chewy
+~Cisco
+~Citi
+~Coke
+~Corning
+~Deere
+~Dell
+~Delta
+~Discover
+~Fidelity
+~Gap
+~Hertz
+~Honda
+~Kodak
+~Kraft
+# Lemonade (the insurer): the Learn corpus names only the DRINK ("Picture a lemonade stand" —
+# journey:income_statement); `compliance._WORD_BRAND_COMPOUNDS` keeps "lemonade stand(s)" a word.
+~Lemonade
+~Macy
+~Micron
+~Mobil
+~Monster
+~Nestle
+~Oracle
+~Peloton
+~Pepsi
+~Prudential
+~Shell
+~Snap
+~Snowflake
+~Square
+~Target
+~Twitter
+~Vanguard
+~Whirlpool
+~Yahoo
+~Zoom
+
+# ── widely known listed companies and brands: not English words ──
+AbbVie
+Accenture
+Activision
+Adidas
+Aetna
+Airbnb
+Alibaba
+Allianz
+Allstate
+Amgen
+AstraZeneca
+Autodesk
+Baidu
+Barclays
+BlackRock
+Broadcom
+Carrefour
+Chipotle
+Chrysler
+Cigna
+Citigroup
+Coinbase
+Colgate
+Comcast
+ConocoPhillips
+Danone
+DoorDash
+Dropbox
+DuPont
+eBay
+Etsy
+Exxon
+ExxonMobil
+FedEx
+Ferrari
+Garmin
+Genentech
+Goldman
+Groupon
+Heineken
+Hershey
+Hilton
+Honeywell
+Huawei
+Hyundai
+Kellogg
+Kroger
+Lenovo
+LinkedIn
+Lockheed
+Lululemon
+Lyft
+Marriott
+McDonald
+Medtronic
+Merck
+MetLife
+Moderna
+Mondelez
+Motorola
+Nike
+Nintendo
+Nissan
+Nokia
+Novartis
+Palantir
+PayPal
+PepsiCo
+Pfizer
+Pinterest
+Porsche
+Qualcomm
+Raytheon
+Reddit
+Rivian
+Robinhood
+Roblox
+Salesforce
+Samsung
+Schwab
+Shopify
+Siemens
+Sony
+Spotify
+Starbucks
+Stellantis
+Tencent
+Unilever
+UnitedHealth
+Verizon
+Walgreens
+Walmart
+Xerox
+YouTube
+
+# ── widely known listed companies: all capitals ──
+AIG
+ASML
+AT&T
+BMW
+BP
+BYD
+CVS
+GE
+GSK
+HP
+HSBC
+IBM
+KFC
+NIO
+SAP
+UBS
+UPS
+
+# ── widely known listed companies: several words ──
+American Express
+Bank of America
+Best Buy
+Capital One
+Charles Schwab
+Delta Air Lines
+Dollar General
+Dollar Tree
+Eli Lilly
+Estee Lauder
+Foot Locker
+General Electric
+General Mills
+General Motors
+Goldman Sachs
+Johnson & Johnson
+JPMorgan
+JPMorgan Chase
+Kraft Heinz
+Morgan Stanley
+Procter & Gamble
+Ralph Lauren
+Southwest Airlines
+Texas Instruments
+Thermo Fisher
+Under Armour
+United Airlines
+Warner Bros
+Wells Fargo

@@ -114,6 +114,19 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 170: the marketing engine (SYSTEM_DESIGN_GUIDELINES §12). iOS never reads these; the
     # media worker reaches them only through the token-gated internal API.
     "170": ("marketing_runs", "marketing_assets", "marketing_posts", "podcast_episodes"),
+    # 173: the writer's accepted package + round violations (web-side only; writer output must
+    # never reach the public bucket) and the smart link's daily tap counters.
+    "173": ("marketing_scripts", "marketing_link_hits"),
+    # 174: the Emerging Frontiers monthly rotation (run record, decisions, AI fit verdicts)
+    # and daily theme insights — FMP-derived and AI output, read only by the backend. It
+    # also CLOSED trending_themes' 081 read grant: its tickers are now the output of a
+    # pipeline scoring FMP data, and its pins/blocks are editorial controls.
+    "174": ("theme_rotation_runs", "theme_rotation_decisions", "theme_relevance_cache",
+            "theme_daily_insights", "trending_themes"),
+    # 175: Trillion-Dollar Club Bets — the registry, the hand-kept stakes and the built 13F
+    # snapshots (FMP-licensed holdings, auth.md §1a). iOS has no Supabase client; only the
+    # backend reads them, as service_role.
+    "175": ("trillion_club_companies", "trillion_club_stakes", "trillion_club_filings"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry
@@ -121,7 +134,7 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
 _CLIENT_ACCESS_BY_DESIGN: dict[str, str] = {
     "credit_packs": "storefront catalogue — GET /billing/credit-packs is `.public` (design doc §9.1); no FMP data, no user data",
     "plan_credits": "storefront catalogue — GET /billing/plans is `.public`; same",
-    "trending_themes": "editorial megatrend cards, server-editable; no FMP data",
+    # trending_themes was here ("editorial, no FMP data") until 174 — see _SERVICE_ROLE_ONLY.
     "lessons": "Learn content (Investor Journey); editorial, no FMP data",
     "money_move_articles": "Learn content (Money Moves); editorial, no FMP data",
     "credit_transactions": "SELECT only, own rows via RLS (credit_transactions_select_own); the ledger the user is entitled to read",
@@ -471,3 +484,235 @@ def test_the_schema_wide_detectors_are_not_vacuous():
         "GRANT ALL ON public.x_cache TO service_role;"
     )
 
+
+
+# ── storage.objects: no policy a client role can use survives the replay ───────────────
+#
+# A PUBLIC bucket is served from /storage/v1/object/public/<bucket>/<path>, which bypasses
+# RLS; a SELECT policy for anon/authenticated on storage.objects only ever adds the LIST api,
+# i.e. lets any holder of the shipped publishable key ENUMERATE the bucket. 153 dropped four
+# such policies; 170 then re-created the pattern for `marketing-media` and 173 dropped it
+# again (a rejected or never-published run's media must not be discoverable). The iOS app has
+# no Supabase client, so no storage policy has a legitimate client-role reader at all — this
+# pins that as an ordered replay, the storage twin of `_replay()` above.
+
+_RE_STORAGE_POLICY = re.compile(
+    r"(?P<verb>CREATE|DROP|ALTER)\s+POLICY\s+(?:IF\s+EXISTS\s+)?\"?(?P<name>[A-Za-z0-9_]+)\"?"
+    r"\s+ON\s+(?:\"?storage\"?\.)\"?objects\"?(?![A-Za-z0-9_])(?P<rest>[^;]*)",
+    re.I,
+)
+_STORAGE_CLIENT_ROLES = frozenset({"anon", "authenticated", "public"})
+
+
+def _storage_policy_roles(rest: str) -> frozenset[str]:
+    """The roles a CREATE POLICY applies to. Only the text BEFORE `USING` / `WITH CHECK` is
+    searched, so a `to` inside the predicate cannot be read as the role clause; no `TO` clause
+    at all means PUBLIC — every role, anon included."""
+    head = re.split(r"\bUSING\b|\bWITH\s+CHECK\b", rest, maxsplit=1, flags=re.I)[0]
+    m = re.search(r"\bTO\s+(.+)$", head, re.I | re.S)
+    if not m:
+        return frozenset({"public"})
+    return frozenset(r.strip().strip('"').lower() for r in m.group(1).split(",") if r.strip())
+
+
+def _storage_policy_replay(files) -> tuple[dict[str, frozenset[str]], set[str], list[str]]:
+    """Ordered replay of CREATE / DROP POLICY on storage.objects over (filename, sql) pairs.
+
+    Returns ({live policy: its roles}, {every policy ever created for a client role},
+    [ALTER POLICY statements]) — ALTER is reported, not modelled, so the caller fails closed
+    on it instead of guessing what it changed."""
+    live: dict[str, frozenset[str]] = {}
+    ever_client: set[str] = set()
+    alters: list[str] = []
+    for fname, sql in files:
+        for m in _RE_STORAGE_POLICY.finditer(_strip_sql_comments(sql)):
+            name, verb = m.group("name").lower(), m.group("verb").upper()
+            if verb == "DROP":
+                live.pop(name, None)
+            elif verb == "ALTER":
+                alters.append(f"{fname}: ALTER POLICY {name}")
+            else:
+                roles = _storage_policy_roles(m.group("rest"))
+                live[name] = roles
+                if roles & _STORAGE_CLIENT_ROLES:
+                    ever_client.add(name)
+    return live, ever_client, alters
+
+
+def test_no_storage_policy_reaches_a_client_role():
+    live, _, alters = _storage_policy_replay(
+        (p.name, p.read_text(encoding="utf-8")) for p in _sql_files()
+    )
+    assert not alters, (
+        "ALTER POLICY on storage.objects is not modelled by this replay — assert its effect by "
+        f"hand and extend `_storage_policy_replay`: {alters}"
+    )
+    open_ = {n: sorted(r) for n, r in live.items() if r & _STORAGE_CLIENT_ROLES}
+    assert not open_, (
+        "storage.objects policy/policies still usable by anon/authenticated/PUBLIC at the end of "
+        "the migration replay. On a PUBLIC bucket that is the LIST api (anyone with the shipped "
+        "publishable key enumerates the bucket; object URLs never needed it — 153 §B); on a "
+        "private bucket it is a read of licensed media. The app has no Supabase client:\n"
+        + "\n".join(f"  • {n}: TO {', '.join(r)}" for n, r in sorted(open_.items()))
+        + '\n\nAdd to a migration:  DROP POLICY IF EXISTS "<name>" ON storage.objects;'
+    )
+
+
+def test_the_storage_policy_replay_is_not_vacuous():
+    live, ever_client, alters = _storage_policy_replay(
+        (p.name, p.read_text(encoding="utf-8")) for p in _sql_files()
+    )
+    # It sees the service-role write policies that must survive, and the client-read ones the
+    # history really created (061 … 170) — so an empty `open_` above means "dropped", not
+    # "never matched".
+    assert {"marketing_media_service_write", "user_avatars_service_all"} <= set(live), sorted(live)
+    assert live["marketing_media_service_write"] == frozenset({"service_role"})
+    assert {"marketing_media_public_read", "book_covers_public_read",
+            "journey_media_public_read"} <= ever_client, sorted(ever_client)
+    assert len(live) >= 9 and len(ever_client) >= 8, (len(live), len(ever_client))
+
+    # Synthetic discrimination, independent of the live tree.
+    live, ever, alters = _storage_policy_replay([
+        ("001.sql",
+         'CREATE POLICY "a" ON storage.objects FOR SELECT TO anon, authenticated USING (true);\n'
+         'CREATE POLICY b ON storage.objects FOR ALL TO service_role USING (true) WITH CHECK (true);\n'
+         "CREATE POLICY c ON storage.objects FOR SELECT USING (note = 'to be');\n"
+         'CREATE POLICY d ON "storage"."objects" FOR SELECT TO "authenticated" USING (true);\n'
+         "CREATE POLICY e ON storage.objects_archive FOR SELECT TO anon USING (true);\n"
+         "CREATE POLICY f ON public.objects FOR SELECT TO anon USING (true);\n"
+         '-- CREATE POLICY "ghost" ON storage.objects FOR SELECT TO anon USING (true);\n'),
+        ("002.sql",
+         'DROP POLICY IF EXISTS "a" ON storage.objects;\n'
+         "/* DROP POLICY IF EXISTS d ON storage.objects; */\n"
+         "ALTER POLICY b ON storage.objects TO anon;\n"),
+    ])
+    assert "a" not in live, "a later DROP must remove the policy"
+    assert live["b"] == frozenset({"service_role"})
+    assert live["c"] == frozenset({"public"}), "no TO clause is PUBLIC; a `to` in USING is not a role"
+    assert live["d"] == frozenset({"authenticated"}), "quoted schema/table/role must still match"
+    assert "e" not in live and "f" not in live, "only storage.objects is in scope"
+    assert "ghost" not in live and "ghost" not in ever, "a commented CREATE must not count"
+    assert ever == {"a", "c", "d"}
+    assert alters == ["002.sql: ALTER POLICY b"], alters
+
+
+# ── the window BEFORE the snapshot can see a table ────────────────────────────
+#
+# `test_snapshot_grants_parity` owns "service_role holds its grant" — but it reads the dump of
+# the LIVE database, so it sees a table only after the migration was applied and re-dumped. By
+# then a dropped `GRANT … TO service_role` has already answered 42501 in production (169's
+# incident: a service_role POLICY with no GRANT admits nobody — this project has no default
+# privileges). The guard below covers exactly that window: every table a migration creates that
+# the snapshot does not hold yet must be granted to service_role (at least the four DML verbs)
+# and have RLS enabled, in the migrations themselves. Once the table is applied and dumped the
+# snapshot guard takes over, so between them a table is covered for its whole life.
+
+_SNAPSHOT = Path(__file__).resolve().parents[1] / "database" / "schema_snapshot.sql"
+_RE_SNAPSHOT_TABLE = re.compile(r"CREATE\s+TABLE\s+public\.([a-z0-9_]+)\s*\(", re.I)
+_RE_DROP_TABLE = re.compile(r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?([a-z0-9_]+)", re.I)
+_RE_ENABLE_RLS = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?([a-z0-9_]+)\s+"
+    r"ENABLE\s+ROW\s+LEVEL\s+SECURITY", re.I,
+)
+_RE_REVOKE_SERVICE = re.compile(
+    r"REVOKE\s+ALL(?:\s+PRIVILEGES)?\s+ON\s+(?:TABLE\s+)?(?:public\.)?([a-z0-9_]+)\s+FROM\s+([^;']+)", re.I,
+)
+_DML = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
+
+
+def _pending_table_state(files) -> dict[str, dict]:
+    """{table: {"created": n, "privs": set, "rls": bool}} for tables whose LAST event in the
+    migrations is a CREATE — replayed from (name, sql) pairs so the detector is testable on
+    synthetic input. `privs` is service_role's effective table privileges (GRANT adds, REVOKE ALL
+    FROM service_role resets); `ALL` expands to the DML verbs."""
+    state: dict[str, dict] = {}
+    for name, text in files:
+        num = int(name[:3])
+        code = _strip_sql_comments(text)
+        events: list[tuple[int, str, str, object]] = []
+        for m in _RE_CREATE_TABLE.finditer(code):
+            events.append((m.start(), m.group(1).lower(), "create", None))
+        for m in _RE_DROP_TABLE.finditer(code):
+            events.append((m.start(), m.group(1).lower(), "drop", None))
+        for m in _RE_ENABLE_RLS.finditer(code):
+            events.append((m.start(), m.group(1).lower(), "rls", None))
+        for m in _RE_GRANT.finditer(code):
+            if "service_role" in re.split(r"[,\s]+", m.group(3).strip().lower()):
+                privs = {p.strip().split("(")[0].upper() for p in m.group(1).split(",")}
+                privs = set(_DML) if privs & {"ALL", "ALL PRIVILEGES"} else privs
+                events.append((m.start(), m.group(2).lower(), "grant", privs))
+        for m in _RE_REVOKE_SERVICE.finditer(code):
+            if "service_role" in re.split(r"[,\s]+", m.group(2).strip().lower()):
+                events.append((m.start(), m.group(1).lower(), "revoke", None))
+        for _, table, kind, privs in sorted(events, key=lambda e: e[0]):
+            if kind == "create":
+                state.setdefault(table, {"created": num, "privs": set(), "rls": False, "live": True})
+                state[table]["live"] = True
+            elif kind == "drop":
+                if table in state:
+                    state[table]["live"] = False
+            elif table in state:
+                if kind == "rls":
+                    state[table]["rls"] = True
+                elif kind == "grant":
+                    state[table]["privs"] |= privs  # type: ignore[operator]
+                elif kind == "revoke":
+                    state[table]["privs"] = set()
+    return {t: v for t, v in state.items() if v["live"]}
+
+
+def _pending_tables() -> dict[str, dict]:
+    in_snapshot = {m.group(1).lower() for m in _RE_SNAPSHOT_TABLE.finditer(_SNAPSHOT.read_text(encoding="utf-8"))}
+    assert len(in_snapshot) > 80, f"the snapshot scan found only {len(in_snapshot)} tables — it has rotted"
+    state = _pending_table_state((p.name, p.read_text(encoding="utf-8")) for p in _sql_files())
+    return {t: v for t, v in state.items() if t not in in_snapshot and t not in _DROPPED}
+
+
+def test_every_not_yet_applied_table_is_granted_to_service_role_and_has_rls():
+    pending = _pending_tables()
+    problems = []
+    for table, st in sorted(pending.items()):
+        missing = sorted(_DML - st["privs"])
+        if missing:
+            problems.append(f"{table} (migration {st['created']:03d}): service_role lacks {missing}")
+        if not st["rls"]:
+            problems.append(f"{table} (migration {st['created']:03d}): no ENABLE ROW LEVEL SECURITY")
+    assert not problems, (
+        "a migration creates a table the snapshot does not hold yet, without the service_role "
+        "GRANT / RLS it needs — applied as is, every backend read 42501s (169):\n  "
+        + "\n  ".join(problems)
+    )
+
+
+def test_the_pending_table_guard_is_not_vacuous():
+    # It sees the not-yet-applied tables of this change (remove a name once 173 is dumped).
+    pending = _pending_tables()
+    assert {"marketing_scripts", "marketing_link_hits"} <= set(pending) or not (
+        _MIGRATIONS / "173_marketing_scripts_and_link_hits.sql").exists(), sorted(pending)
+
+    # Synthetic discrimination: a dropped GRANT, a dropped RLS, a partial grant, a revoke after
+    # a grant, a commented grant, and a table dropped again are each seen for what they are.
+    state = _pending_table_state([
+        ("001_a.sql",
+         "CREATE TABLE IF NOT EXISTS public.ok_t (id int);\n"
+         "ALTER TABLE public.ok_t ENABLE ROW LEVEL SECURITY;\n"
+         "GRANT ALL ON public.ok_t TO service_role;\n"
+         "CREATE TABLE IF NOT EXISTS public.no_grant (id int);\n"
+         "ALTER TABLE public.no_grant ENABLE ROW LEVEL SECURITY;\n"
+         "-- GRANT ALL ON public.no_grant TO service_role;\n"
+         "CREATE TABLE IF NOT EXISTS public.no_rls (id int);\n"
+         "GRANT ALL ON public.no_rls TO service_role;\n"
+         "CREATE TABLE IF NOT EXISTS public.partial (id int);\n"
+         "ALTER TABLE public.partial ENABLE ROW LEVEL SECURITY;\n"
+         "GRANT SELECT, INSERT ON public.partial TO service_role;\n"
+         "CREATE TABLE IF NOT EXISTS public.gone (id int);\n"),
+        ("002_b.sql",
+         "REVOKE ALL ON public.ok_t FROM anon, authenticated;\n"
+         "REVOKE ALL ON TABLE public.no_rls FROM service_role;\n"
+         "DROP TABLE IF EXISTS public.gone;\n"),
+    ])
+    assert "gone" not in state
+    assert _DML <= state["ok_t"]["privs"] and state["ok_t"]["rls"]
+    assert state["no_grant"]["privs"] == set() and state["no_grant"]["rls"]
+    assert state["no_rls"]["privs"] == set() and not state["no_rls"]["rls"]
+    assert state["partial"]["privs"] == {"SELECT", "INSERT"}

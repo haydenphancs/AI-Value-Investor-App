@@ -849,10 +849,18 @@ def test_a_report_notification_opens_the_report():
     assert "case .report(let reportId, let ticker, let persona):" in body, (
         "The report route is not unpacking the persona — the wrong persona's report opens."
     )
+    src = _read(_DESTINATIONS)
     dest = _balanced(
-        _read(_DESTINATIONS),
-        "static func destinations(for item: NotificationEventDTO) -> [AlertDestination] {",
+        src, "static func destinations(for item: NotificationEventDTO) -> [AlertDestination] {",
     )
+    # The rule moved into ONE predicate (2026-09-23) because three places now need it — this
+    # list, the direct open a report row/push does, and the Alerts row grouping. The list must
+    # still ask it, and the predicate must still carry both halves.
+    assert "if isReport(item)" in dest, (
+        "The destination list no longer asks the shared isReport rule — it can drift from the "
+        "direct open and the row grouping."
+    )
+    dest = _balanced(src, "static func isReport(_ item: NotificationEventDTO) -> Bool {")
     assert 'item.kind == "research_complete"' in dest, (
         "The detail screen no longer offers the report for a research_complete notification."
     )

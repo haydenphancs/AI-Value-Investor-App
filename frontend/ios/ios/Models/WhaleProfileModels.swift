@@ -693,7 +693,7 @@ extension WhaleProfile {
     static let warrenBuffett = WhaleProfile(
         id: "warren-buffett",
         name: "Warren Buffett",
-        title: "Berkshire Hathaway CEO",
+        title: "Berkshire Hathaway Chairman",
         description: "Warren Buffett, widely regarded as one of the greatest investors of all time, has built Berkshire Hathaway into a conglomerate worth hundreds of billions through his patient, value-oriented investment philosophy. Known as the 'Oracle of Omaha,' he focuses on businesses with strong fundamentals, competitive advantages, and reliable management. His approach emphasizes buying quality companies at reasonable prices and holding them for the long term, often decades.",
         avatarURL: nil,
         riskProfile: .safeLongTermValue,

@@ -6,7 +6,7 @@ Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from supabase import Client
 import logging
 from typing import Optional
@@ -72,6 +72,7 @@ from app.schemas.notifications import (
     MarkReadRequest,
     MarkReadResponse,
     NotificationListResponse,
+    NotificationLookupResponse,
 )
 from app.services.notification_inbox_service import (
     DEFAULT_PAGE,
@@ -1579,6 +1580,43 @@ async def list_my_notifications(
             ErrorCode.NOTIFICATIONS_UNAVAILABLE,
             message=str(e),
         )
+
+
+# A sanity cap on a value that goes straight into a query filter, not a format check. Real keys
+# run ~20-90 chars, but the insider sender embeds the filer's NAME
+# (`insider:<sym>:<date>:<name>:<action>`), which is unbounded upstream — so leave headroom: a
+# legitimate key refused here would silently leave the detail on its 180-char banner cut.
+_DEDUP_KEY_MAX = 512
+
+
+@router.get("/me/notifications/lookup", response_model=NotificationLookupResponse)
+async def lookup_my_notification(
+    dedup_key: str = Query(..., min_length=1, max_length=_DEDUP_KEY_MAX),
+    user: dict = Depends(get_current_user),
+):
+    """One of the caller's notifications, by the `dedup_key` its push payload carried.
+
+    A push TAP opens the notification's detail screen first, and the payload holds only
+    the banner cut of the body (180 chars + "…") — for a `ticker_move` the cut-off part
+    is the catalyst the alert is about. The client renders the pushed copy at once and
+    swaps in this full row when it lands.
+
+    `item` is null when this user has no such row. Scoped to the caller: another user's
+    key reads as null, never as their row. A read failure is 503
+    NOTIFICATIONS_UNAVAILABLE, never a null — "not found" and "couldn't look" must not
+    look alike.
+    """
+    try:
+        item = await asyncio.to_thread(
+            get_notification_inbox_service().get_by_dedup_key,
+            user["id"], dedup_key,
+        )
+    except NotificationInboxUnavailable as e:
+        return make_error_response(
+            ErrorCode.NOTIFICATIONS_UNAVAILABLE,
+            message=str(e),
+        )
+    return NotificationLookupResponse(item=item)
 
 
 @router.post("/me/notifications/read", response_model=MarkReadResponse)

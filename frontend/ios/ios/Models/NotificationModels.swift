@@ -217,6 +217,108 @@ struct MarkNotificationsReadDTO: Decodable, Sendable {
     }
 }
 
+/// `GET /users/me/notifications/lookup` — one row by `dedup_key`. `item` is null when this
+/// account has no such row, a normal answer the caller treats as "keep the pushed copy".
+struct NotificationLookupDTO: Decodable, Sendable {
+    let item: NotificationEventDTO?
+}
+
+extension NotificationEventDTO {
+    /// Memberwise, for a row that did not come off the wire: the copy of a TAPPED PUSH that
+    /// `PushedNotification.event` builds so the push door can open the very same
+    /// `NotificationDetailView` the Alerts rows open. The struct's own `init(from:)` is what
+    /// the network uses; this one exists only for that.
+    init(
+        id: String, kind: String, category: String, title: String, body: String,
+        route: [String: String], createdAt: String, readAt: String?, deliveryState: String
+    ) {
+        self.id = id
+        self.kind = kind
+        self.category = category
+        self.title = title
+        self.body = body
+        self.route = route
+        self.createdAt = createdAt
+        self.readAt = readAt
+        self.deliveryState = deliveryState
+    }
+}
+
+// MARK: - A tapped push
+
+/// A notification the user TAPPED from outside the app — the lock screen, Notification
+/// Center, a banner, or its "View" action — carried from `AppDelegate.didReceive` to the one
+/// place that presents it (`ContentView`).
+///
+/// WHY IT CARRIES THE CONTENT AND NOT JUST THE ROUTE. A push tap used to resolve straight to
+/// a `NotificationRoute` and open the ticker (or report) screen, so the alert's own words
+/// were gone the moment it was tapped. The developer: *"open the detail screen first, so they
+/// can read the content before they decide to go any further. Not to open the ticker right
+/// away."* The detail needs the title, the body and the time, which only the notification
+/// content has.
+///
+/// ⚠️ `body` is the BANNER cut — the backend trims it to 180 chars + "…" for APNs while the
+/// inbox row keeps the full text. The detail screen shows this copy at once and swaps in the
+/// row fetched by `dedupKey` (`PushNotificationDetailViewModel`).
+struct PushedNotification: Identifiable, Equatable, Sendable {
+    /// `UNNotificationRequest.identifier` — unique per delivery, so two taps on two
+    /// notifications are two different sheets.
+    let id: String
+    let title: String
+    let body: String
+    /// `NotificationKind` key; drives the icon and the kind-specific destination row.
+    let kind: String
+    /// `aps.category` — the backend sends the kind's thread id, which IS the category bucket.
+    let category: String
+    /// The other half of the backend's `(user_id, dedup_key)` unique index; the only field
+    /// in a payload that names the row.
+    let dedupKey: String?
+    /// Every top-level SCALAR of the payload except `aps`, as strings — the same flat map an
+    /// inbox row's `route` is, so `AlertDestination.destinations(for:)` reads both alike.
+    let route: [String: String]
+    /// When the phone received it. The fetched row's `created_at` replaces it once it lands.
+    let deliveredAt: Date
+
+    init(
+        identifier: String, title: String, body: String,
+        userInfo: [AnyHashable: Any], deliveredAt: Date
+    ) {
+        var flat: [String: String] = [:]
+        for (rawKey, value) in userInfo {
+            guard let key = rawKey as? String, key != "aps" else { continue }
+            if let s = value as? String {
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { flat[key] = trimmed }
+            } else if let n = value as? NSNumber {
+                flat[key] = n.stringValue
+            }
+            // Anything nested is dropped, exactly as the inbox's `RouteScalar` drops it.
+        }
+        let aps = userInfo["aps"] as? [String: Any]
+
+        self.id = identifier
+        self.title = title
+        self.body = body
+        self.kind = flat["kind"] ?? "unknown"
+        self.category = (aps?["category"] as? String) ?? (aps?["thread-id"] as? String) ?? "unknown"
+        self.dedupKey = flat["dedup_key"]
+        self.route = flat
+        self.deliveredAt = deliveredAt
+    }
+
+    /// The pushed copy as an inbox row, for `NotificationDetailView`.
+    var event: NotificationEventDTO {
+        NotificationEventDTO(
+            id: "push:\(id)", kind: kind, category: category, title: title, body: body,
+            route: route, createdAt: PushedNotification.iso.string(from: deliveredAt),
+            readAt: nil, deliveryState: "sent"
+        )
+    }
+
+    /// No fractional seconds — the shape `NotificationDetailView`'s second parser reads.
+    private static let iso = ISO8601DateFormatter()
+}
+
 // MARK: - Price alerts
 
 enum PriceAlertKind: String, Codable, CaseIterable, Sendable {

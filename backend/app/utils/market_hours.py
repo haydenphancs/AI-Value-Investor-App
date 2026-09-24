@@ -45,6 +45,20 @@ US_MARKET_HOLIDAYS = {
     (2027, 9, 6),   # Labor Day
     (2027, 11, 25), # Thanksgiving
     (2027, 12, 24), # Christmas (observed — Dec 25 is a Saturday)
+    # 2028 — from NYSE's published calendar (nyse.com/markets/hours-calendars, read
+    # 2026-09-24). NO New Year's Day closure: Jan 1, 2028 is a Saturday and NYSE does not
+    # close on Friday Dec 31, 2027 (year-end). The Trillion Club membership rule reads
+    # these through last_completed_close(); tests/test_trillion_club_rules.py fails once
+    # the table covers less than 12 months ahead — add the next year's dates then.
+    (2028, 1, 17),  # MLK Day
+    (2028, 2, 21),  # Presidents' Day
+    (2028, 4, 14),  # Good Friday
+    (2028, 5, 29),  # Memorial Day
+    (2028, 6, 19),  # Juneteenth
+    (2028, 7, 4),   # Independence Day
+    (2028, 9, 4),   # Labor Day
+    (2028, 11, 23), # Thanksgiving
+    (2028, 12, 25), # Christmas
 }
 
 # Half-days: NYSE/NASDAQ close at 13:00 ET (day after Thanksgiving, Christmas
@@ -62,6 +76,9 @@ US_MARKET_EARLY_CLOSES = {
     (2026, 12, 24),  # Christmas Eve
     # 2027
     (2027, 11, 26),  # Day after Thanksgiving
+    # 2028 (NYSE's published calendar; Christmas Eve is a Sunday, so no half-day for it)
+    (2028, 7, 3),    # Independence Day eve
+    (2028, 11, 24),  # Day after Thanksgiving
 }
 
 

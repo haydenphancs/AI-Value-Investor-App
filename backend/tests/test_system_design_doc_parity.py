@@ -410,6 +410,9 @@ _CURATED_TABLES = {
     # had to be earned rather than asserted. Curated so dropping it fails here
     # instead of quietly orphaning that paragraph.
     "book_chunks",
+    # §12.5 (2026-09-24) names the marketing run ledger bare: the `source_ref` mirror on it is
+    # informational since selection reads marketing_scripts. Curated so the prose stays coupled.
+    "marketing_runs",
     # 2026-09-11: §3.3 names the reference implementation's table (`cached_at`-based, the
     # majority pattern) and §9.1 names the four tables whose `user_id` FK was dropped.
     "profit_power_cache", "portfolios", "portfolio_items",

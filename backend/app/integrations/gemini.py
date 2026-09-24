@@ -1248,6 +1248,7 @@ class GeminiClient:
         model_name: Optional[str] = None,
         response_schema: Optional[Any] = None,
         thinking_budget: Optional[int] = None,
+        usage_tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
@@ -1264,6 +1265,10 @@ class GeminiClient:
         the same prompt under different schemas would have collided and the
         first one's shape served to the second. No such pair exists today; the
         key is fixed rather than the hazard documented.
+
+        `usage_tag` only labels the `GEMINI_USAGE` line (e.g. `marketing_writer`) so one
+        caller's spend can be told apart from every other `generate_json` caller. It is
+        deliberately NOT in the cache key: it changes no output.
         """
         key = _cache_key(
             "json", prompt, system_instruction or "", model_name or "",
@@ -1292,6 +1297,7 @@ class GeminiClient:
             usage = _response_usage(response)
             _log_gemini_usage(
                 usage, call_site="generate_json", model=model_name or self.model_name,
+                tag=usage_tag,
             )
             result = {
                 "text": _response_text(response),

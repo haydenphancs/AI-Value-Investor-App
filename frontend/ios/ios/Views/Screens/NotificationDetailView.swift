@@ -115,8 +115,8 @@ struct NotificationDetailView: View {
     private var receivedCard: some View {
         card {
             detailRow(label: "Received", value: absoluteTime(item))
-            // Only when delivery did NOT happen. Saying "delivered" on every other row would be
-            // permanent chrome carrying no information — the same rule the row's footnote follows.
+            // Only when the user's quiet hours held it back — the same rule the row's footnote
+            // follows. Saying "delivered" on every other row would carry no information.
             if let note = deliveryNote(item) {
                 detailRow(label: "Delivery", value: note)
             }
@@ -190,12 +190,11 @@ struct NotificationDetailView: View {
         return NotificationDetailView.display.string(from: date)
     }
 
-    /// Same wording as `NotificationInboxSection.footnote`, and nil for a normal delivery.
+    /// Same rule as `NotificationInboxSection.footnote`: only quiet hours, which the user chose.
+    /// `no_device` / `failed` were removed from both on request — see the note there.
     private func deliveryNote(_ event: NotificationEventDTO) -> String? {
         switch event.deliveryState {
         case "deferred":  return "Held during quiet hours"
-        case "no_device": return "Not sent to this device"
-        case "failed":    return "Couldn't be delivered"
         default:          return nil
         }
     }

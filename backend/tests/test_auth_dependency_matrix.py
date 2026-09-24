@@ -495,3 +495,29 @@ def test_the_home_feed_resolves_the_caller_through_the_users_row_like_the_dashbo
         deps = [p.default.dependency for p in inspect.signature(handler).parameters.values()
                 if hasattr(p.default, "dependency")]
         assert get_watchlist_identity in deps, handler.__name__
+
+
+def test_the_trillion_club_detail_is_strict_and_reads_its_tier_from_the_users_row():
+    """`GET /home/trillion-club/{slug}` serves 13F rows (FMP-licensed) and gates their depth
+    by tier. Two obligations, pinned separately because either can regress alone:
+
+    * the ROUTER's strict `get_current_user_id` covers it — a per-route guest dependency
+      could never re-open it, since the router dependency runs first and raises;
+    * the handler's own identity is `get_watchlist_identity` (the users row), never a
+      token-only dependency: a token carries no `tier`, so a token-only read would lock every
+      Pro caller out — and a deleted account's still-valid JWT would keep reading.
+    """
+    import inspect
+    from app.api.v1.endpoints import home as home_ep
+    from app.dependencies import get_current_user_id, get_watchlist_identity
+
+    router_deps = [d.dependency for d in home_ep.router.dependencies]
+    assert get_current_user_id in router_deps
+
+    route = next(r for r in home_ep.router.routes if r.path == "/trillion-club/{slug}")
+    assert route.endpoint is home_ep.get_trillion_club_detail
+    deps = [p.default.dependency for p in inspect.signature(route.endpoint).parameters.values()
+            if hasattr(p.default, "dependency")]
+    assert deps == [get_watchlist_identity]
+    for guest_dep in ("get_current_user_or_guest", "get_optional_user_id", "get_identity_only_user"):
+        assert all(getattr(d, "__name__", "") != guest_dep for d in deps), guest_dep

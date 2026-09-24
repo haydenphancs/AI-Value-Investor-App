@@ -19,6 +19,8 @@ how the mock repository built those strings.
 from pydantic import BaseModel
 from typing import List, Optional
 
+from app.schemas.trillion_club import TrillionClubGroupResponse
+
 
 class MarketPulseItemResponse(BaseModel):
     """One tile in the Market Pulse strip (an index, crypto, or commodity)."""
@@ -191,6 +193,17 @@ class TrendingThemeResponse(BaseModel):
     # Avg daily % over the RESOLVABLE tickers (those FMP returned a quote for).
     # Null when zero resolvable → iOS hides the % badge (still shows "N stocks").
     change_percent: Optional[float] = None
+    # ── Monthly rotation + daily insights (migration 174). All optional and null until the
+    # first published rotation / insights run, so an older app and an un-migrated
+    # database both keep working. ──
+    # ISO date the monthly rotation last reviewed this list → "Updated Oct 1".
+    updated_on: Optional[str] = None
+    # Replaced slots in that review (0 is honest: reviewed, nothing better found).
+    change_count: Optional[int] = None
+    # Equal-weight 1-month return of the CURRENT stocks, as a fraction (0.042 = +4.2%).
+    return_1m: Optional[float] = None
+    # Normalised 1-month index (first point = 100) for the card's small trend line.
+    spark_1m: Optional[List[float]] = None
 
 
 class ThemesGroupResponse(BaseModel):
@@ -202,10 +215,11 @@ class ThemesGroupResponse(BaseModel):
 class HomeDashboardResponse(BaseModel):
     """Top-level aggregated payload for the Caydex Home dashboard.
 
-    All four sections are served today: the market-status header + Market Pulse
-    strip, Daily Scanners, App-Exclusive Signals, and Emerging Frontiers themes.
-    Each section defaults empty so a failed sub-build degrades that section only
-    (the iOS views hide an empty section rather than erroring the whole screen).
+    The sections served: the market-status header + Market Pulse strip, Daily
+    Scanners, App-Exclusive Signals, Emerging Frontiers themes, the caller's own
+    watchlist strip, and Trillion-Dollar Club Bets. Each section defaults empty so a
+    failed sub-build degrades that section only (the iOS views hide an empty section
+    rather than erroring the whole screen).
     """
 
     market_status_text: str     # "Markets Open" | "Markets Closed" | "Pre-Market" | "After Hours"
@@ -245,3 +259,8 @@ class HomeDashboardResponse(BaseModel):
     # empty `watchlist`, and iOS hides the section entirely for the second. Without this,
     # creating a list made the whole Home strip vanish with nothing to explain it.
     watchlist_is_group: bool = False
+    # Trillion-Dollar Club Bets (2026-09-24): what the $1T companies own in other companies.
+    # Additive + defaulted like every section above: empty when the feature flag is off,
+    # the data is unreadable, or membership has not been refreshed for over a week — and
+    # iOS hides an empty section. Same for every caller (the Pro depth is on the detail).
+    trillion_club: TrillionClubGroupResponse = TrillionClubGroupResponse()

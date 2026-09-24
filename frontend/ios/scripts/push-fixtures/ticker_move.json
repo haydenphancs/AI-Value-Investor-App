@@ -1,7 +1,7 @@
 {
   "aps": {
     "alert": {
-      "title": "NVDA",
+      "title": "NVDA -9.2%",
       "body": "Down 9.2% \u2014 far more than NVDA usually moves."
     },
     "sound": "default",
@@ -14,5 +14,6 @@
   "route": "ticker",
   "ticker": "NVDA",
   "asset_type": "stock",
+  "dedup_key": "move:NVDA:2026-08-29",
   "Simulator Target Bundle": "com.phan.caydex"
 }

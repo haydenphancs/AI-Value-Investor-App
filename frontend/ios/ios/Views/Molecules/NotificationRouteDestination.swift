@@ -5,31 +5,25 @@
 //  Renders whatever screen a `NotificationRoute` points at.
 //
 //  A view-type DISPATCHER, not a navigation router — the same job `AssetDetailRouter`
-//  does for an asset kind. It exists so the inbox and the push tap-handler resolve a
-//  route through ONE switch: two copies would drift the moment a new route kind is added,
-//  and the symptom would be "taps from the inbox go to the right place but taps from the
-//  banner don't", which is miserable to diagnose.
+//  does for an asset kind. It exists so every notification destination resolves through ONE
+//  switch: two copies would drift the moment a new route kind is added, and the symptom would
+//  be "taps from the inbox go to the right place but taps from the banner don't", which is
+//  miserable to diagnose.
+//
+//  Both notification doors — an Alerts row and a PUSH tap — reach it the same way: their
+//  detail screen reports the chosen `AlertDestination`, and `AlertDestinationCover` renders
+//  it here inside the cover's own `NavigationStack`. There used to be a stack-owning wrapper,
+//  `NotificationRouteDestination`, which the push tap presented straight from Home — skipping
+//  the detail screen entirely. It had no other caller and was removed with that path.
 //
 
 import SwiftUI
 
-struct NotificationRouteDestination: View {
-    let route: NotificationRoute
-
-    var body: some View {
-        NavigationStack {
-            NotificationRouteContent(route: route)
-        }
-    }
-}
-
-/// The same dispatch WITHOUT a `NavigationStack` of its own.
+/// The dispatch, WITHOUT a `NavigationStack` of its own — the presenter supplies one.
 ///
-/// Split out because the alert detail screens push these as destinations inside a stack they
-/// already own, and `NavigationStack` inside `NavigationStack` double-stacks: the pushed screen
-/// gets its own back button that pops to nothing, and the outer stack's back button disappears.
-/// The switch itself must not be copied — a second copy is exactly the "taps from the inbox go to
-/// the right place but taps from the banner don't" drift the wrapper's own comment warns about.
+/// `NavigationStack` inside `NavigationStack` double-stacks: the pushed screen gets its own
+/// back button that pops to nothing, and the outer stack's back button disappears. The switch
+/// itself must not be copied — a second copy is exactly the drift the header warns about.
 struct NotificationRouteContent: View {
     let route: NotificationRoute
 
@@ -67,12 +61,12 @@ struct NotificationRouteContent: View {
                 TickerReportView(ticker: ticker ?? "", persona: persona, reportId: reportId)
 
             case .inbox:
-                // Unreachable by construction: the only caller
-                // (`NotificationInboxContent`) filters `.inbox` out before setting a
-                // route, because "the row itself is already the content". Kept as an
-                // explicit no-op so the switch stays exhaustive — `NotificationRoute`
-                // gains cases over time and a `default:` here would silently swallow
-                // the next one.
+                // Unreachable by construction: the only caller is `AlertDestinationCover`,
+                // and `AlertDestination.route` never yields `.inbox` — a notification with
+                // nowhere to go simply offers no destination rows on its detail screen. Kept
+                // as an explicit no-op so the switch stays exhaustive — `NotificationRoute`
+                // gains cases over time and a `default:` here would silently swallow the
+                // next one.
                 EmptyView()
             }
         }

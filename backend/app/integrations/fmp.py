@@ -9,9 +9,10 @@ NOTE: FMP deprecated all /api/v3 ("legacy") endpoints after August 31 2025.
 
 import asyncio
 import json
+import re
 import httpx
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Sequence
 import logging
 
 from app.config import settings
@@ -732,6 +733,43 @@ class FMPClient:
         )
         return data if isinstance(data, list) else []
 
+    async def get_market_cap_batch(self, symbols: Sequence[str]) -> List[Dict[str, Any]]:
+        """Current market caps for several symbols in ONE call (``market-capitalization-batch``).
+
+        Returns ``[{"symbol", "date", "marketCap"}, ...]``. ⚠️ The figure is INTRADAY
+        (``date`` is today while the market is open) and FMP computes it from a different
+        share count than ``historical-market-capitalization`` (LLY: +9.4% vs a +3.8% price
+        move, 2026-09-24), so it is for DISCOVERY only — never compare it with a dated
+        close or show it beside one. The cap is in the listing's own currency, with no
+        currency field.
+
+        Symbols are upper-cased, de-duplicated and blanks dropped; an empty list makes no
+        call. A bare string raises ``TypeError`` (no call is made): a ``str`` is itself a
+        ``Sequence[str]``, and iterating ``"AAPL"`` would silently ask for ``A,P,L``.
+        Typed FMP exceptions propagate; a non-list body raises ``FMPUnavailableException``.
+        """
+        if isinstance(symbols, (str, bytes)):
+            raise TypeError(
+                f"get_market_cap_batch: symbols must be a list of tickers, not a single "
+                f"{type(symbols).__name__} ({symbols!r})"
+            )
+        clean: List[str] = []
+        for sym in symbols or ():
+            s = sym.strip().upper() if isinstance(sym, str) else ""
+            if s and s not in clean:
+                clean.append(s)
+        if not clean:
+            return []
+        data = await self._make_request(
+            "market-capitalization-batch", params={"symbols": ",".join(clean)}
+        )
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"market-capitalization-batch ({len(clean)} symbols) returned "
+                f"{type(data).__name__}, not a list"
+            )
+        return data
+
     async def get_intraday_prices(
         self,
         ticker: str,
@@ -1414,6 +1452,23 @@ class FMPClient:
             logger.warning(f"ETF holders request failed for {ticker}: {e}")
             return []
 
+    async def get_etf_holdings_strict(self, ticker: str) -> List[Dict[str, Any]]:
+        """EVERY holding of an ETF (`etf/holdings`), raising on failure.
+
+        `get_etf_holders` above swallows every error to `[]` and truncates to 20 rows, which
+        is right for a display card and wrong for the monthly theme rotation: there a lost
+        response would read as "this fund holds nothing" and silently change which stocks
+        belong in a theme. Typed FMP errors propagate; a non-list body raises
+        `FMPUnavailableException`. An empty list is returned as-is — the caller decides
+        whether an ETF with no holdings is plausible.
+        """
+        data = await self._make_request("etf/holdings", params={"symbol": ticker.upper()})
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"etf/holdings for {ticker.upper()} returned {type(data).__name__}, not a list"
+            )
+        return data
+
     async def get_etf_sector_weightings(
         self, ticker: str
     ) -> List[Dict[str, Any]]:
@@ -1610,6 +1665,43 @@ class FMPClient:
             if isinstance(row, dict)
         )
 
+    async def search_isin(self, isin: str) -> List[Dict[str, Any]]:
+        """Securities for an ISIN (``search-isin``): ``[{"symbol", "name", "isin", ...}]``.
+
+        One ISIN can return SEVERAL rows (NL0009805522 -> NBIS and the stale YNDX), so the
+        caller must choose; ``[]`` means FMP has no mapping. Raises ``ValueError`` on a
+        malformed ISIN (no call is made), typed FMP exceptions on failure, and
+        ``FMPUnavailableException`` on a non-list body — a failure must never read as
+        "no match".
+        """
+        norm = isin.strip().upper() if isinstance(isin, str) else ""
+        if not re.fullmatch(r"[A-Z]{2}[0-9A-Z]{9}[0-9]", norm):
+            raise ValueError(f"not an ISIN: {isin!r}")
+        data = await self._make_request("search-isin", params={"isin": norm})
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"search-isin {norm} returned {type(data).__name__}, not a list"
+            )
+        return data
+
+    async def search_cusip(self, cusip: str) -> List[Dict[str, Any]]:
+        """Securities for a CUSIP or CINS (``search-cusip``): ``[{"symbol", "companyName",
+        "cusip", ...}]``.
+
+        The route for a CINS number (a foreign issuer's CUSIP, first character a letter),
+        which has no ``US`` ISIN. Same contract as :meth:`search_isin`: several rows are
+        possible, ``ValueError`` on a malformed CUSIP, typed exceptions on failure.
+        """
+        norm = cusip.strip().upper() if isinstance(cusip, str) else ""
+        if not re.fullmatch(r"[0-9A-Z]{9}", norm):
+            raise ValueError(f"not a CUSIP: {cusip!r}")
+        data = await self._make_request("search-cusip", params={"cusip": norm})
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"search-cusip {norm} returned {type(data).__name__}, not a list"
+            )
+        return data
+
     async def get_stock_splits(self, ticker: str) -> List[Dict[str, Any]]:
         """Stock split history for a symbol (stable ``/splits``).
 
@@ -1658,32 +1750,61 @@ class FMPClient:
     # ── 13F Institutional ownership ─────────────────────────────────
 
     async def get_institutional_filing_dates(
-        self, cik: str
+        self, cik: str, *, strict: bool = False
     ) -> List[Dict[str, Any]]:
-        """Get available 13F filing dates for a CIK."""
+        """Get available 13F filing dates for a CIK.
+
+        ``strict=False`` (the whale default) swallows every error to ``[]`` — which is
+        byte-identical to "this CIK files no 13F". ``strict=True`` re-raises the typed FMP
+        exception instead and raises ``FMPUnavailableException`` on a non-list body, so a
+        caller that WRITES (the Trillion-Dollar Club builder) can tell an outage from a
+        non-filer.
+        """
         try:
-            return await self._make_request(
+            data = await self._make_request(
                 "institutional-ownership/dates",
                 params={"cik": cik},
             )
         except Exception as e:
+            if strict:
+                raise
             logger.warning(f"13F filing dates failed for CIK {cik}: {e}")
             return []
+        if strict and not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"institutional-ownership/dates for CIK {cik} returned "
+                f"{type(data).__name__}, not a list"
+            )
+        return data
 
     async def get_institutional_holdings(
-        self, cik: str, year: int, quarter: int
+        self, cik: str, year: int, quarter: int, *, strict: bool = False
     ) -> List[Dict[str, Any]]:
-        """Get raw 13F holdings for a specific CIK/quarter."""
+        """Get raw 13F holdings for a specific CIK/quarter.
+
+        ``strict=True`` re-raises instead of returning ``[]`` (and raises
+        ``FMPUnavailableException`` on a non-list body): an empty extract for a quarter
+        ``dates`` lists is then distinguishable from a failed fetch. See
+        :meth:`get_institutional_filing_dates`.
+        """
         try:
-            return await self._make_request(
+            data = await self._make_request(
                 "institutional-ownership/extract",
                 params={"cik": cik, "year": year, "quarter": quarter},
             )
         except Exception as e:
+            if strict:
+                raise
             logger.warning(
                 f"13F holdings failed for CIK {cik} {year}Q{quarter}: {e}"
             )
             return []
+        if strict and not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"institutional-ownership/extract for CIK {cik} {year}Q{quarter} returned "
+                f"{type(data).__name__}, not a list"
+            )
+        return data
 
     async def get_institutional_industry_breakdown(
         self, cik: str, year: int = 0, quarter: int = 0

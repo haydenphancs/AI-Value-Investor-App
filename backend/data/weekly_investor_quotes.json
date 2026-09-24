@@ -1,0 +1,474 @@
+{
+  "version": 1,
+  "note": "Brand-cover quote of the week (CaydexSloganView). Entry N shows during ISO week N (device-local, Monday 00:00); ISO week 53 repeats entry 52. Bundle-only: not seeded to Supabase, not served by the backend. Every entry needs a verifiable PRIMARY source (locator + url are reviewer aids, not decoded by the app). Text carries NO wrapping quote marks - the renderer adds them. Contract: backend/tests/test_ios_weekly_investor_quotes.py.",
+  "quotes": [
+    {
+      "week": 1,
+      "text": "The investor’s chief problem—and even his worst enemy—is likely to be himself.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Introduction: What This Book Expects to Accomplish (4th rev. ed., 1973), not ch. 8; p. 8 in the 2003 HarperBusiness reprint",
+      "url": "https://archive.org/download/epdf.pub_the-intelligent-investor/epdf.pub_the-intelligent-investor_djvu.txt"
+    },
+    {
+      "week": 2,
+      "text": "It’s far better to buy a wonderful company at a fair price than a fair company at a wonderful price.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1989,
+      "locator": "1989 Chairman's letter, section \"Mistakes of the First Twenty-five Years (A Condensed Version)\"",
+      "url": "https://www.berkshirehathaway.com/letters/1989.html"
+    },
+    {
+      "week": 3,
+      "text": "Behind every stock is a company. Find out what it’s doing.",
+      "author": "Peter Lynch",
+      "source": "Beating the Street",
+      "year": 1993,
+      "locator": "'25 Golden Rules', the book's closing section, pp. ~305–306, Fireside paperback edition (Simon & Schuster, copyright 1993, 1994)",
+      "url": "https://archive.org/details/0671891634"
+    },
+    {
+      "week": 4,
+      "text": "Time is the friend of the wonderful business, the enemy of the mediocre.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1989,
+      "locator": "1989 Chairman's letter, section \"Mistakes of the First Twenty-five Years (A Condensed Version)\"",
+      "url": "https://www.berkshirehathaway.com/letters/1989.html"
+    },
+    {
+      "week": 5,
+      "text": "Confronted with a like challenge to distill the secret of sound investment into three words, we venture the motto, MARGIN OF SAFETY.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Chapter 20, “‘Margin of Safety’ as the Central Concept of Investment”, opening paragraph",
+      "url": "https://archive.org/download/epdf.pub_the-intelligent-investor/epdf.pub_the-intelligent-investor_djvu.txt"
+    },
+    {
+      "week": 6,
+      "text": "We simply attempt to be fearful when others are greedy and to be greedy only when others are fearful.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1986,
+      "locator": "1986 Chairman's letter, section \"Marketable Securities\"",
+      "url": "https://www.berkshirehathaway.com/letters/1986.html"
+    },
+    {
+      "week": 7,
+      "text": "You have to know what you own, and why you own it.",
+      "author": "Peter Lynch",
+      "source": "Beating the Street",
+      "year": 1993,
+      "locator": "'25 Golden Rules', the book's closing section, pp. ~305–306, Fireside paperback edition (Simon & Schuster, copyright 1993, 1994)",
+      "url": "https://archive.org/details/0671891634"
+    },
+    {
+      "week": 8,
+      "text": "If you aren’t willing to own a stock for ten years, don’t even think about owning it for ten minutes.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1996,
+      "locator": "1996 Chairman's letter, section \"Common Stock Investments\"",
+      "url": "https://www.berkshirehathaway.com/letters/1996.html"
+    },
+    {
+      "week": 9,
+      "text": "Investment is most intelligent when it is most businesslike.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Chapter 20, “To Sum Up” subsection (p. 523 in the 2003 reprint)",
+      "url": "https://archive.org/download/epdf.pub_the-intelligent-investor/epdf.pub_the-intelligent-investor_djvu.txt"
+    },
+    {
+      "week": 10,
+      "text": "Don’t look for the needle in the haystack. Just buy the haystack!",
+      "author": "John C. Bogle",
+      "source": "The Little Book of Common Sense Investing",
+      "year": 2007,
+      "locator": "The Little Book of Common Sense Investing, 1st ed. (Wiley, 2007); same line in the 2017 10th-anniversary ed.",
+      "url": "https://openlibrary.org/search/inside?q=%22just%20buy%20the%20haystack%22"
+    },
+    {
+      "week": 11,
+      "text": "It is impossible to produce a superior performance unless you do something different from the majority.",
+      "author": "John Templeton",
+      "source": "The Templeton Touch",
+      "year": 1983,
+      "locator": "The Templeton Touch (William Proctor, Doubleday, 1983), Templeton's numbered maxims, No. 3; reprinted as No. 3 'Never Follow The Crowd' in Franklin Templeton's Templeton Maxims",
+      "url": "https://www.franklintempletonme.com/insights/investor-education/templeton-maxims"
+    },
+    {
+      "week": 12,
+      "text": "Far more money has been lost by investors preparing for corrections or trying to anticipate corrections than has been lost in corrections themselves.",
+      "author": "Peter Lynch",
+      "source": "Worth magazine column: Fear of Crashing",
+      "year": 1995,
+      "locator": "Peter Lynch column 'Fear of Crashing', Worth, September 1995 issue (reprinted on worth.com 'From the Archives', March 9, 2017)",
+      "url": "https://www.worth.com/from-the-archives-fear-of-crashing/"
+    },
+    {
+      "week": 13,
+      "text": "Games are won by players who focus on the playing field – not by those whose eyes are glued to the scoreboard.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 2013,
+      "locator": "2013 letter (published Feb 2014), \"Some Thoughts About Investing\", p. 17 of the PDF",
+      "url": "https://www.berkshirehathaway.com/letters/2013ltr.pdf"
+    },
+    {
+      "week": 14,
+      "text": "You are neither right nor wrong because the crowd disagrees with you. You are right because your data and reasoning are right.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Chapter 20, “To Sum Up”, the “fourth business rule” paragraph (p. 524 in the 2003 reprint)",
+      "url": "https://archive.org/download/epdf.pub_the-intelligent-investor/epdf.pub_the-intelligent-investor_djvu.txt"
+    },
+    {
+      "week": 15,
+      "text": "I constantly see people rise in life who are not the smartest, sometimes not even the most diligent. But they are learning machines.",
+      "author": "Charlie Munger",
+      "source": "USC Law School commencement address",
+      "year": 2007,
+      "locator": "Commencement address, USC Gould School of Law, May 13, 2007; published text in Poor Charlie’s Almanack (Stripe Press ed.), Ch. 4, Talk Ten",
+      "url": "https://www.stripe.press/poor-charlies-almanack/talk-ten"
+    },
+    {
+      "week": 16,
+      "text": "Rule number one: most things will prove to be cyclical. Rule number two: some of the greatest opportunities for gain and loss come when other people forget rule number one.",
+      "author": "Howard Marks",
+      "source": "The Most Important Thing",
+      "year": 2011,
+      "locator": "The Most Important Thing (Columbia University Press, 2011), cycles chapter: two bulleted rules after 'a few things I hold to with confidence:'",
+      "url": "https://openlibrary.org/search/inside?q=%22Rule%20number%20one%3A%20most%20things%20will%20prove%20to%20be%20cyclical%22"
+    },
+    {
+      "week": 17,
+      "text": "If you don’t lose money, most of the remaining alternatives are good ones.",
+      "author": "Joel Greenblatt",
+      "source": "You Can Be a Stock Market Genius",
+      "year": 1997,
+      "locator": "Chapter 2 'Some Basics—Don't Leave Home Without Them', section '6. Look Down, Not Up' (Simon & Schuster, 1997)",
+      "url": "https://archive.org/details/youcanbestockmar00gree"
+    },
+    {
+      "week": 18,
+      "text": "Time is your friend. Impulse is your enemy.",
+      "author": "John C. Bogle",
+      "source": "Character Counts",
+      "year": 2002,
+      "locator": "Character Counts (McGraw-Hill, 2002), in Bogle's list of maxims ('...Buy the haystack.\" Time is your friend. Impulse is your enemy. The majesty of simplicity. Stay the course!'). Also The Clash of the Cultures (2012), ch. 9, heading 'Rule 2: Time Is Your Friend, Impulse Is Your Enemy'.",
+      "url": "https://openlibrary.org/search/inside?q=%22Impulse%20is%20your%20enemy.%20The%20majesty%20of%20simplicity%22"
+    },
+    {
+      "week": 19,
+      "text": "Worldly wisdom teaches that it is better for reputation to fail conventionally than to succeed unconventionally.",
+      "author": "John Maynard Keynes",
+      "source": "The General Theory of Employment, Interest and Money",
+      "year": 1936,
+      "locator": "Chapter 12, “The State of Long-Term Expectation”, section V (paragraph on the long-term investor)",
+      "url": "https://www.marxists.org/reference/subject/economics/keynes/general-theory/ch12.htm"
+    },
+    {
+      "week": 20,
+      "text": "The time of maximum pessimism is the best time to buy, and the time of maximum optimism is the best time to sell.",
+      "author": "John Templeton",
+      "source": "The Templeton Touch",
+      "year": 1983,
+      "locator": "The Templeton Touch (William Proctor, Doubleday, 1983), Templeton's numbered maxims, No. 4; also Franklin Templeton's Templeton Maxims, No. 7",
+      "url": "https://www.franklintempletonme.com/insights/investor-education/templeton-maxims"
+    },
+    {
+      "week": 21,
+      "text": "Controlling your time is the highest dividend money pays.",
+      "author": "Morgan Housel",
+      "source": "The Psychology of Money",
+      "year": 2020,
+      "locator": "Chapter 7 'Freedom' (Harriman House, 2020): the chapter's opening line, repeated as its closing sentence",
+      "url": "https://archive.org/details/the-psychology-of-money-morgan-morgan-housel-harriman-house"
+    },
+    {
+      "week": 22,
+      "text": "The person that turns over the most rocks wins the game.",
+      "author": "Peter Lynch",
+      "source": "PBS Frontline interview",
+      "year": 1996,
+      "locator": "PBS FRONTLINE interview transcript (conducted mid-1996; program aired January 1997), answer about how he picked stocks at Magellan",
+      "url": "https://www.pbs.org/wgbh/pages/frontline/shows/betting/pros/lynch.html"
+    },
+    {
+      "week": 23,
+      "text": "You only find out who is swimming naked when the tide goes out.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 2001,
+      "locator": "2001 letter (published Feb 2002), reinsurance discussion in the insurance section, p. 9 of the PDF",
+      "url": "https://www.berkshirehathaway.com/letters/2001pdf.pdf"
+    },
+    {
+      "week": 24,
+      "text": "An investment operation is one which, upon thorough analysis promises safety of principal and an adequate return.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Chapter 1, “Investment versus Speculation” (Graham restating his 1934 Security Analysis definition)",
+      "url": "https://archive.org/download/the-intelligent-investor-benjamin-graham_202508/The_Intelligent_Investor_BENJAMIN_GRAHAM_djvu.txt"
+    },
+    {
+      "week": 25,
+      "text": "Make fewer and perhaps better investment decisions.",
+      "author": "Charles D. Ellis",
+      "source": "The Loser’s Game",
+      "year": 1975,
+      "locator": "Financial Analysts Journal vol. 31 no. 4 (July/August 1975), pp. 19–26, closing advice section ('Second, keep it simple.'); scan is the FAJ Jan/Feb 1995 reprint",
+      "url": "https://www.trendfollowing.com/whitepaper/the_losers_game.pdf"
+    },
+    {
+      "week": 26,
+      "text": "You’ve got to have models in your head. And you’ve got to array your experience—both vicarious and direct—on this latticework of models.",
+      "author": "Charlie Munger",
+      "source": "A Lesson on Elementary, Worldly Wisdom",
+      "year": 1994,
+      "locator": "Talk given April 14, 1994, USC Marshall School of Business; Poor Charlie’s Almanack (Stripe Press ed.), Ch. 4, Talk Two, opening section 'What is elementary, worldly wisdom?'",
+      "url": "https://www.stripe.press/poor-charlies-almanack/talk-two"
+    },
+    {
+      "week": 27,
+      "text": "The riskiest thing in the world is the widespread belief that there’s no risk.",
+      "author": "Howard Marks",
+      "source": "Oaktree memo: Risk Revisited",
+      "year": 2014,
+      "locator": "Memo dated September 3, 2014, p. 12, list following 'risk is counterintuitive'",
+      "url": "https://www.oaktreecapital.com/docs/default-source/memos/2014-09-03-risk-revisited.pdf"
+    },
+    {
+      "week": 28,
+      "text": "My definition of value investing is figuring out what something is worth and paying a lot less for it.",
+      "author": "Joel Greenblatt",
+      "source": "Graham & Doddsville interview",
+      "year": 2012,
+      "locator": "Graham & Doddsville, Issue XVI, Fall 2012, Joel Greenblatt interview, p. 6",
+      "url": "https://business.columbia.edu/sites/default/files-efs/imce-uploads/Graham%20&%20Doddsville%20-%20Issue%2016%20-%20Fall%202012_vFINAL2.pdf"
+    },
+    {
+      "week": 29,
+      "text": "In investing, you get what you don’t pay for.",
+      "author": "John C. Bogle",
+      "source": "The Battle for the Soul of Capitalism",
+      "year": 2005,
+      "locator": "The Battle for the Soul of Capitalism (Yale University Press, 2005). Also the title of Bogle's keynote 'In Investing, You Get What You Don’t Pay For', The World Money Show, Orlando, Feb. 2, 2005.",
+      "url": "https://johncbogle.com/speeches/JCB_MS0205.pdf"
+    },
+    {
+      "week": 30,
+      "text": "It is dangerous, however, to apply to the future inductive arguments based on past experience, unless one can distinguish the broad reasons why past experience was what it was.",
+      "author": "John Maynard Keynes",
+      "source": "The Nation and Athenaeum (book review)",
+      "year": 1925,
+      "locator": "The Nation and Athenaeum, Supplement, 2 May 1925, p. 157 (review of Edgar Lawrence Smith’s Common Stocks as Long Term Investments); reprinted in Collected Writings vol. XII, pp. 247–52",
+      "url": "https://archive.org/details/sim_nation-and-athenaeum_1925_37_supplement"
+    },
+    {
+      "week": 31,
+      "text": "An investor who has all the answers doesn’t even understand all the questions.",
+      "author": "John Templeton",
+      "source": "16 Rules for Investment Success",
+      "year": 1993,
+      "locator": "Rule 14 heading; first published in World Monitor: The Christian Science Monitor Monthly (1993); Franklin Templeton reprint TL-R16, p. 8",
+      "url": "https://www.franklintempleton.com/forms-literature/download/TL-R16"
+    },
+    {
+      "week": 32,
+      "text": "Room for error lets you endure, and endurance lets you stick around long enough to let the odds of benefiting from a low-probability outcome fall in your favor.",
+      "author": "Morgan Housel",
+      "source": "Collaborative Fund essay: The Psychology of Money",
+      "year": 2018,
+      "locator": "Collaborative Fund blog, June 1, 2018, item 13 'Underestimating the need for room for error'",
+      "url": "https://www.collabfund.com/blog/the-psychology-of-money/"
+    },
+    {
+      "week": 33,
+      "text": "Never invest in any idea you can’t illustrate with a crayon.",
+      "author": "Peter Lynch",
+      "source": "Beating the Street",
+      "year": 1993,
+      "locator": "Chapter One, 'The Miracle of St. Agnes', stated as Peter’s Principle #3 (p. ~27–28 in the 1994 Fireside paperback)",
+      "url": "https://archive.org/details/0671891634"
+    },
+    {
+      "week": 34,
+      "text": "Our stay-put behavior reflects our view that the stock market serves as a relocation center at which money is moved from the active to the patient.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1991,
+      "locator": "1991 letter, section \"Marketable Common Stocks\"",
+      "url": "https://www.berkshirehathaway.com/letters/1991.html"
+    },
+    {
+      "week": 35,
+      "text": "Have the courage of your knowledge and experience.",
+      "author": "Benjamin Graham",
+      "source": "The Intelligent Investor",
+      "year": 1973,
+      "locator": "Chapter 20, “To Sum Up”, the fourth business rule (p. 524 in the 2003 reprint)",
+      "url": "https://archive.org/download/epdf.pub_the-intelligent-investor/epdf.pub_the-intelligent-investor_djvu.txt"
+    },
+    {
+      "week": 36,
+      "text": "As long as stock markets exist, the collective judgment of investors will sometimes make mistakes.",
+      "author": "Burton G. Malkiel",
+      "source": "The Efficient Market Hypothesis and Its Critics",
+      "year": 2003,
+      "locator": "Journal of Economic Perspectives 17(1), Winter 2003, pp. 59–82; Conclusion, p. 80, opening sentence",
+      "url": "https://eml.berkeley.edu/~craine/EconH195/Fall_14/webpage/Malkiel_Efficient%20Mkts.pdf"
+    },
+    {
+      "week": 37,
+      "text": "Try to do a few things unusually well.",
+      "author": "Charles D. Ellis",
+      "source": "The Loser’s Game",
+      "year": 1975,
+      "locator": "Financial Analysts Journal, July/August 1975, pp. 19–26 (the 'Second, keep it simple' advice); read in the Jan/Feb 1995 FAJ reprint",
+      "url": "https://www.trendfollowing.com/whitepaper/the_losers_game.pdf"
+    },
+    {
+      "week": 38,
+      "text": "It is remarkable how much long-term advantage people like us have gotten by trying to be consistently not stupid, instead of trying to be very intelligent.",
+      "author": "Charlie Munger",
+      "source": "Wesco Financial shareholder letter",
+      "year": 1990,
+      "locator": "Chairman's letter in the Wesco Financial 1989 Annual Report, dated March 5, 1990, printed p. 69 (PDF p. 87 of the 1983–2009 letters collection)",
+      "url": "https://rememberingtheobvious.files.wordpress.com/2012/08/wesco-charlie-munger-letters-1983-2009-collection.pdf"
+    },
+    {
+      "week": 39,
+      "text": "In my opinion, the key to dealing with the future lies in knowing where you are, even if you can’t know precisely where you’re going.",
+      "author": "Howard Marks",
+      "source": "Oaktree memo: You Can’t Predict. You Can Prepare.",
+      "year": 2001,
+      "locator": "Memo dated November 20, 2001, p. 1, third paragraph",
+      "url": "https://www.oaktreecapital.com/docs/default-source/memos/2001-11-20-you-cant-predict-you-can-prepare.pdf"
+    },
+    {
+      "week": 40,
+      "text": "If you can’t explain it very simply and straightforwardly, then you probably don’t understand it all that well yourself.",
+      "author": "Joel Greenblatt",
+      "source": "Graham & Doddsville interview",
+      "year": 2012,
+      "locator": "Graham & Doddsville, Issue XVI, Fall 2012, Joel Greenblatt interview, p. 12",
+      "url": "https://business.columbia.edu/sites/default/files-efs/imce-uploads/Graham%20&%20Doddsville%20-%20Issue%2016%20-%20Fall%202012_vFINAL2.pdf"
+    },
+    {
+      "week": 41,
+      "text": "The miracle of compounding returns is overwhelmed by the tyranny of compounding costs.",
+      "author": "John C. Bogle",
+      "source": "The Little Book of Common Sense Investing",
+      "year": 2007,
+      "locator": "The Little Book of Common Sense Investing (Wiley, 2007), a stand-alone pull-quote in the text (also on the jacket flap); the same wording is inside a longer sentence in Bogle's Nov. 7, 2007 'Building a Better Financial System' remarks, p. 7",
+      "url": "https://openlibrary.org/search/inside?q=%22the%20miracle%20of%20compounding%20returns%20is%20overwhelmed%22"
+    },
+    {
+      "week": 42,
+      "text": "The social object of skilled investment should be to defeat the dark forces of time and ignorance which envelop our future.",
+      "author": "John Maynard Keynes",
+      "source": "The General Theory of Employment, Interest and Money",
+      "year": 1936,
+      "locator": "Book IV, Chapter 12 'The State of Long-Term Expectation', section VI",
+      "url": "https://www.marxists.org/reference/subject/economics/keynes/general-theory/ch12.htm"
+    },
+    {
+      "week": 43,
+      "text": "The only way to avoid mistakes is not to invest—which is the biggest mistake of all.",
+      "author": "John Templeton",
+      "source": "16 Rules for Investment Success",
+      "year": 1993,
+      "locator": "Rule 11 'Learn from your mistakes'; World Monitor (1993); Franklin Templeton reprint TL-R16, p. 7",
+      "url": "https://www.franklintempleton.com/forms-literature/download/TL-R16"
+    },
+    {
+      "week": 44,
+      "text": "Few things matter more with money than understanding your own time horizon and not being persuaded by the actions and behaviors of people playing different games.",
+      "author": "Morgan Housel",
+      "source": "Collaborative Fund essay: The Psychology of Money",
+      "year": 2018,
+      "locator": "Collaborative Fund blog, June 1, 2018, item 14",
+      "url": "https://www.collabfund.com/blog/the-psychology-of-money/"
+    },
+    {
+      "week": 45,
+      "text": "The key to making money in stocks is not to get scared out of them.",
+      "author": "Peter Lynch",
+      "source": "Beating the Street",
+      "year": 1993,
+      "locator": "Chapter Two, 'The Weekend Worrier', opening sentence (p. ~38 in the 1994 Fireside paperback)",
+      "url": "https://archive.org/details/0671891634"
+    },
+    {
+      "week": 46,
+      "text": "If the job has been correctly done when a common stock is purchased, the time to sell it is—almost never.",
+      "author": "Philip A. Fisher",
+      "source": "Common Stocks and Uncommon Profits",
+      "year": 1958,
+      "locator": "Chapter 6, “When to Sell—and When Not To”, closing sentence (right before chapter VII, “The Hullabaloo About Dividends”)",
+      "url": "https://archive.org/details/commonstocksunco00pfis"
+    },
+    {
+      "week": 47,
+      "text": "Most investors are primarily oriented toward return, how much they can make, and pay little attention to risk, how much they can lose.",
+      "author": "Seth Klarman",
+      "source": "Margin of Safety",
+      "year": 1991,
+      "locator": "Introduction (HarperBusiness 1st ed., 1991), paragraph beginning 'The focus of most investors differs from that of value investors.'",
+      "url": "https://pdfroom.com/books/margin-of-safety-risk-averse-value-investing-strategies-for-the-thoughtful-investor/j9ZdY6EAgV4"
+    },
+    {
+      "week": 48,
+      "text": "Buy good companies. Don’t overpay. Do nothing.",
+      "author": "Terry Smith",
+      "source": "Fundsmith annual letter to shareholders",
+      "year": 2024,
+      "locator": "Annual Letter to Shareholders 2023 (dated January 2024), strategy section: 'We continue to apply a simple three step investment strategy:' followed by three bullets; the same wording appears in the 2024 letter",
+      "url": "https://www.fundsmith.co.uk/media/31plodnq/2023-fef-annual-letter-to-shareholders.pdf"
+    },
+    {
+      "week": 49,
+      "text": "This is no time to be panicky.",
+      "author": "Thomas Rowe Price Jr.",
+      "source": "T. Rowe Price client letter",
+      "year": 1939,
+      "locator": "Client letter, September 1939: the typewritten heading (in capitals in the original) above 'We caution our clients against the danger of becoming panicky now that war is an actuality.'",
+      "url": "https://www.troweprice.com/content/workplace/en/retirement-education/thomas-rowe-price--jr--s-words-still-ring-true-today.html"
+    },
+    {
+      "week": 50,
+      "text": "Price is the most important factor to use in relation to value.",
+      "author": "Walter Schloss",
+      "source": "Factors Needed to Make Money in the Stock Market",
+      "year": 1994,
+      "locator": "Typed memo on Walter & Edwin Schloss Associates, L.P. letterhead, dated March 10, 1994, factor 1 of 16 (page 11 of the PDF compilation of his writings)",
+      "url": "https://www.rbcpa.com/wp-content/uploads/2017/01/Walter_Schloss_writings.pdf"
+    },
+    {
+      "week": 51,
+      "text": "Mr. Market is there to serve you, not to guide you.",
+      "author": "Warren Buffett",
+      "source": "Berkshire Hathaway shareholder letter",
+      "year": 1987,
+      "locator": "1987 letter, Marketable Securities section (Mr. Market allegory)",
+      "url": "https://www.berkshirehathaway.com/letters/1987.html"
+    },
+    {
+      "week": 52,
+      "text": "Spend each day trying to be a little wiser than you were when you woke up.",
+      "author": "Charlie Munger",
+      "source": "Poor Charlie’s Almanack (Q&A with Peter Kaufman)",
+      "year": 2006,
+      "locator": "Q&A with Peter Kaufman dated April 20, 2006, printed after 'Talk Two, Revisited' (Stripe Press ed., Ch. 4); the book also quotes it as a Wesco meeting reply in its 'Mungerisms' section",
+      "url": "https://www.stripe.press/poor-charlies-almanack/talk-two"
+    }
+  ]
+}

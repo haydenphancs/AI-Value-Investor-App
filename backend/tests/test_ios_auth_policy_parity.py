@@ -267,6 +267,9 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # Whales / 13F — FMP's Institutional Ownership package plus congress disclosures.
         "getWhaleList", "getWhaleProfile",
         "getWhaleTradeGroups", "getWhaleTradeGroupDetail", "getSignalDetail",
+        # Trillion-Dollar Club Bets: the same FMP 13F extract plus FMP market caps
+        # (2026-09-24). New, not re-gated — listed so it can never be born open.
+        "getTrillionClubDetail",
         # Learn. Note this content is OURS — `learn.py` imports no FMP — so the licence does
         # not compel these three; the hard wall does. Recorded so a future reader knows Learn
         # can be re-opened without touching the FMP contract, if the wall is ever softened.

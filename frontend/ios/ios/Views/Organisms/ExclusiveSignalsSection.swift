@@ -70,26 +70,9 @@ struct ExclusiveSignalsSection: View {
             }
         }
         .padding(16)
-        // ⚠️ The glow is drawn on this background SHAPE, never on the card itself.
-        //
-        // `.shadow()` is derived from the alpha of everything beneath it, so a `.shadow`
-        // applied to the card would force SwiftUI to render the ENTIRE section — title,
-        // badge, subtitle, all three rows — into an offscreen layer to compute an 18pt
-        // blur. A row expanding animates this section's height, so that layer would be
-        // re-allocated and re-rasterized every frame at a new size. That is the classic
-        // whole-card flicker, and it was reported as "the title and the whole card is
-        // blinking when I expand".
-        //
-        // Shadowing a filled RoundedRectangle instead rasterizes one shape and leaves the
-        // content out of the offscreen pass entirely. Same glow, nothing to re-raster.
-        //
-        // This is the second half of a problem this file already fixed once: a perpetual
-        // `.repeatForever` glow drove stroke/shadow here, entangled with a row's expand
-        // `withAnimation` transaction, and hard-froze the main thread on tap-to-expand.
-        // The ANIMATED half was removed then; the shadow-over-content half was left.
-        // (If a breathing glow is ever wanted back, drive it on a sibling overlay that is
-        // NOT an ancestor of the expandable rows.)
         .background(
+            // OPAQUE on purpose — `CardAuraGlow` sits directly behind this card and only
+            // its blur past the edges is meant to show.
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(
                     LinearGradient(
@@ -101,13 +84,28 @@ struct ExclusiveSignalsSection: View {
                         startPoint: .top, endPoint: .bottom
                     )
                 )
-                .shadow(color: accent.opacity(0.22), radius: 18, x: 0, y: 0)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(accent.opacity(0.38), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        // ⚠️ The breathing aura. Three rules, each one a shipped bug:
+        //
+        // 1. AFTER `.clipShape`, never before it. A halo lives outside the card's bounds,
+        //    so a clip cuts it off. From 2026-08-27 the glow was a `.shadow` on the fill
+        //    shape above — inside the clip — and was invisible, while the comment said
+        //    "same glow". A tester reported it missing on 2026-09-23.
+        // 2. A BACKGROUND, not a modifier on the card. `.shadow()` on the card derives from
+        //    the alpha of everything in it, so it would render the whole section — title,
+        //    badge, every row — into an offscreen layer and re-raster it whenever a row's
+        //    expand resizes the card. A background is sized by its host and drawn from one
+        //    rounded rectangle.
+        // 3. The animation lives in the atom, not here. A `.repeatForever` glow driven from
+        //    this view (an ANCESTOR of the rows), entangled with the row's `withAnimation`
+        //    expand, hard-froze the main thread on tap-to-expand. The expand is unanimated
+        //    now, and `CardAuraGlow` animates only its own opacity, in a scoped animation.
+        .background { CardAuraGlow(color: accent, cornerRadius: 18) }
         // Taps on the card body (padding / title / row gaps) count as "outside the
         // expanded row" → collapse it. Still swallows the tap so it doesn't bubble
         // to the Home scroll's collapse .onTapGesture — but forwards it via

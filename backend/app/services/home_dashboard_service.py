@@ -57,6 +57,8 @@ from app.utils.market_hours import (
     SESSION_CLOSED,
     SESSION_PREMARKET,
     SESSION_REGULAR,
+    last_completed_close,
+    previous_trading_day,
     session_phase,
 )
 from app.schemas.home_dashboard import (
@@ -68,9 +70,15 @@ from app.schemas.home_dashboard import (
     ThemesGroupResponse,
     TrendingThemeResponse,
 )
+from app.schemas.trillion_club import TrillionClubGroupResponse
 from app.schemas.themes_detail import (
+    ThemeChangeResponse,
     ThemeConstituentResponse,
     ThemeDetailResponse,
+    ThemeInsightResponse,
+    ThemeNewsItemResponse,
+    ThemePerformanceResponse,
+    ThemePeriodReturnResponse,
 )
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
@@ -258,6 +266,8 @@ _THEMES_MAX_ROWS = 50                        # sane ceiling on active theme card
 # Per-theme drill-down (GET /home/themes/{slug}) — its own 10-min cache, keyed by
 # slug. Separate from the dashboard themes cache (different shape + lazy on tap).
 _THEME_DETAIL_CACHE_TTL_SECONDS = 600
+_THEME_DETAIL_DEGRADED_TTL_SECONDS = 60      # built on a failed review read — retry soon
+_CARD_TREND_MAX_SESSIONS_OLD = 3             # older insights draw no trend on a card
 
 _SHORT_UNIVERSE_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "short_interest_universe.json"
@@ -790,7 +800,7 @@ class HomeDashboardService:
         # from THIS module (same pattern the pre-warmer uses in main.py).
         from app.services.signals_service import get_signals_service, redact_signals
 
-        pulse, scanners, signals, themes, watchlist = await asyncio.gather(
+        pulse, scanners, signals, themes, watchlist, trillion_club = await asyncio.gather(
             self._get_pulse_guarded(),
             self._get_scanners_guarded(),
             get_signals_service().get_signals_guarded(),
@@ -799,6 +809,9 @@ class HomeDashboardService:
             # siblings, so a slow or failed watchlist read costs this section only —
             # never the whole screen.
             self._get_watchlist_guarded(user_id),
+            # Trillion-Dollar Club Bets. This gather has no return_exceptions, so the
+            # branch must never raise — see `_get_trillion_club_guarded`.
+            self._get_trillion_club_guarded(),
         )
         # App-Exclusive Signals are a Pro/Max surface. Redact AFTER the gather, per
         # request: `signals` is the SHARED 45-min cache object, so the gate has to be a
@@ -820,7 +833,28 @@ class HomeDashboardService:
             watchlist=watchlist_tiles,
             watchlist_title=watchlist_title,
             watchlist_is_group=watchlist_is_group,
+            trillion_club=trillion_club,
         )
+
+    # ── Trillion-Dollar Club Bets ─────────────────────────────────────
+
+    async def _get_trillion_club_guarded(self) -> TrillionClubGroupResponse:
+        """The Trillion-Dollar Club group, or an empty one. NEVER raises.
+
+        `get_group_guarded` already promises not to raise; this second belt is for what it
+        cannot cover — the service module failing to IMPORT (its own code, or the 13F rules
+        it loads). The import is function-local for exactly that reason: a defect there
+        must cost this section, not the module every Home request runs through."""
+        try:
+            from app.services.trillion_club_service import get_trillion_club_service
+
+            return await get_trillion_club_service().get_group_guarded()
+        except Exception as exc:  # noqa: BLE001 — a section degrades, Home never fails
+            logger.warning(
+                "Trillion club section unavailable: %s: %s", type(exc).__name__, exc,
+                exc_info=True,
+            )
+            return TrillionClubGroupResponse()
 
     # ── Your Watchlist (user-scoped) ──────────────────────────────────
 
@@ -1592,7 +1626,9 @@ class HomeDashboardService:
         sb = get_supabase()
         res = (
             sb.table(_THEMES_TABLE)
-            .select("slug, title, image_url, accent_hex, tickers, sort_order")
+            # `*`, not a column list: `tickers_as_of` (migration 174) is read when present,
+            # and a database that predates 174 still answers (same reason as the detail read).
+            .select("*")
             .eq("is_active", True)
             .order("sort_order")
             .limit(_THEMES_MAX_ROWS)
@@ -1631,6 +1667,12 @@ class HomeDashboardService:
             row_tickers.append(tickers)
             union.update(_canonical_symbol(t) for t in tickers)
 
+        # Review info (monthly rotation) and insights read concurrently with the quotes;
+        # both degrade to "nothing to show", never to a failed dashboard.
+        slugs = [str(r.get("slug") or "").strip() for r in rows]
+        review_task = asyncio.create_task(_latest_theme_review())
+        insights_task = asyncio.create_task(_latest_theme_insights(slugs))
+
         change_map: Dict[str, float] = {}
         if union:
             # Fetch by the canonical (dash) form — FMP's /quote resolves BRK-B.
@@ -1647,6 +1689,8 @@ class HomeDashboardService:
                 if pct is not None:  # only finite values (NaN/inf already dropped)
                     change_map[key] = pct
 
+        review = await review_task
+        insights = await insights_task
         themes: List[TrendingThemeResponse] = []
         for row, tickers in zip(rows, row_tickers):
             slug = str(row.get("slug") or "").strip()
@@ -1665,6 +1709,10 @@ class HomeDashboardService:
                     accent_hex=accent_hex,
                     ticker_count=len(tickers),
                     change_percent=_theme_change(tickers, change_map),
+                    updated_on=_iso_date(row.get("tickers_as_of")),
+                    change_count=_review_change_count(review, slug, row.get("tickers_as_of")),
+                    **_card_insight_fields(insights.get(slug), tickers,
+                                           now=_theme_insights_now()),
                 )
             )
         return ThemesGroupResponse(themes=themes)
@@ -1705,12 +1753,18 @@ class HomeDashboardService:
         fut: asyncio.Future = loop.create_future()
         self._theme_detail_inflight[key] = fut
         try:
-            result = await self._build_theme_detail(key)
+            flags: Dict[str, bool] = {}
+            result = await self._build_theme_detail(key, flags=flags)
             # Cache a FOUND theme (even with empty constituents on a transient quote
             # failure). None (slug not found) is NOT cached, so a just-created theme
-            # surfaces on the next request.
+            # surfaces on the next request. Built on a FAILED review read, it is kept for
+            # a minute only (stamped as if nearly expired): read_model retries after 60 s,
+            # and the page must not hide "What changed" for ten.
             if result is not None:
-                self._theme_detail_cache[key] = (time.time(), result)
+                stamp = time.time()
+                if flags.get("degraded"):
+                    stamp -= max(0, _THEME_DETAIL_CACHE_TTL_SECONDS - _THEME_DETAIL_DEGRADED_TTL_SECONDS)
+                self._theme_detail_cache[key] = (stamp, result)
             if not fut.done():
                 fut.set_result(result)
             return result
@@ -1721,14 +1775,52 @@ class HomeDashboardService:
         finally:
             self._theme_detail_inflight.pop(key, None)
 
-    async def _build_theme_detail(self, slug: str) -> Optional[ThemeDetailResponse]:
-        """Read the theme row by slug, resolve its tickers to live constituents."""
+    async def _build_theme_detail(
+        self, slug: str, *, flags: Optional[Dict[str, bool]] = None
+    ) -> Optional[ThemeDetailResponse]:
+        """Read the theme row by slug, resolve its tickers to live constituents.
+
+        `flags["degraded"]` is set when a side read (the monthly review) failed, so the
+        caller can cache the result briefly."""
         row = await asyncio.to_thread(self._read_theme_row, slug)
         if row is None:
             return None
         raw = row.get("tickers") or []
         tickers = [str(t).strip().upper() for t in raw if str(t or "").strip()]
+        review_task = asyncio.create_task(_latest_theme_review())
+        insights_task = asyncio.create_task(_latest_theme_insights([slug]))
+        news_task = asyncio.create_task(_theme_news(slug, tickers))
         constituents = await self._build_constituents(tickers)
+
+        # Monthly review: each stock's role + "New", and what changed. All degrade to
+        # nothing (never to an error) — the list itself is what the screen is for.
+        latest = await review_task
+        if flags is not None and getattr(latest, "degraded", False):
+            flags["degraded"] = True
+        review = latest.themes.get(slug)
+        changes: List[ThemeChangeResponse] = []
+        if review is not None:
+            # Joined on the CANONICAL symbol, like the list itself: the review keeps the
+            # stored form ("BRK.B") while the constituents are "BRK-B", and a raw lookup
+            # lost the class share's tag, its "New" and its change-row name.
+            roles = {_canonical_symbol(t): r for t, r in review.roles.items()}
+            new = {_canonical_symbol(t) for t in review.new}
+            constituents = [
+                c.model_copy(update={"role": roles.get(c.ticker), "is_new": c.ticker in new})
+                for c in constituents
+            ]
+            names = {c.ticker: c.company_name for c in constituents}
+            # Removed stocks are no longer in the list, so their names are looked up; so is
+            # any added one the list does not carry (a Studio edit after the review).
+            unnamed = [ch.ticker for ch in review.changes
+                       if not names.get(_canonical_symbol(ch.ticker))]
+            if unnamed:
+                names.update(await self._company_names(unnamed))
+            changes = [ThemeChangeResponse(ticker=_canonical_symbol(ch.ticker),
+                                           company_name=names.get(_canonical_symbol(ch.ticker), ""),
+                                           action=ch.action, reason=ch.reason)
+                       for ch in review.changes if _canonical_symbol(ch.ticker)]
+        insight_fields = _detail_insight_fields((await insights_task).get(slug), tickers)
         return ThemeDetailResponse(
             slug=str(row.get("slug") or slug),
             title=str(row.get("title") or "").strip(),
@@ -1736,7 +1828,25 @@ class HomeDashboardService:
             image_url=(row.get("image_url") or None),
             accent_hex=(str(row.get("accent_hex") or "").strip()) or "22D3EE",
             constituents=constituents,
+            # Only when THIS theme is in the latest review — same rule as the card's
+            # change count. Otherwise the app would print "Reviewed <date> · No changes"
+            # for a review it could not read, or one this theme was left out of.
+            updated_on=_iso_date(row.get("tickers_as_of")) if review is not None else None,
+            changes=changes,
+            news=await news_task,
+            **insight_fields,
         )
+
+    async def _company_names(self, tickers: List[str]) -> Dict[str, str]:
+        """Names for stocks no longer in the list (a removal's row). Best effort."""
+        try:
+            quotes = await price_source(self).get_quotes_list(
+                sorted({_canonical_symbol(t) for t in tickers if _canonical_symbol(t)}))
+        except Exception as exc:  # noqa: BLE001 — a missing name shows the ticker instead
+            logger.warning("Theme change names unavailable: %s: %s", type(exc).__name__, exc)
+            return {}
+        return {_canonical_symbol(q.get("symbol")): str(q.get("name") or "").strip()
+                for q in quotes if isinstance(q, dict) and _canonical_symbol(q.get("symbol"))}
 
     async def _build_constituents(
         self, tickers: List[str]
@@ -1960,6 +2070,232 @@ class HomeDashboardService:
 
 
 # ── Singleton ─────────────────────────────────────────────────────────
+
+# ── Emerging Frontiers: monthly review + daily insights (migration 174) ──────────────
+# Module-level so the rotation job can refresh the caches after it publishes. Every helper
+# degrades to "nothing to show": the theme cards and detail must render exactly as they did
+# before the rotation existed whenever its tables are missing or unreadable.
+
+_THEME_NEWS_LIMIT = 8
+_THEME_NEWS_TICKERS = 12
+
+
+async def _latest_theme_review():
+    from app.services.theme_rotation.read_model import LatestReview, latest_review
+
+    try:
+        return await latest_review()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Theme review unavailable: %s: %s", type(exc).__name__, exc)
+        return LatestReview(run_month=None)
+
+
+async def _latest_theme_insights(slugs: List[str]) -> Dict[str, Dict[str, Any]]:
+    try:
+        from app.services.theme_insights_service import get_latest_insights
+
+        return await get_latest_insights([s for s in slugs if s]) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Theme insights unavailable: %s: %s", type(exc).__name__, exc)
+        return {}
+
+
+async def _theme_news(slug: str, tickers: List[str]) -> List[ThemeNewsItemResponse]:
+    """Recent news across the theme's stocks (the index-news path: one multi-symbol FMP
+    call, cached 6 h under a theme key)."""
+    if not tickers:
+        return []
+    try:
+        from app.services.news_cache_service import get_news_cache_service
+
+        payload = await get_news_cache_service().get_index_news(
+            f"THEME-{slug}", limit=_THEME_NEWS_LIMIT,
+            news_tickers=",".join(tickers[:_THEME_NEWS_TICKERS]),
+        )
+    except Exception as exc:  # noqa: BLE001 — news is an extra; the screen stands without it
+        logger.warning("Theme news unavailable for %s: %s: %s", slug, type(exc).__name__, exc)
+        return []
+    from app.services.theme_insights_service import is_solicitation
+
+    items: List[ThemeNewsItemResponse] = []
+    for a in (payload or {}).get("articles") or []:
+        title = str(a.get("headline") or "").strip()
+        # Law-firm "shareholder alert" releases are solicitations, not news.
+        if not title or is_solicitation(title):
+            continue
+        related = a.get("related_tickers") or []
+        items.append(ThemeNewsItemResponse(
+            title=title,
+            source=str(a.get("source_name") or "").strip(),
+            url=(a.get("article_url") or None),
+            published_at=(str(a.get("published_at")) if a.get("published_at") else None),
+            ticker=(str(related[0]).upper() if related else None),
+        ))
+    return items[:_THEME_NEWS_LIMIT]
+
+
+def _iso_date(value: Any) -> Optional[str]:
+    """Strict YYYY-MM-DD (iOS parses exactly that). `strptime` alone accepted "2026-1-1"."""
+    if not value:
+        return None
+    text = str(value)[:10]
+    if len(text) != 10 or text[4] != "-" or text[7] != "-":
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """A nested JSONB value that must be an object — anything else (a hand edit that
+    stored a list) reads as empty, never as an AttributeError that hides every card."""
+    return value if isinstance(value, dict) else {}
+
+
+def _review_change_count(review: Any, slug: str, tickers_as_of: Any) -> Optional[int]:
+    """Changes in the latest review — only when this theme WAS reviewed in it."""
+    theme = getattr(review, "themes", {}).get(slug) if review is not None else None
+    if theme is None or _iso_date(tickers_as_of) is None:
+        return None
+    return int(theme.change_count)
+
+
+def _period_fraction(period: Any, key: str = "theme_return_pct") -> Optional[float]:
+    """A stored PERCENT → the API's FRACTION, only when the period's coverage passed.
+
+    `theme_insights_service` writes `status` ok | low_coverage | insufficient_history per
+    period; anything but "ok" is null on the wire (never a number built on too few stocks).
+    """
+    if not isinstance(period, dict):
+        return None
+    if key == "theme_return_pct" and period.get("status") != "ok":
+        return None
+    pct = _finite_float(period.get(key))
+    return pct / 100.0 if pct is not None else None
+
+
+def _finite_series(values: Any) -> List[float]:
+    """Finite points only; a series with ANY gap is dropped whole rather than drawn with
+    silently shifted points."""
+    if not isinstance(values, list) or len(values) < 2:
+        return []
+    out = [_finite_float(v) for v in values]
+    return [v for v in out if v is not None] if all(v is not None for v in out) else []
+
+
+def _theme_insights_now() -> datetime:
+    """The clock the card-trend age check reads (a seam for tests)."""
+    return datetime.now(timezone.utc)
+
+
+def _insight_basket_matches(row: Dict[str, Any], current: Optional[List[str]]) -> bool:
+    """True when the insights row was computed on THIS list of stocks.
+
+    On a rotation day the insights run (18:15 ET) goes BEFORE the rotation (18:30), and
+    a catch-up or a Studio edit can change the list any time: until the next run, the row
+    describes a basket that no longer exists while the app calls it "Current stocks".
+    `current=None` skips the check."""
+    if current is None:
+        return True
+    stored = _as_dict(row.get("performance")).get("constituents")
+    if not isinstance(stored, list):
+        return False
+    have = {_canonical_symbol(c.get("ticker")) for c in stored if isinstance(c, dict)} - {""}
+    want = {_canonical_symbol(t) for t in current} - {""}
+    return bool(want) and have == want
+
+
+def _card_trend_is_current(row: Dict[str, Any], now: datetime) -> bool:
+    """The card's 1-month line carries no date, so it is drawn only from a row at most
+    a few sessions old — a stalled job must not leave a month-old trend on every card."""
+    as_of = _iso_date(_as_dict(row.get("performance")).get("as_of") or row.get("as_of"))
+    if as_of is None:
+        return False
+    cutoff = last_completed_close(now).astimezone(_ET_ZONE).date()
+    for _ in range(_CARD_TREND_MAX_SESSIONS_OLD):
+        cutoff = previous_trading_day(cutoff)
+    return datetime.strptime(as_of, "%Y-%m-%d").date() >= cutoff
+
+
+def _card_insight_fields(row: Optional[Dict[str, Any]],
+                         current: Optional[List[str]] = None, *,
+                         now: Optional[datetime] = None) -> Dict[str, Any]:
+    """`return_1m` / `spark_1m` for a card from the latest theme_daily_insights row —
+    only when it was computed on the current list (`current`) and, given `now`, is recent."""
+    if not row or not _insight_basket_matches(row, current):
+        return {}
+    if now is not None and not _card_trend_is_current(row, now):
+        return {}
+    periods = _as_dict(_as_dict(row.get("performance")).get("periods"))
+    one_month = _as_dict(_as_dict(row.get("series")).get("one_month"))
+    spark = _finite_series(one_month.get("theme"))
+    return {"return_1m": _period_fraction(periods.get("1M")), "spark_1m": spark or None}
+
+
+def _detail_insight_fields(row: Optional[Dict[str, Any]],
+                           current: Optional[List[str]] = None) -> Dict[str, Any]:
+    """`performance` + `insight` for the detail screen from the latest insights row.
+
+    Built on a different list than `current` (see `_insight_basket_matches`), the numbers
+    are dropped — the card says "Current stocks" — and the dated summary stays, with its
+    driver chips limited to stocks still in the list."""
+    if not row:
+        return {}
+    out: Dict[str, Any] = {}
+    same_basket = _insight_basket_matches(row, current)
+    members = {_canonical_symbol(t) for t in current} if current is not None else None
+    perf = _as_dict(row.get("performance"))
+    stored = _as_dict(perf.get("periods"))
+    periods = [ThemePeriodReturnResponse(
+                   period=label,
+                   theme=_period_fraction(stored.get(label)),
+                   benchmark=_period_fraction(stored.get(label), "benchmark_return_pct"))
+               for label in ("1M", "YTD", "1Y")]
+    one_year = _as_dict(_as_dict(row.get("series")).get("one_year"))
+    theme_series = _finite_series(one_year.get("theme"))
+    bench_series = _finite_series(one_year.get("benchmark")) if theme_series else []
+    if same_basket and any(p.theme is not None for p in periods):
+        out["performance"] = ThemePerformanceResponse(
+            as_of=_iso_date(perf.get("as_of") or row.get("as_of")), periods=periods,
+            theme_series=theme_series,
+            benchmark_series=bench_series if len(bench_series) == len(theme_series) else [])
+    summary = str(row.get("summary_text") or "").strip()
+    if summary:
+        drivers = row.get("drivers") if isinstance(row.get("drivers"), list) else []
+        out["insight"] = ThemeInsightResponse(
+            as_of=_iso_date(row.get("summary_as_of")),
+            headline=str(row.get("summary_headline") or "").strip(),
+            summary=summary,
+            tickers=[str(d.get("ticker")).strip().upper() for d in drivers
+                     if isinstance(d, dict) and str(d.get("ticker") or "").strip()
+                     and (members is None or _canonical_symbol(d.get("ticker")) in members)],
+        )
+    return out
+
+
+async def refresh_theme_caches() -> None:
+    """After a rotation publishes: rebuild the theme cards and SWAP them in (never clear
+    first — a cold build can come back empty and Home would hide the section), then drop
+    the lazily rebuilt detail pages. Other instances catch up within one TTL (10 min)."""
+    from app.services.theme_rotation import read_model
+
+    read_model.invalidate()
+    try:
+        from app.services.theme_insights_service import invalidate_cache
+
+        invalidate_cache()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Theme insights cache not invalidated: %s: %s", type(exc).__name__, exc)
+    service = get_home_dashboard_service()
+    try:
+        fresh = await service._build_themes()
+        if fresh.themes:
+            HomeDashboardService._themes_cache[_THEMES_CACHE_KEY] = (time.time(), fresh)
+    except Exception as exc:  # noqa: BLE001 — the old cache stays; it expires in 10 min
+        logger.warning("Theme cards not refreshed after rotation: %s: %s", type(exc).__name__, exc)
+    HomeDashboardService._theme_detail_cache.clear()
+
 
 _service: Optional[HomeDashboardService] = None
 

@@ -47,7 +47,8 @@ enum NotificationInboxSection {
     static func rows(
         viewModel: NotificationInboxViewModel,
         items: [NotificationEventDTO],
-        selection: Binding<CollapsedGroup?>
+        selection: Binding<CollapsedGroup?>,
+        openDirectly: Binding<AlertDestination?>
     ) -> some View {
         let groups = collapse(items)
         // Paging is decided from the FLAT list, never from the collapsed groups.
@@ -92,7 +93,14 @@ enum NotificationInboxSection {
                     // Opened even for an unroutable payload. The old code stayed put on
                     // `.inbox` because "the row itself is already the content"; that stopped
                     // being true the moment the row started truncating.
-                    selection.wrappedValue = group
+                    //
+                    // EXCEPT a report: it opens the report itself, by request — see
+                    // `AlertDestination.directDestination`, which the push tap reads too.
+                    if let direct = AlertDestination.directDestination(for: item) {
+                        openDirectly.wrappedValue = direct
+                    } else {
+                        selection.wrappedValue = group
+                    }
                 },
                 trailing: {
                     if group.count > 1 {
@@ -158,22 +166,33 @@ enum NotificationInboxSection {
     }
 
     /// `nil` = never collapse this row.
+    ///
+    /// ⚠️ A REPORT is never collapsed. Each one is a separate artifact (its own persona, its own
+    /// id), and a report row opens its report DIRECTLY — so a "×2" row could only ever open one
+    /// of the two and would hide the other. One row per report (developer's choice, 2026-09-23).
     private static func groupKey(_ item: NotificationEventDTO) -> String? {
+        guard !AlertDestination.isReport(item) else { return nil }
         let ticker = (item.route["ticker"] ?? "").uppercased()
         guard !ticker.isEmpty else { return nil }
         return "\(item.kind)|\(ticker)"
     }
 
-    /// Relative time, plus an explanation when the phone never buzzed.
+    /// Relative time, plus a note ONLY when the user's own quiet hours held the buzz back.
     ///
-    /// The delivery note is only shown when delivery did NOT happen — saying
-    /// "delivered" on every other row would be permanent chrome carrying no information.
+    /// ⚠️ `no_device` ("not sent to this device") and `failed` ("couldn't be delivered") used to
+    /// be shown here too, and were removed on request (2026-09-23). The developer asked what they
+    /// meant; neither told a user anything they could act on, and the row they sat on IS the
+    /// delivery — the user is reading the alert. "This device" was also wrong: `no_device` means
+    /// the account had NO registered phone at send time. In production the recent `failed` rows
+    /// were all report alerts generated on a laptop backend with no APNs keys ("APNs is not
+    /// configured on this server"), i.e. dev noise shown to the account that ran them.
+    ///
+    /// The state still lives in `notification_events.push_state` / `last_error` for support.
+    /// Quiet hours stays: it is a setting the user chose, and it explains a late buzz.
     private static func footnote(for item: NotificationEventDTO) -> String {
         let note: String?
         switch item.deliveryState {
         case "deferred":  note = "held during quiet hours"
-        case "no_device": note = "not sent to this device"
-        case "failed":    note = "couldn't be delivered"
         default:          note = nil
         }
         guard let note else { return item.relativeTime }
@@ -199,13 +218,4 @@ enum NotificationInboxSection {
     static func errorNotice(_ message: String, onRetry: @escaping () -> Void) -> some View {
         InlineRetryNotice(message: message, onRetry: onRetry)
     }
-}
-
-// MARK: - Route presentation
-
-/// `NotificationRoute` is an enum, and `fullScreenCover(item:)` needs `Identifiable`.
-/// Boxing it here keeps the route type itself free of a UI protocol.
-struct NotificationRouteBox: Identifiable {
-    let route: NotificationRoute
-    var id: String { String(describing: route) }
 }

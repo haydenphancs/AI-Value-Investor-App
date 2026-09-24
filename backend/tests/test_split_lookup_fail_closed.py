@@ -107,7 +107,8 @@ async def test_the_finding_replayed_first_leg_fails_second_succeeds(monkeypatch)
 
 
 @pytest.mark.parametrize("path, needle", [
-    ("app/services/whale_service.py", r"if sl is None or isinstance\(sl, BaseException\):"),
+    # the whale request path's split block (extracted 2026-09-24)
+    ("app/services/thirteen_f_splits.py", r"if sl is None or isinstance\(sl, BaseException\):"),
     ("scripts/hydrate_whales.py", r"if sl is None or isinstance\(sl, BaseException\):"),
     ("app/services/holders_service.py", r"split_lookup_failed = stock_splits is None"),
 ])
@@ -119,8 +120,11 @@ def test_every_caller_treats_none_as_a_failed_lookup(path, needle):
 
 def test_the_whale_loop_arms_the_backstop_on_none():
     """Brace-bound to the loop: `unclassified_tickers.add(t)` must sit inside the
-    `sl is None` arm, not merely somewhere in the function."""
-    src = inspect.getsource(WhaleService._process_13f_path)
+    `sl is None` arm, not merely somewhere in the function. The loop is the shared split
+    block the whale request path calls (`thirteen_f_splits`, extracted 2026-09-24)."""
+    from app.services.thirteen_f_splits import resolve_13f_split_adjustments
+
+    src = inspect.getsource(resolve_13f_split_adjustments)
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
     i = code.index("if sl is None or isinstance(sl, BaseException):")
     j = code.index("continue", i)
@@ -208,8 +212,17 @@ def test_the_hydrator_loop_arms_the_backstop_on_none():
     assert "lookup_failed_tickers.add(t)" in code[i:j], "the hydrator does not mark the snapshot degraded"
 
 
+def _whale_path_and_split_block():
+    """The whale writer is now two functions: `_process_13f_path` owns the `raw_hash`
+    arm, the shared split block (`thirteen_f_splits`) owns the batch fail-closed arm."""
+    from app.services.thirteen_f_splits import resolve_13f_split_adjustments
+
+    return (_arm_block(WhaleService._process_13f_path) + "\n"
+            + _arm_block(resolve_13f_split_adjustments))
+
+
 @pytest.mark.parametrize("fn_src", [
-    lambda: _arm_block(WhaleService._process_13f_path),
+    _whale_path_and_split_block,
     lambda: (Path(__file__).resolve().parents[1] / "scripts/hydrate_whales.py").read_text(),
 ])
 def test_both_writers_drop_the_hash_when_a_lookup_failed(fn_src):

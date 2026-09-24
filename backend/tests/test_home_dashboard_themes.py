@@ -36,10 +36,36 @@ from app.services.home_dashboard_service import (
 from _price_fakes import PriceFromFMPFake
 
 
+@pytest.fixture(autouse=True)
+def _no_live_side_reads(monkeypatch):
+    """The card and detail builders also read the monthly review, the daily insights and
+    the theme news (migration 174). Those have their own tests (test_theme_rotation_contract.py);
+    here they are stubbed at the module binding the builders call, or every build reached
+    Supabase / FMP and the hermetic guard failed the run (8 blocked calls)."""
+    import app.services.home_dashboard_service as hds
+    from app.services.theme_rotation.read_model import LatestReview
+
+    async def _review():
+        return LatestReview(run_month=None)
+
+    async def _insights(slugs):
+        return {}
+
+    async def _news(slug, tickers):
+        return []
+
+    monkeypatch.setattr(hds, "_latest_theme_review", _review)
+    monkeypatch.setattr(hds, "_latest_theme_insights", _insights)
+    monkeypatch.setattr(hds, "_theme_news", _news)
+
+
 # ── 1. Schema parity ──────────────────────────────────────────────────
 
 # The exact snake_case keys the iOS `TrendingThemeDTO.CodingKeys` expects.
-_THEME_KEYS = {"slug", "title", "image_url", "accent_hex", "ticker_count", "change_percent"}
+# 174 added the monthly-review + insights keys; the full Swift↔Pydantic parity (including
+# the nested detail types) is `test_theme_rotation_contract.py`.
+_THEME_KEYS = {"slug", "title", "image_url", "accent_hex", "ticker_count", "change_percent",
+               "updated_on", "change_count", "return_1m", "spark_1m"}
 
 
 def test_trending_theme_item_keys_match_ios_dto():
@@ -265,8 +291,10 @@ async def test_build_themes_non_finite_quote_is_dropped():
 
 # ── 4. Theme DETAIL (drill-down) — schema parity ──────────────────────
 
-_DETAIL_KEYS = {"slug", "title", "subtitle", "image_url", "accent_hex", "constituents"}
-_CONSTITUENT_KEYS = {"ticker", "company_name", "price", "change_percent", "market_cap"}
+_DETAIL_KEYS = {"slug", "title", "subtitle", "image_url", "accent_hex", "constituents",
+                "updated_on", "changes", "performance", "insight", "news"}
+_CONSTITUENT_KEYS = {"ticker", "company_name", "price", "change_percent", "market_cap",
+                     "role", "is_new"}
 
 
 def test_theme_detail_keys_match_ios_dto():

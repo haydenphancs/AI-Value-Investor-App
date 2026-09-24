@@ -93,34 +93,16 @@ final class AppState {
     /// them ask without threading a binding through four header organisms.
     var isAIChatPresented: Bool = false
 
-    /// Ticker a notification tap wants opened, consumed by the Home tab.
+    /// A notification the user TAPPED from outside the app, consumed by `ContentView`, which
+    /// presents its DETAIL screen.
     ///
-    /// A tapped push used to land wherever the user happened to be — the alert said
-    /// "NVDA moved 8%" and then showed you the Wiser tab. Routed through AppState
-    /// rather than a new navigation stack so it reuses the ticker presentation Home
-    /// already owns. Cleared by whoever consumes it, so one tap opens one screen.
-    var pendingPushTicker: String?
-
-    /// Where a notification tap wants to land, resolved from the payload.
-    ///
-    /// Supersedes `pendingPushTicker`, which could only ever express "open a ticker" —
-    /// and did so with a HARDCODED `.stock` type, so a crypto or ETF alert opened the
-    /// wrong detail screen. `NotificationRoute` carries the asset type from the payload
-    /// and can also express a report or the inbox.
-    ///
-    /// `pendingPushTicker` is kept alongside it, set in lockstep, so any existing reader
-    /// keeps working through the transition.
-    var pendingPushRoute: NotificationRoute?
-
-    /// Which Tracking segment to open on arrival, consumed by `TrackingContentViewWithBinding`.
-    ///
-    /// The Tracking sub-tab lives in `TrackingViewModel`, which is a `@StateObject` private to
-    /// that screen and therefore unreachable from a push handler. This parks the intent the
-    /// same way `pendingPushRoute` does, and for the same reason: a tap that resolves to no
-    /// detail screen must still land on the notification list rather than nowhere.
+    /// This used to be `pendingPushRoute: NotificationRoute` — a destination — and a tap
+    /// opened the ticker or report screen directly, so the alert's own words were gone the
+    /// moment it was tapped. It now carries the notification itself; the destinations are
+    /// offered on the detail screen, the same one Tracking → Alerts opens for its rows.
     ///
     /// Device-global with no user id, so it is cleared in `discardDataForEndedSession()`.
-    var pendingTrackingTab: TrackingTab?
+    var pendingPushNotification: PushedNotification?
 
     /// Ticker the Research tab should open pre-filled, consumed by `ContentView`.
     ///
@@ -129,7 +111,7 @@ final class AppState {
     /// `ResearchViewModel` — it is a `@StateObject` private to `ResearchViewWithBinding`.
     /// This used to travel as an injected `onNavigateToResearch` closure, which exactly ONE
     /// call site supplied; everywhere else the button silently fell back to opening a chat.
-    /// Parking the intent here is the same shape as `pendingTrackingTab` above and works from
+    /// Parking the intent here is the same shape as `pendingPushNotification` above and works from
     /// every entry point without threading an argument through the whole view tree.
     ///
     /// Carries the ticker only — it PRE-FILLS the target and never starts a generation, so a
@@ -1183,9 +1165,7 @@ final class AppState {
         // its own, and the ended session's notification rows would otherwise sit in memory for
         // the next account to open the tab and read.
         NotificationInboxViewModel.shared.reset()
-        pendingPushRoute = nil
-        pendingPushTicker = nil
-        pendingTrackingTab = nil
+        pendingPushNotification = nil
         pendingResearchTicker = nil
         // `presentationResetToken` is deliberately NOT reset here — see its declaration.
         PortfolioStore.shared.reset()

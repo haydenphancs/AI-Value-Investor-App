@@ -356,6 +356,34 @@ CURATION: dict[str, TableDoc] = {
                 "— behind the 'Institutions' flow chart.",
         key=("ticker", "year", "quarter", "buy_volume", "sell_volume", "net_flow"),
         note="Measured in SHARES. The UI label is 'Institutions'; the code says hedge_fund_*."),
+    # ------------------------------------------ trillion club (175) — Home section
+    "public.trillion_club_companies": T("whales",
+        purpose="Registry of the Trillion-Dollar Club Bets Home section: which companies worth "
+                "$1T or more get a card, how each is sized, and whether its 13F is ingested.",
+        key=("slug", "display_name", "ciks", "card_kind", "use_13f", "cap_source",
+             "membership_mode", "is_member", "last_market_cap", "published"),
+        note="Migration 175. Seeded from data/trillion_club_seed.json by "
+             "scripts/seed_trillion_club.py (writes to PRODUCTION; owner-run). Identity and "
+             "editorial columns are hand-kept; is_member / streaks / last close are written by "
+             "the daily job. A manual cap (Aramco, Samsung) must be force_in/force_out (CHECK). "
+             "use_13f is an owner opt-in, never implied by membership. service_role only."),
+    "public.trillion_club_stakes": T("whales",
+        purpose="Hand-kept stakes outside the 13F (private, non-US listed, off-13F US, "
+                "commitments, notes on 13F rows), each with a primary source and dates.",
+        key=("company_slug", "kind", "investee_name", "ownership_pct", "disclosed_value_usd",
+             "value_basis", "as_of", "source_url", "source_confidence", "material", "published"),
+        note="Migration 175. FK to trillion_club_companies.slug (ON DELETE/UPDATE CASCADE). "
+             "UNIQUE (company_slug, investee_name, kind) is the seed's upsert key. A secondary "
+             "(news-only) row can never be published (CHECK); only material rows reach the "
+             "Home card."),
+    "public.trillion_club_filings": T("whales",
+        purpose="One built 13F snapshot per (CIK, quarter) for the club's 13F filers: holdings "
+                "and quarter-over-quarter share changes.",
+        key=("cik", "period", "period_end", "filed_on", "amended_on", "accessions",
+             "total_value", "holdings", "changes", "raw_hash", "build_status"),
+        note="Migration 175. period_end is the 'holdings as of' date, never the filing date. "
+             "accessions[] because FMP folds a 13F-HR/A into the original quarter. FMP-licensed "
+             "data: served to signed-in users only, never written from a laptop."),
 
     # --------------------------------------------------------------- portfolio
     "public.portfolios": T("portfolio",
@@ -406,6 +434,34 @@ CURATION: dict[str, TableDoc] = {
         note="Apple/Spotify have no upload API: they poll GET /podcast/feed.xml, which is rendered "
              "from this table. guid never changes; mp3_path is immutable (Spotify re-fetches only "
              "on a path change)."),
+    # ------------------------------------------------------------ marketing (173 + 176)
+    # Purpose text comes from each table's COMMENT ON TABLE — migration 173, and 176 for
+    # marketing_scripts, whose comment it rewrites (precedence 1);
+    # `purpose=` is still given so the card is not blank if the comment is ever lost.
+    "public.marketing_scripts": T("marketing",
+        purpose="One row per marketing run: the day's frozen selection and the class-A "
+                "writer's validated package, plus the violations of rounds that failed.",
+        key=("run_id", "run_date", "status", "source_ref", "template_id", "generation_id",
+             "lease_until", "generations", "content_rejections", "reject_reason",
+             "retry_not_before", "output"),
+        note="Migrations 173 + 176 (run_date, content_rejections, reject_reason). Written ONLY by the web side: app/services/marketing/script_service.py "
+             "drives select → generate → accept behind the kick-and-poll internal route (the "
+             "writer itself is app/services/marketing/writer_service.py), through the "
+             "get/insert/update_script helpers in app/services/marketing/run_service.py. The "
+             "worker never writes it. run_id PK = first-write-wins selection. A generation holds the row "
+             "through lease_until + a fresh generation_id (one conditional UPDATE) and every "
+             "terminal write is fenced on that generation_id. `accepted` is terminal and "
+             "`output` immutable. Two caps: 4 content rejections (reject_reason content) and 4 "
+             "generations ending without a verdict (writer_unavailable). `run_date` is written "
+             "in the selecting INSERT and is what selection's `recent` window reads. Writer "
+             "output never goes to the public bucket or to marketing_runs.metadata."),
+    "public.marketing_link_hits": T("marketing",
+        purpose="Per-campaign daily tap counts for the smart link GET /go/{campaign}.",
+        key=("campaign", "day", "hits"),
+        note="Migration 173. Batched in-process by app/services/marketing/smart_link.py and "
+             "flushed every 60 s through the increment_marketing_link_hits RPC (atomic "
+             "upsert-increment, SECURITY INVOKER, service_role only). `day` is the ET calendar "
+             "day; `campaign` is CHECKed against the same pattern the route enforces."),
 
     # ------------------------------------------------------------ market-cache
     "public.stock_fundamentals_cache": T("market-cache",
@@ -594,9 +650,45 @@ CURATION: dict[str, TableDoc] = {
     "public.market_insights": T("news", key=("headline", "bullet_points", "sentiment")),
     "public.daily_briefings": T("news", key=("type", "title", "date", "is_active", "priority")),
     "public.trending_themes": T("news",
+        # 174 adds tickers_as_of / rotation_enabled / pinned_tickers / blocked_tickers; list
+        # them here once 174 is applied and the snapshot is re-dumped (the column-drift
+        # guard only knows the snapshot).
         key=("slug", "category", "title", "tickers", "accent_hex", "is_active", "sort_order"),
         note="`accent_hex` is server-supplied colour — clamp it through "
-             "Color(themedHex:role:fallback:) on iOS, never trust it raw."),
+             "Color(themedHex:role:fallback:) on iOS, never trust it raw. Since migration "
+             "174 `tickers` is rewritten monthly by services/theme_rotation (ONLY through "
+             "publish_theme_rotation, which refuses if a list was edited after the run read "
+             "it); pinned/blocked are the editor overrides; service_role only."),
+    # ------------------------------------------------------ theme rotation (174)
+    "public.theme_rotation_runs": T("news",
+        purpose="One row per (month, mode) of the monthly Emerging Frontiers rotation — the "
+                "month-level done record.",
+        key=("run_month", "mode", "status", "attempts", "summary", "error"),
+        note="Migration 174. services/theme_rotation/service.py. The concurrency claim is "
+             "notification_job_state (theme_rotation_monthly); this row stops a second run "
+             "on day 2-7 of the catch-up window. Preview rows are never unique or published."),
+    "public.theme_rotation_decisions": T("news",
+        purpose="Every (run, theme, ticker) decision of the rotation with reason and score.",
+        key=("run_id", "slug", "ticker", "action", "reason_code", "reason_text", "score",
+             "strike"),
+        note="Migration 174. History (tenure, strikes, returning stocks) is read ONLY from "
+             "published live runs, so a dry run can never cause a live removal. reason_text "
+             "is a fixed template shown in the app's 'What changed'."),
+    "public.theme_relevance_cache": T("news",
+        purpose="Tier-2 cache of the AI verdict on whether a company's own description is "
+                "on-theme.",
+        key=("ticker", "slug", "prompt_version", "definitions_version", "description_hash",
+             "verdict"),
+        note="Migration 174. services/theme_rotation/llm_gate.py. A verdict can only BLOCK; "
+             "keyed by description hash (not month) so it cannot flip at random; failures "
+             "are never stored; rationale is audit-only."),
+    "public.theme_daily_insights": T("news",
+        purpose="Per theme per US trading day: performance vs an S&P 500 ETF and the dated "
+                "'why it's moving' summary.",
+        key=("slug", "as_of", "performance", "series", "summary_text", "summary_as_of"),
+        note="Migration 174. services/theme_insights_service.py, after each close; read by "
+             "the Home theme endpoints. A carried-forward summary keeps its ORIGINAL "
+             "summary_as_of."),
 
     # --------------------------------------------------------------------- rag
     "public.book_chunks": T("rag",

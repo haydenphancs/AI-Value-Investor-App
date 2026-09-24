@@ -122,6 +122,15 @@ WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 # on the same card stay free on every tier.
 CONGRESS_HOLDERS_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 
+# ── Home: Trillion-Dollar Club Bets — the detail's depth is paid ─────────────────────
+#
+# Owner decision D3 (2026-09-24): cards are free, depth is Pro. FREE keeps every card, a
+# company's top 3 holdings, the latest quarter's CHANGED rows and every hand-kept stake.
+# PAID adds the full holdings list and the earlier quarters — the same line the whale
+# profile draws, and deliberately the same frozenset so the two 13F surfaces cannot drift.
+# Applied by `trillion_club_service.redact_trillion_club_detail`, per request.
+TRILLION_CLUB_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
+
 # ── Wiser (Learn): read free, listen with Pro — EXCEPT the Investor Journey ──────────
 #
 # TEXT is free on every tier — all 27 Journey lessons, 13 Money Moves articles and 10
@@ -250,6 +259,20 @@ def congress_holders_unlocked(tier: Optional[str]) -> bool:
 def required_tier_for_congress_holders(tier: Optional[str]) -> Optional[str]:
     """Pure: the plan that unlocks the Congress segment, or None if already unlocked."""
     return None if congress_holders_unlocked(tier) else TIER_PRO
+
+
+def trillion_club_detail_unlocked(tier: Optional[str]) -> bool:
+    """Pure: may this tier see a Trillion-Dollar Club company's full holdings and history?
+
+    False for Free, for guests (identity dict hardcodes ``"free"``), and for anything
+    unrecognised — the unknown case must fall CLOSED onto the paid surface.
+    """
+    return normalize_tier(tier) in TRILLION_CLUB_DETAIL_UNLOCKED_TIERS
+
+
+def required_tier_for_trillion_club_detail(tier: Optional[str]) -> Optional[str]:
+    """Pure: the plan that unlocks the full detail, or None if already unlocked (a floor)."""
+    return None if trillion_club_detail_unlocked(tier) else TIER_PRO
 
 
 def learn_audio_unlocked(tier: Optional[str]) -> bool:

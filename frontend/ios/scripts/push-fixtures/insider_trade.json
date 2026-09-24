@@ -16,5 +16,6 @@
   "asset_type": "stock",
   "tab": "holders",
   "section": "insiders",
+  "dedup_key": "insider:ORCL:2026-09-10:Safra Catz:S",
   "Simulator Target Bundle": "com.phan.caydex"
 }

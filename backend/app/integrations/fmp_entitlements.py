@@ -178,6 +178,9 @@ PACKAGE_OF: Dict[str, str] = {
     "search-name": "Search & Directory (unnamed, serves 200)",
     "search-cik": "Search & Directory (unnamed, serves 200)",
     "search-isin": "Search & Directory (unnamed, serves 200)",
+    # Verified 200 under enforcement on 2026-09-24 (29765A101 -> LIFE; the CINS N97284108
+    # -> NBIS + YNDX). The route for a CINS number, which has no US ISIN for search-isin.
+    "search-cusip": "Search & Directory (unnamed, serves 200)",
     "company-screener": "Search & Directory (unnamed, serves 200)",
     "stock-list": "Search & Directory (unnamed, serves 200)",
     "available-industries": "Search & Directory (unnamed, serves 200)",

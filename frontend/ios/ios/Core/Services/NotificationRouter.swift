@@ -89,8 +89,8 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
     /// A ticker detail screen. `assetType` decides WHICH of the five it is;
     /// `destination` decides where INSIDE it to land.
     ///
-    /// Stays `Hashable` on purpose — `AppState.pendingPushRoute` is observed with
-    /// `.onChange(of:)`, so every associated value has to be.
+    /// Stays `Hashable` on purpose — every associated value has to be, so a route can sit in
+    /// presentation state that SwiftUI compares (`AlertDestination` derives one per row).
     case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
     /// A generated research report.
     ///
@@ -181,23 +181,6 @@ enum NotificationRoute: Equatable, Hashable, Sendable {
         case .ticker(let symbol, _, _): return symbol
         case .report(_, let ticker, _): return ticker
         case .inbox: return nil
-        }
-    }
-
-    /// Whether this tap has no detail screen to open, and must fall back to the notification
-    /// list in Tracking → Alerts.
-    ///
-    /// Defined HERE, once, because two files act on it — `ContentView` picks the tab and
-    /// `HomeDashboardView` declines to consume these routes — and a forked copy of the
-    /// predicate would drift into "some unroutable taps land nowhere", which is silent.
-    ///
-    /// `.report` with no ticker qualifies: the report id alone cannot open anything today, so
-    /// it is as unroutable as `.inbox` is.
-    var needsAlertsFallback: Bool {
-        switch self {
-        case .inbox: return true
-        case .report(_, let ticker, _): return ticker?.isEmpty != false
-        case .ticker: return false
         }
     }
 

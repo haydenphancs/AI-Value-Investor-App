@@ -1566,7 +1566,7 @@ extension TrendingWhale {
             avatarName: "avatar_buffett",
             followersCount: 125000,
             isFollowing: false,
-            title: "Berkshire Hathaway CEO",
+            title: "Berkshire Hathaway Chairman",
             description: "The Oracle of Omaha. Value investing legend with 50+ years of market-beating returns.",
             firmName: "Berkshire Hathaway"
         ),
@@ -1607,7 +1607,7 @@ extension TrendingWhale {
     // 10 Investors — person-fronted, firm always alongside (post-merge shape:
     // one whale per 13F filer; the person is the profile, firmName the firm).
     static let allInvestorsData: [TrendingWhale] = [
-        TrendingWhale(name: "Warren Buffett", category: .investors, avatarName: "avatar_buffett", followersCount: 125000, isFollowing: false, title: "Berkshire Hathaway CEO", firmName: "Berkshire Hathaway"),
+        TrendingWhale(name: "Warren Buffett", category: .investors, avatarName: "avatar_buffett", followersCount: 125000, isFollowing: false, title: "Berkshire Hathaway Chairman", firmName: "Berkshire Hathaway"),
         TrendingWhale(name: "Michael Burry", category: .investors, avatarName: "avatar_burry", followersCount: 98000, isFollowing: false, title: "Scion Asset Management", firmName: "Scion Asset Management"),
         TrendingWhale(name: "George Soros", category: .investors, avatarName: "avatar_soros", followersCount: 95000, isFollowing: false, title: "Soros Fund Management Founder", firmName: "Soros Fund Management"),
         TrendingWhale(name: "Ray Dalio", category: .investors, avatarName: "avatar_dalio", followersCount: 112000, isFollowing: false, title: "Bridgewater Associates Founder", firmName: "Bridgewater Associates"),

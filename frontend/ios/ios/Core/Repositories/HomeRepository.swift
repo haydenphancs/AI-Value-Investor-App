@@ -74,8 +74,23 @@ final class HomeRepository: HomeRepositoryProtocol {
             // the most-visited screen), which the card already handles.
             watchlist: (dto.watchlist ?? []).map { mapWatchlistTile($0) },
             watchlistTitle: watchlistTitle(dto.watchlistTitle),
-            watchlistIsGroup: dto.watchlistIsGroup ?? false
+            watchlistIsGroup: dto.watchlistIsGroup ?? false,
+            trillionClub: mapTrillionClub(dto.trillionClub)
         )
+    }
+
+    // MARK: - Trillion-Dollar Club Bets mapping
+
+    /// The served group → the presentation group. All validation lives in
+    /// `TrillionClubGroup(dto:)` (Foundation-only, so the backend suite can EXECUTE it):
+    /// unknown card kinds, unsourced stakes, non-finite figures and duplicate slugs are
+    /// dropped there and logged. An absent or unreadable group maps to `.empty`, which
+    /// `HomeDashboardView` renders as nothing.
+    ///
+    /// Unlike the themes, nothing here carries a server colour, so there is no clamp to apply.
+    static func mapTrillionClub(_ dto: TrillionClubGroupDTO?) -> TrillionClubGroup {
+        guard let dto else { return .empty }
+        return TrillionClubGroup(dto: dto)
     }
 
     /// The active group's name, or the label this section always showed.
@@ -341,23 +356,17 @@ final class HomeRepository: HomeRepositoryProtocol {
         return "As of \(shortsAsOfDisplay.string(from: date))"
     }
 
-    /// Earnings-shockers subtitle: shows the freshest report date when the backend
-    /// provides one (window is bounded to ~the past week), else the generic tagline.
-    /// Reuses the shorts "as of" date formatters.
-    private static func earningsSubtitle(_ asOfDate: String?) -> String {
-        guard let asOfDate,
-              let date = shortsAsOfParser.date(from: asOfDate) else {
-            return "Just beat or missed the Street big"
-        }
-        return "Biggest EPS surprises · As of \(shortsAsOfDisplay.string(from: date))"
-    }
-
     // MARK: - App-Exclusive Signals mapping
 
     /// Build the signal cards (four since CEO Buys). Like the scanners, the presentation chrome
-    /// (title / subtitle / icon / accent) is FIXED per kind — matching the mock —
+    /// (title / icon / accent) is FIXED per kind — matching the mock —
     /// so it's hardcoded here; the backend supplies only the ranked rows + raw
     /// numbers, which we format into the display strings per kind.
+    ///
+    /// There is no per-row subtitle any more: next to the icon and the ticker column it
+    /// truncated on every row (TestFlight, 2026-09-23). That included the earnings "As of"
+    /// date, which only ever rendered inside the truncated text; `SignalGroupDTO.asOfDate`
+    /// is still decoded, just not shown on the card.
     ///
     /// `SignalRowDTO.value` is polymorphic by kind: congress = # distinct members,
     /// whale = # distinct funds, earnings = SIGNED surprise %. The card headline
@@ -371,9 +380,6 @@ final class HomeRepository: HomeRepositoryProtocol {
                 from: c,
                 kind: "congress",
                 title: "Congressional Buys",
-                // "this month" matches the backend's 30-day disclosure window
-                // (filings lag 30-45d, so a "this week" claim would be inaccurate).
-                subtitle: "Most-bought on Capitol Hill this month",
                 iconSystemName: "building.columns.fill",
                 accent: AppColors.primaryBlue,
                 headline: { "\(Self.wholeCount($0.value)) members buying" },
@@ -386,7 +392,6 @@ final class HomeRepository: HomeRepositoryProtocol {
                 from: w,
                 kind: "whale",
                 title: "Whale Accumulation",
-                subtitle: "Institutions quietly loading up",
                 iconSystemName: "square.3.layers.3d.down.right",
                 accent: AppColors.alertOrange,
                 // Honest fund COUNT (not a $ figure): 13F trade dollars are
@@ -402,7 +407,6 @@ final class HomeRepository: HomeRepositoryProtocol {
                 from: e,
                 kind: "earnings",
                 title: "Earnings Shockers",
-                subtitle: earningsSubtitle(e.asOfDate),
                 iconSystemName: "bolt.fill",
                 accent: AppColors.accentYellow,
                 headline: { "\(formatSurprise($0.value)) surprise" },
@@ -418,7 +422,6 @@ final class HomeRepository: HomeRepositoryProtocol {
                 // Chief executives' open-market purchases of their OWN company's common
                 // stock, last 30 days of Form 4 filings, ranked by dollars (one CEO per
                 // company, so a buyer count would always read "1").
-                subtitle: "CEOs buying their own stock",
                 iconSystemName: "briefcase.fill",
                 // A TEXT-role token (IconTile inks the glyph with it and tints its tile at
                 // 16%), and the one accent no other Home card uses.
@@ -446,7 +449,6 @@ final class HomeRepository: HomeRepositoryProtocol {
         from group: SignalGroupDTO,
         kind: String,
         title: String,
-        subtitle: String,
         iconSystemName: String,
         accent: Color,
         headline: (SignalRowDTO) -> String,
@@ -457,7 +459,6 @@ final class HomeRepository: HomeRepositoryProtocol {
         return [ExclusiveSignal(
             kind: kind,
             title: title,
-            subtitle: subtitle,
             iconSystemName: iconSystemName,
             accent: accent,
             topSymbol: top.symbol,
@@ -502,7 +503,10 @@ final class HomeRepository: HomeRepositoryProtocol {
                 changeText: t.changePercent.map { String(format: "%+.1f%%", $0) } ?? "",
                 isPositive: (t.changePercent ?? 0) >= 0,
                 imageUrl: t.imageUrl,
-                accent: Color(themedHex: t.accentHex, role: .graphic, fallback: AppColors.primaryBlue)
+                accent: Color(themedHex: t.accentHex, role: .graphic, fallback: AppColors.primaryBlue),
+                trend: ThemeTrend.points(t.spark1m),
+                trendIsPositive: ThemeTrend.isPositive(return1m: t.return1m, points: t.spark1m),
+                reviewedOn: ThemeReviewDate.parse(t.updatedOn)
             )
         }
     }
@@ -527,9 +531,21 @@ final class MockHomeRepository: HomeRepositoryProtocol {
             // group (or their master watchlist when they have none).
             watchlist: Array(Self.pulse.prefix(3)),
             watchlistTitle: "Holdings",
-            watchlistIsGroup: true
+            watchlistIsGroup: true,
+            trillionClub: Self.trillionClub
         )
     }
+
+    // MARK: - Trillion-Dollar Club Bets
+    //
+    // Previews-only: NVIDIA (a 13F filer), Microsoft (no 13F), TSMC (non-U.S.) and Berkshire
+    // (a link to its investor profile), with figures from their filings. DECODED from
+    // wire-shaped JSON through `mapTrillionClub`, the same path the live repository takes.
+
+    static let trillionClub: TrillionClubGroup = HomeRepository.mapTrillionClub(
+        try? JSONDecoder().decode(TrillionClubGroupDTO.self,
+                                  from: Data(TrillionClubSamples.groupJSON.utf8))
+    )
 
     // MARK: - Sparkline helper
 
@@ -655,7 +671,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ExclusiveSignal(
             kind: "congress",
             title: "Congressional Buys",
-            subtitle: "Most-bought on Capitol Hill this month",
             iconSystemName: "building.columns.fill",
             accent: AppColors.primaryBlue,
             topSymbol: "NVDA",
@@ -669,7 +684,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ExclusiveSignal(
             kind: "whale",
             title: "Whale Accumulation",
-            subtitle: "Institutions quietly loading up",
             iconSystemName: "square.3.layers.3d.down.right",
             accent: AppColors.alertOrange,
             topSymbol: "MSFT",
@@ -683,7 +697,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ExclusiveSignal(
             kind: "earnings",
             title: "Earnings Shockers",
-            subtitle: "Just beat or missed the Street big",
             iconSystemName: "bolt.fill",
             accent: AppColors.accentYellow,
             topSymbol: "AVGO",
@@ -697,7 +710,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ExclusiveSignal(
             kind: "ceo",
             title: "CEO Buys",
-            subtitle: "CEOs buying their own stock",
             iconSystemName: "briefcase.fill",
             accent: AppColors.alertPurple,
             topSymbol: "GME",
@@ -717,7 +729,6 @@ final class MockHomeRepository: HomeRepositoryProtocol {
         ExclusiveSignal(
             kind: $0.kind,
             title: $0.title,
-            subtitle: $0.subtitle,
             iconSystemName: $0.iconSystemName,
             accent: $0.accent,
             topSymbol: String(repeating: "•", count: min(max($0.topSymbol.count, 2), 5)),

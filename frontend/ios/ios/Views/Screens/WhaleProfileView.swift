@@ -692,7 +692,7 @@ struct SectorExposureInfoSheet: View {
                         VStack(alignment: .leading, spacing: AppSpacing.md) {
                             WhaleBulletPoint(
                                 icon: "target",
-                                text: "Understand the investor's focus areas and conviction sectors"
+                                text: "See which sectors make up the largest share of the reported portfolio"
                             )
                             WhaleBulletPoint(
                                 icon: "arrow.triangle.branch",
@@ -724,7 +724,7 @@ struct SectorExposureInfoSheet: View {
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
-                        Text("Compare the whale's sector exposure to your own portfolio. If you want to follow their strategy, consider similar sector weightings. Use this to identify sectors they're bullish on.")
+                        Text("Sector weights come from the latest 13F filing and cover U.S.-listed stocks only. Comparing them across quarters shows how the reported mix has shifted. They describe past filings, not a recommendation.")
                             .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .lineSpacing(4)
@@ -823,11 +823,11 @@ struct RecentTradesInfoSheet: View {
                         VStack(alignment: .leading, spacing: AppSpacing.md) {
                             WhaleBulletPoint(
                                 icon: "chart.line.uptrend.xyaxis",
-                                text: "Identify emerging trends and conviction changes"
+                                text: "See how reported positions changed from one filing to the next"
                             )
                             WhaleBulletPoint(
                                 icon: AppSymbols.ai,
-                                text: "Discover new opportunities they're exploring"
+                                text: "See which holdings were newly reported in the latest filing"
                             )
                             WhaleBulletPoint(
                                 icon: "exclamationmark.triangle",
@@ -851,7 +851,7 @@ struct RecentTradesInfoSheet: View {
                                 .foregroundColor(AppColors.textPrimary)
                         }
 
-                        Text("Pay attention to the size and direction of trades. Large buys signal high conviction, while sells may indicate risk concerns or profit-taking. Tap on any trade group to see detailed transaction information.")
+                        Text("Each trade group shows the direction and approximate size of a reported change. Filings don't say why a position changed, so a change is a fact about the filing, not a signal. Tap on any trade group to see detailed transaction information.")
                             .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .lineSpacing(4)

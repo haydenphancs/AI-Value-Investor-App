@@ -895,6 +895,39 @@ class Settings(BaseSettings):
     WHALE_PREWARM_CONCURRENCY: int = 3
     REPORT_PREWARM_MAX_INFLIGHT: int = 50
 
+    # ── Emerging Frontiers: monthly theme rotation + daily theme insights ──────
+    # Both default OFF: they write to tables that migration 174 creates, and a loop that
+    # runs before the migration is applied would only log failures every wake. The owner
+    # applies 174, then sets these to true on Railway. `services/theme_rotation/`.
+    #
+    # Rotation: every theme is re-scored on the first US trading day of each month
+    # (18:30 ET) and changes only when a better on-theme stock clearly outranks a member.
+    # The change fraction is a CEILING (owner decision 2026-09-23), not a target.
+    THEME_ROTATION_ENABLED: bool = False
+    # A dry run computes and records decisions but never publishes a basket.
+    THEME_ROTATION_DRY_RUN: bool = False
+    THEME_ROTATION_MAX_CHANGE_FRACTION: float = 0.30
+    # Model for the relevance check on each newcomer's company description. A verdict
+    # can only BLOCK an addition; it never adds points.
+    THEME_ROTATION_FIT_MODEL: str = "gemini-2.5-flash"
+    # Insights: per theme, after each US close (18:15 ET) — equal-weight performance vs
+    # an S&P 500 ETF, and a short "why it's moving" summary from its stocks' news.
+    # ~$1-2/month total at the default model (measured estimate, 2026-09-23); it does not
+    # scale with users — generated once per theme and served from `theme_daily_insights`.
+    THEME_INSIGHTS_ENABLED: bool = False
+    THEME_INSIGHTS_MODEL: str = "gemini-2.5-flash"
+    THEME_INSIGHTS_THINKING_BUDGET: int = 512
+    # ^GSPC is not licensed; SPY tracks it (corr 0.996, index_service).
+    THEME_BENCHMARK_SYMBOL: str = "SPY"
+
+    # Home "Trillion-Dollar Club Bets" (migration 175): what the $1T companies own in other
+    # companies. BOTH off until migration 175 is applied and seeded. ENABLED gates the Home
+    # section and the detail route; JOBS_ENABLED gates the daily/weekly loops (membership
+    # from dated market-cap closes + 13F builds). Kill switches that need no deploy: the
+    # `notification_job_state` rows `trillion_club_daily` / `trillion_club_weekly`.
+    TRILLION_CLUB_ENABLED: bool = False
+    TRILLION_CLUB_JOBS_ENABLED: bool = False
+
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
     # Per-ACCOUNT ceilings on the five market-data routers (stocks / etfs / indices / crypto /
@@ -973,6 +1006,17 @@ class Settings(BaseSettings):
     MARKETING_MEDIA_BUCKET: str = "marketing-media"
     # Signed-upload URLs minted for the worker expire server-side (Supabase default 2 h); the
     # worker uploads within seconds of minting, so a stale URL means a stuck stage, not a leak.
+    # Post-launch target of the public smart link `/go/{campaign}` and the landing page's App
+    # Store button (e.g. https://apps.apple.com/app/id6759525689). Empty = PRE-LAUNCH: both
+    # point at the landing page at `/`. Only an https apps.apple.com URL is accepted; anything
+    # else logs ERROR once and falls back (services/marketing/smart_link.py).
+    MARKETING_APP_STORE_URL: str = ""
+    # App Analytics provider token (`pt`). When set, `/go` appends pt=<token>&ct=<campaign>&mt=8
+    # so App Store Connect attributes installs per platform; empty = no campaign parameters.
+    MARKETING_APP_STORE_PROVIDER_TOKEN: str = ""
+    # X bills per post that carries a URL, so X captions are link-free unless this is flipped
+    # (read by the writer's X caption composer, post_copy.py). Fail-closed.
+    MARKETING_X_ALLOW_URLS: bool = False
 
     # Disclaimer
     LEGAL_DISCLAIMER: str = (

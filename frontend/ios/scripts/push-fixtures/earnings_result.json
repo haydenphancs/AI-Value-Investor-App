@@ -15,5 +15,6 @@
   "ticker": "NVDA",
   "asset_type": "stock",
   "tab": "financials",
+  "dedup_key": "earnings_result:NVDA:2026-08-27",
   "Simulator Target Bundle": "com.phan.caydex"
 }

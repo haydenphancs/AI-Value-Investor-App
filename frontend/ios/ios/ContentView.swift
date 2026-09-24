@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    // Needed to observe a notification tap (pendingPushTicker) and bring Home forward.
+    // Needed to observe a notification tap (`pendingPushNotification`) and present its detail.
     @Environment(AppState.self) private var appState
     @State private var selectedTab: HomeTab = .home
     @State private var researchTickerSymbol: String? = nil
@@ -23,6 +23,22 @@ struct ContentView: View {
     /// their own view models on purpose — the reading screens' "Ask the Agent" and the
     /// asset detail bars each seed a grounded conversation that must not clobber this one.
     @StateObject private var chatViewModel = ChatViewModel()
+
+    /// A TAPPED PUSH whose detail screen is up.
+    ///
+    /// Owned by the SHELL, not a tab: the detail opens over whatever tab is showing (Home on a
+    /// cold launch), and Done returns the user to exactly where they were. It used to be split
+    /// between this view (pick the tab) and `HomeDashboardView` (present the ticker), a two-owner
+    /// arrangement whose handlers had to partition the routes so neither cleared the value
+    /// before the other read it. One owner has no such race.
+    @State private var pushDetail: PushedNotification?
+    /// The destination chosen on that detail, PARKED until the sheet has finished closing — a
+    /// cover cannot present while its sheet is still up, so assigning the cover straight from
+    /// the row tap races the dismissal and the tap does nothing (`AlertsTabContent`, same idiom).
+    @State private var pendingPushDestination: AlertDestination?
+    /// …then opened in `AlertDestinationCover`, whose own `NavigationStack` gives the ticker
+    /// screen a working search and all seven of its sheets.
+    @State private var openedPushDestination: AlertDestination?
 
     var body: some View {
         ZStack {
@@ -88,42 +104,49 @@ struct ContentView: View {
             appState.isAIChatPresented = false
             chatViewModel.resetForIdentityChange()
         }
-        // The chat cover is the one presentation the SHELL owns rather than a tab, so no tab
-        // root's `.onPresentationReset` can reach it.
+        // The chat cover and a tapped push's detail (plus the destination cover it opens) are
+        // the presentations the SHELL owns rather than a tab, so no tab root's
+        // `.onPresentationReset` can reach them.
         .onPresentationReset {
             appState.isAIChatPresented = false
+            // The parked choice FIRST: nil-ing `pushDetail` runs the sheet's `onDismiss`, which
+            // would otherwise promote the parked destination into a cover mid-unwind.
+            pendingPushDestination = nil
+            pushDetail = nil
+            openedPushDestination = nil
         }
-        .onChange(of: appState.pendingPushRoute, initial: true) { _, route in
-            // `initial: true` for the same reason as HomeDashboardView: a cold launch
-            // from a tap sets this before either view exists.
-            // Bring the destination tab forward FIRST. Tabs are opacity-mounted, so without
-            // this the destination cover would present over a tab the user isn't looking at.
-            guard let route else { return }
-
-            // ONE OWNER PER ROUTE KIND — this is a race, not a style choice. Both this and
-            // HomeDashboardView observe `pendingPushRoute`, and Home's handler CLEARS it. If
-            // Home ran first on a fallback route, the clear would land before this branch read
-            // it and the tap would go nowhere. So the two handlers partition the route space
-            // via `needsAlertsFallback` and each clears only what it owns.
-            if route.needsAlertsFallback {
-                // No detail screen to open. The notification list at least SHOWS the
-                // notification, which beats a tap that appears to do nothing — it just lives
-                // in Tracking → Alerts now rather than a separate inbox screen.
-                selectedTab = .tracking
-                appState.pendingTrackingTab = .alerts
-                appState.pendingPushRoute = nil
-                appState.pendingPushTicker = nil
-            } else {
-                // HomeDashboardView consumes and clears these.
-                selectedTab = .home
+        // A notification TAPPED outside the app → its DETAIL screen, never the ticker directly.
+        //
+        // `initial: true` is load-bearing: on a COLD launch from a tap, AppDelegate parks the
+        // notification before this view has ever rendered, and a plain `.onChange` only fires on
+        // a change AFTER first render — the exact scenario the tap handler exists for. Warm taps
+        // would still work, so it would survive manual testing. DO NOT "clean it up".
+        //
+        // Consume-and-clear, so one tap opens one screen and a dismissed detail can't re-open.
+        .onChange(of: appState.pendingPushNotification, initial: true) { _, pushed in
+            guard let pushed else { return }
+            appState.pendingPushNotification = nil
+            presentTappedPush(pushed)
+        }
+        .sheet(item: $pushDetail, onDismiss: {
+            openedPushDestination = pendingPushDestination
+            pendingPushDestination = nil
+        }) { pushed in
+            NavigationStack {
+                PushNotificationDetailScreen(pushed: pushed) { destination in
+                    pendingPushDestination = destination
+                    pushDetail = nil
+                }
             }
+            .environment(appState)
         }
+        .alertDestinationCover($openedPushDestination)
         // "AI Deep Research" on a stock detail screen, from ANY of its ~14 entry points.
         //
-        // ONE OWNER PER ROUTE KIND (see the push-route handler above): this is a new route kind
-        // and ContentView is its only observer and its only clearer, so there is no race with
-        // HomeDashboardView's handler. `initial: true` matches the push route — a cold launch
-        // could park the intent before this view exists.
+        // ONE OWNER PER PARKED INTENT (the push handler above is the same shape): ContentView is
+        // this value's only observer and its only clearer, so nothing can clear it before it is
+        // read. `initial: true` matches the push handler — a cold launch could park the intent
+        // before this view exists.
         //
         // Order matters: seed the ticker BEFORE switching tabs, so the Research tab's own
         // `onChange(of: prefilledTicker)` sees a non-nil value the moment it comes forward.
@@ -144,6 +167,52 @@ struct ContentView: View {
                 researchTickerSymbol = nil
                 researchSubTab = .research
             }
+        }
+    }
+
+    /// Present a tapped push — its DETAIL, or for a report the REPORT itself — taking down
+    /// whatever is on screen first.
+    ///
+    /// A report skips the detail by request (`AlertDestination.directDestination`, which the
+    /// Alerts rows read too): it opens straight into the same destination cover the detail's
+    /// "Read the full report" row would have used. Opening it IS reading it, so it is marked read
+    /// by the payload's `dedup_key`, as an Alerts row marks itself read on tap.
+    ///
+    /// A sheet or cover cannot present while another view's is up; SwiftUI QUEUES it instead
+    /// ("only presenting a single sheet is supported"), so a push tapped while a ticker was open
+    /// from a Home tile did nothing until the user closed that ticker by hand, and then the
+    /// detail appeared out of nowhere. Measured on the simulator.
+    ///
+    /// So: the same teardown AI Deep Research uses (every tab root clears its own presentation
+    /// state, this view included), then present once UIKit reports the stack clear. Assigning
+    /// straight after `dismissAllPresentations()` would not work — this view's own
+    /// `.onPresentationReset` runs on that bump and would nil it again.
+    ///
+    /// Nothing presented (the cold launch, the common case): present at once, no teardown.
+    private func presentTappedPush(_ pushed: PushedNotification) {
+        let direct = AlertDestination.directDestination(for: pushed.event)
+        if direct != nil {
+            Task {
+                await NotificationInboxViewModel.shared.markReadFromNotificationAction(
+                    dedupKey: pushed.dedupKey
+                )
+            }
+        }
+        let present = {
+            if let direct {
+                openedPushDestination = direct
+            } else {
+                pushDetail = pushed
+            }
+        }
+        guard ModalPresentationProbe.isAnythingPresented else {
+            present()
+            return
+        }
+        appState.dismissAllPresentations()
+        Task { @MainActor in
+            _ = await ModalPresentationProbe.waitUntilNothingPresented()
+            present()
         }
     }
 }

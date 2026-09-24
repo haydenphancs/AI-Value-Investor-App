@@ -13,9 +13,9 @@ strings — the same conventions as every other schema in this folder.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Kept in lockstep with the CHECK constraints in migration 170. The service validates against
 # these before touching the database so a typo fails with a 422 that names the field rather
@@ -38,7 +38,12 @@ POST_STATUSES = (
 )
 
 # Extensions the worker may register, with the content type each one is served as. The
-# bucket's `allowed_mime_types` (migration 170) is the same list; keep them together.
+# bucket's `allowed_mime_types` is the same list; keep them together (the LATEST migration that
+# sets it — 173 — is what `test_marketing_run_service` compares against).
+#
+# 173 dropped html/txt/md: the worker is the least-trusted process in the engine, and a PUBLIC
+# bucket that accepts text/html lets a compromised worker host a phishing page under the brand.
+# Drafts (script, captions) live in `marketing_scripts`, never in the bucket.
 ASSET_EXTENSIONS: Dict[str, str] = {
     "mp4": "video/mp4",
     "png": "image/png",
@@ -46,10 +51,77 @@ ASSET_EXTENSIONS: Dict[str, str] = {
     "mp3": "audio/mpeg",
     "m4a": "audio/mp4",
     "json": "application/json",
-    "html": "text/html",
-    "txt": "text/plain",
-    "md": "text/markdown",
 }
+
+#: Asset kinds the WORKER may register. `script` / `caption` / `blog` stay in the CHECK list
+#: (migration 170) but are server-authored: the worker renders media, it never supplies copy.
+WORKER_ASSET_KINDS = ("manifest", "audio", "podcast_audio", "video", "card", "carousel")
+
+#: Which extensions each asset kind may carry. Checked at registration, so a `video` row can
+#: never point at a `.json` object (or the run's manifest pass itself off as a video). Every
+#: kind in ASSET_KINDS has an entry; every extension is in ASSET_EXTENSIONS.
+ASSET_KIND_EXTENSIONS: Dict[str, Tuple[str, ...]] = {
+    "manifest": ("json",),
+    "audio": ("mp3", "m4a"),
+    "podcast_audio": ("mp3", "m4a"),
+    "video": ("mp4",),
+    "card": ("png", "jpg"),
+    "carousel": ("png", "jpg"),
+    # server-authored kinds (never registered by the worker)
+    "script": ("json",),
+    "caption": ("json",),
+    "blog": ("json",),
+}
+
+#: Statuses the WORKER may write on its own run (PATCH /runs/{id}). `in_progress` / `planned`
+#: belong to the claim, `published` to the web-side publisher.
+WORKER_RUN_STATUSES = ("failed", "skipped", "media_ready")
+
+#: Metadata keys the server owns on `marketing_runs.metadata`; a worker PATCH may not write
+#: them. `claim_nonce` is trusted by `decide_claim` AHEAD of the attempts cap.
+SERVER_OWNED_RUN_METADATA = ("claim_nonce",)
+
+#: The formats the server will record a post in, per platform. The accepted package composes
+#: ONE caption per platform (`post_copy.PLATFORMS`) and carries no format, so this map is what
+#: bounds how many posts that caption can become — and the Phase-5 adapters read the same map.
+#: A platform missing here has no Phase-2 copy and is refused anyway.
+POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
+    "tiktok": ("video",),
+    "youtube": ("video",),
+    "instagram": ("video", "carousel"),
+    "facebook": ("text", "video"),
+    "linkedin": ("text", "video"),
+    "x": ("text",),
+    "threads": ("text",),
+    "bluesky": ("text",),
+}
+
+#: Asset kinds a post of each format may carry. `manifest`, `audio`, `script`, `caption` and
+#: `blog` are never post media.
+POST_MEDIA_KINDS: Dict[str, Tuple[str, ...]] = {
+    "video": ("video",),
+    "carousel": ("carousel", "card"),
+    "image": ("card",),
+    "podcast": ("podcast_audio",),
+    "text": ("card",),
+    "article": ("card",),
+}
+
+#: Formats that are nothing without their media: refused unless at least one READY asset of a
+#: matching kind rides along (a media-less "video" post is born broken).
+MEDIA_REQUIRED_FORMATS: FrozenSet[str] = frozenset({"video", "carousel", "image", "podcast"})
+
+#: `marketing_scripts.status` (migration 173). One row per run, written ONLY by the web side.
+SCRIPT_STATUSES = ("rest_day", "selected", "generating", "accepted", "rejected")
+
+#: `marketing_scripts.reject_reason` (migration 176) and the `reason` of a `rejected` kick body.
+#: The worker maps it to the run's skip_reason — only `content` is a compliance verdict:
+#:   content            — MAX_GENERATIONS generations were rejected by the validators
+#:   writer_unavailable — MAX_WRITER_FAILURES generations ended without a verdict (Gemini
+#:                        failures, a ledger blip, a crashed or cancelled owner)
+#:   empty_pool         — selection found nothing eligible
+#:   source_ineligible  — the selected item left the eligible pool before it was written
+SCRIPT_REJECT_REASONS = ("content", "writer_unavailable", "empty_pool", "source_ineligible")
 
 _SHA256_HEX_LEN = 64
 
@@ -189,8 +261,10 @@ class AssetRegisterRequest(BaseModel):
     @field_validator("kind")
     @classmethod
     def _kind(cls, v: str) -> str:
-        if v not in ASSET_KINDS:
-            raise ValueError(f"kind must be one of {ASSET_KINDS}")
+        # The worker renders media; copy (script/caption/blog) is server-authored and never
+        # uploaded by it. ASSET_KINDS (the CHECK list) is wider on purpose.
+        if v not in WORKER_ASSET_KINDS:
+            raise ValueError(f"kind must be one of {WORKER_ASSET_KINDS}")
         return v
 
     @field_validator("ext")
@@ -208,6 +282,13 @@ class AssetRegisterRequest(BaseModel):
         if len(v) != _SHA256_HEX_LEN or any(c not in "0123456789abcdef" for c in v):
             raise ValueError("sha256 must be 64 lowercase hex characters")
         return v
+
+    @model_validator(mode="after")
+    def _kind_matches_ext(self) -> "AssetRegisterRequest":
+        allowed = ASSET_KIND_EXTENSIONS.get(self.kind, ())
+        if self.ext not in allowed:
+            raise ValueError(f"a {self.kind!r} asset must be one of {allowed}, not {self.ext!r}")
+        return self
 
 
 class SignedUpload(BaseModel):
@@ -273,3 +354,41 @@ class PostsCreateRequest(BaseModel):
 
 class PostsCreateResponse(BaseModel):
     posts: List[MarketingPost]
+
+
+# ── the day's script (Phase 2, migration 173) ────────────────────────────────
+
+
+class WorkerScript(BaseModel):
+    """What the worker needs to voice and render. Captions are NOT here — they are
+    server-authored and reach the ledger only through `create_posts`."""
+
+    hook: str
+    video_script: List[str]
+    cards: List[Dict[str, str]]
+    carousel_slides: List[Dict[str, str]]
+    disclaimer_card: str
+    outlets: List[str] = Field(default_factory=list)
+
+
+class ScriptKickResponse(BaseModel):
+    """`POST /runs/{run_id}/script` always answers 200 with one of these states; content
+    outcomes are never HTTP errors (a 4xx/5xx is reserved for the ledger itself):
+
+    * `rest_day`   — not a posting day. Final: close the run `skipped`.
+    * `generating` — the writer is working; poll again in ~15 s.
+    * `deferred`   — the writer failed transiently; stop this tick (retry_after_seconds).
+    * `accepted`   — `script` is set. Final.
+    * `rejected`   — the day is skipped. Final. `reason` (SCRIPT_REJECT_REASONS) says why, and
+      only `content` means the drafts failed the compliance checks — `violations` is filled
+      for that reason alone. `writer_unavailable` is an outage, not a content verdict.
+    """
+
+    status: str
+    source_ref: Optional[str] = None
+    template_id: Optional[str] = None
+    retry_after_seconds: Optional[int] = None
+    violations: List[str] = Field(default_factory=list)
+    script: Optional[WorkerScript] = None
+    # Set only when status == "rejected"; one of SCRIPT_REJECT_REASONS.
+    reason: Optional[str] = None

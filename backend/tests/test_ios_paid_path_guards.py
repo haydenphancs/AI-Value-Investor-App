@@ -454,6 +454,42 @@ def _code(path: Path) -> str:
     return _strip_swift_comments(_src(path))
 
 
+_REPORT_VIEW = _REPO / "frontend/ios/ios/Views/Screens/TickerReportView.swift"
+
+
+def test_opening_a_report_from_a_notification_never_bills():
+    """C3 (2026-09-25): a "report ready" row lives 90 days in the inbox. Tapping it after the
+    report was DELETED made Path A answer REPORT_NOT_READY, a legitimate fall-through on a
+    plain open, and `loadReport()` then called `_fetchReport()` with its paid default:
+    20 credits, no prompt, and the fresh report was not even in the Reports list. The
+    notification init must open with paid generation OFF, and `loadReport` must honour it."""
+    code = _code(_REPORT_VM)
+    notif_init = _decl_body(code, "init(ticker: String, persona: String?, reportId: String?)")
+    assert re.search(r"self\.allowPaidOnOpen\s*=\s*false\b", notif_init), (
+        "the notification route may bill on open again"
+    )
+    for sig in ("init(ticker: String, persona: String = ", "init(report: AnalysisReport)"):
+        assert re.search(r"self\.allowPaidOnOpen\s*=\s*true\b", _decl_body(code, sig)), sig
+    load = _decl_body(code, "func loadReport()")
+    assert "_fetchReport(allowPaidGeneration: self.allowPaidOnOpen)" in load, (
+        "loadReport ignores the per-entry flag — every open uses the paid default"
+    )
+    assert "_fetchReport()" not in load
+
+
+def test_a_refused_open_is_not_a_blank_screen():
+    """The refresh-time "Report no longer cached" alert is attached INSIDE `reportContent`,
+    which is not on screen when nothing loaded. The open-time refusal needs its own branch in
+    `body`, or the notification lands on an empty page with no way forward."""
+    body = _decl_body(_code(_REPORT_VIEW), "var body: some View")
+    m = re.search(r"else\s+if\s+viewModel\.needsPaidRegeneration\s*\{([^}]*)\}", body)
+    assert m and "unavailableView" in m.group(1), "no body branch renders the unavailable state"
+    view = _decl_body(_code(_REPORT_VIEW), "private var unavailableView")
+    assert "regenerateForCredits()" in view and "AnalysisCost.standard.credits" in view, (
+        "the unavailable state must offer the DISCLOSED paid regeneration, not a silent one"
+    )
+
+
 def test_the_sse_reader_decodes_payment_and_admission_refusals():
     """A streamed 402 must become a `businessError`, not a bare `serverError`.
 

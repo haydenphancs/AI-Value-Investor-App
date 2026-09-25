@@ -253,20 +253,24 @@ class SocialMentionsService:
             week_ago = (today - timedelta(days=7)).isoformat()
             two_weeks_ago = (today - timedelta(days=14)).isoformat()
 
+            # Seven DAILY snapshots per window: (today-7, today] and (today-14, today-7].
+            # `.gte(week_ago)` used to include BOTH ends — today's snapshot plus the one
+            # from exactly a week ago — so "this week" summed 8 days against the previous
+            # window's 7 and the week-over-week change read ~14% high all day.
             def _query():
                 cur = (
                     self.supabase.table("social_mentions_history")
                     .select("mentions")
                     .eq("ticker", key)
-                    .gte("snapshot_date", week_ago)
+                    .gt("snapshot_date", week_ago)
                     .execute()
                 )
                 prev = (
                     self.supabase.table("social_mentions_history")
                     .select("mentions")
                     .eq("ticker", key)
-                    .gte("snapshot_date", two_weeks_ago)
-                    .lt("snapshot_date", week_ago)
+                    .gt("snapshot_date", two_weeks_ago)
+                    .lte("snapshot_date", week_ago)
                     .execute()
                 )
                 return cur, prev

@@ -19,6 +19,11 @@ calls but the failure semantics around them:
   * `success=False` deliberately leaves `run_day` untouched so the next wake retries
     the same ET day. That is how a transient FMP failure becomes a retry instead of a
     silently skipped day.
+  * The release is stamped with the CLAIM's time, not the finish time. The SQL derives
+    `run_day` from `p_now`, so a run claimed at 23:50 that succeeded at 00:10 used to
+    record TOMORROW as done and the claim then refused tomorrow's run all day (theme
+    insights retry until midnight ET; a sender after a late deploy; a whale sweep
+    claimed at 23:5x UTC). Side effect: `last_run_at` is the run's START.
 """
 
 from __future__ import annotations
@@ -33,6 +38,12 @@ from app.config import settings
 from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
+
+
+class JobStateUnreadable(RuntimeError):
+    """The job ledger could not be read. Distinct from "no baseline" (`None`): a caller
+    that treats a failed read as "never ran" silently re-baselines and skips rows."""
+
 
 # Job names. Also the `notification_job_state.job` primary key, so renaming one orphans
 # its state row (and grants one extra run on the changeover day — harmless, but say so).
@@ -129,6 +140,11 @@ def last_cursor(job: str) -> Optional[datetime]:
 
     None is meaningful to the whale sender: it means "no baseline", and the sender
     seeds a conservative recent window rather than notifying on the entire table.
+
+    A FAILED read raises `JobStateUnreadable` instead. It used to return None too, so one
+    Supabase blip re-baselined the whale pass to "the last 24 h" and the successful run
+    then overwrote the real cursor — every row between the two was never evaluated. The
+    raise fails the claimed run, which the next hourly wake retries.
     """
     try:
         rows = (
@@ -142,10 +158,10 @@ def last_cursor(job: str) -> Optional[datetime]:
         )
     except Exception as e:
         logger.warning(
-            "notification job %s: cursor read failed (%s: %s) — treating as no baseline",
-            job, type(e).__name__, e,
+            "notification job %s: cursor read failed (%s: %s) — failing this run so the "
+            "next wake retries it", job, type(e).__name__, e,
         )
-        return None
+        raise JobStateUnreadable(f"{job}: cursor read failed: {type(e).__name__}: {e}") from e
     if not rows or not rows[0].get("last_cursor"):
         return None
     raw = str(rows[0]["last_cursor"]).replace("Z", "+00:00")
@@ -178,7 +194,10 @@ async def claimed_job(job: str) -> AsyncIterator[Optional[NotificationJobResult]
     early or raises leaves `run_day` unset and the next hourly wake retries the same ET
     day. Silence must not be mistaken for a completed run.
     """
-    granted = await asyncio.to_thread(claim, job)
+    # One timestamp for the claim AND the release, so `run_day` is the day the run was
+    # claimed even when it finishes after midnight (module docstring).
+    claimed_at = datetime.now(timezone.utc)
+    granted = await asyncio.to_thread(claim, job, now=claimed_at)
     if not granted:
         yield None
         return
@@ -208,6 +227,7 @@ async def claimed_job(job: str) -> AsyncIterator[Optional[NotificationJobResult]
                 notified=result.notified,
                 cursor=result.cursor,
                 error=result.error,
+                now=claimed_at,
             )
         )
 
@@ -364,8 +384,10 @@ async def claimed_scheduled_job(
     Marking `success` is an explicit act: the default is False, so a body that returns
     early or raises leaves `run_day` unset and the next wake retries the same day.
     """
+    claimed_at = datetime.now(timezone.utc)  # stamps the release too — see `claimed_job`
     granted = await asyncio.to_thread(
         claim_scheduled, job, timezone_name=timezone_name, stale_seconds=stale_seconds,
+        now=claimed_at,
     )
     if not granted:
         yield None
@@ -397,5 +419,6 @@ async def claimed_scheduled_job(
                 items=result.items,
                 error=result.error,
                 timezone_name=timezone_name,
+                now=claimed_at,
             )
         )

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.services.active_group_service import (
     ActiveGroupUnavailable,
     fetch_ticker_metadata,
@@ -1087,8 +1088,7 @@ class HomeDashboardService:
                 fut.set_result(pulse)
             return pulse
         except BaseException as exc:  # propagate to all awaiters, then re-raise
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._inflight.pop(_CACHE_KEY, None)
@@ -1293,8 +1293,7 @@ class HomeDashboardService:
             # CancelledError (a BaseException, NOT caught above) on shutdown/cancel
             # must still settle the future, or a joined request hangs forever on a
             # popped-but-unresolved future. Mirrors get_dashboard / _get_pulse_cached.
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._scanner_inflight.pop(_SCANNER_CACHE_KEY, None)
@@ -1584,8 +1583,7 @@ class HomeDashboardService:
         except BaseException as exc:
             # CancelledError (shutdown) must still settle the future or a joined
             # request hangs on a popped-but-unresolved future. Mirrors get_scanners.
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._themes_inflight.pop(_THEMES_CACHE_KEY, None)
@@ -1769,8 +1767,7 @@ class HomeDashboardService:
                 fut.set_result(result)
             return result
         except BaseException as exc:  # settle awaiters (incl. CancelledError), then re-raise
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._theme_detail_inflight.pop(key, None)

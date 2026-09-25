@@ -150,6 +150,11 @@ def mature_benchmark_value(
 # ── Lookup service ────────────────────────────────────────────────
 
 class SectorBenchmarkLookup:
+    """SYNCHRONOUS: every method may run paginated supabase-py reads with a `time.sleep`
+    retry. From async code, call it through `await asyncio.to_thread(...)`; a direct call
+    blocks the single uvicorn worker's event loop on every cold key.
+    `tests/test_sector_benchmark_off_the_loop.py` pins the async callers."""
+
     def __init__(self) -> None:
         self.supabase = get_supabase()
 

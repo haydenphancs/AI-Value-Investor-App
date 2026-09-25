@@ -100,9 +100,9 @@ async def test_a_snapshot_with_no_measured_metric_is_not_persisted(
     monkeypatch.setattr(svc, "_check_supabase_cache", lambda t: None)
 
     async def _fake_compute(ticker):
-        return _snapshot(values, 3)
+        return _snapshot(values, 3), []     # no leg raised: only the value gate decides
 
-    monkeypatch.setattr(svc, "_compute", _fake_compute)
+    monkeypatch.setattr(svc, "_compute_with_status", _fake_compute)
     m._cache.clear()
     m._inflight.clear()
 

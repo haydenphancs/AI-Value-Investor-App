@@ -20,6 +20,7 @@ import ta as ta_lib
 from fastapi import HTTPException
 
 from app.config import settings
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.schemas.technical_analysis import (
     FibonacciLevel,
@@ -300,8 +301,7 @@ async def _deduped(key: str, build):
     except BaseException as e:
         # BaseException, not Exception: a CancelledError must still resolve the future or
         # every joiner hangs forever waiting on a dead build.
-        if not fut.done():
-            fut.set_exception(e)
+        fail_shared_future(fut, e)
         raise
     finally:
         _inflight.pop(key, None)

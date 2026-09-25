@@ -57,6 +57,33 @@ def _pack_txn(product=_PACK_PLUS, txn_id="2000000000000001", **extra):
     return payload
 
 
+class _PgError(Exception):
+    """Stands in for postgrest's `APIError`, which the service classifies by `.code`."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def _check_credit_purchase_insert(db, row):
+    """The constraints on `credit_purchases` a direct INSERT can hit (schema_snapshot.sql):
+    NOT NULL columns, `credits > 0`, UNIQUE (environment, transaction_id), and the
+    `user_id` FK to `public.users`."""
+    for col in ("user_id", "transaction_id", "environment", "product_id", "credits"):
+        if row.get(col) is None:
+            raise _PgError("23502", f'null value in column "{col}" violates not-null constraint')
+    if row["credits"] <= 0:
+        raise _PgError("23514", "violates check constraint credit_purchases_credits_positive")
+    if any(
+        r.get("environment") == row["environment"]
+        and r.get("transaction_id") == row["transaction_id"]
+        for r in db.get("credit_purchases", [])
+    ):
+        raise _PgError("23505", 'duplicate key value violates unique constraint "idx_credit_purchases_txn"')
+    if not any(u.get("id") == row["user_id"] for u in db.get("users", [])):
+        raise _PgError("23503", 'violates foreign key constraint "credit_purchases_user_id_fkey"')
+
+
 class _Q:
     def __init__(self, db, table, fail):
         self._db, self._table, self._fail = db, table, fail
@@ -91,6 +118,8 @@ class _Q:
             out = [r for r in rows if all(r.get(k) == v for k, v in self._filters.items())]
             return type("R", (), {"data": out})()
         if self._op == "insert":
+            if self._table == "credit_purchases":
+                _check_credit_purchase_insert(self._db, self._values)
             rows.append(dict(self._values))
             return type("R", (), {"data": [rows[-1]]})()
         if self._op == "update":
@@ -109,6 +138,10 @@ class FakeSupabase:
     Keep in step with the SQL. The full arithmetic — spend ordering, refund splits, the
     monthly-reset isolation — is exercised in `test_credit_pool_isolation.py`; here the model
     only needs to be faithful about the OUTCOMES the service branches on.
+
+    The `credit_purchases` TABLE is the single source of truth for both RPCs, exactly as in
+    the SQL: a row written by a direct INSERT (the refund tombstone) is what the grant's
+    `ON CONFLICT (environment, transaction_id)` and the revoke's lookup both see.
     """
 
     def __init__(self, fail=(), packs=None, tier="free"):
@@ -126,10 +159,15 @@ class FakeSupabase:
         self.rpcs: list = []
         self.purchased_total = 0
         self.granted_remaining = 50
-        self._purchases: dict[tuple[str, str], dict] = {}
 
     def table(self, name):
         return _Q(self.db, name, self._fail)
+
+    def purchase_row(self, transaction_id, environment="Production"):
+        for row in self.db["credit_purchases"]:
+            if row.get("environment") == environment and row.get("transaction_id") == transaction_id:
+                return row
+        return None
 
     @property
     def spendable(self) -> int:
@@ -142,33 +180,33 @@ class FakeSupabase:
         result = None
 
         if name == "add_purchased_credits":
-            key = (params["p_environment"], params["p_transaction_id"])
             credits = params["p_credits"]
+            row = self.purchase_row(params["p_transaction_id"], params["p_environment"])
             if credits is None or credits <= 0:
                 result = {"outcome": "invalid", "reason": "non_positive_credits"}
-            elif key in self._purchases:
-                row = self._purchases[key]
+            elif row is not None:
+                # ON CONFLICT DO NOTHING, then the owner check — `revoked_at` is NOT read.
                 if row["user_id"] != params["p_user_id"]:
                     result = {"outcome": "conflict", "owner_user_id": row["user_id"]}
                 else:
                     result = {"outcome": "replay", "credits": row["credits"],
                               "spendable": self.spendable}
             else:
-                self._purchases[key] = {"user_id": params["p_user_id"], "credits": credits,
-                                        "revoked_at": None}
                 self.db["credit_purchases"].append({
                     "user_id": params["p_user_id"],
                     "transaction_id": params["p_transaction_id"],
                     "original_transaction_id": params.get("p_original_transaction_id"),
                     "environment": params["p_environment"],
+                    "product_id": params.get("p_product_id"),
+                    "credits": credits,
+                    "revoked_at": None,
                 })
                 self.purchased_total += credits
                 result = {"outcome": "granted", "credits": credits,
                           "spendable": self.spendable}
 
         elif name == "revoke_purchased_credits":
-            key = (params["p_environment"], params["p_transaction_id"])
-            row = self._purchases.get(key)
+            row = self.purchase_row(params["p_transaction_id"], params["p_environment"])
             if row is None:
                 result = {"outcome": "unknown"}
             elif row["revoked_at"] is not None:
@@ -329,10 +367,10 @@ def test_an_already_revoked_consumable_is_never_granted(sb, revocation):
     """Apple refunded it — granting would hand the user their money back AND the credits.
 
     No race is needed to reach this: `Transaction.updates` redelivers unfinished transactions on
-    every launch, so one refunded while unfinished arrives carrying its revocation. And the
-    webhook cannot clean up afterwards — `revoke_purchased_credits` returns `unknown` and writes
-    no tombstone when the REFUND lands before any `credit_purchases` row exists, so a late first
-    grant has nothing to collide with.
+    every launch, so one refunded while unfinished arrives carrying its revocation. The webhook's
+    refund tombstone (see the "REFUND before the grant" tests below) only covers a transaction
+    that carries an `appAccountToken`, so this check is still the guard for a JWS that already
+    shows the revocation.
 
     The subscription path got this free via `status_for_transaction`; the consumable path never
     read revocation at all.
@@ -614,6 +652,178 @@ def test_user_lookup_falls_back_to_credit_purchases(sb):
 
     assert service.user_id_for_transaction("TXN-L") == _USER
     assert service.user_id_for_transaction("NEVER-SEEN") is None
+
+
+def test_a_failed_user_lookup_does_not_block_a_pack_refund(sb):
+    """`user_id_for_transaction` now RAISES on a failed read (so a subscription REFUND gets a
+    503 instead of a silent 200). The pack branch only uses the id for logs — the revoke is
+    keyed on the transaction id — so it must degrade to "unknown user" and still revoke."""
+    service = _service(sb)
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-LF"))
+    assert sb.purchased_total == 250
+    sb._fail.add("subscriptions")
+
+    outcome, user_id = service.apply_notification(
+        *_notification("REFUND", _pack_txn(txn_id="TXN-LF"))
+    )
+
+    assert outcome == "credit_pack_revoked"
+    assert user_id is None
+    assert sb.purchased_total == 0
+
+
+def test_a_failed_credit_purchases_lookup_raises_instead_of_reading_as_not_found(sb):
+    """None must mean "every lookup succeeded and found nothing", never "the read failed"."""
+    sb._fail.add("credit_purchases")
+    with pytest.raises(svc.IAPError):
+        _service(sb).user_id_for_transaction("TXN-ANY")
+
+
+# ── A REFUND that lands BEFORE the grant: the tombstone ───────────────────────────────────
+#
+# `revoke_purchased_credits` answers `unknown` and writes nothing when no `credit_purchases`
+# row exists yet. The pre-refund JWS still verifies and carries no revocation, so re-POSTing
+# it to /billing/verify granted the pack in full: money back AND credits. The webhook now
+# writes a REVOKED row on the dedup key the grant's ON CONFLICT claims.
+
+def _refund_before_grant(service, txn_id="TXN-EARLY", **extra):
+    return service.apply_notification(
+        *_notification("REFUND", _pack_txn(txn_id=txn_id, **extra))
+    )
+
+
+def test_a_refund_before_the_grant_leaves_a_tombstone_the_replay_collides_with(sb):
+    service = _service(sb)
+
+    outcome, _u = _refund_before_grant(service, appAccountToken=_USER)
+
+    assert outcome == "credit_pack_revoked_before_grant"
+    row = sb.purchase_row("TXN-EARLY")
+    assert row is not None and row["revoked_at"], "no revoked tombstone was written"
+    assert row["user_id"] == _USER and row["credits"] == 250
+    assert row["product_id"] == _PACK_PLUS
+
+    # The saved pre-refund JWS, re-POSTed: it verifies, carries no revocation, and must now
+    # grant NOTHING.
+    out = service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-EARLY",
+                                                             appAccountToken=_USER))
+    assert sb.purchased_total == 0, "the refunded pack was granted on replay"
+    assert out["credits_granted"] == 0
+    assert out["status"] == "duplicate"
+
+
+def test_a_redelivered_early_refund_answers_already_revoked(sb):
+    """Apple retries; the tombstone is what the revoke RPC finds the second time."""
+    service = _service(sb)
+    _refund_before_grant(service, appAccountToken=_USER)
+
+    outcome, _u = _refund_before_grant(service, appAccountToken=_USER)
+
+    assert outcome == "credit_pack_already_revoked"
+    assert len(sb.db["credit_purchases"]) == 1
+
+
+def test_the_tombstone_owner_is_canonicalised_so_the_buyer_gets_a_replay_not_a_conflict(sb):
+    """Apple may return the token in any case; `users.id` is lowercase. An un-normalised owner
+    would turn the buyer's own replay into a 409 conflict."""
+    service = _service(sb)
+    _refund_before_grant(service, appAccountToken=_USER.upper())
+
+    assert sb.purchase_row("TXN-EARLY")["user_id"] == _USER
+    out = service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-EARLY"))
+    assert out["status"] == "duplicate" and sb.purchased_total == 0
+
+
+def test_the_tombstone_uses_the_same_environment_fallback_as_the_grant(sb):
+    """`_to_dict` drops None, so `environment` may be absent on BOTH sides. If the two paths
+    defaulted differently the tombstone would sit on a key the grant never claims."""
+    service = _service(sb)
+    early = _pack_txn(txn_id="TXN-NOENV", appAccountToken=_USER)
+    early.pop("environment")
+    service.apply_notification(*_notification("REFUND", early))
+
+    replay = _pack_txn(txn_id="TXN-NOENV")
+    replay.pop("environment")
+    service.apply_verified_transaction(_USER, replay)
+
+    assert sb.purchase_row("TXN-NOENV", settings.IAP_ENVIRONMENT) is not None
+    assert sb.purchased_total == 0
+
+
+def test_a_grant_that_races_the_tombstone_is_revoked_instead(sb):
+    """The grant can land between the revoke RPC's `unknown` and the tombstone INSERT. The
+    INSERT then hits the unique key (23505) — and the refund must still take the credits back."""
+    service = _service(sb)
+    real_pack_lookup = service.credit_pack_for_product
+
+    def pack_lookup_while_a_grant_lands(product_id):
+        pack = real_pack_lookup(product_id)
+        cs.CreditService().grant_purchased(
+            user_id=_USER, transaction_id="TXN-EARLY", product_id=_PACK_PLUS,
+            credits=250, environment="Production",
+        )
+        return pack
+
+    service.credit_pack_for_product = pack_lookup_while_a_grant_lands
+    outcome, _u = _refund_before_grant(service, appAccountToken=_USER)
+
+    assert outcome == "credit_pack_revoked"
+    assert sb.purchased_total == 0
+    assert sb.purchase_row("TXN-EARLY")["revoked_at"]
+
+
+def test_a_transient_tombstone_failure_answers_503_so_apple_redelivers(sb):
+    """A 200 here consumes Apple's only delivery of the refund while nothing was recorded."""
+    sb._fail.add("credit_purchases")        # the user lookup degrades; the INSERT fails
+    with pytest.raises(svc.IAPError):
+        _refund_before_grant(_service(sb), appAccountToken=_USER)
+
+
+def test_a_catalog_read_failure_during_the_tombstone_answers_503(sb):
+    sb._fail.add("credit_packs")
+    with pytest.raises(svc.IAPError) as exc:
+        _refund_before_grant(_service(sb), appAccountToken=_USER)
+    assert not isinstance(exc.value, svc.UnknownProduct)
+
+
+@pytest.mark.parametrize("token", [None, "", "not-a-uuid", 12345])
+def test_no_usable_token_means_no_tombstone_and_still_200(sb, token):
+    """`credit_purchases.user_id` is NOT NULL, so without the buyer's id there is nothing to
+    write. Still a 200: retrying cannot produce a token. (Known gap — needs a schema change.)"""
+    extra = {} if token is None else {"appAccountToken": token}
+    outcome, _u = _refund_before_grant(_service(sb), **extra)
+
+    assert outcome == "credit_pack_unknown"
+    assert sb.db["credit_purchases"] == []
+
+
+def test_a_token_naming_no_account_writes_no_tombstone_and_still_200(sb):
+    """The FK rejects it (23503) — a permanent condition, so no 503 retry loop."""
+    stranger = "99999999-9999-4999-8999-999999999999"
+    outcome, _u = _refund_before_grant(_service(sb), appAccountToken=stranger)
+
+    assert outcome == "credit_pack_unknown"
+    assert sb.db["credit_purchases"] == []
+
+
+def test_an_unpriceable_pack_writes_no_tombstone_and_still_200(sb):
+    outcome, _u = _refund_before_grant(
+        _service(sb), product="com.phan.caydex.credits.ghost", appAccountToken=_USER
+    )
+    assert outcome == "credit_pack_unknown"
+    assert sb.db["credit_purchases"] == []
+
+
+def test_a_refund_after_the_grant_never_writes_a_tombstone(sb):
+    """Negative control: the ordinary order still revokes the granted row in place."""
+    service = _service(sb)
+    service.apply_verified_transaction(_USER, _pack_txn(txn_id="TXN-R2", appAccountToken=_USER))
+
+    outcome, _u = _refund_before_grant(service, txn_id="TXN-R2", appAccountToken=_USER)
+
+    assert outcome == "credit_pack_revoked"
+    assert len(sb.db["credit_purchases"]) == 1
+    assert sb.purchased_total == 0
 
 
 # ── Migration-adjacent: the revoked arm must be TERMINAL, the unmapped arm must not ────

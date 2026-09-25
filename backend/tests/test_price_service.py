@@ -34,6 +34,20 @@ def _clear_cache():
     _cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _forget_learned_closures():
+    """The ingest's bellwether probe REGISTERS a weekday it sees no session for in the
+    process-wide `market_hours._OBSERVED_CLOSURES` — so a fake empty session here used to
+    leak "the market was closed on 2026-09-0x" into every later test in the process:
+    `test_theme_insights_service` then computed its `as_of` a week early, but only when it
+    ran after this file."""
+    from app.utils import market_hours
+    saved = set(market_hours._OBSERVED_CLOSURES)
+    yield
+    market_hours._OBSERVED_CLOSURES.clear()
+    market_hours._OBSERVED_CLOSURES.update(saved)
+
+
 def _screener_row(symbol: str, price: float, **over: Any) -> Dict[str, Any]:
     row = {"symbol": symbol, "companyName": f"{symbol} Inc.", "price": price,
            "volume": 1_000_000, "avgVolume": 2_000_000, "marketCap": 5_000_000_000,

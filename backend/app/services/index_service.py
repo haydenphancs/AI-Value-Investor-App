@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableException
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp_entitlements import INDEX_CONSTITUENT_PATHS, is_entitled
 from app.services.agents.persona_config import neutral_system_instruction
 from app.integrations.gemini import get_gemini_client
@@ -265,11 +266,11 @@ def _settled_bars(historical: List[Dict], now: Optional[datetime] = None) -> Lis
     (it cannot be placed in time, and every consumer already tolerates it). `now` is
     injectable for tests.
     """
-    cutoff = _settled_cutoff_date(now)
-    return [
-        r for r in (historical or [])
-        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
-    ]
+    from app.services.chart_helper import settled_bars
+
+    # The filter is shared (`chart_helper.settled_bars`); the cutoff stays on this module's
+    # own `current_close_cycle_start` binding so each service's clock can be frozen alone.
+    return settled_bars(historical, _settled_cutoff_date(now))
 
 
 def _cache_get_settled(key: str) -> Optional[Any]:
@@ -443,25 +444,13 @@ def _compute_average(prices: List[Dict], days: int) -> Optional[float]:
     return sum(closes) / len(closes) if closes else None
 
 
-def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
-    """Compute year-to-date return."""
-    if not prices or len(prices) < 2:
-        return None
+def _compute_ytd_return(prices: List[Dict], now: Optional[datetime] = None) -> Optional[float]:
+    """Year-to-date return from the previous year's last close — the one shared definition
+    (`chart_helper.ytd_return`); this used to be one of five copies that baselined on the
+    FIRST close of the (UTC) year instead."""
+    from app.services.chart_helper import ytd_return
 
-    from app.services.chart_helper import _finite_or_none
-    current_year = datetime.now(tz=timezone.utc).year
-    # Find the first trading day of the current year
-    for p in prices:
-        date_str = p.get("date") or ""
-        if date_str.startswith(str(current_year)):
-            # Finite-guard both ends so a NaN/Inf close degrades to an omitted period
-            # rather than a NaN change_percent that breaks the iOS JSON decode.
-            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
-            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
-            if start_price and end_price and start_price > 0:
-                return ((end_price - start_price) / start_price) * 100
-            break
-    return None
+    return ytd_return(prices, now)
 
 
 def _compute_index_pe_from_sectors() -> Optional[float]:
@@ -815,12 +804,10 @@ class IndexService:
         except asyncio.CancelledError:
             # CancelledError is a BaseException and would leave the future unresolved,
             # hanging every joiner for the life of the process.
-            if not fut.done():
-                fut.set_exception(RuntimeError("Index history fetch was cancelled"))
+            fail_shared_future(fut, RuntimeError("Index history fetch was cancelled"))
             raise
         except Exception as e:
-            if not fut.done():
-                fut.set_exception(e)
+            fail_shared_future(fut, e)
             raise
         finally:
             _inflight.pop(key, None)
@@ -1193,12 +1180,10 @@ class IndexService:
             # CancelledError is a BaseException, so it skips the handler below and would
             # leave the future unresolved — every joiner would hang for the life of the
             # process. Hand them a normal exception, then honour our own cancellation.
-            if not future.done():
-                future.set_exception(RuntimeError("index detail fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("index detail fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)

@@ -269,3 +269,141 @@ async def test_a_failing_fallback_yields_the_honest_sentinel(monkeypatch):
     agent = _agent(gem, monkeypatch)
     out = await agent._agentic_research(_Out(), "EVIDENCE")
     assert out == "Analysis for AAPL could not be completed."
+
+
+# ── C11: the reply to the LAST round's tool results is read, not discarded ───────────────
+#
+# With a tool call in every one of the MAX_AGENTIC_ROUNDS rounds, the final round still sends
+# its tool results and receives a reply (MAX_AGENTIC_ROUNDS + 1 sends in all). That reply was
+# never parsed: a `research_complete` or a written synthesis in it — the one turn that holds
+# every fetched datum — was dropped, AGENTIC_ROUNDS_EXHAUSTED was logged falsely, and a sixth
+# call produced a single-pass analysis that sees none of the tool data the 20 credits bought.
+
+def _tool_rounds() -> List[_Resp]:
+    return [fc("fetch_more_news", ticker="AAPL")] * MAX_AGENTIC_ROUNDS
+
+
+async def _ok(args):
+    return {"ok": 1}
+
+
+def _exhausted_logged(caplog) -> bool:
+    return any("AGENTIC_ROUNDS_EXHAUSTED" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_research_complete_in_the_reply_to_the_last_round_is_used(monkeypatch, caplog):
+    gem = _Gem(_tool_rounds() + [fc("research_complete", summary="REAL SYNTHESIS")],
+               fallback_text="SINGLE-PASS FALLBACK (no tool data)")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "REAL SYNTHESIS"
+    assert gem.fallback_calls == [], "no sixth call: the synthesis was already paid for"
+    assert len(gem.chat.sent) == MAX_AGENTIC_ROUNDS + 1
+    assert isinstance(gem.chat.sent[-1], list), "the last round's tool results were still sent"
+    assert not _exhausted_logged(caplog), "the model finished — not an exhaustion"
+
+
+@pytest.mark.asyncio
+async def test_prose_in_the_reply_to_the_last_round_is_returned(monkeypatch, caplog):
+    gem = _Gem(_tool_rounds() + [text("FINDINGS: margins expanding, net cash.")],
+               fallback_text="FALLBACK")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "FINDINGS: margins expanding, net cash."
+    assert gem.fallback_calls == []
+    assert not _exhausted_logged(caplog)
+
+
+@pytest.mark.asyncio
+async def test_last_reply_research_complete_prefers_the_models_prose_over_the_summary(monkeypatch):
+    last = _Resp([_Part(text="FULL PROSE"), _Part(fc=_FC("research_complete", {"summary": "short"}))])
+    gem = _Gem(_tool_rounds() + [last])
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    assert await agent._agentic_research(_Out(), "EVIDENCE") == "FULL PROSE"
+    assert gem.fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_last_reply_research_complete_wins_over_a_pending_tool_call(monkeypatch):
+    """Same rule as a round: `research_complete` ends the research whatever sits beside it."""
+    last = _Resp([_Part(fc=_FC("fetch_more_news", {"ticker": "AAPL"})),
+                  _Part(fc=_FC("research_complete", {"summary": "DONE"}))])
+    gem = _Gem(_tool_rounds() + [last])
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    assert await agent._agentic_research(_Out(), "EVIDENCE") == "DONE"
+    assert gem.fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_last_reply_falls_back_without_claiming_exhaustion(monkeypatch, caplog):
+    gem = _Gem(_tool_rounds() + [_Resp([])], fallback_text="FALLBACK")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "FALLBACK" and len(gem.fallback_calls) == 1
+    assert not _exhausted_logged(caplog)
+    assert any("EMPTY" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_last_reply_is_empty_not_findings(monkeypatch):
+    gem = _Gem(_tool_rounds() + [text("  \n ")], fallback_text="FALLBACK")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    assert await agent._agentic_research(_Out(), "EVIDENCE") == "FALLBACK"
+
+
+@pytest.mark.asyncio
+async def test_a_last_reply_research_complete_with_nothing_in_it_falls_back(monkeypatch):
+    """No prose and no summary: shipping "Research complete." would make a placeholder the
+    whole deep-research premium, which is what the exhaustion branch exists to prevent."""
+    gem = _Gem(_tool_rounds() + [fc("research_complete", summary="  ")], fallback_text="FALLBACK")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "FALLBACK" and len(gem.fallback_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_prose_beside_a_pending_tool_call_is_a_preamble_not_findings(monkeypatch, caplog):
+    """The model is still asking for data: the budget is genuinely exhausted, and its "let me
+    check…" line must not become the report's findings."""
+    last = _Resp([_Part(text="Let me check the cash flow statement next."),
+                  _Part(fc=_FC("fetch_extended_financials", {"ticker": "AAPL"}))])
+    gem = _Gem(_tool_rounds() + [last], fallback_text="SINGLE-PASS SYNTHESIS")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "SINGLE-PASS SYNTHESIS" and len(gem.fallback_calls) == 1
+    assert _exhausted_logged(caplog)
+
+
+@pytest.mark.asyncio
+async def test_true_exhaustion_still_logs_the_marker_with_the_pending_tool(monkeypatch, caplog):
+    """Negative control for the tests above: the marker still fires when it is true."""
+    gem = _Gem(_tool_rounds() + [fc("fetch_sector_performance")], fallback_text="SYN")
+    agent = _agent(gem, monkeypatch, {"fetch_more_news": _ok})
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        assert await agent._agentic_research(_Out(), "EVIDENCE") == "SYN"
+    msgs = [r.getMessage() for r in caplog.records if "AGENTIC_ROUNDS_EXHAUSTED" in r.getMessage()]
+    assert len(msgs) == 1 and "pending=fetch_sector_performance" in msgs[0]
+    assert len(gem.chat.sent) == MAX_AGENTIC_ROUNDS + 1, "no extra model call beyond the budget"
+
+
+@pytest.mark.asyncio
+async def test_an_in_loop_research_complete_with_no_summary_falls_back_not_a_placeholder(monkeypatch):
+    gem = _Gem([_Resp([_Part(fc=_FC("research_complete", {}))])], fallback_text="FALLBACK")
+    agent = _agent(gem, monkeypatch)
+    out = await agent._agentic_research(_Out(), "EVIDENCE")
+    assert out == "FALLBACK" and "Research complete." not in out
+    assert len(gem.fallback_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_in_loop_research_complete_prefers_prose_over_summary(monkeypatch):
+    first = _Resp([_Part(text="PROSE"), _Part(fc=_FC("research_complete", {"summary": "S"}))])
+    gem = _Gem([first])
+    agent = _agent(gem, monkeypatch)
+    assert await agent._agentic_research(_Out(), "EVIDENCE") == "PROSE"
+    assert gem.fallback_calls == []

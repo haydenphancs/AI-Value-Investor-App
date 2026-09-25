@@ -28,6 +28,7 @@ from app.integrations.fmp import (
     FMPPartialPageException,
 )
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.utils.period_labels import filing_period_display
 from app.services.corporate_actions_service import (
     corporate_actions_source,
@@ -874,8 +875,7 @@ class WhaleService:
             if not fut.done():
                 fut.set_result(profile_no_follow)
         except Exception as e:
-            if not fut.done():
-                fut.set_exception(e)
+            fail_shared_future(fut, e)
             raise
         finally:
             # SETTLE ON CANCELLATION. CancelledError is a BaseException and skips the

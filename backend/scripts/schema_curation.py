@@ -314,8 +314,9 @@ CURATION: dict[str, TableDoc] = {
     "public.whales": T("whales",
         key=("id", "name", "cik", "category", "firm_name", "lifecycle_status",
              "last_filing_period", "followers_count"),
-        note="The hub — 7 tables cascade from it. Seeded from data/whale_registry.json at "
-             "startup, then hydrated from EDGAR. UNIQUE(cik) WHERE cik IS NOT NULL."),
+        note="The hub — 7 tables cascade from it. Seeded from data/whale_registry.json by "
+             "hand (scripts/sync_whale_registry.py), then hydrated nightly via FMP. "
+             "UNIQUE(cik) WHERE cik IS NOT NULL."),
     "public.whale_holdings": T("whales",
         purpose="Current position per whale per ticker, as a share of the portfolio.",
         key=("whale_id", "ticker", "allocation", "change_percent")),

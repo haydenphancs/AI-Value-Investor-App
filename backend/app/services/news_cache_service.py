@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 
 from app.utils.market_hours import to_utc_instant
+from app.utils.inflight import fail_shared_future
 from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
@@ -260,7 +261,7 @@ class NewsCacheService:
                 # produces a "Future exception was never retrieved" traceback on
                 # GC for every single failure — pure log/Sentry noise.
                 if _has_waiters(fut):
-                    fut.set_exception(e)
+                    fail_shared_future(fut, e)
                 else:
                     fut.cancel()
             raise
@@ -865,7 +866,7 @@ class NewsCacheService:
                 # else an unretrieved future exception logs noisily on GC (same
                 # rule as `get_market_news`).
                 if _has_waiters(fut):
-                    fut.set_exception(e)
+                    fail_shared_future(fut, e)
                 else:
                     fut.cancel()
             raise

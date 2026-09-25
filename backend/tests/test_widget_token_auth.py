@@ -354,12 +354,82 @@ def test_the_strict_widget_routes_are_still_strict():
 
 
 # ── 5. The mint ─────────────────────────────────────────────────────────────
+#
+# The mint takes `get_current_user`, so it reads `public.users`. `accounts` stands in for that
+# table through FastAPI's own override of `get_supabase` — the exact object `get_current_user`
+# receives via `Depends(get_supabase)` — so the suite stays hermetic (testing.md).
+
+_MINT = "/api/v1/widget/token"
+
+
+class _UsersQuery:
+    def __init__(self, accounts):
+        self._accounts = accounts
+        self._id = None
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, _col, value):
+        self._id = value
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        if self._accounts.down:
+            raise RuntimeError("users read failed (stubbed outage)")
+        row = self._accounts.rows.get(self._id)
+        return type("R", (), {"data": [dict(row)] if row else []})()
+
+
+class _Accounts:
+    """The `public.users` rows the mint can see. Empty unless a test adds one."""
+
+    def __init__(self):
+        self.rows: dict = {}
+        self.down = False
+
+    def add(self, user_id, **cols):
+        self.rows[user_id] = {"id": user_id, "password_changed_at": None, **cols}
+
+    def table(self, _name):
+        return _UsersQuery(self)
+
+
+@pytest.fixture
+def accounts():
+    from app.database import get_supabase
+
+    fake = _Accounts()
+    previous = app.dependency_overrides.get(get_supabase)
+    app.dependency_overrides[get_supabase] = lambda: fake
+    try:
+        yield fake
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_supabase, None)
+        else:
+            app.dependency_overrides[get_supabase] = previous
+
+
+def _access_token(sub=_UID, *, issued_ago: timedelta = timedelta(0)) -> str:
+    """A real-shaped session token, optionally issued in the past (still unexpired)."""
+    iat = datetime.now(timezone.utc) - issued_ago
+    return jwt.encode(
+        {"sub": sub, "type": "access", "iat": iat, "exp": iat + timedelta(hours=24)},
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
 
 def test_the_mint_requires_a_session(client):
     assert client.get("/api/v1/widget/token").status_code == 401
 
 
-def test_the_mint_returns_a_usable_token(client):
+def test_the_mint_returns_a_usable_token(client, accounts):
+    accounts.add(_UID)
     r = client.get(
         "/api/v1/widget/token",
         headers={"Authorization": f"Bearer {create_access_token({'sub': _UID})}"},
@@ -372,14 +442,77 @@ def test_the_mint_returns_a_usable_token(client):
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", body["expires_at"]), body
 
 
-def test_the_minted_token_is_for_the_CALLER(client):
+def test_the_minted_token_is_for_the_CALLER(client, accounts):
     """A correct-looking token for somebody else's subject would be worse than no token."""
     other = "99999999-8888-7777-6666-555555555555"
+    accounts.add(_UID)
+    accounts.add(other)
     r = client.get(
         "/api/v1/widget/token",
         headers={"Authorization": f"Bearer {create_access_token({'sub': other})}"},
     )
     assert decode_widget_token(r.json()["token"]) == other
+
+
+# 🔴 The mint used to take the TOKEN-ONLY `get_current_user_id` (signature + expiry). A widget
+# token is never re-checked against `public.users` and deliberately skips password-change
+# eviction (`core/security.py`), so whatever this route mints lives for 90 days regardless of
+# what happens to the account. The account therefore has to be checked HERE, strictly.
+
+def test_an_evicted_session_cannot_mint(client, accounts):
+    """The victim reset their password because someone else holds their session. The thief's
+    access token is still inside its 24 h life and 401s on every account route — it must not
+    be able to trade itself for a 90-day FMP-data credential on the way out."""
+    accounts.add(
+        _UID,
+        password_changed_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    )
+    stolen = _access_token(issued_ago=timedelta(hours=2))
+    r = client.get(_MINT, headers={"Authorization": f"Bearer {stolen}"})
+    assert r.status_code == 401, f"an evicted session minted a widget token: {r.text}"
+    assert r.json()["error_code"] == "AUTH_SESSION_EXPIRED"
+    assert "token" not in r.json()
+
+
+def test_a_session_issued_after_the_password_change_still_mints(client, accounts):
+    """Anti-vacuity for the eviction case: the check must evict only OLDER sessions — the
+    user's own re-sign-in after their reset has to keep the widget working."""
+    accounts.add(
+        _UID,
+        password_changed_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    )
+    r = client.get(_MINT, headers={"Authorization": f"Bearer {_access_token()}"})
+    assert r.status_code == 200, r.text
+    assert decode_widget_token(r.json()["token"]) == _UID
+
+
+def test_a_deleted_account_cannot_mint(client, accounts):
+    """A valid, unexpired token naming an account with no `public.users` row (deleted, or a
+    signup whose trigger never seeded it). The account-only licence gate (auth.md §1a) needs an
+    ACCOUNT, and a 90-day credential outliving its account's deletion is the opposite."""
+    r = client.get(_MINT, headers={"Authorization": f"Bearer {_access_token()}"})
+    assert r.status_code == 401, f"a deleted account minted a widget token: {r.text}"
+    assert r.json()["error_code"] == "AUTH_ACCOUNT_NOT_FOUND"
+
+
+def test_an_unreadable_users_table_refuses_to_mint(client, accounts):
+    """Fail CLOSED: when the account cannot be checked, the answer is the retryable 503, never a
+    90-day token issued on the signature alone."""
+    accounts.add(_UID)
+    accounts.down = True
+    r = client.get(_MINT, headers={"Authorization": f"Bearer {_access_token()}"})
+    assert r.status_code == 503, r.text
+    assert r.json()["error_code"] == "AUTH_UNAVAILABLE"
+
+
+def test_the_mint_checks_the_account_not_just_the_token():
+    """Structural pin for the three behaviours above. `test_the_strict_widget_routes_are_still_
+    strict` cannot catch a revert: the router's own `get_current_user_id` keeps that name in the
+    mint's dependency tree either way."""
+    assert _MINT in _routes_using("get_current_user")
+    assert _MARKET not in _routes_using("get_current_user"), (
+        "the market route must stay reachable with a widget token alone"
+    )
 
 
 # ── 6. iOS side: the extension sends it, and skips the call without one ─────
@@ -482,6 +615,12 @@ def test_only_the_app_writes_the_token():
 #     Removing the router dependency ALONE leaves it 401 (measured), because the rate limiter
 #     resolves `get_widget_caller` too. Defence in depth, not a gap — recorded so the next
 #     reader does not mistake that for an untested path.
+#  9. (2026-09-25) The mint reverted to the token-only `Depends(get_current_user_id)`
+#       -> test_an_evicted_session_cannot_mint, test_a_deleted_account_cannot_mint,
+#          test_an_unreadable_users_table_refuses_to_mint and
+#          test_the_mint_checks_the_account_not_just_the_token FAILED ✅
+#          (test_the_strict_widget_routes_are_still_strict stays green on the revert: the
+#          router's own dependency keeps `get_current_user_id` in the tree either way)
 #
 # CONTROL: appending "groundingLines tokenHeader clearAll" to a COMMENT in the fetcher left
 # every scan green ✅ — the comment strippers are doing their job.

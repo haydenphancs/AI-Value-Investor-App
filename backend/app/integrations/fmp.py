@@ -71,7 +71,10 @@ class EmptyAfterFailure(list):
 
     def __init__(self, reason: str = ""):
         super().__init__()
-        self.reason = reason
+        # REDACTED at construction: the reason is usually `str(httpx error)`, whose message is
+        # the request URL — `apikey=<KEY>` included — and it is read by consumers that never
+        # pass through the logging filter (chat grounding, the agent's tool results).
+        self.reason = redact_secrets(reason)
 
 
 class FMPException(Exception):
@@ -1272,7 +1275,7 @@ class FMPClient:
         except Exception as e:
             logger.warning(
                 "Stock news request failed (symbols=%s): %s: %s",
-                params.get("symbols", "<market>"), type(e).__name__, e,
+                params.get("symbols", "<market>"), type(e).__name__, redact_secrets(e),
             )
             return EmptyAfterFailure(f"{type(e).__name__}: {e}")
 
@@ -1338,7 +1341,7 @@ class FMPClient:
         except Exception as e:
             logger.warning(
                 "Crypto news request failed (symbols=%s): %s: %s",
-                params.get("symbols", "<all>"), type(e).__name__, e,
+                params.get("symbols", "<all>"), type(e).__name__, redact_secrets(e),
             )
             return EmptyAfterFailure(f"{type(e).__name__}: {e}")
 
@@ -1501,7 +1504,7 @@ class FMPClient:
                 return data[:limit]
             return []
         except Exception as e:
-            logger.warning(f"Dividend history failed for {ticker}: {e}")
+            logger.warning(f"Dividend history failed for {ticker}: {type(e).__name__}: {redact_secrets(e)}")
             return []
 
     # ── Batch / crypto helpers ───────────────────────────────────────

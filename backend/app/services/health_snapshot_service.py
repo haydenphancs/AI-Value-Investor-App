@@ -23,7 +23,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
-from app.integrations.fmp import get_fmp_client
+from app.utils.inflight import fail_shared_future
+from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
 from app.services.sector_benchmark_service import _normalize_sector
@@ -311,12 +312,24 @@ class HealthSnapshotService:
 
         try:
             logger.info(f"Health snapshot cache MISS for {ticker} — computing")
-            result = await self._compute(ticker)
+            result, degraded = await self._compute_with_status(ticker)
 
-            # Persist to Supabase in background thread
-            asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_supabase_cache, ticker, result,
-            )
+            # NEVER persist a degraded build. HealthCheckService refuses to persist a
+            # result with no metrics; this card would turn it into "Financial Health —"
+            # rated with the neutral sentinel 3 and pin that in snapshot_cache for 24h,
+            # where the Overview card and the report's snap_health read it. Serve it, keep
+            # the 5-min memory tier, rebuild on the next miss. Mirrors
+            # valuation_snapshot_service.
+            if degraded:
+                logger.warning(
+                    "Health snapshot NOT persisted for %s (degraded: %s) — will rebuild "
+                    "after the in-memory TTL", ticker, ", ".join(degraded),
+                )
+            else:
+                # Persist to Supabase in background thread
+                asyncio.get_running_loop().run_in_executor(
+                    None, self._upsert_supabase_cache, ticker, result,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():
@@ -329,12 +342,10 @@ class HealthSnapshotService:
             # whenever the LEADER is a cancellable caller: a report run hitting
             # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
             # Hand waiters a normal exception so they fail fast through their own error path.
-            if not future.done():
-                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -389,7 +400,22 @@ class HealthSnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
+        """`_compute_with_status` without the degradation list."""
+        snapshot, _degraded = await self._compute_with_status(ticker)
+        return snapshot
+
+    async def _compute_with_status(
+        self, ticker: str,
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
         """Reuse HealthCheckService (Financials tab) + compute Altman Z-Score.
+
+        Returns ``(snapshot, degraded)``; `get_health_snapshot` refuses to persist a build
+        with a non-empty list. Degraded means: the health check RAISED (the local
+        fallback then stands in, plus any of its own bs/income/profile legs that raised),
+        or no metric in the card carries a value, which includes a health check that
+        returned no metrics (the build it refuses to persist itself). A permanent
+        `FMPNotEntitledException` is not degradation — that slice will not come back on
+        retry.
 
         Income-statement fields (operatingIncome, interestExpense, revenue)
         are summed across the last 4 quarters to get TTM values. The balance
@@ -410,6 +436,15 @@ class HealthSnapshotService:
         results = await asyncio.gather(
             health_task, bs_task, inc_task, profile_task, return_exceptions=True,
         )
+
+        degraded: List[str] = []
+        for name, raw in zip(("health_check", "balance_sheet", "income", "profile"), results):
+            if isinstance(raw, Exception) and not isinstance(raw, FMPNotEntitledException):
+                degraded.append(name)
+        if not isinstance(results[0], Exception):
+            # The bs/income/profile legs only feed the local fallback below; with a
+            # usable health check they change nothing on the card.
+            degraded = []
 
         health = results[0] if not isinstance(results[0], Exception) else None
         bs_raw = results[1] if not isinstance(results[1], Exception) else []
@@ -471,7 +506,9 @@ class HealthSnapshotService:
                 try:
                     # CURRENT benchmark per metric: TTM row if present, else latest
                     # mature annual value (fallback).
-                    cur = get_sector_benchmark_lookup().get_current_benchmark_values(
+                    # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
+                    cur = await asyncio.to_thread(
+                        get_sector_benchmark_lookup().get_current_benchmark_values,
                         industry,
                         sector,
                         ["interest_coverage", "quick_ratio", "debt_to_equity", "current_ratio"],
@@ -593,16 +630,21 @@ class HealthSnapshotService:
         weighted = 0.4 * z_rating + 0.6 * pass_rating
         rating = max(1, min(5, round(weighted)))
 
+        # Also covers a health check that returned NO metrics, the case HealthCheckService
+        # itself refuses to persist: the card then has nothing but the placeholder below.
+        if not any(m.value not in (None, "", "—") for m in metrics):
+            degraded.append("no_values")
         if not metrics:
             metrics.append(SnapshotMetricResponse(name="Financial Health", value="—"))
 
-        return SnapshotItemResponse(
+        snapshot = SnapshotItemResponse(
             category="Financial Health",
             rating=rating,
             metrics=metrics,
             full_report_available=True,
             weighted_score=round(weighted, 3),
         )
+        return snapshot, degraded
 
 
 # ── Singleton ─────────────────────────────────────────────────────

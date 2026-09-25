@@ -32,6 +32,7 @@ Pure logic — no network, no real Supabase. Run via `python -m pytest` from bac
 
 import asyncio
 import sys
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -342,8 +343,20 @@ def _hydration_job_body() -> str:
 
 def test_full_hydration_uses_the_durable_claim():
     body = _hydration_job_body()
-    assert "claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL)" in body
+    assert re.search(r"claimed_scheduled_job\(\s*JOB_WHALE_HYDRATION_FULL\b", body)
     assert "run.success = True" in body
+
+
+def test_full_hydration_claim_outlasts_the_sweep():
+    """The 15-minute notification default let a deploy-overlap instance steal the claim
+    from a full sweep still running (every whale, FMP + Gemini) and start a second
+    concurrent sweep over the same rows. It uses the chain's 3 h window."""
+    import app.main as m
+    body = _hydration_job_body()
+    call = re.search(r"claimed_scheduled_job\(\s*JOB_WHALE_HYDRATION_FULL(.*?)\)\s*as run", body, re.S)
+    assert call, "the full sweep's claim call moved"
+    assert "stale_seconds=_CHAIN_PHASE_STALE_SECONDS" in call.group(1), call.group(0)
+    assert m._CHAIN_PHASE_STALE_SECONDS >= 2 * 3600
 
 
 def test_clock_inferred_seed_is_gone():

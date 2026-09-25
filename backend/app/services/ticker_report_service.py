@@ -142,8 +142,12 @@ class TickerReportService:
         # 3. Stage A: structural / scoring shell
         shell = await self._generate_stage_a(out, persona, evidence)
 
-        # 4. Merge deterministic real-data with Stage A shell
-        report = self.collector.assemble_report(out, shell)
+        # 4. Merge deterministic real-data with Stage A shell. On a worker thread:
+        #    assemble_report is sync and makes blocking Supabase reads (sector
+        #    benchmarks for the competitor set, moat sector medians, peer moats) that
+        #    would otherwise stall every other request on the single-worker loop.
+        #    `out` is this request's own deep copy, and nothing else runs on it here.
+        report = await asyncio.to_thread(self.collector.assemble_report, out, shell)
 
         # 5. Stage B narratives + cross-module thesis synthesis, in parallel.
         #    Stage B fills per-field prose; synthesize_core_thesis rewrites

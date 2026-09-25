@@ -97,7 +97,10 @@ public enum WidgetAPIConfig {
 }
 
 /// The one App Group suite, shared by every store in this file's neighbourhood.
-enum WidgetSharedDefaults {
+///
+/// `nonisolated`: `UserDefaults` is thread-safe, and `WidgetModeOverride` reads this from the
+/// widget's nonisolated `AppIntent.perform()`.
+nonisolated enum WidgetSharedDefaults {
     static var store: UserDefaults? {
         UserDefaults(suiteName: WidgetSharedConfig.appGroupIdentifier)
     }

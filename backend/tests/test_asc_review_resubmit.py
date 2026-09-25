@@ -220,3 +220,20 @@ def test_iap_notes_name_paths_that_exist():
     assert '"Add Credits"' in profile and '"Plans"' in profile
     assert "Profile → Add Credits" in mod.CREDIT_PACK_NOTE
     assert "Profile → Plans" in mod.SUBSCRIPTION_NOTE_SWAP[1]
+
+
+def test_a_reworded_paragraph_is_found_after_the_first_apply():
+    """After the first --apply the live paragraph starts 'Background audio', not 'Background
+    modes.' — a later wording fix must still find and replace it (not 'no paragraph')."""
+    first = mod.apply_replacements(_LIVE_SHAPE, mod.REPLACEMENTS)
+    edited = first.replace(mod.NEW_PARAGRAPH, "Background audio (UIBackgroundModes: audio). OLD WORDING.")
+    again = mod.apply_replacements(edited, mod.REPLACEMENTS)
+    assert "OLD WORDING" not in again and again.count(mod.NEW_PARAGRAPH) == 1
+
+
+def test_the_notes_never_claim_an_attachment_asc_cannot_hold():
+    """ASC allows ONE review attachment and it is the FMP Order Form (409 'max of 1 attachment',
+    2026-09-24). A notes line saying the recording is 'attached to App Review Information' was
+    false the moment it was written."""
+    assert "attached to App Review Information" not in mod.NEW_PARAGRAPH
+    assert "Resolution Center" in mod.NEW_PARAGRAPH

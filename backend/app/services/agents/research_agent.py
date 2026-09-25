@@ -40,8 +40,10 @@ from app.integrations.fmp import FMPClient
 from app.integrations.gemini import GeminiClient, _call_with_timeout
 from app.integrations.gemini import _log_gemini_usage, _response_usage, truncate_tool_result
 from app.services.agents.fmp_tools import (
+    _scrub,
     build_fmp_tool_declarations,
     build_tool_handlers,
+    tool_error_message,
 )
 from app.services.report_degradation import (
     REPORT_DEGRADED_KEY,
@@ -110,6 +112,29 @@ def _safe_response_text(response: Any) -> str:
         return ""
 
 
+def _research_complete_text(response: Any, fc: Any) -> str:
+    """The synthesis carried by a `research_complete` turn: the model's prose if it wrote
+    any, else the call's `summary`. "" when it carried neither — the caller falls back
+    rather than shipping a placeholder as the 20-credit deep-research premium (the old
+    `"Research complete."` default was exactly that)."""
+    text = _safe_response_text(response)
+    if text.strip():
+        return text
+    args = dict(fc.args) if getattr(fc, "args", None) else {}
+    summary = args.get("summary")
+    return summary if isinstance(summary, str) and summary.strip() else ""
+
+
+def _function_calls(response: Any) -> List[Any]:
+    """Named function calls in the first candidate, in order."""
+    calls: List[Any] = []
+    for part in _response_parts(response):
+        fc = getattr(part, "function_call", None)
+        if fc and getattr(fc, "name", None):
+            calls.append(fc)
+    return calls
+
+
 class ResearchAgent:
     """Autonomous research agent for the Generate Analysis flow.
 
@@ -170,7 +195,12 @@ class ResearchAgent:
             await progress_cb(75, "Building report...")
 
         # ── Phase 4: assemble (real-data + Stage A merge) ────────────
-        report = self.collector.assemble_report(out, shell)
+        # On a worker thread, exactly as the direct path (`TickerReportService`) does:
+        # assemble_report is sync and makes blocking Supabase reads (sector benchmarks for
+        # the competitor set, moat sector medians, peer moats) that would otherwise stall
+        # every other request on the single-worker loop. `out` is this run's own deep copy
+        # (`collector.collect`), and nothing else touches it while the thread runs.
+        report = await asyncio.to_thread(self.collector.assemble_report, out, shell)
 
         # Carry the degradation marker across the merge. `assemble_report` builds a fresh
         # dict from the real-data sections, so the shell-level key does NOT survive on its
@@ -289,13 +319,15 @@ class ResearchAgent:
                     has_function_call = True
 
                     if fc.name == "research_complete":
-                        args = dict(fc.args) if fc.args else {}
-                        text_from_parts = _safe_response_text(response)
-                        final_text = (
-                            text_from_parts if text_from_parts
-                            else args.get("summary", "Research complete.")
+                        final_text = _research_complete_text(response, fc)
+                        if final_text:
+                            return final_text
+                        logger.warning(
+                            "Agent %s round %d: research_complete carried no summary or "
+                            "text (ticker=%s) — falling back to single-pass analysis",
+                            self.persona.key, round_num + 1, ticker,
                         )
-                        return final_text
+                        return await self._fallback_text_analysis(out, evidence)
 
                     handler = handlers.get(fc.name)
                     args = dict(fc.args) if fc.args else {}
@@ -307,11 +339,14 @@ class ResearchAgent:
                         try:
                             result = await handler(args)
                         except Exception as e:
+                            # The fmp_tools handlers catch their own FMP errors; this arm
+                            # sees whatever escapes them, and it goes to Gemini too — so
+                            # the same redaction applies (never an `apikey=` URL).
                             logger.warning(
-                                f"Tool {fc.name} failed: "
-                                f"{type(e).__name__}: {e}"
+                                "Tool %s failed (ticker=%s): %s", fc.name, ticker,
+                                _scrub(f"{type(e).__name__}: {e}", self.fmp),
                             )
-                            result = {"error": str(e)}
+                            result = {"error": tool_error_message(e, self.fmp)}
 
                     response_parts.append(
                         types.Part.from_function_response(
@@ -353,6 +388,39 @@ class ResearchAgent:
             if final_text:
                 return final_text
 
+            # The loop ran every round, and each one ended in a tool call. The LAST of those
+            # rounds still sent its tool results and received a reply — `response` — which no
+            # round ever read. It is the one turn that holds every fetched datum, and the most
+            # likely place for the model to finish: it used to be thrown away and replaced by
+            # a single-pass fallback that sees none of the tool data the user's 20 credits
+            # paid for, under a false AGENTIC_ROUNDS_EXHAUSTED (C11). Read it first, with the
+            # same rules as a round.
+            last_calls = _function_calls(response)
+            done = next((c for c in last_calls if c.name == "research_complete"), None)
+            if done is not None:
+                final_text = _research_complete_text(response, done)
+                if final_text:
+                    return final_text
+                logger.warning(
+                    "Agent %s final reply: research_complete carried no summary or text "
+                    "(ticker=%s) — falling back to single-pass analysis",
+                    self.persona.key, ticker,
+                )
+                return await self._fallback_text_analysis(out, evidence)
+            if not last_calls:
+                final_text = _safe_response_text(response)
+                if final_text.strip():
+                    return final_text
+                logger.warning(
+                    "Agent %s final reply after %d tool rounds was EMPTY (ticker=%s) — "
+                    "falling back to single-pass analysis",
+                    self.persona.key, MAX_AGENTIC_ROUNDS, ticker,
+                )
+                return await self._fallback_text_analysis(out, evidence)
+            # Still asking for tools: the budget really is exhausted. Any prose alongside a
+            # pending call is a preamble ("let me check the cash flow…"), not a synthesis —
+            # a round would ignore it too — so it is not shipped as the findings.
+
             # Every round ended in a tool call and the budget ran out before the model
             # ever called `research_complete` — so there IS no synthesis. This used to
             # return the literal string "Research analysis complete.", which is not a
@@ -371,10 +439,11 @@ class ResearchAgent:
             # is unmeasured on this path (thinking OFF is exactly the setting that could
             # make the model keep calling tools rather than judge it has enough).
             logger.warning(
-                "AGENTIC_ROUNDS_EXHAUSTED ticker=%s persona=%s rounds=%d — no research_complete; "
-                "running the single-pass synthesis so Stage A gets real findings instead of a "
-                "placeholder",
+                "AGENTIC_ROUNDS_EXHAUSTED ticker=%s persona=%s rounds=%d pending=%s — no "
+                "research_complete; running the single-pass synthesis so Stage A gets real "
+                "findings instead of a placeholder",
                 ticker, self.persona.key, MAX_AGENTIC_ROUNDS,
+                ",".join(c.name for c in last_calls),
             )
             return await self._fallback_text_analysis(out, evidence)
 

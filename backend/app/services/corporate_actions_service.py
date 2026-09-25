@@ -100,6 +100,7 @@ from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.integrations.fmp import get_fmp_client
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp_entitlements import is_blocked_symbol
 
 logger = logging.getLogger(__name__)
@@ -615,12 +616,10 @@ class CorporateActionsService:
             # below. Without this arm the future is never settled and every joiner
             # parked on `asyncio.shield(...)` waits for the life of the process —
             # while `finally` has already popped the key, so nothing can recover it.
-            if not future.done():
-                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("shared fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(key, None)

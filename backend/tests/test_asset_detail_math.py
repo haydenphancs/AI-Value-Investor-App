@@ -445,14 +445,21 @@ def test_index_compute_return_finite_history_still_works():
 
 
 def test_index_compute_ytd_nonfinite_returns_none():
-    # First row of the current year carries a NaN close → YTD omitted, not NaN.
+    # The YTD BASELINE (the previous year's last close) carries a NaN close → YTD
+    # omitted, not NaN. (This used to put the NaN on the first row of the year, which
+    # stopped being the baseline when YTD moved to the prior-year-close convention.)
     from datetime import datetime, timezone
-    year = datetime.now(tz=timezone.utc).year
+    now = datetime(2026, 6, 2, 20, tzinfo=timezone.utc)
     rows = [
-        {"date": f"{year}-01-02", "close": float("nan")},
-        {"date": f"{year}-06-01", "close": 120.0},
+        {"date": "2025-12-31", "close": float("nan")},
+        {"date": "2026-01-02", "close": 100.0},
+        {"date": "2026-06-01", "close": 120.0},
     ]
-    assert index_compute_ytd(rows) is None
+    assert index_compute_ytd(rows, now) is None
+    rows[0]["close"] = 100.0                      # control: finite baseline → a number
+    assert index_compute_ytd(rows, now) == pytest.approx(20.0)
+    rows[-1]["close"] = float("inf")              # a non-finite END is refused too
+    assert index_compute_ytd(rows, now) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -480,3 +487,162 @@ def test_crypto_all_time_return_nonfinite_returns_none():
     rows2 = _rows([100.0, 150.0, 200.0])
     rows2[0]["close"] = float("inf")
     assert _compute_all_time_return(rows2) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YTD (C9): ONE definition across the five detail screens — from the PREVIOUS
+# YEAR'S LAST CLOSE, in the ET year — the same one `theme_insights_service` uses
+# (`test_ytd_on_the_first_session_of_the_year_is_the_one_day_move`). The five
+# copies this replaced baselined on the FIRST close OF the UTC year: the first
+# session read 0.00% and its move was missing from YTD all year, and YTD went
+# blank from 19:00 ET on Dec 31 until the first new-year row.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
+
+from app.services import chart_helper as _chart_helper
+from app.services.crypto_service import _compute_ytd_return as crypto_compute_ytd
+from app.services.etf_service import _compute_ytd_return as etf_compute_ytd
+
+
+def _commodity_ytd(rows, now):
+    """The commodity screen has no standalone helper; YTD is one row of its Performance
+    card, so read it from there (None when the row is omitted)."""
+    periods = object.__new__(CommodityService)._build_performance(rows, now=now)
+    row = next((p for p in periods if p.label == "YTD"), None)
+    return None if row is None else row.change_percent
+
+
+_YTD_FNS = [stock_compute_ytd, etf_compute_ytd, index_compute_ytd, crypto_compute_ytd,
+            _commodity_ytd]
+_YTD_IDS = ["stock", "etf", "index", "crypto", "commodity"]
+
+
+def _dated(pairs):
+    return [{"date": d, "close": c} for d, c in pairs]
+
+
+# Jan 2 2026 (Fri) 18:30 ET — the first session of 2026 has settled.
+_JAN2_EVENING = _dt(2026, 1, 2, 23, 30, tzinfo=_tz.utc)
+# 2026-01-01T00:30Z is still Dec 31 2025, 19:30 ET.
+_DEC31_EVENING_ET = _dt(2026, 1, 1, 0, 30, tzinfo=_tz.utc)
+_MID_YEAR = _dt(2026, 3, 3, 20, tzinfo=_tz.utc)
+
+
+@pytest.mark.parametrize("fn", _YTD_FNS, ids=_YTD_IDS)
+def test_ytd_on_the_first_session_of_the_year_is_that_sessions_move(fn):
+    rows = _dated([("2025-12-30", 99.0), ("2025-12-31", 100.0), ("2026-01-02", 103.0)])
+    assert fn(rows, _JAN2_EVENING) == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("fn", _YTD_FNS, ids=_YTD_IDS)
+def test_ytd_is_not_blank_on_the_evening_of_dec_31_et(fn):
+    """00:30 UTC is already next year in UTC, but still Dec 31 in New York: YTD is the
+    2025 year's move, anchored on the 2024 year-end close — not None."""
+    rows = _dated([("2024-12-31", 100.0), ("2025-06-02", 110.0), ("2025-12-31", 125.0)])
+    assert fn(rows, _DEC31_EVENING_ET) == pytest.approx(25.0)
+
+
+@pytest.mark.parametrize("fn", _YTD_FNS, ids=_YTD_IDS)
+def test_ytd_mid_year_baselines_on_the_previous_years_last_close(fn):
+    rows = _dated([
+        ("2024-06-03", 50.0),      # oldest — never the baseline
+        ("2025-12-31", 100.0),     # previous year's last close → baseline
+        ("2026-01-02", 130.0),     # first row of the year — NOT the baseline
+        ("2026-03-02", 120.0),
+    ])
+    assert fn(rows, _MID_YEAR) == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize("fn", _YTD_FNS, ids=_YTD_IDS)
+def test_ytd_refuses_a_baseline_more_than_a_week_before_the_year_end(fn):
+    """Sparse history must still refuse: a newest pre-January row from mid-December is
+    not the year boundary, and anchoring on it would label a longer return "YTD"."""
+    assert fn(_dated([("2025-12-23", 100.0), ("2026-03-02", 110.0)]), _MID_YEAR) is None
+    # Boundary: seven days before Dec 31 is still accepted.
+    assert fn(_dated([("2025-12-24", 100.0), ("2026-03-02", 110.0)]), _MID_YEAR) == \
+        pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("fn", _YTD_FNS, ids=_YTD_IDS)
+def test_ytd_is_none_when_history_starts_this_year(fn):
+    rows = _dated([("2026-01-02", 100.0), ("2026-03-02", 120.0)])
+    assert fn(rows, _MID_YEAR) is None
+
+
+def test_ytd_falls_back_to_the_last_printed_session_of_the_previous_year():
+    rows = _dated([("2025-12-29", 90.0), ("2025-12-30", 100.0), ("2026-03-02", 110.0)])
+    assert _chart_helper.ytd_return(rows, _MID_YEAR) == pytest.approx(10.0)
+
+
+def test_ytd_with_no_new_year_row_is_flat_in_the_first_week_and_stale_after():
+    """Jan 1 (a holiday) / the first days: nothing has settled this year, so 0.0 is the
+    honest YTD. In March the same series is STALE and must refuse, not show a flat year."""
+    rows = _dated([("2025-12-30", 99.0), ("2025-12-31", 100.0)])
+    jan1 = _dt(2026, 1, 1, 17, tzinfo=_tz.utc)
+    assert _chart_helper.ytd_return(rows, jan1) == 0.0
+    assert _chart_helper.ytd_return(rows, _dt(2026, 1, 7, 20, tzinfo=_tz.utc)) == 0.0
+    assert _chart_helper.ytd_return(rows, _dt(2026, 1, 8, 20, tzinfo=_tz.utc)) is None
+    assert _chart_helper.ytd_return(rows, _MID_YEAR) is None
+
+
+def test_ytd_is_total_and_order_independent():
+    """Unsorted, duplicated, undated, non-dict, timestamped and FUTURE-dated rows: never
+    raises, and the answer does not depend on the order the rows arrive in."""
+    rows = [
+        {"date": "2026-03-02", "close": 120.0},
+        "junk", None, 42, {"close": 5.0}, {"date": None, "close": 6.0},
+        {"date": "not-a-date", "close": 7.0},
+        {"date": "2025-12-31 16:00:00", "close": 100.0},   # timestamped baseline
+        {"date": "2026-01-02", "close": 101.0},
+        {"date": "2026-09-01", "close": 999.0},            # after "today" (Mar 3) — ignored
+        {"date": "2025-12-29", "close": 80.0},
+    ]
+    assert _chart_helper.ytd_return(rows, _MID_YEAR) == pytest.approx(20.0)
+    assert _chart_helper.ytd_return(list(reversed(rows)), _MID_YEAR) == pytest.approx(20.0)
+    for empty in (None, [], ["junk"], [{"date": None}]):
+        assert _chart_helper.ytd_return(empty, _MID_YEAR) is None
+
+
+@pytest.mark.parametrize("bad", [0.0, -5.0, float("nan"), float("inf"), "abc", None])
+def test_ytd_refuses_a_non_positive_or_non_finite_close_at_either_end(bad):
+    base = _dated([("2025-12-31", bad), ("2026-03-02", 110.0)])
+    assert _chart_helper.ytd_return(base, _MID_YEAR) is None
+    end = _dated([("2025-12-31", 100.0), ("2026-03-02", bad)])
+    assert _chart_helper.ytd_return(end, _MID_YEAR) is None
+
+
+def test_ytd_uses_adjclose_when_close_is_absent_and_a_naive_now_is_utc():
+    rows = [{"date": "2025-12-31", "adjClose": 100.0}, {"date": "2026-03-02", "adjClose": 105.0}]
+    assert _chart_helper.ytd_return(rows, _dt(2026, 3, 3, 20)) == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    "as_of,now",
+    [
+        (_date(2026, 1, 2), _JAN2_EVENING),
+        (_date(2026, 9, 23), _dt(2026, 9, 23, 22, 15, tzinfo=_tz.utc)),
+    ],
+    ids=["first-session", "mid-year"],
+)
+def test_detail_ytd_matches_the_theme_insights_definition(as_of, now):
+    """The same series through the Emerging Frontiers engine and the detail-screen helper
+    must give the same YTD — two surfaces of one app disagreeing on one metric is the bug."""
+    from app.services import theme_insights_service as tis
+    from app.utils.market_hours import is_trading_day
+
+    days, d = [], as_of
+    while len(days) < 300:
+        if is_trading_day(d):
+            days.append(d)
+        d -= _td(days=1)
+    days.reverse()
+    closes = {day: 100.0 * (1.001 ** i) + (3.0 if day == days[-1] else 0.0)
+              for i, day in enumerate(days)}
+    perf = tis.compute_theme_performance({"A": closes}, dict(closes), as_of,
+                                         benchmark_symbol="SPY")
+    theme_ytd = perf.performance["periods"]["YTD"]["theme_return_pct"]
+    assert theme_ytd is not None, "fixture did not produce a theme YTD; parity proves nothing"
+    rows = [{"date": day.isoformat(), "close": c} for day, c in closes.items()]
+    for fn in _YTD_FNS:
+        assert round(fn(rows, now), 2) == theme_ytd, fn

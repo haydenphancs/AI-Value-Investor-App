@@ -127,7 +127,7 @@ async def test_a_claimed_phase_runs_once_and_records_success(monkeypatch):
         ran.append(1)
         return {"ok": 1}
 
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is True
     assert ran == [1]
     assert calls == [("job_x", m._CHAIN_PHASE_STALE_SECONDS)]
     assert outcomes == [("job_x", True)]
@@ -174,7 +174,7 @@ async def test_a_phase_that_already_ran_today_is_skipped(monkeypatch):
     async def _body():
         ran.append(1)
 
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is True, "already ran = settled"
     assert ran == [] and calls["claims"] == 1 and calls["sleeps"] == []
 
 
@@ -192,7 +192,7 @@ async def test_a_held_claim_is_waited_on_and_taken_over_when_released(monkeypatc
         ran.append(1)
         return {"ok": 1}
 
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is True
     assert ran == [1], "taken over once the holder released it"
     assert calls["claims"] == 4
     assert calls["sleeps"] == [m._CLAIM_RETRY_SECONDS] * 3
@@ -208,7 +208,7 @@ async def test_a_held_claim_whose_holder_finishes_is_then_skipped(monkeypatch):
     async def _body():
         ran.append(1)
 
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is True
     assert ran == [] and calls["claims"] == 2 and len(calls["sleeps"]) == 1
 
 
@@ -230,7 +230,7 @@ async def test_a_held_claim_is_abandoned_after_the_stale_window(monkeypatch):
     async def _body():
         ran.append(1)
 
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is False, "unsettled → retried"
     assert ran == []
     assert calls["sleeps"], "it waited before giving up"
     assert sum(calls["sleeps"]) >= m._CHAIN_PHASE_STALE_SECONDS
@@ -244,9 +244,9 @@ async def test_an_unreadable_ledger_or_a_disabled_job_fails_closed(monkeypatch):
         ran.append(1)
 
     _refusing(monkeypatch, [None])
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is False, "unreadable → retried"
     calls = _refusing(monkeypatch, [{"run_day": None, "claim_at": None, "enabled": False}])
-    await m._run_claimed_phase("job_x", "X", _body)
+    assert await m._run_claimed_phase("job_x", "X", _body) is True, "operator-disabled = settled"
     assert ran == [] and calls["sleeps"] == []
 
 
@@ -291,7 +291,8 @@ async def test_a_failing_phase_releases_its_claim_as_a_failure(monkeypatch):
     async def _body():
         raise RuntimeError("FMP down")
 
-    await m._run_claimed_phase("job_x", "X", _body)      # swallowed + logged, loop survives
+    # swallowed + logged, loop survives — and reported UNSETTLED so the loop retries it
+    assert await m._run_claimed_phase("job_x", "X", _body) is False
     assert outcomes == [False]
 
 
@@ -354,3 +355,99 @@ def test_the_claim_helper_honours_a_per_job_stale_window(monkeypatch):
     assert seen["params"]["p_stale_seconds"] == 10_800
     assert nj.claim_scheduled("job_x") is True
     assert seen["params"]["p_stale_seconds"] == nj.settings.NOTIFICATION_JOB_STALE_SECONDS
+
+
+# ── A failed phase is retried inside the same run's catch-up window ─────────────────────
+# `_run_claimed_phase` used to return None on a failure and both loops then slept to the
+# NEXT anchor: one FRED/FMP blip at 02:00 on a quarter-start Sunday left that phase's data
+# a quarter stale (the TTM job: a week), although the docstring promised a retry.
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def _drive_loop(monkeypatch, *, anchor_fn_name, phase_results):
+    """Run a scheduled loop against a fixed anchor 3 h in the past (inside its catch-up
+    window, every chain offset already due). `_run_claimed_phase` answers from
+    `phase_results[job]` in order (last value repeats). Sleeps are instant; the long sleep
+    to the NEXT anchor ends the test."""
+    anchor = datetime.now(timezone.utc) - timedelta(hours=3)
+    monkeypatch.setattr(m, anchor_fn_name, lambda now: anchor)
+    runs, sleeps = [], []
+
+    async def _phase(job, label, body):
+        runs.append(job)
+        seq = phase_results.get(job, [True])
+        return seq[min(runs.count(job) - 1, len(seq) - 1)]
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+        if seconds not in (120, 180, m._PHASE_RETRY_SECONDS):
+            raise _StopLoop()
+
+    monkeypatch.setattr(m, "_run_claimed_phase", _phase)
+    monkeypatch.setattr(m.asyncio, "sleep", _sleep)
+    return runs, sleeps
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ttm_run_is_retried_in_the_same_window(monkeypatch):
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_weekly_ttm_run",
+        phase_results={m.JOB_TTM_BENCHMARK_WEEKLY: [False, True]},
+    )
+    with pytest.raises(_StopLoop):
+        await m._run_ttm_benchmark_job()
+    assert runs == [m.JOB_TTM_BENCHMARK_WEEKLY] * 2, "failed once, retried once, then settled"
+    assert sleeps.count(m._PHASE_RETRY_SECONDS) == 1
+
+
+@pytest.mark.asyncio
+async def test_retries_are_bounded_per_anchor(monkeypatch):
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_weekly_ttm_run",
+        phase_results={m.JOB_TTM_BENCHMARK_WEEKLY: [False]},
+    )
+    with pytest.raises(_StopLoop):
+        await m._run_ttm_benchmark_job()
+    assert runs == [m.JOB_TTM_BENCHMARK_WEEKLY] * (1 + m._MAX_PHASE_RETRIES_PER_ANCHOR)
+    assert sleeps.count(m._PHASE_RETRY_SECONDS) == m._MAX_PHASE_RETRIES_PER_ANCHOR
+
+
+@pytest.mark.asyncio
+async def test_a_settled_ttm_run_is_not_retried(monkeypatch):
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_weekly_ttm_run",
+        phase_results={m.JOB_TTM_BENCHMARK_WEEKLY: [True]},
+    )
+    with pytest.raises(_StopLoop):
+        await m._run_ttm_benchmark_job()
+    assert runs == [m.JOB_TTM_BENCHMARK_WEEKLY]
+    assert m._PHASE_RETRY_SECONDS not in sleeps
+
+
+@pytest.mark.asyncio
+async def test_one_failed_quarterly_phase_re_enters_the_chain(monkeypatch):
+    """The whole chain is re-entered; in production the phases that already ran are
+    skipped by their own day-keyed claims, so only the failed one does work again."""
+    runs, sleeps = _drive_loop(
+        monkeypatch, anchor_fn_name="_last_quarterly_dossier_run",
+        phase_results={m.JOB_COMPETITOR_INTEL_QUARTERLY: [False, True]},
+    )
+    with pytest.raises(_StopLoop):
+        await m._run_industry_dossier_job()
+    assert runs.count(m.JOB_COMPETITOR_INTEL_QUARTERLY) == 2
+    assert runs.count(m.JOB_INDUSTRY_BENCHMARK_QUARTERLY) == 2, "the chain re-entered once"
+    assert sleeps.count(m._PHASE_RETRY_SECONDS) == 1
+
+
+def test_the_retry_budget_is_per_anchor():
+    r = m._AnchorRetries()
+    a1 = datetime(2026, 10, 4, 2, tzinfo=timezone.utc)
+    r.entered(a1)
+    r.used = 2
+    r.entered(a1)
+    assert r.used == 2, "re-entering the same anchor must not refill its budget"
+    r.entered(a1 + timedelta(days=91))
+    assert r.used == 0

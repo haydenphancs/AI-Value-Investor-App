@@ -65,6 +65,11 @@ struct TickerReportView: View {
                 reportContent(report)
             } else if let error = viewModel.error {
                 errorView(error)
+            } else if viewModel.needsPaidRegeneration {
+                // Opened from a notification and the report is gone (deleted, or aged out of
+                // the cache). The alert that serves a REFRESH lives inside `reportContent`,
+                // which is not on screen here, so without this branch the screen was blank.
+                unavailableView
             }
         }
         .navigationBarHidden(true)
@@ -440,6 +445,40 @@ struct TickerReportView: View {
             if let hms = report.hiddenMarketSignals {
                 ReportHiddenMarketSignalsSection(data: hms)
             }
+        }
+    }
+
+    // MARK: - Unavailable View
+
+    /// The report a notification pointed at is not there any more. Regenerating costs credits,
+    /// so the cost is on the button and nothing is spent until it is tapped.
+    private var unavailableView: some View {
+        VStack(spacing: AppSpacing.lg) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 40))
+                .foregroundColor(AppColors.textMuted)
+
+            Text("Report No Longer Available")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+
+            Text("It may have been deleted or aged out of the cache. Generating a fresh one uses "
+                 + "\(AnalysisCost.standard.credits) credits.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, AppSpacing.xxl)
+
+            errorActionButton(
+                icon: "arrow.clockwise",
+                title: "Regenerate · \(AnalysisCost.standard.credits) credits"
+            ) {
+                Task { await viewModel.regenerateForCredits() }
+            }
+
+            Button("Go Back") { dismiss() }
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textMuted)
         }
     }
 

@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
 
 logger = logging.getLogger(__name__)
@@ -162,11 +163,24 @@ class GrowthSnapshotService:
 
         try:
             logger.info(f"Growth snapshot cache MISS for {ticker} — computing")
-            result = await self._compute(ticker)
+            result, degraded = await self._compute_with_status(ticker)
 
-            asyncio.get_running_loop().run_in_executor(
-                None, self._upsert_supabase_cache, ticker, result,
-            )
+            # NEVER persist a degraded build. GrowthService turns a failed FMP leg into an
+            # empty series and refuses to write that build to its own 24h tier; this card
+            # would render the hole as "—" scored with the neutral sentinel 3 and then pin
+            # that made-up rating in snapshot_cache for a day (the Overview card and the
+            # report's snap_growth both read it). Serve it, keep the 5-min memory tier to
+            # absorb the retry storm, and let the next miss rebuild. Mirrors
+            # valuation_snapshot_service.
+            if degraded:
+                logger.warning(
+                    "Growth snapshot NOT persisted for %s (degraded: %s) — will rebuild "
+                    "after the in-memory TTL", ticker, ", ".join(degraded),
+                )
+            else:
+                asyncio.get_running_loop().run_in_executor(
+                    None, self._upsert_supabase_cache, ticker, result,
+                )
 
             _cache_set(cache_key, result)
             if not future.done():
@@ -179,12 +193,10 @@ class GrowthSnapshotService:
             # whenever the LEADER is a cancellable caller: a report run hitting
             # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
             # Hand waiters a normal exception so they fail fast through their own error path.
-            if not future.done():
-                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -239,10 +251,24 @@ class GrowthSnapshotService:
     # ── Core computation ──────────────────────────────────────────
 
     async def _compute(self, ticker: str) -> SnapshotItemResponse:
-        """Reuse GrowthService (Financials tab) to get exact same data the user sees."""
+        """`_compute_with_status` without the degradation list."""
+        snapshot, _degraded = await self._compute_with_status(ticker)
+        return snapshot
+
+    async def _compute_with_status(
+        self, ticker: str,
+    ) -> Tuple[SnapshotItemResponse, List[str]]:
+        """Reuse GrowthService (Financials tab) to get exact same data the user sees.
+
+        Returns ``(snapshot, degraded)``. ``degraded`` carries GrowthService's own list of
+        failed FMP legs for the build it served, plus ``"no_values"`` when none of the
+        four metrics has a value (every score is then the neutral sentinel 3).
+        `get_growth_snapshot` refuses to persist a build with a non-empty list.
+        """
         from app.services.growth_service import get_growth_service
 
-        growth = await get_growth_service().get_growth(ticker)
+        growth, upstream_degraded = await get_growth_service().get_growth_with_status(ticker)
+        degraded: List[str] = list(upstream_degraded)
 
         # Extract the most recent annual YoY + sector benchmark for each metric.
         # GrowthResponse lists are sorted oldest→newest. Walk backwards to find
@@ -268,6 +294,9 @@ class GrowthSnapshotService:
         score_fcf = _growth_score(fcf_growth, sector_fcf)
         score_op = _growth_score(op_growth, sector_op)
 
+        if all(v is None for v in (rev_growth, eps_growth, fcf_growth, op_growth)):
+            degraded.append("no_values")
+
         # Weighted average: Revenue 30%, EPS 30%, FCF 20%, Op Income 20%
         weighted = (score_rev * 0.30) + (score_eps * 0.30) + (score_fcf * 0.20) + (score_op * 0.20)
         rating = max(1, min(5, round(weighted)))
@@ -283,13 +312,14 @@ class GrowthSnapshotService:
                                    metric_key="operating_income_growth", score=score_op if op_growth is not None else None),
         ]
 
-        return SnapshotItemResponse(
+        snapshot = SnapshotItemResponse(
             category="Growth",
             rating=rating,
             metrics=metrics,
             full_report_available=True,
             weighted_score=round(weighted, 3),
         )
+        return snapshot, degraded
 
 
 # ── Singleton ─────────────────────────────────────────────────────

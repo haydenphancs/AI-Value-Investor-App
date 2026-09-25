@@ -409,12 +409,50 @@ def test_berkshire_links_to_its_whale_by_the_same_cik(companies):
 
 
 def test_berkshire_13f_holdings_are_never_duplicated_as_stakes(seed):
+    """Berkshire's card links to its 13F whale profile, so no stake may repeat a common-stock
+    holding that profile already lists. Its stakes are Japan-listed shares (never on a 13F),
+    private joint ventures, and one U.S. security that is not a 13(f) line: Occidental's
+    preferred and warrants (the OXY common IS on the 13F, so it must never appear here)."""
     brk = [s for s in seed["stakes"] if s["company_slug"] == "berkshire"]
     assert {s["investee_name"] for s in brk} == {
         "Mitsubishi Corporation", "ITOCHU Corporation", "Mitsui & Co.", "Marubeni Corporation",
-        "Sumitomo Corporation"}
-    assert all(s["kind"] == "non_us_listed" and s["material"] for s in brk)
-    assert all(s["investee_us_symbol"] is None and s["investee_cusip"] is None for s in brk)
+        "Sumitomo Corporation", "Tokio Marine Holdings", "Electric Transmission Texas",
+        "Iroquois Gas Transmission System", "Berkadia Commercial Mortgage",
+        "Occidental Petroleum (preferred and warrants)"}
+    for s in brk:
+        k = seed_mod.stake_key(s)
+        assert s["investee_cusip"] is None, k
+        if s["kind"] == "us_listed_off_13f":
+            # Only a named non-common security: a bare "Occidental Petroleum" would be the
+            # 13F common stock a second time.
+            assert re.search(r"\((?:[^)]*\b)?(?:preferred|warrants?)\b", s["investee_name"], re.I), k
+        else:
+            assert s["kind"] in ("non_us_listed", "private") and s["investee_us_symbol"] is None, k
+    assert all(s["material"] for s in brk if s["kind"] == "non_us_listed")
+
+
+def test_withdrawn_stakes_stay_in_the_seed_unpublished(seed):
+    """The seed script never deletes: a row dropped from the JSON stays LIVE in production.
+    A stake that is withdrawn (Meta's AMD warrant: a supplier's customer warrant, not a Meta
+    stake) or renamed (AMD's unnamed $5B commitment, now the named Anthropic row) must stay
+    in the file with published false, so ``--apply --update`` hides it."""
+    rows = {seed_mod.stake_key(s): s for s in seed["stakes"]}
+    for key in (("meta", "AMD", "commitment"),
+                ("amd", "Investment commitments (not named)", "commitment")):
+        assert key in rows and rows[key]["published"] is False, key
+    assert rows[("amd", "Anthropic", "commitment")]["published"] is True
+    # A renamed stake must not be shown twice: the replacement carries the figure alone.
+    assert rows[("amd", "Anthropic", "commitment")]["disclosed_value_usd"] == 5_000_000_000
+
+
+def test_every_note_on_a_13f_holding_carries_its_cusip(seed):
+    """An on_13f_note is shown beside its holding, matched by CUSIP first (the filed symbol is
+    the fallback). Every note's CUSIP was read off the member's 13F for the quarter ended
+    2026-06-30."""
+    notes = [s for s in seed["stakes"] if s["kind"] == "on_13f_note"]
+    assert len(notes) >= 12
+    for s in notes:
+        assert s["investee_cusip"] and s["investee_us_symbol"], seed_mod.stake_key(s)
 
 
 def test_material_means_a_disclosed_amount_or_percentage(seed):
@@ -458,6 +496,17 @@ def test_the_verified_investee_symbols(seed):
     assert sym[("nvidia", "Nebius")] == "NBIS" and sym[("nvidia", "Nokia")] == "NOK"
     assert sym[("amazon", "X-Energy")] == "XE" and sym[("samsung", "Corning")] == "GLW"
     assert sym[("tesla", "SpaceX")] == sym[("alphabet", "SpaceX")] == "SPCX"
+    # Added 2026-09-24, each checked against the SEC's company_tickers.json the same day.
+    assert sym[("nvidia", "CoreWeave")] == "CRWV" and sym[("nvidia", "Synopsys")] == "SNPS"
+    assert sym[("nvidia", "Coherent")] == "COHR"
+    assert sym[("nvidia", "Marvell Technology (convertible preferred)")] == "MRVL"
+    assert sym[("nvidia", "Lumentum Holdings (convertible preferred)")] == "LITE"
+    assert sym[("nvidia", "Corning (pre-funded warrant)")] == "GLW"
+    assert sym[("alphabet", "Planet Labs")] == "PL" and sym[("alphabet", "CME Group")] == "CME"
+    assert sym[("amazon", "Rivian Automotive")] == "RIVN"
+    assert sym[("amazon", "BETA Technologies")] == "BETA"
+    assert sym[("eli-lilly", "Foghorn Therapeutics")] == "FHTX"
+    assert sym[("berkshire", "Occidental Petroleum (preferred and warrants)")] == "OXY"
 
 
 # ── Banned wording ────────────────────────────────────────────────────────────────────
@@ -1065,7 +1114,11 @@ def test_anthropic_commitments_say_part_was_already_invested(seed):
     each carries exactly that — attributed and dated — in its background."""
     rows = {s["company_slug"]: s for s in seed["stakes"]
             if s["investee_name"] == "Anthropic" and s["kind"] == "commitment"}
-    assert set(rows) == {"nvidia", "microsoft"}
+    assert set(rows) == {"nvidia", "microsoft", "amazon", "amd"}
+    # Only the Nov 18, 2025 pair predates the Series G. Amazon's facility (its Q2 2026 10-Q)
+    # and AMD's Jul 22, 2026 commitment are later, separate agreements.
+    assert {slug for slug, s in rows.items() if s["as_of"] == "2025-11-18"} == {"nvidia", "microsoft"}
+    assert all(rows[slug]["as_of"] > "2026-02-12" for slug in ("amazon", "amd"))
     for slug, want in (("nvidia", 1.0e10), ("microsoft", 5.0e9)):
         s = rows[slug]
         assert s["background"] == ("Anthropic said its Feb 12, 2026 Series G included a portion "

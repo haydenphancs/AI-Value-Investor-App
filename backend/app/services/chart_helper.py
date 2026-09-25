@@ -5,15 +5,15 @@ for all asset types (stocks, crypto, ETFs, indices, commodities).
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date as date_type, datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.config import settings
 from app.integrations.fmp import FMPClient
 from app.services.asset_class import uses_coingecko_price
 
 logger = logging.getLogger(__name__)
-from app.utils.market_hours import US_MARKET_EARLY_CLOSES
+from app.utils.market_hours import ET, US_MARKET_EARLY_CLOSES
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
@@ -31,6 +31,108 @@ def _finite_or_none(v: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
     return f if math.isfinite(f) else None
+
+
+# ── Settled daily bars (shared by the stock / ETF / index / commodity screens) ──
+#
+# FMP `historical-price-eod/full` includes the CURRENT session's partial bar (F16-2; the
+# live evidence is in `index_service`'s block comment). Every service that derives from or
+# persists a daily history must drop it first. Each service computes its OWN cutoff from its
+# module binding of `current_close_cycle_start` (so tests can freeze each clock), and hands
+# it here; the filter itself exists once.
+
+
+def settled_bars(historical: Any, cutoff: str) -> List[Dict]:
+    """The daily rows whose session has settled: rows dated after ``cutoff`` (the ISO date
+    of the current close cycle, i.e. the last settled session) are the in-progress bar or a
+    stray future-dated row, and are dropped.
+
+    Total for any input: ``None`` / a non-sequence gives ``[]``, non-dict rows are
+    dropped, a row without a date is kept (it cannot be placed in time, and every consumer
+    already tolerates it). A timestamped date compares on its first ten characters.
+    """
+    if not isinstance(historical, (list, tuple)):
+        return []
+    return [
+        r for r in historical
+        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
+    ]
+
+
+# ── Year-to-date (shared by all five asset-detail screens) ─────────────────────
+#
+# ONE definition, the industry one, and the one `theme_insights_service` already uses
+# (`_period_start_index`, pinned by `test_ytd_on_the_first_session_of_the_year_is_the_one_day_move`):
+# YTD runs from the LAST CLOSE OF THE PREVIOUS YEAR to the latest close. Five copies used
+# to take the FIRST close OF the year instead, which (a) read 0.00% on the first session
+# of the year and dropped that session's move from YTD for the rest of the year, and (b)
+# keyed the year on UTC, blanking YTD from 19:00 ET on Dec 31 until the first new-year row.
+
+#: How far before Jan 1 the previous year's last close may sit. The last session of a
+#: year is at worst a few days before Dec 31 (a weekend plus a holiday); a series whose
+#: newest pre-January row is older than this does not describe the year boundary, and a
+#: YTD anchored on it would be a longer return under a "YTD" label.
+YTD_BASELINE_MAX_GAP_DAYS = 7
+
+
+def _row_day(row: Any) -> Optional[date_type]:
+    """The calendar date of a history row (``YYYY-MM-DD`` or a timestamp), else None."""
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("date")
+    if not isinstance(raw, str) or len(raw) < 10:
+        return None
+    try:
+        return date_type.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def ytd_return(prices: Optional[Iterable[Any]], now: Optional[datetime] = None) -> Optional[float]:
+    """Year-to-date % return, or None when it cannot be stated honestly.
+
+    * The year is the CURRENT ET year (``now`` in America/New_York), not UTC.
+    * Baseline: the last row dated BEFORE Jan 1 of that year — the previous year's last
+      close — and it must sit within ``YTD_BASELINE_MAX_GAP_DAYS`` of Dec 31, else None
+      (a series that starts this year, or one with a hole over the year end).
+    * End: the latest-dated row on or before today (ET). Rows are scanned, not indexed, so
+      an unsorted series gives the same answer; a future-dated row is ignored.
+    * A series with no row in the new year is an honest 0.0 only in the first
+      ``YTD_BASELINE_MAX_GAP_DAYS`` days of January (no session has settled yet); after
+      that it is a STALE series, and None rather than a fabricated flat year.
+    * A non-finite, zero or negative close at either end gives None — a NaN here would
+      serialize as an invalid JSON token and break the iOS decode of the whole screen.
+    """
+    if not prices:
+        return None
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    today = now.astimezone(ET).date()
+    year_start = date_type(today.year, 1, 1)
+
+    base_row = base_day = end_row = end_day = None
+    for row in prices:
+        d = _row_day(row)
+        if d is None or d > today:
+            continue
+        if d < year_start and (base_day is None or d >= base_day):
+            base_row, base_day = row, d
+        if end_day is None or d >= end_day:
+            end_row, end_day = row, d
+
+    if base_row is None or base_day is None or end_row is None or end_day is None:
+        return None
+    if (year_start - base_day).days > YTD_BASELINE_MAX_GAP_DAYS + 1:
+        return None
+    if end_day < year_start and (today - year_start).days >= YTD_BASELINE_MAX_GAP_DAYS:
+        return None
+
+    start = _finite_or_none(base_row.get("close") or base_row.get("adjClose"))
+    end = _finite_or_none(end_row.get("close") or end_row.get("adjClose"))
+    if start is None or end is None or start <= 0 or end <= 0:
+        return None
+    return ((end - start) / start) * 100
 
 # A sparkline that covers the WHOLE plotting window — the value every degenerate
 # branch of `intraday_span` returns, because it reproduces the pre-existing

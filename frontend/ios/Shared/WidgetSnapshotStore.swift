@@ -47,7 +47,9 @@ import WidgetKit
 /// `test_ios_widget_parity.py` fails the build if they drift, because a mismatch is
 /// silent: `UserDefaults(suiteName:)` simply returns nil and the widget shows its
 /// placeholder forever with nothing logged on either side.
-public enum WidgetSharedConfig {
+///
+/// `nonisolated`: pure constants, read by the nonisolated `WidgetSharedDefaults`.
+nonisolated public enum WidgetSharedConfig {
     public static let appGroupIdentifier = "group.com.phan.caydex"
     public static let snapshotKey = "widget.movers.snapshot.v1"
     /// Widget kind, shared so the app can reload exactly this widget.

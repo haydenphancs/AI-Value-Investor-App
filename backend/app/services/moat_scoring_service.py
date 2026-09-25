@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
+from app.utils.inflight import fail_shared_future
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
@@ -951,8 +952,7 @@ class MoatScoringService:
                 "moat_scoring: unhandled error in grounded fallback for %s: %s",
                 focal, exc,
             )
-            if not future.done():
-                future.set_exception(exc)
+            fail_shared_future(future, exc)
             return None
         finally:
             _grounded_inflight.pop(cache_key, None)

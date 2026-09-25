@@ -263,23 +263,275 @@ async def test_signing_up_claims_this_installs_reports():
     assert store["research_reports"][0]["user_id"] == _USER["id"]
 
 
+# ---------------------------------------------------------------------------
+# 3a. The claim carries the report's Storage PDF with it
+#
+# `pdf_path` is stamped `reports/<user_id>/<id>.pdf` with the id the report had at GENERATION
+# time — for a guest-era report, the per-install bucket — and account deletion
+# (`_purge_research_pdfs`) lists `reports/<account id>/` and nothing else. The claim used to
+# clear `pdf_path` and leave the object where it was, under a test named
+# `test_claiming_resets_the_pdf_so_deletion_can_still_find_it`. It did the opposite: it erased
+# the only handle on the object and kept its bytes (ticker, thesis, fair value) in Storage
+# forever. That test asserted row fields only and had no Storage at all, so it could not see it.
+# ---------------------------------------------------------------------------
+
+_GENERATED_AT = "2026-08-01T00:00:00+00:00"
+
+
+class _Storage:
+    """storage3 stand-in over a flat set of object keys, faithful where the claim relies on it.
+
+    `move` fails when the source is missing or the destination exists (Supabase answers 400 to
+    both), `remove` deletes what exists and ignores the rest (Supabase returns 200 either way),
+    and `list` is page-capped and non-recursive like the real one — so `_purge_research_pdfs`
+    runs against it unmodified.
+    """
+
+    def __init__(self, keys=(), *, move_fails=False, remove_fails=False):
+        self.keys = set(keys)
+        self.move_fails, self.remove_fails = move_fails, remove_fails
+        self.calls: list = []
+        self.buckets: set = set()
+
+    def from_(self, name):
+        self.buckets.add(name)
+        return self
+
+    def move(self, src, dst):
+        self.calls.append(("move", src, dst))
+        if self.move_fails:
+            raise RuntimeError("storage unavailable (move)")
+        if src not in self.keys:
+            raise RuntimeError("Object not found")
+        if dst in self.keys:
+            raise RuntimeError("The resource already exists")
+        self.keys.remove(src)
+        self.keys.add(dst)
+        return {"message": "Successfully moved"}
+
+    def remove(self, paths):
+        self.calls.append(("remove", tuple(paths)))
+        if self.remove_fails:
+            raise RuntimeError("storage unavailable (remove)")
+        for p in paths:
+            self.keys.discard(p)
+        return []
+
+    def list(self, prefix, options=None):
+        limit = (options or {}).get("limit", 100)
+        offset = (options or {}).get("offset", 0)
+        head = prefix.rstrip("/") + "/"
+        names = sorted(
+            k[len(head):] for k in self.keys
+            if k.startswith(head) and "/" not in k[len(head):]
+        )
+        return [{"name": n} for n in names[offset: offset + limit]]
+
+    def under(self, prefix: str) -> set:
+        return {k for k in self.keys if k.startswith(prefix)}
+
+
+class _SBStorage(_SB):
+    def __init__(self, store, storage):
+        super().__init__(store)
+        self.storage = storage
+
+
+async def _claim_with_storage(store, storage, guest_id="install-A"):
+    return await users_ep.claim_guest_data(
+        user=_USER, x_guest_id=guest_id, supabase=_SBStorage(store, storage),
+    )
+
+
+def _pdf_report(report_id, owner, path, status="ready"):
+    return {
+        "id": report_id, "user_id": owner, "pdf_path": path,
+        "pdf_status": status, "pdf_generated_at": _GENERATED_AT,
+    }
+
+
+def _row(store, report_id):
+    return next(r for r in store["research_reports"] if r["id"] == report_id)
+
+
 @pytest.mark.asyncio
-async def test_claiming_resets_the_pdf_so_deletion_can_still_find_it():
-    """`pdf_path` is stamped `reports/<user_id>/<id>.pdf` with the id the report had at
-    GENERATION time. Re-pointing user_id without clearing it leaves the object under a prefix
-    `_purge_research_pdfs` never lists — and once the row is deleted the path was the only
-    handle that existed."""
+async def test_claiming_carries_the_pdf_to_the_accounts_prefix():
+    """The object moves to the key `pdf_report_service` would write for the account, and the
+    row points at it. The PDF stays READY — the user does not have to regenerate it."""
     bucket = guest_user_id_for("install-A")
-    store = _empty_store(research_reports=[{
-        "id": "r1", "user_id": bucket,
-        "pdf_path": f"reports/{bucket}/r1.pdf", "pdf_status": "ready",
-        "pdf_generated_at": "2026-08-01T00:00:00+00:00",
-    }])
-    await _claim(store)
-    row = store["research_reports"][0]
-    assert row["pdf_path"] is None, "the PDF stays under the guest prefix and is orphaned"
+    old = f"reports/{bucket}/r1.pdf"
+    new = f"reports/{_USER['id']}/r1.pdf"
+    store = _empty_store(research_reports=[_pdf_report("r1", bucket, old)])
+    storage = _Storage({old})
+
+    res = await _claim_with_storage(store, storage)
+
+    assert "error" not in res, res
+    assert res["claimed"]["research_reports"] == 1
+    assert storage.under(f"reports/{bucket}/") == set(), (
+        "the PDF was left under the guest prefix — account deletion never lists it"
+    )
+    assert storage.keys == {new}
+    row = _row(store, "r1")
+    assert row["user_id"] == _USER["id"]
+    assert row["pdf_path"] == new, "the row must name the moved object, not erase its handle"
+    assert row["pdf_status"] == "ready"
+    assert row["pdf_generated_at"] == _GENERATED_AT
+    assert storage.buckets == {"research-pdfs"}
+
+
+@pytest.mark.asyncio
+async def test_account_deletion_after_a_claim_leaves_no_report_pdf_anywhere():
+    """The promise the old test's NAME made, checked against Storage end to end: claim, then run
+    the real deletion purge, and nothing may survive — the claimed guest PDF included."""
+    bucket = guest_user_id_for("install-A")
+    guest_pdf = f"reports/{bucket}/r1.pdf"
+    own_pdf = f"reports/{_USER['id']}/own.pdf"
+    store = _empty_store(research_reports=[
+        _pdf_report("r1", bucket, guest_pdf),
+        _pdf_report("own", _USER["id"], own_pdf),
+    ])
+    storage = _Storage({guest_pdf, own_pdf})
+    sb = _SBStorage(store, storage)
+
+    await users_ep.claim_guest_data(user=_USER, x_guest_id="install-A", supabase=sb)
+    err = users_ep._purge_research_pdfs(sb, _USER["id"])
+
+    assert err is None, err
+    assert storage.keys == set(), f"survived account deletion: {sorted(storage.keys)}"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_move_removes_the_guest_copy_and_resets_the_row():
+    """Degraded path 1: the move fails but Storage is reachable. The guest copy is removed and
+    the row reset, so the app regenerates on demand — under the ACCOUNT's prefix."""
+    bucket = guest_user_id_for("install-A")
+    old = f"reports/{bucket}/r1.pdf"
+    store = _empty_store(research_reports=[_pdf_report("r1", bucket, old)])
+    storage = _Storage({old}, move_fails=True)
+
+    res = await _claim_with_storage(store, storage)
+
+    assert "error" not in res, "a Storage fault must never fail the claim"
+    assert res["claimed"]["research_reports"] == 1
+    assert storage.under(f"reports/{bucket}/") == set()
+    row = _row(store, "r1")
+    assert row["user_id"] == _USER["id"]
+    assert row["pdf_path"] is None, "the row must not point at a key the move never wrote"
     assert row["pdf_status"] == "pending"
     assert row["pdf_generated_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_storage_down_still_claims_the_report_and_keeps_the_handle():
+    """Degraded path 2: neither move nor remove works. The REPORT is still claimed (the user
+    must not lose it to a Storage outage), and `pdf_path` is kept — it is now the only record
+    that the object exists, and erasing it is exactly the orphan this fix exists to prevent."""
+    bucket = guest_user_id_for("install-A")
+    old = f"reports/{bucket}/r1.pdf"
+    store = _empty_store(research_reports=[_pdf_report("r1", bucket, old)])
+    storage = _Storage({old}, move_fails=True, remove_fails=True)
+
+    res = await _claim_with_storage(store, storage)
+
+    assert "error" not in res, "a Storage fault must never fail the claim"
+    assert res["claimed"]["research_reports"] == 1
+    row = _row(store, "r1")
+    assert row["user_id"] == _USER["id"], "a Storage outage cost the user their report"
+    assert row["pdf_path"] == old, "the only handle on a surviving object was erased"
+    assert row["pdf_path"] in storage.keys
+    assert row["pdf_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_a_pdf_outside_this_installs_prefix_is_never_moved_or_deleted():
+    """Negative control. Only an object provably under THIS install's prefix is ours to move or
+    delete — another install's key, or one that climbs out of the prefix with `..`, is left
+    exactly where it is, and so is the row's handle on it."""
+    bucket = guest_user_id_for("install-A")
+    foreign = f"reports/{guest_user_id_for('install-B')}/r1.pdf"
+    climbing = f"reports/{bucket}/../{guest_user_id_for('install-B')}/r2.pdf"
+    store = _empty_store(research_reports=[
+        _pdf_report("r1", bucket, foreign),
+        _pdf_report("r2", bucket, climbing),
+    ])
+    storage = _Storage({foreign, climbing})
+
+    res = await _claim_with_storage(store, storage)
+
+    assert res["claimed"]["research_reports"] == 2
+    assert storage.calls == [], f"touched an object that is not this install's: {storage.calls}"
+    assert storage.keys == {foreign, climbing}
+    assert _row(store, "r1")["pdf_path"] == foreign
+    assert _row(store, "r2")["pdf_path"] == climbing
+    assert {r["user_id"] for r in store["research_reports"]} == {_USER["id"]}
+
+
+@pytest.mark.asyncio
+async def test_reports_without_a_pdf_touch_no_storage():
+    """Negative control: the common case (no PDF, or a missing column) makes no Storage call and
+    keeps the old reset, so the app regenerates on demand."""
+    bucket = guest_user_id_for("install-A")
+    store = _empty_store(research_reports=[
+        {"id": "r1", "user_id": bucket, "pdf_path": None, "pdf_status": "failed"},
+        {"id": "r2", "user_id": bucket},
+        {"id": "r3", "user_id": bucket, "pdf_path": ""},
+    ])
+    storage = _Storage()
+
+    res = await _claim_with_storage(store, storage)
+
+    assert res["claimed"]["research_reports"] == 3
+    assert storage.calls == [] and storage.buckets == set()
+    for rid in ("r1", "r2", "r3"):
+        row = _row(store, rid)
+        assert row["user_id"] == _USER["id"]
+        assert row["pdf_path"] is None and row["pdf_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_each_report_is_relocated_independently():
+    """One report's missing object must not decide another's fate: r1 moves, r2 has no PDF,
+    and r3's object is already gone (the move 404s, the remove is a no-op, the row resets)."""
+    bucket = guest_user_id_for("install-A")
+    r1_old = f"reports/{bucket}/r1.pdf"
+    store = _empty_store(research_reports=[
+        _pdf_report("r1", bucket, r1_old),
+        {"id": "r2", "user_id": bucket, "pdf_path": None},
+        _pdf_report("r3", bucket, f"reports/{bucket}/r3.pdf"),
+    ])
+    storage = _Storage({r1_old})
+
+    res = await _claim_with_storage(store, storage)
+
+    assert "error" not in res, res
+    assert res["claimed"]["research_reports"] == 3
+    assert storage.keys == {f"reports/{_USER['id']}/r1.pdf"}
+    assert _row(store, "r1")["pdf_path"] == f"reports/{_USER['id']}/r1.pdf"
+    assert _row(store, "r2")["pdf_path"] is None
+    assert _row(store, "r3")["pdf_path"] is None
+    assert _row(store, "r3")["pdf_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_a_half_finished_claim_orphans_nothing():
+    """A previous claim moved the object and then failed to update the row, so the row still
+    sits in the bucket naming the OLD key. The retry's move fails (source gone, destination
+    taken); the row resets, and the moved object — under the account's prefix — is still
+    found by the deletion purge. No key survives."""
+    bucket = guest_user_id_for("install-A")
+    moved = f"reports/{_USER['id']}/r1.pdf"
+    store = _empty_store(research_reports=[_pdf_report("r1", bucket, f"reports/{bucket}/r1.pdf")])
+    storage = _Storage({moved})
+    sb = _SBStorage(store, storage)
+
+    res = await users_ep.claim_guest_data(user=_USER, x_guest_id="install-A", supabase=sb)
+
+    assert "error" not in res, res
+    assert _row(store, "r1")["user_id"] == _USER["id"]
+    assert storage.under(f"reports/{bucket}/") == set()
+    assert users_ep._purge_research_pdfs(sb, _USER["id"]) is None
+    assert storage.keys == set()
 
 
 @pytest.mark.asyncio

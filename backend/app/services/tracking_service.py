@@ -12,7 +12,7 @@ Design (mirrors home_service.py):
 import asyncio
 import math
 import time as _time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 import logging
 
@@ -411,6 +411,24 @@ class _Rows:
 
     def __init__(self, data):
         self.data = data
+
+
+def _thirteen_f_floor(today: date) -> str:
+    """First day of the calendar quarter BEFORE the one `today` falls in (ISO).
+
+    A 13F row's `date` is the QUARTER END its filing describes, and a filing made
+    during quarter Q describes Q-1 at the newest (SEC Rule 13f-1: due 45 days after
+    the quarter ends). A row dated on/after Q-1's first day belongs to the latest
+    filed quarter; anything older is a previous quarter, which only a first
+    hydration writes. The first DAY rather than Q-1's end, because the hydrators'
+    fallback date is `{year}-{q*3:02d}-30` (03-30 / 12-30 for Q1 / Q4).
+
+    Mirrors `smart_money_sender._thirteen_f_floor` so the push and this card agree on
+    which 13F rows are new; `tests/test_whale_13f_quarter_floor.py` pins the pair.
+    """
+    q0 = (today.month - 1) // 3
+    year, prev = (today.year, q0 - 1) if q0 else (today.year - 1, 3)
+    return date(year, prev * 3 + 1, 1).isoformat()
 
 
 class TrackingService:
@@ -1125,9 +1143,10 @@ class TrackingService:
 
         ticker_list = [t.upper() for t in watchlist_tickers]
         cutoff_iso = (datetime.now() - timedelta(days=7)).isoformat()
-        # Same 7-day window as a DATE string, to gate 13F rows on their own
-        # trade/filing date (see the backfill guard in the bucket loop).
-        cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        # Floor for a 13F row's own `date` — a QUARTER END, not a filing date — so
+        # the first day of the previous calendar quarter (see the backfill guard in
+        # the bucket loop).
+        thirteen_f_floor = _thirteen_f_floor(datetime.now().date())
 
         sb = get_supabase()
         try:
@@ -1168,15 +1187,22 @@ class TrackingService:
             # BACKFILL GUARD (13F only): the query windows on created_at, but a
             # newly added whale's FIRST hydration inserts months-old filings
             # with created_at=now — without this, the "this week" alert would
-            # present May filings as this week's activity. A 13F row's `date`
-            # IS the filing date, so require it inside the same 7-day window.
+            # present May filings as this week's activity.
+            # ⚠️ A 13F row's `date` is the QUARTER END the filing describes (the
+            # hydrators write FMP's `institutional-ownership/dates` date), NOT the
+            # filing date. This guard used to require it inside the same 7-day
+            # window, and since a 13F can only be filed after its quarter ends —
+            # usually weeks after — EVERY 13F row failed it: only congressional
+            # rows ever reached "Whales Bought/Sold". The floor is now the first
+            # day of the previous calendar quarter, i.e. "belongs to the latest
+            # filed quarter" (`_thirteen_f_floor`).
             # Congress rows (amount_range set) keep the created_at window:
             # their `date` is the TRANSACTION date, which legitimately lags
             # the disclosure that makes the trade newsworthy. Missing/blank
             # date → keep (degrade to the old created_at-only behavior).
             if not is_congress_row:
                 trade_date = str(row.get("date") or "")[:10]
-                if trade_date and trade_date < cutoff_date:
+                if trade_date and trade_date < thirteen_f_floor:
                     continue
             key = (ticker, action, is_congress_row)
             bucket = buckets.setdefault(

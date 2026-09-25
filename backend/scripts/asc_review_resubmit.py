@@ -15,8 +15,10 @@ section ... for future submissions". This script does the two metadata halves of
      paragraph (deletion path; how to buy each IAP from a Max account), the library paragraph
      ("Learn" is the Wiser tab) and the age rating (18+ is selected, not 17+). Every other
      paragraph is left byte-identical.
-  2. Uploads the recording as an App Review attachment, next to the existing FMP Order Form
-     PDF (which is kept).
+  2. Uploads the recording as the App Review attachment — ONLY when the slot is free. ASC
+     allows exactly one attachment (verified 2026-09-24: 409 "There can be max of 1
+     attachment"), and Caydex's holds the signed FMP Order Form, so in practice the recording
+     is attached to the Resolution Center reply and this step reports that and stops.
 
 The Resolution Center REPLY is not here on purpose: it is a message sent on the developer's
 behalf, and the developer sends it.
@@ -52,7 +54,10 @@ NOTES_LIMIT = 4000
 
 # The paragraph being replaced begins with this. Matched on the stripped paragraph start so a
 # leading space or a trailing edit elsewhere in the paragraph does not defeat it.
-OLD_PARAGRAPH_START = "Background modes."
+# A tuple: the ORIGINAL live paragraph began "Background modes."; after the first --apply it
+# begins "Background audio". Either is this script's paragraph, so a later wording fix still
+# finds it (str.startswith takes a tuple).
+OLD_PARAGRAPH_START = ("Background modes.", "Background audio")
 
 # ⚠️ Keep every paragraph below TRUE against the build under review. They name tap paths; if
 # a screen is reorganised, re-walk the path on a device and edit this text before the next
@@ -65,8 +70,8 @@ NEW_PARAGRAPH = (
     "sign in, tap the Wiser tab (last tab), tap the first Money Moves article, then tap Listen "
     "Now. Books work the same way (Wiser > AI-Enabled Books > any book > Listen Now). Then go "
     "to the Home Screen or lock the device: the narration continues. A screen recording of "
-    "this on a physical iPhone is attached to App Review Information. The app declares no "
-    "other background mode."
+    "this on a physical iPhone accompanies our Resolution Center reply to the 2.5.4 rejection "
+    "of 1.0 (9). The app declares no other background mode."
 )
 
 DEMO_PARAGRAPH = (
@@ -362,6 +367,15 @@ def main() -> int:
             print("    no --video given — skipping")
         elif video.name in names:
             print(f"    {video.name} already attached — skipping")
+        elif existing:
+            # App Store Connect allows ONE App Review attachment (409 STATE_ERROR "There can be
+            # max of 1 attachment"), and that slot holds the signed FMP Order Form the notes cite
+            # as licence proof. Refuse rather than delete it: the recording goes with the
+            # Resolution Center reply instead.
+            problems.append(
+                f"ASC allows one review attachment and {names} already holds it — not replacing "
+                "it. Attach the recording to the Resolution Center reply instead."
+            )
         elif args.apply:
             problems += _upload_attachment(asc, c, token, detail["id"], video)
         else:

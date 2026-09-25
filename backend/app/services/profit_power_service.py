@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import extract_year as _extract_year, quarterly_period_label
 from app.schemas.profit_power import ProfitPowerDataPointSchema, ProfitPowerResponse
@@ -299,12 +300,10 @@ class ProfitPowerService:
             # whenever the LEADER is a cancellable caller: a report run hitting
             # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
             # Hand waiters a normal exception so they fail fast through their own error path.
-            if not future.done():
-                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -460,16 +459,22 @@ class ProfitPowerService:
         peer_group_level: Optional[str] = None
         if sector:
             lookup = get_sector_benchmark_lookup()
-            benchmarks_annual = lookup.get_benchmark_values(
-                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual"
+            # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry): run it on
+            # a worker thread so a cold key cannot stall the event loop. Sequential, so
+            # the third call below still finds the first one's cache entry.
+            benchmarks_annual = await asyncio.to_thread(
+                lookup.get_benchmark_values,
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual",
             )
-            benchmarks_quarterly = lookup.get_benchmark_values(
-                industry, sector, _MARGIN_BENCHMARK_METRICS, "quarterly"
+            benchmarks_quarterly = await asyncio.to_thread(
+                lookup.get_benchmark_values,
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "quarterly",
             )
             # One ticker-level peer group for the label, by majority of the margin
             # benchmark cells (rich lookup is a cache hit — same args as above).
-            rich = lookup.get_benchmarks(
-                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual"
+            rich = await asyncio.to_thread(
+                lookup.get_benchmarks,
+                industry, sector, _MARGIN_BENCHMARK_METRICS, "annual",
             )
             # Only cells that actually declare a level get a vote. A set of
             # all-None levels used to win the `0 >= 0` tie for "industry",

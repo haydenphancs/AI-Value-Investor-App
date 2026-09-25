@@ -57,7 +57,11 @@ extension Optional where Wrapped == Double {
 /// `Int?` — so the whole `StockDetail` decode threw on every ticker, silently gutting the
 /// fallback the `/overview` failure path depends on. The backend now coerces the field
 /// too; this is the other half, so neither side is a single point of failure.
-struct LenientInt: Codable, Equatable, Sendable {
+///
+/// `nonisolated`: a pure value type with no main-actor state. Under the target's default
+/// MainActor isolation, `StockDetail.init`'s `fullTimeEmployees.map(LenientInt.init)` formed
+/// a nonisolated thunk around a main-actor initializer.
+nonisolated struct LenientInt: Codable, Equatable, Sendable {
     let value: Int?
 
     init(_ value: Int?) { self.value = value }

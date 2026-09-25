@@ -410,6 +410,87 @@ def test_on_the_wire_a_body_the_real_parser_rejects_is_400(client, monkeypatch, 
     assert verify.calls == [] and service.calls == []
 
 
+# ── 6. The REAL service: a failed user lookup is transient, not "unknown transaction" ──
+#
+# `user_id_for_transaction` used to log a failed SELECT and return None — the same value as
+# "the notification beat the client's verify call". `apply_notification` then answered
+# `ignored_unknown_transaction`, the handler said 200, and Apple (which retries only non-2xx)
+# never redelivered the REFUND: the subscriber kept the tier and up to 4000 credits. The
+# sections above stub the service; these run the real `IAPService` over a fake client, so the
+# service's None-vs-raise decision is what reaches the status code.
+
+class _LookupOnlyDB:
+    """Serves only the SELECTs `user_id_for_transaction` makes. Every table answers `[]`
+    (found nothing) unless listed in `fail`, which raises like a PostgREST 520."""
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.queried: list[str] = []
+
+    def table(self, name):
+        db = self
+
+        class _Query:
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, *_a, **_k):
+                return self
+
+            def limit(self, *_a, **_k):
+                return self
+
+            def execute(self):
+                db.queried.append(name)
+                if name in db.fail:
+                    raise RuntimeError(f"APIError 520: {name} JSON could not be generated")
+                return type("R", (), {"data": []})()
+
+        return _Query()
+
+
+def _real_service(db):
+    from app.services.iap_service import IAPService
+
+    service = IAPService.__new__(IAPService)      # bypass __init__ (it wires Supabase)
+    service.supabase = db
+    return service
+
+
+@pytest.mark.parametrize(
+    "fail, queried",
+    [
+        ({"subscriptions"}, ["subscriptions"]),
+        ({"credit_purchases"}, ["subscriptions", "credit_purchases"]),
+    ],
+    ids=["subscriptions-read-fails", "credit-purchases-read-fails-after-an-empty-subscriptions"],
+)
+def test_a_failed_user_lookup_raises_instead_of_reading_as_unknown(fail, queried):
+    db = _LookupOnlyDB(fail)
+    with pytest.raises(IAPError):
+        _real_service(db).apply_notification(_NOTIFICATION, _TRANSACTION)
+    assert db.queried == queried
+
+
+def test_a_clean_miss_is_still_the_expected_race_and_stays_200(monkeypatch):
+    """Negative control: every read succeeded and found nothing — the notification really did
+    beat the verify call. Retrying that forever helps nobody."""
+    db = _LookupOnlyDB()
+    assert _real_service(db).apply_notification(_NOTIFICATION, _TRANSACTION) == (
+        "ignored_unknown_transaction", None,
+    )
+    _wire(monkeypatch, service=_real_service(_LookupOnlyDB()))
+    assert _post() == {"received": True, "outcome": "ignored_unknown_transaction"}
+
+
+@pytest.mark.parametrize("fail", [{"subscriptions"}, {"credit_purchases"}],
+                         ids=["subscriptions", "credit_purchases"])
+def test_on_the_wire_a_failed_user_lookup_answers_503(client, monkeypatch, fail):
+    _wire(monkeypatch, service=_real_service(_LookupOnlyDB(fail)))
+    r = client.post(_WEBHOOK, json=_BODY)
+    assert (r.status_code, r.json()["detail"]) == (503, "Could not apply notification")
+
+
 # ── MUTATION_LOG ─────────────────────────────────────────────────────────────────
 #
 # Hand-run 2026-09-10 (testing.md §3 rule 3). Each mutant was built from the handler's

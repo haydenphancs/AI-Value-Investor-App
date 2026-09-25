@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPClient, get_fmp_client
 from app.utils.period_labels import quarterly_period_label
 from app.schemas.earnings import (
@@ -340,8 +341,7 @@ class EarningsService:
                 future.set_result(result)
             return result
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             # CancelledError is a BaseException, not caught above. Resolve with a NORMAL

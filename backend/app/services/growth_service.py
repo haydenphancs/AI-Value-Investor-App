@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
 from app.utils.period_labels import extract_year as _extract_year, quarterly_period_label
 from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
@@ -100,6 +101,28 @@ def _cache_set(key: str, value: Any) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# Degraded legs of the build CURRENTLY held in Tier 1, keyed like `_cache`. A degraded
+# build is served from Tier 1 for 5 min but never persisted; without this memo a caller
+# that hit Tier 1 (or joined the in-flight leader) could not tell it apart from a
+# complete build, and the growth SNAPSHOT would write it to its own 24h tier. Updated on
+# EVERY Tier-1 write, so an entry always describes the value `_cache` holds for its key.
+_degraded_by_key: Dict[str, List[str]] = {}
+
+
+def _note_degraded(key: str, degraded: List[str]) -> None:
+    _degraded_by_key.pop(key, None)
+    if not degraded:
+        return
+    _degraded_by_key[key] = list(degraded)
+    if len(_degraded_by_key) > _CACHE_MAX_ENTRIES:
+        for _old in list(_degraded_by_key.keys())[: len(_degraded_by_key) - _CACHE_MAX_ENTRIES]:
+            _degraded_by_key.pop(_old, None)
+
+
+def _degraded_of(key: str) -> List[str]:
+    return list(_degraded_by_key.get(key) or [])
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -330,6 +353,17 @@ class GrowthService:
         (24h, invalidated early by the next earnings date). Mirrors
         profit_power_service, the reference template.
         """
+        response, _degraded = await self.get_growth_with_status(ticker)
+        return response
+
+    async def get_growth_with_status(self, ticker: str) -> Tuple[GrowthResponse, List[str]]:
+        """`get_growth` plus the FMP legs that failed in the build being served.
+
+        ``degraded`` is empty for a Tier-2 hit (only complete builds are persisted) and
+        for a complete build. A Tier-1 hit or an in-flight join reports the degradation of
+        the build it received, so a caller with its own long-lived cache (the growth
+        snapshot) can refuse to persist what this service itself refused to persist.
+        """
         # UNIQUE(ticker) in growth_cache is case-SENSITIVE, so "aapl" and "AAPL"
         # would occupy two rows and cost two FMP fan-outs (and the
         # profit_power_cache lookup below would miss). Every current caller
@@ -340,14 +374,15 @@ class GrowthService:
         # ── Tier 1: in-memory ──
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached
+            return cached, _degraded_of(cache_key)
 
         # ── Tier 2: Supabase (in a thread — the SDK is sync) ──
         db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
         if db_cached is not None:
             logger.info(f"Growth Supabase HIT for {ticker}")
             _cache_set(cache_key, db_cached)
-            return db_cached
+            _note_degraded(cache_key, [])
+            return db_cached, []
 
         # ── In-flight dedup ──
         if cache_key in _inflight:
@@ -358,7 +393,9 @@ class GrowthService:
             # perfectly, while every other joiner gets a CancelledError. Verified: an
             # unshielded joiner cancellation makes the leader's set_result raise; a shielded
             # one leaves it untouched. Matches profit_power_service.py.
-            return await asyncio.shield(_inflight[cache_key])
+            joined = await asyncio.shield(_inflight[cache_key])
+            # The leader notes its degradation BEFORE resolving the future.
+            return joined, _degraded_of(cache_key)
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -386,14 +423,15 @@ class GrowthService:
                 )
 
             _cache_set(cache_key, result)
+            # A joiner reads the memo when it resumes after set_result below.
+            _note_degraded(cache_key, degraded)
             # Guarded: a joiner that was cancelled before we shielded the join could have
             # already resolved this future, and a bare set_result would raise InvalidStateError.
             if not future.done():
                 future.set_result(result)
-            return result
+            return result, list(degraded)
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             # CancelledError is a BaseException, so the `except Exception` above does NOT
@@ -595,17 +633,22 @@ class GrowthService:
         benchmarks_qoq_quarterly: Dict[str, Dict[str, float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
+            # The lookup is SYNCHRONOUS (sync supabase-py + a time.sleep retry), and a
+            # cold key costs two paginated PostgREST reads. Run each on a worker thread
+            # so a cache miss cannot stall the single uvicorn worker's event loop.
+            # Sequential on purpose: the keys differ, and a thread per call would only
+            # add concurrent use of the shared sync client.
             # Hold thin just-completed periods back to the last mature (n>=20) value
             # so a contaminated latest-FY median can't make a real grower read weak.
-            benchmarks_annual = _hold_back_thin_benchmarks(
-                lookup.get_benchmarks(industry, sector, all_yoy_metrics, "annual")
-            )
-            benchmarks_quarterly = _hold_back_thin_benchmarks(
-                lookup.get_benchmarks(industry, sector, all_yoy_metrics, "quarterly")
-            )
-            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(
-                lookup.get_benchmarks(industry, sector, all_qoq_metrics, "quarterly")
-            )
+            benchmarks_annual = _hold_back_thin_benchmarks(await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "annual",
+            ))
+            benchmarks_quarterly = _hold_back_thin_benchmarks(await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_yoy_metrics, "quarterly",
+            ))
+            benchmarks_qoq_quarterly = _hold_back_thin_benchmarks(await asyncio.to_thread(
+                lookup.get_benchmarks, industry, sector, all_qoq_metrics, "quarterly",
+            ))
 
         # Phase 5: assemble response with sector averages matched by period label
         def _to_schemas(

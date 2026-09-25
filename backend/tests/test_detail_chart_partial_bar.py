@@ -12,7 +12,9 @@ two halves and each test below pins one:
     MISS once the cycle turns, whatever the rolling 12h TTL says — otherwise the settled
     bar would be MISSING for up to 12h instead of wrong.
 
-Both services are exercised: `index_service` and `etf_service` carry twin copies.
+Index, ETF and commodity carry the fix since F16-2; the stock overview (C7) got it later —
+its daily history lives inside the 24h `stock_fundamentals_cache` bundle, so its freshness
+half is a close-cycle MISS on that bundle (see the stock section at the bottom).
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import pytest
 from app.services import commodity_service as C
 from app.services import etf_service as E
 from app.services import index_service as I
+from app.services import stock_overview_service as S
 from app.utils.market_hours import ET
 
 
@@ -56,13 +59,13 @@ THREE_DAYS = ["2026-09-14", "2026-09-15", "2026-09-16"]
 
 # ── `_settled_bars`: the filter ───────────────────────────────────────────────
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_mid_session_drops_todays_partial_bar(M):
     out = M._settled_bars(_rows(THREE_DAYS), now=MID_SESSION)
     assert [r["date"] for r in out] == ["2026-09-14", "2026-09-15"]
 
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_after_the_bell_but_before_settle_still_drops_it(M):
     """16:02 ET is not "closed" as far as the bar is concerned — FMP is still finalising
     it. The 18:00 close cycle is the boundary, not the 16:00 bell."""
@@ -70,20 +73,20 @@ def test_after_the_bell_but_before_settle_still_drops_it(M):
     assert [r["date"] for r in out] == ["2026-09-14", "2026-09-15"]
 
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_once_settled_todays_bar_is_kept(M):
     out = M._settled_bars(_rows(THREE_DAYS), now=SETTLED)
     assert [r["date"] for r in out] == THREE_DAYS
 
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_on_a_weekend_the_cutoff_is_fridays_close(M):
     rows = _rows(["2026-09-17", "2026-09-18", "2026-09-19", "2026-09-21"])  # Thu Fri Sat Mon
     out = M._settled_bars(rows, now=SATURDAY)
     assert [r["date"] for r in out] == ["2026-09-17", "2026-09-18"]
 
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_the_filter_is_total_for_malformed_input(M):
     """Empty, None, non-dict rows, a null date, a datetime-stamped date and a stray
     future-dated row: never raises, drops what it cannot trust, keeps the undated row
@@ -101,7 +104,7 @@ def test_the_filter_is_total_for_malformed_input(M):
     assert [r["close"] for r in out] == [1.0, 2.0]
 
 
-@pytest.mark.parametrize("M", [I, E, C], ids=["index", "etf", "commodity"])
+@pytest.mark.parametrize("M", [I, E, C, S], ids=["index", "etf", "commodity", "stock"])
 def test_a_duplicate_of_todays_date_is_dropped_with_it(M):
     rows = _rows(["2026-09-15", "2026-09-16", "2026-09-16"])
     assert [r["date"] for r in M._settled_bars(rows, now=MID_SESSION)] == ["2026-09-15"]
@@ -377,3 +380,232 @@ async def test_commodity_derived_and_daily_chart_exclude_the_partial_bar(monkeyp
     for key, payload in persisted.items():
         if isinstance(payload, list):
             assert all(float(b.get("close", 0)) != 999.0 for b in payload), key
+
+
+# ── stock overview (C7): the history inside `stock_fundamentals_cache` ─────────────
+#
+# The stock screen's daily history is not its own cache entry: it rides inside the 24h
+# fundamentals bundle (`_fetch_fundamentals`, `historical-price-eod/full` from 1900 to
+# today) next to a separately cached SPY series. The first viewer after 09:30 pinned the
+# in-progress bar for 24h, and the Performance / Benchmark cards and the 3M-1Y daily chart
+# ended on it.
+
+
+class _StockFMP:
+    """Every FMP call the fundamentals fan-out makes. Histories end TODAY (UTC) with a
+    tell-tale partial close; everything else is a minimal usable payload."""
+
+    def __init__(self, stock_rows, spy_rows):
+        self.stock_rows, self.spy_rows = stock_rows, spy_rows
+        self.history_calls = []
+
+    async def get_historical_prices(self, symbol, frm, to):
+        self.history_calls.append(symbol)
+        return [dict(r) for r in (self.spy_rows if symbol == "SPY" else self.stock_rows)]
+
+    async def get_company_profile(self, ticker):
+        return {"companyName": "Apple", "sector": "Technology"}
+
+    def __getattr__(self, name):
+        async def _call(*args, **kwargs):
+            return [{"stub": name}]
+        return _call
+
+
+class _NoMovers:
+    async def get_sector_performance(self):
+        return []
+
+    async def get_industry_performance(self):
+        return []
+
+
+def _stock_service(monkeypatch, fmp):
+    async def _no_short_interest(ticker):
+        return {}
+
+    monkeypatch.setattr(S, "get_short_interest", _no_short_interest)
+    monkeypatch.setattr(S, "get_market_movers_service", lambda: _NoMovers())
+    S._cache.clear()
+    svc = S.StockOverviewService.__new__(S.StockOverviewService)
+    svc.fmp = fmp
+    svc.supabase = None
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_stock_bundle_drops_the_partial_bar_from_both_histories_mid_session(monkeypatch):
+    today = datetime.now(tz=timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    stock_rows = _calendar_rows(partial_close=999.0)
+    spy_rows = _calendar_rows(partial_close=888.0)
+    svc = _stock_service(monkeypatch, _StockFMP(stock_rows, spy_rows))
+    monkeypatch.setattr(S, "current_close_cycle_start", _cycle_at(today - timedelta(days=1)))
+
+    bundle = await svc._fetch_fundamentals("AAPL")
+
+    stock, spy = bundle["stock_historical"], bundle["spy_historical"]
+    assert stock[-1]["date"] == yesterday, "today's in-progress stock bar was kept"
+    assert spy[-1]["date"] == yesterday, "today's in-progress SPY bar was kept"
+    assert all(r["close"] != 999.0 for r in stock) and all(r["close"] != 888.0 for r in spy)
+    assert bundle[S._SETTLED_THROUGH_KEY] == yesterday
+
+    # Everything derived from the bundle ends on the settled close.
+    periods = {p.label: p for p in svc._build_performance_periods(stock, spy)}
+    assert periods["1 Month"].change_percent == round(S._compute_return(stock_rows[:-1], 21), 2)
+    assert periods["1 Month"].change_percent < 100, "the 999 partial close leaked in"
+    assert S._extract_chart_data(stock, "1Y")[-1]["date"] == yesterday
+    S._cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_stock_bundle_keeps_todays_bar_once_settled(monkeypatch):
+    today = datetime.now(tz=timezone.utc).date()
+    svc = _stock_service(monkeypatch, _StockFMP(_calendar_rows(), _calendar_rows()))
+    monkeypatch.setattr(S, "current_close_cycle_start", _cycle_at(today))
+    bundle = await svc._fetch_fundamentals("AAPL")
+    assert bundle["stock_historical"][-1]["date"] == today.isoformat()
+    assert bundle["spy_historical"][-1]["date"] == today.isoformat()
+    assert bundle[S._SETTLED_THROUGH_KEY] == today.isoformat()
+    S._cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_spy_history_is_keyed_on_the_close_cycle_not_the_utc_date(monkeypatch):
+    """One SPY pull per cycle, shared across tickers; a new cycle re-pulls it (and ends on
+    the newly settled bar) and drops the previous cycle's multi-thousand-row series."""
+    today = datetime.now(tz=timezone.utc).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    fmp = _StockFMP(_calendar_rows(), _calendar_rows(partial_close=888.0))
+    svc = _stock_service(monkeypatch, fmp)
+    monkeypatch.setattr(S, "current_close_cycle_start", _cycle_at(today - timedelta(days=1)))
+
+    await svc._fetch_fundamentals("AAPL")
+    await svc._fetch_fundamentals("MSFT")
+    assert fmp.history_calls.count("SPY") == 1, "SPY re-pulled inside one close cycle"
+    assert f"spy_hist_full:{yesterday}" in S._cache
+    assert f"spy_hist_full:{today.isoformat()}" not in S._cache, "keyed on the UTC date"
+
+    monkeypatch.setattr(S, "current_close_cycle_start", _cycle_at(today))
+    bundle = await svc._fetch_fundamentals("AAPL")
+    assert fmp.history_calls.count("SPY") == 2, "the new cycle served the old SPY series"
+    assert bundle["spy_historical"][-1]["date"] == today.isoformat()
+    assert f"spy_hist_full:{yesterday}" not in S._cache, "previous cycle's series left resident"
+    S._cache.clear()
+
+
+# `_bundle_is_current` — the freshness rule for both tiers, on a frozen clock.
+
+def test_stock_bundle_freshness_is_one_close_cycle():
+    cur = {S._SETTLED_THROUGH_KEY: "2026-09-15"}          # Tue's settled session
+    # Wed 10:00 ET (cycle = Tue 18:00 ET = 22:00 UTC): a bundle cut at Tue, written Wed.
+    assert S._bundle_is_current(cur, _utc(2026, 9, 16, 13), now=MID_SESSION) is True
+    # Written Tue 17:00 ET, BEFORE the cycle turned — stale, even though it is 21h old.
+    assert S._bundle_is_current(cur, _utc(2026, 9, 15, 21), now=MID_SESSION) is False
+    # Wed 19:00 ET: the Wed cycle started at 18:00, so the Wed-morning bundle is stale.
+    assert S._bundle_is_current(cur, _utc(2026, 9, 16, 13), now=SETTLED) is False
+    # A bundle fetched across the boundary: cut at the OLD date, stamped in the new cycle.
+    assert S._bundle_is_current(cur, _utc(2026, 9, 16, 22, 1), now=SETTLED) is False
+    assert S._bundle_is_current({S._SETTLED_THROUGH_KEY: "2026-09-16"},
+                                _utc(2026, 9, 16, 22, 1), now=SETTLED) is True
+    # A pre-fix row (no stamp, possibly carrying the partial bar) is never current.
+    assert S._bundle_is_current({}, _utc(2026, 9, 16, 13), now=MID_SESSION) is False
+    assert S._bundle_is_current(None, _utc(2026, 9, 16, 13), now=MID_SESSION) is False
+    # Weekend: Friday's bundle holds through Saturday.
+    fri = {S._SETTLED_THROUGH_KEY: "2026-09-18"}
+    assert S._bundle_is_current(fri, _utc(2026, 9, 18, 23), now=SATURDAY) is True
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.data = rows
+
+
+class _FakeTable:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, name):
+        assert name == "stock_fundamentals_cache"
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def execute(self):
+        return _Rows(self._rows)
+
+
+def test_a_tier2_row_cached_before_the_close_cycle_is_a_miss(monkeypatch):
+    """Frozen cycle one hour ago. A 2h-old row is well inside the 24h TTL and is STILL a
+    miss — even with a stamp that matches the current cycle — because it was written
+    before the cycle turned. The row written after it, stamped for this cycle, is a hit."""
+    now = datetime.now(timezone.utc)
+    cycle = now - timedelta(hours=1)
+    monkeypatch.setattr(S, "current_close_cycle_start", lambda now=None: cycle)
+    stamp = cycle.astimezone(ET).date().isoformat()
+    svc = S.StockOverviewService.__new__(S.StockOverviewService)
+
+    def _row(age, bundle):
+        return [{"response_json": bundle, "cached_at": (now - age).isoformat()}]
+
+    good = {"profile": {"companyName": "Apple"}, S._SETTLED_THROUGH_KEY: stamp}
+    svc.supabase = _FakeTable(_row(timedelta(hours=2), good))
+    assert svc._check_fundamentals_db("AAPL") is None, "served a row from the previous cycle"
+
+    svc.supabase = _FakeTable(_row(timedelta(minutes=30), good))
+    assert svc._check_fundamentals_db("AAPL") == good
+
+    # Inside the cycle but cut at an older session / never stamped (pre-fix code): miss.
+    for bundle in ({**good, S._SETTLED_THROUGH_KEY: "2000-01-03"},
+                   {"profile": {"companyName": "Apple"}}):
+        svc.supabase = _FakeTable(_row(timedelta(minutes=30), bundle))
+        assert svc._check_fundamentals_db("AAPL") is None
+
+    # The 24h ceiling still applies inside a (long, weekend) cycle.
+    weekend_cycle = now - timedelta(hours=30)
+    monkeypatch.setattr(S, "current_close_cycle_start", lambda now=None: weekend_cycle)
+    old_stamp = {**good, S._SETTLED_THROUGH_KEY: weekend_cycle.astimezone(ET).date().isoformat()}
+    svc.supabase = _FakeTable(_row(timedelta(hours=25), old_stamp))
+    assert svc._check_fundamentals_db("AAPL") is None
+
+
+@pytest.mark.asyncio
+async def test_the_tier1_bundle_is_refetched_when_the_cycle_turns(monkeypatch):
+    """The 1h memory tier must not outlive the close cycle either: a bundle cached at
+    17:59 would otherwise serve its (settled-bar-less) history until 18:59."""
+    S._cache.clear()
+    svc = S.StockOverviewService.__new__(S.StockOverviewService)
+    calls = {"n": 0}
+
+    async def _fetch(ticker):
+        calls["n"] += 1
+        return {
+            "profile": {"companyName": "Apple"},
+            "stock_historical": [{"date": "2026-09-15", "close": 1.0}],
+            "key_metrics": [{}],
+            S._SETTLED_THROUGH_KEY: S._settled_cutoff_date(),
+        }
+
+    monkeypatch.setattr(svc, "_check_fundamentals_db", lambda ticker: None)
+    monkeypatch.setattr(svc, "_fetch_fundamentals", _fetch)
+    monkeypatch.setattr(svc, "_upsert_fundamentals_db", lambda ticker, data: None)
+
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    monkeypatch.setattr(S, "current_close_cycle_start", lambda now=None: past)
+    await svc._get_fundamentals("AAPL")
+    await svc._get_fundamentals("AAPL")
+    assert calls["n"] == 1, "not cached within a cycle"
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=1)
+    monkeypatch.setattr(S, "current_close_cycle_start", lambda now=None: future)
+    await svc._get_fundamentals("AAPL")
+    assert calls["n"] == 2, "served the previous cycle's bundle from memory"
+    assert S._cache.get("fundamentals:AAPL") is not None, "the refetched bundle was not cached"
+    S._cache.clear()

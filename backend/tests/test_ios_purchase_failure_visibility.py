@@ -357,17 +357,23 @@ def test_the_regenerate_affordance_states_its_cost():
     # EVERY place the cost is rendered must read the shared constant. Asserting mere presence
     # is not enough: a partial hardcode leaves one correct reference and one that silently
     # drifts from REPORT_CREDIT_COST the next time the ladder is repriced.
-    alert = view[view.index("needsPaidRegeneration"):][:900]
-    refs = alert.count("AnalysisCost.standard.credits")
-    assert refs >= 2, (
-        f"the regenerate affordance renders the cost in {refs} place(s) via the shared "
-        "constant — the button label and the explanatory copy must BOTH use it"
-    )
-    assert not _re.search(r"\b\d+\s+credits\b", alert), (
-        "a literal credit count is hardcoded in the regenerate copy; it will drift from "
-        "settings.REPORT_CREDIT_COST"
-    )
-    assert "regenerateForCredits" in view
+    # TWO affordances (2026-09-25): the refresh-time alert inside `reportContent`, and the
+    # open-time "Report No Longer Available" state a notification lands on. Each is checked on
+    # its own anchor — anchoring on the first `needsPaidRegeneration` mention silently checked
+    # whichever one happened to come first in the file.
+    alert = view[view.index("isPresented: $viewModel.needsPaidRegeneration"):][:900]
+    unavailable = view[view.index("private var unavailableView"):][:1600]
+    for name, block in (("refresh alert", alert), ("unavailable state", unavailable)):
+        refs = block.count("AnalysisCost.standard.credits")
+        assert refs >= 2, (
+            f"the {name} renders the cost in {refs} place(s) via the shared constant — the "
+            "button label and the explanatory copy must BOTH use it"
+        )
+        assert not _re.search(r"\b\d+\s+credits\b", block), (
+            f"a literal credit count is hardcoded in the {name}; it will drift from "
+            "settings.REPORT_CREDIT_COST"
+        )
+        assert "regenerateForCredits" in block, f"the {name} has no deliberate paid route"
 
 
 def test_the_app_account_token_is_resolved_at_tap_not_snapshotted():

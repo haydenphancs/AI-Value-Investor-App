@@ -11,14 +11,89 @@ Uses google.genai types for Gemini-compatible function declarations.
 """
 
 import logging
-from typing import Dict, Any, Callable, Awaitable
+from typing import Dict, Any, Callable, Awaitable, Optional
 
+import httpx
 from google.genai import types
 
+from app.config import settings
 from app.integrations.fmp import FMPClient
+from app.log_redaction import redact_secrets
 from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
+
+
+# ── Tool-result error text (what the MODEL may see) ───────────────────────────
+#
+# ⚠️ A tool result is sent to a third-party LLM, and whatever the model quotes from it can
+# land in `research_findings` → `research_reports.full_report` → the report detail API. FMP
+# puts the key in the query string (`fmp.py`: `params["apikey"] = self.api_key`), and
+# `_make_request_impl` re-raises a raw `httpx.HTTPStatusError` for every status it does not
+# type (400/403/404/405/…) — whose `str()` is "Client error '404 …' for url
+# '…/income-statement?symbol=X&limit=0&apikey=<KEY>'". These handlers used to return
+# `{"error": str(e)}`, i.e. the production FMP key, verbatim, to Gemini. The chat door never
+# did (`gemini._run_tool_handler` redacts); this door had no equivalent.
+
+_TOOL_ERROR_MAX_CHARS = 200
+
+
+def _scrub(text: Any, fmp: Any = None) -> str:
+    """`redact_secrets` plus a literal replacement of the FMP key itself.
+
+    The regex anchors on a parameter NAME (`apikey=`); the literal pass catches the key in
+    any other shape (a repr, a re-encoded URL, a message someone formats differently).
+    """
+    out = redact_secrets(text)
+    for secret in (getattr(settings, "FMP_API_KEY", None), getattr(fmp, "api_key", None)):
+        # Length floor: never blank out a short/empty placeholder that would match everywhere.
+        if isinstance(secret, str) and len(secret) >= 8:
+            out = out.replace(secret, "***")
+    return out
+
+
+def tool_error_message(exc: BaseException, fmp: Any = None) -> str:
+    """The `error` string a tool result may carry to the model. Never a credential, never a URL.
+
+    An httpx error is reduced to a generic line (its message IS the request URL, and the
+    model has no use for our endpoint or query string); anything else keeps its message —
+    our typed FMP exceptions say something useful ("FMP rate limit hit on …") — scrubbed
+    and capped. Details go to the log instead (`_log_tool_failure`).
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return f"upstream data request failed (HTTP {status})" if status else "upstream data request failed"
+    if isinstance(exc, httpx.HTTPError):
+        return f"upstream data request failed ({type(exc).__name__})"
+    return _scrub(exc, fmp)[:_TOOL_ERROR_MAX_CHARS]
+
+
+def _log_tool_failure(tool: str, ticker: str, exc: BaseException, fmp: Any = None) -> None:
+    # Scrubbed here as well, not only by main.py's root SecretRedactingFilter: that filter
+    # exists only where main.py configured logging (not in scripts, not under pytest).
+    logger.warning(
+        "Tool %s failed (ticker=%s): %s", tool, ticker or "-",
+        _scrub(f"{type(exc).__name__}: {exc}", fmp),
+    )
+
+
+def _bounded_int(value: Any, default: int, hi: Optional[int] = None) -> int:
+    """A model-chosen count, clamped to [1, hi]. `min(limit, 12)` alone let 0 and negatives
+    through to FMP (a 4xx, i.e. the leak above) and `data[:-3]` silently dropped rows; a
+    non-numeric or null `limit` raised outside the handler's `try`."""
+    try:
+        n = int(value) if value is not None and not isinstance(value, bool) else default
+    except (TypeError, ValueError):
+        n = default
+    n = max(1, n)
+    return min(n, hi) if hi is not None else n
+
+
+def _ticker_arg(args: Dict[str, Any]) -> str:
+    return str(args.get("ticker") or "").strip().upper()
+
+
+_NO_TICKER = "ticker is required"
 
 
 # ── Gemini Function Declarations ──────────────────────────────────────────────
@@ -183,10 +258,11 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
     """Build async handler functions for each FMP tool."""
 
     async def fetch_quarterly_financials(args: Dict[str, Any]) -> Dict[str, Any]:
-        ticker = args.get("ticker", "").upper()
+        ticker = _ticker_arg(args)
         statement = args.get("statement_type", "income")
-        limit = int(args.get("limit", 8))
-        limit = min(limit, 12)  # Cap at 12 quarters
+        limit = _bounded_int(args.get("limit"), 8, hi=12)  # 1..12 quarters
+        if not ticker:
+            return {"error": _NO_TICKER, "data": []}
 
         try:
             if statement == "income":
@@ -201,12 +277,12 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
             return _compress_financial_data(data, statement)
 
         except Exception as e:
-            logger.warning(f"Tool fetch_quarterly_financials failed: {e}")
-            return {"error": str(e), "data": []}
+            _log_tool_failure("fetch_quarterly_financials", ticker, e, fmp)
+            return {"error": tool_error_message(e, fmp), "data": []}
 
     async def fetch_dividend_history(args: Dict[str, Any]) -> Dict[str, Any]:
-        ticker = args.get("ticker", "").upper()
-        limit = int(args.get("limit", 20))
+        ticker = _ticker_arg(args)
+        limit = _bounded_int(args.get("limit"), 20)
         if not _dividend_history_licensed():
             # Belt-and-braces: the declaration is omitted above, so Gemini should never
             # reach here. If it does (a cached tool list, a hand-built call), an EXPLICIT
@@ -214,25 +290,30 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
             # company pays nothing" — `get_dividend_history` swallows the entitlement
             # exception and returns `[]`, which reads as the latter.
             return {"error": "not_licensed", "dividends": []}
+        if not ticker:
+            return {"error": _NO_TICKER, "dividends": []}
         try:
             data = await fmp.get_dividend_history(ticker, limit)
             return {"dividends": data[:limit]}
         except Exception as e:
-            logger.warning(f"Tool fetch_dividend_history failed: {e}")
-            return {"error": str(e), "dividends": []}
+            _log_tool_failure("fetch_dividend_history", ticker, e, fmp)
+            return {"error": tool_error_message(e, fmp), "dividends": []}
 
     async def fetch_sector_performance(args: Dict[str, Any]) -> Dict[str, Any]:
         try:
             data = await get_market_movers_service().get_sector_performance()
             return {"sectors": data}
         except Exception as e:
-            logger.warning(f"Tool fetch_sector_performance failed: {e}")
-            return {"error": str(e), "sectors": []}
+            _log_tool_failure("fetch_sector_performance", "", e, fmp)
+            return {"error": tool_error_message(e, fmp), "sectors": []}
 
     async def fetch_more_news(args: Dict[str, Any]) -> Dict[str, Any]:
-        ticker = args.get("ticker", "").upper()
-        limit = int(args.get("limit", 10))
-        limit = min(limit, 15)
+        ticker = _ticker_arg(args)
+        limit = _bounded_int(args.get("limit"), 10, hi=15)
+        if not ticker:
+            # NOT a formality: `get_stock_news` with no symbol makes FMP fall back to AAPL,
+            # so an empty ticker handed the model Apple's news as this company's.
+            return {"error": _NO_TICKER, "articles": []}
         try:
             data = await fmp.get_stock_news(ticker, limit)
             if getattr(data, "fetch_failed", False):
@@ -242,9 +323,11 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
                 # to "no coverage" — and a 20-credit report then narrated "there is no
                 # recent news" and froze that claim in `ticker_report_data` for the whole
                 # close-aligned window. Same shape the chat tool already returns.
+                # `reason` is `f"{type(e).__name__}: {e}"` from fmp.py — an httpx URL, key
+                # and all — so it is scrubbed before it is logged.
                 logger.warning(
                     "Tool fetch_more_news: news feed FAILED for %s (%s) — reported as "
-                    "unavailable, not empty", ticker, getattr(data, "reason", ""),
+                    "unavailable, not empty", ticker, _scrub(getattr(data, "reason", ""), fmp),
                 )
                 return {
                     "error": "news feed unavailable (upstream fetch failed)",
@@ -262,12 +345,14 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
                 })
             return {"articles": articles}
         except Exception as e:
-            logger.warning(f"Tool fetch_more_news failed: {e}")
-            return {"error": str(e), "articles": []}
+            _log_tool_failure("fetch_more_news", ticker, e, fmp)
+            return {"error": tool_error_message(e, fmp), "articles": []}
 
     async def fetch_extended_financials(args: Dict[str, Any]) -> Dict[str, Any]:
-        ticker = args.get("ticker", "").upper()
+        ticker = _ticker_arg(args)
         statement = args.get("statement_type", "income")
+        if not ticker:
+            return {"error": _NO_TICKER, "data": []}
         try:
             if statement == "income":
                 data = await fmp.get_income_statement(ticker, "annual", 10)
@@ -279,8 +364,8 @@ def build_tool_handlers(fmp: FMPClient) -> Dict[str, Callable[..., Awaitable[Dic
                 return {"error": f"Unknown statement type: {statement}"}
             return _compress_financial_data(data, statement)
         except Exception as e:
-            logger.warning(f"Tool fetch_extended_financials failed: {e}")
-            return {"error": str(e), "data": []}
+            _log_tool_failure("fetch_extended_financials", ticker, e, fmp)
+            return {"error": tool_error_message(e, fmp), "data": []}
 
     async def research_complete(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "complete", "summary": args.get("summary", "")}

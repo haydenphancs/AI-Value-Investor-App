@@ -53,6 +53,7 @@ from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Set, Tuple
 import re
 
 from app.utils.postgrest_paging import fetch_all_rows
+from app.utils.inflight import fail_shared_future
 from app.database import get_supabase
 from app.integrations.fmp import (
     get_fmp_client,
@@ -885,8 +886,7 @@ class SignalsService:
         except BaseException as exc:
             # CancelledError (a BaseException) on shutdown must still settle the
             # future, or a joined request hangs forever. Mirrors get_scanners.
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._inflight.pop(_SIGNALS_CACHE_KEY, None)
@@ -1285,8 +1285,7 @@ class SignalsService:
                 fut.set_result(result)
             return result
         except BaseException as exc:
-            if not fut.done():
-                fut.set_exception(exc)
+            fail_shared_future(fut, exc)
             raise
         finally:
             self._detail_inflight.pop(key, None)

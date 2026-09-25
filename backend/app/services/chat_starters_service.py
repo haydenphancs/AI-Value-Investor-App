@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.schemas.chat_starters import (
     ChatStarterResponse,
     ChatStartersResponse,
@@ -293,7 +294,7 @@ class ChatStartersService:
             )
             if not future.done():
                 if _has_waiters(future):
-                    future.set_exception(exc)
+                    fail_shared_future(future, exc)
                 else:
                     future.cancel()
             raise
@@ -378,7 +379,7 @@ class ChatStartersService:
         except BaseException as exc:
             if not future.done():
                 if _has_waiters(future):
-                    future.set_exception(exc)
+                    fail_shared_future(future, exc)
                 else:
                     future.cancel()
             raise

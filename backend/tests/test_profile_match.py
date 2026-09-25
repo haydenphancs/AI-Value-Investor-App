@@ -492,3 +492,94 @@ def test_no_test_in_this_file_uses_an_invalid_follow_signal():
                 if isinstance(item, ast.Constant) and item.value not in vocab:
                     bad.append((item.value, item.lineno))
     assert not bad, f"invalid follow_signals values in this file: {bad} (vocab {sorted(vocab)})"
+
+
+# ── A failed read leaves the day OPEN (retried next hour), never "success, 0 sent" ──────
+# `_load_profiles` returned [] on a read failure and the run then recorded SUCCESS, so one
+# Supabase blip at 19:xx ET cost every reader that day's match. A failed tier chunk did the
+# same thing to the readers in it. The per-user-per-day dedup key makes a retry safe.
+
+import contextlib  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def test_a_failed_profile_read_raises_instead_of_reading_as_nobody(monkeypatch):
+    class _Boom:
+        def table(self, _n):
+            raise RuntimeError("520 Origin Error")
+
+    monkeypatch.setattr(pms, "get_supabase", lambda: _Boom())
+    with pytest.raises(RuntimeError):
+        pms._load_profiles()
+
+
+def _drive_run(monkeypatch, *, profiles, tiers, tier_failures=()):
+    outcomes, sent_to = [], []
+
+    @contextlib.asynccontextmanager
+    async def _claimed(job):
+        run = SimpleNamespace(success=False, notified=0, cursor=None, error=None)
+        try:
+            yield run
+        finally:
+            outcomes.append(run.success)
+
+    class _Dispatcher:
+        async def notify_users(self, users, **kw):
+            sent_to.extend(users)
+            assert kw["dedup_key"].endswith(users[0]), "dedup must stay per user per day"
+            return len(users)
+
+    class _Signals:
+        async def get_signals(self):
+            return {}
+
+    def _tiers(ids, failures=None):
+        if failures is not None:
+            failures.extend(tier_failures)
+        return dict(tiers)
+
+    import app.services.push_dispatch_service as pds
+    import app.services.signals_service as sigs
+    monkeypatch.setattr(pms, "claimed_job", _claimed)
+    monkeypatch.setattr(sigs, "get_signals_service", lambda: _Signals())
+    monkeypatch.setattr(pms, "_all_symbols", lambda s: ["AAPL"])
+    monkeypatch.setattr(pms, "_load_profiles", profiles)
+    monkeypatch.setattr(pms, "_tiers_for", _tiers)
+    monkeypatch.setattr(pms, "_sector_map", lambda syms: {})
+    monkeypatch.setattr(pms, "match_profile", lambda p, s, sec, limit: [SimpleNamespace(symbol="AAPL")])
+    monkeypatch.setattr(pms, "_title", lambda lead: "t")
+    monkeypatch.setattr(pms, "_body", lambda matches: "b")
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Dispatcher())
+    return outcomes, sent_to
+
+
+@pytest.mark.asyncio
+async def test_a_failed_profile_read_fails_the_run(monkeypatch):
+    def _boom():
+        raise RuntimeError("520")
+    outcomes, sent_to = _drive_run(monkeypatch, profiles=_boom, tiers={})
+    with pytest.raises(RuntimeError):
+        await pms.run_profile_match_notifications()
+    assert outcomes == [False] and sent_to == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tier_chunk_sends_the_rest_and_leaves_the_day_open(monkeypatch):
+    profiles = lambda: [{"user_id": "u1"}, {"user_id": "u2"}]  # noqa: E731
+    outcomes, sent_to = _drive_run(
+        monkeypatch, profiles=profiles, tiers={"u1": "premium"}, tier_failures=[200],
+    )
+    assert await pms.run_profile_match_notifications() == 1
+    assert sent_to == ["u1"], "the known paid reader is still served"
+    assert outcomes == [False], "u2's tier was never read — the day must stay open for a retry"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_run_records_success(monkeypatch):
+    profiles = lambda: [{"user_id": "u1"}, {"user_id": "u2"}]  # noqa: E731
+    outcomes, sent_to = _drive_run(monkeypatch, profiles=profiles, tiers={"u1": "premium", "u2": "free"})
+    assert await pms.run_profile_match_notifications() == 1
+    assert sent_to == ["u1"] and outcomes == [True]

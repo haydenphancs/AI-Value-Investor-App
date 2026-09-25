@@ -382,10 +382,12 @@ async def app_store_notifications(
     verified against Apple's certificate chain exactly like a client transaction, and the
     inner transaction is verified separately rather than trusted via the envelope.
 
-    Always answers 200 once the signature checks out. Apple retries non-2xx for days, so
-    returning an error for something we've decided to ignore (an unmapped product, a
-    transaction we have no user for) would just generate retries forever. What happened is
-    recorded in `outcome` and the logs.
+    Answers 200 once the signature checks out, EXCEPT on a transient failure of ours
+    (`IAPError` → 503 so Apple redelivers). Apple retries non-2xx for days, so returning an
+    error for something we've decided to ignore (an unmapped product, a transaction we have no
+    user for) would just generate retries forever. "No user" must mean the lookup SUCCEEDED
+    and found nothing: a failed lookup raises `IAPError`, because answering 200 there drops a
+    REFUND permanently. What happened is recorded in `outcome` and the logs.
     """
     # The only route in the app with NO credential, and the work behind it — Apple's JWS
     # certificate-chain verification — is the most CPU-expensive in the process. Rate-limit

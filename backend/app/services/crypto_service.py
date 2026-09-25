@@ -39,7 +39,7 @@ from app.schemas.crypto import (
 )
 from app.utils.market_hours import to_utc_instant
 from app.services.price_service import price_source
-from app.services.chart_helper import AGGREGATED_INTERVALS, _aggregate_prices
+from app.services.chart_helper import AGGREGATED_INTERVALS, _aggregate_prices, ytd_return
 
 logger = logging.getLogger(__name__)
 
@@ -854,22 +854,12 @@ def _compute_return_by_date(
     return ((end - start) / start) * 100
 
 
-def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
-    if not prices or len(prices) < 2:
-        return None
-    current_year = datetime.now(tz=timezone.utc).year
-    from app.services.chart_helper import _finite_or_none
-    for p in prices:
-        date_str = p.get("date") or ""
-        if date_str.startswith(str(current_year)):
-            # Finite-guard so a NaN/Inf close degrades to an omitted period, not a
-            # NaN change_percent that breaks the (non-optional) iOS decode.
-            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
-            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
-            if start_price and end_price and start_price > 0:
-                return ((end_price - start_price) / start_price) * 100
-            break
-    return None
+def _compute_ytd_return(prices: List[Dict], now: Optional[datetime] = None) -> Optional[float]:
+    """YTD from the previous year's last close — the one shared definition
+    (`chart_helper.ytd_return`). The copy this replaced baselined on the first row of the
+    UTC year, which left the year's first day out of YTD, and went blank from 19:00 ET on
+    Dec 31 until a new-year row existed."""
+    return ytd_return(prices, now)
 
 
 def _compute_all_time_return(prices: List[Dict]) -> Optional[float]:

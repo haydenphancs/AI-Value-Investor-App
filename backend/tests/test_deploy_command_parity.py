@@ -56,3 +56,23 @@ def test_the_graceful_shutdown_is_bounded():
         m = re.search(r"--timeout-graceful-shutdown (\d+)", cmd)
         assert m, f"{cmd!r}: no graceful-shutdown bound"
         assert 5 <= int(m.group(1)) <= 60, "must beat Railway's stop grace while draining a normal request"
+
+
+def test_the_repo_root_railway_toml_cannot_start_a_different_server():
+    """A second `railway.toml` sits at the REPO root. Railway resolves a config file from
+    the repo root unless the service sets a custom path, so if it is ever the one applied
+    its `startCommand` REPLACES the Dockerfile CMD. It carried a stale command without the
+    graceful-shutdown bound (and a `/health` check that skips the WeasyPrint probe). It must
+    start exactly what the Dockerfile starts."""
+    root = _BACKEND.parent / "railway.toml"
+    if not root.exists():
+        return
+    toml = root.read_text()
+    m = re.search(r'^startCommand\s*=\s*"(.*)"\s*$', toml, re.M)
+    if m:
+        assert m.group(1) == _dockerfile_cmd().replace("${PORT:-8000}", "$PORT"), m.group(1)
+    hc = re.search(r'^healthcheckPath\s*=\s*"(.*)"\s*$', toml, re.M)
+    backend_hc = re.search(r'^healthcheckPath\s*=\s*"(.*)"\s*$', (_BACKEND / "railway.toml").read_text(), re.M)
+    if hc:
+        assert hc.group(1) == backend_hc.group(1), (hc.group(1), backend_hc.group(1))
+    assert "--workers" not in toml

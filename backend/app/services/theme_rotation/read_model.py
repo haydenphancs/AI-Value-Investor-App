@@ -17,6 +17,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,7 @@ async def latest_review() -> LatestReview:
             fut.set_result(review)
         return review
     except BaseException as exc:
-        if not fut.done():
-            fut.set_exception(exc)
+        fail_shared_future(fut, exc)
         raise
     finally:
         # Only clear OUR future: after invalidate() a newer read may own the slot.

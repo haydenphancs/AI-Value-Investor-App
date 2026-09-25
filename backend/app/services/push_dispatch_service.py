@@ -234,6 +234,55 @@ class PushDispatchService:
             return []
         return list(dict.fromkeys(r["user_id"] for r in rows if r.get("user_id")))
 
+    def watchers_of_any(self, tickers: Sequence[str]) -> Dict[str, List[str]]:
+        """User id → the subset of `tickers` that user watches, in `tickers` order.
+
+        For an event that spans several tickers (one whale's filing). The smart-money
+        sender used to call `watchers_of` for the FIRST FIVE tickers of a roll-up only —
+        in read order, i.e. arbitrary within one bulk upsert — so a user watching ticker
+        #6 of a 12-ticker PTR was never told, and every reader got the same copy whatever
+        they watched. This returns the whole audience AND what each member watches, so
+        the sender can word the alert per reader.
+
+        One paged `in_("ticker", …)` read per URL-safe chunk of symbols. Whole audience,
+        like `watchers_of`: the per-scope cap lands after the preference filter, never
+        here. A failed chunk is logged and skipped; the other chunks still count.
+        """
+        symbols = list(dict.fromkeys(
+            str(t).strip().upper() for t in (tickers or []) if t and str(t).strip()
+        ))
+        position = {s: i for i, s in enumerate(symbols)}
+        watched: Dict[str, set] = {}
+        for chunk in _chunks(symbols):
+            wanted = list(chunk)
+            try:
+                rows = fetch_all_rows(
+                    lambda wanted=wanted: (
+                        self.supabase.table("watchlist_items")
+                        .select("user_id, ticker")
+                        .in_("ticker", wanted)
+                    ),
+                    # `id`: OFFSET paging needs a UNIQUE sort key (see `watchers_of`).
+                    order_by="id", what=f"watchers of {len(wanted)} ticker(s)",
+                    # The same per-ticker ceiling `watchers_of` allows, summed over the chunk.
+                    max_pages=MAX_AUDIENCE_SCAN_PAGES * len(wanted),
+                )
+            except Exception as e:
+                logger.warning(
+                    "push: watcher lookup failed for %d ticker(s) %s (%s: %s) — those "
+                    "tickers' watchers get no alert this cycle",
+                    len(wanted), wanted[:5], type(e).__name__, e,
+                )
+                continue
+            for r in rows:
+                uid = r.get("user_id")
+                symbol = str(r.get("ticker") or "").strip().upper()
+                if uid and symbol in position:
+                    watched.setdefault(uid, set()).add(symbol)
+        return {
+            uid: sorted(syms, key=position.__getitem__) for uid, syms in watched.items()
+        }
+
     # `asset_type_of()` USED TO LIVE HERE AND WAS DELETED. It read the modal
     # `watchlist_items.asset_type` for a ticker — selecting on `ticker` ALONE, with no
     # user scope, over an arbitrary 50 rows. That column is written by

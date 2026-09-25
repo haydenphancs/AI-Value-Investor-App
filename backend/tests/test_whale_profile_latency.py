@@ -465,7 +465,7 @@ def test_todays_run_is_tracked_durably_not_inferred_from_the_boot_clock():
         "the clock-inferred boot seed is back — a mid-run restart will again silently "
         "skip the rest of the day"
     )
-    assert "claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL)" in src_nc, (
+    assert re.search(r"claimed_scheduled_job\(\s*JOB_WHALE_HYDRATION_FULL\b", src_nc), (
         "the full sweep no longer runs under the durable claim"
     )
     assert "run.success = True" in src_nc, (

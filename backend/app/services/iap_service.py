@@ -29,6 +29,7 @@ Two invariants worth stating up front, because both are easy to lose:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -112,6 +113,9 @@ _TIER_RANK: Dict[str, int] = {"free": 0, "pro": 1, "premium": 2}
 # Statuses that count as entitling. Apple keeps a subscription "active" through the billing
 # retry grace period, so a failed renewal does not instantly strip access.
 _ENTITLING_STATUSES = {"active", "grace_period", "billing_retry"}
+# Entitling statuses that mean "the period HAS ended, Apple is still retrying billing":
+# the expiry sweep gives them Apple's 60-day retry window instead of 24 h.
+_LONG_WINDOW_STATUSES = frozenset({"grace_period", "billing_retry"})
 
 # PostgREST / Postgres codes for "that column does not exist" — how a SELECT of
 # `users.comp_tier` fails before migration 177 is applied.
@@ -337,8 +341,9 @@ def _stale_delivery_reason(
 
       1. **No prior row, or no stored ordering key** — nothing to compare against, so apply.
          This is also the pre-migration-114 state, where the whole guard is inert by design.
-      2. **No `signedDate` on the incoming record** — the client-verify path has none (it
-         submits a transaction, not a notification). Unorderable, so apply.
+      2. **No `signedDate` on the notification** — unorderable, so apply. (The CLIENT-verify
+         path is ordered by `_stale_client_delivery_reason` instead, on the transaction's own
+         `signedDate` — a verified JWS does carry one.)
       3. **Revocation always wins.** A refund/chargeback is authoritative, and leaving a
          refunded user entitled is the expensive direction.
       4. **Equal timestamps apply.** Apple can re-sign an identical payload; re-applying it is
@@ -362,6 +367,110 @@ def _stale_delivery_reason(
         f"{_EVENT_AT_COLUMN}={prior_event_at.isoformat()} "
         f"(stored status={prior.get('status')!r}, tier={prior.get('tier')!r})"
     )
+
+
+def _stale_client_delivery_reason(
+    prior: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    signed_at: Optional[datetime],
+) -> Optional[str]:
+    """Why a CLIENT-submitted transaction is older news than the stored row, or None to apply.
+
+    The replay this closes: buy Max, get an Apple refund (the REFUND notification revokes the
+    row and claws the allocation back), then re-POST the SAVED pre-refund JWS to
+    `/billing/verify`. Apple's signature still verifies — online checks validate the chain at
+    the CURRENT time — and that JWS has no `revocationDate` and a future `expiresDate`, so it
+    reads "active". Unordered, it overwrote the revoked row and `grant_tier_upgrade` handed
+    back the full 4000: the refund AND the tier, repeatable after every purchase.
+
+    The ordering key is the JWS's own `signedDate` — when Apple asserted this state. Anything
+    Apple signed after the refund carries the revocation, so a payload signed BEFORE the stored
+    event is stale by construction; a genuine re-subscribe is a new transaction Apple signs
+    later, and still applies.
+
+    Rules, deliberately narrower than "never trust the client":
+
+      * **Incoming revocation always applies** (same as the webhook guard).
+      * **No stored key → apply**, exactly as before — EXCEPT a REVOKED row, which falls back
+        to its `updated_at` (when we wrote the revocation): rows revoked before migration 114,
+        or by the client path, may carry no `last_event_at`.
+      * **Compared across lineages.** `prior` may be the user's row for a DIFFERENT
+        originalTransactionId (the owner fallback). Skipping those would re-open the replay
+        through a cheap re-subscribe: refund Max, buy Pro, replay the Max JWS.
+      * **Against a REVOKED row, fail closed:** a payload with no `signedDate`, or one signed
+        at the same instant as the stored key, cannot prove it postdates the revocation.
+        Otherwise ties apply, as on the webhook path.
+
+    Accepted cost: a genuine NEW-lineage purchase whose verify is delayed past a later
+    notification about the user's OLD lineage reads as stale. That needs a lineage switch, a
+    failed verify, and an old-lineage event inside that window — against a free, repeatable
+    replay on every refund.
+    """
+    if not prior:
+        return None
+    if status == "revoked":
+        return None
+
+    prior_status = str(prior.get("status") or "").lower()
+    prior_revoked = prior_status == "revoked"
+
+    key_name = _EVENT_AT_COLUMN
+    stored = _parse_iso(prior.get(_EVENT_AT_COLUMN))
+    if stored is None and prior_revoked:
+        key_name = "updated_at"
+        stored = _parse_iso(prior.get("updated_at"))
+    if stored is None:
+        return None
+
+    context = (
+        f"stored {key_name}={stored.isoformat()}, "
+        f"status={prior.get('status')!r}, tier={prior.get('tier')!r}"
+    )
+    if signed_at is None:
+        if prior_revoked:
+            return (
+                "client payload has no signedDate, so it cannot prove it postdates the "
+                f"revocation ({context})"
+            )
+        return None
+    if signed_at > stored:
+        return None
+    if signed_at == stored and not prior_revoked:
+        return None
+    return f"client signedDate={signed_at.isoformat()} does not postdate the {context}"
+
+
+def _is_upgraded(payload: Dict[str, Any]) -> bool:
+    """Apple's `isUpgraded`: this transaction was SUPERSEDED by an upgrade in its group.
+
+    The upgrade's own transaction carries the entitlement; the upgraded one describes nothing
+    current, and applying it overwrote the row with the LOWER tier (or, if it carries a
+    revocation, revoked a paying Max subscriber and clawed back their credits). A bool from
+    `_to_dict`; a string is tolerated so a JSON-shaped payload cannot slip past as truthy junk.
+    """
+    value = payload.get("isUpgraded")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def _uuid_or_none(value: Any) -> Optional[str]:
+    """Canonical lowercase UUID string, or None for anything that is not a UUID."""
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+# Postgres SQLSTATEs the consumable refund tombstone branches on (read from `.code`, never
+# from the message text).
+_UNIQUE_VIOLATION = "23505"
+_FOREIGN_KEY_VIOLATION = "23503"
 
 
 class IAPService:
@@ -478,10 +587,11 @@ class IAPService:
         #
         # No race is needed to reach it. `Transaction.updates` redelivers unfinished
         # transactions on every launch, so one that was refunded while unfinished arrives here
-        # carrying its revocation. And the webhook cannot clean up afterwards:
-        # `revoke_purchased_credits` answers `{"outcome":"unknown"}` and writes no tombstone
-        # when the REFUND notification lands before any `credit_purchases` row exists, so a
-        # late first grant has nothing to collide with.
+        # carrying its revocation. The webhook covers the OTHER order — a REFUND that lands
+        # before any grant — with a revoked tombstone row the late grant collides with
+        # (`_record_refund_tombstone`), but only when the transaction carries an
+        # `appAccountToken`; this check is the only guard for a JWS that already shows the
+        # revocation.
         #
         # `UnknownProduct` is the right exception: billing.py maps it to a terminal 400, so the
         # client finishes the transaction and stops redelivering something that can never be
@@ -658,11 +768,13 @@ class IAPService:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # When Apple told us WHEN it said this, persist it as the ordering key. Absent on the
-        # client-verify path (a transaction has no signedDate), which is fine: that path is
-        # user-initiated and never arrives out of order relative to itself.
+        # When Apple told us WHEN it said this (a notification's `signedDate`), persist it as
+        # the ordering key. The client-verify path is ordered on the transaction's OWN
+        # `signedDate` further down, and persists it only for a revocation.
         if event_at is not None:
             row[_EVENT_AT_COLUMN] = event_at.isoformat()
+        client_path = event_at is None and client_submitted
+        client_signed_at = _ms_to_dt(payload.get("signedDate")) if client_path else None
 
         # Idempotent on original_transaction_id: a replayed delivery updates the existing
         # row rather than inserting a duplicate entitlement.
@@ -739,26 +851,60 @@ class IAPService:
         # delivery won regardless of which one described the newer state — silently demoting
         # a paying subscriber (and, symmetrically, able to re-entitle a refunded one).
         #
-        # `current_period_end` is the ordering key: a renewal always carries a LATER
-        # expiresDate than the period it replaces, so "incoming period ends before the one we
-        # already stored" is exactly "this describes older news".
-        stale = _stale_delivery_reason(prior, status=status, event_at=event_at)
-        if stale:
-            logger.warning(
-                "IAP: IGNORING stale delivery for txn=%s user=%s (%s) — stored state is "
-                "newer; tier/status/current_period_end left unchanged",
-                original_txn_id, user_id, stale,
-            )
-            winning_tier = self.reconcile_user_tier(user_id)
+        # The ordering key is Apple's `signedDate` (see `_stale_delivery_reason`), never
+        # `expiresDate`. The client-verify path is ordered too, on the transaction's own
+        # `signedDate`: without it a refunded subscriber could re-POST the saved pre-refund JWS
+        # and get the tier and the allocation back (`_stale_client_delivery_reason`).
+        def _unapplied() -> Dict[str, Any]:
+            # Nothing is written; report the stored state and re-mirror the effective tier.
+            winning = self.reconcile_user_tier(user_id)
+            kept = prior or {}
             return {
-                "tier": prior.get("tier") or tier,
-                "status": prior.get("status") or status,
-                "winning_tier": winning_tier,
+                "tier": kept.get("tier") or tier,
+                "status": kept.get("status") or status,
+                "winning_tier": winning,
                 "original_transaction_id": original_txn_id,
-                "current_period_end": prior.get("current_period_end"),
+                "current_period_end": kept.get("current_period_end"),
                 "was_replay": txn_replay,
                 "was_stale": True,
             }
+
+        # An UPGRADED transaction is superseded by the upgrade's own transaction, which carries
+        # the entitlement. Applying it wrote the lower tier over the row (demoting a Max
+        # subscriber to Pro) or — if it carries a revocation — revoked them outright and
+        # clawed back the allocation they paid for.
+        if _is_upgraded(payload):
+            logger.warning(
+                "IAP: IGNORING superseded (isUpgraded) txn=%s original=%s user=%s product=%s "
+                "status=%s source=%s — the upgrade's own transaction carries the entitlement",
+                payload.get("transactionId"), original_txn_id, user_id,
+                payload.get("productId"), status,
+                "client" if client_submitted else "notification",
+            )
+            return _unapplied()
+
+        if client_path:
+            stale = _stale_client_delivery_reason(
+                prior, status=status, signed_at=client_signed_at
+            )
+        else:
+            stale = _stale_delivery_reason(prior, status=status, event_at=event_at)
+        if stale:
+            logger.warning(
+                "IAP: IGNORING stale delivery for txn=%s user=%s source=%s (%s) — stored "
+                "state is newer; tier/status/current_period_end left unchanged",
+                original_txn_id, user_id, "client" if client_path else "notification", stale,
+            )
+            return _unapplied()
+
+        # A revocation seen on the CLIENT path records its own `signedDate` as the ordering
+        # key, so an older JWS — or an older notification redelivered late — cannot re-entitle
+        # the row even when the REFUND notification never arrives. Monotonic: never lowers a
+        # key a later event already stored.
+        if client_path and status == "revoked" and client_signed_at is not None:
+            stored_key = _parse_iso((prior or {}).get(_EVENT_AT_COLUMN))
+            if stored_key is None or client_signed_at > stored_key:
+                row[_EVENT_AT_COLUMN] = client_signed_at.isoformat()
 
         def _write(payload_row: Dict[str, Any]) -> None:
             if prior:
@@ -1047,17 +1193,27 @@ class IAPService:
         short_cutoff = (now - timedelta(hours=24)).isoformat()
         long_cutoff = (now - timedelta(days=60)).isoformat()
 
+        # TWO reads, each with its own cutoff IN SQL and oldest-first. One unordered
+        # `.limit(limit)` read with the 60-day grace filter applied in Python afterwards let
+        # grace/billing-retry rows that are still inside their window fill every page once
+        # there are `limit` of them — and the lapsed `active` rows behind them, the leak this
+        # sweep exists to close, were then never expired.
+        long_window = sorted(_ENTITLING_STATUSES & _LONG_WINDOW_STATUSES)
+        short_window = sorted(_ENTITLING_STATUSES - _LONG_WINDOW_STATUSES)
         try:
-            result = (
-                self.supabase.table("subscriptions")
-                .select("id, user_id, status, current_period_end, tier")
-                .in_("status", sorted(_ENTITLING_STATUSES))
-                .not_.is_("current_period_end", "null")
-                .lt("current_period_end", short_cutoff)
-                .limit(limit)
-                .execute()
-            )
-            rows = result.data or []
+            rows = []
+            for statuses, cutoff in ((short_window, short_cutoff), (long_window, long_cutoff)):
+                result = (
+                    self.supabase.table("subscriptions")
+                    .select("id, user_id, status, current_period_end, tier")
+                    .in_("status", statuses)
+                    .not_.is_("current_period_end", "null")
+                    .lt("current_period_end", cutoff)
+                    .order("current_period_end")
+                    .limit(limit)
+                    .execute()
+                )
+                rows.extend(result.data or [])
         except Exception as e:
             logger.error(
                 "IAP sweep: could not read subscriptions (%s: %s) — no rows expired this pass",
@@ -1065,10 +1221,11 @@ class IAPService:
             )
             return {"scanned": 0, "expired": 0, "users_reconciled": 0, "errors": 1}
 
+        # Belt and braces on the SQL cutoffs above (and on a status whose case differs).
         stale: list[dict] = []
         for row in rows:
             status = (row.get("status") or "").lower()
-            cutoff = long_cutoff if status in {"grace_period", "billing_retry"} else short_cutoff
+            cutoff = long_cutoff if status in _LONG_WINDOW_STATUSES else short_cutoff
             end = row.get("current_period_end")
             if end and str(end) < cutoff:
                 stale.append(row)
@@ -1139,6 +1296,12 @@ class IAPService:
         `credit_purchases`. Without the second lookup a consumable REFUND resolved to None and
         was dropped as "ignored_unknown_transaction" — the refunded user silently kept every
         credit they bought.
+
+        Returns None ONLY when every lookup succeeded and found nothing. A lookup that FAILS
+        raises `IAPError`: it used to return None too, which `apply_notification` cannot tell
+        from "the notification beat the verify call", so a PostgREST 520 during a REFUND was
+        answered 200 `ignored_unknown_transaction` and Apple — which retries only non-2xx —
+        never redelivered it. The refunded subscriber kept the tier and the allocation.
         """
         try:
             result = (
@@ -1153,10 +1316,12 @@ class IAPService:
                 return rows[0]["user_id"]
         except Exception as e:
             logger.error(
-                "IAP: user lookup failed for txn=%s: %s: %s",
+                "IAP: subscriptions user lookup failed for txn=%s: %s: %s",
                 original_transaction_id, type(e).__name__, e,
             )
-            return None
+            raise IAPError(
+                f"subscriptions user lookup failed for txn={original_transaction_id}"
+            ) from e
 
         # Consumables have no `subscriptions` row. Apple may identify the purchase by either
         # id, so try both — for the FIRST purchase of a consumable the two are equal, and for
@@ -1178,8 +1343,118 @@ class IAPService:
                     "IAP: credit_purchases user lookup failed on %s for txn=%s: %s: %s",
                     column, original_transaction_id, type(e).__name__, e,
                 )
-                return None
+                raise IAPError(
+                    f"credit_purchases user lookup failed for txn={original_transaction_id}"
+                ) from e
         return None
+
+    def _record_refund_tombstone(
+        self,
+        notification_type: str,
+        transaction: Dict[str, Any],
+        *,
+        transaction_id: str,
+        environment: str,
+    ) -> str:
+        """Record a REVOKED `credit_purchases` row for a pack refunded BEFORE it was granted.
+
+        `revoke_purchased_credits` answers `unknown` and writes nothing when the REFUND lands
+        before any grant. The pre-refund JWS then still verifies and carries no revocation, so
+        re-POSTing it to `/billing/verify` granted the pack in full — money back AND credits.
+        This row occupies the `(environment, transaction_id)` key `add_purchased_credits`
+        claims with `ON CONFLICT DO NOTHING`, so that late grant becomes a replay (same
+        account) or a conflict (another account) and grants nothing; a redelivered REFUND
+        finds `revoked_at` set and answers `already_revoked`.
+
+        The owner comes from `appAccountToken` inside Apple's signed transaction: no other
+        source exists yet (`user_id` is NOT NULL and FK-bound). Returns the webhook outcome.
+        Raises `IAPError` (→ 503, Apple redelivers) only on a transient failure. Gaps that
+        need a schema change, and are logged as errors: no token, a token naming no account,
+        and a product with no `credit_packs` row.
+        """
+        from app.services.credit_service import CreditService
+
+        product_id = str(transaction.get("productId") or "")
+        raw_token = transaction.get("appAccountToken")
+        owner = _uuid_or_none(raw_token)
+        if owner is None:
+            logger.error(
+                "IAP webhook %s for credit pack txn=%s product=%s arrived BEFORE any grant "
+                "and carries no usable appAccountToken (%r) — cannot record a revocation "
+                "tombstone (credit_purchases.user_id is NOT NULL); a later client replay of "
+                "the pre-refund transaction WOULD be granted",
+                notification_type, transaction_id, product_id, raw_token,
+            )
+            return "credit_pack_unknown"
+
+        try:
+            pack = self.credit_pack_for_product(product_id)
+        except UnknownProduct as e:
+            logger.error(
+                "IAP webhook %s for credit pack txn=%s user=%s arrived before any grant, but "
+                "the product cannot be priced (%s) — no tombstone recorded",
+                notification_type, transaction_id, owner, e,
+            )
+            return "credit_pack_unknown"
+        # Any other IAPError (catalog read failed, misconfigured row) propagates → 503.
+
+        purchased_at = _ms_to_dt(transaction.get("purchaseDate"))
+        original = transaction.get("originalTransactionId")
+        tombstone = {
+            "user_id": owner,
+            "transaction_id": transaction_id,
+            "environment": environment,
+            "original_transaction_id": str(original) if original else None,
+            "product_id": product_id,
+            "credits": int(pack["credits"]),
+            "price_cents": pack.get("price_cents"),
+            "app_account_token": owner,
+            "purchased_at": purchased_at.isoformat() if purchased_at else None,
+            "revoked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.supabase.table("credit_purchases").insert(tombstone).execute()
+        except Exception as e:
+            code = str(getattr(e, "code", "") or "")
+            if code == _UNIQUE_VIOLATION:
+                # A grant landed between the revoke RPC's lookup and this insert. Revoke THAT.
+                retried = CreditService().revoke_purchased(
+                    transaction_id=transaction_id, environment=environment
+                )
+                if retried is None:
+                    raise IAPError(
+                        f"revoke_purchased_credits RPC failed on the retry for "
+                        f"txn={transaction_id} — returning 503 so Apple redelivers"
+                    ) from e
+                logger.warning(
+                    "IAP webhook %s for credit pack txn=%s: a grant raced the tombstone — "
+                    "revoked the granted row instead (outcome=%s)",
+                    notification_type, transaction_id, retried.get("outcome"),
+                )
+                return f"credit_pack_{retried.get('outcome', 'revoked')}"
+            if code == _FOREIGN_KEY_VIOLATION:
+                logger.error(
+                    "IAP webhook %s for credit pack txn=%s: appAccountToken %s names no "
+                    "account — no tombstone recorded",
+                    notification_type, transaction_id, owner,
+                )
+                return "credit_pack_unknown"
+            logger.error(
+                "IAP webhook %s for credit pack txn=%s user=%s: tombstone insert failed "
+                "(%s: %s, code=%s) — returning 503 so Apple redelivers",
+                notification_type, transaction_id, owner, type(e).__name__, e, code or None,
+            )
+            raise IAPError(
+                f"could not record the refund tombstone for txn={transaction_id}"
+            ) from e
+
+        logger.warning(
+            "IAP webhook %s for credit pack txn=%s product=%s landed BEFORE the grant — "
+            "recorded a revoked tombstone for user=%s, so a replay of the pre-refund "
+            "transaction cannot be granted",
+            notification_type, transaction_id, product_id, owner,
+        )
+        return "credit_pack_revoked_before_grant"
 
     def _apply_consumable_notification(
         self,
@@ -1194,15 +1469,27 @@ class IAPService:
         the purchase itself already landed through `POST /billing/verify` — the webhook is
         purely the channel through which Apple tells us money went back.
 
-        Never raises: every path returns an outcome so the webhook answers 200.
+        Answers an outcome (→ 200) on every path EXCEPT a transient failure to record a
+        refund — the revoke RPC or the tombstone write — which raises `IAPError` (→ 503) so
+        Apple redelivers. Both writes are idempotent, so a redelivery is safe.
         """
         from app.services.credit_service import CreditService
 
         # The per-purchase id is the dedup/revoke key for a consumable, NOT the original.
         transaction_id = str(transaction.get("transactionId") or original_txn_id)
         environment = str(transaction.get("environment") or settings.IAP_ENVIRONMENT)
-        user_id = self.user_id_for_transaction(transaction_id) or \
-            self.user_id_for_transaction(original_txn_id)
+        # For logs and the webhook's response only — the revoke itself is keyed on the
+        # transaction id — so a failed lookup degrades to "unknown user" rather than a 503.
+        try:
+            user_id = self.user_id_for_transaction(transaction_id) or \
+                self.user_id_for_transaction(original_txn_id)
+        except IAPError as e:
+            logger.warning(
+                "IAP webhook %s for credit pack txn=%s: user lookup failed (%s) — continuing "
+                "without a user id; the revoke is keyed on the transaction id",
+                notification_type, transaction_id, e,
+            )
+            user_id = None
 
         ntype = (notification_type or "").upper()
 
@@ -1226,6 +1513,12 @@ class IAPService:
                     f"revoke_purchased_credits RPC failed for txn={transaction_id} — "
                     "returning 503 so Apple redelivers"
                 )
+            if outcome.get("outcome") == "unknown":
+                # The refund beat the grant: there is no `credit_purchases` row to revoke.
+                return self._record_refund_tombstone(
+                    notification_type, transaction,
+                    transaction_id=transaction_id, environment=environment,
+                ), user_id
             return f"credit_pack_{outcome.get('outcome', 'revoked')}", user_id
 
         if ntype == "CONSUMPTION_REQUEST":

@@ -407,8 +407,11 @@ final class AuthService {
 // MARK: - Keychain Service
 
 /// Simple Keychain wrapper for secure token storage
-/// @unchecked Sendable because Keychain APIs are thread-safe
-final class KeychainService: @unchecked Sendable {
+///
+/// `nonisolated`: the target defaults to MainActor isolation, but `DeviceProofStore` reads and
+/// writes through this from `APIClient`'s actor. It holds only an immutable service name and the
+/// Keychain APIs are thread-safe, so it is checked `Sendable` rather than `@unchecked`.
+nonisolated final class KeychainService: Sendable {
 
     static let shared = KeychainService()
 

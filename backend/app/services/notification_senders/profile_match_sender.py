@@ -121,11 +121,15 @@ def _load_profiles() -> List[Dict[str, Any]]:
             max_pages=max(1, _MAX_PROFILES // 1000),
         )
     except Exception as e:
+        # RAISE, not `return []`: an empty list reads as "nobody consented", the run then
+        # recorded SUCCESS and the whole day's profile matches were lost to one Supabase
+        # blip. Propagating fails the claimed run, which the next hourly wake retries; the
+        # per-user-per-day dedup key makes that retry safe.
         logger.warning(
-            "profile match: profile read failed (%s: %s) — no sends this pass",
-            type(e).__name__, e,
+            "profile match: profile read failed (%s: %s) — failing this pass so the next "
+            "wake retries it", type(e).__name__, e,
         )
-        return []
+        raise
     if len(rows) >= _MAX_PROFILES:
         logger.warning(
             "profile match: hit the %d-profile scan ceiling — some readers were not "
@@ -145,8 +149,12 @@ def _load_profiles() -> List[Dict[str, Any]]:
 _TIER_BATCH = 200
 
 
-def _tiers_for(user_ids: Sequence[str]) -> Dict[str, str]:
+def _tiers_for(user_ids: Sequence[str], failures: Optional[List[int]] = None) -> Dict[str, str]:
     """user_id → tier, in CHUNKED batched reads. Missing → "free" (falls closed).
+
+    `failures`, when given, receives the size of every chunk whose read FAILED, so the
+    caller can tell "these readers are free" from "we could not read their tier" — the
+    second must leave the day open for a retry, not be recorded as a completed run.
 
     `_load_profiles` now pages to completion (up to 5,000 consented readers), and handing
     all of them to a single `.in_("id", …)` did two things at once: past ~1,000 rows
@@ -173,6 +181,8 @@ def _tiers_for(user_ids: Sequence[str]) -> Dict[str, str]:
                 "them as free, so nothing is sent rather than risking a paid-ticker leak",
                 len(chunk), type(e).__name__, e,
             )
+            if failures is not None:
+                failures.append(len(chunk))
     return out
 
 
@@ -246,7 +256,10 @@ async def run_profile_match_notifications(now: Optional[datetime] = None) -> int
             run.success = True
             return 0
 
-        tiers = await asyncio.to_thread(_tiers_for, [p["user_id"] for p in profiles if p.get("user_id")])
+        tier_failures: List[int] = []
+        tiers = await asyncio.to_thread(
+            _tiers_for, [p["user_id"] for p in profiles if p.get("user_id")], tier_failures,
+        )
         sectors = await asyncio.to_thread(_sector_map, symbols)
 
         # Imported here, not at module scope: push_dispatch_service pulls in the
@@ -288,7 +301,15 @@ async def run_profile_match_notifications(now: Optional[datetime] = None) -> int
             )
 
         run.notified = sent
-        run.success = True
+        # A failed tier chunk skipped readers who may be paid: leave the day OPEN so the
+        # next hourly wake retries them. Readers already notified are protected by the
+        # per-user-per-day dedup key, so the retry cannot double-send.
+        run.success = not tier_failures
+        if tier_failures:
+            logger.warning(
+                "profile match: %d reader(s) skipped on a failed tier read — the day stays "
+                "open for a retry", sum(tier_failures),
+            )
 
     logger.info("profile match notifications: %d send(s)", sent)
     return sent

@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import get_fmp_client
 from app.schemas.health_check import HealthCheckMetricSchema, HealthCheckResponse
 from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
@@ -965,12 +966,10 @@ class HealthCheckService:
             # whenever the LEADER is a cancellable caller: a report run hitting
             # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
             # Hand waiters a normal exception so they fail fast through their own error path.
-            if not future.done():
-                future.set_exception(RuntimeError("in-flight fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -1099,7 +1098,9 @@ class HealthCheckService:
         cur_bench: Dict[str, Optional[float]] = {}
         if sector:
             lookup = get_sector_benchmark_lookup()
-            cur_bench = lookup.get_current_benchmark_values(
+            # Sync lookup (supabase-py + time.sleep retry): keep it off the loop.
+            cur_bench = await asyncio.to_thread(
+                lookup.get_current_benchmark_values,
                 industry,
                 sector,
                 [

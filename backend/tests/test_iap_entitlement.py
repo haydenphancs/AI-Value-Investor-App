@@ -776,9 +776,14 @@ def test_a_stale_delivery_can_never_block_a_refund():
     assert s.winning_tier(_USER) == "free"
 
 
-def test_the_client_verify_path_is_never_treated_as_stale():
-    """A transaction carries no signedDate, so it is unorderable. Dropping it would break
-    Restore Purchases and the normal buy flow."""
+def test_a_client_payload_without_signedDate_is_not_treated_as_stale():
+    """A payload with no `signedDate` is unorderable, so against a row that is NOT revoked it
+    applies — dropping it would break Restore Purchases and the normal buy flow.
+
+    Renamed from `test_the_client_verify_path_is_never_treated_as_stale`, whose premise ("a
+    transaction carries no signedDate") was false: a verified JWS does carry one, and ignoring
+    it is what let a refunded subscriber replay the pre-refund JWS. The client path IS ordered
+    now — see the "Replaying a pre-refund JWS" section below."""
     now = datetime.now(timezone.utc)
     sb = FakeSupabase()
     s = _service(sb)
@@ -838,6 +843,335 @@ def test_a_naive_stored_timestamp_is_comparable():
         "last_event_at": (now + timedelta(days=1)).replace(tzinfo=None).isoformat(),
     }
     assert svc._stale_delivery_reason(prior, status="expired", event_at=now) is not None
+
+
+# ── Replaying a pre-refund JWS (client-verify ordering on signedDate) ────────
+#
+# Buy Max, get an Apple refund, re-POST the SAVED pre-refund JWS to /billing/verify. Apple's
+# signature still verifies (online checks validate the chain at the current time), the JWS has
+# no revocationDate and a future expiresDate, so it read "active" — and the client path was
+# never ordered, so it overwrote the revoked row and `grant_tier_upgrade` handed back the 4000.
+# The fix orders the client path on the JWS's own `signedDate`.
+
+def _jws(product=_MAX, txn_id="txn-1", *, signed_at, original=None, **extra):
+    payload = _txn(product=product, txn_id=txn_id, signedDate=_ms(signed_at), **extra)
+    if original is not None:
+        payload["originalTransactionId"] = original
+    return payload
+
+
+def _refund(s, txn_id="txn-1", *, at, product=_MAX):
+    return s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(at)},
+        _jws(product=product, txn_id=txn_id, signed_at=at, revocationDate=_ms(at)),
+    )
+
+
+def test_a_refunded_subscriber_cannot_replay_the_pre_refund_jws():
+    """THE bug. Before the fix: premium and 4000 credits back, `was_stale` False."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    jws_1 = _jws(signed_at=now - timedelta(days=3))
+    s.apply_verified_transaction(_USER, jws_1)
+    assert sb.credits == {"total": 4000, "used": 0}
+
+    _refund(s, at=now - timedelta(days=1))
+    assert sb._tier() == "free" and sb.credits["total"] == 50
+
+    out = s.apply_verified_transaction(_USER, jws_1)
+
+    assert out["was_stale"] is True
+    assert out["winning_tier"] == "free"
+    assert sb._tier() == "free"
+    assert sb.credits["total"] == 50, "the replay handed the refunded allocation back"
+    assert sb.db["subscriptions"][0]["status"] == "revoked"
+
+
+@pytest.mark.parametrize("new_lineage", [False, True], ids=["same-original", "new-original"])
+def test_a_genuine_resubscribe_after_a_refund_still_applies(new_lineage):
+    """The guard must not lock a refunded customer out: a new purchase is a new transaction
+    that Apple signs AFTER the refund."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=3)))
+    _refund(s, at=now - timedelta(days=1))
+
+    fresh = _jws(txn_id="txn-2", signed_at=now,
+                 original="txn-2" if new_lineage else "txn-1")
+    out = s.apply_verified_transaction(_USER, fresh)
+
+    assert out["was_stale"] is False
+    assert out["winning_tier"] == "premium"
+    assert sb.credits["total"] == 4000
+    assert len(sb.db["subscriptions"]) == 1
+
+
+@pytest.mark.parametrize("new_lineage", [False, True], ids=["same-original", "new-original"])
+def test_a_cheap_resubscribe_does_not_reopen_the_replay(new_lineage):
+    """Refund Max, buy Pro, replay the Max JWS. If the comparison ran only against a REVOKED
+    row — or only within one originalTransactionId — the Pro purchase would re-open it."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    jws_max = _jws(signed_at=now - timedelta(days=3))
+    s.apply_verified_transaction(_USER, jws_max)
+    _refund(s, at=now - timedelta(days=2))
+    s.apply_verified_transaction(_USER, _jws(
+        product=_PRO, txn_id="txn-pro", signed_at=now - timedelta(days=1),
+        original="txn-pro" if new_lineage else "txn-1",
+    ))
+    assert sb._tier() == "pro" and sb.credits["total"] == 1200
+
+    out = s.apply_verified_transaction(_USER, jws_max)
+
+    assert out["was_stale"] is True
+    assert sb._tier() == "pro"
+    assert sb.credits["total"] == 1200
+    assert sb.db["subscriptions"][0]["tier"] == "pro"
+
+
+def test_a_revocation_seen_only_by_the_client_still_blocks_the_replay():
+    """No webhook at all (or the REFUND notification lost): the refund arrives as a revoked
+    JWS through `Transaction.updates`. Its signedDate becomes the ordering key, so neither the
+    replay nor a DID_RENEW redelivered late can re-entitle the row."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    jws_1 = _jws(signed_at=now - timedelta(days=3))
+    s.apply_verified_transaction(_USER, jws_1)
+
+    refunded_at = now - timedelta(days=1)
+    s.apply_verified_transaction(
+        _USER, _jws(signed_at=refunded_at, revocationDate=_ms(refunded_at))
+    )
+    assert sb._tier() == "free" and sb.credits["total"] == 50
+    assert svc._parse_iso(sb.db["subscriptions"][0]["last_event_at"]) == svc._ms_to_dt(
+        _ms(refunded_at)
+    )
+
+    assert s.apply_verified_transaction(_USER, jws_1)["was_stale"] is True
+    s.apply_notification(
+        {"notificationType": "DID_RENEW", "signedDate": _ms(now - timedelta(days=2))},
+        _txn(product=_MAX, txn_id="txn-1", expires_in_days=30),
+    )
+    assert sb._tier() == "free" and sb.credits["total"] == 50
+
+
+def test_a_client_revocation_never_lowers_a_later_stored_key():
+    """Monotonic: an older revoked JWS still revokes (revocation wins) but must not rewind the
+    ordering key — that would re-admit anything signed between the two."""
+    now = datetime.now(timezone.utc)
+    later = now - timedelta(hours=1)
+    sb = FakeSupabase(subscriptions=[{
+        "id": "row-1", "user_id": _USER, "tier": "premium", "status": "active",
+        "original_transaction_id": "txn-1", "last_event_at": later.isoformat(),
+        "current_period_end": (now + timedelta(days=20)).isoformat(),
+    }])
+    s = _service(sb)
+
+    s.apply_verified_transaction(_USER, _jws(
+        signed_at=now - timedelta(days=1), revocationDate=_ms(now - timedelta(days=1)),
+    ))
+
+    row = sb.db["subscriptions"][0]
+    assert row["status"] == "revoked"
+    assert row["last_event_at"] == later.isoformat()
+
+
+def test_a_legacy_revoked_row_without_last_event_at_orders_on_updated_at():
+    """Rows revoked before migration 114, or by the client path before this fix, carry no
+    `last_event_at`. `updated_at` — when we wrote the revocation — is the fallback."""
+    now = datetime.now(timezone.utc)
+    revoked_written = now - timedelta(days=1)
+
+    def _legacy():
+        return FakeSupabase(subscriptions=[{
+            "id": "row-1", "user_id": _USER, "tier": "premium", "status": "revoked",
+            "original_transaction_id": "txn-1", "updated_at": revoked_written.isoformat(),
+            "current_period_end": (now + timedelta(days=20)).isoformat(),
+        }], credits={"total": 50, "used": 0})
+
+    sb = _legacy()
+    out = _service(sb).apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=2)))
+    assert out["was_stale"] is True
+    assert sb.credits["total"] == 50
+
+    sb = _legacy()
+    out = _service(sb).apply_verified_transaction(_USER, _jws(txn_id="txn-2", signed_at=now,
+                                                              original="txn-1"))
+    assert out["was_stale"] is False
+    assert sb._tier() == "premium"
+
+
+def test_a_revoked_row_with_no_timestamp_at_all_is_inert_as_before():
+    """Nothing to compare against — the guard's documented inert state, same as the webhook's
+    pre-migration-114 behaviour. (Every row the service writes carries `updated_at`.)"""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase(subscriptions=[{
+        "id": "row-1", "user_id": _USER, "tier": "premium", "status": "revoked",
+        "original_transaction_id": "txn-1",
+    }])
+    out = _service(sb).apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=9)))
+    assert out["was_stale"] is False
+
+
+def test_a_payload_without_signedDate_cannot_reentitle_a_revoked_row():
+    """Fail closed against a revocation: with no signedDate the payload cannot prove it
+    postdates the refund. (Apple always sets it; its absence is malformed.)"""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    no_date = _txn(product=_MAX, txn_id="txn-1")
+    s.apply_verified_transaction(_USER, no_date)
+    _refund(s, at=now - timedelta(days=1))
+
+    out = s.apply_verified_transaction(_USER, no_date)
+
+    assert out["was_stale"] is True
+    assert sb._tier() == "free" and sb.credits["total"] == 50
+
+
+def test_an_old_client_payload_cannot_demote_a_renewed_subscriber():
+    """The same missing ordering let a superseded JWS overwrite newer state in the OTHER
+    direction: an old period's transaction (expired) replayed after a DID_RENEW demoted a payer."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    old = _jws(product=_PRO, txn_id="txn-r", signed_at=now - timedelta(days=31),
+               expires_in_days=-1)
+    s.apply_verified_transaction(_USER, _jws(product=_PRO, txn_id="txn-r",
+                                             signed_at=now - timedelta(days=31)))
+    s.apply_notification(*_renew_notification("txn-r", signed_at=now - timedelta(hours=1),
+                                               expires_in_days=30))
+
+    out = s.apply_verified_transaction(_USER, old)
+
+    assert out["was_stale"] is True
+    assert s.winning_tier(_USER) == "pro"
+
+
+def test_a_client_payload_signed_after_the_stored_event_still_applies():
+    """Negative control for the ordering: a later-signed payload is newer news."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_transaction(_USER, _txn(product=_PRO, txn_id="txn-r"))
+    s.apply_notification(*_renew_notification("txn-r", signed_at=now - timedelta(hours=1),
+                                               expires_in_days=30))
+
+    out = s.apply_verified_transaction(_USER, _jws(txn_id="txn-r", signed_at=now))
+
+    assert out["was_stale"] is False
+    assert s.winning_tier(_USER) == "premium"
+
+
+def test_the_client_ordering_edges():
+    """Pure-function edges: ties, revocation, no prior, junk stored keys."""
+    t = datetime.now(timezone.utc)
+    revoked = {"status": "revoked", "last_event_at": t.isoformat()}
+    active = {"status": "active", "last_event_at": t.isoformat()}
+    reason = svc._stale_client_delivery_reason
+
+    assert reason(revoked, status="active", signed_at=t) is not None, "a tie with a refund"
+    assert reason(active, status="active", signed_at=t) is None, "ties apply elsewhere"
+    assert reason(active, status="active", signed_at=t - timedelta(milliseconds=1)) is not None
+    assert reason(revoked, status="active", signed_at=t + timedelta(milliseconds=1)) is None
+    assert reason(revoked, status="revoked", signed_at=t - timedelta(days=1)) is None, \
+        "an incoming revocation always applies"
+    assert reason(active, status="expired", signed_at=None) is None
+    assert reason(None, status="active", signed_at=t) is None
+    assert reason({}, status="active", signed_at=None) is None
+    for junk in (None, "", "not-a-date", 12345):
+        assert reason({"status": "active", "last_event_at": junk},
+                      status="active", signed_at=t) is None
+    # Status case must not decide the rule.
+    assert reason({"status": "REVOKED", "last_event_at": t.isoformat()},
+                  status="active", signed_at=None) is not None
+
+
+def test_a_junk_client_signedDate_against_a_revoked_row_fails_closed():
+    """`_ms_to_dt` degrades junk to None — which, against a revocation, must mean stale."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(signed_at=now - timedelta(days=3)))
+    _refund(s, at=now - timedelta(days=1))
+
+    junk = _txn(product=_MAX, txn_id="txn-1", signedDate="not-a-number")
+    assert s.apply_verified_transaction(_USER, junk)["was_stale"] is True
+    assert sb._tier() == "free"
+
+
+# ── isUpgraded: a superseded transaction must never overwrite the upgrade ───
+
+def test_an_upgraded_transaction_does_not_demote_the_upgrade():
+    """Pro → Max keeps the originalTransactionId; StoreKit then delivers the old Pro
+    transaction with `isUpgraded`. Applying it wrote Pro over the Max row."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(txn_id="txn-max", original="txn-g",
+                                             signed_at=now - timedelta(hours=1)))
+    assert sb._tier() == "premium"
+
+    out = s.apply_verified_transaction(_USER, _jws(
+        product=_PRO, txn_id="txn-pro", original="txn-g", signed_at=now, isUpgraded=True,
+    ))
+
+    assert out["was_stale"] is True
+    assert sb._tier() == "premium"
+    assert sb.db["subscriptions"][0]["tier"] == "premium"
+    assert sb.credits["total"] == 4000
+
+
+def test_a_revoked_upgraded_transaction_does_not_revoke_the_upgrade():
+    """If the superseded transaction carries a revocation, applying it revoked a paying Max
+    subscriber and clawed back the allocation — through the webhook as well."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    s = _service(sb)
+    s.apply_verified_transaction(_USER, _jws(txn_id="txn-max", original="txn-g",
+                                             signed_at=now - timedelta(hours=1)))
+
+    s.apply_notification(
+        {"notificationType": "REFUND", "signedDate": _ms(now)},
+        _jws(product=_PRO, txn_id="txn-pro", original="txn-g", signed_at=now,
+             isUpgraded=True, revocationDate=_ms(now)),
+    )
+
+    assert sb._tier() == "premium"
+    assert sb.db["subscriptions"][0]["status"] == "active"
+    assert not any(n == "revoke_tier_credits" for n, _ in sb.rpcs)
+
+
+def test_an_upgraded_transaction_with_no_row_writes_nothing():
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    out = _service(sb).apply_verified_transaction(
+        _USER, _jws(product=_PRO, txn_id="txn-pro", signed_at=now, isUpgraded=True)
+    )
+    assert sb.db["subscriptions"] == []
+    assert out["winning_tier"] == "free"
+
+
+def test_a_transaction_that_is_not_upgraded_still_applies():
+    """Negative control: `isUpgraded: False` is the ordinary case."""
+    now = datetime.now(timezone.utc)
+    sb = FakeSupabase()
+    _service(sb).apply_verified_transaction(
+        _USER, _jws(signed_at=now, isUpgraded=False)
+    )
+    assert sb._tier() == "premium"
+
+
+@pytest.mark.parametrize("value, expected", [
+    (True, True), ("true", True), (" TRUE ", True),
+    (False, False), (None, False), ("false", False), ("", False), (1, False), ("yes", False),
+])
+def test_is_upgraded_reads_only_a_real_true(value, expected):
+    assert svc._is_upgraded({"isUpgraded": value}) is expected
 
 
 # ── A cross-account purchase is TERMINAL, not retryable ──────────────────────

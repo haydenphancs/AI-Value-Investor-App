@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,7 @@ from app.services.price_alert_engine import (
     finite_percent,
     finite_price,
 )
+from app.services.push_dispatch_service import TABLE as NOTIFICATION_LEDGER
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
 from app.services.asset_class import uses_coingecko_price
@@ -65,6 +67,18 @@ MAX_UNIVERSE = 500
 
 # Bound on rules loaded per cycle.
 MAX_RULES = 5_000
+
+
+def _trigger_count(rule: dict) -> int:
+    """The rule's claimed-fire count as a non-negative int (0 for a missing/garbage value).
+
+    ONE reader for both the one-shot dedup key and the `+1` the state write records, so
+    the two can never disagree about which arming a fire belongs to.
+    """
+    try:
+        return max(0, int(rule.get("trigger_count") or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class PriceAlertLimitReached(Exception):
@@ -353,7 +367,7 @@ class PriceAlertService:
         }
         if decision.fire:
             patch["last_triggered_at"] = datetime.now(timezone.utc).isoformat()
-            patch["trigger_count"] = int(rule.get("trigger_count") or 0) + 1
+            patch["trigger_count"] = _trigger_count(rule) + 1
         if decision.deactivate:
             patch["is_active"] = False
         try:
@@ -387,10 +401,60 @@ class PriceAlertService:
         )
 
     def dedup_key(self, rule: dict, repeat_mode: str) -> str:
-        """One-shot rules key on the alert id alone (once ever). Daily rules add the ET
-        trading date, so a re-armed rule can fire again tomorrow but not twice today."""
+        """One-shot rules key on the alert id plus the rule's PRE-FIRE `trigger_count`
+        (once per ARMING). Daily rules add the ET trading date, so a re-armed rule can
+        fire again tomorrow but not twice today.
+
+        ⚠️ Once per arming, NOT once ever. The key used to be `pa:{id}` alone, and a
+        user may turn a fired one-shot rule back on (`update()` re-arms it). Its next
+        crossing then claimed the SAME key, hit the `UNIQUE (user_id, dedup_key)` row the
+        first fire left behind, and was dropped as a duplicate — no push, no inbox row —
+        while the rule was still switched off again with a fresh trigger. `trigger_count`
+        only moves when a fire was claimed (see `evaluate_once`), so:
+
+          * a re-enabled rule gets a new key (its count moved on the first fire);
+          * two instances evaluating the same row read the same count and share one key,
+            so cross-instance dedup still holds;
+          * a fire whose state write was lost keeps the old count and dedups against its
+            own earlier claim instead of buzzing twice.
+
+        The first arming keeps the legacy `pa:{id}` form, so a rule that fired under the
+        old key and lost its state write cannot buzz again across the deploy.
+        """
         base = f"pa:{rule.get('id')}"
-        return base if repeat_mode == "once" else f"{base}:{trading_date_et()}"
+        if repeat_mode != "once":
+            return f"{base}:{trading_date_et()}"
+        armings = _trigger_count(rule)
+        return base if armings == 0 else f"{base}:n{armings}"
+
+    def _was_claimed(self, user_id: str, dedup_key: str) -> Optional[bool]:
+        """Did the dispatcher write a ledger row for this key? None = could not tell.
+
+        `notify_users` returns only how many pushes APNs accepted, so 0 covers both "the
+        alert is in the inbox" (no device, dry run, APNs rejected, a concurrent instance
+        claimed it) and "it was suppressed". The dispatcher writes NO row for exactly two
+        verdicts — `preference_off` and `cap_reached` (SYSTEM_DESIGN_GUIDELINES §11.6) —
+        so the row's presence is the documented line between the two.
+        """
+        try:
+            rows = (
+                self.supabase.table(NOTIFICATION_LEDGER)
+                .select("dedup_key")
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            return bool(rows)
+        except Exception as e:
+            logger.warning(
+                "price alerts: ledger read failed for user=%s key=%s (%s: %s) — holding "
+                "the rule's state so the next cycle retries under the same key",
+                user_id, dedup_key, type(e).__name__, e,
+            )
+            return None
 
     async def evaluate_once(self, *, only_round_the_clock: bool = False) -> Dict[str, int]:
         """One evaluation cycle. Never raises.
@@ -459,19 +523,26 @@ class PriceAlertService:
                 rearm_pct=settings.PRICE_ALERT_REARM_PCT,
             )
 
-            await asyncio.to_thread(self._persist, rule, decision)
             if not decision.fire:
+                await asyncio.to_thread(self._persist, rule, decision)
                 continue
             stats["fired"] += 1
 
+            # A FIRE IS PERSISTED ONLY AFTER DISPATCH, and only as a fire when the
+            # dispatcher claimed it. Persisting first consumed the rule whatever became of
+            # the notification: a one-shot rule suppressed by the daily `price_alert` cap
+            # (10/day against 20 rules a user may hold — a gap day does it) or by the
+            # user's own toggle was switched off and counted as triggered, with no push
+            # and no inbox row to show for it.
+            key = self.dedup_key(rule, rule.get("repeat_mode") or "once")
             price = finite_price((quote or {}).get("price")) or 0.0
             title, body = self.fire_copy(rule, price, decision)
-            stats["sent"] += await dispatcher.notify_users(
+            delivered = await dispatcher.notify_users(
                 [rule["user_id"]],
                 kind=KIND_PRICE_ALERT,
                 title=title,
                 body=body,
-                dedup_key=self.dedup_key(rule, rule.get("repeat_mode") or "once"),
+                dedup_key=key,
                 route={
                     # From the ROW, not hardcoded: a crypto alert must open the crypto
                     # screen. The old tap handler hardcoded `.stock` for everything.
@@ -485,6 +556,30 @@ class PriceAlertService:
                     "alert_id": str(rule.get("id") or ""),
                 },
             )
+            stats["sent"] += delivered
+
+            claimed: Optional[bool] = True if delivered else await asyncio.to_thread(
+                self._was_claimed, str(rule["user_id"]), key
+            )
+            if claimed is None:
+                # Unknown. Write nothing: the next cycle sees the same crossing and
+                # re-dispatches under the SAME key, which the claim makes harmless.
+                continue
+            if not claimed:
+                # Suppressed (preference off or daily cap). Keep the rule live: advance
+                # the baseline, leave the latch up, record no trigger and do not switch
+                # a one-shot rule off — its next crossing can still reach the user.
+                logger.info(
+                    "price alerts: id=%s user=%s fired (%s) but was not delivered — "
+                    "suppressed by preference or the daily cap; the rule stays active and "
+                    "no trigger is recorded",
+                    rule.get("id"), rule.get("user_id"), decision.reason,
+                )
+                decision = replace(
+                    decision, fire=False, new_armed=True, deactivate=False,
+                    reason=f"suppressed:{decision.reason}",
+                )
+            await asyncio.to_thread(self._persist, rule, decision)
 
         if stats["fired"]:
             logger.info("price alerts: %s", stats)

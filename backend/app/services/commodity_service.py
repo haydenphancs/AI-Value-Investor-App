@@ -30,7 +30,8 @@ from app.schemas.commodity import (
     PerformancePeriodResponse,
     RelatedCommodityResponse,
 )
-from app.services.chart_helper import _finite_or_none
+from app.services.chart_helper import _finite_or_none, settled_bars, ytd_return
+from app.utils.inflight import fail_shared_future
 from app.services.benchmark_math import (
     cagr_between,
     format_since,
@@ -107,11 +108,9 @@ def _settled_bars(historical: List[Dict], now: Optional[datetime] = None) -> Lis
     """The daily rows whose session has settled; anything dated after the current close
     cycle's date is the in-progress bar (or a stray future-dated row) and is dropped.
     Non-dict rows are dropped; a row without a date is kept (every consumer tolerates it)."""
-    cutoff = _settled_cutoff_date(now)
-    return [
-        r for r in (historical or [])
-        if isinstance(r, dict) and str(r.get("date") or "")[:10] <= cutoff
-    ]
+    # The filter is shared (`chart_helper.settled_bars`); the cutoff stays on this module's
+    # own `current_close_cycle_start` binding so each service's clock can be frozen alone.
+    return settled_bars(historical, _settled_cutoff_date(now))
 
 
 def _cache_get_settled(key: str) -> Optional[Any]:
@@ -514,14 +513,10 @@ class CommodityService:
             # CancelledError is a BaseException, so it skips the handler below and would
             # leave the future unresolved — every joiner would hang for the life of the
             # process. Hand them a normal exception, then honour our own cancellation.
-            if not future.done():
-                future.set_exception(
-                    RuntimeError("commodity detail fetch was cancelled")
-                )
+            fail_shared_future(future, RuntimeError("commodity detail fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(cache_key, None)
@@ -1626,7 +1621,9 @@ class CommodityService:
             })
         return result
 
-    def _build_performance(self, historical: List[Dict]) -> List[PerformancePeriodResponse]:
+    def _build_performance(
+        self, historical: List[Dict], now: Optional[datetime] = None,
+    ) -> List[PerformancePeriodResponse]:
         from app.services.chart_helper import _finite_or_none
 
         periods = [
@@ -1647,14 +1644,12 @@ class CommodityService:
 
         for label, days in periods:
             if label == "YTD":
-                # Find first trading day of current year
-                year_start = datetime.now(tz=timezone.utc).strftime("%Y-01-01")
-                past_close = None
-                for p in historical:
-                    if (p.get("date") or "") >= year_start:
-                        past_close = _finite_or_none(p.get("close"))
-                        break
-                if not past_close or past_close <= 0:
+                # From the previous year's last close, in the ET year — the one shared
+                # definition (`chart_helper.ytd_return`). This used to take the first row
+                # on/after Jan 1 of the UTC year, so the first session's move was never
+                # part of YTD and the row vanished from 19:00 ET on Dec 31.
+                change_pct = ytd_return(historical, now)
+                if change_pct is None:
                     continue
             else:
                 # Not enough history to cover the window: OMIT the period rather than
@@ -1666,8 +1661,8 @@ class CommodityService:
                 past_close = _finite_or_none(historical[idx].get("close"))
                 if not past_close or past_close <= 0:
                     continue
+                change_pct = ((current_close - past_close) / past_close) * 100
 
-            change_pct = ((current_close - past_close) / past_close) * 100
             result.append(PerformancePeriodResponse(
                 label=label,
                 change_percent=round(change_pct, 2),

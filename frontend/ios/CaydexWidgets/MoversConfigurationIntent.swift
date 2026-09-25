@@ -92,7 +92,10 @@ struct ToggleMoversModeIntent: AppIntent {
 /// questions: the configuration is what the user chose when they placed the tile, the
 /// override is what they tapped since. The provider prefers the override, so an
 /// untouched tile keeps behaving exactly as it always did.
-enum WidgetModeOverride {
+///
+/// `nonisolated`: `ToggleMoversModeIntent.perform()` is not main-actor isolated, and this is
+/// a thin wrapper over thread-safe `UserDefaults` with no main-actor state.
+nonisolated enum WidgetModeOverride {
     private static let key = "widget.movers.modeOverride"
 
     static func current() -> MoversMode? {

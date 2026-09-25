@@ -62,8 +62,11 @@ class _Q:
     def lt(self, col, val):
         self._lt = (col, val); return self
 
-    def limit(self, _n):
-        return self
+    def limit(self, n):
+        self._limit = n; return self
+
+    def order(self, col, *_a, **_k):
+        self._order = col; return self
 
     @property
     def not_(self):
@@ -86,6 +89,11 @@ class _Q:
                 if not all(r.get(k) == v for k, v in self._eq.items()):
                     continue
                 out.append(dict(r))
+            # Model the server: an ORDER BY when asked, else storage order, then the LIMIT.
+            if getattr(self, "_order", None):
+                out.sort(key=lambda r: str(r.get(self._order)))
+            if getattr(self, "_limit", None) is not None:
+                out = out[: self._limit]
             return type("R", (), {"data": out})()
         if self._op == "update":
             for r in rows:
@@ -229,3 +237,30 @@ def test_each_affected_user_is_reconciled_once():
     out = _service(sb).sweep_expired_subscriptions()
     assert out["expired"] == 3
     assert out["users_reconciled"] == 1
+
+
+def test_grace_rows_inside_their_window_cannot_starve_a_lapsed_active_row():
+    """One unordered `.limit(500)` read with the 60-day grace filter applied in PYTHON: once
+    500 grace/billing-retry rows were still inside their window, they filled every page and
+    the lapsed `active` row behind them was never expired — the exact leak this sweep closes."""
+    rows = [
+        _row(user=_OTHER, status="grace_period", end_delta={"days": -3}, tier="pro", rid=f"g{i}")
+        for i in range(600)
+    ]
+    rows.append(_row(status="active", end_delta={"days": -10}, rid="lapsed"))
+    sb = FakeSupabase(rows)
+    out = _service(sb).sweep_expired_subscriptions()
+    assert out["expired"] == 1
+    lapsed = next(r for r in sb.db["subscriptions"] if r["id"] == "lapsed")
+    assert lapsed["status"] == "expired"
+    assert sb.tier_of(_USER) == "free"
+    assert all(r["status"] == "grace_period" for r in sb.db["subscriptions"] if r["id"] != "lapsed")
+
+
+def test_the_oldest_lapsed_rows_are_expired_first_when_over_the_limit():
+    rows = [_row(status="active", end_delta={"days": -(2 + i)}, rid=f"a{i}") for i in range(5)]
+    sb = FakeSupabase(rows)
+    out = _service(sb).sweep_expired_subscriptions(limit=2)
+    assert out["expired"] == 2
+    done = {r["id"] for r in sb.db["subscriptions"] if r["status"] == "expired"}
+    assert done == {"a4", "a3"}, "a capped pass must drain the oldest backlog first"

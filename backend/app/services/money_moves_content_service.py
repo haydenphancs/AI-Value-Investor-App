@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.schemas.money_moves import MoneyMovesResponse
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ class MoneyMovesContentService:
                 # Only hand the exception over when someone is actually waiting: an unretrieved
                 # future exception logs a spurious traceback on GC for every cancellation.
                 if _has_waiters(future):
-                    future.set_exception(exc)
+                    fail_shared_future(future, exc)
                 else:
                     future.cancel()
             raise

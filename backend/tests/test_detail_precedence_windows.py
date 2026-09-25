@@ -110,22 +110,29 @@ def test_extract_chart_data_empty_input(cls):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Commodity YTD: baseline must be the first row on/after Jan 1, not the oldest
+# Commodity YTD: baseline is the previous year's last close (the one shared
+# definition, `chart_helper.ytd_return`) — never the oldest row
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_commodity_ytd_baseline_is_year_start_not_oldest():
+    """Written to kill the oldest-row bug (memory project_date_filter_precedence_trap).
+    The baseline convention has since moved to the industry one — the previous year's
+    LAST close, as `theme_insights_service` defines it — so the fixture carries a Dec 31
+    row, and the first new-year row must NOT be the baseline either."""
     svc = _svc(CommodityService)
-    year = datetime.now(tz=timezone.utc).year
+    now = datetime(2026, 9, 2, 20, tzinfo=timezone.utc)
     historical = [
-        {"date": f"{year - 2}-06-01", "close": 100.0},  # oldest — must NOT baseline
-        {"date": f"{year}-01-02", "close": 200.0},       # first row of THIS year
-        {"date": f"{year}-06-01", "close": 220.0},
-        {"date": f"{year}-09-01", "close": 240.0},       # latest → current_close
+        {"date": "2024-06-01", "close": 100.0},   # oldest — must NOT baseline
+        {"date": "2025-12-31", "close": 160.0},   # previous year's last close → baseline
+        {"date": "2026-01-02", "close": 200.0},   # first row of THIS year — not the baseline
+        {"date": "2026-06-01", "close": 220.0},
+        {"date": "2026-09-01", "close": 240.0},   # latest → current_close
     ]
-    periods = svc._build_performance(historical)
+    periods = svc._build_performance(historical, now=now)
     ytd = next(p for p in periods if p.label == "YTD")
-    # (240 - 200)/200*100 = 20.0 — NOT the (240-100)/100 = 140.0 oldest-row bug.
-    assert ytd.change_percent == pytest.approx(20.0)
+    # (240 - 160)/160*100 = 50.0 — NOT the (240-100)/100 = 140.0 oldest-row bug, and not
+    # the (240-200)/200 = 20.0 first-session-of-the-year convention either.
+    assert ytd.change_percent == pytest.approx(50.0)
 
 
 def test_commodity_ytd_absent_when_no_current_year_rows():

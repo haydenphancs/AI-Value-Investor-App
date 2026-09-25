@@ -71,6 +71,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.services._analyst_common import analyst_section_available
 from app.services.asset_class import uses_coingecko_price
 from app.integrations.fmp import get_fmp_client
@@ -1027,8 +1028,7 @@ class WidgetMoversService:
         except BaseException as e:
             # Waiters must not hang when the leader is cancelled — the shape
             # news_cache_service uses, and the one the Learn services got wrong.
-            if not fut.done():
-                fut.set_exception(e)
+            fail_shared_future(fut, e)
             raise
         finally:
             self._inflight.pop(key, None)

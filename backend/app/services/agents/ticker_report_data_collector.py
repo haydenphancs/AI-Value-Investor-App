@@ -547,7 +547,11 @@ class TickerReportDataCollector:
             raise ValueError(f"No company profile found for ticker: {ticker}")
 
         self._compute_metrics(out)
-        self._build_sections(out)
+        # Worker thread: `_build_sections` reads the SYNCHRONOUS sector-benchmark lookup
+        # (sync supabase-py + a time.sleep retry) for the peer-group label, and the
+        # section assembly is CPU work besides. `out` is not published to anyone until
+        # this coroutine returns, so no other task can see it mid-build.
+        await asyncio.to_thread(self._build_sections, out)
         await self._precompute_price_catalyst(out)
         await self._precompute_geopolitical(out)
         await self._apply_intraday_chart(out)
@@ -1822,9 +1826,9 @@ class TickerReportDataCollector:
 
         # One peer-group level for the 4 cards' "vs industry/sector" labels:
         # "industry" when the company's industry has benchmark rows, else "sector".
-        # `_build_sections` is sync, but this is a cache hit — the async
-        # sector-history fetch already warmed the same gb: key (same industry +
-        # normalized sector + metrics). Best-effort: any failure leaves it None →
+        # `_build_sections` is sync and runs on a worker thread (`_collect_fresh`), so
+        # this lookup never blocks the event loop even when the async sector-history
+        # fetch failed to warm its gb: key. Best-effort: any failure leaves it None →
         # iOS keeps the "sector" wording.
         peer_group_level: Optional[str] = None
         try:

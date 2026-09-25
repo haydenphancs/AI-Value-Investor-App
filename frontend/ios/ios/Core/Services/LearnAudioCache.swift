@@ -29,23 +29,23 @@
 import Darwin
 import Foundation
 
-// Constants live at file scope, NOT as statics on the `@MainActor` class: they are read from
-// `nonisolated` helpers and from URLSession's completion queue, and a stored static inside a
-// global-actor-isolated type inherits that isolation.
+// Constants are explicitly `nonisolated`: they are read from `nonisolated` helpers and from
+// URLSession's completion queue, and the target defaults to MainActor isolation — which binds
+// file-scope declarations to the main actor just as it does statics on the `@MainActor` class.
 
 /// The only buckets we mirror. See the boundary note above.
-private let cacheableBuckets: Set<String> = [
+nonisolated private let cacheableBuckets: Set<String> = [
     "book-media", "money-moves-media", "journey-media",
 ]
 
 /// The whole narration library is ~361 MB, so this holds all of it and still leaves the Caches
 /// directory bounded. The OS may evict the directory under disk pressure — that is correct for
 /// a cache, and a miss just streams.
-private let maxBytesOnDisk: Int64 = 400 * 1024 * 1024
+nonisolated private let maxBytesOnDisk: Int64 = 400 * 1024 * 1024
 
 /// Extended attribute holding the ETag the file was downloaded with. Stored ON the file so
 /// eviction and purge stay a single `removeItem` — a sidecar would need parallel bookkeeping.
-private let etagAttribute = "com.caydex.learnaudio.etag"
+nonisolated private let etagAttribute = "com.caydex.learnaudio.etag"
 
 @MainActor
 final class LearnAudioCache {
@@ -290,7 +290,9 @@ final class LearnAudioCache {
 
 /// Attach `etag` to `file`. Best-effort: without it the file simply never revalidates, which
 /// degrades to the pre-existing behaviour rather than to a wrong one.
-fileprivate func storeETag(_ etag: String, on file: URL) {
+///
+/// `nonisolated`: called from `persist`, which runs on URLSession's completion queue.
+nonisolated fileprivate func storeETag(_ etag: String, on file: URL) {
     guard let data = etag.data(using: .utf8) else { return }
     _ = file.withUnsafeFileSystemRepresentation { path -> Int32 in
         guard let path else { return -1 }

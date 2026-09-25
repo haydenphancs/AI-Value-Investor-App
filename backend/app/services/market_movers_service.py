@@ -41,6 +41,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.utils.market_hours import session_trading_date
 from app.services.price_service import PriceService, _finite, price_source
 
@@ -116,12 +117,10 @@ class MarketMoversService:
             # below. Without this arm the future is never settled and every joiner
             # parked on `asyncio.shield(...)` waits for the life of the process —
             # while `finally` has already popped the key, so nothing can recover it.
-            if not future.done():
-                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("shared fetch was cancelled"))
             raise
         except Exception as e:
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(key, None)

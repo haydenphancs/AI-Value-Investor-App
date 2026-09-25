@@ -113,16 +113,20 @@ def build_book(order: int, dirname: str, manifest: dict):
 
 
 def emit_book(order: int, core_blocks: dict) -> str:
-    lines = [f"        {order}: ["]
+    """Swift statements for one book: one `cores[N] = [...]` statement PER CORE.
+
+    Never fold the cores back into a single literal: see the note on `makeByBook()` in the
+    template in main(). The statement shape keeps each type-checked expression one core big."""
+    lines = [f"        // Book {order}", "        cores = [:]"]
     for num in sorted(core_blocks):
-        lines.append(f"            {num}: [")
+        lines.append(f"        cores[{num}] = [")
         for is_heading, timed in core_blocks[num]:
-            lines.append(f"                ReadAlongBlock(isHeading: {str(is_heading).lower()}, sentences: [")
+            lines.append(f"            ReadAlongBlock(isHeading: {str(is_heading).lower()}, sentences: [")
             for sent, start, end in timed:
-                lines.append(f'                    ReadAlongSentence(text: "{sw(sent)}", start: {start}, end: {end}),')
-            lines.append("                ]),")
-        lines.append("            ],")
-    lines.append("        ],")
+                lines.append(f'                ReadAlongSentence(text: "{sw(sent)}", start: {start}, end: {end}),')
+            lines.append("            ]),")
+        lines.append("        ]")
+    lines.append(f"        books[{order}] = cores")
     return "\n".join(lines)
 
 
@@ -172,6 +176,13 @@ def main():
         summary.append((order, m["book_title"], len(cb), nsent, src))
 
     blocks.sort(key=lambda b: b[0])
+    # `books[order] = cores` statements OVERWRITE on a repeated order, where the old single
+    # dictionary literal trapped at runtime. Two manifests claiming one curriculum_order must
+    # fail here instead of silently dropping a book.
+    orders = [b[0] for b in blocks]
+    dupes = sorted({o for o in orders if orders.count(o) > 1})
+    if dupes:
+        raise SystemExit(f"duplicate curriculum_order {dupes} across {AUDIO_DIR}/*.manifest.json")
     body = "\n".join(b[1] for b in blocks)
     swift = f"""//
 //  BookReadAlong.swift
@@ -193,9 +204,18 @@ import Foundation
 
 extension ReadAlongBlock {{
     /// [curriculumOrder: [coreNumber: [blocks in narration order]]].
-    static let byBook: [Int: [Int: [ReadAlongBlock]]] = [
+    static let byBook: [Int: [Int: [ReadAlongBlock]]] = makeByBook()
+
+    /// Built ONE STATEMENT PER CORE, never as a single literal. As one ~4,300-call literal this
+    /// table made the Swift type checker's memory grow roughly quadratically — tens of GB in the
+    /// emit-module job — and kernel-panicked a 16 GB Mac (2026-09-25). A function body is also
+    /// skipped by emit-module. Pinned by backend/tests/test_ios_no_giant_literals.py.
+    private static func makeByBook() -> [Int: [Int: [ReadAlongBlock]]] {{
+        var books: [Int: [Int: [ReadAlongBlock]]] = [:]
+        var cores: [Int: [ReadAlongBlock]]
 {body}
-    ]
+        return books
+    }}
 }}
 """
     OUT.write_text(swift)

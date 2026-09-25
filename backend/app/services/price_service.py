@@ -54,6 +54,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
+from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPRateLimitException, FMPUnavailableException, get_fmp_client
 from app.config import settings
 from app.integrations.fmp_entitlements import is_blocked_symbol
@@ -848,8 +849,7 @@ class PriceService:
             # future, that joiner waits forever with nothing able to recover it. Resolve
             # it with an exception (never a result: a cancelled fetch produced no data,
             # and handing back `{}` would look like "this coin has no price").
-            if not future.done():
-                future.set_exception(RuntimeError("shared crypto fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("shared crypto fetch was cancelled"))
             raise
         except Exception as e:
             # Never let a CoinGecko failure break the equity path that shares the batch.
@@ -946,13 +946,11 @@ class PriceService:
             # below. Without this arm the future is never settled and every joiner
             # parked on `asyncio.shield(...)` waits for the life of the process —
             # while `finally` has already popped the key, so nothing can recover it.
-            if not future.done():
-                future.set_exception(RuntimeError("shared fetch was cancelled"))
+            fail_shared_future(future, RuntimeError("shared fetch was cancelled"))
             raise
         except Exception as e:
             _cache_set(_UNIVERSE_DEGRADED_KEY, True)
-            if not future.done():
-                future.set_exception(e)
+            fail_shared_future(future, e)
             raise
         finally:
             _inflight.pop(key, None)

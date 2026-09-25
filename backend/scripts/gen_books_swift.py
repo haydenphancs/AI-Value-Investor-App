@@ -106,78 +106,91 @@ def parse_core(path: Path):
 
 
 def emit_core(num, title, sections, action, dur, book_title, book_author):
-    o = [f"            {num}: CoreChapterContent("]
-    o.append(f"                chapterNumber: {num},")
-    o.append(f'                chapterTitle: "{sw(title)}",')
-    o.append(f'                bookTitle: "{sw(book_title)}",')
-    o.append(f'                bookAuthor: "{sw(book_author)}",')
-    o.append("                sections: [")
+    """ONE Swift statement for one core — `cores[N] = CoreChapterContent(...)`.
+
+    Never fold the cores back into a single literal: see the note on `makeBooksByOrder()` in the
+    header below. The statement shape is what keeps each type-checked expression one core big."""
+    o = [f"        cores[{num}] = CoreChapterContent("]
+    o.append(f"            chapterNumber: {num},")
+    o.append(f'            chapterTitle: "{sw(title)}",')
+    o.append(f'            bookTitle: "{sw(book_title)}",')
+    o.append(f'            bookAuthor: "{sw(book_author)}",')
+    o.append("            sections: [")
     for kind, text in sections:
-        o.append("                    CoreChapterSection(")
-        o.append(f"                        type: .{kind},")
-        o.append("                        title: nil,")
-        o.append(f'                        content: .text("{sw(text)}")')
-        o.append("                    ),")
+        o.append("                CoreChapterSection(")
+        o.append(f"                    type: .{kind},")
+        o.append("                    title: nil,")
+        o.append(f'                    content: .text("{sw(text)}")')
+        o.append("                ),")
     if action:
-        o.append("                    CoreChapterSection(")
-        o.append("                        type: .actionPlan,")
-        o.append("                        title: nil,")
-        o.append("                        content: .actionPlan([")
+        o.append("                CoreChapterSection(")
+        o.append("                    type: .actionPlan,")
+        o.append("                    title: nil,")
+        o.append("                    content: .actionPlan([")
         for name, desc in action:
-            o.append("                            ActionStep(")
-            o.append(f'                                title: "{sw(name)}",')
-            o.append(f'                                description: "{sw(desc)}",')
-            o.append("                                isCompleted: false")
-            o.append("                            ),")
-        o.append("                        ])")
-        o.append("                    )")
-    o.append("                ],")
-    o.append(f"                audioDurationSeconds: {dur},")
-    o.append("                currentProgress: 0.0")
-    o.append("            ),")
+            o.append("                        ActionStep(")
+            o.append(f'                            title: "{sw(name)}",')
+            o.append(f'                            description: "{sw(desc)}",')
+            o.append("                            isCompleted: false")
+            o.append("                        ),")
+        o.append("                    ])")
+        o.append("                )")
+    o.append("            ],")
+    o.append(f"            audioDurationSeconds: {dur},")
+    o.append("            currentProgress: 0.0")
+    o.append("        )")
     return "\n".join(o)
 
 
-content_blocks = []
-list_blocks = []
-read_min = []
-summary = []
-for order, dirname, btitle, bauthor in BOOKS:
-    d = BD / dirname
-    # Only ingest strictly-named "core <N>.txt" files. This excludes the course-index
-    # "cores.txt" (which has no number -> would land as a bogus "Core 0") and accidental
-    # Finder duplicates like "core 1 copy 5.txt" (which all collapse to the same number).
-    cores = sorted([p for p in d.glob("*.txt") if re.fullmatch(r"core\s+\d+", p.stem, re.I)], key=core_num)
-    # Fail fast on duplicate core numbers: a Swift dictionary literal with duplicate keys
-    # traps at runtime ("Dictionary literal contains duplicate keys") the first time
-    # booksByOrder is accessed — i.e. when the user opens any core. Catch it at gen time.
-    _nums = [core_num(p) for p in cores]
-    _dupes = sorted({n for n in _nums if _nums.count(n) > 1})
-    if _dupes:
-        raise SystemExit(
-            f"[{dirname}] duplicate core numbers {_dupes} from files "
-            f"{[p.name for p in cores]} — fix the source filenames before regenerating"
+def main() -> None:
+    """Write BooksContent.swift. Guarded by __main__: six scripts (gen_book_read_along,
+    align_book_audio, generate_book_audio(_clone), normalize_book_speed, clone_prototype) import
+    this module only for BD / BOOKS /
+    core_num / parse_core, and a test imports one of them — at import this used to REWRITE
+    the Swift source tree on every pytest run (and could race a running Xcode build)."""
+    content_blocks = []
+    list_blocks = []
+    read_min = []
+    summary = []
+    for order, dirname, btitle, bauthor in BOOKS:
+        d = BD / dirname
+        # Only ingest strictly-named "core <N>.txt" files. This excludes the course-index
+        # "cores.txt" (which has no number -> would land as a bogus "Core 0") and accidental
+        # Finder duplicates like "core 1 copy 5.txt" (which all collapse to the same number).
+        cores = sorted([p for p in d.glob("*.txt") if re.fullmatch(r"core\s+\d+", p.stem, re.I)], key=core_num)
+        # Fail fast on duplicate core numbers. This is now the ONLY guard: booksByOrder is built
+        # with one `cores[N] = …` statement per core (see the header), and a repeated N would
+        # silently OVERWRITE the earlier core — the old single dictionary literal at least trapped
+        # ("Dictionary literal contains duplicate keys"). Catch it at gen time.
+        _nums = [core_num(p) for p in cores]
+        _dupes = sorted({n for n in _nums if _nums.count(n) > 1})
+        if _dupes:
+            raise SystemExit(
+                f"[{dirname}] duplicate core numbers {_dupes} from files "
+                f"{[p.name for p in cores]} — fix the source filenames before regenerating"
+            )
+        core_entries = []
+        list_entries = []
+        total_words = 0
+        total_dur = 0
+        for p in cores:
+            n = core_num(p)
+            title, sections, action, dur, words, desc = parse_core(p)
+            total_words += words
+            total_dur += dur
+            core_entries.append(emit_core(n, title, sections, action, dur, btitle, bauthor))
+            list_entries.append(
+                f'            BookCoreChapter(number: {n}, title: "{sw(title)}", description: "{sw(desc)}"),'
+            )
+        content_blocks.append(
+            f"        // {btitle}\n        cores = [:]\n" + "\n".join(core_entries) + f"\n        books[{order}] = cores"
         )
-    core_entries = []
-    list_entries = []
-    total_words = 0
-    total_dur = 0
-    for p in cores:
-        n = core_num(p)
-        title, sections, action, dur, words, desc = parse_core(p)
-        total_words += words
-        total_dur += dur
-        core_entries.append(emit_core(n, title, sections, action, dur, btitle, bauthor))
-        list_entries.append(
-            f'            BookCoreChapter(number: {n}, title: "{sw(title)}", description: "{sw(desc)}"),'
-        )
-    content_blocks.append(f"        {order}: [\n" + "\n".join(core_entries) + "\n        ],")
-    list_blocks.append(f"        {order}: [\n" + "\n".join(list_entries) + "\n        ],")
-    mins = round(total_words / WPM)
-    read_min.append(f"        {order}: {mins},  // {btitle}")
-    summary.append((order, btitle, len(cores), total_words, mins, total_dur))
+        list_blocks.append(f"        {order}: [\n" + "\n".join(list_entries) + "\n        ],")
+        mins = round(total_words / WPM)
+        read_min.append(f"        {order}: {mins},  // {btitle}")
+        summary.append((order, btitle, len(cores), total_words, mins, total_dur))
 
-header = """//
+    header = """//
 //  BooksContent.swift
 //  ios
 //
@@ -191,25 +204,37 @@ import Foundation
 
 extension CoreChapterContent {
     /// Core detail content per book, keyed by curriculumOrder then core number.
-    static let booksByOrder: [Int: [Int: CoreChapterContent]] = [
+    static let booksByOrder: [Int: [Int: CoreChapterContent]] = makeBooksByOrder()
+
+    /// Built ONE STATEMENT PER CORE, never as a single literal. As one ~1,300-call literal this
+    /// table made the Swift type checker's memory grow roughly quadratically — tens of GB in the
+    /// emit-module job — and kernel-panicked a 16 GB Mac (2026-09-25). A function body is also
+    /// skipped by emit-module. Pinned by backend/tests/test_ios_no_giant_literals.py.
+    private static func makeBooksByOrder() -> [Int: [Int: CoreChapterContent]] {
+        var books: [Int: [Int: CoreChapterContent]] = [:]
+        var cores: [Int: CoreChapterContent]
 """
-mid1 = "\n".join(content_blocks) + "\n    ]\n}\n\n"
-mid2 = ("extension BookCoreChapter {\n"
-        "    /// The real Core list (timeline rows) per book, keyed by curriculumOrder.\n"
-        "    static let listsByOrder: [Int: [BookCoreChapter]] = [\n"
-        + "\n".join(list_blocks) + "\n    ]\n}\n\n")
-mid3 = ("extension LibraryBook {\n"
-        "    /// Total read time (minutes) per book, computed from the authored core content.\n"
-        "    static let readMinutesByOrder: [Int: Int] = [\n"
-        + "\n".join(read_min) + "\n    ]\n}\n")
+    mid1 = "\n".join(content_blocks) + "\n        return books\n    }\n}\n\n"
+    mid2 = ("extension BookCoreChapter {\n"
+            "    /// The real Core list (timeline rows) per book, keyed by curriculumOrder.\n"
+            "    static let listsByOrder: [Int: [BookCoreChapter]] = [\n"
+            + "\n".join(list_blocks) + "\n    ]\n}\n\n")
+    mid3 = ("extension LibraryBook {\n"
+            "    /// Total read time (minutes) per book, computed from the authored core content.\n"
+            "    static let readMinutesByOrder: [Int: Int] = [\n"
+            + "\n".join(read_min) + "\n    ]\n}\n")
 
-OUT.parent.mkdir(parents=True, exist_ok=True)  # pod-safe: create dest dir if missing (no-op on Mac)
-OUT.write_text(header + mid1 + mid2 + mid3)
+    OUT.parent.mkdir(parents=True, exist_ok=True)  # pod-safe: create dest dir if missing (no-op on Mac)
+    OUT.write_text(header + mid1 + mid2 + mid3)
 
-print(f"{'ord':>3} {'cores':>5} {'words':>6} {'min':>4}  book")
-tw = tc = 0
-for order, btitle, ncores, words, mins, dur in summary:
-    print(f"{order:>3} {ncores:>5} {words:>6} {mins:>4}  {btitle}")
-    tw += words; tc += ncores
-print(f"\nTOTAL: {tc} cores, {tw} words across {len(BOOKS)} books")
-print("wrote:", OUT)
+    print(f"{'ord':>3} {'cores':>5} {'words':>6} {'min':>4}  book")
+    tw = tc = 0
+    for order, btitle, ncores, words, mins, dur in summary:
+        print(f"{order:>3} {ncores:>5} {words:>6} {mins:>4}  {btitle}")
+        tw += words; tc += ncores
+    print(f"\nTOTAL: {tc} cores, {tw} words across {len(BOOKS)} books")
+    print("wrote:", OUT)
+
+
+if __name__ == "__main__":
+    main()

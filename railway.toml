@@ -1,9 +1,16 @@
+# ⚠️ Probably NOT the file production reads. The Railway service's Root Directory is
+# `/backend`, and `backend/railway.toml` (builder = dockerfile, `/health/pdf`) is the
+# deploy config; there the Dockerfile CMD is the start command. Railway resolves a config
+# file from the REPO root unless the service sets a custom config path, so if this file
+# were ever the one applied, its `startCommand` would replace the Dockerfile CMD. It is
+# therefore kept IDENTICAL in effect: same command (single worker, bounded graceful
+# shutdown — without it one live SSE stream kept the old instance alive until SIGKILL and
+# the durable job claims stayed parked) and the same health check.
+# Pinned by backend/tests/test_deploy_command_parity.py. Owner check: Railway → service →
+# Settings → Config-as-code path should read `/backend/railway.toml`.
 [deploy]
-# --proxy-headers + --forwarded-allow-ips='*' so uvicorn honors Railway's
-# X-Forwarded-For and .client.host is the real client IP (per-guest live-price
-# WebSocket cap + accurate IP logging). Safe: Railway's edge is the only ingress.
-startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
-healthcheckPath = "/health"
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"
+healthcheckPath = "/health/pdf"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5

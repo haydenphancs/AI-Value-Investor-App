@@ -45,8 +45,9 @@ from pathlib import Path
 
 import httpx
 
-# parse_core / BOOKS / BD live in the Swift content generator. Importing it re-emits
-# BooksContent.swift (idempotent, same bytes) and prints a summary — suppress that noise.
+# parse_core / BOOKS / BD live in the Swift content generator. Importing it is side-effect free
+# since 2026-09-25 (its generation moved under `__main__`); run `scripts/gen_books_swift.py`
+# yourself to regenerate BooksContent.swift. The redirect stays as harmless belt-and-braces.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 with contextlib.redirect_stdout(io.StringIO()):
     import gen_books_swift as g  # noqa: E402

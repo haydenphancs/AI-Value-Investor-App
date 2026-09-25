@@ -51,6 +51,16 @@ class TickerReportViewModel: ObservableObject {
     private let reportId: String?
     private var loadAttempts: Int = 0
 
+    /// Whether OPENING this screen may fall through to the billable Path B on a miss.
+    ///
+    /// False for the notification route. A "report ready" row lives 90 days in the inbox, so
+    /// tapping it after the report was DELETED (Path A answers REPORT_NOT_READY) or after its
+    /// cache row rotated out used to regenerate for 20 credits with no prompt, and the
+    /// fresh report was not even saved to the Reports list. A tap on an old notification is
+    /// not a purchase decision, so that path shows `needsPaidRegeneration` instead and waits
+    /// for the explicit "Regenerate · N credits" button.
+    private let allowPaidOnOpen: Bool
+
     // Deep Dive Modules - stored once to avoid regenerating UUIDs on every access
     let deepDiveModules: [DeepDiveModule] = [
         DeepDiveModule(title: "Recent Price Movement", iconName: "chart.xyaxis.line", type: .recentPriceMovement),
@@ -69,6 +79,7 @@ class TickerReportViewModel: ObservableObject {
         self.ticker = ticker
         self.persona = persona
         self.reportId = nil
+        self.allowPaidOnOpen = true
         loadReport()
     }
 
@@ -79,6 +90,7 @@ class TickerReportViewModel: ObservableObject {
         self.ticker = report.ticker
         self.persona = report.persona.backendKey
         self.reportId = report.backendId
+        self.allowPaidOnOpen = true
         loadReport()
     }
 
@@ -96,7 +108,10 @@ class TickerReportViewModel: ObservableObject {
     init(ticker: String, persona: String?, reportId: String?) {
         self.ticker = ticker
         self.persona = persona ?? "warren_buffett"
-        self.reportId = reportId
+        // An empty id is no id: Path A would request `/research/reports//ticker-report`.
+        self.reportId = (reportId?.isEmpty ?? true) ? nil : reportId
+        // NEVER bill from a notification tap — see `allowPaidOnOpen`.
+        self.allowPaidOnOpen = false
         loadReport()
     }
 
@@ -105,6 +120,7 @@ class TickerReportViewModel: ObservableObject {
         self.ticker = ticker
         self.persona = "warren_buffett"
         self.reportId = nil
+        self.allowPaidOnOpen = true
         self.reportData = preloadedReport
         self.isLoading = false
     }
@@ -133,7 +149,7 @@ class TickerReportViewModel: ObservableObject {
 
         Task { [weak self] in
             guard let self = self else { return }
-            await self._fetchReport()
+            await self._fetchReport(allowPaidGeneration: self.allowPaidOnOpen)
         }
     }
 

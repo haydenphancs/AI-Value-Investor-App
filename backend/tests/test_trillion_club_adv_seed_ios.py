@@ -185,8 +185,11 @@ def _bases(seed: Mapping) -> Dict[str, Dict[str, Any]]:
                logo_symbol=None)
     f13 = dict(copy.deepcopy(by_slug["amd"]), slug="adv-13f", display_name="Adv Filer",
                cap_symbol="ADVY", detail_symbol="ADVY", logo_symbol="ADVY", ciks=["0009999992"])
+    # A %-only private stake: the catalogue's value / material mutations assume the base has
+    # no dollar figure, and the real row gained its $11.9B "invested" on 2026-09-24.
     st = dict(copy.deepcopy(stakes[("microsoft", "OpenAI Group PBC", "private")]),
-              investee_name="Adv Stake", background=None)
+              investee_name="Adv Stake", background=None,
+              disclosed_value_usd=None, value_basis=None)
     commit = dict(copy.deepcopy(stakes[("microsoft", "Anthropic", "commitment")]),
                   investee_name="Adv Commitment", background=None)
     return {"co": co, "man": man, "f13": f13, "st": st, "commit": commit}

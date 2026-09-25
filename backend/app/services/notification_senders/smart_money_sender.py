@@ -25,8 +25,9 @@ notification has no intraday urgency — hence `passive` delivery, which lets iO
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
@@ -42,9 +43,13 @@ from app.services.notification_kinds import (
     KIND_CONGRESS_TRADE,
     KIND_INSIDER_TRADE,
     KIND_WHALE_13F,
+    get_kind,
     ticker_route,
 )
-from app.services.push_dispatch_service import get_push_dispatch_service
+from app.services.push_dispatch_service import (
+    MAX_RECIPIENTS_PER_SCOPE,
+    get_push_dispatch_service,
+)
 from app.services.updates_materiality import finite
 from app.utils.market_hours import ET
 from app.utils.postgrest_paging import PAGE_SIZE, fetch_all_rows
@@ -68,8 +73,10 @@ INSIDER_CONCURRENCY = 5
 # days; beyond that the market has priced it.
 INSIDER_LOOKBACK_DAYS = 3
 
-# Trade-date floor for whale rows. A 13F is a quarterly snapshot, so its `date` is
-# legitimately weeks old — but not months. See `_recent_whale_rows`.
+# Disclosure floor for CONGRESSIONAL rows, measured on `disclosure_date` (the day the
+# PTR became public), falling back to the transaction `date` for rows that predate
+# migration 076. 13F rows are NOT measured against this: their `date` is a QUARTER END,
+# gated by quarter instead — see `_thirteen_f_floor` and `_recent_whale_rows`.
 WHALE_TRADE_MAX_AGE_DAYS = 45
 # Pages of 1,000 `whale_trades` rows one run will evaluate. The read is in `created_at`
 # order (id as the tiebreak), so a run that fills every page has read the OLDEST rows
@@ -245,8 +252,43 @@ async def _run_insider_phase(now: datetime) -> int:
 # ── whale / congress ─────────────────────────────────────────────────────────
 
 
+def _thirteen_f_floor(run_day: date) -> str:
+    """First day of the calendar quarter BEFORE the one `run_day` falls in (ISO).
+
+    A 13F row's `date` is the QUARTER END its filing describes — the hydrators write the
+    `date` of FMP's `institutional-ownership/dates` entry — never the day it was filed.
+    SEC Rule 13f-1 allows 45 days after the quarter closes, so the newest quarter a filing
+    made during quarter Q can describe is Q-1. A row dated on or after Q-1's FIRST day
+    therefore belongs to the latest filed quarter (or an early filing of a newer one);
+    anything older is a previous quarter, which only a first hydration writes.
+
+    The first DAY, not Q-1's end: the hydrators' fallback builds `{year}-{q*3:02d}-30`,
+    which is 03-30 / 12-30 for Q1 / Q4 — a day before the true end — and an end-date floor
+    would drop exactly those rows. `tracking_service._thirteen_f_floor` must agree with
+    this one (`tests/test_whale_13f_quarter_floor.py`).
+    """
+    q0 = (run_day.month - 1) // 3                        # 0-based current quarter
+    year, prev = (run_day.year, q0 - 1) if q0 else (run_day.year - 1, 3)
+    return date(year, prev * 3 + 1, 1).isoformat()
+
+
+def _is_congress_row(row: Dict[str, Any]) -> bool:
+    """A STOCK Act row: it carries a range or a disclosure date, or its whale is congressional.
+
+    13F rows carry neither column (both hydrators write None), so the source is the
+    tiebreak only for a congressional row written before migration 076.
+    """
+    if row.get("amount_range") or row.get("disclosure_date"):
+        return True
+    whale = row.get("whales") if isinstance(row.get("whales"), dict) else {}
+    return _whale_kind(whale.get("data_source")) == KIND_CONGRESS_TRADE
+
+
 def _recent_whale_rows(rows: Any, *, cutoff_date: str) -> List[Dict[str, Any]]:
     """Filter freshly-ingested whale trades down to genuinely recent ones.
+
+    `cutoff_date` is the run's ET date minus `WHALE_TRADE_MAX_AGE_DAYS`; the 13F quarter
+    floor is derived from the same run date, so the one argument carries both.
 
     ⚠️ THE BACKFILL TRAP, and this repo has shipped it once already.
 
@@ -254,6 +296,18 @@ def _recent_whale_rows(rows: Any, *, cutoff_date: str) -> List[Dict[str, Any]]:
     hydration of a newly-added whale inserts hundreds of quarter-old filings with a
     brand-new `created_at`. Windowing on `created_at` alone would announce a fund's
     entire historical book as "this week's activity" — one notification per position.
+
+    ⚠️ AND THE TWO ROW TYPES DATE DIFFERENTLY — one floor for both dropped real filings:
+
+      * **13F** — `date` is the QUARTER END, and the filing deadline is quarter end + 45
+        days. A 45-day floor on it therefore EQUALLED the deadline: a fund filing on
+        deadline day (large filers routinely do) is hydrated that night and read the next
+        evening, when every one of its rows sat one day under the floor. The cursor then
+        moved past them for good. Gated by quarter instead (`_thirteen_f_floor`).
+      * **Congress** — `date` is the TRANSACTION date; the news is the DISCLOSURE. A PTR
+        filed at the 45-day legal limit (or late, which is common) was dropped on its
+        transaction date while the Home congress card showed it. Gated on
+        `disclosure_date`, falling back to `date` for rows written before migration 076.
 
     ⚠️ AND THE PARENTHESES ARE LOAD-BEARING:
 
@@ -270,12 +324,29 @@ def _recent_whale_rows(rows: Any, *, cutoff_date: str) -> List[Dict[str, Any]]:
     """
     if not isinstance(rows, list):
         return []
+    try:
+        quarter_floor = _thirteen_f_floor(
+            date.fromisoformat(str(cutoff_date)[:10]) + timedelta(days=WHALE_TRADE_MAX_AGE_DAYS)
+        )
+    except (TypeError, ValueError) as e:
+        # Internal input, so this is a bug, not data. Fall back to the strictest floor
+        # (the old behaviour) rather than to none, and say so.
+        logger.warning(
+            "smart money: unusable whale cutoff %r (%s: %s) — gating 13F rows on it too",
+            cutoff_date, type(e).__name__, e,
+        )
+        quarter_floor = str(cutoff_date)
     keep: List[Dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        trade_date = str(row.get("date") or "")[:10]
-        if trade_date and trade_date < cutoff_date:
+        if _is_congress_row(row):
+            when = str(row.get("disclosure_date") or row.get("date") or "")[:10]
+            floor = cutoff_date
+        else:
+            when = str(row.get("date") or "")[:10]
+            floor = quarter_floor
+        if when and when < floor:
             continue
         keep.append(row)
     return keep
@@ -298,23 +369,94 @@ def _whale_kind(data_source: Any) -> Optional[str]:
 
 
 def whale_copy(
-    whale_name: str, action: str, tickers: List[str], amount_label: str
+    whale_name: str,
+    action: str,
+    tickers: List[str],
+    amount_label: str,
+    *,
+    on_watchlist: bool = True,
 ) -> Tuple[str, str]:
-    """Rolled-up copy for one whale's activity.
+    """Rolled-up copy for one whale's activity, worded for ONE reader variant.
 
     A 40-position 13F becomes ONE notification naming up to three tickers, not forty.
     The per-user `smart_money` cap of 3 is the backstop, not the design.
+
+    `tickers` and `amount_label` must describe what THIS reader is told about: for a
+    watcher, only the tickers on their watchlist and the amount over only those (see
+    `_run_whale_phase`); for a follower who watches none of them, the whole filing, and
+    `on_watchlist=False` — "on your watchlist" would be false for them.
     """
     verb = "bought" if action == "bought" else "sold"
     shown = ", ".join(tickers[:3])
     more = f" +{len(tickers) - 3} more" if len(tickers) > 3 else ""
-    return (
-        f"{whale_name} {verb} {shown}{more}",
+    if on_watchlist:
         # "on your watchlist", NOT "stocks you follow" — the second reads as an
         # instruction to follow the investor, which is exactly the framing to avoid on a
         # surface FINRA/SEC treat as a supervised digital-engagement practice.
-        f"Disclosed activity totalling {amount_label} on your watchlist.",
-    )
+        body = f"Disclosed activity totalling {amount_label} on your watchlist."
+    else:
+        body = f"New disclosed activity totalling {amount_label}."
+    return f"{whale_name} {verb} {shown}{more}", body
+
+
+def _ranked_tickers(per_ticker: Dict[str, Dict[str, Any]]) -> List[str]:
+    """A roll-up's tickers, largest first (by the low bound), then by symbol.
+
+    Deterministic on purpose: the read order is `created_at, id`, and every row of one
+    bulk upsert shares `created_at` while `id` is a random uuid — so "the first three
+    tickers" used to be an arbitrary pick that could change between identical re-reads.
+    """
+    return sorted(per_ticker, key=lambda t: (-per_ticker[t]["low"], t))
+
+
+def _amount_label(per_ticker: Dict[str, Dict[str, Any]], tickers: List[str]) -> str:
+    """The summed range over `tickers` ONLY — never the whole filing's total."""
+    low = sum(per_ticker[t]["low"] for t in tickers)
+    high = sum(per_ticker[t]["high"] for t in tickers)
+    open_ended = any(per_ticker[t]["open_ended"] for t in tickers)
+    return format_amount_range(low, None if open_ended else max(high, low))
+
+
+def _whale_audience_variants(
+    ranked: List[str], watched: Dict[str, List[str]], followers: List[str]
+) -> List[Tuple[Tuple[str, ...], List[str]]]:
+    """Split one roll-up's audience into copy variants: `[(subset, users), …]`.
+
+    `subset` is the tickers those users watch, in `ranked` order; `()` is the
+    follower-only variant (follows the whale, watches none of its tickers). Every user
+    lands in exactly ONE variant, so nobody gets two alerts for one filing.
+    """
+    in_group = set(ranked)
+    by_subset: Dict[Tuple[str, ...], List[str]] = {}
+    for uid, symbols in (watched or {}).items():
+        mine = {str(t).upper() for t in (symbols or [])} & in_group
+        if not uid or not mine:
+            continue
+        subset = tuple(t for t in ranked if t in mine)
+        by_subset.setdefault(subset, []).append(uid)
+    placed = {u for users in by_subset.values() for u in users}
+    variants = [
+        (subset, sorted(users))
+        for subset, users in sorted(by_subset.items(), key=lambda kv: [ranked.index(t) for t in kv[0]])
+    ]
+    follower_only = sorted(u for u in dict.fromkeys(followers or []) if u and u not in placed)
+    if follower_only:
+        variants.append(((), follower_only))
+    return variants
+
+
+def whale_dedup_key(whale_id: Any, action: str, latest_date: str, tickers: List[str]) -> str:
+    """Dedup key for one (whale, direction) roll-up.
+
+    Carries a digest of the TICKER SET. The key used to be `whale:{id}:{action}:{date}`
+    alone, so a second filing whose newest trade shares a date with an earlier one (a
+    senator's second PTR: NVDA on 09-12 notified Monday, AAPL on 09-12 filed Wednesday)
+    collided and was dropped for every user. Trade-off: a retry after a PARTIAL failure,
+    in which new rows joined the group, re-notifies once with the larger set — bounded by
+    the per-user `smart_money` cap.
+    """
+    digest = hashlib.sha1(",".join(sorted(set(tickers))).encode()).hexdigest()[:10]
+    return f"whale:{whale_id}:{action}:{latest_date or 'nodate'}:{digest}"
 
 
 async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[int, Optional[datetime]]:
@@ -358,7 +500,8 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
                 lambda: supabase.table("whale_trades")
                 .select(
                     "id, ticker, company_name, action, amount, amount_range, date, "
-                    "created_at, whale_id, whales(name, firm_name, data_source)"
+                    "disclosure_date, created_at, whale_id, "
+                    "whales(name, firm_name, data_source)"
                 )
                 .gt("created_at", since.isoformat())
                 .order("created_at"),
@@ -419,65 +562,88 @@ async def _run_whale_phase(now: datetime, cursor: Optional[datetime]) -> Tuple[i
         group = groups.setdefault(key, {
             "kind": kind,
             "name": (whale.get("firm_name") or whale.get("name") or "A tracked investor").strip(),
-            "tickers": [],
-            "low": 0.0,
-            "high": 0.0,
-            "open_ended": False,
-            "is_congress": False,
+            # ticker → its OWN summed bounds, so each reader is told the amount over the
+            # tickers THEY watch rather than the whole filing's total.
+            "tickers": {},
+            "low": 0.0,          # the whole roll-up's low bound — event ordering only
             "latest_date": "",
         })
-        if ticker not in group["tickers"]:
-            group["tickers"].append(ticker)
+        bounds = group["tickers"].setdefault(
+            ticker, {"low": 0.0, "high": 0.0, "open_ended": False}
+        )
         group["latest_date"] = max(group["latest_date"], str(row.get("date") or "")[:10])
 
         amount_range = row.get("amount_range")
         if amount_range:
             # Congressional: an honest STOCK Act RANGE. Never collapse this into a
             # precise figure — the disclosure genuinely does not contain one.
-            group["is_congress"] = True
             low, high = parse_congress_amount_bounds(amount_range)
-            group["low"] += finite(low) or 0.0
+            low = finite(low) or 0.0
+            bounds["low"] += low
+            group["low"] += low
             if high is None:
-                group["open_ended"] = True
+                bounds["open_ended"] = True
             else:
-                group["high"] += finite(high) or 0.0
+                bounds["high"] += finite(high) or 0.0
         else:
             # 13F: an exact point. Summing it as low == high keeps the range machinery
             # honest when a group somehow mixes both.
             amount = finite(row.get("amount")) or 0.0
+            bounds["low"] += amount
+            bounds["high"] += amount
             group["low"] += amount
-            group["high"] += amount
 
     ordered = sorted(groups.items(), key=lambda kv: kv[1]["low"], reverse=True)
 
+    dispatcher = get_push_dispatch_service()
     sent = 0
     for (whale_id, action), group in ordered[:MAX_EVENTS_PER_PHASE]:
-        label = format_amount_range(
-            group["low"], None if group["open_ended"] else max(group["high"], group["low"])
-        )
-        title, body = whale_copy(group["name"], action, group["tickers"], label)
-        route_ticker = group["tickers"][0]
-        # Audience is the UNION of two selectors: people watching any of the tickers,
-        # and people following this whale. De-duplicated in `notify_users`, so a user in
-        # both gets exactly one notification.
-        dispatcher = get_push_dispatch_service()
-        audience: List[str] = []
-        for ticker in group["tickers"][:5]:
-            audience.extend(await asyncio.to_thread(dispatcher.watchers_of, ticker))
-        audience.extend(await asyncio.to_thread(dispatcher.followers_of_whale, whale_id))
+        per_ticker = group["tickers"]
+        ranked = _ranked_tickers(per_ticker)
+        # Audience is the UNION of two selectors: people watching ANY of the roll-up's
+        # tickers — ALL of them, in one paged read; this used to take the first five in
+        # read order, so a watcher of ticker #6 of a 12-ticker PTR was never told — and
+        # people following this whale.
+        watched = await asyncio.to_thread(dispatcher.watchers_of_any, ranked)
+        followers = await asyncio.to_thread(dispatcher.followers_of_whale, whale_id)
+        audience = list(dict.fromkeys([*watched, *followers]))
         if not audience:
             continue
+        if len(audience) > MAX_RECIPIENTS_PER_SCOPE:
+            # The per-scope ceiling applies to the EVENT, as it did when this was one
+            # `notify_users` call — splitting it into copy variants must not multiply it.
+            # Same preference-first, rotating cut `notify_users` applies to one call.
+            keep = set(await asyncio.to_thread(
+                dispatcher._cap_after_preferences,
+                audience, get_kind(group["kind"]),
+                whale_dedup_key(whale_id, action, group["latest_date"], ranked), now,
+            ))
+            watched = {u: t for u, t in watched.items() if u in keep}
+            followers = [u for u in followers if u in keep]
 
-        sent += await dispatcher.notify_users(
-            audience,
-            kind=group["kind"],
-            title=title,
-            body=body,
-            dedup_key=f"whale:{whale_id}:{action}:{group['latest_date'] or 'nodate'}",
-            # `whale_id` rides along so the client can offer the investor's profile, not
-            # just the ticker. Half this audience follows the WHALE rather than the ticker.
-            route=ticker_route(group["kind"], route_ticker, whale_id=whale_id),
-        )
+        # One notification per reader, worded for THAT reader: a watcher is told about
+        # the tickers on their watchlist and the amount over only those, and routed to
+        # the largest of them; a follower who watches none of them gets the whole filing
+        # WITHOUT "on your watchlist", which would be false for them. Each variant has
+        # its own key (the reader's ticker set), so a retry of the same data re-derives
+        # the same keys and the claim absorbs it.
+        for subset, users in _whale_audience_variants(ranked, watched, followers):
+            shown = list(subset) or ranked
+            title, body = whale_copy(
+                group["name"], action, shown, _amount_label(per_ticker, shown),
+                on_watchlist=bool(subset),
+            )
+            sent += await dispatcher.notify_users(
+                users,
+                kind=group["kind"],
+                title=title,
+                body=body,
+                dedup_key=whale_dedup_key(whale_id, action, group["latest_date"], shown),
+                # `whale_id` rides along so the client can offer the investor's profile,
+                # not just the ticker. Part of this audience follows the WHALE rather
+                # than the ticker.
+                route=ticker_route(group["kind"], shown[0], whale_id=whale_id),
+            )
 
     return sent, next_cursor
 

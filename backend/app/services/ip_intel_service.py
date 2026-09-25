@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.utils.postgrest_paging import fetch_all_rows
+from app.utils.inflight import fail_shared_future
 from app.database import get_supabase
 from app.integrations.openfda import (
     OpenFDAException,
@@ -256,8 +257,7 @@ class IPIntelService:
             logger.exception(
                 "ip_intel: unhandled error for %s: %s", focal, exc,
             )
-            if not future.done():
-                future.set_exception(exc)
+            fail_shared_future(future, exc)
             return None
         finally:
             _inflight.pop(focal, None)

@@ -1194,17 +1194,64 @@ def _catchup_anchor(now: "datetime", last_run, window_hours: int = _SCHEDULED_CA
 # How often a phase whose claim is HELD by another instance re-asks for it.
 _CLAIM_RETRY_SECONDS = 120
 
+# A phase that did NOT complete (it raised, the ledger was unreadable, or another holder
+# kept the claim past its stale window) is retried inside the SAME run's catch-up window.
+# `_run_claimed_phase` used to return and the loop then slept to the NEXT anchor, so one
+# FRED/FMP blip at 02:00 on a quarter-start Sunday left that phase's data a quarter stale
+# (the TTM job: a week). Bounded per anchor so a hard outage cannot loop all day.
+_PHASE_RETRY_SECONDS = 30 * 60
+_MAX_PHASE_RETRIES_PER_ANCHOR = 3
 
-async def _run_claimed_phase(job: str, label: str, body) -> None:
+
+class _AnchorRetries:
+    """Retry budget for one scheduled anchor. Re-entering the SAME anchor keeps the count
+    (a retry must not reset its own budget); a new anchor starts fresh."""
+
+    def __init__(self) -> None:
+        self.anchor = None
+        self.used = 0
+
+    def entered(self, anchor) -> None:
+        if anchor != self.anchor:
+            self.anchor, self.used = anchor, 0
+
+
+async def _retry_unsettled_run(label: str, settled: bool, retries: _AnchorRetries) -> bool:
+    """After a scheduled run: True when the loop should RE-ENTER the same anchor (the
+    retry delay has already been slept). Phases that completed are skipped on re-entry by
+    their own day-keyed claims, so only the unsettled ones run again."""
+    if settled:
+        return False
+    if retries.used >= _MAX_PHASE_RETRIES_PER_ANCHOR:
+        logger.error(
+            "%s: a phase is still unsettled after %d retries — giving up until the next "
+            "scheduled run (%s)", label, _MAX_PHASE_RETRIES_PER_ANCHOR, retries.anchor,
+        )
+        return False
+    retries.used += 1
+    logger.warning(
+        "%s: a phase did not complete — retry %d/%d in %d min, inside this run's catch-up "
+        "window", label, retries.used, _MAX_PHASE_RETRIES_PER_ANCHOR, _PHASE_RETRY_SECONDS // 60,
+    )
+    await asyncio.sleep(_PHASE_RETRY_SECONDS)
+    return True
+
+
+async def _run_claimed_phase(job: str, label: str, body) -> bool:
     """Run one scheduled phase under its durable claim (migration 147).
+
+    Returns True when the phase is SETTLED — it ran, it already ran today, or the operator
+    disabled it — and False when it should be retried: it raised, the ledger was
+    unreadable, or the claim stayed held past its stale window. The caller retries False
+    via `_retry_unsettled_run` inside the same catch-up window.
 
     `body` is an async callable returning a summary. The claim is day-keyed and shared
     across instances, so a phase that already completed today (before a restart, or on
     the other instance of a deploy overlap) is skipped rather than re-run — the fiscal
     dossier recompute and the two Gemini-grounded `refresh_top_tickers` batches have no
     freshness gate of their own, so the claim is what makes a catch-up pass idempotent.
-    A phase that raises releases the claim with success=False (retried on the next
-    catch-up pass); one cancelled by a redeploy does the same, in the manager's `finally`.
+    A phase that raises releases the claim with success=False; one cancelled by a
+    redeploy does the same, in the manager's `finally`.
 
     A REFUSED claim is not "done". It is one of three things, told apart by reading the
     ledger row: the phase already ran today (skip); the claim is HELD — the old instance
@@ -1226,31 +1273,31 @@ async def _run_claimed_phase(job: str, label: str, body) -> None:
                     summary = await body()
                     run.success = True
                     logger.info(f"{label} completed: {summary}")
-                    return
+                    return True
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"{label} failed: {e}", exc_info=True)
-            return
+            logger.error(f"{label} failed: {type(e).__name__}: {e}", exc_info=True)
+            return False
 
         state = await asyncio.to_thread(scheduled_job_state, job)
         if state is None:
             logger.warning("%s: claim refused and the job ledger is unreadable — skipping (fail closed)", label)
-            return
+            return False
         if not state.get("enabled", True):
             logger.info("%s: disabled by the operator kill switch — skipping", label)
-            return
+            return True
         today = datetime.now(timezone.utc).date().isoformat()
         if str(state.get("run_day") or "")[:10] == today:
             logger.info("%s: already ran today (durable claim) — skipping", label)
-            return
+            return True
         if time.monotonic() >= deadline:
             logger.warning(
                 "%s: claim still held after the %ds stale window — skipping this pass "
-                "(the holder never released it; re-entered on the next catch-up)",
+                "(the holder never released it; retried inside this run's window)",
                 label, _CHAIN_PHASE_STALE_SECONDS,
             )
-            return
+            return False
         logger.info(
             "%s: claim held by another instance (claim_at=%s) — re-asking in %ds",
             label, state.get("claim_at"), _CLAIM_RETRY_SECONDS,
@@ -1278,6 +1325,7 @@ async def _run_ttm_benchmark_job():
     await asyncio.sleep(180)  # let app fully start
 
     entered = None  # the anchor this process last entered — a catch-up runs once per anchor
+    retries = _AnchorRetries()
     while True:
         now = datetime.now(timezone.utc)
         catchup = _catchup_anchor(now, _last_weekly_ttm_run)
@@ -1295,6 +1343,7 @@ async def _run_ttm_benchmark_job():
             )
             await asyncio.sleep(sleep_seconds)
         entered = next_run
+        retries.entered(next_run)
 
         async def _ttm():
             from app.services.industry_benchmark_service import (
@@ -1303,7 +1352,9 @@ async def _run_ttm_benchmark_job():
             return await get_industry_benchmark_service().recompute_all_ttm(
                 skip_if_fresh_hours=24,
             )
-        await _run_claimed_phase(JOB_TTM_BENCHMARK_WEEKLY, "TTM benchmark weekly job", _ttm)
+        settled = await _run_claimed_phase(JOB_TTM_BENCHMARK_WEEKLY, "TTM benchmark weekly job", _ttm)
+        if await _retry_unsettled_run("TTM benchmark weekly job", settled, retries):
+            entered = None  # re-enter this week's anchor while its catch-up window is open
 
 
 def _next_daily_run(now: "datetime", hour_utc: int = 8) -> "datetime":
@@ -1514,6 +1565,7 @@ async def _run_industry_dossier_job():
     # redeploy at 03:00 on the first Sunday lost every phase after the one in flight for
     # three months, with nothing logged but the new boot's "next run in 2183.0h" (F24-6).
     entered = None
+    retries = _AnchorRetries()
     while True:
         now = datetime.now(timezone.utc)
         catchup = _catchup_anchor(now, _last_quarterly_dossier_run)
@@ -1532,11 +1584,13 @@ async def _run_industry_dossier_job():
             )
             await asyncio.sleep(sleep_seconds)
         entered = next_run
+        retries.entered(next_run)
+        settled = True  # AND of every phase below; one unsettled phase re-enters the chain
 
         async def _dossier():
             from app.services.industry_dossier_service import get_industry_dossier_service
             return await get_industry_dossier_service().recompute_all()
-        await _run_claimed_phase(JOB_INDUSTRY_DOSSIER_QUARTERLY, "Industry dossier job", _dossier)
+        settled &= await _run_claimed_phase(JOB_INDUSTRY_DOSSIER_QUARTERLY, "Industry dossier job", _dossier)
 
         # ── Phase 2 chained: competitor intel @ base + 30 min ──
         # Waits until the staggered start time so its Gemini-grounded
@@ -1551,7 +1605,7 @@ async def _run_industry_dossier_job():
                 get_competitor_intel_service,
             )
             return await get_competitor_intel_service().refresh_top_tickers()
-        await _run_claimed_phase(
+        settled &= await _run_claimed_phase(
             JOB_COMPETITOR_INTEL_QUARTERLY, "Competitor intel quarterly batch", _competitor,
         )
 
@@ -1563,7 +1617,7 @@ async def _run_industry_dossier_job():
         async def _ip():
             from app.services.ip_intel_service import get_ip_intel_service
             return await get_ip_intel_service().refresh_top_tickers()
-        await _run_claimed_phase(JOB_IP_INTEL_QUARTERLY, "IP intel quarterly batch", _ip)
+        settled &= await _run_claimed_phase(JOB_IP_INTEL_QUARTERLY, "IP intel quarterly batch", _ip)
 
         # ── Industry moat benchmarks (Peer Avg overlay) @ base + 90 min ──
         # Heaviest job in the chain (~140k FMP calls, ~60-90 min wall-clock
@@ -1580,7 +1634,7 @@ async def _run_industry_dossier_job():
             return await get_industry_moat_benchmark_service().recompute_all(
                 skip_if_fresh_hours=24,
             )
-        await _run_claimed_phase(
+        settled &= await _run_claimed_phase(
             JOB_INDUSTRY_MOAT_QUARTERLY, "Industry moat benchmark quarterly batch", _moat,
         )
 
@@ -1603,9 +1657,11 @@ async def _run_industry_dossier_job():
             return await get_industry_benchmark_service().recompute_all(
                 skip_if_fresh_hours=24,
             )
-        await _run_claimed_phase(
+        settled &= await _run_claimed_phase(
             JOB_INDUSTRY_BENCHMARK_QUARTERLY, "Industry benchmark quarterly batch", _benchmarks,
         )
+        if await _retry_unsettled_run("Industry dossier job (quarterly)", settled, retries):
+            entered = None  # re-enter this quarter's chain while its catch-up window is open
 
 
 # Set once the hydration job's first politician sweep completes. The pre-warmer waits on
@@ -1743,7 +1799,7 @@ async def _run_whale_hydration_job():
     #
     # The claim RPC enforces at-most-one-successful-run-per-UTC-day atomically and across
     # instances, so no local date is tracked here at all. A crashed run leaves `claim_at`
-    # set and is retried once the stale window (NOTIFICATION_JOB_STALE_SECONDS) expires;
+    # set and is retried once the stale window (`_CHAIN_PHASE_STALE_SECONDS`) expires;
     # a graceful shutdown records failure immediately via the shielded release.
     #
     # ⚠️ `max(whales.last_hydrated_at)` is NOT usable as this marker: the 6-hourly
@@ -1836,7 +1892,14 @@ async def _run_whale_hydration_job():
         attempts = full_attempts.get(now.date(), 0)
         if now.hour >= 2 and attempts < _MAX_FULL_ATTEMPTS_PER_DAY:
             try:
-                async with claimed_scheduled_job(JOB_WHALE_HYDRATION_FULL) as run:
+                # The chain's 3 h stale window, not the 15-minute notification default: a
+                # full sweep of every whale (FMP + Gemini) can outlast 15 min, and on a
+                # deploy overlap the other instance would steal the claim and run a second
+                # concurrent sweep over the same rows. A parked claim (SIGKILL) only DELAYS
+                # the run — attempts are counted only when the claim is granted.
+                async with claimed_scheduled_job(
+                    JOB_WHALE_HYDRATION_FULL, stale_seconds=_CHAIN_PHASE_STALE_SECONDS,
+                ) as run:
                     if run is not None:
                         full_attempts[now.date()] = attempts + 1
                         # Prune by age, not by one specific key: popping only

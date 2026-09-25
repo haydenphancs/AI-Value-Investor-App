@@ -323,7 +323,9 @@ The redesigned Home tab (`HomeDashboardView`) is fed by ONE aggregation endpoint
 5. **Trillion-Dollar Club Bets** (migration 175, off until `TRILLION_CLUB_ENABLED`) — what the
    companies worth $1T or more own in other companies, with a drill-down at
    `GET /home/trillion-club/{slug}`. Two kinds of data, never mixed: U.S.-listed holdings
-   from a member's own SEC 13F (built daily by `services/trillion_club/`, stored per
+   from a member's own SEC 13F (built daily at 07:00 ET, plus a Monday 08:00 ET re-hash,
+   new-filer probe and discovery screen, by `services/trillion_club/` — the jobs are off until
+   `TRILLION_CLUB_JOBS_ENABLED` — stored per
    (CIK, quarter) with every accession, because FMP folds 13F-HR/A amendments into the
    original quarter), and hand-kept private / non-U.S. / off-13F stakes, each with a primary
    source and dates (`trillion_club_stakes`; news-only rows can never be published).
@@ -999,7 +1001,10 @@ Generated reports are **point-in-time snapshots**, so the three report cache lay
 (`ticker_data_cache` by ticker, `ticker_report_cache`, and the `research_reports` lookup) are
 **not rolling-TTL** — they pin to the **last completed market close** (`is_cache_fresh` /
 `current_close_cycle_start`, a weekday 6pm ET boundary). The first viewer after a new close
-regenerates; everyone that session shares the result.
+regenerates; everyone that session shares the result. The stock detail's history bundle
+(`stock_fundamentals_cache`, 2026-09-25) follows the same close alignment: it drops FMP's
+in-progress bar before storing, and a bundle cut before the current close cycle is a miss, so
+the Performance / Benchmark cards and the 3M–2Y chart never end on a mid-session price.
 
 - **`CACHE_SCHEMA_FLOOR`** is a deploy-time schema-version floor: any report cached before it is
   treated as stale and re-collected, so a shape/semantics change (e.g. the TTM benchmark rollout)
@@ -1008,6 +1013,46 @@ regenerates; everyone that session shares the result.
   fail the freshness check, turning the report cache cold (every view re-collects → cost spike).
   User-history reports in `research_reports` are **not** invalidated by the floor; they are patched
   on read.
+
+### 7.4 Scheduled background jobs (the lifespan loops)
+
+Everything scheduled runs INSIDE the one web process: 24 loops started by
+`app/main.py::_spawn`, plus one Railway cron service (the marketing worker, §12.2). There is
+no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
+whether any of it runs:
+
+- **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
+  a laptop), all 24 start; in development only the notification trio can run, and only
+  behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
+  refunds, subscription expiry and every push silently stop.
+- **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
+  and are safe only because of that; the daily/weekly/quarterly ones hold a day-keyed claim
+  in `notification_job_state` (migrations 120/147), stamped with the CLAIM's time so a run
+  that finishes after midnight is recorded on the day it ran.
+
+| Loop | Cadence | Gate (default) |
+|---|---|---|
+| close snapshot | hourly, all day | — |
+| social snapshot | one per UTC day, hourly retry | — |
+| news / report / scanner / index pre-warmers | 2 h / 1 h / 15 min in session / 30 min | `*_PREWARM_ENABLED` (on) |
+| quarterly chain: dossier → competitor → IP → moat → industry benchmarks | first Sunday of Jan/Apr/Jul/Oct, 02:00 UTC, +30 min each | per-phase claim |
+| TTM benchmarks | Sunday 06:00 UTC | claim |
+| volatility precompute | daily 08:00 UTC | — |
+| whale hydration | politicians every 6 h; full sweep daily ≥ 02:00 UTC (3 h claim) | claim |
+| whale profile pre-warm | once, after the first politician sweep | `WHALE_PREWARM_ENABLED` (on) |
+| research reconciliation (refunds) | every 5 min | — |
+| subscription expiry sweep | hourly | — |
+| Updates insight sweeper | 5 min in the market day; crypto-only every 30 min when closed | — |
+| chat starter warm | 15 min while the market is active | `CHAT_STARTER_WARM_ENABLED` (on) |
+| theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
+| Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
+| marketing publisher / link-hit flush | 10 min / 60 s | `MARKETING_ENABLED` (**off**) / — |
+| push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
+
+A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
+catch-up window (30 min apart, at most 3 times); phases that already ran are skipped by
+their own claims. The owner-facing view of all of this — what runs itself and what must be
+done by hand — is `documents/OWNER_TASKS.md`.
 
 ---
 
@@ -1404,9 +1449,9 @@ delivery while `Transaction.updates` redelivers on every app launch.
   `credits_granted` is 0 on a replay so the client never claims credits the user can't find.
 - Routing is by product-id **prefix** (`IAP_CREDIT_PACK_PREFIX`), so a pack retired from the
   catalog is still diagnosed as a pack. `tier_for_product` is untouched and still raises
-  `UnknownProduct` for anything unmapped. `apply_transaction` (subscriptions) is likewise
-  untouched — consumables got a **sibling**, `apply_consumable_transaction`, not a branch inside
-  it, so the subscription path's two rounds of money-bug fixes are provably unaffected.
+  `UnknownProduct` for anything unmapped. Consumables got a **sibling**,
+  `apply_consumable_transaction`, not a branch inside `apply_transaction` (subscriptions), so
+  the two paths' money-bug fixes stay independent.
 - The **credit amount** is read server-side from `credit_packs` and bounded by
   `IAP_MAX_PACK_CREDITS` — never taken from the client, never inferred from the product id.
 
@@ -1447,6 +1492,27 @@ news; answering 200 consumes it permanently, and nothing sweeps `credit_purchase
 a refunded buyer kept their credits with no repair path. 503 makes Apple redeliver. This is safe
 to retry because `credit_purchases.revoked_at` is an idempotency tombstone — a replayed revocation
 returns `already_revoked` rather than reclaiming twice.
+
+**A failed user LOOKUP answers 503 too (2026-09-25).** `user_id_for_transaction` used to return
+`None` on a query error, which `apply_notification` read as "no such user yet" and answered 200
+`ignored_unknown_transaction` — Apple never retried, and a REFUND/REVOKE was lost for good. It
+now raises `IAPError` (→ 503); `None` means only "every lookup succeeded and found nothing".
+A consumable REFUND that arrives BEFORE the grant writes a revoked row into `credit_purchases`
+(the existing schema) so a later replay of the pre-refund JWS collides with it and grants
+nothing — except when the transaction has no usable `appAccountToken` or its pack has no catalog
+row (`user_id` is NOT NULL, `credits` > 0); those are logged as errors and are a known gap that
+needs a migration.
+
+**Subscriptions: the client-verify path is ordered too (2026-09-25).** It used to pass no event
+time, so `_stale_delivery_reason` returned "never stale": a refunded subscriber could re-POST the
+saved pre-refund JWS to `/billing/verify` and get the paid tier and its full allocation back. The
+client path now orders on the verified payload's own `signedDate` against the stored
+`last_event_at` (falling back to `updated_at` on old rows), including against the user's row for
+a DIFFERENT original transaction — otherwise "refund Max, buy a cheap Pro, replay the Max JWS"
+still worked. A genuine re-subscribe is signed after the refund and still applies. Transactions
+with `isUpgraded` are skipped on both paths (they could demote or revoke the upgraded tier).
+Accepted trade-off: a purchase on a NEW lineage whose verify is delayed past a newer notification
+on the user's old subscription reads as stale.
 
 ### 9b.4 Restore, and why buying requires an account
 
@@ -1977,8 +2043,8 @@ Migration 089 exists because two of these were mixed once already.
 | earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **1 call/day** (one market-wide window serves both passes) | `claim_notification_job` |
 | insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
-| price alerts | 60s, `session_phase() != "closed"` | 1 batch-quote/cycle | none — the dedup key is the lock |
-| profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | dedup key `profile_match:{day}:{user_id}` |
+| price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed | 1 batch-quote/cycle | none — the dedup key is the lock |
+| profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | `claim_notification_job` (a failed profile or tier read leaves the day open) + dedup key `profile_match:{day}:{user_id}` |
 | ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a catalyst tier and the quote is usable; body = the grounded catalyst, else the card headline | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
@@ -2407,7 +2473,7 @@ backend/
 │   ├── database.py               # get_supabase(); raw SDK, no ORM
 │   ├── dependencies.py           # NOT app/api/v1/dependencies.py
 │   ├── log_redaction.py
-│   └── main.py                   # lifespan, middleware, ~18 supervised background loops
+│   └── main.py                   # lifespan, middleware, 24 supervised background loops (§7.4)
 ├── database/
 │   ├── migrations/               # NNN_*.sql, applied by hand
 │   └── schema_snapshot.sql       # pg_dump --schema-only of live Supabase

@@ -96,6 +96,50 @@ async def test_7d_db_calls_run_off_the_event_loop():
         "PostgREST round-trips must not run on the event-loop thread"
 
 
+class _FilteringQuery:
+    """Applies the real date filters to one row per day, so the WINDOW BOUNDS are tested,
+    not just the summing."""
+
+    _OPS = {
+        "gt": lambda a, b: a > b, "gte": lambda a, b: a >= b,
+        "lt": lambda a, b: a < b, "lte": lambda a, b: a <= b,
+    }
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def select(self, *_):
+        return self
+
+    def eq(self, col, val):
+        self.rows = [r for r in self.rows if r[col] == val]
+        return self
+
+    def __getattr__(self, name):
+        op = self._OPS[name]  # KeyError on an operator this fake does not model
+
+        def _f(col, val):
+            self.rows = [r for r in self.rows if op(r[col], val)]
+            return self
+        return _f
+
+    def execute(self):
+        return SimpleNamespace(data=self.rows)
+
+
+@pytest.mark.asyncio
+async def test_7d_windows_are_seven_daily_snapshots_each():
+    """One snapshot per day, one mention each. `.gte(week_ago)` used to include both
+    today's snapshot AND the one from exactly a week ago: "this week" summed 8 days
+    against the previous window's 7 (a +14% week-over-week change out of nothing)."""
+    today = date.today()
+    rows = [{"ticker": "NVDA", "snapshot_date": (today - timedelta(days=d)).isoformat(),
+             "mentions": 1} for d in range(0, 21)]
+    svc = sms.SocialMentionsService.__new__(sms.SocialMentionsService)
+    svc.supabase = SimpleNamespace(table=lambda _n: _FilteringQuery(rows))
+    assert await svc.get_mentions_7d("NVDA") == (7, 7, True)
+
+
 # ── 24h: cache hit / cold cache / not tracked ──────────────────────────────────────
 
 

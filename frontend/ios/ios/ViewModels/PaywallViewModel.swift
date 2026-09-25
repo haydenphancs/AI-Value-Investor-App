@@ -138,7 +138,10 @@ final class PaywallViewModel: ObservableObject {
     /// again. So the row must also still entitle, be for THIS tier, and not have ended —
     /// except in grace/billing-retry, where the period has ended by definition (same carve-out
     /// as `iap_service.winning_tier`).
-    nonisolated static func isPayingFor(
+    /// Main-actor isolated on purpose (NOT `nonisolated`): it reads `SubscriptionDTO.userTier`,
+    /// which the project's default MainActor isolation makes main-actor, and its only caller
+    /// (`loadSubscription`) is on the main actor anyway.
+    static func isPayingFor(
         subscription: SubscriptionDTO,
         accountTier: UserTier,
         now: Date

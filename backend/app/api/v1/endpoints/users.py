@@ -559,6 +559,81 @@ def _merge_portfolio_items(supabase: Client, source_id: str, target_id: str) -> 
         supabase.table("portfolio_items").delete().in_("id", dupes).execute()
 
 
+def _relocate_claimed_report_pdfs(
+    supabase: Client, reports: list, bucket: str, user_id: str
+) -> dict:
+    """Move each claimed guest report's Storage PDF under the ACCOUNT's prefix.
+
+    `pdf_path` is stamped `reports/<user_id>/<report_id>.pdf` with the id the report had at
+    GENERATION time — for a guest-era report, the per-install bucket. Account deletion
+    (`_purge_research_pdfs`) lists `reports/<account id>/` and nothing else, so an object left
+    under the bucket's prefix survives deletion forever. The claim used to "handle" that by
+    clearing `pdf_path`, which erased the only handle on the object while leaving its bytes —
+    ticker, thesis, fair value — in Storage permanently.
+
+    Per report, best-effort and never raising: a Storage fault must not cost the user their
+    reports, so the row is claimed whatever happens here.
+
+      * no PDF                             → reset by the caller (regenerated on demand)
+      * under `reports/<bucket>/`, move OK → `pdf_path` = `reports/<user_id>/<id>.pdf`, the
+                                             same key `pdf_report_service` writes, so the
+                                             deletion purge and a regenerate both find it
+      * move fails, removing the old object succeeds
+                                           → reset; nothing is left under the guest prefix
+      * move AND remove fail (Storage down) → columns kept AS THEY ARE: the old path is then
+                                             the only record the object exists, and erasing
+                                             it is exactly the orphan this replaces
+      * any other path                     → kept as is, never moved or deleted: it is not
+                                             provably this install's object
+
+    Returns `{report_id: pdf column updates}` for every row whose PDF columns must NOT be
+    reset (an empty dict means "leave them untouched"). Rows absent from it are reset.
+    """
+    prefix = f"reports/{bucket}/"
+    keep: dict = {}
+    for row in reports:
+        report_id = row["id"]
+        old = row.get("pdf_path")
+        if not old:
+            continue
+        if (
+            not isinstance(old, str)
+            or not old.startswith(prefix)
+            or ".." in old.split("/")
+        ):
+            logger.warning(
+                "Guest-data claim: report=%s has pdf_path=%r outside the guest prefix %s "
+                "(bucket=%s user=%s) — leaving the object and the path untouched",
+                report_id, old, prefix, bucket, user_id,
+            )
+            keep[report_id] = {}
+            continue
+
+        new = f"reports/{user_id}/{report_id}.pdf"
+        try:
+            supabase.storage.from_(_RESEARCH_PDF_BUCKET).move(old, new)
+            keep[report_id] = {"pdf_path": new}
+            continue
+        except Exception as e:  # noqa: BLE001 — degrade to removing the guest copy
+            logger.warning(
+                "Guest-data claim: moving report PDF %s -> %s failed for report=%s "
+                "bucket=%s user=%s (%s: %s) — removing the guest copy instead",
+                old, new, report_id, bucket, user_id, type(e).__name__, e,
+            )
+
+        try:
+            supabase.storage.from_(_RESEARCH_PDF_BUCKET).remove([old])
+        except Exception as e:  # noqa: BLE001 — keep the handle; see the docstring
+            logger.error(
+                "Guest-data claim: report PDF %s could be neither moved nor removed for "
+                "report=%s bucket=%s user=%s (%s: %s) — keeping pdf_path so the object "
+                "stays findable; it is NOT under the account's deletion prefix",
+                old, report_id, bucket, user_id, type(e).__name__, e,
+            )
+            keep[report_id] = {}
+    return keep
+
+
 @router.post("/me/claim-guest-data")
 async def claim_guest_data(
     user: dict = Depends(get_current_user),
@@ -801,23 +876,34 @@ async def claim_guest_data(
         #    having spent their one free guest report to get there. No unique constraint
         #    to collide with (the id is a uuid), so every row moves.
         guest_reports = (
-            supabase.table("research_reports").select("id")
+            supabase.table("research_reports").select("id,pdf_path")
             .eq("user_id", bucket).execute().data or []
         )
         if guest_reports:
-            # Reset the PDF alongside the move. `pdf_path` is stamped at generation time as
+            # The PDF moves WITH the row. `pdf_path` is stamped at generation time as
             # `reports/<user_id>/<report_id>.pdf` with the id the report had THEN — the guest
-            # bucket. Re-pointing user_id without clearing it leaves the object under a prefix
-            # `_purge_research_pdfs` never lists, so account deletion would orphan it forever
-            # (and with the row gone, the path is the only handle that existed). The PDF is
-            # derived data: clearing it makes the app regenerate on demand from the frozen
-            # report, which is cheap and keeps the deletion promise honest.
-            supabase.table("research_reports").update({
-                "user_id": user_id,
-                "pdf_path": None,
-                "pdf_status": "pending",
-                "pdf_generated_at": None,
-            }).in_("id", [r["id"] for r in guest_reports]).execute()
+            # bucket — and `_purge_research_pdfs` lists only the account's prefix. This used
+            # to clear `pdf_path` and leave the object where it was, which erased the only
+            # handle on it: account deletion then could not find it, and nothing else ever
+            # would. Storage goes FIRST, so a row only ever points at a key that was moved;
+            # see `_relocate_claimed_report_pdfs` for every degraded case.
+            keep = _relocate_claimed_report_pdfs(supabase, guest_reports, bucket, user_id)
+            # Rows keeping a PDF differ in `pdf_path`, so they update one by one. Guest
+            # reports are legacy-only (generation is account-only now), so this is rare.
+            for report_id, pdf_cols in keep.items():
+                supabase.table("research_reports").update(
+                    {"user_id": user_id, **pdf_cols}
+                ).eq("id", report_id).execute()
+            # No PDF, or its guest copy was removed: reset so the app regenerates on demand
+            # from the frozen report — under the account's prefix this time.
+            reset_ids = [r["id"] for r in guest_reports if r["id"] not in keep]
+            if reset_ids:
+                supabase.table("research_reports").update({
+                    "user_id": user_id,
+                    "pdf_path": None,
+                    "pdf_status": "pending",
+                    "pdf_generated_at": None,
+                }).in_("id", reset_ids).execute()
             claimed["research_reports"] = len(guest_reports)
 
     def _claim_chats() -> None:

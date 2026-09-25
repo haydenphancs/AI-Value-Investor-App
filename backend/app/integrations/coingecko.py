@@ -28,6 +28,7 @@ import logging
 import httpx
 
 from app.config import settings
+from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
 
@@ -454,14 +455,12 @@ class CoinGeckoClient:
             assert last is not None
             logger.error("CoinGecko %s failed after %d attempts: %s",
                          endpoint, self._MAX_RETRIES, last)
-            if not fut.done():
-                fut.set_exception(last)
+            fail_shared_future(fut, last)
             raise last
         except BaseException as e:
             # Includes CancelledError and the permanent errors from `_request_once`.
-            if not fut.done():
-                fut.set_exception(e if isinstance(e, Exception) else
-                                  CoinGeckoUnavailableException(f"{endpoint}: {e!r}"))
+            fail_shared_future(fut, e if isinstance(e, Exception) else
+                               CoinGeckoUnavailableException(f"{endpoint}: {e!r}"))
             raise
         finally:
             self._inflight.pop(key, None)

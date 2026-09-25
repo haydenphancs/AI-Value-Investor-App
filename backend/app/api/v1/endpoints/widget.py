@@ -38,6 +38,7 @@ from app.core.security import create_widget_token, widget_token_expires_at
 from app.dependencies import (
     StandardRateLimit,
     WidgetRateLimit,
+    get_current_user,
     get_current_user_id,
     get_watchlist_identity,
     get_widget_caller,
@@ -153,7 +154,7 @@ async def get_market_mover(_rate_limit=WidgetRateLimit) -> WidgetMoverPayload:
 
 
 @router.get("/token", response_model=WidgetTokenResponse)
-async def issue_widget_token(user_id: str = Depends(get_current_user_id)) -> WidgetTokenResponse:
+async def issue_widget_token(user: dict = Depends(get_current_user)) -> WidgetTokenResponse:
     """Mint the Home Screen extension's market-data credential for the signed-in caller.
 
     On the STRICT router: you must already hold a real session to be issued one. The token that
@@ -161,10 +162,20 @@ async def issue_widget_token(user_id: str = Depends(get_current_user_id)) -> Wid
     `type == "access"`, so presenting this as a bearer is a 401 on every authenticated route
     (`tests/test_widget_token_auth.py` proves it rather than asserting it).
 
+    ⚠️ `get_current_user`, NOT the router's token-only `get_current_user_id`. That one checks
+    signature and expiry alone, so an access token still inside its life after the victim's
+    PASSWORD RESET, or one naming a DELETED account, used to mint here — and the widget token
+    deliberately does not participate in password-change eviction (`core/security.py`) and is
+    never re-checked against `public.users`, so that caller kept FMP market data for 90 days
+    with no account behind it (auth.md §1a). `get_current_user` refuses both
+    (AUTH_SESSION_EXPIRED / AUTH_ACCOUNT_NOT_FOUND). This is the ONE place a widget token's
+    account is ever checked, so the check has to be the strict one.
+
     Not rate-limited beyond the router's own gate: the client asks at most once per sign-in and
-    once per renewal window (30 days), and a caller able to reach this route already holds the
-    strictly more powerful credential.
+    once per renewal window (30 days), and a caller that passes `get_current_user` holds a
+    live session on a live account — the strictly more powerful credential.
     """
+    user_id = user["id"]
     token = create_widget_token(user_id)
     expires = widget_token_expires_at(token)
     # `widget_token_expires_at` re-decodes what we just minted, so None here means the token we

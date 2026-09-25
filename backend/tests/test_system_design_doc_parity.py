@@ -398,6 +398,7 @@ _CURATED_TABLES = {
     # rule: two settled sessions, derived corporate actions, and the durable half of a
     # coin's fundamentals.
     "market_close_snapshot", "corporate_action_cache", "crypto_fundamentals_cache",
+    "stock_fundamentals_cache",
     # §9b.9 (chat starters, migrations 161/162) names this table; the snapshot now holds it.
     "chat_starter_answers",
     # 2026-09-18: the benchmark-scheduling invariants name the durable claim ledger the

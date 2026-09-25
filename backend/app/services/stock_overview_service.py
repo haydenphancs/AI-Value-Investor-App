@@ -46,6 +46,7 @@ from app.schemas.stock_overview import (
 )
 from app.services.sector_benchmark_service import _FMP_SECTOR_MAP
 from app.utils.market_hours import (
+    ET,
     SESSION_AFTERHOURS,
     SESSION_CLOSED,
     SESSION_PREMARKET,
@@ -59,6 +60,9 @@ from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
 from app.services.market_movers_service import get_market_movers_service
+# The close-cycle boundary every close-aligned cache in the app shares (weekday 18:00 ET).
+# Bound at MODULE level, like index/etf/commodity, so a test can freeze this module's clock.
+from app.services.ticker_report_cache import current_close_cycle_start
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +75,19 @@ def _normalize_sector(name: str) -> str:
 
 _cache: Dict[str, Tuple[float, Any]] = {}
 _VOLATILE_TTL = 120            # 2 min for intraday data (quote, chart)
+# The two fundamentals TTLs are CEILINGS: the bundle carries the daily price history, so
+# it is also a miss once the close cycle turns (`_bundle_is_current`).
 _FUNDAMENTALS_MEM_TTL = 3600   # 1 hour in-memory for fundamentals
 _FUNDAMENTALS_DB_TTL_HOURS = 24  # 24 hours in Supabase for fundamentals
-_SP_HIST_CACHE_TTL = 3600      # 1 hour for S&P historical
+_SP_HIST_CACHE_TTL = 3600      # 1 hour for S&P historical (key carries the close cycle)
+_SP_HIST_KEY_PREFIX = "spy_hist_full:"
+# Stamped into the fundamentals bundle: the settled-session date its two histories were
+# cut at. See `_bundle_is_current`.
+_SETTLED_THROUGH_KEY = "history_settled_through"
+# The six sector medians the degraded Price card scores against (`build_price_snapshot`).
+_VALUATION_BENCH_METRICS = (
+    "pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio", "ev_ebitda", "earnings_yield",
+)
 _CACHE_TTL = _VOLATILE_TTL     # default TTL for general cache
 # Hard cap on live entries. Expired rows are only swept lazily on read of the
 # same key, so without a cap this dict grows unbounded in the long-lived Railway
@@ -101,6 +115,73 @@ def _cache_set(key: str, value: Any):
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Settled-close alignment for the daily price history (C7) ──────────────────
+#
+# Same defect the index / ETF / commodity screens were fixed for (F16-2, see the block in
+# `index_service`): FMP `historical-price-eod/full` includes the CURRENT session's partial
+# bar, and `_fetch_fundamentals` asks for history through today. The first viewer after
+# 09:30 used to pin that ~snapshot bar into `stock_fundamentals_cache` as "today" for 24h
+# (plus a 1h memory tier), so the Performance card (1M/YTD/1Y/3Y/5Y/10Y vs S&P), the
+# Benchmark card and the 3M/6M/1Y daily chart on the first overview load all ended on an
+# intraday price and never picked up that afternoon's move. SPY came from a separate 1h
+# cache keyed by the UTC date, so the two series could also end on different sessions.
+#
+# Three parts, all keyed on ONE cutoff per bundle (`_settled_cutoff_date`):
+#   1. both histories are cut to settled sessions before anything derives from or
+#      persists them (`_fetch_fundamentals`);
+#   2. a bundle is a MISS once the close cycle turns, in both tiers, whatever the 24h / 1h
+#      ceiling says (`_bundle_is_current`) — otherwise the fix trades a wrong last bar for
+#      a missing one until the rolling TTL runs out;
+#   3. the SPY history is keyed on the same cutoff, so stock and S&P end on one session.
+
+
+def _settled_cutoff_date(now: Optional[datetime] = None) -> str:
+    """ISO date of the most recent SETTLED session — the last row a daily history may carry."""
+    return current_close_cycle_start(now).astimezone(ET).date().isoformat()
+
+
+def _settled_bars(historical: Any, now: Optional[datetime] = None) -> List[Dict]:
+    """The daily rows whose session has settled (see `chart_helper.settled_bars`)."""
+    from app.services.chart_helper import settled_bars
+
+    return settled_bars(historical, _settled_cutoff_date(now))
+
+
+def _bundle_is_current(
+    bundle: Any, cached_at: datetime, now: Optional[datetime] = None
+) -> bool:
+    """True when a cached fundamentals bundle still describes the current close cycle.
+
+    Two tests, both needed:
+      * written on/after `current_close_cycle_start()` — the rule every close-aligned
+        cache in the app uses;
+      * its histories were cut at the CURRENT cycle's settled date (the stamp
+        `_fetch_fundamentals` writes). The timestamp alone misses two cases: a row written
+        by the pre-fix code inside the current cycle (no stamp, and it may still carry the
+        in-progress bar), and a fetch that straddled 18:00 ET (cut at the old date, stamped
+        in the new cycle — the settled bar would be missing for the whole cycle).
+    """
+    if not isinstance(bundle, dict):
+        return False
+    cycle_start = current_close_cycle_start(now)
+    if cached_at < cycle_start:
+        return False
+    return bundle.get(_SETTLED_THROUGH_KEY) == cycle_start.astimezone(ET).date().isoformat()
+
+
+def _fundamentals_mem_get(key: str) -> Optional[Dict[str, Any]]:
+    """Tier-1 read for the fundamentals bundle: the 1h ceiling, plus a MISS (and eviction)
+    once the close cycle turns."""
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if not _bundle_is_current(value, datetime.fromtimestamp(ts, tz=timezone.utc)):
+        _cache.pop(key, None)
+        return None
+    return _cache_get(key, ttl=_FUNDAMENTALS_MEM_TTL)
 
 
 # The four hardcoded _SECTOR_*_AVG tables that used to live here were DELETED.
@@ -256,22 +337,13 @@ def _compute_return(prices: List[Dict], days_back: int) -> Optional[float]:
     return ((end - start) / start) * 100
 
 
-def _compute_ytd_return(prices: List[Dict]) -> Optional[float]:
-    if not prices or len(prices) < 2:
-        return None
-    current_year = datetime.now(tz=timezone.utc).year
-    from app.services.chart_helper import _finite_or_none
-    for p in prices:
-        date_str = p.get("date") or ""
-        if date_str.startswith(str(current_year)):
-            # Finite-guard so a NaN/Inf close degrades to an omitted period, not a
-            # NaN that breaks the iOS JSON decode of the stock detail screen.
-            start_price = _finite_or_none(p.get("close") or p.get("adjClose"))
-            end_price = _finite_or_none(prices[-1].get("close") or prices[-1].get("adjClose"))
-            if start_price and end_price and start_price > 0:
-                return ((end_price - start_price) / start_price) * 100
-            break
-    return None
+def _compute_ytd_return(prices: List[Dict], now: Optional[datetime] = None) -> Optional[float]:
+    """YTD from the previous year's last close — the one shared definition
+    (`chart_helper.ytd_return`), so the stock, ETF, index, crypto, commodity and theme
+    screens cannot disagree on the same metric."""
+    from app.services.chart_helper import ytd_return
+
+    return ytd_return(prices, now)
 
 
 def _get_market_status() -> MarketStatusResponse:
@@ -515,6 +587,15 @@ class StockOverviewService:
         if isinstance(val_snapshot, Exception):
             logger.warning(f"Valuation snapshot failed for {ticker}: {val_snapshot}")
             val_snapshot = None
+        # The degraded Price card (built when the valuation snapshot is missing) scores
+        # against sector medians. That read is the SYNC supabase-py client, and
+        # `_build_full_response` is synchronous — so it is fetched HERE, off the loop, and
+        # handed in, rather than read inline on the single uvicorn worker.
+        valuation_bench: Optional[Dict[str, Optional[float]]] = None
+        if val_snapshot is None:
+            valuation_bench = await self._fetch_valuation_bench(
+                ticker, fundamentals.get("profile")
+            )
         if isinstance(health_snapshot, Exception):
             logger.warning(f"Health snapshot failed for {ticker}: {health_snapshot}")
             health_snapshot = None
@@ -568,6 +649,7 @@ class StockOverviewService:
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
             ipo_price_data=ipo_price_data,
+            valuation_bench=valuation_bench,
         )
 
         # Cache the formatted profile for chat AI context. Same write, same best-effort
@@ -597,6 +679,38 @@ class StockOverviewService:
         _cache_set(overview_key, response)
         return response
 
+    async def _fetch_valuation_bench(
+        self, ticker: str, profile: Any,
+    ) -> Dict[str, Optional[float]]:
+        """Sector medians for the DEGRADED Price card, read on a worker thread.
+
+        `SectorBenchmarkLookup` drives the synchronous Supabase client (a cold key is one or
+        two paginated reads, plus a blocking retry sleep on a blip), so it must never run
+        from `_build_full_response`, which is a plain `def` on the event loop. Never
+        raises: this is already the degraded path, and an empty result degrades each label
+        to a bare metric name, which is honest. A profile with no sector reads nothing.
+        """
+        profile = profile if isinstance(profile, dict) else {}
+        sector = profile.get("sector") or ""
+        if not sector:
+            return {}
+        industry = profile.get("industry") or ""
+        normalized = _normalize_sector(sector)
+        try:
+            lookup = get_sector_benchmark_lookup()
+            bench = await asyncio.to_thread(
+                lookup.get_current_benchmark_values,
+                industry, normalized, list(_VALUATION_BENCH_METRICS),
+            )
+        except Exception as e:
+            logger.warning(
+                "Sector benchmark lookup failed on the fallback Price card for %s "
+                "(sector=%s, industry=%s): %s: %s",
+                ticker, normalized, industry, type(e).__name__, e,
+            )
+            return {}
+        return bench if isinstance(bench, dict) else {}
+
     # ── Fundamentals: 24h Supabase + 1h in-memory ─────────────────
 
     async def _get_fundamentals(self, ticker: str) -> Dict[str, Any]:
@@ -605,11 +719,13 @@ class StockOverviewService:
           Tier 1: in-memory (1h TTL)
           Tier 2: Supabase stock_fundamentals_cache (24h TTL)
           Miss:   parallel FMP calls → cache in both tiers
+        Both TTLs are ceilings: the bundle carries the daily price history, so either tier
+        is also a MISS once the close cycle turns (`_bundle_is_current`).
         """
         mem_key = f"fundamentals:{ticker}"
 
         # Tier 1: in-memory
-        cached = _cache_get(mem_key, ttl=_FUNDAMENTALS_MEM_TTL)
+        cached = _fundamentals_mem_get(mem_key)
         if cached is not None:
             logger.debug(f"Fundamentals in-memory HIT for {ticker}")
             return cached
@@ -665,13 +781,25 @@ class StockOverviewService:
         return data
 
     async def _fetch_fundamentals(self, ticker: str) -> Dict[str, Any]:
-        """Parallel FMP calls for all fundamental/slow-moving data."""
+        """Parallel FMP calls for all fundamental/slow-moving data.
+
+        Both daily histories are cut to SETTLED sessions (FMP's in-progress bar dropped)
+        before they are returned or persisted, and the bundle is stamped with the cutoff
+        it was cut at — see the "Settled-close alignment" block at the top of the module.
+        """
+        from app.services.chart_helper import settled_bars
+
         today = datetime.now(tz=timezone.utc).date()
         from_date_full = "1900-01-01"  # Fetch full history — FMP returns from actual IPO
         to_date = today.isoformat()
+        # ONE cutoff for the whole bundle: the stock filter, the SPY filter, the SPY cache
+        # key and the freshness stamp all agree even if this fetch straddles 18:00 ET.
+        settled_through = _settled_cutoff_date()
 
-        # SPY historical (separate 1h cache)
-        sp_cache_key = f"spy_hist_full:{to_date}"
+        # SPY historical (separate 1h cache). Keyed on the SETTLED date, not the UTC date:
+        # the UTC key rolled over at 20:00 ET and not at the close, so a stock bundle and
+        # the SPY series it is compared with could end on different sessions.
+        sp_cache_key = f"{_SP_HIST_KEY_PREFIX}{settled_through}"
         cached_spy = _cache_get(sp_cache_key, _SP_HIST_CACHE_TTL)
 
         tasks = [
@@ -713,14 +841,22 @@ class StockOverviewService:
             spy_hist = cached_spy
         else:
             spy_raw = _safe(spy_task_idx) if spy_task_idx is not None else {}
-            spy_hist = _parse_historical(spy_raw)
+            spy_hist = settled_bars(_parse_historical(spy_raw), settled_through)
             if spy_hist:
+                # A previous cycle's series (up to 5,000 rows) is never read again once
+                # the key moves on; drop it now rather than leave it resident until the
+                # entry cap happens to evict it.
+                for stale_key in [
+                    k for k in _cache
+                    if k.startswith(_SP_HIST_KEY_PREFIX) and k != sp_cache_key
+                ]:
+                    _cache.pop(stale_key, None)
                 _cache_set(sp_cache_key, spy_hist)
 
         # Parse lists safely
         def _list(i): return _safe(i, []) if isinstance(_safe(i, []), list) else []
 
-        stock_hist = _parse_historical(_safe(12))
+        stock_hist = settled_bars(_parse_historical(_safe(12)), settled_through)
 
         return {
             "profile": _safe(0),
@@ -738,10 +874,11 @@ class StockOverviewService:
             "stock_historical": stock_hist,
             "spy_historical": spy_hist,
             "industry_perf": _list(13),
+            _SETTLED_THROUGH_KEY: settled_through,
         }
 
     def _check_fundamentals_db(self, ticker: str) -> Optional[Dict[str, Any]]:
-        """Check Supabase stock_fundamentals_cache (24h TTL)."""
+        """Check Supabase stock_fundamentals_cache (24h ceiling, cut at the close cycle)."""
         try:
             row = (
                 self.supabase.table("stock_fundamentals_cache")
@@ -766,11 +903,21 @@ class StockOverviewService:
 
             data = entry.get("response_json")
             if data and isinstance(data, dict):
+                if not _bundle_is_current(data, cached_at):
+                    logger.info(
+                        "Fundamentals Supabase STALE for %s — written for an earlier close "
+                        "cycle (cached_at=%s, settled_through=%s, current=%s)",
+                        ticker, cached_at_str, data.get(_SETTLED_THROUGH_KEY),
+                        _settled_cutoff_date(),
+                    )
+                    return None
                 logger.info(f"Fundamentals Supabase HIT for {ticker} (age={age})")
                 return data
             return None
         except Exception as e:
-            logger.warning(f"Fundamentals Supabase check failed for {ticker}: {e}")
+            logger.warning(
+                f"Fundamentals Supabase check failed for {ticker}: {type(e).__name__}: {e}"
+            )
             return None
 
     def _upsert_fundamentals_db(self, ticker: str, data: Dict[str, Any]) -> None:
@@ -1052,8 +1199,12 @@ class StockOverviewService:
         profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
         ipo_price_data=None,
+        valuation_bench: Optional[Dict[str, Optional[float]]] = None,
     ) -> StockOverviewResponse:
-        """Combine fundamentals + volatile into one response."""
+        """Combine fundamentals + volatile into one response.
+
+        Synchronous, so it must do no I/O: `valuation_bench` is the degraded Price card's
+        sector medians, prefetched off the loop by `get_overview`."""
         profile = fund.get("profile", {})
         quote = vol.get("quote", {})
         key_metrics = fund.get("key_metrics", [])
@@ -1146,6 +1297,7 @@ class StockOverviewService:
             valuation_snapshot=valuation_snapshot,
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
+            valuation_bench=valuation_bench,
         )
 
         # Sector & Industry
@@ -1532,6 +1684,7 @@ class StockOverviewService:
         sector: str, profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
         profile: Optional[Dict] = None, industry: str = "",
+        valuation_bench: Optional[Dict[str, Optional[float]]] = None,
     ) -> List[SnapshotItemResponse]:
         snapshots = []
 
@@ -1566,6 +1719,7 @@ class StockOverviewService:
             snapshots.append(self._build_valuation_snapshot(
                 fr, km, cf0, inc0, bs, profile or {},
                 _normalize_sector(sector) if sector else "", industry,
+                bench=valuation_bench,
             ))
 
         # 4. Financial Health (use cached sector-relative snapshot if available)
@@ -1682,6 +1836,7 @@ class StockOverviewService:
     def _build_valuation_snapshot(
         self, fr: Dict, km: Dict, cf: Dict, inc: Dict, bs: Dict,
         profile: Dict, sector: str, industry: str,
+        bench: Optional[Dict[str, Optional[float]]] = None,
     ) -> SnapshotItemResponse:
         """DEGRADED fallback for the Price card.
 
@@ -1699,14 +1854,21 @@ class StockOverviewService:
         It now calls the SAME builder as the primary, so the two cannot drift
         again. The only remaining difference is freshness: no Supabase snapshot
         row, computed inline from the overview's own already-fetched payloads.
+
+        `bench` is the sector medians, PREFETCHED off the event loop by `get_overview`
+        (`_fetch_valuation_bench`) — pass it, even when empty. `None` keeps the old inline
+        read for a direct caller only: that read is the synchronous Supabase client, and
+        this method runs on the loop.
         """
-        bench: Dict[str, Optional[float]] = {}
+        if bench is not None:
+            return build_price_snapshot(
+                fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile, bench=bench,
+            )
+        bench = {}
         if sector:
             try:
                 bench = get_sector_benchmark_lookup().get_current_benchmark_values(
-                    industry, sector,
-                    ["pe_ratio", "ps_ratio", "pb_ratio", "pfcf_ratio",
-                     "ev_ebitda", "earnings_yield"],
+                    industry, sector, list(_VALUATION_BENCH_METRICS),
                 )
             except Exception as e:
                 # Non-fatal by design: an empty `bench` degrades each label to a

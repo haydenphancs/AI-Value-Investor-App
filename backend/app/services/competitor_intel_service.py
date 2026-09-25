@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.utils.postgrest_paging import fetch_all_rows
+from app.utils.inflight import fail_shared_future
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
@@ -315,8 +316,7 @@ class CompetitorIntelService:
             logger.exception(
                 "competitor_intel: unhandled error for %s: %s", focal, exc,
             )
-            if not future.done():
-                future.set_exception(exc)
+            fail_shared_future(future, exc)
             return None
         finally:
             _inflight.pop(cache_key, None)

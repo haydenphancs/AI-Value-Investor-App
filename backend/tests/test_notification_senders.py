@@ -328,18 +328,47 @@ def test_insider_copy_names_who_and_how_much_without_a_recommendation():
 
 CUTOFF_DATE = (TODAY - timedelta(days=45)).isoformat()
 
+# What production writes (C13, 2026-09-25). The fixtures here used to date "fresh" rows
+# TODAY, a shape no hydrator produces, so they passed against a floor that dropped real
+# filings:
+#   * a 13F row's `date` is the QUARTER END it describes (FMP `institutional-ownership/
+#     dates`), filed up to 45 days later — TODAY (2026-08-07) sits in Q3, so the latest
+#     quarter a 13F can describe is Q2, ending 06-30;
+#   * a congressional row's `date` is the TRANSACTION date; `disclosure_date` is the news.
+Q2_END, Q1_END = "2026-06-30", "2026-03-31"
+_FUND = {"name": "Fund", "firm_name": "Fund", "data_source": "13f"}
+_MEMBER = {"name": "Member", "firm_name": None, "data_source": "congressional_house"}
+
+
+def _cutoff_at(now: datetime) -> str:
+    """The cutoff exactly as `_run_whale_phase` derives it."""
+    from app.utils.market_hours import ET
+
+    return (now.astimezone(ET).date() - timedelta(days=45)).isoformat()
+
+
+def _13f(ticker="AAPL", when=Q2_END):
+    return {"ticker": ticker, "date": when, "amount_range": None, "disclosure_date": None,
+            "created_at": "2026-08-07T02:00:00Z", "whales": dict(_FUND)}
+
+
+def _ptr(ticker="AAPL", traded="2026-07-20", disclosed="2026-08-05"):
+    return {"ticker": ticker, "date": traded, "disclosure_date": disclosed,
+            "amount_range": "$1,001 - $15,000", "created_at": "2026-08-07T02:00:00Z",
+            "whales": dict(_MEMBER)}
+
 
 def test_the_backfill_guard_drops_quarter_old_trades():
     """THE trap. First hydration of a new whale inserts hundreds of quarter-old filings
     with a brand-new created_at. Windowing on created_at alone would announce a fund's
     entire historical book as this week's activity — one notification per position."""
-    old = {"ticker": "AAPL", "date": "2026-01-15", "created_at": "2026-08-07T00:00:00Z"}
-    assert _recent_whale_rows([old], cutoff_date=CUTOFF_DATE) == []
+    assert _recent_whale_rows([_13f(when=Q1_END)], cutoff_date=CUTOFF_DATE) == []
+    assert _recent_whale_rows([_13f(when="2026-01-15")], cutoff_date=CUTOFF_DATE) == []
 
 
 def test_a_genuinely_recent_trade_survives_the_guard():
-    fresh = {"ticker": "AAPL", "date": TODAY.isoformat(), "created_at": "2026-08-07T00:00:00Z"}
-    assert len(_recent_whale_rows([fresh], cutoff_date=CUTOFF_DATE)) == 1
+    assert len(_recent_whale_rows([_13f()], cutoff_date=CUTOFF_DATE)) == 1
+    assert len(_recent_whale_rows([_ptr()], cutoff_date=CUTOFF_DATE)) == 1
 
 
 def test_the_guard_is_not_a_no_op():
@@ -347,10 +376,10 @@ def test_the_guard_is_not_a_no_op():
     `x.get("date") or ("" < cutoff)` — truthy for ANY non-empty date, i.e. no guard at
     all. It looks like a filter and does nothing. If someone reintroduces that form, the
     mixed batch below comes back with both rows instead of one."""
-    rows = [
-        {"ticker": "OLD", "date": "2020-01-01"},
-        {"ticker": "NEW", "date": TODAY.isoformat()},
-    ]
+    rows = [_13f("OLD", "2020-01-01"), _13f("NEW", Q2_END)]
+    kept = _recent_whale_rows(rows, cutoff_date=CUTOFF_DATE)
+    assert [r["ticker"] for r in kept] == ["NEW"]
+    rows = [_ptr("OLD", "2020-01-01", "2020-02-01"), _ptr("NEW")]
     kept = _recent_whale_rows(rows, cutoff_date=CUTOFF_DATE)
     assert [r["ticker"] for r in kept] == ["NEW"]
 
@@ -360,6 +389,86 @@ def test_a_row_with_no_trade_date_is_kept():
     congressional rows whose transaction date FMP omits."""
     assert len(_recent_whale_rows([{"ticker": "AAPL", "date": None}], cutoff_date=CUTOFF_DATE)) == 1
     assert len(_recent_whale_rows([{"ticker": "AAPL"}], cutoff_date=CUTOFF_DATE)) == 1
+    assert len(_recent_whale_rows([_ptr(traded=None, disclosed=None)], cutoff_date=CUTOFF_DATE)) == 1
+
+
+# ── C13: each row type is dated by what its `date` actually means ──────────────
+
+DEADLINE_PLUS_ONE = datetime(2026, 8, 15, 22, 0, tzinfo=timezone.utc)   # 18:00 ET run
+
+
+def test_a_deadline_day_13f_is_kept_the_evening_after():
+    """Q2 ends 06-30 and is due 08-14. A deadline-day filer is hydrated at 02:00 UTC and
+    first read by the 18:00 ET run on 08-15 — when the old 45-day floor on `date` was
+    07-01, one day above every row of the filing. The cursor then moved past them."""
+    assert _cutoff_at(DEADLINE_PLUS_ONE) == "2026-07-01"
+    kept = _recent_whale_rows([_13f()], cutoff_date=_cutoff_at(DEADLINE_PLUS_ONE))
+    assert len(kept) == 1
+
+
+def test_an_older_quarter_is_still_dropped_at_the_same_instant():
+    assert _recent_whale_rows([_13f(when=Q1_END)], cutoff_date=_cutoff_at(DEADLINE_PLUS_ONE)) == []
+
+
+def test_a_late_disclosed_congress_trade_is_kept_on_its_disclosure_date():
+    """Traded 06-20, disclosed 08-10 (past the 45-day limit, which is common), read
+    08-12: the transaction date is under the floor (06-28), the disclosure is not."""
+    at = datetime(2026, 8, 12, 22, 0, tzinfo=timezone.utc)
+    row = _ptr(traded="2026-06-20", disclosed="2026-08-10")
+    assert len(_recent_whale_rows([row], cutoff_date=_cutoff_at(at))) == 1
+
+
+def test_a_congress_trade_disclosed_long_ago_is_dropped():
+    at = datetime(2026, 8, 12, 22, 0, tzinfo=timezone.utc)
+    row = _ptr(traded="2026-05-01", disclosed="2026-06-20")          # > 45 days before
+    assert _recent_whale_rows([row], cutoff_date=_cutoff_at(at)) == []
+
+
+def test_a_pre_076_congress_row_falls_back_to_its_transaction_date():
+    """No `disclosure_date`, no range: the data source says congress, and the 45-day
+    window applies to `date` as before — never the looser 13F quarter floor."""
+    fresh = {"ticker": "AAPL", "date": "2026-07-30", "whales": dict(_MEMBER)}
+    stale = {"ticker": "MSFT", "date": "2026-05-15", "whales": dict(_MEMBER)}   # in Q2
+    kept = _recent_whale_rows([fresh, stale], cutoff_date=CUTOFF_DATE)
+    assert [r["ticker"] for r in kept] == ["AAPL"]
+
+
+@pytest.mark.parametrize("today,kept,dropped", [
+    (date(2026, 2, 17), "2025-12-31", "2025-09-30"),   # year boundary: Q1 → last Q4
+    (date(2026, 2, 17), "2025-12-30", "2025-09-30"),   # the hydrators' Q4 fallback date
+    (date(2026, 5, 20), "2026-03-30", "2025-12-31"),   # the hydrators' Q1 fallback date
+    (date(2026, 9, 30), "2026-06-30", "2026-03-31"),   # last day of a quarter
+    (date(2026, 10, 1), "2026-09-30", "2026-06-30"),   # first day of the next one
+])
+def test_the_13f_floor_is_the_previous_quarters_first_day(today, kept, dropped):
+    cutoff = (today - timedelta(days=45)).isoformat()
+    rows = [_13f("KEEP", kept), _13f("DROP", dropped)]
+    assert [r["ticker"] for r in _recent_whale_rows(rows, cutoff_date=cutoff)] == ["KEEP"]
+
+
+def test_an_unusable_cutoff_falls_back_to_the_strict_floor(caplog):
+    """Internal input, so garbage is a bug: fail to the OLD (strict) floor, loudly —
+    never to no floor at all."""
+    with caplog.at_level("WARNING"):
+        kept = _recent_whale_rows([_13f(when=Q2_END), _13f("NODATE", None)],
+                                  cutoff_date="garbage")
+    # "2026-…" < "garbage": every dated row is held back, exactly as the raw string
+    # comparison always did; the undated row keeps its documented created_at-only path.
+    assert [r["ticker"] for r in kept] == ["NODATE"]
+    assert any("unusable whale cutoff" in r.getMessage() for r in caplog.records)
+
+
+def test_the_whale_read_selects_the_disclosure_date():
+    """The congress gate reads `disclosure_date`; a select that omits it silently degrades
+    every congress row to its transaction date again."""
+    import inspect
+    import re
+
+    from app.services.notification_senders import smart_money_sender as sm
+
+    src = "\n".join(ln.split("#", 1)[0] for ln in inspect.getsource(sm._run_whale_phase).splitlines())
+    select = re.search(r"\.select\((.*?)\)\s*\.gt\(", src, re.S)
+    assert select and "disclosure_date" in select.group(1)
 
 
 @pytest.mark.parametrize("payload", [None, {}, "rows", [None], ["x"], [1]])

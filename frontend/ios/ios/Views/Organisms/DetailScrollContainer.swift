@@ -53,6 +53,23 @@ import SwiftUI
 /// to jump. The in-scroll copy keeps its space and simply scrolls up behind the (opaque) pinned
 /// copy.
 ///
+/// ## Why the pin threshold is measured on ONE wrapper view
+///
+/// Seen 2026-09-25, AAPL: the tab bar drawn twice, the pinned copy under the nav header and the
+/// in-scroll copy directly below it, until the next scroll. It was not intermittent. Every
+/// loaded screen passes `aboveTabs` as a MULTI-view `@ViewBuilder` (price header + chart; crypto
+/// adds a third view), and a modifier on a multi-view builder is applied to EACH child. So the
+/// height `GeometryReader` ran once per child, the `max` reducer kept the chart's height, and
+/// the threshold was short by the price header: 214pt against 265pt on AAPL. The bar pinned
+/// while the in-scroll copy was still fully visible. You only saw it when a scroll came to rest
+/// inside that ~51pt band, which "Key Statistics at the top" does, on any tab.
+/// `VStack(spacing: 0) { aboveTabs }` makes it one view with an identical layout.
+///
+/// The pin is also judged again when the THRESHOLD moves, not only when the offset moves. The
+/// chart grows 20pt after load (the block measures 245 then 265pt with nothing scrolling), and
+/// the scroll-geometry callback fires BEFORE the new height arrives. A pin decided only there
+/// would stay on the old threshold until the next scroll.
+///
 /// ## Why the content is pinned to the viewport width
 ///
 /// TestFlight, build 1.0 (8), ETH → Overview: *"I don't want it move the whole thing like this."*
@@ -116,6 +133,11 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
     /// chart differ per asset class, and the skeleton is a different height again.
     @State private var aboveTabsHeight: CGFloat = 0
 
+    /// The latest scroll offset, kept so the pin can be judged again when `aboveTabsHeight`
+    /// moves under a page at rest. A reference box and NOT `@State`: it is written on every
+    /// scroll frame, and a `@State` write would re-render the container at scroll rate.
+    @State private var scrollOffset = DetailScrollOffset()
+
     /// The scroll content's natural width, i.e. the width of its WIDEST child. Read only to
     /// name an over-wide child in DEBUG; the frame below keeps it from ever affecting layout.
     @State private var contentNaturalWidth: CGFloat = 0
@@ -125,15 +147,20 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
         ScrollView(showsIndicators: false) {
             // EAGER. See the type comment — do not reintroduce LazyVStack here.
             VStack(spacing: 0) {
-                aboveTabs
-                    .background(
-                        GeometryReader { geometry in
-                            Color.clear.preference(
-                                key: AboveTabsHeightPreferenceKey.self,
-                                value: geometry.size.height
-                            )
-                        }
-                    )
+                // Wrapped so the measurement sees ONE view. `aboveTabs` is a multi-view
+                // builder on every loaded screen, and a bare `.background` would measure each
+                // child on its own. See the type comment.
+                VStack(spacing: 0) {
+                    aboveTabs
+                }
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: AboveTabsHeightPreferenceKey.self,
+                            value: geometry.size.height
+                        )
+                    }
+                )
 
                 tabBarChrome
 
@@ -167,6 +194,9 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
         .onPreferenceChange(AboveTabsHeightPreferenceKey.self) { height in
             if height > 0, height != aboveTabsHeight {
                 aboveTabsHeight = height
+                // The threshold moved under an offset that did not, so no scroll callback
+                // will come to fix the pin. Judge it here too.
+                updatePin()
             }
         }
         .onPreferenceChange(ContentNaturalWidthPreferenceKey.self) { width in
@@ -188,10 +218,8 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
             geometry.contentOffset.y + geometry.contentInsets.top
         } action: { _, offset in
-            let shouldPin = aboveTabsHeight > 0 && offset >= aboveTabsHeight
-            if shouldPin != isTabBarPinned {
-                isTabBarPinned = shouldPin
-            }
+            scrollOffset.value = offset
+            updatePin()
         }
         // The viewport width, for the DEBUG over-wide report only. Separate from the pin
         // read above so the pin keeps firing on every frame with the cheapest possible value.
@@ -205,6 +233,16 @@ struct DetailScrollContainer<AboveTabs: View, Tabs: View, Content: View>: View {
         }
         .refreshable {
             await onRefresh()
+        }
+    }
+
+    /// The ONE place the pin is decided. It has two inputs, and each has its own trigger: the
+    /// offset (scroll callback) and the threshold (height preference). Deciding it in only one
+    /// of those callbacks leaves it stale whenever the other input moves alone.
+    private func updatePin() {
+        let shouldPin = aboveTabsHeight > 0 && scrollOffset.value >= aboveTabsHeight
+        if shouldPin != isTabBarPinned {
+            isTabBarPinned = shouldPin
         }
     }
 
@@ -249,6 +287,12 @@ struct AboveTabsHeightPreferenceKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
+}
+
+/// The latest scroll offset of a `DetailScrollContainer`. A class so writing it is not a view
+/// invalidation: the scroll callback writes it on every frame.
+final class DetailScrollOffset {
+    var value: CGFloat = 0
 }
 
 /// The scroll content's natural width — what its widest child reports. Compared against the

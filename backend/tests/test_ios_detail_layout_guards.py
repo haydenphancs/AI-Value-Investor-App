@@ -178,10 +178,10 @@ def test_container_scrolls_eagerly_and_pins_without_changing_layout():
 
 
 def test_container_writes_the_pin_state_conditionally():
-    """`onPreferenceChange` fires continuously while scrolling. An unconditional write to
+    """The scroll callback fires on every scroll frame. An unconditional write to
     `isTabBarPinned` re-renders the whole screen on every scroll frame."""
-    body = _decl_block(_read(_CONTAINER), "var body: some View")
-    assert "if shouldPin != isTabBarPinned" in body, (
+    decide = _decl_block(_read(_CONTAINER), "private func updatePin()")
+    assert "if shouldPin != isTabBarPinned" in decide, (
         "the pin state is being written without comparing it first — that re-renders the screen "
         "on every scroll frame, which is the cost this whole change exists to remove.")
 
@@ -501,3 +501,109 @@ def test_the_width_and_carousel_scans_are_not_vacuous():
     assert "HStack(spacing: 0)" not in _decl_block(carousel_raw, "var body: some View")
     for section in _KEY_STATS_SECTIONS:
         assert len(_strip_comments(_read(_ORGANISMS / section))) > 300, f"{section} is a stub"
+
+
+# ── 9. The pin threshold is the WHOLE above-tabs block, re-judged when it moves ──
+#
+# 2026-09-25, AAPL, Debug on the iPhone 17 Pro simulator: the tab bar drawn TWICE. The pinned
+# overlay copy sat under the nav header and the in-scroll copy directly below it, until the next
+# scroll. It was reported as intermittent and tied to a first Analysis open. Instrumenting the
+# container showed it was neither:
+#
+# - Every loaded screen passes `aboveTabs` as a MULTI-view `@ViewBuilder` (price header + chart;
+#   crypto adds a third view). A modifier on a multi-view builder is applied to EACH child, so
+#   `aboveTabs.background(GeometryReader …)` measured each child alone, and the `max` reducer
+#   kept the chart. The threshold read 214pt against 265pt of real content, so the bar pinned
+#   ~51pt early (the price header). Resting anywhere in that band showed both copies. "Key
+#   Statistics at the top" lands in it, on the Overview tab too; the Analysis tap only kept the
+#   offset.
+# - The pin was decided only in the scroll callback. The chart grows 20pt after load (the block
+#   measures 245 then 265pt with nothing scrolling), and that callback fires BEFORE the new height
+#   arrives, so a moved threshold left the pin stale until the next scroll.
+
+_ABOVE_TABS_EMITTER = "key: AboveTabsHeightPreferenceKey.self"
+# `aboveTabs` modified DIRECTLY, i.e. the pre-fix shape. It must never come back.
+_BARE_ABOVE_TABS_MODIFIER = re.compile(r"\baboveTabs\s*\n?\s*\.(background|overlay|onGeometryChange)\(")
+
+
+def test_the_pin_threshold_measures_the_above_tabs_block_as_one_view():
+    body = _decl_block(_read(_CONTAINER), "var body: some View")
+    scroll = _decl_block(body, "ScrollView(showsIndicators: false)")
+    stack = _decl_block(scroll, "VStack(spacing: 0)")      # the eager stack (first match)
+    wrapper = _decl_block(stack, "VStack(spacing: 0)")     # the first stack INSIDE it
+
+    assert re.sub(r"\s+", "", wrapper) == "{aboveTabs}", (
+        "the pin-threshold wrapper no longer holds exactly `aboveTabs`. It exists to turn the "
+        "screens' multi-view builder (price header + chart) into ONE view for the height "
+        "measurement. Without it the GeometryReader runs once per child, the max reducer keeps "
+        "the chart, and the tab bar pins ~51pt early with the in-scroll copy still visible.")
+
+    after_wrapper = stack[stack.index(wrapper) + len(wrapper):]
+    modifiers = after_wrapper[: after_wrapper.index("tabBarChrome")]
+    assert _ABOVE_TABS_EMITTER in modifiers, (
+        "the above-tabs height is no longer measured on the wrapper (between it and the tab "
+        "bar). The measurement must sit on the one-view wrapper, not on its children.")
+
+    assert not _BARE_ABOVE_TABS_MODIFIER.search(body), (
+        "`aboveTabs` is modified directly again. On a multi-view builder a modifier is applied "
+        "to EACH child, so a height measured this way is the tallest child, not the block.")
+    assert body.count(_ABOVE_TABS_EMITTER) == 1, (
+        "the above-tabs height has more than one emitter. The max reducer would pick the "
+        "tallest, and the threshold would no longer be the height of the content above the tabs.")
+
+
+def test_the_pin_is_rejudged_when_the_threshold_moves():
+    raw = _read(_CONTAINER)
+    body = _decl_block(raw, "var body: some View")
+    decide = _decl_block(raw, "private func updatePin()")
+
+    assert "aboveTabsHeight" in decide and "scrollOffset.value" in decide, (
+        "updatePin no longer judges the pin from BOTH inputs (threshold and stored offset)")
+
+    height_cb = _decl_block(body, ".onPreferenceChange(AboveTabsHeightPreferenceKey.self)")
+    assert "aboveTabsHeight = height" in height_cb, "the height callback no longer stores the height"
+    assert "updatePin()" in height_cb, (
+        "the pin is no longer judged when the THRESHOLD moves. The chart grows 20pt after load "
+        "with the page at rest (measured 245 then 265pt), and the scroll callback fires before the new "
+        "height arrives, so a pin decided only on scroll stays on the old threshold.")
+
+    offset_cb = _decl_block(body, "action: { _, offset in")
+    assert "scrollOffset.value = offset" in offset_cb, (
+        "the scroll callback no longer records the offset the height callback re-judges against")
+    assert "updatePin()" in offset_cb, "the scroll callback no longer decides the pin"
+
+    src = _strip_comments(raw)
+    writes = re.findall(r"(?<![\w.])isTabBarPinned\s*=(?!=)", src)
+    assert len(writes) == 1 and re.search(r"(?<![\w.])isTabBarPinned\s*=(?!=)", decide), (
+        "`isTabBarPinned` is written outside updatePin. A second decision site is how one "
+        "input's change goes unjudged.")
+
+    # The offset is written on every scroll frame. A value-type `@State` there is an
+    # invalidation per frame, the cost the conditional pin write exists to avoid.
+    assert "@State private var scrollOffset = DetailScrollOffset()" in src, (
+        "the stored scroll offset is no longer the non-invalidating reference box")
+    assert "final class DetailScrollOffset" in src, "the offset box type is gone"
+
+
+def test_the_pin_threshold_scans_are_not_vacuous():
+    raw = _read(_CONTAINER)
+    # The type comment names the fixed shape in prose. Stripping must hide it, or the scans
+    # above would pass on the comment alone.
+    assert "`VStack(spacing: 0) { aboveTabs }`" in raw, "the container lost its explanatory comment"
+    assert "{ aboveTabs }" not in _strip_comments(raw)
+    # The regex bites on the pre-fix shape, verbatim from the version that shipped the bug...
+    pre_fix = (
+        "            VStack(spacing: 0) {\n"
+        "                aboveTabs\n"
+        "                    .background(\n"
+        "                        GeometryReader { geometry in\n"
+    )
+    assert _BARE_ABOVE_TABS_MODIFIER.search(pre_fix)
+    # ...and not on the wrapper, whose modifier follows a closing brace.
+    assert not _BARE_ABOVE_TABS_MODIFIER.search("VStack(spacing: 0) {\n    aboveTabs\n}\n.background(")
+    # The write-site regex skips the init's `self._isTabBarPinned = …` and a comparison.
+    pattern = re.compile(r"(?<![\w.])isTabBarPinned\s*=(?!=)")
+    assert not pattern.search("self._isTabBarPinned = isTabBarPinned")
+    assert not pattern.search("if shouldPin != isTabBarPinned {")
+    assert not pattern.search("isTabBarPinned == true")
+    assert pattern.search("isTabBarPinned = shouldPin")

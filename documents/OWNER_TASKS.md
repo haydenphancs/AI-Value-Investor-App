@@ -95,23 +95,25 @@ admin recomputes, and marketing script generation.
 
 ### 2.1 Do now / verify once
 
-- [ ] **Railway variables:** check each of these.
-  - `ENVIRONMENT` is set and is not `development`.
-  - Service → Settings → Config-as-code path reads **`/backend/railway.toml`**. The repo-root `railway.toml` is kept identical in effect, just in case.
-  - `SENTRY_DSN` is set. Sentry received no backend events after 2026-09-04: the quota was spent, or the DSN is missing.
+- [x] **Railway variables** (verified 2026-09-25 against deploy 95ea9b25):
+  - `ENVIRONMENT=production`; all 24 loops started.
+  - Deploys use root `/backend` and config `/backend/railway.toml`.
+  - `SENTRY_DSN` is set and the SDK starts.
+  - APNs keys are set, `APNS_ENV=production`, `PUSH_DRY_RUN` is unset.
+- [ ] **Sentry quota:** the DSN is fine, but Sentry received no backend events after 2026-09-04. Check the Sentry project's quota and rate-limit page.
+- [ ] **Clean up Railway variables** (found 2026-09-25; one staged change, so one redeploy):
+  - **Delete unused secrets.** Nothing on Railway reads them: `DATABASE_URL`, `SUPABASE_DB_PASSWORD`, `REDIS_URL`, `SERP_API_KEY`, `NEWS_API_KEY`, `FINANCIAL_NEWS_API_KEY`, `DISCORD_WEBHOOK_URL`. Keep them in your local `backend/.env`, because `dump_schema.sh`, `check_function_grants.py` and `error_digest.py` use them.
+  - **Delete 12 dead knobs** that do nothing: `FREE/PRO/PREMIUM_TIER_DEEP_RESEARCH_LIMIT`, `DEEP_RESEARCH_TIMEOUT_SECONDS`, `CACHE_TTL_SECONDS`, `AI_MODEL_VERSION`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `LOG_FORMAT`, `NEWS_SCRAPING_SCHEDULE`, `WIDGET_RENDER_TIMEOUT_SECONDS`, `WIDGET_UPDATE_SCHEDULE`.
+  - **Decide on three overrides.** `LEGAL_DISCLAIMER`, `APP_NAME` and `APP_VERSION` are set on Railway and override the code. Railway's disclaimer is SHORTER than the one in `config.py`; delete it if that isn't intended.
+- [ ] **Migration 177 check** (the demo-tier code is live in 95ea9b25). In Studio: `SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='comp_tier';` should return 1 row, and `SELECT email, comp_tier FROM public.users WHERE comp_tier IS NOT NULL;` should show the App Review demo account as `premium`.
 - [ ] **App Review:** 1.0 (10) was resubmitted 2026-09-24. If it's rejected again: `./venv/bin/python scripts/asc_review_resubmit.py --video <mov>` (dry run), then add `--apply` (**⚠️ ASC**).
-- [ ] **Demo-tier fix is deployed:** `railway ssh 'grep -c "def effective_tier" /app/app/services/iap_service.py'` → 1 or more.
+- [x] **Demo-tier fix is deployed.** `def effective_tier` is in deployed commit 95ea9b25; the database side is checked by the migration 177 item above.
 - [ ] **Apply migration 176** (`backend/database/migrations/176_marketing_scripts_caps_and_run_date.sql`) in Studio, then run its VERIFY block. The marketing worker fails without it.
 - [ ] **Migration 172** (data-only 'N/A' sector cleanup): run its two VERIFY counts. Both must be 0; if not, apply it.
 - [ ] **Migration 166 constraint:** run the count query in `166_…sql`. If it returns 0, run `ALTER TABLE public.credit_transactions VALIDATE CONSTRAINT credit_transactions_split_sums;`.
-- [ ] **Trillion Club go-live:**
-  - Seed ✅ done 2026-09-24: the dry run shows 0 changes.
-  - Now set `TRILLION_CLUB_ENABLED=true` and `TRILLION_CLUB_JOBS_ENABLED=true` on Railway, and deploy.
-- [ ] **Emerging Frontiers go-live** (the first rotation would run **Thu 2026-10-01, 18:30 ET**):
-  1. Preview (read-only): `./venv/bin/python -m scripts.preview_theme_rotation --month 2026-10`
-  2. Decide: set `THEME_ROTATION_DRY_RUN=true` for October's first run, or trust the preview.
-  3. Set `THEME_ROTATION_ENABLED=true` and `THEME_INSIGHTS_ENABLED=true`, then deploy.
-  4. Flipping dry-run → live is fine within Oct 1–7. After Oct 8 there is no October rotation.
+- [x] **Trillion Club go-live.** Seed done 2026-09-24. Both flags are on. The daily job ran OK on 2026-09-25 (19 members evaluated). One filing, Alphabet 2025-Q3, is marked degraded because of an ambiguous CUSIP (`91864C107`) and is retried daily; check around 2026-10-03 that it cleared.
+- [x] **Emerging Frontiers flags are on**, with `THEME_ROTATION_DRY_RUN=true`. Theme insights first run tonight, 18:15 ET.
+- [ ] **After Thu 2026-10-01 18:30 ET:** review October's dry-run decisions in `theme_rotation_runs`. If the lists should publish, set `THEME_ROTATION_DRY_RUN=false` (or delete it) **by Oct 7**. After Oct 8 18:30 ET there is no October rotation.
 - [ ] **Learn misattribution reseed** (production still serves the old text):
   1. `./venv/bin/python scripts/seed_journey.py` (**⚠️ PROD**)
   2. `./venv/bin/python scripts/seed_money_moves.py` (**⚠️ PROD**)
@@ -123,8 +125,8 @@ admin recomputes, and marketing script generation.
   1. `./scripts/dump_schema.sh`
   2. `./venv/bin/python scripts/generate_schema_doc.py`, then `--check`
   3. Then ask Claude to prune `_PENDING_MIGRATION_TABLES` / `_PENDING_CLIENT_REVOKES` in the two grants/atlas tests.
-- [ ] **Commit the working tree.** Several fixes are uncommitted: the 2026-09-25 job fixes, the 2026-09-25 bug-sweep fixes (listed below), the peer's Swift/generator fix, and the seed JSON.
-- [ ] **Deploy the backend** for the 2026-09-25 bug-sweep fixes:
+- [x] **Committed and pushed** as 95ea9b25 (2026-09-25).
+- [x] **Deployed** 2026-09-25 15:09 UTC as commit 95ea9b25. It booted clean with no errors, and the full suite on that commit passed (25,946). Fixes included:
   - a refunded subscription could be restored by replaying the old Apple receipt;
   - a lost Apple refund webhook;
   - price-alert re-enable;

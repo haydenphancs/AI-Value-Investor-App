@@ -17,7 +17,16 @@
 //  ⚠️ ONE `LazyVStack`, rows as a direct `ForEach`. Do not nest another lazy stack inside
 //  it and do not move the rows behind an intermediate `View` struct — that combination is
 //  the documented 100%-CPU main-thread hang (see the header of
-//  `Views/Organisms/NotificationInboxSection.swift`).
+//  `Views/Organisms/NotificationInboxSection.swift`). That is also why each day's rounded
+//  group is drawn BY ITS ROWS (`CreditHistoryRow` + `RowGroupPosition`) rather than by a
+//  per-day container: a container would grow in place every time "Load more" appends to
+//  the last day.
+//
+//  COMPACT + "LOAD MORE" (developer request, 2026-09-24): rows went from ~100pt cards to
+//  ~52pt two-line segments, and paging moved from scroll-triggered to an explicit button,
+//  50 rows a page. The history goes back to the account's FIRST movement —
+//  `credit_transactions` is never trimmed — so the end of the list says so explicitly
+//  rather than just stopping.
 //
 //  All user-facing copy for a row (`title`, `subtitle`, `poolNote`) is BACKEND-authored
 //  and rendered verbatim, so a ledger reason added after this build ships still reads
@@ -47,12 +56,13 @@ struct CreditHistoryView: View {
                 .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
-                // THE one lazy stack.
-                LazyVStack(alignment: .leading, spacing: AppSpacing.md) {
+                // THE one lazy stack. Zero spacing: rows of a day abut to form one group, and
+                // the day headers carry their own padding.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     content
                 }
                 .padding(.horizontal, AppSpacing.lg)
-                .padding(.top, AppSpacing.md)
+                .padding(.top, AppSpacing.sm)
                 .padding(.bottom, AppSpacing.xxxl)
             }
         }
@@ -133,33 +143,65 @@ struct CreditHistoryView: View {
     private var rows: some View {
         ForEach(viewModel.days) { day in
             // Same muted band as the Reports and Chat history lists.
+            // UNIFORM padding, never "0 for the first day": a refresh that adds a new day at
+            // the top would then change the old first header's height IN PLACE — the lazy-
+            // child resize this screen must never do.
             Text(day.label)
                 .font(AppTypography.captionEmphasis)
                 .foregroundColor(AppColors.textMuted)
-                .padding(.top, AppSpacing.sm)
+                .padding(.top, AppSpacing.md)
+                .padding(.bottom, AppSpacing.xs)
+                .padding(.leading, AppSpacing.xs)
                 .accessibilityAddTraits(.isHeader)
 
-            ForEach(day.items) { item in
-                ActivityRow(
-                    systemName: item.iconName,
-                    iconColor: item.iconColor,
-                    title: item.title,
-                    subtitle: item.rowSubtitle,
-                    footnote: item.footnote,
-                    trailing: {
-                        TintedTagBadge(text: item.amountText, color: item.amountColor)
-                            .accessibilityLabel(item.accessibilityAmount)
-                    }
+            // Direct lazy children — see the header. `enumerated()` only to tell each row
+            // where it sits in the day's group; the id stays the ledger row's.
+            ForEach(Array(day.items.enumerated()), id: \.element.id) { index, item in
+                CreditHistoryRow(
+                    item: item,
+                    position: RowGroupPosition(index: index, count: day.items.count)
                 )
-                .task { await viewModel.loadMoreIfNeeded(currentItem: item) }
             }
         }
 
+        footer
+            .padding(.top, AppSpacing.lg)
+    }
+
+    /// Three states, and never silence: a list that just STOPS reads as "maybe it didn't
+    /// load", which on a statement means "maybe I was never charged for that".
+    ///
+    /// All three are 44pt tall, so switching between them never changes this lazy child's
+    /// height.
+    @ViewBuilder
+    private var footer: some View {
         if viewModel.isLoadingMore {
             ProgressView()
                 .tint(AppColors.textSecondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, AppSpacing.lg)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        } else if viewModel.hasMore {
+            Button {
+                viewModel.loadMore()
+            } label: {
+                Text(viewModel.loadMoreFailed ? "Couldn't load more · Try again" : "Load more")
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.primaryBlue)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.large, style: .continuous)
+                            .cardFill()
+                    )
+                    // A Button hit-tests what its label DRAWS; the shape makes the whole
+                    // 44pt bar the target, not just the words.
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Text("You've reached the start of your credit history.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: 44)
         }
     }
 }

@@ -236,7 +236,18 @@ def apply_credits(db, user_id: str, tester: dict) -> str | None:
     """Set the tier, grant its allocation, top the purchased pool up. Returns an error string."""
     email, tier, target = tester["email"], tester["tier"], tester["credits"]
     try:
-        db.table("users").update({"tier": tier}).eq("id", user_id).execute()
+        # `comp_tier` (migration 177) is the FLOOR `reconcile_user_tier` honours. Without it a
+        # tester's sandbox purchase re-tiers the account, and the sandbox expiry drops it to
+        # Free. Written alongside `tier`; before 177 is applied the column is missing, so fall
+        # back to `tier` alone and say so rather than failing the whole seed.
+        comp = tier if tier != "free" else None
+        try:
+            db.table("users").update({"tier": tier, "comp_tier": comp}).eq("id", user_id).execute()
+        except Exception as e:                               # noqa: BLE001
+            if getattr(e, "code", None) not in ("42703", "PGRST204"):
+                raise
+            print(f"  {email}: users.comp_tier missing — apply migration 177; tier set without a floor")
+            db.table("users").update({"tier": tier}).eq("id", user_id).execute()
         # Creates the user_credits row if absent and rolls a due period.
         db.rpc("ensure_credit_period", {"p_user_id": user_id}).execute()
         # Reuse the production RPC: total = GREATEST(alloc, total), tier_alloc stamped, ledger

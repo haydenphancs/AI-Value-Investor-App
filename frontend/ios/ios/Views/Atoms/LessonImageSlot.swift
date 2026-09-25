@@ -76,7 +76,7 @@ struct LessonImageSlot: View {
                     Image(systemName: "photo")
                         .font(.system(size: 28, weight: .light))
                         .foregroundColor(AppColors.textMuted)
-                    Text("Image coming soon")
+                    Text("Image unavailable")
                         .font(AppTypography.bodySmall)
                         .foregroundColor(AppColors.textMuted)
                 }

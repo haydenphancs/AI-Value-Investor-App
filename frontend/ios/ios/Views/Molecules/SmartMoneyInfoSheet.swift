@@ -51,7 +51,10 @@ struct SmartMoneyInfoSheet: View {
                 .font(AppTypography.iconXL)
                 .foregroundColor(AppColors.primaryBlue)
 
-            Text("Insiders might sell their shares for any number of reasons (taxes, divorce, buying a house), but they buy them for only one: they think the price will rise.")
+            // Lynch's own words only. "(taxes, divorce, buying a house)" used to sit inside the
+            // quotation marks; it is not in his line, so it made a real person say something he
+            // did not.
+            Text("Insiders might sell their shares for any number of reasons, but they buy them for only one: they think the price will rise.")
                 .font(AppTypography.body)
                 .italic()
                 .foregroundColor(AppColors.textPrimary)

@@ -16,8 +16,10 @@
 
   Required-reason APIs: UserDefaults only. `UserDefaults(suiteName:)` in `WidgetAPIConfig`,
   `WidgetSnapshotStore` and `MoversConfigurationIntent` — all against the shared App Group
-  `group.com.phan.caydex`, hence CA92.1 (access limited to the app group the process belongs
-  to), not 1C8F.1. Verified ABSENT from `CaydexWidgets/` and `Shared/`: file-timestamp APIs,
+  `group.com.phan.caydex`, hence 1C8F.1 (defaults shared by members of the same App Group).
+  ⚠️ This used to declare CA92.1 with the two definitions reversed: CA92.1 is "accessible
+  only to the app itself", and this extension never touches its own standard defaults.
+  Verified ABSENT from `CaydexWidgets/` and `Shared/`: file-timestamp APIs,
   system boot time, disk space, and active-keyboard APIs.
 
   Tracking: false. The extension links no SDK at all — its only dependencies are WidgetKit,
@@ -46,7 +48,7 @@
 			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
-				<string>CA92.1</string>
+				<string>1C8F.1</string>
 			</array>
 		</dict>
 	</array>

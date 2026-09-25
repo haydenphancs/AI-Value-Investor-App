@@ -7,37 +7,27 @@
 
 import SwiftUI
 
+/// A plain label, not a control. It used to be a `Button` with an optional `onTap` and a
+/// "Today" chevron — but the chevron was commented out and the only caller's handler just
+/// printed, so it was a tappable row that did nothing. Nothing navigates from a section.
 struct ChatHistorySectionHeader: View {
     let section: ChatHistorySection
-    var showChevron: Bool = false
-    var onTap: (() -> Void)?
 
     var body: some View {
-        Button(action: {
-            onTap?()
-        }) {
-            HStack {
-                Text(section.rawValue)
-                    .font(AppTypography.captionEmphasis)
-                    .foregroundColor(AppColors.textMuted)
+        HStack {
+            Text(section.rawValue)
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(AppColors.textMuted)
 
-                Spacer()
-
-//                if showChevron {
-//                    Image(systemName: "chevron.right")
-//                        .font(AppTypography.iconXS).fontWeight(.semibold)
-//                        .foregroundColor(AppColors.textMuted)
-//                }
-            }
+            Spacer()
         }
-        .buttonStyle(PlainButtonStyle())
-        .disabled(onTap == nil)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
 #Preview {
     VStack(spacing: AppSpacing.lg) {
-        ChatHistorySectionHeader(section: .today, showChevron: true)
+        ChatHistorySectionHeader(section: .today)
         ChatHistorySectionHeader(section: .yesterday)
         ChatHistorySectionHeader(section: .older)
     }

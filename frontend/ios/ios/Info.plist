@@ -33,11 +33,14 @@
 	<string>https://gutlnhsjxrkxvrbqbbqq.supabase.co</string>
 	<key>UIBackgroundModes</key>
 	<array>
+		<!-- `audio` = Learn narration keeps playing on the Home/Lock Screen (AudioManager:
+		     .playback + MPRemoteCommandCenter). App Review rejected 1.0 (9) under 2.5.4 for
+		     not finding it; the review notes now give the tap path.
+		     `remote-notification` was REMOVED 2026-09-24: nothing implemented a background
+		     wake (no didReceiveRemoteNotification handler, and the backend sends only
+		     apns-push-type alert). Alert pushes, aps.badge and notification actions need no
+		     background mode. tests/test_ios_background_modes_justified.py pins both. -->
 		<string>audio</string>
-		<!-- Lets the app be woken to keep the badge in step with the server's unread
-		     count. Without it iOS still delivers alert pushes, but the app can never
-		     reconcile a badge for a notification the user never opened. -->
-		<string>remote-notification</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict>

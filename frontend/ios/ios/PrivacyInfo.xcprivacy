@@ -10,8 +10,17 @@
   Contents are derived from an audit of what the app actually collects, not from a
   template. Keep it in sync when adding an integration, an SDK, or a new stored field.
 
-  Required-reason APIs: UserDefaults only (23 files use @AppStorage). Verified ABSENT:
-  file-timestamp APIs, system boot time, disk space, and active-keyboard APIs.
+  Required-reason APIs (re-audited 2026-09-24; tests/test_ios_privacy_manifest_reasons.py
+  now scans for them, so a new use fails the build instead of the upload):
+    * UserDefaults — CA92.1 for the app's own defaults (@AppStorage, UserDefaults.standard)
+      AND 1C8F.1 for the App Group suite `group.com.phan.caydex`, which the app writes via
+      the Shared/ widget files (WidgetSnapshotStore, WidgetAPIConfig). CA92.1 alone
+      does not cover App Group access.
+    * File timestamp — C617.1. `LearnAudioCache` touches `.modificationDate` and reads
+      `.contentModificationDateKey` on files inside its own Caches directory for LRU
+      eviction. This line used to say "file-timestamp APIs verified ABSENT"; the cache
+      arrived later and nobody re-ran the audit.
+  Verified ABSENT: system boot time, disk space, and active-keyboard APIs.
 
   Tracking: false. There is no IDFA, no AppTrackingTransparency and no advertising SDK —
   grep for ATTrackingManager / advertisingIdentifier / NSUserTrackingUsageDescription
@@ -45,14 +54,26 @@
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>
-			<!-- @AppStorage throughout the app: settings, playback prefs, notification
-			     toggles, the first-run disclaimer acknowledgement. Reads and writes the
-			     app's OWN defaults only. -->
+			<!-- CA92.1: @AppStorage throughout the app (settings, playback prefs, notification
+			     toggles, the first-run disclaimer acknowledgement) — the app's OWN defaults.
+			     1C8F.1: the App Group suite shared with CaydexWidgets (widget snapshot,
+			     widget token, base-URL override), written by the Shared/ widget files. -->
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>CA92.1</string>
+				<string>1C8F.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- C617.1: LearnAudioCache sets and reads modification dates on narration files
+			     inside its own Caches directory to evict least-recently-used clips. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
 			</array>
 		</dict>
 	</array>

@@ -433,6 +433,23 @@ struct ProfileView: View {
                         UpgradeCard()
                     }
                     .buttonStyle(PlainButtonStyle())
+                } else {
+                    // A paid account needs a way to the plans too. Without this row the only
+                    // paywall a Pro/Max account could reach was Buy Credits → "more credits
+                    // with a plan", and App Review (demo account on Max) reported it could not
+                    // find the subscriptions. Same one-row card chrome as Credit History.
+                    Button(action: { showPaywall = true }) {
+                        ProfileSettingsRowContent(
+                            icon: "crown.fill",
+                            iconColor: AppColors.caution,
+                            title: "Plans",
+                            subtitle: "You're on \(viewModel.userTier == .premium ? "Max" : "Pro") · compare or change plans"
+                        )
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .background(AppColors.cardBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: AppCornerRadius.large))
+                    .cardBorder(cornerRadius: AppCornerRadius.large)
                 }
 
             }

@@ -114,7 +114,7 @@ struct CryptoSnapshotCard: View {
                                 .font(AppTypography.iconSmall)
                                 .foregroundColor(AppColors.textMuted)
 
-                            Text("Content coming soon")
+                            Text("No details available")
                                 .font(AppTypography.labelSmall)
                                 .foregroundColor(AppColors.textMuted)
                                 .italic()

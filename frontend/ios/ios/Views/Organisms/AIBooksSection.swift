@@ -24,7 +24,9 @@ struct AIBooksSection: View {
                         .font(AppTypography.heading)
                         .foregroundColor(AppColors.textPrimary)
 
-                    Text("Most Read")
+                    // Not "Most Read": nothing counts reads (the same claim was already
+                    // removed from Money Moves). This subtitle describes what the row IS.
+                    Text("Study guides you can question")
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textSecondary)
                 }

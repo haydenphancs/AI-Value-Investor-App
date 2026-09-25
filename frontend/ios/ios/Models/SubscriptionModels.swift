@@ -608,7 +608,7 @@ struct SubscriptionDTO: Codable, Sendable, Equatable {
     let displayName: String
     let status: String                  // active | grace | expired | canceled
     let currentPeriodEnd: String?       // ISO-8601
-    let store: String?                  // apple | stripe | promo
+    let store: String?                  // app_store (what iap_service writes); nil = no subscription row
 
     var userTier: UserTier { UserTier(rawValue: tier) ?? .free }
 

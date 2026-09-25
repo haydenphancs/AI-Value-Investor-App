@@ -8,6 +8,7 @@
 
 import SwiftUI
 import StoreKit
+import OSLog
 
 struct AppSettingsView: View {
     @Environment(\.appState) private var appState
@@ -160,7 +161,10 @@ struct AppSettingsView: View {
             Button("Delete Forever", role: .destructive) { deleteAccount() }
                 .disabled(isDeleting)
         } message: {
-            Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.")
+            // The subscription sentence is Apple's account-deletion guidance for apps that sell
+            // auto-renewable subscriptions: billing is Apple's, so deleting the account here
+            // cannot stop it, and the user must be told how to.
+            Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.")
         }
         // Local, for the reason spelled out in `deleteAccount()`: `appState.currentError` renders
         // on the root, which this fullScreenCover is drawn above.
@@ -728,15 +732,31 @@ struct AppSettingsView: View {
     }
 
     private func openManageSubscription() {
-        // Deliberately NOT the in-app browser: this is an App Store deep link that must be
-        // handled by the App Store app, and `SFSafariViewController` would render a sign-in
-        // wall instead. It does go through `openInSystem` so a device that cannot open it —
-        // the Simulator has no App Store — says so rather than doing nothing.
-        guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
-        openInSystem(url, action: "open the App Store") {
-            appStoreUnavailable = true
+        Task { @MainActor in
+            // StoreKit's own sheet first. The web page below lists only PRODUCTION
+            // subscriptions, so a sandbox subscriber — App Review — tapped "Manage Subscription"
+            // and found nothing to manage. The sheet shows whichever environment is live.
+            if let scene = UIApplication.shared.connectedScenes
+                .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene {
+                do {
+                    try await AppStore.showManageSubscriptions(in: scene)
+                    return
+                } catch {
+                    Self.log.warning("showManageSubscriptions failed, falling back to the App Store URL: \(String(describing: type(of: error)), privacy: .public)")
+                }
+            }
+            // Fallback. Deliberately NOT the in-app browser: this is an App Store deep link that
+            // must be handled by the App Store app, and `SFSafariViewController` would render a
+            // sign-in wall instead. It goes through `openInSystem` so a device that cannot open
+            // it — the Simulator has no App Store — says so rather than doing nothing.
+            guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
+            openInSystem(url, action: "open the App Store") {
+                appStoreUnavailable = true
+            }
         }
     }
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "settings")
 
     private func calculateCacheSize() {
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first

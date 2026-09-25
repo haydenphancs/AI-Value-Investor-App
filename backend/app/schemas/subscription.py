@@ -81,7 +81,7 @@ class SubscriptionResponse(BaseModel):
     display_name: str
     status: str               # active | grace | expired | canceled
     current_period_end: Optional[str] = None  # ISO-8601
-    store: Optional[str] = None               # apple | stripe | promo
+    store: Optional[str] = None               # "app_store" (iap_service); None = no subscriptions row
 
 
 class VerifyPurchaseRequest(BaseModel):

@@ -113,6 +113,10 @@ _TIER_RANK: Dict[str, int] = {"free": 0, "pro": 1, "premium": 2}
 # retry grace period, so a failed renewal does not instantly strip access.
 _ENTITLING_STATUSES = {"active", "grace_period", "billing_retry"}
 
+# PostgREST / Postgres codes for "that column does not exist" — how a SELECT of
+# `users.comp_tier` fails before migration 177 is applied.
+_MISSING_COLUMN_CODES = {"42703", "PGRST204"}
+
 
 def product_tier_map() -> Dict[str, str]:
     """StoreKit product id → tier. Read from settings each call so a config change
@@ -872,6 +876,60 @@ class IAPService:
                 best = tier
         return best
 
+    def comp_tier(self, user_id: str) -> str:
+        """The account's complimentary tier FLOOR (`users.comp_tier`, migration 177), or "free".
+
+        Exists for the App Review demo account and TestFlight testers, which sit on a paid tier
+        with no subscription behind it. Without a floor, `reconcile_user_tier` re-tiered the
+        demo account to whatever the reviewer bought in sandbox and dropped it to Free when
+        that sandbox subscription expired (~1 hour) — locking the narration the 2.5.4 answer
+        depends on.
+
+        A MISSING COLUMN is "no floor" (warned): migration 177 is applied by hand, so this code
+        can run against a database without it, and raising there would fail every purchase to
+        protect two test accounts. Any OTHER read failure raises, exactly like `winning_tier`:
+        guessing "no floor" on a transient error would demote the demo account, which is the
+        bug this exists to prevent. Classified by `.code`, never by message text.
+        """
+        try:
+            result = (
+                self.supabase.table("users")
+                .select("comp_tier")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            if getattr(e, "code", None) in _MISSING_COLUMN_CODES:
+                logger.warning(
+                    "IAP: users.comp_tier missing for user=%s (%s) — no complimentary floor "
+                    "applied. Apply migration 177.",
+                    user_id, getattr(e, "code", None),
+                )
+                return "free"
+            logger.error(
+                "IAP: could not read users.comp_tier for user=%s (%s: %s) — tier unchanged",
+                user_id, type(e).__name__, e,
+            )
+            raise IAPError("could not read the complimentary tier") from e
+        rows = result.data or []
+        raw = (rows[0].get("comp_tier") if rows else None) or "free"
+        tier = str(raw).lower()
+        if tier not in _TIER_RANK:
+            logger.warning("IAP: unknown comp_tier %r for user=%s — ignoring it", raw, user_id)
+            return "free"
+        return tier
+
+    def effective_tier(self, user_id: str) -> str:
+        """max(winning subscription tier, complimentary floor) — what `users.tier` should be.
+
+        A floor, never a ceiling: a comp-Pro account that buys Max gets Max, and when that
+        subscription lapses it returns to Pro, not Free.
+        """
+        paid = self.winning_tier(user_id)
+        floor = self.comp_tier(user_id)
+        return floor if _TIER_RANK.get(floor, 0) > _TIER_RANK.get(paid, 0) else paid
+
     def _revoke_tier_credits(self, user_id: str, original_txn_id: str = "") -> None:
         """Claw back the UNSPENT portion of a revoked tier's allocation. Best-effort.
 
@@ -901,13 +959,17 @@ class IAPService:
             )
 
     def reconcile_user_tier(self, user_id: str) -> str:
-        """Mirror the winning tier onto `users.tier` and refresh the credit period.
+        """Mirror the EFFECTIVE tier onto `users.tier` and refresh the credit period.
+
+        Effective = the winning subscription tier, floored by `users.comp_tier` (migration 177)
+        so a complimentary account (App Review's demo account, testers) is never demoted by a
+        sandbox purchase or its expiry. See `effective_tier`.
 
         `users.tier` is what `ensure_credit_period` reads to decide the monthly allocation
         (migration 100), so the mirror has to happen before the allocation call or the user
         gets last tier's credits.
         """
-        tier = self.winning_tier(user_id)
+        tier = self.effective_tier(user_id)
 
         try:
             self.supabase.table("users").update({"tier": tier}).eq("id", user_id).execute()

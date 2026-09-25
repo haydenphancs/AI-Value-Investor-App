@@ -17,9 +17,10 @@ struct EducationBookCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.lg) {
-            // Most Read badge
+            // Editorial pick. The flag is still `isMostRead` in the model, but the label is
+            // "Featured": no readership is measured, so "Most Read" was an unbacked claim.
             if book.isMostRead {
-                Text("Most Read")
+                Text("Featured")
                     .font(AppTypography.captionEmphasis)
                     .foregroundColor(AppColors.textSecondary)
                     .padding(.bottom, -AppSpacing.sm)

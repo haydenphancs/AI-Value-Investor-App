@@ -88,8 +88,7 @@ struct ChatHistoryView: View {
                 ChatHistoryList(
                     groups: historyGroups,
                     onItemTap: handleItemTap,
-                    onItemMoreOptions: handleItemMoreOptions,
-                    onSectionTap: handleSectionTap
+                    onItemMoreOptions: handleItemMoreOptions
                 )
             }
         }
@@ -162,10 +161,6 @@ struct ChatHistoryView: View {
 
     private func handleItemMoreOptions(_ item: ChatHistoryItem) {
         onItemMoreOptions?(item)
-    }
-
-    private func handleSectionTap(_ section: ChatHistorySection) {
-        print("📂 [History] Section: \(section.rawValue)")
     }
 }
 

@@ -21,10 +21,14 @@ Two halves, because there is no XCTest target:
 
 A. `InstallSourcePolicy` is EXECUTED — piped into `xcrun swift -` with a harness, the mechanism
    `test_ios_weekly_investor_quotes.py` uses. The half that skips without `xcrun`.
-B. Source guards over the StoreKit half and the call sites. Comments are stripped and every
+B. Source guards over `InstallSourceStore` and the call sites. Comments are stripped and every
    check is brace-bounded to its declaration (.claude/rules/testing.md §3) — the comments beside
-   this fix name `requestReview()`, `CAYDEX_INSTALL_SOURCE` and `AppTransaction.refresh`
+   this fix name `requestReview()`, `CAYDEX_INSTALL_SOURCE` and `AppTransaction.shared`
    verbatim, so an un-stripped scan would pass on prose after the code was reverted.
+
+⚠️ The install source comes from the receipt's FILE NAME, never `AppTransaction`: measured
+2026-09-24 on the Simulator, `AppTransaction.shared` with no cached app transaction put an
+interactive "Sign in to Apple Account" sheet on screen at launch. Pinned tree-wide below.
 """
 
 import re
@@ -40,7 +44,6 @@ _POLICY = _IOS / "Core/Utilities/InstallSourcePolicy.swift"
 _STORE = _IOS / "Core/Services/InstallSourceStore.swift"
 _APP_INFO = _IOS / "Core/Utilities/AppInfo.swift"
 _SETTINGS = _IOS / "Views/Screens/AppSettingsView.swift"
-_APP = _IOS / "iosApp.swift"
 _LAUNCH_CHECKLIST = _REPO / "documents/legal/LAUNCH_CHECKLIST.md"   # GITIGNORED — local only
 _STORE_LISTING = _REPO / "documents/legal/app-store-listing.md"     # tracked
 
@@ -104,29 +107,24 @@ let review = URL(string: "https://apps.apple.com/app/id6759525689?action=write-r
 let web = URL(string: "https://caydexinvest.com")!
 let none: InstallSource? = nil
 
-// --- classify: a recognised store environment decides on its own --------------------------
-check("store_production", P.classify(store: .production, receiptFileName: nil), .appStore)
-check("store_sandbox", P.classify(store: .sandbox, receiptFileName: nil), .preRelease)
-check("store_xcode", P.classify(store: .xcode, receiptFileName: nil), .development)
-// ... and beats a receipt that disagrees (the signed source wins)
-check("sandbox_beats_prod_receipt", P.classify(store: .sandbox, receiptFileName: "receipt"), .preRelease)
-check("prod_beats_sandbox_receipt", P.classify(store: .production, receiptFileName: "sandboxReceipt"), .appStore)
-check("xcode_beats_prod_receipt", P.classify(store: .xcode, receiptFileName: "receipt"), .development)
+// --- classify: a DEBUG build / the Simulator is development, WHATEVER the receipt says ------
+// (the Simulator's receipt path is named "receipt" — measured — and must not pass for the App Store)
+check("dev_prod_receipt", P.classify(receiptFileName: "receipt", isDevelopmentBuild: true), .development)
+check("dev_sandbox_receipt", P.classify(receiptFileName: "sandboxReceipt", isDevelopmentBuild: true), .development)
+check("dev_no_receipt", P.classify(receiptFileName: nil, isDevelopmentBuild: true), .development)
+check("dev_garbage_receipt", P.classify(receiptFileName: "garbage", isDevelopmentBuild: true), .development)
 
-// --- classify: no usable store answer → the receipt decides ---------------------------------
-check("unrecognised_sandbox_receipt", P.classify(store: .unrecognised, receiptFileName: "sandboxReceipt"), .preRelease)
-check("unrecognised_prod_receipt", P.classify(store: .unrecognised, receiptFileName: "receipt"), .appStore)
-check("unrecognised_no_receipt", P.classify(store: .unrecognised, receiptFileName: nil), none)
-check("nil_sandbox_receipt", P.classify(store: nil, receiptFileName: "sandboxReceipt"), .preRelease)
-check("nil_prod_receipt", P.classify(store: nil, receiptFileName: "receipt"), .appStore)
-check("nil_nil", P.classify(store: nil, receiptFileName: nil), none)
+// --- classify: a release build → the receipt's file name decides ---------------------------
+check("sandbox_receipt", P.classify(receiptFileName: "sandboxReceipt", isDevelopmentBuild: false), .preRelease)
+check("prod_receipt", P.classify(receiptFileName: "receipt", isDevelopmentBuild: false), .appStore)
+check("no_receipt", P.classify(receiptFileName: nil, isDevelopmentBuild: false), none)
 // --- classify: EXACT match only — an unexpected name is unknown, never a confident guess ---
-check("empty_receipt", P.classify(store: nil, receiptFileName: ""), none)
-check("uppercase_receipt", P.classify(store: nil, receiptFileName: "SANDBOXRECEIPT"), none)
-check("suffixed_receipt", P.classify(store: nil, receiptFileName: "sandboxReceipt.bak"), none)
-check("padded_receipt", P.classify(store: nil, receiptFileName: " receipt"), none)
-check("prefix_receipt", P.classify(store: nil, receiptFileName: "receipt2"), none)
-check("garbage_receipt", P.classify(store: .unrecognised, receiptFileName: "garbage"), none)
+check("empty_receipt", P.classify(receiptFileName: "", isDevelopmentBuild: false), none)
+check("uppercase_receipt", P.classify(receiptFileName: "SANDBOXRECEIPT", isDevelopmentBuild: false), none)
+check("suffixed_receipt", P.classify(receiptFileName: "sandboxReceipt.bak", isDevelopmentBuild: false), none)
+check("padded_receipt", P.classify(receiptFileName: " receipt", isDevelopmentBuild: false), none)
+check("prefix_receipt", P.classify(receiptFileName: "receipt2", isDevelopmentBuild: false), none)
+check("garbage_receipt", P.classify(receiptFileName: "garbage", isDevelopmentBuild: false), none)
 
 // --- downloadURL: the store page ONLY for a known App Store install -------------------------
 check("dl_appstore", P.downloadURL(for: .appStore, appStoreURL: store, websiteURL: web), store)
@@ -165,10 +163,10 @@ print("DONE|\(failures)|\(cases)")
 
 # A LITERAL, not `_HARNESS.count(...)`: counting the harness would shrink with it, so deleting
 # the core regression case would stay green. Change it only when adding cases.
-_EXPECTED_CASES = 42
+_EXPECTED_CASES = 37
 # The cases this fix exists for — a TestFlight install must never get the store link or prompt.
-_CORE_CASES = ("store_sandbox", "nil_sandbox_receipt", "dl_prerelease", "dl_unknown",
-               "rate_prerelease", "rate_unknown", "sandbox_beats_prod_receipt")
+_CORE_CASES = ("sandbox_receipt", "dev_prod_receipt", "dl_prerelease", "dl_unknown",
+               "rate_prerelease", "rate_development", "prod_receipt")
 
 
 def _run_swift() -> str:
@@ -335,50 +333,48 @@ def test_the_pre_release_alert_offers_a_way_forward():
     assert "FeedbackView()" in dest
 
 
-# ── D. The StoreKit half ──────────────────────────────────────────────
+# ── D. InstallSourceStore ─────────────────────────────────────────────
 
 
-def test_the_store_environment_mapping_is_one_to_one():
-    """Mapping `.sandbox` to `.production` would send every TestFlight share to a 404."""
-    block = _flat(_decl_block(_STORE.read_text(),
-                              "private static func storeEnvironment(_ environment: AppStore.Environment)"))
-    for arm in ("case .production: return .production",
-                "case .sandbox: return .sandbox",
-                "case .xcode: return .xcode",
-                "default: return .unrecognised"):
-        assert arm in block, f"missing `{arm}`"
-    assert block.count("return .production") == 1
-
-
-def test_current_prefers_app_transaction_then_the_receipt():
-    block = _decl_block(_STORE.read_text(), "static var current: InstallSource?")
-    after_debug = block[block.index("#endif"):]
-    resolved = after_debug.find("if let resolved = fromAppTransaction { return resolved }")
-    receipt = after_debug.find(
-        "InstallSourcePolicy.classify(store: nil, receiptFileName: receiptFileName())")
-    assert resolved != -1 and receipt != -1 and resolved < receipt, (
-        "`current` must use the signed AppTransaction answer when it has one and fall back "
-        "to the receipt — the fallback is what covers AppTransaction throwing on TestFlight")
-
-
-def test_resolve_reads_app_transaction_and_logs_both_outcomes():
-    block = _decl_block(_STORE.read_text(), "static func resolve()")
-    assert "try await AppTransaction.shared" in block
-    assert "storeEnvironment(environment)" in block
-    assert "} catch {" in block
-    assert block.count("log.warning(") >= 2, (
-        "an unverified transaction and a failed fetch are both degradations — log each "
-        "(CLAUDE.md: never swallow silently)")
-    assert "guard fromAppTransaction == nil, resolveTask == nil else { return }" in block
-    assert "fromAppTransaction = source" in block, "resolve() must KEEP what AppTransaction said"
-    assert "#if" not in block, "resolve() must run in release builds too"
-
-
-def test_app_transaction_refresh_is_never_called():
-    """`refresh()` shows an App Store sign-in sheet — never acceptable to pick a link."""
+def test_app_transaction_is_never_read():
+    """`AppTransaction.shared` with no cached app transaction starts an INTERACTIVE receipt
+    renewal — a "Sign in to Apple Account" sheet at launch (measured 2026-09-24, Simulator,
+    storekitd log `Sending authentication request for receipt renewal`). `refresh()` always
+    prompts. Tree-wide: no screen may pay a sign-in sheet to pick a link."""
     offenders = [str(p.relative_to(_IOS)) for p in sorted(_IOS.rglob("*.swift"))
-                 if re.search(r"AppTransaction\s*\.\s*refresh", _code(p))]
+                 if re.search(r"AppTransaction\s*\.\s*(shared|refresh)", _code(p))]
     assert not offenders, offenders
+    store = _code(_STORE)
+    assert "import StoreKit" not in store and "AppTransaction" not in store
+
+
+def test_current_is_the_override_then_the_resolved_receipt_answer():
+    block = _decl_block(_STORE.read_text(), "static var current: InstallSource?")
+    assert block.rstrip("} \n").endswith("return resolved"), (
+        "after the DEBUG override, `current` must return the once-computed receipt answer")
+    resolved = _flat(_decl_block(_STORE.read_text(), "private static let resolved: InstallSource? ="))
+    assert ("InstallSourcePolicy.classify(receiptFileName: receipt, "
+            "isDevelopmentBuild: isDevelopmentBuild)") in resolved
+    assert "let receipt = receiptFileName()" in resolved
+    assert "log.info(" in resolved, "log the decision once, so a device log shows the branch"
+
+
+def test_a_debug_or_simulator_build_is_development():
+    """The Simulator's receipt path reads `receipt` — without this it classified as an App
+    Store install (measured 2026-09-24)."""
+    block = _decl_block(_STORE.read_text(), "private static var isDevelopmentBuild: Bool")
+    for token in ("#if DEBUG || targetEnvironment(simulator)", "return true", "#else",
+                  "return false", "#endif"):
+        assert token in block, f"isDevelopmentBuild lost `{token}`"
+    assert block.index("#if DEBUG || targetEnvironment(simulator)") < block.index("return true")
+    assert block.index("#else") < block.index("return false") < block.index("#endif")
+    assert block.index("return true") < block.index("#else")
+
+
+def test_the_receipt_name_comes_from_the_bundle():
+    block = _decl_block(_STORE.read_text(), "private static func receiptFileName()")
+    assert "(Bundle.main as ReceiptURLReading).appStoreReceiptURL?.lastPathComponent" in block
+    assert "extension Bundle: ReceiptURLReading {}" in _code(_STORE)
 
 
 def test_the_debug_override_cannot_ship():
@@ -391,16 +387,6 @@ def test_the_debug_override_cannot_ship():
         assert opened != -1 and "#endif" not in between and "#else" not in between, (
             "CAYDEX_INSTALL_SOURCE is read outside `#if DEBUG` — an environment variable would "
             "decide what a production build links to")
-
-
-def test_the_install_source_is_resolved_at_launch():
-    block = _decl_block(_APP.read_text(), "init() {")
-    assert "StoreKitService.shared.startObservingTransactions()" in block, "wrong init() found"
-    pos = block.find("InstallSourceStore.resolve()")
-    assert pos != -1
-    opened = block.rfind("#if", 0, pos)
-    assert opened == -1 or "#endif" in block[opened:pos], (
-        "resolve() sits inside an #if block — it must run in release builds")
 
 
 # ── E. Anti-vacuity ───────────────────────────────────────────────────

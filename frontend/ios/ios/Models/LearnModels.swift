@@ -675,7 +675,7 @@ extension EducationBook {
         EducationBook(
             title: "The Intelligent Investor",
             author: "Benjamin Graham",
-            description: "The Bible of Value Investing. Warren Buffett's #1 recommended book.",
+            description: "The Bible of Value Investing, and a book Warren Buffett has long recommended.",
             pageCount: 623,
             publishedYear: 1949,
             rating: 4.8,
@@ -770,7 +770,7 @@ extension LibraryBook {
         LibraryBook(
             title: "The Intelligent Investor",
             author: "Benjamin Graham",
-            description: "The definitive book on value investing. Warren Buffett calls it 'the best book on investing ever written.'",
+            description: "The definitive book on value investing. Warren Buffett called it 'by far the best book about investing ever written.'",
             pageCount: 623,
             publishedYear: 1949,
             rating: 4.8,

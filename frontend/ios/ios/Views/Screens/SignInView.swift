@@ -21,6 +21,8 @@ struct SignInView: View {
     @State private var errorMessage: String?
     @State private var isSubmitting = false
     @State private var showForgotPassword = false
+    /// Terms / Privacy, readable BEFORE an account exists. See `legalFooter`.
+    @State private var legalDocument: SignInLegalDocument?
     /// Set after a signup that needs email confirmation — the view then shows a
     /// terminal "check your inbox" state instead of pretending the user is signed in.
     @State private var pendingConfirmationMessage: String?
@@ -146,6 +148,8 @@ struct SignInView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 4)
 
+                    legalFooter
+
                     Spacer(minLength: 40)
                 }
                 .padding(.horizontal, 24)
@@ -154,6 +158,21 @@ struct SignInView: View {
         .sheet(isPresented: $showForgotPassword) {
             // Carry the typed email over so the user doesn't retype it.
             ForgotPasswordView(initialEmail: email)
+        }
+        .sheet(item: $legalDocument) { document in
+            NavigationStack {
+                Group {
+                    switch document {
+                    case .terms: TermsOfUseView()
+                    case .privacy: PrivacyPolicyView()
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { legalDocument = nil }
+                    }
+                }
+            }
         }
         .overlay {
             if let message = pendingConfirmationMessage {
@@ -182,6 +201,28 @@ struct SignInView: View {
         .onChange(of: appState.auth.isAuthenticated) { _, isAuthenticated in
             if isAuthenticated { dismiss() }
         }
+    }
+
+    // MARK: - Legal
+
+    /// Guideline 5.1.1(i): the privacy policy must be easy to find inside the app, and this is
+    /// the form that collects email, name and password. The in-app copies of both documents
+    /// were reachable only from Profile and the paywall — both behind sign-in — so nobody
+    /// could read them before handing the data over.
+    private var legalFooter: some View {
+        HStack(spacing: AppSpacing.xs) {
+            Button { legalDocument = .terms } label: {
+                Text("Terms of Use").foregroundColor(AppColors.primaryBlue)
+            }
+            Text("·").foregroundColor(AppColors.textMuted)
+            Button { legalDocument = .privacy } label: {
+                Text("Privacy Policy").foregroundColor(AppColors.primaryBlue)
+            }
+        }
+        .font(AppTypography.caption)
+        .buttonStyle(PlainButtonStyle())
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.top, 8)
     }
 
     // MARK: - Social sign-in
@@ -510,3 +551,8 @@ private struct PasswordRequirementsView: View {
     }
 }
 
+/// Which legal document the sign-in screen is showing. `Identifiable` for `.sheet(item:)`.
+private enum SignInLegalDocument: String, Identifiable {
+    case terms, privacy
+    var id: String { rawValue }
+}

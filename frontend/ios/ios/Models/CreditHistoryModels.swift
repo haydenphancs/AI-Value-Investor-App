@@ -152,20 +152,14 @@ struct CreditTransactionDTO: Decodable, Identifiable, Hashable, Sendable {
         }
     }
 
-    /// Small print under the row: the pool split, plus the settled marker when the debit
-    /// was refunded. Nil when neither applies, which is the common case.
-    var footnote: String? {
-        var parts: [String] = []
-        if isReversed { parts.append("Refunded") }
-        if let poolNote, !poolNote.isEmpty { parts.append(poolNote) }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
+    /// What follows "Title · " on the compact row's first line — usually a ticker. Nil when
+    /// the ledger names nothing (a plain chat turn), so the title stands alone.
+    var detail: String? { CreditHistoryRowFormat.detail(subtitle) }
 
-    /// `subtitle` is often nil (a plain chat turn names nothing), and `ActivityRow`
-    /// requires a non-optional subtitle. The time reads better there than an empty line.
-    var rowSubtitle: String {
-        if let subtitle, !subtitle.isEmpty { return subtitle }
-        return timeOfDay
+    /// The compact row's small second line: `time · Refunded · pool note`. Every row now
+    /// shows its time — the old card showed a report's ticker IN PLACE of it.
+    var metaLine: String? {
+        CreditHistoryRowFormat.metaLine(time: timeOfDay, poolNote: poolNote, isReversed: isReversed)
     }
 
     // MARK: - Time

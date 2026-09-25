@@ -86,10 +86,6 @@ struct iosApp: App {
         // unfinished, and Apple re-offers it here on the next launch.
         Task { @MainActor in
             StoreKitService.shared.startObservingTransactions()
-            // Where this copy came from (App Store vs TestFlight / App Review / Xcode), read
-            // once in the background so it is known before anyone shares or taps "Rate the
-            // App". Both have a synchronous receipt-based answer until this lands.
-            InstallSourceStore.resolve()
         }
 
         // Product analytics. `app_open` per cold launch is the denominator for every

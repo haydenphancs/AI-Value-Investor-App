@@ -299,8 +299,10 @@ struct LearnContentView: View {
         showingInvestorJourney = true
     }
 
+    /// The row under "Resume Lessons" is the current lesson, so a tap does what Resume does.
+    /// It used to only `print`, which made a visible, tappable row do nothing.
     private func handleJourneyItemTap(_ item: JourneyItem) {
-        print("Journey item tapped: \(item.title)")
+        handleContinueJourney()
     }
 
     private func handleSeeAllMoneyMoves() {

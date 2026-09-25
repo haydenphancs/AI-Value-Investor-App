@@ -236,7 +236,7 @@ struct PaywallView: View {
                 "tier": .string(currentTier.rawValue),
             ])
             viewModel.context = context
-            await viewModel.load()
+            await viewModel.load(isSignedIn: isSignedIn, accountTier: currentTier)
         }
     }
 
@@ -285,7 +285,16 @@ struct PaywallView: View {
 
     @ViewBuilder
     private func planCTA(_ plan: PlanDTO) -> some View {
-        if plan.userTier == currentTier {
+        // Not `plan.userTier == currentTier` alone: a tier set on the account by hand (App
+        // Review's demo account) has no subscription behind it, and that comparison hid the
+        // buy button for the very plan App Review had to purchase. See
+        // `PaywallViewModel.currentTierIsStoreBacked`.
+        if PaywallViewModel.showsCurrentPlan(
+            planTier: plan.userTier,
+            currentTier: currentTier,
+            isFreePlan: plan.priceCents == 0,
+            currentTierIsStoreBacked: viewModel.currentTierIsStoreBacked
+        ) {
             Text("Current Plan")
                 .font(AppTypography.bodyEmphasis)
                 .foregroundColor(AppColors.textMuted)
@@ -365,7 +374,7 @@ struct PaywallView: View {
                 .foregroundColor(AppColors.textSecondary)
                 .multilineTextAlignment(.center)
             Button("Try Again") {
-                Task { await viewModel.load() }
+                Task { await viewModel.load(isSignedIn: isSignedIn, accountTier: currentTier) }
             }
             .font(AppTypography.bodyEmphasis)
             .foregroundColor(AppColors.primaryBlue)

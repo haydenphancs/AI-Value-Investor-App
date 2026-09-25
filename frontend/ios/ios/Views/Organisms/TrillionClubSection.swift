@@ -22,10 +22,13 @@
 //  tallest one's height. An ODD last column fills its second slot with a blank, so its single
 //  tile keeps a tile's height instead of stretching to fill two.
 //
-//  THIS SECTION PRESENTS NOTHING ITSELF. The ⓘ button calls `onInfoTap`, and Home owns and
-//  presents the info sheet, so Home's `.onPresentationReset` can take it down. A sheet owned
-//  here escaped that reset: a push tapped while it was open queued its screen BEHIND the sheet,
-//  and nothing appeared until the user closed the sheet by hand.
+//  NO ⓘ HERE (owner, 2026-09-24): every company's detail screen carries the info button and
+//  presents "About this section" itself, so the header is just the title and subtitle.
+//
+//  THIS SECTION PRESENTS NOTHING ITSELF: a tile calls `onCompanyTap` and Home presents the
+//  detail, so Home's `.onPresentationReset` can take it down. A sheet owned here escaped that
+//  reset: a push tapped while it was open queued its screen BEHIND the sheet, and nothing
+//  appeared until the user closed the sheet by hand.
 //
 
 import SwiftUI
@@ -34,8 +37,6 @@ struct TrillionClubSection: View {
     let group: TrillionClubGroup
     /// A tile → that company's detail screen.
     let onCompanyTap: (TrillionClubCompany) -> Void
-    /// The ⓘ button → Home presents the info sheet (see the header: Home owns it).
-    let onInfoTap: () -> Void
 
     var body: some View {
         if !group.isEmpty {
@@ -98,26 +99,11 @@ struct TrillionClubSection: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
-                Text(TrillionClubCopy.title)
-                    .font(AppTypography.heading)
-                    .foregroundColor(AppColors.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 0)
-                Button {
-                    onInfoTap()
-                } label: {
-                    Image(systemName: "info.circle")
-                        .font(AppTypography.iconSmall)
-                        .foregroundColor(AppColors.textMuted)
-                        .frame(width: 22, height: 22)
-                        .hitSlop(reaching: 22)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("About \(TrillionClubCopy.title)")
-                .accessibilityHint("Explains where these stakes come from")
-            }
+            Text(TrillionClubCopy.title)
+                .font(AppTypography.heading)
+                .foregroundColor(AppColors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
 
             Text(TrillionClubCopy.subtitle)
                 .font(AppTypography.labelSmall)
@@ -134,8 +120,7 @@ struct TrillionClubSection: View {
     ScrollView {
         TrillionClubSection(
             group: MockHomeRepository.trillionClub,
-            onCompanyTap: { _ in },
-            onInfoTap: {}
+            onCompanyTap: { _ in }
         )
         .padding(.vertical)
     }

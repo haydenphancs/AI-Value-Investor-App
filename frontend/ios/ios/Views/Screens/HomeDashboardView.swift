@@ -41,9 +41,6 @@ struct HomeDashboardView: View {
     /// A tapped Trillion-Dollar Club tile → that company's stakes. (Berkshire's "Open
     /// profile" lives on its detail screen, which presents the whale profile itself.)
     @State private var trillionClubTarget: TrillionClubTarget?
-    /// The club section's ⓘ → its info sheet. Owned HERE, not by the section, so the
-    /// presentation reset below takes it down (a child-owned sheet escapes it).
-    @State private var showTrillionClubInfo = false
     /// A tapped LOCKED App-Exclusive Signals row → the plan sheet. Signals tickers are a
     /// Pro/Max surface (backend `entitlements.signals_unlocked`).
     @State private var showSignalsPaywall = false
@@ -167,7 +164,6 @@ struct HomeDashboardView: View {
             signalDetailTarget = nil
             themeDetailTarget = nil
             trillionClubTarget = nil
-            showTrillionClubInfo = false
             showSearch = false
             showProfile = false
             showSignalsPaywall = false
@@ -219,10 +215,6 @@ struct HomeDashboardView: View {
             }
             .environment(appState)
             .environment(\.appState, appState)
-        }
-        // The members WITHOUT a card — never a detail's `otherMembers` (see TrillionClubInfoSheet).
-        .sheet(isPresented: $showTrillionClubInfo) {
-            TrillionClubInfoSheet(members: .withoutCard(viewModel.data?.trillionClub.alsoInClub ?? []))
         }
         // A PLAN gate, so the plan sheet — not the BuyCredits route a 402 takes. Buying
         // credits would not reveal a single ticker here. Same choice as UpdatesView's
@@ -398,8 +390,7 @@ struct HomeDashboardView: View {
                     if !data.trillionClub.isEmpty {
                         TrillionClubSection(
                             group: data.trillionClub,
-                            onCompanyTap: { trillionClubTarget = TrillionClubTarget(slug: $0.slug) },
-                            onInfoTap: { showTrillionClubInfo = true }
+                            onCompanyTap: { trillionClubTarget = TrillionClubTarget(slug: $0.slug) }
                         )
                     }
 

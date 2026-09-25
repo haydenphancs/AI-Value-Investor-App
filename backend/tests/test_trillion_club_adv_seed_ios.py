@@ -1829,10 +1829,11 @@ def test_icon_guard_fires():
     # The Home tile has no glyph of its own since 2026-09-24; the info sheet's intro icon
     # sits in no Button, so un-hiding it must be reported.
     assert unlabelled_icons(_drop_hide_after(_src(INFO), 'Image(systemName: "building.columns.fill")'))
-    section = _src(SECTION)
+    # The ⓘ lives on the detail's toolbar since 2026-09-24 (the Home section has none): its
+    # glyph is inside a Button, so dropping the Button's label must be reported.
     label = '.accessibilityLabel("About \\(TrillionClubCopy.title)")'
-    assert label in section
-    assert unlabelled_icons(section.replace(label, "", 1))
+    assert label in src
+    assert unlabelled_icons(src.replace(label, "", 1))
 
 
 def _prop_body(code: str, decl: str) -> str:

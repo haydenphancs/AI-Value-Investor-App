@@ -8,11 +8,15 @@
 //  not-a-recommendation line. The 2026-09-24 redesign cut eight paragraphs to this; every
 //  fact the old sheet guarded is still here, in one sentence.
 //
-//  WHICH MEMBERS, AND WHAT THE LIST MEANS, TRAVEL TOGETHER (`Members`). Home passes the members
-//  WITHOUT a card, captioned "no disclosed stake large enough for a card"; a company's detail
-//  passes every OTHER member — carded or not — under "Other members of the club". The detail
-//  once fed its full list to the no-card caption and named Microsoft, Alphabet and nine more
-//  carded companies as having no disclosed stake.
+//  Presented ONLY from a company's detail screen (its toolbar ⓘ) since 2026-09-24 — the Home
+//  section header has no ⓘ of its own.
+//
+//  WHICH MEMBERS, AND WHAT THE LIST MEANS, TRAVEL TOGETHER (`Members`). The detail passes every
+//  OTHER member — carded or not — under "Other members of the club". `.withoutCard` (the
+//  members WITHOUT a card, captioned "no disclosed stake large enough for a card") was Home's
+//  list and stays for a caller that has exactly that list: the detail once fed its full list to
+//  the no-card caption and named Microsoft, Alphabet and nine more carded companies as having
+//  no disclosed stake.
 //
 //  Hand-written and static on purpose: nothing in this section is generated text. It states
 //  two 13F facts precisely: a 13F is due WITHIN 45 days (filers often file sooner), and it

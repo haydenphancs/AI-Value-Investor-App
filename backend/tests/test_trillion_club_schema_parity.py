@@ -964,6 +964,13 @@ check("more.below_card", company(#"""
 """#)?.stakeCount.map { String($0) }, "2")
 
 // ── 7c. The 2026-09-24 simplified UI ─────────────────────────────────────────
+// The detail's one filing line: the quarter-end date, only for a filer with a filing on file.
+check("asof.filer", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "period_end": "2026-06-30"}"#)?.holdingsAsOfLine,
+      "Holdings as of Jun 30, 2026")
+check("asof.first_run", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f"}"#)?.holdingsAsOfLine, nil)
+check("asof.no_13f", company(#"{"slug": "m", "name": "Microsoft", "card_kind": "no_thirteen_f", "period_end": "2026-06-30"}"#)?.holdingsAsOfLine, nil)
+check("asof.non_us", company(#"{"slug": "s", "name": "Samsung", "card_kind": "non_us", "period_end": "2026-06-30"}"#)?.holdingsAsOfLine, nil)
+check("asof.bad_date", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "period_end": "2026-02-30"}"#)?.holdingsAsOfLine, nil)
 // The Home tile's one line: never empty, and its stakes never count a note on a 13F holding
 // (`other_stake_count`) — NVIDIA's Intel note is already one of its 8 holdings.
 let filerCard = #"{"slug": "n", "name": "NVIDIA", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 8, "stake_count": 5, "other_stake_count": 2}"#

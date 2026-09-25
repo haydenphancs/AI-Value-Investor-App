@@ -462,7 +462,13 @@ def _user_literals(path: Path) -> List[str]:
 @pytest.mark.parametrize("path", NEW_FILES, ids=lambda p: p.name)
 def test_no_banned_word_in_any_club_string(path):
     literals = _user_literals(path)
-    assert literals, f"anti-vacuity: no literals parsed from {path.name}"
+    if not literals:
+        # A file may carry no copy of its own (the section, since its ⓘ went on 2026-09-24) —
+        # then every Text it draws must be TrillionClubCopy, which the models' scan covers.
+        texts = re.findall(r"\bText\(([^)]*)\)", _code(_src(path)))
+        assert texts and all(t.startswith("TrillionClubCopy.") for t in texts), \
+            f"anti-vacuity: no literals parsed from {path.name}, and its text is not all TrillionClubCopy"
+        return
     hits = [(s[:90], banned_hits(s)) for s in literals if banned_hits(s)]
     assert not hits, f"{path.name}: {hits}"
 
@@ -629,9 +635,11 @@ def members_violations(info_src: str, detail_src: str, home_src: str) -> List[st
         out.append("the detail's sheet does not pass .others(otherMembers)")
     if ".withoutCard(" in detail:
         out.append("the detail puts a list under the no-card caption")
+    # Since 2026-09-24 the detail's ⓘ is the ONLY door to the sheet (the Home section has none),
+    # so Home must not present one — and whatever it would pass could not be the detail's list.
     home = type_body(_code(home_src), "HomeDashboardView")
-    if not re.search(r"TrillionClubInfoSheet\(members:\s*\.withoutCard\([^)]*trillionClub\.alsoInClub", home):
-        out.append("Home's sheet does not pass .withoutCard(trillionClub.alsoInClub)")
+    if "TrillionClubInfoSheet(" in home:
+        out.append("Home presents the club info sheet again (the section has no ⓘ; each detail does)")
     return out
 
 
@@ -650,11 +658,16 @@ def test_member_guard_fires():
         "case .withoutCard: return nil\n"
         '            case .others: return "Members with no disclosed stake large enough for a card."')
     assert members_violations(swapped, detail, home)
-    home_others = _replace_once(home, "TrillionClubInfoSheet(members: .withoutCard(", "TrillionClubInfoSheet(members: .others(")
-    assert members_violations(info, detail, home_others)
+    home_sheet = _replace_once(home, "        // Trillion-Dollar Club: a company's stakes.",
+                               "        .sheet(isPresented: .constant(false)) { TrillionClubInfoSheet(members: .withoutCard([])) }\n"
+                               "        // Trillion-Dollar Club: a company's stakes.")
+    assert members_violations(info, detail, home_sheet)
 
 
-# ── 7.2 The section presents nothing; Home owns (and resets) the info sheet ───────────
+# ── 7.2 The section presents nothing, and has no ⓘ of its own ─────────────────────
+# A sheet owned by the section escaped Home's `.onPresentationReset` (a push tapped while it was
+# open queued BEHIND it). Since 2026-09-24 the header has no ⓘ at all (owner: every company's
+# detail carries one), so Home presents no club info sheet either.
 
 
 def section_presentation_violations(section_src: str, home_src: str) -> List[str]:
@@ -662,32 +675,32 @@ def section_presentation_violations(section_src: str, home_src: str) -> List[str
     body = type_body(_code(section_src), "TrillionClubSection")
     if re.search(r"\.sheet\s*\(|\.fullScreenCover\s*\(|\.popover\s*\(|@State\b", body):
         out.append("the section owns a presentation Home's reset cannot reach")
-    if not re.search(r"Button\s*\{\s*onInfoTap\(\)\s*\}", body):
-        out.append("the info button does not call onInfoTap")
+    if re.search(r"\bonInfoTap\b|\bImage\(systemName:|\bButton\b", body):
+        out.append("the section header grew a button again (each company's detail carries the ⓘ)")
     home = type_body(_code(home_src), "HomeDashboardView")
-    if not re.search(r"\bshowTrillionClubInfo\s*=\s*false\b", _closure_after(home, ".onPresentationReset")):
-        out.append("Home's presentation reset does not clear the club info sheet")
-    anchor = ".sheet(isPresented: $showTrillionClubInfo)"
-    if anchor not in home or "TrillionClubInfoSheet(" not in _closure_after(home, anchor):
-        out.append("Home does not present the club info sheet")
-    if not re.search(r"onInfoTap:\s*\{\s*showTrillionClubInfo\s*=\s*true\s*\}", home):
-        out.append("Home's section call does not open the sheet")
+    if re.search(r"\bshowTrillionClubInfo\b", home):
+        out.append("Home still keeps a club info-sheet presentation")
     return out
 
 
-def test_the_info_sheet_is_cleared_by_home_reset():
+def test_the_section_presents_nothing_and_has_no_info_button():
     assert section_presentation_violations(_src(SECTION), _src(HOME)) == []
 
 
 def test_section_presentation_guard_fires():
     section, home = _src(SECTION), _src(HOME)
-    owned = _replace_once(section, "    let onInfoTap: () -> Void\n",
-                          "    let onInfoTap: () -> Void\n    @State private var showInfo = false\n")
+    anchor = "    let onCompanyTap: (TrillionClubCompany) -> Void\n"
+    owned = _replace_once(section, anchor, anchor + "    @State private var showInfo = false\n")
     assert section_presentation_violations(owned, home)
     sheet = _replace_once(section, "                .scrollTargetBehavior(.viewAligned)\n",
                           "                .scrollTargetBehavior(.viewAligned)\n                .sheet(isPresented: .constant(false)) { EmptyView() }\n")
     assert section_presentation_violations(sheet, home)
-    assert section_presentation_violations(section, _replace_once(home, "            showTrillionClubInfo = false\n", ""))
+    title = "                .accessibilityAddTraits(.isHeader)\n"
+    info = _replace_once(section, title, title + '            Button { } label: { Image(systemName: "info.circle") }\n')
+    assert section_presentation_violations(info, home)
+    kept = _replace_once(home, "    @State private var trillionClubTarget: TrillionClubTarget?\n",
+                         "    @State private var trillionClubTarget: TrillionClubTarget?\n    @State private var showTrillionClubInfo = false\n")
+    assert section_presentation_violations(section, kept)
 
 
 # ── 7.3 The whole card is the tap target ───────────────────────────────────────────
@@ -1079,18 +1092,20 @@ def rendering_rule_violations(detail_src: str, card_src: str, models_src: str) -
     if "if detail.showsHistoryLock {" not in history or re.search(r"if\s+detail\.isLocked\b", history):
         out.append("the History lock shows with nothing behind it")
     # Change state reaches the screen only through the model, which empties `changes` after a
-    # gap or a first filing: the holdings' pills, `noLongerReportedText`, and the footnote's
-    # `changeLine` (which is also what says WHY no pill appears then).
+    # gap or a first filing: the holdings' pills and `unlistedChangeLines`.
     holdings = _closure_after(detail, "private func holdingsSection(")
     # A Free caller gets the top 3 holdings but EVERY changed row: the rest must be named.
     if "ForEach(detail.unlistedChangeLines" not in holdings:
         out.append("the changes the list does not show (Free: outside the top 3) are not the model's lines")
-    if not re.search(r"\bfilingFootnote\(\s*detail\.company\s*\)", holdings):
-        out.append("the holdings segment no longer draws the filing footnote (a gap would go unexplained)")
     if re.search(r"\bdetail\.changes\b", detail):
         out.append("the detail reads change rows itself instead of through the model's rules")
-    if "company.changeLine" not in _closure_after(detail, "private func filingFootnote("):
-        out.append("the filing footnote lost the comparison line (a gap would go unexplained)")
+    # The one filing line the owner kept (2026-09-24): the quarter-end date, which is what says
+    # the list is a weeks-old snapshot. It must come from the model's rule (13F filer, filing on file).
+    if "if let asOf = detail.company.holdingsAsOfLine {" not in holdings:
+        out.append("the Holdings tab lost its 'Holdings as of <date>' line")
+    # The owner removed the rest of the filing footnote (stat, dates, "vs Q1" line) on 2026-09-24.
+    if re.search(r"\b(?:holdingsStatLine|filingDatesLine|changeLine|nextDueLine)\b|\bfilingFootnote\b", detail):
+        out.append("the detail draws the filing's stat / dates / comparison lines again")
     if any("No share-count changes" in s for s in strings):
         out.append("the detail hard-codes a 'no changes' claim")
     card, card_strings = scan_swift(card_src)
@@ -1118,11 +1133,12 @@ def test_rendering_rule_guard_fires():
     detail, card, models = _src(DETAIL), _src(CARD), _src(MODELS)
     for old, new in [("if detail.showsThirteenFSegments {", "if detail.company.kind == .thirteenF {"),
                      ("if detail.showsHistoryLock {", "if detail.isLocked {"),
+                     ("if let asOf = detail.company.holdingsAsOfLine {", "if let asOf = Optional<String>.none {"),
                      ("ForEach(detail.unlistedChangeLines, id: \\.self) { line in",
                       "ForEach(detail.changes.map(\\.name), id: \\.self) { line in"),
-                     ("            filingFootnote(detail.company)\n", ""),
-                     ("[company.holdingsStatLine, company.filingDatesLine, company.changeLine]",
-                      "[company.holdingsStatLine, company.filingDatesLine]"),
+                     ("                stakesSection(detail.holdingNotes, title: \"Notes from its filings\", emptyText: nil)\n",
+                      "                stakesSection(detail.holdingNotes, title: \"Notes from its filings\", emptyText: nil)\n"
+                      "                Text(detail.company.changeLine ?? \"\")\n"),
                      ("CompanyLogoView(ticker: symbol, size: 48, fallbackText: company.monogram)",
                       "CompanyLogoView(ticker: symbol, size: 48)"),
                      ("            Text(company.monogram)\n                .font(AppTypography.heading)",

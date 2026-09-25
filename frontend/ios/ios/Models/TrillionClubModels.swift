@@ -1396,6 +1396,14 @@ nonisolated extension TrillionClubCompany {
         }
     }
 
+    /// "Holdings as of Jun 30, 2026" — the detail's one line about the filing: a 13F is a
+    /// quarter-end snapshot, weeks old by the time it is filed. Only for a 13F filer with a
+    /// filing on file and a readable quarter-end date; nothing is claimed otherwise.
+    var holdingsAsOfLine: String? {
+        guard kind == .thirteenF, hasFilingOnFile, let periodEnd else { return nil }
+        return "Holdings as of \(periodEnd.long)"
+    }
+
     /// "Next 13F due by Nov 16, 2026" — the legal deadline, not a promise of a date.
     var nextDueLine: String? {
         guard kind == .thirteenF, hasFilingOnFile, let nextDue else { return nil }

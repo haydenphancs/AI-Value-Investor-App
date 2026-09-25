@@ -11,7 +11,7 @@
 //  any filing notice; holding rows of name, weight and "SYMBOL · $value"; stake rows of name,
 //  figure and source. What moved rather than vanished: a holding's change is its pill (the
 //  Changes segment is gone), holdings that left the filing are one "No longer reported" line,
-//  the filing's stat / dates / comparison are a footnote under Holdings, and a stake with no
+//  of the filing's lines only "Holdings as of <quarter end>" remains (owner, 2026-09-24), and a stake with no
 //  disclosed figure says what it IS (`rowFigureText`) now that its chips are gone.
 //
 //  FREE vs PRO is decided on the SERVER (`redact_trillion_club_detail`): a Free caller receives
@@ -218,7 +218,7 @@ struct TrillionClubDetailView: View {
     }
 
     /// Market value, and — for a company with no 13F list on screen — why. The filing's stat,
-    /// dates and comparison are the footnote under Holdings, not header lines.
+    /// dates and comparison line are not drawn at all (owner, 2026-09-24).
     private func headerLines(_ company: TrillionClubCompany) -> [String] {
         [company.marketValueLine, company.explainer].compactMap { $0 }
     }
@@ -289,10 +289,19 @@ struct TrillionClubDetailView: View {
                 }
             }
 
+            // The filing's one remaining line (owner, 2026-09-24): its quarter-end date, which is
+            // what tells a reader the list is a snapshot, weeks old.
+            if let asOf = detail.company.holdingsAsOfLine {
+                Text(asOf)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // The quarter's changes the list above does not show as a pill (a Free caller's
             // changed holdings outside the top 3), then the holdings that left the filing.
             // Change rows only exist after a real quarter-on-quarter comparison, so a gap or a
-            // first filing shows nothing here — the footnote's comparison line says why.
+            // first filing shows nothing here (and no pill appears on the list above).
             ForEach(detail.unlistedChangeLines, id: \.self) { line in
                 Text(line)
                     .font(AppTypography.bodySmall)
@@ -303,24 +312,7 @@ struct TrillionClubDetailView: View {
             if !detail.holdingNotes.isEmpty {
                 stakesSection(detail.holdingNotes, title: "Notes from its filings", emptyText: nil)
             }
-
-            filingFootnote(detail.company)
         }
-    }
-
-    /// The filing under the list: its stat line, its dates, and what it was compared with —
-    /// `changeLine` is also what says why no pill appears after a gap or a first filing.
-    private func filingFootnote(_ company: TrillionClubCompany) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-            ForEach([company.holdingsStatLine, company.filingDatesLine, company.changeLine]
-                .compactMap { $0 }, id: \.self) { line in
-                Text(line)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func lockedHoldingsRow(_ text: String) -> some View {

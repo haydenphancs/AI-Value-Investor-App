@@ -2,10 +2,17 @@
 //  TrillionClubDetailView.swift
 //  ios
 //
-//  Screen: one Trillion-Dollar Club company's stakes, opened from its Home card
-//  (GET /home/trillion-club/{slug}). A 13F filer WITH A FILING ON FILE gets four segments —
-//  Holdings, Changes, Private & non-U.S., History — and every other card (including a 13F filer
-//  whose first filing has not been processed yet) gets its disclosed stakes.
+//  Screen: one Trillion-Dollar Club company's stakes, opened from its Home tile
+//  (GET /home/trillion-club/{slug}). A 13F filer WITH A FILING ON FILE gets three segments —
+//  Holdings, Other stakes, History — and every other card (including a 13F filer whose first
+//  filing has not been processed yet) gets its disclosed stakes as one list.
+//
+//  Kept deliberately light (2026-09-24 redesign): a header of logo, name, market value and
+//  any filing notice; holding rows of name, weight and "SYMBOL · $value"; stake rows of name,
+//  figure and source. What moved rather than vanished: a holding's change is its pill (the
+//  Changes segment is gone), holdings that left the filing are one "No longer reported" line,
+//  the filing's stat / dates / comparison are a footnote under Holdings, and a stake with no
+//  disclosed figure says what it IS (`rowFigureText`) now that its chips are gone.
 //
 //  FREE vs PRO is decided on the SERVER (`redact_trillion_club_detail`): a Free caller receives
 //  the top 3 holdings, the latest changes and every stake, plus a COUNT of what is withheld.
@@ -27,8 +34,7 @@ import SwiftUI
 /// The detail's segments. `History` is Pro (locked card for Free).
 enum TrillionClubDetailSegment: String, CaseIterable, Identifiable {
     case holdings = "Holdings"
-    case changes = "Changes"
-    case stakes = "Private & non-U.S."
+    case stakes = "Other stakes"
     case history = "History"
 
     var id: String { rawValue }
@@ -138,8 +144,7 @@ struct TrillionClubDetailView: View {
                         segmentPicker
                         segmentContent(detail)
                     } else {
-                        stakesSection(detail.stakes, detail: detail,
-                                      emptyText: "No disclosed stakes on file yet.")
+                        stakesSection(detail.stakes, emptyText: "No disclosed stakes on file yet.")
                     }
 
                     if detail.company.kind == .whaleLink, let whaleId = detail.company.whaleId {
@@ -168,15 +173,11 @@ struct TrillionClubDetailView: View {
         return VStack(alignment: .leading, spacing: AppSpacing.sm) {
             HStack(spacing: AppSpacing.md) {
                 logo(company)
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    Text(company.name)
-                        .font(AppTypography.title)
-                        .foregroundColor(AppColors.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                    TintedTagBadge(text: company.badgeText, color: AppColors.primaryBlue,
-                                   backgroundOpacity: 0.08)
-                }
+                Text(company.name)
+                    .font(AppTypography.title)
+                    .foregroundColor(AppColors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 0)
             }
 
@@ -216,16 +217,16 @@ struct TrillionClubDetailView: View {
         }
     }
 
-    /// Market value, the 13F stat line and dates, the next due date, or the explainer.
+    /// Market value, and — for a company with no 13F list on screen — why. The filing's stat,
+    /// dates and comparison are the footnote under Holdings, not header lines.
     private func headerLines(_ company: TrillionClubCompany) -> [String] {
-        [company.marketValueLine, company.holdingsStatLine, company.filingDatesLine,
-         company.nextDueLine, company.explainer].compactMap { $0 }
+        [company.marketValueLine, company.explainer].compactMap { $0 }
     }
 
     @ViewBuilder
     private func logo(_ company: TrillionClubCompany) -> some View {
         if let symbol = company.logoSymbol {
-            CompanyLogoView(ticker: symbol, size: 48)
+            CompanyLogoView(ticker: symbol, size: 48, fallbackText: company.monogram)
                 .accessibilityHidden(true)
         } else {
             Text(company.monogram)
@@ -263,10 +264,7 @@ struct TrillionClubDetailView: View {
     private func segmentContent(_ detail: TrillionClubDetail) -> some View {
         switch segment {
         case .holdings: holdingsSection(detail)
-        case .changes: changesSection(detail)
-        case .stakes:
-            stakesSection(detail.otherStakes, detail: detail,
-                          emptyText: "No private or non-U.S. stakes on file.")
+        case .stakes: stakesSection(detail.otherStakes, emptyText: "No other stakes on file.")
         case .history: historySection(detail)
         }
     }
@@ -291,11 +289,38 @@ struct TrillionClubDetailView: View {
                 }
             }
 
+            // The quarter's changes the list above does not show as a pill (a Free caller's
+            // changed holdings outside the top 3), then the holdings that left the filing.
+            // Change rows only exist after a real quarter-on-quarter comparison, so a gap or a
+            // first filing shows nothing here — the footnote's comparison line says why.
+            ForEach(detail.unlistedChangeLines, id: \.self) { line in
+                Text(line)
+                    .font(AppTypography.bodySmall)
+                    .foregroundColor(AppColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if !detail.holdingNotes.isEmpty {
-                stakesSection(detail.holdingNotes, detail: detail, title: "Notes from its filings",
-                              emptyText: nil)
+                stakesSection(detail.holdingNotes, title: "Notes from its filings", emptyText: nil)
+            }
+
+            filingFootnote(detail.company)
+        }
+    }
+
+    /// The filing under the list: its stat line, its dates, and what it was compared with —
+    /// `changeLine` is also what says why no pill appears after a gap or a first filing.
+    private func filingFootnote(_ company: TrillionClubCompany) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            ForEach([company.holdingsStatLine, company.filingDatesLine, company.changeLine]
+                .compactMap { $0 }, id: \.self) { line in
+                Text(line)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func lockedHoldingsRow(_ text: String) -> some View {
@@ -328,63 +353,6 @@ struct TrillionClubDetailView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(text), locked")
         .accessibilityHint("Shows upgrade options")
-    }
-
-    // MARK: Changes
-
-    private func changesSection(_ detail: TrillionClubDetail) -> some View {
-        VStack(alignment: .leading, spacing: AppSpacing.md) {
-            if let line = detail.company.changeLine {
-                Text(line)
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            let kinds = changeKinds(in: detail.changes)
-            if !kinds.isEmpty {
-                VStack(alignment: .leading, spacing: AppSpacing.xs) {
-                    ForEach(kinds, id: \.self) { kind in
-                        if let label = kind.pillLabel, let help = kind.helpText {
-                            Text("\(label): \(help)")
-                                .font(AppTypography.caption)
-                                .foregroundColor(AppColors.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
-
-            if detail.changes.isEmpty {
-                // Only a real quarter-on-quarter comparison can have "no changes"; a gap or a
-                // first filing is explained by the change line above.
-                if let text = detail.changesEmptyText {
-                    emptyText(text)
-                }
-            } else {
-                listCard {
-                    ForEach(Array(detail.changes.enumerated()), id: \.element.id) { pair in
-                        positionRow(pair.element, style: .change)
-                        if pair.offset < detail.changes.count - 1 {
-                            Divider().overlay(AppColors.divider)
-                        }
-                    }
-                }
-            }
-
-            if let unchanged = detail.unchangedText {
-                Text(unchanged)
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-        }
-    }
-
-    /// The outcomes present, once each, in a fixed order — the legend explains only what is on
-    /// screen.
-    private func changeKinds(in changes: [ClubPosition]) -> [ClubChangeKind] {
-        let present = Set(changes.compactMap(\.change))
-        return ClubChangeKind.allCases.filter { present.contains($0) }
     }
 
     // MARK: History (Pro)
@@ -449,8 +417,8 @@ struct TrillionClubDetailView: View {
     // MARK: - Stakes
 
     @ViewBuilder
-    private func stakesSection(_ stakes: [ClubStake], detail: TrillionClubDetail,
-                               title: String? = nil, emptyText text: String?) -> some View {
+    private func stakesSection(_ stakes: [ClubStake], title: String? = nil,
+                               emptyText text: String?) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             if let title {
                 Text(title)
@@ -464,7 +432,7 @@ struct TrillionClubDetailView: View {
             } else {
                 listCard {
                     ForEach(Array(stakes.enumerated()), id: \.element.id) { pair in
-                        stakeRow(pair.element, onThirteenFCard: detail.company.kind == .thirteenF)
+                        stakeRow(pair.element)
                         if pair.offset < stakes.count - 1 {
                             Divider().overlay(AppColors.divider)
                         }
@@ -474,7 +442,10 @@ struct TrillionClubDetailView: View {
         }
     }
 
-    private func stakeRow(_ stake: ClubStake, onThirteenFCard: Bool) -> some View {
+    /// Name (and its ticker), what was disclosed, and where — nothing else. `rowFigureText`
+    /// is never empty: a stake with no figure says what it is, so a warrant disclosed by the
+    /// investee cannot read as shares held.
+    private func stakeRow(_ stake: ClubStake) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             HStack(alignment: .firstTextBaseline, spacing: AppSpacing.sm) {
                 Text(stake.investeeName)
@@ -502,29 +473,10 @@ struct TrillionClubDetailView: View {
                 }
             }
 
-            if let figure = stake.figureText {
-                Text(figure)
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let listing = stake.localListing {
-                Text("Listed in \(listing)")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            }
-
-            let chips = stake.chips(onThirteenFCard: onThirteenFCard)
-            if !chips.isEmpty {
-                ClubChipGroup(chips: chips, source: stake.sourceTitle)
-            }
-
-            if let background = stake.background {
-                Text("Background: \(background)")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(stake.rowFigureText)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if let url = stake.sourceURL {
                 Button {

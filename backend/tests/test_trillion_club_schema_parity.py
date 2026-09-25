@@ -925,12 +925,18 @@ check("pill.unknown", ClubChangeKind(wire: "whatever").pillLabel, nil)
 check("chip.a11y", ClubChip.privateCompany.accessibilityText, "Private: not publicly traded, so there's no market price.")
 
 // ── 7b. Hardening fixes (2026-09-24) ─────────────────────────────────────────
-// Logo: only a U.S. ticker reaches the logo CDN; a local listing gets the NAME's letter tile.
-for (raw, want) in [("2222.SR", nil), ("005930.KS", nil), ("BRK.B", nil), ("ABCDEF", nil), ("BRK-BB", nil),
+// Logo: a U.S. ticker, or (since 2026-09-24) a local listing with a KNOWN exchange suffix —
+// the CDN has Aramco's and Samsung's logos, and the views show the monogram while one loads.
+// A dotted class share, a bare local code or an unknown suffix is never guessed at.
+for (raw, want) in [("2222.SR", "2222.SR"), ("005930.KS", "005930.KS"), ("0700.hk", "0700.HK"),
+                    ("BRK.B", nil), ("ABCDEF", nil), ("BRK-BB", nil), ("2222", nil), ("2222.XX", nil),
+                    ("2222.SR.X", nil), (".SR", nil), ("ABCDEFGHIJK.SR", nil),
                     ("-B", nil), ("NVDA", "NVDA"), ("brk-b", "BRK-B"), ("A", "A"), ("GOOGL", "GOOGL")] as [(String, String?)] {
     check("logo.\(raw)", company(#"{"slug": "a", "name": "A", "card_kind": "non_us", "logo_symbol": "\#(raw)"}"#)?.logoSymbol, want)
 }
 check("logo.monogram_aramco", company(#"{"slug": "a", "name": "Saudi Aramco", "card_kind": "non_us", "logo_symbol": "2222.SR"}"#)?.monogram, "S")
+// A logo never makes a company routable: the stock page comes only from `detail_symbol`.
+check("logo.not_routable", company(#"{"slug": "a", "name": "Saudi Aramco", "card_kind": "non_us", "logo_symbol": "2222.SR"}"#)?.detailSymbol, nil)
 check("logo.monogram_digit_name", company(#"{"slug": "a", "name": "3M Company", "card_kind": "no_thirteen_f"}"#)?.monogram, "M")
 check("logo.monogram_lower", company(#"{"slug": "a", "name": "eBay", "card_kind": "no_thirteen_f"}"#)?.monogram, "E")
 
@@ -957,6 +963,119 @@ check("more.below_card", company(#"""
   {"investee_name": "B", "kind": "private", "as_of": "2026-06-30", "source_title": "S"}]}
 """#)?.stakeCount.map { String($0) }, "2")
 
+// ── 7c. The 2026-09-24 simplified UI ─────────────────────────────────────────
+// The Home tile's one line: never empty, and its stakes never count a note on a 13F holding
+// (`other_stake_count`) — NVIDIA's Intel note is already one of its 8 holdings.
+let filerCard = #"{"slug": "n", "name": "NVIDIA", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 8, "stake_count": 5, "other_stake_count": 2}"#
+check("line.filer", company(filerCard)?.cardLine, "8 holdings · 2 stakes")
+check("line.a11y", company(filerCard)?.cardAccessibilityText, "NVIDIA. 8 holdings · 2 stakes.")
+check("line.singular", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 1, "other_stake_count": 1}"#)?.cardLine, "1 holding · 1 stake")
+check("line.grouped", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 1234}"#)?.cardLine, "1,234 holdings")
+check("line.notes_only", company(#"{"slug": "a", "name": "Alphabet", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 28, "stake_count": 1, "other_stake_count": 0}"#)?.cardLine, "28 holdings")
+// A filer before its first filing claims no holdings; nor does a filing that lists none.
+// …and its detail is then ONE list of every stake, notes included, so all are counted.
+check("line.no_filing", company(#"{"slug": "a", "name": "AMD", "card_kind": "thirteen_f", "position_count": 5, "stake_count": 3, "other_stake_count": 2}"#)?.cardLine, "3 stakes")
+check("line.zero_holdings", company(#"{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 0, "other_stake_count": 1}"#)?.cardLine, "1 stake")
+check("line.non_filer", company(#"{"slug": "m", "name": "Microsoft", "card_kind": "no_thirteen_f", "position_count": 9, "stake_count": 3, "other_stake_count": 3}"#)?.cardLine, "3 stakes")
+check("line.nothing", company(#"{"slug": "n", "name": "N", "card_kind": "non_us"}"#)?.cardLine, "See details")
+// An older backend (no `other_stake_count`): the card's own stakes stand in — never the
+// all-stakes `stake_count`, which counts notes.
+check("line.fallback", company(#"""
+{"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "position_count": 8, "stake_count": 5, "stakes": [
+  {"investee_name": "A", "kind": "private", "as_of": "2026-06-30", "source_title": "S"},
+  {"investee_name": "B", "kind": "private", "as_of": "2026-06-30", "source_title": "S"}]}
+"""#)?.cardLine, "8 holdings · 2 stakes")
+// Without the Holdings split the detail lists every stake — Meta's 4, one of them not on its
+// card — so the all-stakes count is the one that matches, server field or not.
+check("line.unsegmented_counts_all", company(#"""
+{"slug": "m", "name": "Meta", "card_kind": "no_thirteen_f", "stake_count": 4, "stakes": [
+  {"investee_name": "A", "kind": "private", "as_of": "2026-06-30", "source_title": "S"}]}
+"""#)?.cardLine, "4 stakes")
+check("line.negative_count", company(#"{"slug": "s", "name": "S", "card_kind": "non_us", "other_stake_count": -3}"#)?.otherStakeCount.map { String($0) }, nil)
+
+// The detail's holding line: symbol and value (no shares); a first 13F because it began
+// trading says so, so its "Newly reported" pill never reads as a purchase.
+let simple = detail(#"""
+{"company": {"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "comparison": "quarter"},
+ "holdings": [
+   {"name": "Intel", "symbol": "INTC", "weight": 0.47, "shares": 214776632, "value": 29989261126, "change": "unchanged"},
+   {"name": "SpaceX", "symbol": "SPCX", "shares": 122764805, "value": 20980000000, "change": "newly_reported", "newly_listed": true},
+   {"name": "Private Co", "value": 5000000, "change": "increased", "newly_listed": true}],
+ "changes": [{"name": "Arm Holdings", "change": "no_longer_reported", "prev_shares": 100},
+             {"name": "Snowflake", "change": "no_longer_reported"},
+             {"name": "SpaceX", "change": "newly_reported", "shares": 5}]}
+"""#)
+check("short.plain", simple?.holdings[0].shortHoldingLine, "INTC · $30B")
+check("short.newly_listed", simple?.holdings[1].shortHoldingLine, "SPCX · $21B · first 13F since it began trading")
+check("short.listed_only_when_new", simple?.holdings[2].shortHoldingLine, "$5M")
+check("short.a11y_keeps_shares", simple?.holdings[0].holdingLine, "INTC · 214.8M shares · $30B")
+check("gone.names", simple?.noLongerReportedText, "No longer reported: Arm Holdings, Snowflake")
+// Pro: every changed holding is already a pill in the list, so only the "gone" line remains.
+check("unlisted.pro", simple?.unlistedChangeLines.joined(separator: " | "), "No longer reported: Arm Holdings, Snowflake")
+// Free: the top 3 holdings, but EVERY changed row — the rest are named, never dropped.
+let freeDetail = detail(#"""
+{"company": {"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "comparison": "quarter"},
+ "is_locked": true, "locked_holdings_count": 5,
+ "holdings": [
+   {"name": "Intel", "symbol": "INTC", "value": 30000000000, "change": "unchanged"},
+   {"name": "SpaceX", "symbol": "SPCX", "value": 21000000000, "change": "newly_reported"},
+   {"name": "CoreWeave", "symbol": "CRWV", "value": 4700000000, "change": "unchanged"}],
+ "changes": [{"name": "SpaceX", "symbol": "SPCX", "change": "newly_reported"},
+             {"name": "Arm Holdings", "symbol": "ARM", "change": "newly_reported"},
+             {"name": "Coherent", "symbol": "COHR", "change": "increased"},
+             {"name": "Synopsys", "symbol": "SNPS", "change": "decreased"},
+             {"name": "Nokia", "symbol": "NOK", "change": "corporate_action"},
+             {"name": "Snowflake", "change": "no_longer_reported"}]}
+"""#)
+// Same 13F row under two spellings of its name: the symbol says it is already a pill.
+check("unlisted.symbol_match", detail(#"""
+{"company": {"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "comparison": "quarter"},
+ "holdings": [{"name": "Space Exploration Technologies Corp.", "symbol": "SPCX", "change": "newly_reported"}],
+ "changes": [{"name": "SpaceX", "symbol": "SPCX", "change": "newly_reported"}]}
+"""#).map { String($0.unlistedChangeLines.count) }, "0")
+check("unlisted.free", freeDetail?.unlistedChangeLines.joined(separator: " | "),
+      "Newly reported: Arm Holdings | Increased shares: Coherent | Decreased shares: Synopsys | Corporate action: Nokia | No longer reported: Snowflake")
+// After a gap or a first filing nothing was compared: no pill, no clause, no "gone" line.
+for comparison in ["gap", "first_filing"] {
+    let uncompared = detail(#"""
+    {"company": {"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "comparison": "\#(comparison)"},
+     "holdings": [{"name": "SpaceX", "symbol": "SPCX", "value": 20980000000, "change": "newly_reported", "newly_listed": true}],
+     "changes": [{"name": "Arm Holdings", "change": "no_longer_reported"}]}
+    """#)
+    check("gone.\(comparison)", uncompared?.noLongerReportedText, nil)
+    check("unlisted.\(comparison)", String(uncompared?.unlistedChangeLines.count ?? -1), "0")
+    check("short.\(comparison)", uncompared?.holdings.first?.shortHoldingLine, "SPCX · $21B")
+    checkTrue("short.\(comparison).no_pill", uncompared?.holdings.first?.change == nil)
+}
+check("gone.none", detail(#"{"company": {"slug": "n", "name": "N", "card_kind": "thirteen_f", "period": "2026-Q2", "comparison": "quarter"}}"#)?.noLongerReportedText, nil)
+
+// A stake row's figure line is never empty: without a figure it says what the stake IS.
+func stakeRowOf(_ json: String) -> ClubStake? {
+    detail(#"{"company": {"slug": "m", "name": "Meta", "card_kind": "no_thirteen_f"}, "stakes": [\#(json)]}"#)?.stakes.first
+}
+check("figure.warrant", stakeRowOf(#"{"investee_name": "AMD", "kind": "commitment", "as_of": "2026-06-27", "source_title": "AMD 10-Q", "tied_to_deal": true}"#)?.rowFigureText,
+      "Commitment — not a reported holding")
+check("figure.committed", stakeRowOf(#"{"investee_name": "Anthropic", "kind": "commitment", "disclosed_value": 10000000000, "value_basis": "committed_up_to", "as_of": "2025-11-18", "source_title": "S"}"#)?.rowFigureText,
+      "committed up to $10B")
+check("figure.private", stakeRowOf(#"{"investee_name": "Anthropic", "kind": "private", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "Private stake — no figure disclosed")
+check("figure.private_unknown_basis", stakeRowOf(#"{"investee_name": "X", "kind": "private", "disclosed_value": 5, "value_basis": "rumoured", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "Private stake — no figure disclosed")
+check("figure.non_us_listing", stakeRowOf(#"{"investee_name": "Bahri", "kind": "non_us_listed", "local_listing": "Tadawul", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "Listed in Tadawul — no figure disclosed")
+check("figure.non_us", stakeRowOf(#"{"investee_name": "Bahri", "kind": "non_us_listed", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "Listed outside the U.S. — no figure disclosed")
+check("figure.off_13f", stakeRowOf(#"{"investee_name": "SpaceX", "kind": "us_listed_off_13f", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "U.S.-listed, not on a 13F — no figure disclosed")
+// A commitment sized as a percent (a warrant) says it is a commitment; "committed up to"
+// already says so on its own.
+check("figure.commitment_pct", stakeRowOf(#"{"investee_name": "AMD", "kind": "commitment", "ownership_pct": 10, "ownership_basis": "of shares", "as_of": "2026-06-27", "source_title": "S"}"#)?.rowFigureText,
+      "Commitment · 10% of shares")
+check("figure.commitment_invested", stakeRowOf(#"{"investee_name": "X", "kind": "commitment", "disclosed_value": 5000000000, "value_basis": "invested", "as_of": "2026-06-27", "source_title": "S"}"#)?.rowFigureText,
+      "Commitment · $5B invested")
+check("figure.pct", stakeRowOf(#"{"investee_name": "OpenAI", "kind": "private", "ownership_pct": 25, "ownership_basis": "approximate", "as_of": "2026-06-30", "source_title": "S"}"#)?.rowFigureText,
+      "25% approximate")
+
 // Whale link: the profile sentence only when there is a profile to open.
 check("whale.no_profile", company(#"{"slug": "b", "name": "Berkshire Hathaway", "card_kind": "whale_link"}"#)?.explainer, nil)
 check("whale.profile", company(#"{"slug": "b", "name": "Berkshire Hathaway", "card_kind": "whale_link", "whale_id": "w"}"#)?.explainer,
@@ -973,7 +1092,9 @@ let warrant = company(#"""
 {"slug": "m", "name": "Meta", "card_kind": "no_thirteen_f", "stakes": [
   {"investee_name": "AMD", "kind": "commitment", "as_of": "2026-06-27", "source_title": "AMD 10-Q"}]}
 """#)?.stakes.first
-checkTrue("chip.stake_names_source", warrant?.accessibilityText(onThirteenFCard: false).contains("disclosed in AMD 10-Q") == true)
+// The detail row (no chips since 2026-09-24) still says what the warrant is, and where from.
+check("chip.stake_row_says_commitment", warrant?.rowFigureText, "Commitment — not a reported holding")
+checkTrue("chip.stake_names_source", warrant?.sourceText.contains("AMD 10-Q") == true)
 checkTrue("chip.sentence_flag", ClubChip.listedSince(ClubDate(iso: "2026-06-12")!).isSentence && !ClubChip.commitment.isSentence && !ClubChip.clubMember.isSentence)
 
 // Gap: nothing was compared — no counts, no pills, no rows, no "unchanged".

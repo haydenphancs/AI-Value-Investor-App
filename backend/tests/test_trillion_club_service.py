@@ -1493,6 +1493,37 @@ async def test_stake_count_counts_every_published_stake_not_only_the_carded_ones
 
 
 @pytest.mark.asyncio
+async def test_other_stake_count_leaves_out_notes_on_13f_holdings(db):
+    """The card's "· N stakes" must not count a note about a holding the holdings count
+    already includes (NVIDIA's Intel), and must count a non-material stake (the detail's
+    "Other stakes" tab lists it)."""
+    group = await _svc().get_group()
+    microsoft = _card(group, "microsoft")
+    assert microsoft.other_stake_count == microsoft.stake_count == 3   # incl. non-material Anthropic
+    nvidia = _card(group, "nvidia")
+    assert nvidia.stake_count == 1 and nvidia.other_stake_count == 0   # its one stake is a note
+    assert _card(group, "alphabet").other_stake_count == 0
+
+    _add_notes(db)
+    tcs.invalidate()   # the group above cached the pre-note stakes
+    detail = await _svc().get_detail("nvidia")
+    others = [s for s in detail.stakes if s.kind != "on_13f_note"]
+    assert detail.company.other_stake_count == len(others) == 0
+    # Redaction drops only notes, so the count a Free reader sees is the Pro count.
+    locked = redact_trillion_club_detail(detail, "pro")
+    assert locked.company.other_stake_count == detail.company.other_stake_count
+    micron = await _svc().get_detail("micron")
+    assert micron.company.other_stake_count == len(micron.stakes) == 1
+    # A non-zero count, different from both the card's material stakes and 0, survives the
+    # Free redaction unchanged and still equals what the locked detail lists as "other".
+    ms = await _svc().get_detail("microsoft")
+    ms_locked = redact_trillion_club_detail(ms, "pro")
+    assert len(ms_locked.company.stakes) == 2
+    assert ms_locked.company.other_stake_count == 3 == len(
+        [s for s in ms_locked.stakes if s.kind != "on_13f_note"])
+
+
+@pytest.mark.asyncio
 async def test_a_refused_stake_is_not_counted(db):
     for row in db.tables["trillion_club_stakes"]:
         if row["investee_name"] == "G42":

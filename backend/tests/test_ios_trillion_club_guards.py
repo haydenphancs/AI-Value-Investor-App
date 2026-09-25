@@ -151,6 +151,42 @@ def test_a_trap_mentioned_only_in_a_comment_does_not_fire():
     assert layout_violations(src) == []
 
 
+# ── 1b. Two-tile columns, and a lone last tile keeps a tile's height ──────────────────
+# The row is `.fixedSize(vertical)` and a tile's label is `maxHeight: .infinity`, so a column
+# holding ONE tile would stretch it to two tiles' height — unless a flexible blank takes the
+# second slot. But only beside a FULL column: with one company the blank itself would set the
+# row to a tile plus ~10pt and halve the tile (verified on a render, 2026-09-24).
+
+
+def column_violations(src: str) -> List[str]:
+    body = type_body(_code(src), "TrillionClubSection")
+    out = []
+    if "Array(stride(from: 0, to: group.companies.count, by: 2))" not in body:
+        out.append("the tiles are not grouped into columns of two")
+    if ".containerRelativeFrame(.horizontal)" not in body:
+        out.append("a column's width no longer comes from the container (two columns per row)")
+    col = (_closure_after(body, "private func column(startingAt")
+           if "private func column(startingAt" in body else "")
+    blank = re.search(r"\}\s*else\s+if\s+group\.companies\.count\s*>\s*2\s*\{\s*Color\.clear\b", col)
+    if not blank:
+        out.append("an odd last column has no guarded flexible blank (its tile would stretch, or a lone tile halve)")
+    return out
+
+
+def test_columns_hold_two_tiles_and_a_lone_tile_keeps_its_height():
+    assert column_violations(_src(SECTION)) == []
+
+
+def test_column_guard_fires():
+    src = _src(SECTION)
+    for old, new in [
+        ("            } else if group.companies.count > 2 {\n", "            } else {\n"),
+        ("                Color.clear\n                    .accessibilityHidden(true)\n", ""),
+        (".containerRelativeFrame(.horizontal) { length, _ in", ".frame(width: 174); let _ = { (length: CGFloat, _: Axis) in"),
+    ]:
+        assert column_violations(_replace_once(src, old, new)), old
+
+
 # ══════════════════════════════════════════════════════════════════════════════════════
 # 2. Chips are labels, not Buttons, and speak a full sentence
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -293,8 +329,9 @@ def cover_violations(src: str, covers: Iterable[Tuple[str, str]]) -> List[str]:
     return out
 
 
-_HOME_COVERS = [("trillionClubTarget", "TrillionClubDetailView(slug:"),
-                ("trillionClubProfileTarget", "WhaleProfileView(whaleId:")]
+# Berkshire's "Open profile" moved off the Home tile on 2026-09-24 (the tiles carry a name
+# and one line); the detail screen keeps it and presents the profile itself (`_DETAIL_COVERS`).
+_HOME_COVERS = [("trillionClubTarget", "TrillionClubDetailView(slug:")]
 _DETAIL_COVERS = [("selectedTicker", "TickerDetailView(tickerSymbol:"),
                   ("profileTarget", "WhaleProfileView(whaleId:")]
 
@@ -325,7 +362,7 @@ def reset_violations(src: str) -> List[str]:
             if not re.search(rf"\b{name}\s*=\s*nil\b", reset)]
 
 
-def test_home_reset_clears_both_club_presentations():
+def test_home_reset_clears_the_club_presentation():
     assert "themeDetailTarget = nil" in _closure_after(type_body(_code(_src(HOME)), "HomeDashboardView"),
                                                        ".onPresentationReset"), "anti-vacuity"
     assert reset_violations(_src(HOME)) == []
@@ -681,40 +718,78 @@ def test_card_tap_guard_fires():
     src = _src(CARD)
     assert card_tap_violations(_replace_once(src, ".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)",
                                              ".frame(maxWidth: .infinity, alignment: .leading)"))
-    assert card_tap_violations(_replace_once(src, "\n            if company.kind == .whaleLink, company.whaleId != nil {",
-                                             "\n            Spacer(minLength: 0)\n            if company.kind == .whaleLink, company.whaleId != nil {"))
+    assert card_tap_violations(_replace_once(src, "                logoBand\n                textBand\n",
+                                             "                logoBand\n                Spacer(minLength: 0)\n                textBand\n"))
 
 
-# ── 7.4 Card text wraps; the stake's source keeps its date ─────────────────────────
+# ── 7.4 A tile is a name and one line, and every tile is the same height ─────────────
+# 2026-09-24 owner redesign: the 292pt card listed market value, a badge, the top holdings,
+# the change line, dates and two stakes with chips, grew to its content, and read as a wall of
+# text. Tiles now mirror Emerging Frontiers: a fixed logo band, the name, `cardLine`. Equal
+# height is by construction — a fixed band, and a text band that is always the same number of
+# lines (one scaled line each at the standard sizes; a name that RESERVES two at AX sizes).
+
+_TILE_DETAIL_CONTENT = (r"\bClubHoldingRow\b", r"\bClubChipGroup\b", r"\bClubStakeChip\b", r"\bfigureText\b",
+                        r"\bsourceText\b", r"\bstakes\b", r"\btopHoldings\b", r"\bmarketValueLine\b",
+                        r"\bholdingsStatLine\b", r"\bchangeLine\b", r"\bbadgeText\b", r"\bmoreStakesText\b",
+                        # A second control or a glyph grows ONE tile (Berkshire's old "Open profile").
+                        r"\bLabel\s*\(", r"\bopenProfile\b", r"\bwhaleId\b", r"\bImage\(systemName:")
 
 
-def card_wrap_violations(card_src: str) -> List[str]:
+def tile_violations(card_src: str) -> List[str]:
     card = type_body(_code(card_src), "TrillionClubCard")
-    out = []
-    for decl in ("private func stakeLine(", "private var header: some View"):
-        if ".lineLimit(1)" in _closure_after(card, decl):
-            out.append(f"{decl}: a one-line cap truncates")
-    source = _chain_after(_closure_after(card, "private func stakeLine("), "Text(stake.sourceText)")
-    if ".fixedSize(horizontal: false, vertical: true)" not in source or ".lineLimit(" in source:
-        out.append("the source line does not wrap")
+    out = [f"the tile draws detail content: {pat}" for pat in _TILE_DETAIL_CONTENT if re.search(pat, card)]
+    if len(re.findall(r"\bButton\s*\(", card)) != 1:
+        out.append("the tile has more than its one Button")
+    # Structure, not just words: the label is the band and the text band, nothing else.
+    body = _closure_after(card, "var body: some View")
+    stack = re.search(r"VStack\([^)]*\)\s*\{", body)
+    parts = body[stack.end():match_brace(body, stack.end())].split() if stack else []
+    if parts != ["logoBand", "textBand"]:
+        out.append(f"the tile's label is not exactly the logo band and the text band: {parts}")
+    if "private var textBand: some View" in card:
+        band = _closure_after(card, "private var textBand: some View")
+        inner = re.search(r"VStack\([^)]*\)\s*\{", band)
+        rows = band[inner.end():match_brace(band, inner.end())] if inner else ""
+        rows = rows.replace(_chain_after(rows, "Text(company.cardLine)") if "Text(company.cardLine)" in rows else "", "")
+        if rows.split() != ["nameText"]:
+            out.append(f"the text band is not exactly the name and cardLine: {rows.split()}")
+    texts = sorted(re.findall(r"\bText\(([^)]*)\)", card))
+    if texts != ["company.cardLine", "company.monogram", "company.name"]:
+        out.append(f"the tile's text is not exactly the name + cardLine (+ the monogram tile): {texts}")
+    if not re.search(r"static let bandHeight: CGFloat = \d+", card) or ".frame(height: Self.bandHeight)" not in card:
+        out.append("the logo band is not a fixed height")
+    line = _chain_after(card, "Text(company.cardLine)") if "Text(company.cardLine)" in card else ""
+    if ".lineLimit(1)" not in line or ".minimumScaleFactor(" not in line:
+        out.append("the tile's line is not one line scaled before it truncates")
+    name = (_closure_after(card, "private var nameText: some View")
+            if "private var nameText: some View" in card else "")
+    # From xxLarge, not only the AX sizes: the name's font hits its 1.4x cap at xxxLarge.
+    if ("dynamicTypeSize >= .xxLarge" not in name or ".lineLimit(2, reservesSpace: true)" not in name
+            or ".lineLimit(1)" not in name or ".minimumScaleFactor(" not in name):
+        out.append("the name does not keep one line count per text size (tiles would differ in height)")
     return out
 
 
-def test_card_text_wraps():
-    assert card_wrap_violations(_src(CARD)) == []
+def test_a_tile_is_a_name_and_one_line_at_a_fixed_height():
+    assert tile_violations(_src(CARD)) == []
 
 
-def test_card_wrap_guard_fires():
+def test_tile_guard_fires():
     src = _src(CARD)
-    name = ("                    .font(AppTypography.headingSmall)\n"
-            "                    .foregroundColor(AppColors.textPrimary)\n"
-            "                    .lineLimit(2)\n")
-    assert card_wrap_violations(_replace_once(src, name, name.replace("lineLimit(2)", "lineLimit(1)")))
-    source = ("                .foregroundColor(AppColors.textMuted)\n"
-              "                .fixedSize(horizontal: false, vertical: true)\n"
-              "            let chips")
-    assert card_wrap_violations(_replace_once(src, source, source.replace(
-        ".fixedSize(horizontal: false, vertical: true)", ".lineLimit(1)")))
+    for old, new in [
+        ("Text(company.cardLine)", "Text(company.marketValueLine ?? \"\")"),
+        ("            nameText\n", "            nameText\n            ClubHoldingRow(position: company.topHoldings[0], style: .compact)\n"),
+        (".lineLimit(2, reservesSpace: true)", ".lineLimit(2)"),
+        ("dynamicTypeSize >= .xxLarge", "dynamicTypeSize.isAccessibilitySize"),
+        ("                .minimumScaleFactor(0.8)\n        }\n", "                .minimumScaleFactor(0.8)\n"
+         "            Label(TrillionClubCopy.openProfile, systemImage: \"person.crop.circle\")\n        }\n"),
+        ("                logoBand\n                textBand\n", "                logoBand\n                textBand\n"
+         "                Text(company.cardLine)\n"),
+        (".frame(height: Self.bandHeight)", ".frame(minHeight: Self.bandHeight)"),
+        ("                .lineLimit(1)\n                .minimumScaleFactor(0.8)\n        }", "        }"),
+    ]:
+        assert tile_violations(_replace_once(src, old, new)), old
 
 
 # ── 7.5 The compact row gives the NAME the room ────────────────────────────────────
@@ -779,13 +854,18 @@ def flow_violations(src: str) -> List[str]:
 
 
 def chip_group_violations(chip_src: str, card_src: str, detail_src: str) -> List[str]:
+    """`ClubChipGroup` keeps its word/sentence split for whatever draws stake chips next, and
+    neither the Home tile nor the detail draws them any more (2026-09-24 redesign: a stake
+    row is name, figure and source; `rowFigureText` says what a figure-less stake is)."""
     out = []
     group = type_body(_code(chip_src), "ClubChipGroup")
     if "filter(\\.isSentence)" not in group or "ForEach(words)" not in group or "ForEach(sentences)" not in group:
         out.append("ClubChipGroup no longer splits word chips from sentence chips")
     for name, src in (("card", card_src), ("detail", detail_src)):
-        if "ClubChipGroup(chips: chips, source: stake.sourceTitle)" not in _code(src):
-            out.append(f"the {name} lays stake chips out without ClubChipGroup")
+        code = _code(src)
+        for drawn in ("ClubChipGroup(", "ClubStakeChip(", ".chips(onThirteenFCard:"):
+            if drawn in code:
+                out.append(f"the {name} draws stake chips again ({drawn})")
     return out
 
 
@@ -798,7 +878,7 @@ def test_no_sentence_inside_a_flow_layout(path, has_flow):
     assert flow_violations(_src(path)) == []
 
 
-def test_stake_chips_go_through_the_chip_group():
+def test_no_screen_draws_stake_chips():
     assert chip_group_violations(_src(CHIP), _src(CARD), _src(DETAIL)) == []
 
 
@@ -812,11 +892,15 @@ def test_flow_guards_fire():
                           "                        }\n"
                           "                        if let small = position.smallText { Text(small) }\n")
     assert flow_violations(moved)
-    card = _replace_once(_src(CARD), "ClubChipGroup(chips: chips, source: stake.sourceTitle)",
+    card = _replace_once(_src(CARD), "Text(company.cardLine)",
                          "FlowLayout(spacing: AppSpacing.xs) { ForEach(chips) { ClubStakeChip(chip: $0) } }")
     assert flow_violations(card) and chip_group_violations(_src(CHIP), card, _src(DETAIL))
     chip = _replace_once(_src(CHIP), "ForEach(words) {", "ForEach(chips) {")
     assert flow_violations(chip) and chip_group_violations(chip, _src(CARD), _src(DETAIL))
+    detail = _replace_once(_src(DETAIL), "            Text(stake.rowFigureText)\n",
+                           "            ClubChipGroup(chips: stake.chips(onThirteenFCard: true), source: stake.sourceTitle)\n"
+                           "            Text(stake.rowFigureText)\n")
+    assert chip_group_violations(_src(CHIP), _src(CARD), detail)
 
 
 # ── 7.7 Segment chips clear 4.5:1, COMPOSED (ink on a tint of itself over the page) ───
@@ -885,6 +969,9 @@ def heading_violations(info_src: str, detail_src: str) -> List[str]:
         out.append("an info-sheet section is combined into one element (its title stops being a heading)")
     if ".accessibilityAddTraits(.isHeader)" not in _chain_after(sheet, "Text(members.heading)"):
         out.append("the member list's title is not a heading")
+    for decl in ("private var introCard: some View", "private var legend: some View"):
+        if ".accessibilityAddTraits(.isHeader)" not in _chain_after(_closure_after(sheet, decl), "Text("):
+            out.append(f"{decl}: its title is not a heading")
     stakes = _closure_after(type_body(_code(detail_src), "TrillionClubDetailView"), "private func stakesSection(")
     if ".accessibilityAddTraits(.isHeader)" not in _chain_after(stakes, "Text(title)"):
         out.append("the detail's stakes-section title is not a heading")
@@ -905,6 +992,10 @@ def test_heading_guard_fires():
                              "                .fixedSize(horizontal: false, vertical: true)\n        }\n"
                              "        .accessibilityElement(children: .combine)\n    }\n}")
     assert heading_violations(combined, detail)
+    legend = ("                .fixedSize(horizontal: false, vertical: true)\n"
+              "                .accessibilityAddTraits(.isHeader)\n\n            legendRow(")
+    assert heading_violations(_replace_once(info, legend, legend.replace(
+        "                .accessibilityAddTraits(.isHeader)\n", "")), detail)
 
 
 # ── 7.9 The info sheet's 13F facts ────────────────────────────────────────────────
@@ -932,8 +1023,8 @@ def test_info_fact_guard_fires():
     src = _src(INFO)
     old = '"A 13F is filed up to 45 days after the quarter ends, so its "'
     assert info_fact_violations(_replace_once(src, old, '"13F filings are due 45 days after the quarter ends, so the most "'))
-    assert info_fact_violations(_replace_once(src, '"as convertible notes and options — we leave those out. Private "',
-                                              '"as warrants — we leave those out. Private "'))
+    assert info_fact_violations(_replace_once(src, '"as convertible notes and options, are left out."',
+                                              '"as warrants, are left out."'))
 
 
 # ── 7.10 Model copy: explainers and the Commitment sentence ────────────────────────
@@ -987,22 +1078,35 @@ def rendering_rule_violations(detail_src: str, card_src: str, models_src: str) -
     history = _closure_after(detail, "private func historySection(")
     if "if detail.showsHistoryLock {" not in history or re.search(r"if\s+detail\.isLocked\b", history):
         out.append("the History lock shows with nothing behind it")
-    if "detail.changesEmptyText" not in _closure_after(detail, "private func changesSection("):
-        out.append("the Changes empty text ignores the comparison")
+    # Change state reaches the screen only through the model, which empties `changes` after a
+    # gap or a first filing: the holdings' pills, `noLongerReportedText`, and the footnote's
+    # `changeLine` (which is also what says WHY no pill appears then).
+    holdings = _closure_after(detail, "private func holdingsSection(")
+    # A Free caller gets the top 3 holdings but EVERY changed row: the rest must be named.
+    if "ForEach(detail.unlistedChangeLines" not in holdings:
+        out.append("the changes the list does not show (Free: outside the top 3) are not the model's lines")
+    if not re.search(r"\bfilingFootnote\(\s*detail\.company\s*\)", holdings):
+        out.append("the holdings segment no longer draws the filing footnote (a gap would go unexplained)")
+    if re.search(r"\bdetail\.changes\b", detail):
+        out.append("the detail reads change rows itself instead of through the model's rules")
+    if "company.changeLine" not in _closure_after(detail, "private func filingFootnote("):
+        out.append("the filing footnote lost the comparison line (a gap would go unexplained)")
     if any("No share-count changes" in s for s in strings):
         out.append("the detail hard-codes a 'no changes' claim")
     card, card_strings = scan_swift(card_src)
     # The original defect lived INSIDE an interpolation ("+\(company.stakes.count - …) more"),
     # which the scanner lifts out of `code` — so the lifted strings are searched too.
-    block = _closure_after(type_body(card, "TrillionClubCard"), "private var stakesBlock: some View")
-    if (re.search(r"stakes\.count\s*-", card) or any(re.search(r"stakes\.count\s*-", t) for t in card_strings)
-            or "company.moreStakesText(shown:" not in block):
-        out.append("the card counts '+N more' from its material stakes")
+    if re.search(r"stakes\.count\s*-", card) or any(re.search(r"stakes\.count\s*-", t) for t in card_strings):
+        out.append("the card counts stakes itself")
     for name, src in (("card", card), ("detail", code)):
         if "Text(company.monogram)" not in src or "name.prefix(" in src:
             out.append(f"the {name}'s letter tile is not the name's first letter")
-    if "logoSymbol: ClubSanitize.usTicker(dto.logoSymbol)" not in _code(models_src):
-        out.append("a non-U.S. logo symbol reaches the logo CDN")
+        # A local listing ("2222.SR") reaches the logo CDN now, so the atom's placeholder must be
+        # the MONOGRAM — its own default, the symbol's first character, is a digit there.
+        if not re.search(r"CompanyLogoView\(ticker:\s*symbol,[^)]*fallbackText:\s*company\.monogram\)", src):
+            out.append(f"the {name}'s logo placeholder is not the monogram")
+    if "logoSymbol: ClubSanitize.logoSymbol(dto.logoSymbol)" not in _code(models_src):
+        out.append("the logo symbol skips the logo sanitiser (a guessed symbol can fetch another logo)")
     return out
 
 
@@ -1014,11 +1118,62 @@ def test_rendering_rule_guard_fires():
     detail, card, models = _src(DETAIL), _src(CARD), _src(MODELS)
     for old, new in [("if detail.showsThirteenFSegments {", "if detail.company.kind == .thirteenF {"),
                      ("if detail.showsHistoryLock {", "if detail.isLocked {"),
-                     ("if let text = detail.changesEmptyText {", "if let text = Optional(\"No share-count changes vs the quarter before.\") {"),
+                     ("ForEach(detail.unlistedChangeLines, id: \\.self) { line in",
+                      "ForEach(detail.changes.map(\\.name), id: \\.self) { line in"),
+                     ("            filingFootnote(detail.company)\n", ""),
+                     ("[company.holdingsStatLine, company.filingDatesLine, company.changeLine]",
+                      "[company.holdingsStatLine, company.filingDatesLine]"),
+                     ("CompanyLogoView(ticker: symbol, size: 48, fallbackText: company.monogram)",
+                      "CompanyLogoView(ticker: symbol, size: 48)"),
                      ("            Text(company.monogram)\n                .font(AppTypography.heading)",
                       "            Text(String(company.name.prefix(1)))\n                .font(AppTypography.heading)")]:
         assert rendering_rule_violations(_replace_once(detail, old, new), card, models), old
-    assert rendering_rule_violations(detail, _replace_once(card, "if let more = company.moreStakesText(shown: shownStakes) {\n",
-                                                           "if let more = Optional(\"+\\(company.stakes.count - 2) more\") {\n"), models)
-    assert rendering_rule_violations(detail, card, _replace_once(models, "logoSymbol: ClubSanitize.usTicker(dto.logoSymbol)",
+    assert rendering_rule_violations(detail, _replace_once(card, "fallbackText: company.monogram)",
+                                                           "fallbackText: nil)"), models)
+    assert rendering_rule_violations(detail, card, _replace_once(models, "logoSymbol: ClubSanitize.logoSymbol(dto.logoSymbol)",
                                                                  "logoSymbol: ClubSanitize.symbol(dto.logoSymbol)"))
+
+
+# ── 7.12 The detail: three segments, and a stake row that says what it is ─────────────
+# 2026-09-24 redesign: the Changes segment went (a holding's change is its pill; holdings that
+# left are one line), and a stake row lost its chips, "Listed in" and "Background:". What must
+# survive: the row's figure line never empty (Meta's AMD warrant has no figure — without
+# `rowFigureText` it read as a holding of AMD shares), its source and date, and its stale note.
+
+
+def detail_simplicity_violations(detail_src: str) -> List[str]:
+    code = _code(detail_src)
+    out = []
+    cases = re.findall(r"\bcase\s+(\w+)", type_body(code, "TrillionClubDetailSegment", kind="enum"))
+    if cases != ["holdings", "stakes", "history"]:
+        out.append(f"the detail's segments are {cases}, not Holdings / Other stakes / History")
+    row = _closure_after(type_body(code, "TrillionClubDetailView"), "private func stakeRow(")
+    if "Text(stake.rowFigureText)" not in row:
+        out.append("the stake row lost Text(stake.rowFigureText)")
+    # Both branches draw the source: the link (https) AND the plain line (anything else).
+    if row.count("Text(stake.sourceText)") < 2 or "} else {" not in row:
+        out.append("a stake row can lose its source line (both the link and the plain branch must draw it)")
+    stale = re.search(r"if let (\w+) = stake\.staleText \{", row)
+    if not stale or f"Text({stale.group(1)})" not in _closure_after(row, stale.group(0)):
+        out.append("the stale note is not drawn")
+    for gone in ("stake.figureText", "stake.background", "stake.localListing", ".chips(onThirteenFCard:"):
+        if gone in row:
+            out.append(f"the stake row draws {gone} again")
+    return out
+
+
+def test_the_detail_is_three_segments_and_plain_stake_rows():
+    assert detail_simplicity_violations(_src(DETAIL)) == []
+
+
+def test_detail_simplicity_guard_fires():
+    src = _src(DETAIL)
+    for old, new in [
+        ('    case stakes = "Other stakes"\n', '    case changes = "Changes"\n    case stakes = "Other stakes"\n'),
+        ("Text(stake.rowFigureText)", "Text(stake.figureText ?? \"\")"),
+        ("            if let stale = stake.staleText {", "            if let stale = Optional<String>.none {"),
+        ("                Text(stale)\n", "                EmptyView()\n"),
+        ("            } else {\n                Text(stake.sourceText)\n", "            } else {\n                EmptyView()\n"),
+        ("            Text(stake.rowFigureText)\n", "            Text(stake.rowFigureText)\n            if let b = stake.background { Text(b) }\n"),
+    ]:
+        assert detail_simplicity_violations(_replace_once(src, old, new)), old

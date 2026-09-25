@@ -56,7 +56,8 @@ _DETAIL_SCREENS = [
 
 
 def _strip_comments(src: str) -> str:
-    """Drop `//` lines and trailing `//` tails. See the module docstring."""
+    """Drop `/* */` blocks, `//` lines and trailing `//` tails. See the module docstring."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
     out = []
     for line in src.splitlines():
         if line.strip().startswith("//"):
@@ -137,23 +138,17 @@ def test_app_info_declares_a_working_website_url():
         f"AppInfo.websiteURL must be {_WEBSITE} — measured 2026-08-28 as the only path on "
         "that domain that answers 200 (/app, /download, /get and /ios all 404)"
     )
-    assert "static var downloadURL: URL { appStoreURL ?? websiteURL }" in block, (
-        "downloadURL must fall back to the website while appStoreAppID is blank, and prefer "
-        "the App Store once it is set — that fallback is what makes launch day a "
-        "one-constant flip"
-    )
-
-
-def test_the_app_store_id_is_still_unset():
-    """`https://apps.apple.com/app/id6759525689` 404s until the app is approved (measured
-    2026-08-28). Filling the id early ships a dead link to every share recipient AND breaks
-    the "Rate the App" row, which returns nil while it is blank. Delete this test on the day
-    the app goes live — that is the intended way to retire it."""
-    block = _decl_block(_APP_INFO.read_text(), "enum AppInfo")
-    assert 'static let appStoreAppID = ""' in block, (
-        "appStoreAppID was filled in. If the app is now live on the App Store this test has "
-        "done its job — delete it. If it is not live yet, revert: the id 404s and every "
-        "share would point at a dead page."
+    # `test_the_app_store_id_is_still_unset` used to live below, pinning the id BLANK until
+    # launch day. A compiled-in id cannot reach the 1.0 binary that way, so the id is now set
+    # and the pre-launch 404 is handled at RUNTIME — the website unless THIS copy is an App
+    # Store install. Pinned, and the policy executed, in test_ios_install_source_rate_the_app.py.
+    flat = re.sub(r"\s+", " ", block)
+    assert ("static var downloadURL: URL { InstallSourcePolicy.downloadURL(for: "
+            "InstallSourceStore.current, appStoreURL: appStoreURL, websiteURL: websiteURL) }"
+            ) in flat, (
+        "downloadURL must fall back to the website unless this copy was installed from the "
+        "App Store — the listing 404s until approval, so a TestFlight or review build must "
+        "never send a share recipient there"
     )
 
 

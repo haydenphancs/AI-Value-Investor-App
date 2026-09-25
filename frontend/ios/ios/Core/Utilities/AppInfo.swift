@@ -45,17 +45,21 @@ enum AppInfo {
     static var appVersion: String { Bundle.main.appVersion }
     static var buildNumber: String { Bundle.main.buildNumber }
 
-    /// The App Store's NUMERIC app id (the `id` in `apps.apple.com/app/id123456789`).
+    /// The App Store's NUMERIC app id (the `id` in `apps.apple.com/app/id123456789`) — the
+    /// adamId App Store Connect assigned Caydex's record (documents/legal/LAUNCH_CHECKLIST.md
+    /// §7; the same value as `IAP_APP_APPLE_ID` on Railway).
     ///
-    /// ⚠️ PLACEHOLDER — fill this in once App Store Connect assigns the record. It is empty on
-    /// purpose rather than a fake number: `reviewURL` returns nil while it is blank, and the
-    /// "Rate the App" row falls back to `requestReview()` alone. A made-up id would deep-link
-    /// every user to somebody else's app.
+    /// It used to be a deliberate blank until launch, because the listing 404s until App
+    /// Review approves it. But this is COMPILED IN, and the 1.0 binary is built before launch,
+    /// so a launch-day flip could only have reached users in a 1.0.1. The pre-launch 404 is
+    /// now handled at RUNTIME instead: `InstallSourcePolicy` uses the store links only for an
+    /// App Store install, which cannot exist before the listing is live.
     ///
     /// This is a NUMBER, not the bundle id. Digits only.
-    static let appStoreAppID = ""
+    static let appStoreAppID = "6759525689"
 
-    /// The App Store product page, or nil until `appStoreAppID` is set.
+    /// The App Store product page, or nil if `appStoreAppID` is ever blank. A pure URL
+    /// builder — whether it is SAFE to use is `InstallSourcePolicy`'s call.
     ///
     /// One digits-only guard for every App Store link in the app — `reviewURL` and
     /// `downloadURL` both build on this rather than repeating it.
@@ -65,7 +69,9 @@ enum AppInfo {
         return URL(string: "https://apps.apple.com/app/id\(id)")
     }
 
-    /// Deep link to the App Store review sheet, or nil until `appStoreAppID` is set.
+    /// Deep link to the App Store review sheet, or nil if `appStoreAppID` is ever blank.
+    ///
+    /// Only ever OPENED for an App Store install — `InstallSourcePolicy.rateAction` decides.
     ///
     /// Why this exists at all: `requestReview()` is rate-limited by iOS to three prompts per
     /// 365 days and is documented as "may not display". As the ONLY behaviour behind a row the
@@ -86,14 +92,16 @@ enum AppInfo {
 
     /// Where a share tells the recipient to go to get the app.
     ///
-    /// Prefers the App Store once `appStoreAppID` lands and falls back to the site until
-    /// then, so **launch day is a one-constant flip**: fill in the id and every share in the
-    /// app switches over at once, along with the "Rate the App" row.
-    ///
-    /// It deliberately does NOT hardcode the known id (6759525689, see
-    /// documents/legal/LAUNCH_CHECKLIST.md). That record 404s until the app is approved —
-    /// measured 2026-08-28 — so setting it early would ship a dead link to every recipient.
-    static var downloadURL: URL { appStoreURL ?? websiteURL }
+    /// The App Store page when THIS copy was installed from the App Store, the website
+    /// otherwise. The listing 404s until App Review approves it (measured 2026-08-28), so a
+    /// TestFlight or review build must not send recipients there — and an App Store install
+    /// proves the listing is live. Nothing changes on launch day: the first App Store install
+    /// is the switch.
+    static var downloadURL: URL {
+        InstallSourcePolicy.downloadURL(for: InstallSourceStore.current,
+                                        appStoreURL: appStoreURL,
+                                        websiteURL: websiteURL)
+    }
 
     static var osVersion: String {
         "iOS \(UIDevice.current.systemVersion)"

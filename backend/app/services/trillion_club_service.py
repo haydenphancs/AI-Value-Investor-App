@@ -1095,6 +1095,9 @@ def _card(
         # Every published stake, material or not: the card lists only the material ones, and
         # "+N more in the details" must count what the detail actually lists.
         stake_count=len(stakes),
+        # The stakes that are not notes on a 13F holding (those are already in the holdings
+        # count): material or not — the detail's "Other stakes" tab lists all of them.
+        other_stake_count=sum(1 for s in stakes if s.response.kind != _STAKE_ON_13F_NOTE),
         whale_id=whale_id if company.card_kind == CARD_WHALE_LINK else None,
         reviewed_on=company.reviewed_on,
     )
@@ -1156,7 +1159,8 @@ def _link_notes(stakes: Sequence[_Stake], holdings: Sequence[_Holding]) -> None:
 # decided, not inherited by accident).
 REDACTION_POLICY = {
     "company": "kept; its top_holdings cut to the free holdings, its stakes filtered like "
-               "`stakes` and its stake_count recounted",
+               "`stakes` and its stake_count recounted (other_stake_count unchanged: only "
+               "on_13f_note stakes are ever dropped, and it never counts those)",
     "holdings": "top 3 only",
     "changes": "kept (changed rows only — never unchanged)",
     "stakes": "kept, except an on_13f_note that names a withheld holding",

@@ -166,6 +166,10 @@ class TrillionClubCompanyResponse(BaseModel):
     # Every published stake of the company (the card shows only the material ones), so the
     # card can say "+N more in the details" truthfully.
     stake_count: Optional[int] = None
+    # Published stakes that are NOT an `on_13f_note` — a note describes a 13F holding that
+    # `position_count` already counts, so "8 holdings · 5 stakes" would count NVIDIA's Intel
+    # twice. This is the card's "· N stakes" and exactly the detail's "Other stakes" list.
+    other_stake_count: Optional[int] = None
     whale_id: Optional[str] = None              # whale_link cards: the whale profile to open
     reviewed_on: Optional[str] = None
 

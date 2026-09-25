@@ -2,9 +2,11 @@
 //  TrillionClubInfoSheet.swift
 //  ios
 //
-//  Molecule: "About Trillion-Dollar Club Bets" — what the section shows, what a 13F leaves out,
-//  why the data is weeks old, how membership is decided, where every figure comes from, and
-//  a list of club members.
+//  Molecule: "About this section" for Trillion-Dollar Club Bets — short, in the shape of the
+//  Ticker Detail "i" sheets (`ValuationInfoSheet`): an intro card, who's in the club, a
+//  "What you'll see" legend (one sentence per thing on screen), the member list, and the
+//  not-a-recommendation line. The 2026-09-24 redesign cut eight paragraphs to this; every
+//  fact the old sheet guarded is still here, in one sentence.
 //
 //  WHICH MEMBERS, AND WHAT THE LIST MEANS, TRAVEL TOGETHER (`Members`). Home passes the members
 //  WITHOUT a card, captioned "no disclosed stake large enough for a card"; a company's detail
@@ -12,13 +14,13 @@
 //  once fed its full list to the no-card caption and named Microsoft, Alphabet and nine more
 //  carded companies as having no disclosed stake.
 //
-//  Hand-written and static on purpose: nothing in this section is generated text. It follows
-//  the app's existing 13F explanations (`WhalePortfolioStatsInfoSheet`, `RecentTradesInfoSheet`)
-//  minus their advice-like lines, and states two facts precisely: a 13F is due WITHIN 45 days
-//  (filers often file sooner), and it lists some securities besides stocks. The whale sheet
-//  now uses the same wording — keep the two aligned.
-//  The membership sentence describes the backend rule in `services/trillion_club/rules.py`
-//  (JOIN_CLOSES = 10, LEAVE_CLOSES = 20) — change both together.
+//  Hand-written and static on purpose: nothing in this section is generated text. It states
+//  two 13F facts precisely: a 13F is due WITHIN 45 days (filers often file sooner), and it
+//  lists some securities besides stocks. The whale sheet uses the same wording — keep the two
+//  aligned. The membership sentence describes the backend rule in
+//  `services/trillion_club/rules.py` (JOIN_CLOSES = 10, LEAVE_CLOSES = 20) — change both
+//  together. Neutral ink only: the Valuation sheet's red/green dots would make a legend of
+//  facts read as good or bad news.
 //
 //  Every section title is a VoiceOver HEADING (the rotor's Headings jump between them).
 //
@@ -63,62 +65,16 @@ struct TrillionClubInfoSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: AppSpacing.lg) {
-                    section(
-                        title: "What this shows",
-                        body: "Stakes that companies valued at $1 trillion or more hold in other "
-                            + "companies. If a company files an SEC Form 13F, its U.S.-listed "
-                            + "holdings come from that filing. Other stakes are ones disclosed in "
-                            + "its own reports or in official announcements, each with its source."
-                    )
-
-                    section(
-                        title: "What a 13F leaves out",
-                        body: "Form 13F lists U.S.-listed stocks and some other securities, such "
-                            + "as convertible notes and options — we leave those out. Private "
-                            + "companies, shares listed only outside the U.S., cash and short "
-                            + "positions never appear on one, so a company's stakes are usually "
-                            + "wider than its 13F."
-                    )
-
-                    section(
-                        title: "Why it's weeks old",
-                        body: "A 13F is filed up to 45 days after the quarter ends, so its "
-                            + "positions are usually several weeks old when they appear and may "
-                            + "already have changed. That delay is set by law, not by us."
-                    )
-
-                    section(
-                        title: "\u{201C}Newly reported\u{201D} is not the same as new money",
-                        body: "A holding can appear for the first time because a private company "
-                            + "went public or a deal turned into shares — not because of a market "
-                            + "purchase. A holding that leaves the filing may have been sold, "
-                            + "merged, fallen below the reporting threshold, or been kept "
-                            + "confidential. Changes are counted in shares, so a holding whose "
-                            + "value moved with its price is unchanged."
-                    )
-
-                    section(
-                        title: "Many stakes come with a deal",
-                        body: "Some of these companies are also customers, suppliers or partners of "
-                            + "the company they hold. A stake can say more about that relationship "
-                            + "than about the stock. Stakes tied to a business agreement are marked "
-                            + "\u{201C}Tied to a deal\u{201D}."
-                    )
-
-                    section(
-                        title: "Private stakes",
-                        body: "Private companies have no market price. Where we show a figure, it's "
-                            + "the one the owner disclosed — carried at, invested, or committed up "
-                            + "to — with its source and date. Stakes may have changed since."
-                    )
+                VStack(alignment: .leading, spacing: AppSpacing.xxl) {
+                    introCard
 
                     section(
                         title: "Who's in the club",
-                        body: TrillionClubCopy.membershipRule + " The buffer keeps a company near "
-                            + "the line from flickering in and out. Companies listed only outside "
-                            + "the U.S. are reviewed by hand from a cited market value."
+                        body: TrillionClubCopy.membershipRule
+                            + " Companies listed only outside the U.S. are reviewed by hand."
                     )
+
+                    legend
 
                     if !members.list.isEmpty {
                         VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -142,18 +98,13 @@ struct TrillionClubInfoSheet: View {
                         }
                     }
 
-                    section(
-                        title: "Sources",
-                        body: "SEC Form 13F filings for U.S.-listed holdings. Everything else comes "
-                            + "from each company's own filings — 10-K, 10-Q, 20-F, 8-K and Schedule "
-                            + "13D/13G — or its official releases, and every stake names its source "
-                            + "and the date it describes. News reports alone are never used."
-                    )
-
-                    section(title: "Not a recommendation", body: TrillionClubCopy.detailFooter)
-
-                    InlineDisclaimerNotice()
-                        .padding(.top, AppSpacing.xs)
+                    VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                        Text(TrillionClubCopy.detailFooter)
+                            .font(AppTypography.caption)
+                            .foregroundColor(AppColors.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        InlineDisclaimerNotice()
+                    }
                 }
                 .padding(AppSpacing.lg)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -162,15 +113,112 @@ struct TrillionClubInfoSheet: View {
             .navigationTitle("About this section")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
-                        .fontWeight(.semibold)
                         .foregroundColor(AppColors.primaryBlue)
                 }
             }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    // MARK: - Intro
+
+    private var introCard: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            HStack(spacing: AppSpacing.md) {
+                Image(systemName: "building.columns.fill")
+                    .font(AppTypography.iconXL)
+                    .foregroundColor(AppColors.primaryBlue)
+                    .accessibilityHidden(true)
+                Text("Trillion-Dollar Club")
+                    .font(AppTypography.titleCompact)
+                    .foregroundColor(AppColors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            Text("What companies valued at $1 trillion or more own in other companies, from SEC "
+                 + "filings and other official disclosures. Tap a company for its holdings and stakes.")
+                .font(AppTypography.body)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: AppCornerRadius.large).cardFill())
+    }
+
+    // MARK: - Legend
+
+    /// One row per thing the section shows, like the Valuation sheet's meter rows — but with a
+    /// neutral dot: these are facts, not a rating.
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("What you\u{2019}ll see")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+
+            legendRow(
+                label: "Holdings",
+                detail: "U.S.-listed stocks from the company\u{2019}s SEC Form 13F. "
+                    + "A 13F is filed up to 45 days after the quarter ends, so its "
+                    + "positions can be weeks old. Other securities it lists, such "
+                    + "as convertible notes and options, are left out."
+            )
+            if let newly = ClubChangeKind.newlyReported.helpText {
+                legendRow(label: "Newly reported", detail: newly + ".")
+            }
+            if let gone = ClubChangeKind.noLongerReported.helpText {
+                legendRow(label: "No longer reported", detail: gone + ".")
+            }
+            legendRow(
+                label: "Increased / Decreased shares",
+                detail: "More or fewer shares than the quarter before \u{2014} counted in shares, so a "
+                    + "holding whose value moved only with its price has no tag."
+            )
+            if let action = ClubChangeKind.corporateAction.helpText {
+                legendRow(label: "Corporate action", detail: action + ".")
+            }
+            legendRow(
+                label: "Other stakes",
+                detail: "Private stakes, shares listed outside the U.S., commitments and other "
+                    + "stakes not on a 13F \u{2014} each with the source that disclosed it and its date."
+            )
+            legendRow(
+                label: "Stakes that came with a deal",
+                detail: "Many of these stakes came with a business agreement between the two "
+                    + "companies, such as a supply or partnership deal. Such a stake can say more "
+                    + "about that relationship than about the stock; its source describes it."
+            )
+            legendRow(label: "Club member", detail: "The holding is itself valued at $1 trillion or more.")
+        }
+    }
+
+    private func legendRow(label: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            HStack(spacing: AppSpacing.sm) {
+                Circle()
+                    .fill(AppColors.primaryBlue)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .font(AppTypography.bodyEmphasis)
+                    .foregroundColor(AppColors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(detail)
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: AppCornerRadius.medium).cardFill())
+        // One element per row: "Holdings. U.S.-listed stocks from…".
+        .accessibilityElement(children: .combine)
     }
 
     /// A titled paragraph. The title is its own element with the HEADER trait — not combined

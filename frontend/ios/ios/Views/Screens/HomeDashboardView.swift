@@ -38,10 +38,9 @@ struct HomeDashboardView: View {
     @State private var signalDetailTarget: SignalDetailTarget?
     /// A tapped Emerging Frontiers theme → its detail screen (hero + companies).
     @State private var themeDetailTarget: ThemeDetailTarget?
-    /// A tapped Trillion-Dollar Club card → that company's stakes.
+    /// A tapped Trillion-Dollar Club tile → that company's stakes. (Berkshire's "Open
+    /// profile" lives on its detail screen, which presents the whale profile itself.)
     @State private var trillionClubTarget: TrillionClubTarget?
-    /// "Open profile" on the club's investor-profile card (Berkshire) → its whale profile.
-    @State private var trillionClubProfileTarget: TrillionClubProfileLink?
     /// The club section's ⓘ → its info sheet. Owned HERE, not by the section, so the
     /// presentation reset below takes it down (a child-owned sheet escapes it).
     @State private var showTrillionClubInfo = false
@@ -168,7 +167,6 @@ struct HomeDashboardView: View {
             signalDetailTarget = nil
             themeDetailTarget = nil
             trillionClubTarget = nil
-            trillionClubProfileTarget = nil
             showTrillionClubInfo = false
             showSearch = false
             showProfile = false
@@ -211,20 +209,13 @@ struct HomeDashboardView: View {
                 ThemeDetailView(slug: target.slug)
             }
         }
-        // Trillion-Dollar Club: a company's stakes, and the investor-profile link. BOTH
-        // spellings of AppState on both: the detail reads `AppState.self` (and presents
-        // PaywallView/WhaleProfileView, which read `\.appState`), and a cover inherits neither
-        // for free — the reason the Profile cover above carries both.
+        // Trillion-Dollar Club: a company's stakes. BOTH spellings of AppState: the detail
+        // reads `AppState.self` (and presents PaywallView/WhaleProfileView, which read
+        // `\.appState`), and a cover inherits neither for free — the reason the Profile cover
+        // above carries both.
         .fullScreenCover(item: $trillionClubTarget) { target in
             NavigationStack {
                 TrillionClubDetailView(slug: target.slug)
-            }
-            .environment(appState)
-            .environment(\.appState, appState)
-        }
-        .fullScreenCover(item: $trillionClubProfileTarget) { target in
-            NavigationStack {
-                WhaleProfileView(whaleId: target.whaleId)
             }
             .environment(appState)
             .environment(\.appState, appState)
@@ -408,10 +399,6 @@ struct HomeDashboardView: View {
                         TrillionClubSection(
                             group: data.trillionClub,
                             onCompanyTap: { trillionClubTarget = TrillionClubTarget(slug: $0.slug) },
-                            onProfileTap: { company in
-                                guard let whaleId = company.whaleId else { return }
-                                trillionClubProfileTarget = TrillionClubProfileLink(whaleId: whaleId)
-                            },
                             onInfoTap: { showTrillionClubInfo = true }
                         )
                     }
@@ -545,12 +532,6 @@ private struct ThemeDetailTarget: Identifiable {
 private struct TrillionClubTarget: Identifiable {
     let id = UUID()
     let slug: String
-}
-
-/// The club's investor-profile card → an existing whale profile.
-private struct TrillionClubProfileLink: Identifiable {
-    let id = UUID()
-    let whaleId: String
 }
 
 #Preview {

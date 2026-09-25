@@ -12,12 +12,18 @@ struct CompanyLogoView: View {
     let imageName: String?
     let size: CGFloat
     let gradientColors: [String]?
+    /// What the placeholder tile says while the logo loads or when the CDN has none. nil →
+    /// the ticker's first character — which is a DIGIT for a local listing ("2222.SR"), so a
+    /// caller showing one passes the company's monogram instead.
+    let fallbackText: String?
 
-    init(ticker: String, imageName: String? = nil, size: CGFloat = 40, gradientColors: [String]? = nil) {
+    init(ticker: String, imageName: String? = nil, size: CGFloat = 40, gradientColors: [String]? = nil,
+         fallbackText: String? = nil) {
         self.ticker = ticker
         self.imageName = imageName
         self.size = size
         self.gradientColors = gradientColors
+        self.fallbackText = fallbackText
     }
 
     private var fallbackGradient: LinearGradient {
@@ -51,10 +57,18 @@ struct CompanyLogoView: View {
         return Image(imageName)
     }
 
+    /// White ink belongs to a caller's saturated brand gradient. The default gradient is
+    /// the card fills (near-white in light mode), where white ink vanished — so it carries
+    /// the TEXT-role `textPrimary`, which clears 4.5:1 on both card fills in both modes.
+    private var initialsInk: Color {
+        if let colors = gradientColors, colors.count >= 2 { return AppColors.textOnAccent }
+        return AppColors.textPrimary
+    }
+
     private var initialsView: some View {
-        Text(String(ticker.prefix(1)))
+        Text(fallbackText ?? String(ticker.prefix(1)))
             .font(.system(size: size * 0.4, weight: .bold))
-            .foregroundColor(AppColors.textOnAccent)
+            .foregroundColor(initialsInk)
             .frame(width: size, height: size)
             .background(fallbackGradient)
             .clipShape(RoundedRectangle(cornerRadius: size * 0.25))

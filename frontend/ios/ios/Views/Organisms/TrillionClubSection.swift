@@ -3,21 +3,24 @@
 //  ios
 //
 //  Organism: Home › "Trillion-Dollar Club Bets" — what the companies valued at $1 trillion or
-//  more own in other companies, one card per company in a horizontal row. Placed after
-//  Emerging Frontiers and above the disclaimer; hidden when there are no cards.
+//  more own in other companies. Laid out like Emerging Frontiers: columns of TWO small tiles
+//  (logo, name, one line), two columns to a screen, swiped sideways. Placed after Emerging
+//  Frontiers and above the disclaimer; hidden when there are no cards.
 //
-//  A PLAIN horizontal `ScrollView` + `HStack`, paged by `.viewAligned`, and deliberately NOT
-//  endless: a fixed handful of companies has a real first and last card. Three things this
-//  file must not grow, each of which has frozen or hung Home before and is pinned by
-//  backend/tests/test_ios_trillion_club_guards.py:
+//  A PLAIN horizontal `ScrollView` + `HStack` of columns, paged by `.viewAligned`, and
+//  deliberately NOT endless (unlike Frontiers): a fixed handful of companies has a real first
+//  and last tile. Three things this file must not grow, each of which has frozen or hung Home
+//  before and is pinned by backend/tests/test_ios_trillion_club_guards.py:
 //   • no `Lazy*` stack — a lazy container around cards that size themselves hung the feed
 //     (project_home_feed_lazyvstack_hang);
 //   • no `.scrollPosition(id:)` — it writes its binding back DURING layout (banned app-wide);
-//   • no `GeometryReader` — the cards have a fixed width and a free height instead.
+//   • no `GeometryReader` — a column's width comes from `.containerRelativeFrame`, exactly as
+//     in Frontiers, where a horizontal ScrollView's width is its parent's, not its content's.
 //
-//  Equal-height cards come from `.fixedSize(horizontal: false, vertical: true)` on the row:
-//  the row takes its tallest card's ideal height and every card fills it, so a short card's
-//  "Open profile" button sits on the same baseline as its neighbours.
+//  Equal-height tiles: every tile is the same height by construction (`TrillionClubCard`),
+//  and `.fixedSize(horizontal: false, vertical: true)` on the row makes every column the
+//  tallest one's height. An ODD last column fills its second slot with a blank, so its single
+//  tile keeps a tile's height instead of stretching to fill two.
 //
 //  THIS SECTION PRESENTS NOTHING ITSELF. The ⓘ button calls `onInfoTap`, and Home owns and
 //  presents the info sheet, so Home's `.onPresentationReset` can take it down. A sheet owned
@@ -29,10 +32,8 @@ import SwiftUI
 
 struct TrillionClubSection: View {
     let group: TrillionClubGroup
-    /// A card → that company's detail screen.
+    /// A tile → that company's detail screen.
     let onCompanyTap: (TrillionClubCompany) -> Void
-    /// "Open profile" on an investor-profile card (Berkshire) → its whale profile.
-    let onProfileTap: (TrillionClubCompany) -> Void
     /// The ⓘ button → Home presents the info sheet (see the header: Home owns it).
     let onInfoTap: () -> Void
 
@@ -44,12 +45,13 @@ struct TrillionClubSection: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: AppSpacing.md) {
-                        ForEach(group.companies) { company in
-                            TrillionClubCard(
-                                company: company,
-                                onTap: { onCompanyTap(company) },
-                                onProfileTap: { onProfileTap(company) }
-                            )
+                        ForEach(columnStarts, id: \.self) { start in
+                            column(startingAt: start)
+                                // Two columns fill the row, as in Frontiers, so a swipe
+                                // advances one column (both stacked tiles) at a time.
+                                .containerRelativeFrame(.horizontal) { length, _ in
+                                    (length - 2 * AppSpacing.lg - AppSpacing.md) / 2
+                                }
                         }
                     }
                     .scrollTargetLayout()
@@ -66,6 +68,32 @@ struct TrillionClubSection: View {
                     .padding(.top, AppSpacing.sm)
             }
         }
+    }
+
+    // MARK: - Columns
+
+    /// The index of each column's first company: column c holds companies 2c and 2c+1, so
+    /// the largest company sits top-left and the order reads down each column.
+    private var columnStarts: [Int] { Array(stride(from: 0, to: group.companies.count, by: 2)) }
+
+    private func column(startingAt start: Int) -> some View {
+        VStack(spacing: AppSpacing.md) {
+            tile(group.companies[start])
+            if start + 1 < group.companies.count {
+                tile(group.companies[start + 1])
+            } else if group.companies.count > 2 {
+                // An odd last column beside a full one: that column sets the row to two tiles
+                // plus spacing, so a flexible blank takes the second slot and the single tile
+                // gets a tile's share rather than all of it. With ONE company there is no full
+                // column — a blank would then set the row to a tile plus ~10pt and halve it.
+                Color.clear
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func tile(_ company: TrillionClubCompany) -> some View {
+        TrillionClubCard(company: company, onTap: { onCompanyTap(company) })
     }
 
     private var header: some View {
@@ -107,7 +135,6 @@ struct TrillionClubSection: View {
         TrillionClubSection(
             group: MockHomeRepository.trillionClub,
             onCompanyTap: { _ in },
-            onProfileTap: { _ in },
             onInfoTap: {}
         )
         .padding(.vertical)

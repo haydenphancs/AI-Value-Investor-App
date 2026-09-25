@@ -1442,7 +1442,10 @@ def _harness_program(models_src: str) -> str:
                  '.listedSince(ClubDate(iso: "2026-06-12")!)] { __out("A", c.label, c.accessibilityText) }')
     lines.append('if let d = TrillionClubSamples.nvidiaDetailLocked { '
                  'for p in d.holdings + d.changes { __out("P", p.name, p.accessibilityText) }; '
-                 'for s in d.stakes { __out("S", s.investeeName, s.accessibilityText(onThirteenFCard: true)) } }')
+                 # The detail's stake row, as VoiceOver meets it: its name, its figure line (never
+                 # empty — a figure-less stake says what it is) and its source, each drawn.
+                 'for s in d.stakes { __out("S", s.investeeName, '
+                 '[s.investeeName, s.rowFigureText, s.sourceText].joined(separator: ". ")) } }')
     lines.append('print("DONE|")')
     return "\n".join(lines)
 
@@ -1647,16 +1650,24 @@ def test_no_device_clock_or_zone_api_in_club_code(path):
     assert _TZ_APIS.findall(_code("let f = DateFormatter()\n// Calendar.current\n")) == ["DateFormatter"]
 
 
-def _logo_fallback_glyph(name: str, logo_symbol: Optional[str], card_code: str, atom_code: str) -> str:
+def _logo_fallback_glyph(name: str, logo_symbol: Optional[str], view_code: str, atom_code: str) -> str:
     """What the logo tile shows when no image is on screen (loading, or no logo on the CDN),
-    derived from the CURRENT view code rather than assumed."""
+    derived from the CURRENT view and atom code rather than assumed.
+
+    Since 2026-09-24 a local listing ("2222.SR") DOES reach `CompanyLogoView` — the CDN has
+    those logos — so the glyph is the atom's placeholder: `fallbackText` when the view passes
+    the monogram, else the symbol's first character (a digit for "2222.SR")."""
+    letter = next((c for c in name if c.isalpha()), name[:1]).upper()
     uses_atom = re.search(r"if\s+let\s+symbol\s*=\s*company\.logoSymbol\s*\{\s*CompanyLogoView\(ticker:\s*symbol",
-                          card_code) is not None
+                          view_code) is not None
+    if logo_symbol is None or not uses_atom:
+        return letter
     initials = type_body(atom_code, "CompanyLogoView")
-    atom_uses_ticker = re.search(r"Text\(String\(ticker\.prefix\(1\)\)\)", initials) is not None
-    if logo_symbol is not None and uses_atom:
-        return logo_symbol[:1] if atom_uses_ticker else name[:1].upper()
-    return name[:1].upper()
+    placeholder = re.search(r"Text\((fallbackText\s*\?\?\s*)?String\(ticker\.prefix\(1\)\)\)", initials)
+    assert placeholder, "CompanyLogoView's placeholder drifted — re-derive this guard"
+    passes_monogram = re.search(r"CompanyLogoView\(ticker:\s*symbol,[^)]*fallbackText:\s*company\.monogram\)",
+                                view_code) is not None
+    return letter if (passes_monogram and placeholder.group(1)) else logo_symbol[:1]
 
 
 def test_regression_non_us_logo_symbol_never_falls_back_to_a_digit_tile(swift_runs):
@@ -1671,17 +1682,28 @@ def test_regression_non_us_logo_symbol_never_falls_back_to_a_digit_tile(swift_ru
     `^[A-Z]{1,5}(-[A-Z])?$`) — or null logo_symbol for non-U.S. rows in the seed and add that
     rule to `company_problems`."""
     swift_logo = _lines(swift_runs[_TZ_EAST], "L")
-    card_code, atom_code = _code(_src(CARD)), _code(_src(LOGO_ATOM))
-    detail_code = _code(_src(DETAIL))
-    assert "CompanyLogoView(ticker: symbol" in detail_code, "detail header drifted — re-derive"
+    atom_code = _code(_src(LOGO_ATOM))
+    views = {"card": _code(_src(CARD)), "detail": _code(_src(DETAIL))}
+    assert all("CompanyLogoView(ticker: symbol" in v for v in views.values()), "a logo view drifted — re-derive"
+    local = [slug for slug, _, _ in _seed_logo_cases() if (swift_logo.get(slug) or "").count(".") == 1]
+    assert local, "no local-listing logo reaches the atom any more — this guard would be vacuous; re-derive"
     bad = []
-    for slug, name, _ in _seed_logo_cases():
-        logo = swift_logo.get(slug)
-        logo = None if logo in (None, "<nil>") else logo
-        glyph = _logo_fallback_glyph(name, logo, card_code, atom_code)
-        if not glyph.isalpha():
-            bad.append(f"{slug}: logo_symbol {logo!r} → fallback tile {glyph!r} (name {name!r})")
+    for where, view_code in views.items():
+        for slug, name, _ in _seed_logo_cases():
+            logo = swift_logo.get(slug)
+            logo = None if logo in (None, "<nil>") else logo
+            glyph = _logo_fallback_glyph(name, logo, view_code, atom_code)
+            if not glyph.isalpha():
+                bad.append(f"{where} {slug}: logo_symbol {logo!r} → fallback tile {glyph!r} (name {name!r})")
     assert bad == [], "\n".join(bad)
+
+
+def test_logo_fallback_guard_fires():
+    atom = _code(_src(LOGO_ATOM))
+    card = _code(_src(CARD))
+    assert _logo_fallback_glyph("Saudi Aramco", "2222.SR", card, atom) == "S"
+    unpassed = card.replace("fallbackText: company.monogram)", ")", 1)
+    assert unpassed != card and _logo_fallback_glyph("Saudi Aramco", "2222.SR", unpassed, atom) == "2"
 
 
 @pytest.mark.parametrize("pct", ["99.95", "99.97", "99.999"])
@@ -1804,7 +1826,9 @@ def test_icon_guard_fires():
     assert unlabelled_icons(_drop_hide_after(src, 'Image(systemName: "clock")'))
     # The locked row's lock glyph IS inside a labelled Button, so un-hiding it is fine.
     assert unlabelled_icons(_drop_hide_after(src, 'Image(systemName: "lock.fill")')) == []
-    assert unlabelled_icons(_drop_hide_after(_src(CARD), 'Image(systemName: "chevron.right")'))
+    # The Home tile has no glyph of its own since 2026-09-24; the info sheet's intro icon
+    # sits in no Button, so un-hiding it must be reported.
+    assert unlabelled_icons(_drop_hide_after(_src(INFO), 'Image(systemName: "building.columns.fill")'))
     section = _src(SECTION)
     label = '.accessibilityLabel("About \\(TrillionClubCopy.title)")'
     assert label in section
@@ -1827,12 +1851,10 @@ def row_label_violations(row_src: str, card_src: str, detail_src: str) -> List[s
             out.append(f"ClubHoldingRow.{prop.split()[2]} has no single VoiceOver label")
     card = _code(card_src)
     main_button = _prop_body(card, "var body: some View")
-    if not re.search(r"Button\(action:\s*onTap\)\s*\{.*?\}\s*\.buttonStyle\(\.plain\)\s*\.accessibilityLabel\(accessibilityLabel\)",
-                     main_button, re.S):
+    # The tile reads as ONE element: the name and the same line it shows.
+    if not re.search(r"Button\(action:\s*onTap\)\s*\{.*?\}\s*\.buttonStyle\(\.plain\)\s*"
+                     r"\.accessibilityLabel\(company\.cardAccessibilityText\)", main_button, re.S):
         out.append("TrillionClubCard's main button lost its combined label")
-    label = _prop_body(card, "private var accessibilityLabel: String")
-    if "accessibilityText(onThirteenFCard:" not in label or "company.accessibilityText" not in label:
-        out.append("TrillionClubCard's label no longer reads the stakes / company")
     detail = _code(detail_src)
     if ".accessibilityLabel(position.accessibilityText)" not in _prop_body(detail, "private func positionRow("):
         out.append("detail position button unlabelled")

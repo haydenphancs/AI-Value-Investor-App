@@ -37,6 +37,12 @@ struct AppSettingsView: View {
     /// and this screen sits inside the Account `.fullScreenCover`, so a toast raised from here
     /// is drawn behind the cover and never seen. Verified on the Simulator.
     @State private var appStoreUnavailable = false
+    /// "Rate the App" tapped in a TestFlight / App Review / Xcode build, where there is no
+    /// live listing to review and iOS never shows `requestReview()`. An alert for the same
+    /// reason as `appStoreUnavailable`.
+    @State private var showPreReleaseRating = false
+    /// Pushes "Help Us Improve" — the alert's way forward, so the tap never dead-ends.
+    @State private var showFeedback = false
 
     /// Third-party AI processing consent. 5.1.1(ii)/5.1.2 require an accessible way to
     /// withdraw consent, so it is surfaced here rather than only at the first-send gate.
@@ -115,6 +121,22 @@ struct AppSettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This device can't open the App Store. Manage your subscription in iOS Settings → your name → Subscriptions.")
+        }
+        // Worded to stay true for TestFlight, App Review and Xcode builds, before AND after
+        // launch — so it never has to be edited or removed. And deliberately NEUTRAL: App
+        // Review installs are sandbox installs too, so a reviewer who taps the row reads this,
+        // and a build that calls itself "pre-release" / "beta" / "not available" invites a
+        // Guideline 2.2 / 2.1 rejection.
+        .alert("Rate Caydex", isPresented: $showPreReleaseRating) {
+            Button("Send Feedback") { showFeedback = true }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text("Ratings are left on the App Store version of Caydex. Want to tell us what you think here instead?")
+        }
+        // This screen is pushed inside ProfileView's NavigationStack — the same stack that
+        // pushes FeedbackView from "Help Us Improve".
+        .navigationDestination(isPresented: $showFeedback) {
+            FeedbackView()
         }
         .alert("Clear Cache", isPresented: $showClearCacheConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -442,10 +464,14 @@ struct AppSettingsView: View {
             // display", with no callback to say which happened. As the only behaviour behind a
             // row the user deliberately tapped, that is a button that silently does nothing.
             //
-            // The deep link always works, and `openInSystem` reports it when it cannot open
-            // (the Simulator has no App Store) rather than failing silently — the same
-            // treatment "Manage Subscription" already gets. `requestReview()` stays as the
-            // fallback while `AppInfo.appStoreAppID` is still the empty placeholder.
+            // The deep link always works on an App Store install, and `openInSystem` reports it
+            // when it cannot open (the Simulator has no App Store) rather than failing silently
+            // — the same treatment "Manage Subscription" already gets.
+            //
+            // It was still a dead tap on TestFlight (1.0 (3) and 1.0 (6)): the App Store id
+            // was blank until launch, so the row fell back to `requestReview()`, which iOS
+            // never shows there. What a tap does now depends on where THIS copy came from —
+            // see `rateTheApp()` and `InstallSourcePolicy.rateAction`.
             Button(action: rateTheApp) {
                 actionRow(title: "Rate the App",
                           subtitle: "Tell us what you think",
@@ -684,14 +710,20 @@ struct AppSettingsView: View {
     private var buildNumber: String { AppInfo.buildNumber }
 
     private func rateTheApp() {
-        guard let url = AppInfo.reviewURL else {
-            // No App Store record yet. The system prompt is all we have; it may not show,
-            // which is precisely why it is the fallback rather than the behaviour.
+        switch InstallSourcePolicy.rateAction(for: InstallSourceStore.current,
+                                              reviewURL: AppInfo.reviewURL) {
+        case .openReview(let url):
+            openInSystem(url, action: "open the App Store") {
+                appStoreUnavailable = true
+            }
+        case .explainPreRelease:
+            // TestFlight / App Review / Xcode: the listing may not exist yet, and
+            // `requestReview()` never displays here — the silent tap testers reported.
+            showPreReleaseRating = true
+        case .systemPrompt:
+            // Only if the App Store id is ever blank again. The system prompt may not show,
+            // which is precisely why it is the last resort rather than the behaviour.
             requestReview()
-            return
-        }
-        openInSystem(url, action: "open the App Store") {
-            appStoreUnavailable = true
         }
     }
 

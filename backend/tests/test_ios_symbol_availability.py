@@ -38,6 +38,9 @@ PBXPROJ = REPO / "frontend" / "ios" / "ios.xcodeproj" / "project.pbxproj"
 _NOT_SYMBOLS = {
     # A word in the depositary-receipt suffix table, not an icon. (`receipt` is an iOS 18.2 symbol.)
     ("Core/Utilities/CompanyNameFormatter.swift", "receipt"),
+    # The App Store receipt FILE name (`appStoreReceiptURL.lastPathComponent` on an App Store
+    # install), compared to decide where this copy was installed from — never drawn.
+    ("Core/Utilities/InstallSourcePolicy.swift", "receipt"),
 }
 
 # Content files whose icon values reach `Image(systemName:)`. These can never be `#available`-gated,

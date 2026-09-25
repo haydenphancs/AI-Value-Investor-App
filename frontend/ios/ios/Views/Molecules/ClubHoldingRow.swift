@@ -21,9 +21,10 @@ struct ClubHoldingRow: View {
     enum Style {
         /// Home card: name (up to two lines, the Club member chip under it) + weight.
         case compact
-        /// Detail › Holdings: symbol, shares, value, and the change pill.
+        /// Detail › Holdings: "SYMBOL · $value" and the change pill (no shares — VoiceOver
+        /// keeps the full line), no small-position line (the "<1%" weight says it).
         case holding
-        /// Detail › Changes: what moved, in shares.
+        /// What moved, in shares (the detail's Changes segment until 2026-09-24).
         case change
     }
 
@@ -102,7 +103,8 @@ struct ClubHoldingRow: View {
                 // A sentence, so OUTSIDE the flow, on its own line at the column's width. (Inside it,
                 // before `FlowLayout` capped children at the row width on 2026-09-24, this line was laid
                 // out at its one-line width and ran into the weight column at larger text sizes.)
-                if let small = position.smallText {
+                // Not on a `.holding` row: its "<1%" weight already says the same thing.
+                if style != .holding, let small = position.smallText {
                     Text(small)
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
@@ -133,7 +135,8 @@ struct ClubHoldingRow: View {
     private var secondaryLine: String? {
         switch style {
         case .change: return position.changeLine ?? position.holdingLine
-        case .holding, .compact: return position.holdingLine
+        case .holding: return position.shortHoldingLine
+        case .compact: return position.holdingLine
         }
     }
 

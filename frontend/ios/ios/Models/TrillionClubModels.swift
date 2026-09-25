@@ -325,6 +325,8 @@ nonisolated struct TrillionClubCompanyDTO: Codable, Sendable {
     let stakes: [ClubStakeDTO]?
     /// Every published stake of the company — the card carries only the material ones.
     let stakeCount: Int?
+    /// Published stakes that are not a note on a 13F holding — the card's "· N stakes".
+    let otherStakeCount: Int?
     let whaleId: String?
     let reviewedOn: String?
 
@@ -351,6 +353,7 @@ nonisolated struct TrillionClubCompanyDTO: Codable, Sendable {
         case notice
         case stakes
         case stakeCount = "stake_count"
+        case otherStakeCount = "other_stake_count"
         case whaleId = "whale_id"
         case reviewedOn = "reviewed_on"
     }
@@ -379,6 +382,7 @@ nonisolated struct TrillionClubCompanyDTO: Codable, Sendable {
         notice = ClubDecode.field(c, .notice)
         stakes = ClubDecode.list(c, .stakes)
         stakeCount = ClubDecode.field(c, .stakeCount)
+        otherStakeCount = ClubDecode.field(c, .otherStakeCount)
         whaleId = ClubDecode.field(c, .whaleId)
         reviewedOn = ClubDecode.field(c, .reviewedOn)
     }
@@ -789,6 +793,28 @@ nonisolated enum ClubSanitize {
         }
     }
 
+    /// The exchange suffixes the logo CDN keys a local listing on ("2222.SR", "005930.KS").
+    static let logoExchangeSuffixes: Set<String> = [
+        "SR", "KS", "KQ", "T", "HK", "SS", "SZ", "TW", "L", "PA", "DE", "AS", "SW", "TO", "AX", "NS", "BO",
+    ]
+
+    /// The symbol the logo CDN keys on, or nil: a U.S. ticker (`usTicker`), or a local
+    /// listing with a REQUIRED exchange suffix from `logoExchangeSuffixes` ("2222.SR",
+    /// "005930.KS"). A dotted class share ("BRK.B") or a bare local code ("2222") is not
+    /// guessed at — a guessed symbol can pull a different listed company's logo. For logos
+    /// only: it never makes a company routable (`detailSymbol` has its own rule), and the
+    /// placeholder while a logo loads is the company's monogram, so a local listing never
+    /// flashes a DIGIT tile.
+    static func logoSymbol(_ raw: String?) -> String? {
+        if let us = usTicker(raw) { return us }
+        guard let s = symbol(raw) else { return nil }
+        let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2, (1...10).contains(parts[0].count),
+              parts[0].allSatisfy({ ("A"..."Z").contains($0) || ("0"..."9").contains($0) }),
+              logoExchangeSuffixes.contains(String(parts[1])) else { return nil }
+        return s
+    }
+
     /// The migration's slug rule: `^[a-z0-9-]{1,40}$`.
     static func slug(_ raw: String?) -> String? {
         guard let s = raw, (1...40).contains(s.count),
@@ -1032,6 +1058,15 @@ nonisolated extension ClubPosition {
 
     var smallText: String? { isSmall ? "Small position · under 1% of reported holdings" : nil }
 
+    /// The detail row's short grey line: "INTC · $30B" — symbol and value, no share count
+    /// (VoiceOver keeps the full `holdingLine`). A holding on its first 13F because it began
+    /// trading says so here too, so its "Newly reported" pill never reads as a purchase.
+    var shortHoldingLine: String? {
+        let listed = change == .newlyReported && newlyListed ? "first 13F since it began trading" : nil
+        let parts = [symbol, valueText, listed].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     var accessibilityText: String {
         var parts = [name]
         if let w = weightText { parts.append("\(w) of reported holdings") }
@@ -1131,6 +1166,27 @@ nonisolated extension ClubStake {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// The detail row's figure line — never empty. A stake with no disclosed figure still
+    /// says what it IS: Meta's AMD warrant (no value, no percent) must not read as a
+    /// holding of AMD shares once the chips are gone from the row.
+    var rowFigureText: String {
+        if let figureText {
+            // A commitment sized as a percent ("10% of shares", a warrant) reads as a holding
+            // without its kind; only the "committed up to" verb says it on its own.
+            let saysCommitment = valueBasis == .committedUpTo && (disclosedValue ?? 0) > 0
+            return kind == .commitment && !saysCommitment ? "Commitment · \(figureText)" : figureText
+        }
+        switch kind {
+        case .commitment: return "Commitment — not a reported holding"
+        case .privateCompany: return "Private stake — no figure disclosed"
+        case .nonUSListed:
+            return localListing.map { "Listed in \($0) — no figure disclosed" }
+                ?? "Listed outside the U.S. — no figure disclosed"
+        case .usListedOff13F: return "U.S.-listed, not on a 13F — no figure disclosed"
+        case .on13FNote, .unknown: return "No figure disclosed"
+        }
+    }
+
     /// "per Microsoft 10-K (FY2026), Jun 30, 2026".
     var sourceText: String { "per \(sourceTitle), \(asOf.long)" }
 
@@ -1139,15 +1195,6 @@ nonisolated extension ClubStake {
         return verifiedOn.map { "Last checked \($0.long) — may be out of date." } ?? "May be out of date."
     }
 
-    func accessibilityText(onThirteenFCard: Bool) -> String {
-        var parts = [investeeName]
-        if let figureText { parts.append(figureText) }
-        if let localListing { parts.append(localListing) }
-        parts += chips(onThirteenFCard: onThirteenFCard).map { $0.accessibilityText(source: sourceTitle) }
-        parts.append(sourceText)
-        if let staleText { parts.append(staleText) }
-        return parts.joined(separator: ". ")
-    }
 }
 
 /// One earlier quarter of a 13F filer (Pro).
@@ -1184,7 +1231,8 @@ nonisolated struct TrillionClubCompany: Identifiable, Sendable {
     let slug: String
     let name: String
     let kind: ClubCardKind
-    /// Only ever a U.S. ticker the logo CDN knows. nil → a letter tile, never a guessed
+    /// A symbol the logo CDN knows (`ClubSanitize.logoSymbol`: a U.S. ticker, or a local
+    /// listing with a known exchange suffix). nil → a letter tile, never a guessed
     /// pseudo-ticker (which could pull a DIFFERENT listed company's logo).
     let logoSymbol: String?
     let detailSymbol: String?
@@ -1207,6 +1255,9 @@ nonisolated struct TrillionClubCompany: Identifiable, Sendable {
     /// Every published stake, material or not (`stakes` holds only the card's material ones).
     /// nil when the server did not say — then no count is claimed.
     let stakeCount: Int?
+    /// Published stakes that are not a note on a 13F holding — exactly the detail's "Other
+    /// stakes" list. nil when the server did not say (a build before the field).
+    let otherStakeCount: Int?
     let whaleId: String?
     let reviewedOn: ClubDate?
 
@@ -1239,7 +1290,7 @@ nonisolated extension TrillionClubCompany {
         }
         self.init(
             slug: slug, name: name, kind: kind,
-            logoSymbol: ClubSanitize.usTicker(dto.logoSymbol),
+            logoSymbol: ClubSanitize.logoSymbol(dto.logoSymbol),
             detailSymbol: ClubSanitize.symbol(dto.detailSymbol),
             marketCap: dto.marketCap.flatMap { $0.isFinite && $0 > 0 ? $0 : nil },
             marketCapAsOf: ClubDate(iso: dto.marketCapAsOf),
@@ -1259,6 +1310,7 @@ nonisolated extension TrillionClubCompany {
             stakes: stakes,
             // Never fewer than the stakes actually on the card; a negative count is no count.
             stakeCount: dto.stakeCount.flatMap { $0 >= 0 ? min(max($0, stakes.count), 100_000) : nil },
+            otherStakeCount: dto.otherStakeCount.flatMap { $0 >= 0 ? min($0, 100_000) : nil },
             // Only a link card opens a profile; a stray id on any other card is ignored.
             whaleId: kind == .whaleLink ? whale : nil,
             reviewedOn: ClubDate(iso: dto.reviewedOn)
@@ -1414,6 +1466,28 @@ nonisolated extension TrillionClubCompany {
         return more > 0 ? "+\(TrillionClubFormat.grouped(more)) more in the details" : nil
     }
 
+    /// The Home card's one grey line, never empty: "8 holdings · 2 stakes", "1 stake". It
+    /// counts what the detail LISTS. A 13F filer with a filing on file gets the Holdings /
+    /// Other stakes split, so its notes on 13F holdings are among the holdings and only the
+    /// other stakes are counted (`otherStakeCount`; before the server sends it, the card's
+    /// own material, never-a-note stakes stand in). Every other card's detail is one list of
+    /// EVERY stake, notes included, so all of them are counted (`stakeCount`).
+    var cardLine: String {
+        var parts: [String] = []
+        let segmented = kind == .thirteenF && hasFilingOnFile
+        if segmented, let n = positionCount, n > 0 {
+            parts.append(n == 1 ? "1 holding" : "\(TrillionClubFormat.grouped(n)) holdings")
+        }
+        let others = segmented ? (otherStakeCount ?? stakes.count) : (stakeCount ?? stakes.count)
+        if others > 0 {
+            parts.append(others == 1 ? "1 stake" : "\(TrillionClubFormat.grouped(others)) stakes")
+        }
+        return parts.isEmpty ? "See details" : parts.joined(separator: " · ")
+    }
+
+    /// VoiceOver for the Home card: the name and the same line the card shows.
+    var cardAccessibilityText: String { "\(name). \(cardLine)." }
+
     var accessibilityText: String {
         let lines: [String?] = [name, badgeText, marketValueLine, holdingsStatLine, changeLine,
                                 filingDatesLine, explainer, noticeText]
@@ -1505,8 +1579,8 @@ nonisolated extension TrillionClubDetail {
         )
     }
 
-    /// The four 13F segments (Holdings / Changes / Private & non-U.S. / History) — only for a
-    /// 13F filer with a filing on file. Without one, every segment would describe a filing
+    /// The three 13F segments (Holdings / Other stakes / History) — only for a 13F filer
+    /// with a filing on file. Without one, every segment would describe a filing
     /// that does not exist ("No U.S.-listed holdings on this filing."); the screen lists the
     /// disclosed stakes instead.
     var showsThirteenFSegments: Bool { company.kind == .thirteenF && company.hasFilingOnFile }
@@ -1515,9 +1589,10 @@ nonisolated extension TrillionClubDetail {
     /// filer with no earlier quarter would otherwise be sold content that does not exist.
     var showsHistoryLock: Bool { isLocked && (lockedHistoryCount ?? 1) > 0 }
 
-    /// The Changes segment's line when no row changed. Only a real quarter-on-quarter
-    /// comparison can have "no share-count changes"; a gap or a first filing is already
-    /// explained by the change line above it.
+    /// The line for "no row changed". Only a real quarter-on-quarter comparison can have "no
+    /// share-count changes"; a gap or a first filing is explained by `company.changeLine`.
+    /// (The Changes segment that showed it was removed on 2026-09-24; the rule stays pinned
+    /// by the parity harness for whatever shows change state next.)
     var changesEmptyText: String? {
         switch company.comparison {
         case .quarter?: return "No share-count changes vs the quarter before."
@@ -1529,8 +1604,44 @@ nonisolated extension TrillionClubDetail {
     /// Notes attached to 13F rows (a deal, a 13G figure) — shown under Holdings.
     var holdingNotes: [ClubStake] { stakes.filter { $0.kind == .on13FNote } }
 
-    /// Everything else — the "Private & non-U.S." segment.
+    /// Everything else — the "Other stakes" segment (the card's `otherStakeCount`).
     var otherStakes: [ClubStake] { stakes.filter { $0.kind != .on13FNote } }
+
+    /// "No longer reported: Arm Holdings, Snowflake" — the holdings that left this filing,
+    /// under the Holdings list now that there is no Changes segment. Change rows exist only
+    /// after a real quarter-on-quarter comparison (a gap or a first filing has none), so
+    /// this never describes a comparison nobody made.
+    var noLongerReportedText: String? {
+        let names = changes.filter { $0.change == .noLongerReported }.map(\.name)
+        guard !names.isEmpty else { return nil }
+        return "No longer reported: " + names.joined(separator: ", ")
+    }
+
+    /// One line per change the Holdings list does NOT already show as a pill, then the
+    /// holdings that left: "Newly reported: Arm Holdings", "Increased shares: Coherent",
+    /// "No longer reported: Snowflake". A Free caller receives only the top 3 holdings but
+    /// EVERY changed row (the server's "the latest changes are free"), so for Free this is
+    /// where the rest of the quarter's changes are named; for Pro every changed holding is
+    /// already a pill and only the "no longer reported" line appears. Empty after a gap or a
+    /// first filing, when the model empties `changes`.
+    var unlistedChangeLines: [String] {
+        // Already drawn when a holdings row has the same name OR the same symbol — the two
+        // lists come from the same 13F rows, and a change row may lack a symbol its holding has
+        // (or the reverse); either match means it already shows as a pill.
+        let drawnNames = Set(holdings.map(\.name))
+        let drawnSymbols = Set(holdings.compactMap(\.symbol))
+        func isDrawn(_ p: ClubPosition) -> Bool {
+            drawnNames.contains(p.name) || p.symbol.map { drawnSymbols.contains($0) } == true
+        }
+        let kinds: [ClubChangeKind] = [.newlyReported, .increased, .decreased, .corporateAction]
+        var lines: [String] = kinds.compactMap { kind in
+            let names = changes.filter { $0.change == kind && !isDrawn($0) }.map(\.name)
+            guard !names.isEmpty, let label = kind.pillLabel else { return nil }
+            return "\(label): " + names.joined(separator: ", ")
+        }
+        if let gone = noLongerReportedText { lines.append(gone) }
+        return lines
+    }
 
     /// "+5 more holdings" — nil when nothing is withheld.
     var lockedHoldingsText: String? {

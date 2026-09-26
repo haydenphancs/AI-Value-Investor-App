@@ -28,13 +28,23 @@ class TickerDetailViewModel: ObservableObject {
     @Published var isAnalystLoaded: Bool = false
     @Published var isSentimentLoaded: Bool = false
     @Published var isTechnicalLoaded: Bool = false
-    @Published var earningsData: EarningsData?
+    @Published var earningsData: EarningsData? {
+        didSet { recomputeValuationPriceHistory() }
+    }
     @Published var growthData: GrowthSectionData?
     @Published var profitPowerData: ProfitPowerSectionData?
     @Published var signalOfConfidenceData: SignalOfConfidenceSectionData?
     @Published var revenueBreakdownData: RevenueBreakdownData?
     @Published var healthCheckData: HealthCheckSectionData?
-    @Published var holdersData: HoldersData?
+    @Published var holdersData: HoldersData? {
+        didSet { recomputeValuationPriceHistory() }
+    }
+    /// ~2 years of daily closes for the Valuation card's Caydex Fair Value chart, and the
+    /// label for its window. Derived from data Phase 2 already fetches (earnings' daily
+    /// history, else the 13F payload's daily prices — the report's own source); never a
+    /// fetch of its own, and never the 1D header chart. Empty until one of them lands.
+    @Published private(set) var valuationPriceHistory: [Double] = []
+    @Published private(set) var valuationPriceHistoryLabel: String?
     @Published var technicalAnalysisDetailData: TechnicalAnalysisDetailData?
     @Published var isTechnicalDetailLoading: Bool = false
     /// Set only when the technical fetch failed — the card used to simply vanish, so a
@@ -563,6 +573,42 @@ class TickerDetailViewModel: ObservableObject {
         } catch {
             print("⚠️ TickerDetailVM: Chart events failed for \(ticker): \(error)")
         }
+    }
+
+    /// Rebuilds `valuationPriceHistory` from whichever daily series is usable. Filters FIRST
+    /// and only then falls back: a long earnings history can be stale or cover the wrong
+    /// window, and must not hide a good holders series. Dates are "yyyy-MM-dd", so the
+    /// window test is a plain string comparison.
+    private func recomputeValuationPriceHistory() {
+        let cutoff = Self.valuationWindowStart()
+        func usable(_ rows: [(date: String, price: Double)]) -> [(date: String, price: Double)] {
+            var byDate: [String: Double] = [:]
+            for row in rows where row.price.isFinite && row.price > 0 {
+                let day = String(row.date.prefix(10))
+                guard day.count == 10, day >= cutoff else { continue }
+                byDate[day] = row.price
+            }
+            return byDate.sorted { $0.key < $1.key }.map { (date: $0.key, price: $0.value) }
+        }
+        let fromEarnings = usable((earningsData?.dailyPriceHistory ?? []).map { (date: $0.date, price: $0.price) })
+        let fromHolders = usable((holdersData?.hedgeFundsData.dailyPrices ?? []).map { (date: $0.date, price: $0.price) })
+        let chosen = fromEarnings.count >= 2 ? fromEarnings : fromHolders
+        let prices = chosen.count >= 2 ? chosen.map(\.price) : []
+        let label = chosen.count >= 2
+            ? CaydexFairValue.pricePeriodLabel(from: chosen.first?.date, to: chosen.last?.date)
+            : nil
+        if prices != valuationPriceHistory { valuationPriceHistory = prices }
+        if label != valuationPriceHistoryLabel { valuationPriceHistoryLabel = label }
+    }
+
+    /// "yyyy-MM-dd" of the day two years ago (UTC) — the report's window.
+    private static func valuationWindowStart() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: -730, to: Date()) ?? Date()
+        return f.string(from: start)
     }
 
     private func fetchEarnings(_ ticker: String) async {

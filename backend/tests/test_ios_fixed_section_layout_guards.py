@@ -86,6 +86,8 @@ _EAGER = [
      "profile.isLocked swaps the locked stub for two full sections when the tier changes"),
     ("Views/Screens/SearchView.swift", "var body: some View", "RecentSearchesSection",
      "Recent vs Results swap on every keystroke"),
+    ("Views/Organisms/SearchTrendingChipsSection.swift", "var body: some View", "FlowOptionChips",
+     "the sections swap from the bundled Popular list to the fetched ones in place"),
     ("Views/Screens/AllWhalesView.swift", "var body: some View", "AllWhalesFlatList",
      "a 3-way swap between a full list and a short empty state as the user types"),
     ("Views/Screens/NotificationsSettingsView.swift", "var body: some View", "NotificationPermissionBanner",

@@ -34,8 +34,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from app.schemas.marketing import AUDIO_WORD_MAX_CHARS
 from app.services.agents.persona_config import neutral_system_instruction
+from app.services.marketing import judge as jd
 from app.services.marketing import writer_prompts as wp
+from app.services.marketing.generation_budget import MODEL_CALLS_PER_GENERATION
 from app.services.marketing.compliance import Violation, clean, scan_text
 from app.services.marketing.content_pool import ContentItem, strict_instruments
 from app.services.marketing.grounding import check_grounding
@@ -82,10 +85,22 @@ class ValidationResult:
     shared: List[Violation] = field(default_factory=list)
     outlets: Dict[str, List[Violation]] = field(default_factory=dict)
     posts: Dict[str, ComposedPost] = field(default_factory=dict)
+    #: The semantic judge has graded this candidate (`generate_package` sets both flags;
+    #: `validate_package` alone never does, so a pure validation keeps its old meaning). In
+    #: `enforce` mode an UNJUDGED candidate is never ok — a judge call that failed, or never
+    #: ran, cannot turn into a pass.
+    judged: bool = False
+    judge_required: bool = False
+    judge_call: Optional[Dict[str, Any]] = None
+
+    @property
+    def regex_ok(self) -> bool:
+        """Clean by the lexical validators alone (the judge's input condition)."""
+        return self.package is not None and not self.shared and len(self.posts) >= MIN_OUTLETS
 
     @property
     def ok(self) -> bool:
-        return self.package is not None and not self.shared and len(self.posts) >= MIN_OUTLETS
+        return self.regex_ok and (self.judged or not self.judge_required)
 
     @property
     def violations(self) -> List[Violation]:
@@ -103,13 +118,18 @@ class RoundRecord:
     tokens_used: int
     violations: List[Dict[str, str]]
     valid_outlets: List[str]
+    #: The judge call on this round's package (`judge.JudgeCall.as_dict()`), when one ran.
+    judge: Optional[Dict[str, Any]] = None
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "round": self.round, "kind": self.kind, "finish_reason": self.finish_reason,
             "tokens_used": self.tokens_used, "violations": self.violations,
             "valid_outlets": self.valid_outlets,
         }
+        if self.judge is not None:
+            out["judge"] = self.judge
+        return out
 
 
 @dataclass
@@ -126,6 +146,7 @@ class WriterResult:
     model: str = WRITER_MODEL
     prompt_version: str = wp.PROMPT_VERSION
     raw_outputs: List[Any] = field(default_factory=list)   # for the preview CLI only
+    judge_mode: str = jd.MODE_ENFORCE
 
 
 # ── parsing ───────────────────────────────────────────────────────────────────
@@ -180,6 +201,20 @@ def _has_words(text: str) -> bool:
 _HAS_ALNUM_RE = re.compile(r"[^\W_]")
 
 
+def _over_words(n: int, limit: int) -> str:
+    """A length detail the repair prompt can act on: the count, the limit, and the cut."""
+    return f"{n} words - the limit is {limit}; cut at least {n - limit} words"
+
+
+def _over_chars(n: int, limit: int) -> str:
+    """One ceiling only (the enforced one) and the cut in characters and words — the repair
+    prompt used to show "216 > 199" next to the spec's "never more than 159", two ceilings for
+    one field. `n` is the platform's own count (X weighs an emoji or a link more than 1)."""
+    cut = n - limit
+    return (f"{n} characters as the platform counts them - the hard limit is {limit}; cut at "
+            f"least {cut} characters (about {max(1, -(-cut // 6))} words)")
+
+
 def _str(obj: Dict[str, Any], key: str, out: List[Violation]) -> str:
     v = obj.get(key)
     if not isinstance(v, str):
@@ -195,7 +230,7 @@ def _pairs(obj: Dict[str, Any], key: str, lo: int, hi: int, title_max: int, body
         out.append(Violation(key, "schema", "expected a list"))
         return []
     if not lo <= len(raw) <= hi:
-        out.append(Violation(key, "count", f"{len(raw)} not in {lo}-{hi}"))
+        out.append(Violation(key, "count", f"{len(raw)} items - use {lo} to {hi}"))
     pairs: List[Dict[str, str]] = []
     for i, p in enumerate(raw[:hi]):
         name = f"{key}[{i}]"
@@ -210,9 +245,9 @@ def _pairs(obj: Dict[str, Any], key: str, lo: int, hi: int, title_max: int, body
         if body and not _has_words(body):
             out.append(Violation(name + ".body", "empty", "body has no words"))
         if _words(title) > title_max:
-            out.append(Violation(name + ".title", "too_long", f"{_words(title)} words > {title_max}"))
+            out.append(Violation(name + ".title", "too_long", _over_words(_words(title), title_max)))
         if _words(body) > body_max:
-            out.append(Violation(name + ".body", "too_long", f"{_words(body)} words > {body_max}"))
+            out.append(Violation(name + ".body", "too_long", _over_words(_words(body), body_max)))
         pairs.append({"title": title, "body": body})
     return pairs
 
@@ -249,7 +284,7 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
     if isinstance(obj.get("hook"), str) and not _has_words(hook):
         shared.append(Violation("hook", "empty", "hook has no words" if hook else "hook is empty"))
     if hook and _words(hook) > wp.HOOK_MAX_WORDS:
-        shared.append(Violation("hook", "too_long", f"{_words(hook)} words"))
+        shared.append(Violation("hook", "too_long", _over_words(_words(hook), wp.HOOK_MAX_WORDS)))
 
     script_raw = obj.get("video_script")
     script: List[str] = []
@@ -259,15 +294,37 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
         script = [clean(s) for s in script_raw if clean(s)]
         words = sum(_words(s) for s in script)
         if not wp.SCRIPT_MIN_LINES <= len(script) <= wp.SCRIPT_MAX_LINES:
-            shared.append(Violation("video_script", "count", f"{len(script)} lines"))
-        if not wp.SCRIPT_MIN_WORDS <= words <= wp.SCRIPT_MAX_WORDS:
-            shared.append(Violation("video_script", "length", f"{words} words"))
+            shared.append(Violation(
+                "video_script", "count",
+                f"{len(script)} lines - use {wp.SCRIPT_MIN_LINES} to {wp.SCRIPT_MAX_LINES}"))
+        if words > wp.SCRIPT_MAX_WORDS:
+            shared.append(Violation(
+                "video_script", "length",
+                f"{words} words - the limit is {wp.SCRIPT_MAX_WORDS}; cut at least "
+                f"{words - wp.SCRIPT_MAX_WORDS} words (drop a line)"))
+        elif words < wp.SCRIPT_MIN_WORDS:
+            shared.append(Violation(
+                "video_script", "length",
+                f"{words} words - the minimum is {wp.SCRIPT_MIN_WORDS}; add at least "
+                f"{wp.SCRIPT_MIN_WORDS - words} words (add a whole line)"))
         for i, line in enumerate(script):
             if not _has_words(line):
                 # A pause line ("…") would be narrated as silence and counted as a line.
                 shared.append(Violation(f"video_script[{i}]", "empty", "line has no words"))
             if _words(line) > wp.SCRIPT_LINE_MAX_WORDS:
-                shared.append(Violation(f"video_script[{i}]", "too_long", f"{_words(line)} words"))
+                shared.append(Violation(f"video_script[{i}]", "too_long",
+                                        _over_words(_words(line), wp.SCRIPT_LINE_MAX_WORDS)))
+    # Every narrated word becomes one entry of the audio asset's timing table, which the server
+    # refuses above AUDIO_WORD_MAX_CHARS — a chained token ("buy-high-sell-low-then-…") would
+    # fail the voice stage on EVERY attempt after a full synthesis. Refuse it here, as content.
+    for name, text in ([("hook", hook)] if hook else []) + [
+            (f"video_script[{i}]", s) for i, s in enumerate(script)]:
+        long_tok = next((t for t in text.split() if len(t) > AUDIO_WORD_MAX_CHARS), None)
+        if long_tok is not None:
+            shared.append(Violation(
+                name, "too_long",
+                f"a word of {len(long_tok)} characters (\"{long_tok[:24]}…\") - the limit is "
+                f"{AUDIO_WORD_MAX_CHARS}; put spaces around dashes or use shorter words"))
 
     cards = _pairs(obj, "cards", wp.CARDS_MIN, wp.CARDS_MAX, wp.CARD_TITLE_MAX_WORDS,
                    wp.CARD_BODY_MAX_WORDS, shared)
@@ -306,7 +363,7 @@ def validate_package(obj: Dict[str, Any], item: ContentItem, run_date: date, *,
                 budget = body_budget(f, item.category, run_date, allow_x_url=allow_x_url)
                 n = measured_length(f, text)
                 if n > budget:
-                    vs.append(Violation(f, "too_long", f"{n} > {budget}"))
+                    vs.append(Violation(f, "too_long", _over_chars(n, budget)))
                 vs.extend(_scan(f, text, item, allow_emoji=True))
             elif not vs:
                 # compose() always appends hashtags + CTA + disclaimer, so a body-less caption
@@ -387,26 +444,72 @@ def _note_failed_generation(e: Exception, tokens: int, rounds: List[RoundRecord]
         )
 
 
+#: Judge verdicts listed first in a repair prompt, capped: `repair_prompt` keeps 40 violations,
+#: and a regex flood must not push the semantic findings out of the model's view.
+_JUDGE_REPAIR_CAP = 10
+
+
+def _apply_verdicts(vr: ValidationResult, verdicts: List[jd.Verdict]) -> List[Violation]:
+    """Enforce the judge's verdicts on a candidate: a shared-field verdict fails the round; a
+    caption verdict drops ONLY that outlet (a YouTube title or description drops `youtube`).
+    The stored `package["posts"]` / `dropped_outlets` are rebuilt too — `create_posts` copies
+    captions from the ACCEPTED package, so a flagged caption must be gone from it."""
+    applied: List[Violation] = []
+    for v in verdicts:
+        viol = v.violation()
+        applied.append(viol)
+        if v.is_caption:
+            platform = jd.caption_platform(v.field)
+            vr.posts.pop(platform, None)
+            vr.outlets.setdefault(platform, []).append(viol)
+        else:
+            vr.shared.append(viol)
+    if vr.package is not None:
+        vr.package["posts"] = {p: post.as_dict() for p, post in vr.posts.items()}
+        vr.package["dropped_outlets"] = {p: [x.as_dict() for x in xs] for p, xs in vr.outlets.items()}
+    return applied
+
+
+def _repair_list(judge_vs: List[Violation], vr: Optional[ValidationResult],
+                 parse_vs: List[Violation]) -> List[Violation]:
+    if vr is None:
+        return parse_vs
+    first = judge_vs[:_JUDGE_REPAIR_CAP]
+    return first + [v for v in vr.violations if v not in first]
+
+
 async def generate_package(
     item: ContentItem,
     template: Template,
     run_date: date,
     *,
     generation_id: str,
+    judge_mode: str,
     client: Any = None,
     allow_x_url: bool = False,
     before_call: Optional[Callable[[], Awaitable[Optional[bool]]]] = None,
 ) -> WriterResult:
-    """One generation: a draft and, if it has any violation, ONE repair. Gemini errors
-    propagate (the caller classifies transient vs not) — unchanged in type, but carrying the
-    tokens this generation already spent as `marketing_tokens_used` (`TOKENS_ATTR`); content
-    failures come back as a `rejected` result with every round's violations. `before_call`
-    runs before each model call and whatever it raises propagates (the script service
-    refreshes its lease there — a generation that lost the run must not spend another call;
-    telling a lost lease from a database blip is the caller's job, not this module's). If it
-    returns False (the lease can no longer cover a call), a publishable candidate in hand is
-    kept and the call is skipped; with nothing to keep the call still runs — it is the only way
-    to a package, and the caller's terminal write is fenced. None or True mean proceed."""
+    """One generation: a draft and, if it has any violation, ONE repair — each graded by the
+    semantic judge (`judge.py`) under `judge_mode` (REQUIRED: there is no fail-open default;
+    `script_service` passes `settings.MARKETING_JUDGE_MODE`). At most
+    `MODEL_CALLS_PER_GENERATION` (4) model calls: draft, judge, repair, judge.
+
+    * The judge grades round 1 whenever it parsed (so the one repair hears both the regex and the
+      semantic findings), and round 2 only when the regex passed it (nothing else could use it).
+    * `enforce`: a verdict on a shared field fails the round, one on a caption drops that outlet,
+      and a candidate the judge did not grade is never accepted. `shadow`: verdicts are recorded
+      and never block; a judge failure is logged and ignored. `off`: no judge call.
+    * Gemini errors propagate (the caller classifies transient vs not) — unchanged in type, but
+      carrying the tokens this generation already spent as `marketing_tokens_used`
+      (`TOKENS_ATTR`); an unusable judge answer raises `judge.MarketingJudgeUnavailable` the same
+      way. Either is a writer FAILURE, never a pass — unless an earlier candidate of this same
+      generation already passed both gates, which is then kept (loudly).
+    * `before_call` runs before EACH model call, judge calls included; whatever it raises
+      propagates (the script service refreshes its lease there). If it returns False (the lease
+      can no longer cover a call), an acceptable candidate in hand is kept and the call skipped;
+      with nothing to keep the call still runs — it is the only way to a package, and the caller's
+      terminal write is fenced. None or True mean proceed."""
+    mode = jd.normalize_mode(judge_mode)
     if client is None:
         from app.integrations.gemini import get_gemini_client
 
@@ -416,8 +519,24 @@ async def generate_package(
     raw_outputs: List[Any] = []
     candidates: List[ValidationResult] = []
     tokens = 0
+    calls = 0
     last_violations: List[Violation] = []
     previous: Any = None
+
+    async def _may_call(kind: str, round_no: int) -> bool:
+        """False = keep the candidate in hand and skip this call."""
+        if before_call is None or await before_call() is not False:
+            return True
+        if _pick_best(candidates) is not None:
+            logger.warning(
+                "marketing writer: the lease cannot cover the %s call source_ref=%s generation=%s "
+                "— accepting the best round so far", kind, item.key, generation_id)
+            return False
+        logger.warning(
+            "marketing writer: the lease cannot cover the %s call source_ref=%s generation=%s and "
+            "nothing publishable is in hand — calling anyway (the terminal write is fenced)",
+            kind, item.key, generation_id)
+        return True
 
     try:
         for round_no, kind in ((1, "draft"), (2, "repair")):
@@ -428,21 +547,10 @@ async def generate_package(
                 prompt = wp.repair_prompt(item, template, run_date, generation_id=generation_id,
                                           round_no=round_no, previous=previous,
                                           violations=last_violations, allow_x_url=allow_x_url)
-            if before_call is not None and await before_call() is False:
-                best = _pick_best(candidates)
-                if best is not None:
-                    logger.warning(
-                        "marketing writer: the lease cannot cover the %s call source_ref=%s "
-                        "generation=%s — accepting the round-%d package", kind, item.key,
-                        generation_id, round_no - 1,
-                    )
-                    break
-                logger.warning(
-                    "marketing writer: the lease cannot cover the %s call source_ref=%s "
-                    "generation=%s and nothing publishable is in hand — calling anyway (the "
-                    "terminal write is fenced)", kind, item.key, generation_id,
-                )
+            if not await _may_call(kind, round_no):
+                break
             try:
+                calls += 1
                 result = await client.generate_json(
                     prompt,
                     system_instruction=neutral_system_instruction(wp.SYSTEM_BODY),
@@ -455,8 +563,8 @@ async def generate_package(
                 best = _pick_best(candidates)
                 if best is None:
                     raise
-                # The repair call failed but the draft was already publishable: keep it rather
-                # than spend another generation. Loud, because it is a degraded path.
+                # The repair call failed but an earlier round was already publishable: keep it
+                # rather than spend another generation. Loud, because it is a degraded path.
                 logger.warning(
                     "marketing writer repair call failed (%s: %s) source_ref=%s generation=%s — "
                     "accepting the round-1 package", type(e).__name__, e, item.key, generation_id,
@@ -466,25 +574,79 @@ async def generate_package(
             tokens += used
             obj, parse_violations = parse_response(result)
             raw_outputs.append(obj if obj is not None else (result.get("text") or "")[:2000])
-            if obj is None:
-                vr = None
-                last_violations = parse_violations
-            else:
+            vr: Optional[ValidationResult] = None
+            judge_vs: List[Violation] = []
+            judge_record: Optional[Dict[str, Any]] = None
+            stop = False
+            if obj is not None:
                 vr = validate_package(obj, item, run_date, allow_x_url=allow_x_url)
-                candidates.append(vr)
-                last_violations = vr.violations
+                vr.judge_required = mode == jd.MODE_ENFORCE
                 previous = obj
+                if mode == jd.MODE_OFF:
+                    vr.judged = True
+                elif round_no == 1 or vr.regex_ok:
+                    if not await _may_call("judge", round_no):
+                        stop = True
+                    else:
+                        calls += 1
+                        try:
+                            verdicts, jraw = await jd.judge_fields(
+                                client, item, jd.package_fields(vr.package or {}),
+                                generation_id=generation_id, round_no=round_no)
+                        except Exception as e:
+                            spent = int(getattr(e, TOKENS_ATTR, 0) or 0)
+                            tokens += spent
+                            judge_record = jd.JudgeCall([], spent, None, mode,
+                                                        f"{type(e).__name__}: {e}"[:300]).as_dict()
+                            if mode == jd.MODE_SHADOW:
+                                logger.warning(
+                                    "marketing judge (shadow) FAILED source_ref=%s generation=%s "
+                                    "round=%d (%s: %s) — ignored", item.key, generation_id,
+                                    round_no, type(e).__name__, e)
+                                vr.judged = True
+                            elif _pick_best(candidates) is not None:
+                                logger.warning(
+                                    "marketing judge FAILED on round %d (%s: %s) source_ref=%s "
+                                    "generation=%s — keeping the judged round-1 package",
+                                    round_no, type(e).__name__, e, item.key, generation_id)
+                                stop = True
+                            else:
+                                raise
+                        else:
+                            jtokens = int(jraw.get("tokens_used") or 0)
+                            tokens += jtokens
+                            judge_record = jd.JudgeCall(
+                                verdicts, jtokens, jraw.get("finish_reason"), mode).as_dict()
+                            if mode == jd.MODE_ENFORCE:
+                                judge_vs = _apply_verdicts(vr, verdicts)
+                            elif verdicts:
+                                logger.info(
+                                    "marketing judge (shadow) would flag source_ref=%s "
+                                    "generation=%s round=%d codes=%s", item.key, generation_id,
+                                    round_no, sorted({v.rule for v in verdicts}))
+                            vr.judged = True
+                            vr.judge_call = judge_record
+                candidates.append(vr)
+            last_violations = _repair_list(judge_vs, vr, parse_violations)
             rounds.append(RoundRecord(
                 round=round_no, kind=kind, finish_reason=result.get("finish_reason"),
-                tokens_used=used, violations=[v.as_dict() for v in last_violations],
+                tokens_used=used,
+                violations=[v.as_dict() for v in (vr.violations if vr else parse_violations)],
                 valid_outlets=sorted(vr.posts) if vr else [],
+                judge=judge_record,
             ))
+            if stop:
+                break
             if vr is not None and vr.ok and not vr.violations:
                 break  # clean — nothing for a repair to improve
     except Exception as e:
         # Only Exception: a CancelledError (BaseException) must propagate untouched.
         _note_failed_generation(e, tokens, rounds, item, generation_id)
         raise
+    if calls > MODEL_CALLS_PER_GENERATION:  # pragma: no cover — a contract breach, loudly
+        logger.error("marketing writer made %d model calls (> %d) source_ref=%s generation=%s — "
+                     "script_service's owner-life arithmetic assumes at most %d", calls,
+                     MODEL_CALLS_PER_GENERATION, item.key, generation_id, MODEL_CALLS_PER_GENERATION)
 
     best = _pick_best(candidates)
     if best is None:
@@ -495,9 +657,15 @@ async def generate_package(
             "codes=%s", item.key, template.id, generation_id, _round_codes(rounds),
         )
         return WriterResult("rejected", None, history, rounds, tokens,
-                            raw_outputs=raw_outputs)
+                            raw_outputs=raw_outputs, judge_mode=mode)
     package = dict(best.package or {})
     package.update({"template_id": template.id, "prompt_version": wp.PROMPT_VERSION,
                     "model": WRITER_MODEL})
+    if mode != jd.MODE_OFF:
+        package["judge"] = {
+            "mode": mode, "model": jd.JUDGE_MODEL, "thinking_budget": jd.JUDGE_THINKING_BUDGET,
+            "temperature": jd.JUDGE_TEMPERATURE, "rubric_version": jd.JUDGE_RUBRIC_VERSION,
+            "verdicts": (best.judge_call or {}).get("verdicts", []),
+        }
     return WriterResult("accepted", package, [v.as_dict() for v in best.violations], rounds,
-                        tokens, raw_outputs=raw_outputs)
+                        tokens, raw_outputs=raw_outputs, judge_mode=mode)

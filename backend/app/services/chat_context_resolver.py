@@ -78,6 +78,27 @@ _DROP_KEYS = frozenset({
     "embedding", "query_embedding", "sources",
 })
 
+# Keys dropped ONLY as direct children of one top-level section — never globally, because the
+# same flattener serves every screen and these names are generic (`rating`, `target_price` may be
+# real, licensed data elsewhere). The report's "Wall Street Consensus" section became
+# "Valuation & Institutions" (2026-09-26): its analyst half — rating, price targets, rating
+# distribution, momentum — is unlicensed FMP data the user no longer sees, and
+# `valuation_status` / `discount_percent` / `dcf_measured` are the verdict-shaped FMP-DCF
+# leftovers. The dump is presented to the model as "data the user can see", so none of it may
+# reach it. Direct children only: the published estimate below it carries `analyst_years` (an
+# assumption, kept). Compared case-insensitively: exact names, then name prefixes.
+_SECTION_DROP_KEYS: Dict[str, Tuple[frozenset, Tuple[str, ...]]] = {
+    "wall_street_consensus": (
+        frozenset({"rating", "target_price", "low_target", "high_target",
+                   "valuation_status", "discount_percent", "dcf_measured",
+                   # the vendor stamp (the model must not name a data vendor), and the
+                   # analyst-card insight's pre-rename key
+                   "dcf_source", "hedge_fund_note"}),
+        ("analyst_", "momentum_"),
+    ),
+}
+_NO_SECTION_DROP: Tuple[frozenset, Tuple[str, ...]] = (frozenset(), ())
+
 # agent_tag → full persona key, so a reference_id built from EITHER form
 # ("AAPL|buffett" or "AAPL|warren_buffett") resolves to the same cache row.
 _AGENT_TAG_TO_KEY = {
@@ -183,7 +204,7 @@ def _flatten_for_grounding(
 ) -> str:
     """Render a JSON-ish payload (a cached dict / a ``model_dump`` / an article dict) to compact
     ``key: value`` grounding lines. Drops ``_DROP_KEYS`` anywhere in the tree + ``skip_top`` at the top
-    level (case-insensitive), truncates long strings to ``str_cap``, caps total output at ``max_chars``,
+    level + ``_SECTION_DROP_KEYS`` among one top-level section's direct children (case-insensitive), truncates long strings to ``str_cap``, caps total output at ``max_chars``,
     and NEVER raises (a bad node is skipped). Lists are inlined (scalars) or walked per-item (dicts),
     both capped at 12 elements so one long array can't blow the budget. ``priority_top`` top-level keys
     are emitted FIRST (stable), so high-value narratives aren't starved by an early bulky section."""
@@ -206,10 +227,12 @@ def _flatten_for_grounding(
         remaining[0] -= len(line) + 1
         return remaining[0] > 0
 
-    def _walk(o: Any, prefix: str, top: bool = False) -> bool:
+    def _walk(o: Any, prefix: str, top: bool = False,
+              section_drop: Tuple[frozenset, Tuple[str, ...]] = _NO_SECTION_DROP) -> bool:
         if remaining[0] <= 0:
             return False
         if isinstance(o, dict):
+            drop_names, drop_prefixes = section_drop
             items = list(o.items())
             if top and priority_top_l:   # emit high-value narratives before a bulky early section
                 items.sort(key=lambda kv: 0 if (isinstance(kv[0], str) and kv[0].lower() in priority_top_l) else 1)
@@ -219,11 +242,15 @@ def _flatten_for_grounding(
                 kl = k.lower()
                 if kl in _DROP_KEYS or (top and kl in skip_top_l):
                     continue
+                if kl in drop_names or (drop_prefixes and kl.startswith(drop_prefixes)):
+                    continue
                 if v is None or v == "" or v == [] or v == {}:
                     continue
                 key = f"{prefix}.{k}" if prefix else k
                 if isinstance(v, (dict, list)):
-                    if not _walk(v, key):
+                    # A section's drop list applies to ITS direct children only (never deeper).
+                    child_drop = _SECTION_DROP_KEYS.get(kl, _NO_SECTION_DROP) if top else _NO_SECTION_DROP
+                    if not _walk(v, key, section_drop=child_drop):
                         return False
                 else:
                     sv = _scalar(v)
@@ -393,8 +420,17 @@ class ChatContextResolver:
         if not report:
             report = await ticker_report_cache.get_cached_report(ticker, persona)
         # Kill switch: never ground the chat on a published estimate the switch has withdrawn.
-        from app.services.dcf_report_gate import strip_caydex_if_disabled
+        from app.services.dcf_report_gate import (
+            strip_caydex_if_disabled, wall_street_insight_is_for_this_card,
+        )
         report = strip_caydex_if_disabled(report)
+        # The section's insight reaches the model only when the user can see it: beside the
+        # estimate it was written with (the rule the app card and the PDF use). Checked on the
+        # RAW section, before the flattener drops the analyst fields the rule reads.
+        ws = report.get("wall_street_consensus") if isinstance(report, dict) else None
+        if isinstance(ws, dict) and ws.get("wall_street_insight") \
+                and not wall_street_insight_is_for_this_card(ws):
+            report = {**report, "wall_street_consensus": {**ws, "wall_street_insight": None}}
         if not report:
             logger.info(
                 "chat_context: no report for %s/%s (report_id=%s) — chat proceeds ungrounded",
@@ -435,7 +471,11 @@ class ChatContextResolver:
             _without_unmeasured_guidance(report), _DUMP_CAP,
             skip_top=("symbol", "company_name", "exchange", "agent", "quality_score",
                       "live_date", "price_close_date", "price_action", "executive_summary_text",
-                      "disclaimer_text"),
+                      "disclaimer_text",
+                      # Internal scoring inputs, never sent to iOS: they carry the analyst
+                      # rating/target (or the estimate re-labelled "price_target") and a
+                      # "deep_undervalued" valuation status.
+                      "_scoring_inputs", "key_vitals"),
             # Emit the narrative modules FIRST so a report with many fundamental_metrics can't starve
             # the moat / revenue / Wall-Street / macro insights out of the budget (fundamental_metrics
             # is not listed → it sorts after these and takes whatever budget is left).

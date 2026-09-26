@@ -1,5 +1,5 @@
 {
- "_about": "Honest copy from REAL writer output (gemini-2.5-flash, marketing_preview --raw, 2026-09-24): every hook / script line / card / slide / caption of the ACCEPTED items that passed the full field scan (compliance.scan_text + grounding.check_grounding) at the time it was vendored. Round-2 bypass fix: a rule that rejects any of these rejects what the model naturally writes - narrow it. Captions allow emoji; shared fields do not. Regenerate only from a fresh marketing_preview run (a human spends the Gemini call). Round 3 (W3VAC-02): `items` was SCAN-selected - every field that passed the scan when it was vendored - so it can pin a false negative as honest. Four Mr. Market lines that time a trade ('when his greed makes prices high, you can choose to pass or sell', 'his fear can present opportunities to buy') broke rule 3 and were moved to `must_reject` with the reason; the neutral repairs ('you can consider the situation', 'opportunities for consideration') stay honest. Reclassify a policy-breaking line to `must_reject` with a why; never reclassify one to make a test pass.",
+ "_about": "Honest copy from REAL writer output (gemini-2.5-flash, marketing_preview --raw, 2026-09-24): every hook / script line / card / slide / caption of the ACCEPTED items that passed the full field scan (compliance.scan_text + grounding.check_grounding) at the time it was vendored. Round-2 bypass fix: a rule that rejects any of these rejects what the model naturally writes - narrow it. Captions allow emoji; shared fields do not. Regenerate only from a fresh marketing_preview run (a human spends the Gemini call). Round 3 (W3VAC-02): `items` was SCAN-selected - every field that passed the scan when it was vendored - so it can pin a false negative as honest. Four Mr. Market lines that time a trade ('when his greed makes prices high, you can choose to pass or sell', 'his fear can present opportunities to buy') broke rule 3 and were moved to `must_reject` with the reason; the neutral repairs ('you can consider the situation', 'opportunities for consideration') stay honest. Reclassify a policy-breaking line to `must_reject` with a why; never reclassify one to make a test pass. 2026-09-26: lines only the semantic judge rejects (own-voice risk-softening; trim/prune/water directives) moved to `judge_must_reject` with the user's 2026-09-26 decision as the why, pre-registered before any judge run; see marketing_real_drafts_2026_09_24.json `judge_true_positives`.",
  "items": {
   "journey:balance_sheet": {
    "shared": [
@@ -159,7 +159,6 @@
     "Has the reason for owning the position truly changed?",
     "Avoid Emotional Selling",
     "Don't sell due to boredom or a single news story.",
-    "Consider Trimming Positions",
     "Selling a portion can manage risk and lock in gains.",
     "The Art of Selling",
     "Understanding when and how to exit positions without emotion is key.",
@@ -181,7 +180,6 @@
     "The Art of Selling: When to Exit Positions",
     "While buying gets most of the attention, knowing when to sell is an equally important and often more challenging skill. Emotions like fear of loss and greed for more can cloud judgment. To navigate this, it's wise to decide in advance what conditions would lead you to sell. Consider if the original reason for owning a position has changed, if a better opportunity has arisen, or if one position has grown too large. Avoid selling due to fleeting boredom, a single scary headline, or simply to lock in a tiny profit. These are typically emotional responses. Developing a clear, pre-determined plan for selling can help you make logical decisions and avoid impulsive reactions. Sometimes, selling a portion of a position can help manage risk and secure some gains.",
     "Knowing when to sell is an essential skill for investors, often more challenging than deciding when to buy. Emotions like fear of loss and greed can make selling difficult. A good strategy is to plan your exit criteria in advance, when you're thinking clearly. Write down specific reasons that would lead you to sell, such as a fundamental change in the business or finding a significantly better opportunity. Avoid reacting to minor headlines, boredom, or the urge to grab a small profit. These are often emotional drivers. Remember, you don't always have to sell everything at once; trimming a portion can help manage risk and lock in some gains, while letting the rest continue to work for you. Make selling a planned decision, not an emotional reaction.",
-    "The art of selling is a vital, yet often overlooked, skill in investing. While everyone focuses on when to buy, the decision to sell can be far more challenging, as it often involves intense emotions like fear and greed. To make better selling decisions, it's helpful to establish a clear plan in advance. Before any emotional pressure, define the specific conditions that would lead you to exit a position. This could include a fundamental change in the business, the emergence of a clearly superior opportunity, or a single position growing to an outsized portion of your portfolio. Avoid selling based on boredom, a single unsettling news story, or the impulse to take a small, quick profit. Following a pre-determined plan helps ensure decisions are based on logic, not emotion. Consider trimming a position rather than selling it entirely; this can help manage risk and secure some profits while retaining exposure.",
     "Selling well is a key investing skill. Plan your exits calmly. Avoid emotional sales from fear or greed. Focus on logical reasons, like a business change.",
     "Knowing when to sell is just as important as knowing when to buy. It's often harder because emotions like fear and greed can cloud judgment. Create a clear selling plan in advance. Decide what logical reasons, such as a fundamental business change, would trigger a sale, rather than reacting to headlines or small profits.",
     "Selling well is a key investing skill. Plan your exits calmly. Avoid emotional sales from fear or greed. Focus on logical reasons.",
@@ -401,7 +399,6 @@
     "This helps cushion the impact if one company performs poorly.",
     "Many ETFs follow an index, such as the S&P 500, which includes hundreds of large companies.",
     "ETFs are generally affordable and easy to buy, making them popular for beginners.",
-    "They provide a calm and simple way to invest in many places at once.",
     "While ETFs spread risk, they do not eliminate it entirely.",
     "If the overall market declines, an ETF will also experience a dip.",
     "Myth: Diversifying is complex",
@@ -418,21 +415,15 @@
     "Many ETFs track a list of companies called an index. For example, an ETF might follow the S&P 500, which includes about 500 of America's biggest companies.",
     "Affordable and accessible",
     "ETFs are usually cheap to own and are as easy to buy as a single stock. This makes them a popular starting point for many beginner investors.",
-    "A calm core for investing",
     "Because an ETF can hold hundreds of companies, a single bad news headline barely moves it. Many people use broad ETFs as a steady core of their investment plan.",
     "Understanding the risk",
     "While an ETF spreads your risk, it does not erase it. If the entire market has a rough day, your ETF basket will also experience a dip."
    ],
    "captions": [
-    "Many new investors believe they need to buy individual stocks to diversify. An ETF is like a basket filled with many stocks, instantly spreading your money across companies. This helps cushion falls if one company stumbles. ETFs are easy to buy and often cheap, making them a popular choice for beginners. They provide a calm, simple way to invest in many places at once. However, if the whole market dips, your ETF will too.",
     "ETFs Explained: Diversify Your Investments Simply",
-    "New investors often wonder how to diversify their money across many companies. Some think they need to buy many individual stocks. However, an Exchange Traded Fund (ETF) offers a simpler solution. An ETF is like a basket filled with numerous stocks. When you buy one ETF, your money instantly spreads across many companies, which helps cushion the impact if one company performs poorly. Many ETFs track an index, such as the S&P 500. ETFs are generally affordable and easy to buy, making them popular for beginners. They offer a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
-    "Many new investors believe they need to buy individual stocks to diversify their money. An Exchange Traded Fund (ETF) offers a simpler way. Think of an ETF as a basket filled with many stocks. When you buy one ETF, your money instantly spreads across numerous companies. This helps cushion the impact if one company performs poorly. Many ETFs track an index, like the S&P 500. ETFs are generally affordable and easy to buy, making them popular for beginners. They provide a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
-    "Many new investors believe they need to buy individual stocks to diversify their money. An Exchange Traded Fund (ETF) offers a simpler way. Think of an ETF as a basket filled with numerous stocks. When you buy one ETF, your money instantly spreads across many companies. This helps cushion the impact if one company performs poorly. Many ETFs track an index, such as the S&P 500, which includes about 500 of America's biggest companies. ETFs are generally affordable and easy to buy, making them popular for beginners. They provide a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
     "Myth: Diversifying means buying many stocks. Fact: ETFs simplify this by holding many companies in one easy-to-buy basket. They are often cheap and great for beginners.",
     "Many new investors think diversifying means buying many individual stocks. The fact is, ETFs offer a simpler path. An ETF is like a basket with many stocks inside. Buying one ETF instantly spreads your money across numerous companies, helping to cushion risk. They're generally cheap and easy to buy, making them popular for beginners. Remember, they spread risk but don't erase it.",
     "Diversifying doesn't have to be complex. ETFs are like a basket of many stocks, spreading your money instantly. Easy to buy and often cheap.",
-    "A common misconception among new investors is that effective diversification requires buying numerous individual stocks one by one. However, Exchange Traded Funds (ETFs) provide a more streamlined approach. An ETF functions much like a basket, holding a collection of various stocks. By purchasing a single ETF, an investor's capital is instantly spread across multiple companies simultaneously. This inherent diversification helps to mitigate risk, as the impact of an underperforming company can be cushioned by the performance of others within the fund. Many ETFs are designed to track specific market indexes, such as the S&P 500, which encompasses hundreds of leading American companies. ETFs are typically cost-effective to own and are traded with the same ease as individual stocks, making them an accessible entry point for beginner investors. They offer a calm and simple method for investing in a broad range of assets at once. It is important to note that while ETFs spread risk, they do not eliminate it entirely; if the broader market experiences a downturn, the value of an ETF will also reflect that movement.",
     "Many new investors think diversifying means buying many individual stocks. Fact: ETFs offer a simpler path. An ETF is like a basket with many stocks inside. Buying one ETF instantly spreads your money across numerous companies, helping to cushion risk. They're generally cheap and easy to buy, making them popular for beginners. Remember, they spread risk but don't erase it."
    ]
   },
@@ -508,7 +499,6 @@
     "Opportunity in His Fear",
     "When Mr. Market is scared, he might offer to sell his shares at a very low price, creating a potential opportunity.",
     "Opportunity in His Greed",
-    "When Mr. Market is thrilled, he might offer to buy your shares at a very high price, if you choose to sell.",
     "Focus on the Business",
     "When prices move, ask if the business itself changed, or if it is simply Mr. Market's current mood.",
     "When his fear makes prices low, you can consider the situation.",
@@ -518,7 +508,6 @@
     "Meet Mr. Market, your imaginary business partner. Every day, he offers to buy or sell his share of your business. His prices swing wildly due to his moods, not the business's real value. Remember, you never have to trade with him. His moods can create opportunities, but you decide when to act.",
     "Understanding Mr. Market: A Key Investing Concept",
     "Imagine a business partner named Mr. Market. Every day, he offers to buy or sell his part of your business. His prices are driven by his ever-changing moods, not the actual value of the business. One day he's thrilled, the next he's scared. The key is that you are never forced to trade with him. His emotional swings can present opportunities, but it's important to differentiate between his moods and the fundamental changes in the business.",
-    "Meet Mr. Market, your imaginary business partner. Every day, he makes an offer to buy or sell his share of your business. His prices are highly volatile, often moving based on his current mood rather than any real change in the business. Remember, you're never obligated to accept his offers. His emotional swings can create opportunities, allowing you to act when his fear makes prices low or when his greed makes prices high. Focus on the business itself, not just his daily mood.",
     "Imagine you have a business partner named Mr. Market. Each day, he offers to buy your share or sell you his. His prices fluctuate significantly, driven by his moods rather than the underlying value of the business. Some days he's ecstatic, offering high prices; other days he's fearful, offering low prices. The important takeaway is that you are not compelled to trade with him. His mood swings can create opportunities for you, but the decision to act remains yours. Consider if the business has truly changed or if it's simply Mr. Market's current emotional state.",
     "Meet Mr. Market. He's your moody business partner, offering to buy or sell shares daily. His prices reflect his emotions, not the business's true value. You don't have to trade.",
     "Imagine Mr. Market, your moody business partner. Every day, he offers to buy or sell his part of your business. His prices jump around based on his mood, not the business's actual value. You are never forced to trade with him. His emotional swings can create opportunities for you.",
@@ -531,28 +520,21 @@
     "Imagine your investments as a garden.",
     "It needs patient care, not daily digging.",
     "Resist selling strong businesses just for small gains; let them grow.",
-    "Consider trimming holdings if their story has truly broken, freeing space for better opportunities.",
     "However, a falling price does not always mean a dying business; sometimes it is just temporary bad weather.",
     "Spreading investments across a few good ideas is wise.",
     "Owning too many holdings can dilute your best ideas and make your portfolio harder to manage.",
     "More holdings are not automatically safer past a certain point.",
     "A gentle rhythm of checking in now and then works best.",
-    "Water your winners, prune the weak ones, and let your garden grow.",
     "Tend Your Garden",
     "A portfolio needs patient care, not daily digging.",
-    "Water Your Winners",
     "Let strong businesses thrive; resist selling for small gains.",
-    "Prune the Weak",
-    "Trim holdings if their story is broken, freeing up space.",
     "Beware Too Many Seeds",
     "Too many holdings can dilute good ideas and add complexity.",
     "Your Portfolio: A Garden",
     "Think of your investments as a garden. It needs gentle, patient tending to grow.",
     "Patient Care Pays Off",
     "A garden doesn't need daily digging. It needs water, pruning, and time to grow quietly.",
-    "Nurture Your Winners",
     "When a strong business thrives, resist selling it too soon. Let your healthiest plants reach for the sky.",
-    "Trim Weak Holdings",
     "If a holding no longer earns its place, trimming it frees up room and sunlight for better plants.",
     "Price Drops Are Not Always Bad",
     "A falling price isn't always a dying business. Sometimes it is just bad weather passing overhead.",
@@ -564,14 +546,9 @@
     "Check in now and then, not every hour. Let your garden quietly do what gardens do: grow."
    ],
    "captions": [
-    "Is a bigger portfolio always better? Think of your investments as a garden. It needs patient care: water your winners and prune the weak ones. Resist selling strong businesses too soon. A falling price isn't always a dying business. Too many holdings can dilute your best ideas and make management harder. Focus on quality, not just quantity. Let your garden grow with a gentle rhythm.",
     "Portfolio Gardening: Tend Your Investments Wisely",
     "Imagine your investments as a garden. It needs gentle, patient tending, not constant digging. Resist the urge to sell strong businesses just to lock in small gains; let your healthiest plants reach for the sky. If a holding's story has truly broken, trimming it frees up room for better opportunities. However, a falling price isn't always a dying business; sometimes it's just temporary bad weather. Spreading across a few good plants is wise, but owning too many can dilute your best ideas and make your garden harder to tend. More holdings are not automatically safer. A gentle rhythm of checking in now and then works best.",
-    "Is a bigger portfolio always better? Think of your investments as a garden that needs gentle, patient tending. Resist the urge to sell strong businesses just to lock in small gains; let your healthiest plants reach for the sky. If a holding's story has truly broken, trimming it frees up room for better opportunities. But a falling price isn't always a dying business; sometimes it's just temporary bad weather. Spreading across a few good plants is wise, but owning too many can dilute your best ideas and make your garden harder to tend. More holdings are not automatically safer. A gentle rhythm of checking in now and then works best.",
-    "Is a bigger portfolio always better? Treat your investments like a garden. Nurture winners, prune the weak, and avoid over-diversifying. Focus on quality over quantity.",
-    "Is a bigger portfolio always better? Think of your investments as a garden needing patient care. Water your winners and prune the weak. Resist selling strong businesses too soon. Owning too many can dilute your best ideas. More holdings are not automatically safer. A gentle rhythm works best.",
-    "Is a bigger portfolio always better? Treat investments like a garden. Nurture winners, prune the weak, avoid over-diversifying. Quality over quantity.",
-    "Is a bigger portfolio always better? Imagine your investments as a garden that needs gentle, patient tending, not constant digging. Resist the urge to sell strong businesses simply to lock in small gains; instead, allow your healthiest plants to reach their full potential. If a holding's fundamental story has genuinely broken, consider trimming it to free up capital and focus on better opportunities. However, remember that a falling price does not always signify a dying business; sometimes it is merely a temporary market shift. While spreading investments across a few good ideas is prudent, owning too many can dilute your best ideas and make the entire portfolio challenging to manage effectively. The myth of diversification suggests that more holdings are not automatically safer beyond a certain point. A measured approach, checking in periodically rather than constantly, allows your investment garden to quietly grow."
+    "Is a bigger portfolio always better? Think of your investments as a garden that needs gentle, patient tending. Resist the urge to sell strong businesses just to lock in small gains; let your healthiest plants reach for the sky. If a holding's story has truly broken, trimming it frees up room for better opportunities. But a falling price isn't always a dying business; sometimes it's just temporary bad weather. Spreading across a few good plants is wise, but owning too many can dilute your best ideas and make your garden harder to tend. More holdings are not automatically safer. A gentle rhythm of checking in now and then works best."
    ]
   },
   "journey:power_of_discipline": {
@@ -1436,6 +1413,169 @@
     "class_b_recommendation"
    ],
    "why": "a timed trade: 'when his greed pushes prices high, you might choose to sell' - a directive (rule 3)"
+  }
+ ],
+ "judge_must_reject": [
+  {
+   "item": "journey:art_of_selling",
+   "text": "Consider Trimming Positions",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:art_of_selling",
+   "text": "The art of selling is a vital, yet often overlooked, skill in investing. While everyone focuses on when to buy, the decision to sell can be far more challenging, as it often involves intense emotions like fear and greed. To make better selling decisions, it's helpful to establish a clear plan in advance. Before any emotional pressure, define the specific conditions that would lead you to exit a position. This could include a fundamental change in the business, the emergence of a clearly superior opportunity, or a single position growing to an outsized portion of your portfolio. Avoid selling based on boredom, a single unsettling news story, or the impulse to take a small, quick profit. Following a pre-determined plan helps ensure decisions are based on logic, not emotion. Consider trimming a position rather than selling it entirely; this can help manage risk and secure some profits while retaining exposure.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "They provide a calm and simple way to invest in many places at once.",
+   "emoji": false,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "A calm core for investing",
+   "emoji": false,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "Many new investors believe they need to buy individual stocks to diversify. An ETF is like a basket filled with many stocks, instantly spreading your money across companies. This helps cushion falls if one company stumbles. ETFs are easy to buy and often cheap, making them a popular choice for beginners. They provide a calm, simple way to invest in many places at once. However, if the whole market dips, your ETF will too.",
+   "emoji": true,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "New investors often wonder how to diversify their money across many companies. Some think they need to buy many individual stocks. However, an Exchange Traded Fund (ETF) offers a simpler solution. An ETF is like a basket filled with numerous stocks. When you buy one ETF, your money instantly spreads across many companies, which helps cushion the impact if one company performs poorly. Many ETFs track an index, such as the S&P 500. ETFs are generally affordable and easy to buy, making them popular for beginners. They offer a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
+   "emoji": true,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "Many new investors believe they need to buy individual stocks to diversify their money. An Exchange Traded Fund (ETF) offers a simpler way. Think of an ETF as a basket filled with many stocks. When you buy one ETF, your money instantly spreads across numerous companies. This helps cushion the impact if one company performs poorly. Many ETFs track an index, like the S&P 500. ETFs are generally affordable and easy to buy, making them popular for beginners. They provide a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
+   "emoji": true,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "Many new investors believe they need to buy individual stocks to diversify their money. An Exchange Traded Fund (ETF) offers a simpler way. Think of an ETF as a basket filled with numerous stocks. When you buy one ETF, your money instantly spreads across many companies. This helps cushion the impact if one company performs poorly. Many ETFs track an index, such as the S&P 500, which includes about 500 of America's biggest companies. ETFs are generally affordable and easy to buy, making them popular for beginners. They provide a calm and simple way to invest in many places at once. While ETFs spread risk, they do not eliminate it; if the overall market declines, an ETF will also dip.",
+   "emoji": true,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:etfs_101",
+   "text": "A common misconception among new investors is that effective diversification requires buying numerous individual stocks one by one. However, Exchange Traded Funds (ETFs) provide a more streamlined approach. An ETF functions much like a basket, holding a collection of various stocks. By purchasing a single ETF, an investor's capital is instantly spread across multiple companies simultaneously. This inherent diversification helps to mitigate risk, as the impact of an underperforming company can be cushioned by the performance of others within the fund. Many ETFs are designed to track specific market indexes, such as the S&P 500, which encompasses hundreds of leading American companies. ETFs are typically cost-effective to own and are traded with the same ease as individual stocks, making them an accessible entry point for beginner investors. They offer a calm and simple method for investing in a broad range of assets at once. It is important to note that while ETFs spread risk, they do not eliminate it entirely; if the broader market experiences a downturn, the value of an ETF will also reflect that movement.",
+   "emoji": true,
+   "rule": "judge_risk_softening",
+   "why": "user decision 2026-09-26 (ETF lines: descriptive yes, risk-softening no): calls a product category calm in the text's own voice ('they provide a calm and simple way', 'a calm core'); pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Consider trimming holdings if their story has truly broken, freeing space for better opportunities.",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Water your winners, prune the weak ones, and let your garden grow.",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Water Your Winners",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Prune the Weak",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Trim holdings if their story is broken, freeing up space.",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Trim Weak Holdings",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Is a bigger portfolio always better? Think of your investments as a garden. It needs patient care: water your winners and prune the weak ones. Resist selling strong businesses too soon. A falling price isn't always a dying business. Too many holdings can dilute your best ideas and make management harder. Focus on quality, not just quantity. Let your garden grow with a gentle rhythm.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Is a bigger portfolio always better? Treat your investments like a garden. Nurture winners, prune the weak, and avoid over-diversifying. Focus on quality over quantity.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Is a bigger portfolio always better? Think of your investments as a garden needing patient care. Water your winners and prune the weak. Resist selling strong businesses too soon. Owning too many can dilute your best ideas. More holdings are not automatically safer. A gentle rhythm works best.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Is a bigger portfolio always better? Treat investments like a garden. Nurture winners, prune the weak, avoid over-diversifying. Quality over quantity.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Is a bigger portfolio always better? Imagine your investments as a garden that needs gentle, patient tending, not constant digging. Resist the urge to sell strong businesses simply to lock in small gains; instead, allow your healthiest plants to reach their full potential. If a holding's fundamental story has genuinely broken, consider trimming it to free up capital and focus on better opportunities. However, remember that a falling price does not always signify a dying business; sometimes it is merely a temporary market shift. While spreading investments across a few good ideas is prudent, owning too many can dilute your best ideas and make the entire portfolio challenging to manage effectively. The myth of diversification suggests that more holdings are not automatically safer beyond a certain point. A measured approach, checking in periodically rather than constantly, allows your investment garden to quietly grow.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "user decision 2026-09-26 (trade directives no): tells the reader to trim, prune, water or nurture holdings - a sell/add directive the regex's verb list lacks; pre-registered before any judge run"
+  },
+  {
+   "item": "journey:mr_market",
+   "text": "When Mr. Market is thrilled, he might offer to buy your shares at a very high price, if you choose to sell.",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "a timed trade offered as a choice ('if you choose to sell' when he is thrilled / 'act when his fear makes prices low or his greed makes prices high') - the SAME shape as the round-3 true positive 'When his greed makes prices high, you can choose to pass or sell' (user decision 2026-09-26: Mr. Market parable yes, trade directives no). Reclassified by precedent AFTER a judge calibration run flagged it (2026-09-26, rubric 2026-09-26.3) - disclosed, not pre-registered: the regex scan had passed it, which is why it sat in honest"
+  },
+  {
+   "item": "journey:mr_market",
+   "text": "Meet Mr. Market, your imaginary business partner. Every day, he makes an offer to buy or sell his share of your business. His prices are highly volatile, often moving based on his current mood rather than any real change in the business. Remember, you're never obligated to accept his offers. His emotional swings can create opportunities, allowing you to act when his fear makes prices low or when his greed makes prices high. Focus on the business itself, not just his daily mood.",
+   "emoji": true,
+   "rule": "judge_directive",
+   "why": "a timed trade offered as a choice ('if you choose to sell' when he is thrilled / 'act when his fear makes prices low or his greed makes prices high') - the SAME shape as the round-3 true positive 'When his greed makes prices high, you can choose to pass or sell' (user decision 2026-09-26: Mr. Market parable yes, trade directives no). Reclassified by precedent AFTER a judge calibration run flagged it (2026-09-26, rubric 2026-09-26.3) - disclosed, not pre-registered: the regex scan had passed it, which is why it sat in honest"
+  },
+  {
+   "item": "journey:portfolio_gardening",
+   "text": "Nurture Your Winners",
+   "emoji": false,
+   "rule": "judge_directive",
+   "why": "same shape as the pre-registered 'Water Your Winners' (a heading telling the reader to add to winning holdings - user decision 2026-09-26, trade directives no); missed by the pre-registration keyword pass and reclassified by that precedent AFTER a judge calibration run (2026-09-26, rubric 2026-09-26.5) flagged it - disclosed, not pre-registered"
   }
  ]
 }

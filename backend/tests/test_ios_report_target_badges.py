@@ -1,16 +1,18 @@
-"""Price-target badges sit level with their own pole dots (E4, TestFlight 2026-09-02).
+"""The fair-value chart's label column: every label sits level with its own mark (E4 lineage).
 
-`ReportConsensusBar.targetBadges` used to `.position` the centre of a price-over-percent
-badge at the dot's y, so every coloured percent sat half a line BELOW its dot and butted
-against the next badge's price — "+61.0%" read as the label of the $461.50 dot beneath it.
-Now the PERCENT line is anchored to the dot (`anchor - badgeLineOffset`) and a pure
-resolver keeps the three badges `minGap` apart and inside the chart.
+History: the report's analyst price-target chart (`ReportConsensusBar.targetBadges`) placed
+two-line price-over-percent badges, and positioned them so that each percent sat half a line
+below its dot and read as the label of the next dot (TestFlight 2026-09-02, E4). The fix moved
+with the pole into `CaydexFairValueRangeChart` on 2026-09-26, and the owner then reported that
+"the chart and prices don't fit or align at all": the two-line badges (label OVER price) in a
+60pt gutter made a ragged column, "Low" sat directly under the estimate's price and read as its
+label, and the dashed price line ended at the pole with no number on it.
 
-The component cannot be rendered on-device today (analyst targets are unlicensed), so the
-maths is pinned twice: here from the Swift source, and by an offscreen `ImageRenderer`
-sheet that copies the resolver verbatim (session scratchpad `e4/badges.png`). This file
-also re-implements the resolver in Python line-for-line and checks the cases the sheet
-showed, so a change to the Swift has to be mirrored here on purpose.
+The chart now draws ONE right-hand column of single-line labels — "Price $341.07",
+"High $266.46", "Estimate $213.29", "Low $176.20" — all starting at the same x, each centred on
+the y of the mark it names, pushed apart only where two would overlap. This file pins that from
+the Swift source and re-implements the collision resolver in Python line for line, so a change
+to the Swift has to be mirrored here on purpose.
 """
 
 import re
@@ -19,7 +21,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
-_BAR = _REPO / "frontend/ios/ios/Views/Molecules/ReportConsensusBar.swift"
+_CHART = _REPO / "frontend/ios/ios/Views/Molecules/CaydexFairValueRangeChart.swift"
 
 
 def _strip_comments(src: str) -> str:
@@ -28,8 +30,8 @@ def _strip_comments(src: str) -> str:
 
 
 def _code() -> str:
-    assert _BAR.exists(), f"{_BAR} moved — update this guard, do not delete it"
-    return _strip_comments(_BAR.read_text(encoding="utf-8"))
+    assert _CHART.exists(), f"{_CHART} moved — update this guard, do not delete it"
+    return _strip_comments(_CHART.read_text(encoding="utf-8"))
 
 
 def _decl_block(src: str, prefix: str) -> str:
@@ -49,179 +51,171 @@ def _decl_block(src: str, prefix: str) -> str:
 
 # ── source scan ──────────────────────────────────────────────────────────────
 
-def test_every_badge_is_anchored_by_its_percent_line():
-    body = _decl_block(_code(), "private func targetBadges(")
-    positions = re.findall(r"\.position\(x:\s*badgeCenterX,\s*y:\s*([^)]+)\)", body)
-    assert len(positions) == 3, positions
-    for expr in positions:
-        assert re.fullmatch(r"anchors\.(high|avg|low) - badgeLineOffset", expr.strip()), (
-            f"badge positioned at {expr!r} — the percent is no longer level with its dot"
-        )
-    assert "Self.resolvedBadgeAnchors(" in body, "the collision resolver is no longer used"
-    for name in ("high:", "avg:", "low:", "minGap: badgeMinGap", "height: geometry.size.height"):
-        assert name in body
+def test_every_label_starts_at_the_same_x_and_sits_at_its_resolved_y():
+    col = _decl_block(_code(), "private func labelColumn(")
+    assert "Self.resolvedLabelPositions(" in col, "the collision resolver is no longer used"
+    assert "rows.map(\\.y)" in col, "the resolver must be fed the marks' own y"
+    # One x for every row — the column is a left-aligned list, not a ragged stack.
+    assert re.search(r"\.frame\(width: Layout\.labelWidth, alignment: \.leading\)\s*"
+                     r"\.position\(x: centerX, y: anchors\[index\]\)", col)
+    assert col.count(".position(") == 1
 
 
-def test_the_offset_is_half_a_line_plus_half_the_spacing():
-    src = _code()
-    off = _decl_block(src, "private var badgeLineOffset: CGFloat")
-    assert "(badgeLineHeight + Self.badgeLineSpacing) / 2" in off
-    gap = _decl_block(src, "private var badgeMinGap: CGFloat")
-    assert "2 * badgeLineHeight + Self.badgeLineSpacing + 2" in gap
-    line = _decl_block(src, "private var badgeLineHeight: CGFloat")
-    # Scaled like the caption font, so Dynamic Type does not un-anchor it.
-    assert "AppTypography.scaledSize(13, .caption2, maxScale: AppTypography.readingCap)" in line
-    assert "VStack(alignment: .center, spacing: 2)" in _decl_block(src, "private func targetBadge(")
+def test_a_label_is_one_line_name_then_price():
+    label = _decl_block(_code(), "private func columnLabel(")
+    assert "HStack(" in label and "VStack(" not in label, "two-line badges are back"
+    assert label.index("row.name") < label.index("row.price")
+    assert ".lineLimit(1)" in label and ".minimumScaleFactor(0.7)" in label
 
 
-def test_the_dots_still_sit_at_their_true_price_y():
-    pole = _decl_block(_code(), "private func targetPole(")
-    assert "resolvedBadgeAnchors" not in pole, "the dots must never be nudged — only the badges"
+def test_the_column_labels_the_range_AND_the_price():
+    rows = _decl_block(_code(), "private func columnLabels(")
+    for name in ('"High"', '"Estimate"', '"Low"', '"Price"'):
+        assert name in rows, name
+    # Each row's y is its own mark's y, through the one scale.
+    for src in ("b.high", "b.value", "b.low", "p"):
+        assert f"yPosition(for: {src}, in: geometry)" in rows, src
+    assert ".sorted { ($0.y, $0.rank) < ($1.y, $1.rank) }" in rows, "rows must be sorted by y"
+
+
+def test_the_marks_still_sit_at_their_true_price_y():
+    pole = _decl_block(_code(), "private func rangePole(")
+    assert "resolvedLabelPositions" not in pole, "the marks must never be nudged — only the labels"
     assert pole.count(".position(x: xPos, y: highY)") == 1
-    assert pole.count(".position(x: xPos, y: avgY)") == 1
+    assert pole.count(".position(x: xPos, y: valueY)") == 1
     assert pole.count(".position(x: xPos, y: lowY)") == 1
+
+
+def test_the_dashed_price_line_runs_to_the_column():
+    ind = _decl_block(_code(), "private func currentPriceIndicator(")
+    assert "Layout.leadingPadding + chartWidth" in ind
+
+
+def test_the_column_is_wide_enough_and_the_13f_axis_shares_it():
+    src = _code()
+    layout = _decl_block(src, "enum Layout")
+    width = float(re.search(r"trailingGutter: CGFloat = (\d+)", layout).group(1))
+    assert width >= 96, "\"Estimate $213.29\" needs ~92pt of caption text"
+    bar = _strip_comments((_REPO / "frontend/ios/ios/Views/Molecules/ReportConsensusBar.swift")
+                          .read_text(encoding="utf-8"))
+    bars = _decl_block(bar, "private func volumeBarsChart(")
+    assert "CaydexFairValueRangeChart.Layout.labelGap" in bars, "the 13F axis must start where the labels do"
+    assert "CaydexFairValueRangeChart.Layout.trailingGutter" in bars
+
+
+def test_the_plot_is_inset_for_the_labels_when_there_is_a_column():
+    y = _decl_block(_code(), "private func yPosition(")
+    assert "showsColumn ? labelInset : 0" in y
+    assert "return top + plotHeight * (1 - normalizedValue)" in y
+    fmt = _decl_block(_code(), "private func formatBadgePrice(")
+    assert "abs(value) >= 1000" in fmt, "four-digit values must drop their cents"
 
 
 # ── the resolver, mirrored ───────────────────────────────────────────────────
 
-def _resolve(high, avg, low, *, min_gap, top_inset, bottom_inset, height):
-    top = top_inset
-    bottom = max(top, height - bottom_inset)
+def _resolve(ys, *, min_gap, top, bottom):
+    if not ys:
+        return []
     gap = max(0.0, min_gap)
-    h = min(high, avg - gap)
-    a = avg
-    l = max(low, avg + gap)
-    if h < top:
-        h = top
-        a = max(a, h + gap)
-        l = max(l, a + gap)
-    if l > bottom:
-        l = bottom
-        a = min(a, l - gap)
-        h = min(h, a - gap)
-    clamp = lambda v: min(max(v, top), bottom)
-    return clamp(h), clamp(a), clamp(l)
+    lowest = max(top, bottom)
+    starts, counts, sums = [], [], []
+    for y in ys:
+        starts.append(y)
+        counts.append(1)
+        sums.append(y)
+        while len(starts) >= 2:
+            j = len(starts) - 1
+            if starts[j - 1] + counts[j - 1] * gap <= starts[j]:
+                break
+            counts[j - 1] += counts[j]
+            sums[j - 1] += sums[j]
+            starts.pop()
+            counts.pop()
+            sums.pop()
+            n = counts[j - 1]
+            starts[j - 1] = sums[j - 1] / n - (n - 1) * gap / 2
+    out = [s + k * gap for s, c in zip(starts, counts) for k in range(c)]
+    out[0] = max(out[0], top)
+    for i in range(1, len(out)):
+        out[i] = max(out[i], out[i - 1] + gap)
+    last = len(out) - 1
+    if out[last] > lowest:
+        out[last] = lowest
+        for i in range(last - 1, -1, -1):
+            out[i] = min(out[i], out[i + 1] - gap)
+    return [min(max(v, top), lowest) for v in out]
 
 
-LINE, SPACING = 13.0, 2.0
-GAP = 2 * LINE + SPACING + 2          # 30
-TOP = 1.5 * LINE + SPACING            # 21.5
-BOT = LINE / 2                        # 6.5
+LINE = 13.0
+GAP = LINE + 3                 # 16
+INSET = LINE / 2 + 1           # 7.5
 H = 200.0
 
 
-def _r(high, avg, low, height=H):
-    return _resolve(high, avg, low, min_gap=GAP, top_inset=TOP, bottom_inset=BOT, height=height)
+def _r(*ys, height=H):
+    return _resolve(list(ys), min_gap=GAP, top=INSET, bottom=height - INSET)
 
 
 def test_the_swift_resolver_matches_this_mirror_line_for_line():
-    body = _decl_block(_code(), "static func resolvedBadgeAnchors(")
+    body = _decl_block(_code(), "static func resolvedLabelPositions(")
     for line in (
-        "let bottom = max(top, height - bottomInset)",
-        "var h = min(high, avg - gap)",
-        "var l = max(low, avg + gap)",
-        "if h < top {", "a = max(a, h + gap)", "l = max(l, a + gap)",
-        "if l > bottom {", "a = min(a, l - gap)", "h = min(h, a - gap)",
-        "h = min(max(h, top), bottom)",
+        "let lowest = max(top, bottom)",
+        "if starts[j - 1] + CGFloat(counts[j - 1]) * gap <= starts[j] { break }",
+        "counts[j - 1] += counts[j]",
+        "sums[j - 1] += sums[j]",
+        "starts[j - 1] = sums[j - 1] / n - (n - 1) * gap / 2",
+        "out.append(start + CGFloat(k) * gap)",
+        "out[0] = max(out[0], top)",
+        "out[i] = max(out[i], out[i - 1] + gap)",
+        "out[i] = min(out[i], out[i + 1] - gap)",
+        "return out.map { min(max($0, top), lowest) }",
     ):
         assert line in body, f"resolver drifted from the mirror at: {line}"
 
 
-def test_well_spaced_dots_are_left_exactly_where_they_are():
-    # TER on the screenshot's scale: 30pt / 28pt apart — clear of the 30pt gap? No:
-    # 40→70 is exactly 30 (kept), 70→98 is 28 (low nudged to 100).
-    assert _r(40, 70, 98) == (40, 70, 100)
-    assert _r(40, 80, 120) == (40, 80, 120)
+def test_well_spaced_labels_stay_exactly_on_their_marks():
+    # The owner's AAPL screenshot scale: price far above, the range spread out below.
+    assert _r(12.0, 96.0, 140.0, 183.0) == [12.0, 96.0, 140.0, 183.0]
 
 
-def test_compressed_dots_spread_outward_from_the_average():
-    assert _r(60, 80, 100) == (50, 80, 110)
-    assert _r(100, 100, 100) == (70, 100, 130)
+def test_a_crowded_group_is_centred_on_its_marks():
+    # Two marks 6pt apart: centred on their mean (103), GAP apart — not one pushed away.
+    assert _r(100.0, 106.0) == [95.0, 111.0]
+    # Three at once: the middle label stays on the middle mark.
+    a, b, c = _r(100.0, 104.0, 108.0)
+    assert b == 104.0 and b - a == GAP and c - b == GAP
+    # A tie (low == estimate == high) spreads around the shared mark.
+    assert _r(50.0, 50.0, 50.0) == [34.0, 50.0, 66.0]
 
 
-def test_the_top_edge_cascades_downward_never_stacking():
-    h, a, l = _r(0, 30, 60)
-    assert h == TOP
-    assert a - h >= GAP and l - a >= GAP
-    assert l <= H - BOT
+def test_a_merged_group_absorbs_a_neighbour_it_now_overlaps():
+    # 100/106 centre to 95/111; a third label at 118 now overlaps 111 → one group of three.
+    out = _r(100.0, 106.0, 118.0)
+    assert all(out[i + 1] - out[i] >= GAP - 1e-9 for i in range(2))
+    assert abs(sum(out) / 3 - (100 + 106 + 118) / 3) < 1e-9, "the group stays centred on its marks"
 
 
-def test_the_bottom_edge_cascades_upward():
-    h, a, l = _r(140, 170, 200)
-    assert l == H - BOT
-    assert a - h >= GAP and l - a >= GAP
-    assert h >= TOP
+def test_the_top_edge_pushes_down_never_stacking():
+    out = _r(0.0, 5.0, 10.0)
+    assert out[0] == INSET
+    assert all(out[i + 1] - out[i] >= GAP - 1e-9 for i in range(2))
 
 
-def test_a_chart_too_short_for_three_badges_keeps_the_top_and_clamps():
-    h, a, l = _r(0, 10, 20, height=50)
-    assert h == TOP
-    assert TOP <= a <= 50 - BOT and TOP <= l <= 50 - BOT
-    assert h <= a <= l
+def test_the_bottom_edge_pushes_up():
+    out = _r(190.0, 195.0, 200.0)
+    assert out[-1] == H - INSET
+    assert all(out[i + 1] - out[i] >= GAP - 1e-9 for i in range(2))
+    assert out[0] >= INSET
 
 
-def test_inverted_or_nan_free_inputs_never_reorder():
-    # An inverted feed (low above high) still yields high ≤ avg ≤ low on screen.
-    h, a, l = _r(120, 80, 40)
-    assert h <= a <= l
-    assert a == 80
+def test_a_column_too_short_keeps_order_and_the_top_wins():
+    out = _r(0.0, 10.0, 20.0, 30.0, height=40.0)
+    assert out[0] == INSET
+    assert out == sorted(out)
+    assert all(INSET <= v <= 40.0 - INSET for v in out)
 
 
-# ── review round (2026-09-19): three more invariants ─────────────────────────
-
-def test_badges_are_sorted_by_dot_y_before_resolving():
-    """An inverted feed (consensus above the "high" target) must not put a badge on the
-    far side of the pole from its own dot: the triples are sorted by y, and the
-    resolver's high/avg/low mean top/middle/bottom on screen."""
-    body = _decl_block(_code(), "private func targetBadges(")
-    assert ".sorted { $0.y < $1.y }" in body, "the (y, price, percent, colour) triples are no longer sorted"
-    assert "high: items[0].y" in body and "avg: items[1].y" in body and "low: items[2].y" in body
-    for i in range(3):
-        assert f"targetBadge(price: items[{i}].price, percent: items[{i}].percent, color: items[{i}].color)" in body
-
-
-def test_each_badge_line_stays_a_single_line():
-    """The anchoring maths assumes price OVER percent on exactly two lines; a four-digit
-    target with cents wrapped the 50pt gutter to three lines."""
-    badge = _decl_block(_code(), "private func targetBadge(")
-    assert badge.count(".lineLimit(1)") == 2
-    assert badge.count(".minimumScaleFactor(0.7)") == 2
-    fmt = _decl_block(_code(), "private func formatTargetPrice(")
-    assert "abs(value) >= 1000" in fmt, "four-digit targets must drop their cents"
-
-
-def test_the_plot_is_inset_for_the_badges_when_targets_exist():
-    y = _decl_block(_code(), "private func yPosition(")
-    assert "consensus.hasAnalystTargets ? badgeTopInset : 0" in y
-    assert "consensus.hasAnalystTargets ? badgeBottomInset : 0" in y
-    assert "return top + plotHeight * (1 - normalizedValue)" in y
-
-
-def _y(price, lo, hi, *, height=H, inset=True):
-    """Mirror of `yPosition` with `minPrice`/`maxPrice` padding (10 % below, 7 % above)."""
-    rng = hi - lo
-    mn, mx = lo - rng * 0.1, hi + rng * 0.07
-    top = TOP if inset else 0.0
-    bottom = BOT if inset else 0.0
-    plot = max(height - top - bottom, 1)
-    return top + plot * (1 - (price - mn) / (mx - mn))
-
-
-def test_the_ter_screenshot_case_needs_no_clamp_once_the_plot_is_inset():
-    """TER on 2026-09-02: targets 390 / 461.5 / 550, current 341.62, two-year low ≈ 65.
-    Without the inset the high dot sat at y≈12 (above TOP=21.5) and the resolver clamped
-    every badge down; with it the dots are inside the badge band and stay put."""
-    lo, hi = 65.0, 550.0
-    old = [_y(p, lo, hi, inset=False) for p in (550, 461.5, 390)]
-    assert old[0] < TOP, "premise: the un-inset high dot really was above the top inset"
-    new = [_y(p, lo, hi) for p in (550, 461.5, 390)]
-    assert new[0] >= TOP and new[2] <= H - BOT
-    h, a, l = _r(*new)
-    # The middle badge sits exactly on its dot; each outer badge moves only by the
-    # band deficit (the TER dots are 27pt / 22pt apart under a 30pt badge band) — and,
-    # the point of the inset, the top badge is NOT pinned to the top edge any more.
-    assert a == new[1]
-    assert abs(h - new[0]) <= GAP - (new[1] - new[0]) + 1e-9
-    assert abs(l - new[2]) <= GAP - (new[2] - new[1]) + 1e-9
-    assert h > TOP + 1
-    assert a - h >= GAP - 1e-9 and l - a >= GAP - 1e-9
+def test_single_and_empty_inputs():
+    assert _r() == []
+    assert _r(3.0) == [INSET]
+    assert _r(100.0) == [100.0]

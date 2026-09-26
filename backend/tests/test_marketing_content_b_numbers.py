@@ -119,6 +119,9 @@ def test_a_ranges_lower_bound_takes_the_upper_bounds_unit():
     got = [(v.code, v.detail) for v in g.check_grounding(
         "f", "Other retailers routinely take 25-50%.", _COSTCO)]
     # The source's 25 and 50 are unit-less: neither end of a percent range may ground on them.
+    # 2026-09-26 re-decided after round 4: any source-side unit inheritance anchors on word
+    # overlap, which let invented Costco percentages ground (the cap is 15%); fail closed — the
+    # model can restate the sheet's own "25, 50, or more".
     assert ("ungrounded_number", "25") in got and ("ungrounded_number", "50%") in got, got
 
 

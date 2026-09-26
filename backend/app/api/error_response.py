@@ -816,6 +816,11 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         return ErrorCode.MARKETING_NOT_FOUND, _DEFAULT_STATUS[ErrorCode.MARKETING_NOT_FOUND]
     if "marketingrunerror" in cls:
         return ErrorCode.MARKETING_LEDGER_ERROR, _DEFAULT_STATUS[ErrorCode.MARKETING_LEDGER_ERROR]
+    if "marketingjudge" in cls:
+        # judge.MarketingJudgeUnavailable: the compliance judge answered with no usable verdict
+        # (blocked / cut off / not JSON). A writer failure — the script is simply not ready; its
+        # message may say "timeout", which the generic heuristics below would call FMP.
+        return ErrorCode.MARKETING_SCRIPT_NOT_READY, _DEFAULT_STATUS[ErrorCode.MARKETING_SCRIPT_NOT_READY]
 
     # ── Watchlist datastore unreadable (tracking_service) ─────────────
     # Checked BEFORE the generic heuristics below: a PostgREST read timeout

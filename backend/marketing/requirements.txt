@@ -1,12 +1,26 @@
 # marketing/requirements.txt — the MEDIA WORKER image (marketing/Dockerfile), NOT the web
 #
-# Why a separate file: the worker's ML stack (Kokoro TTS + torch-cpu + misaki/spaCy, Phase 3;
-# Pillow pinned for card rendering, Phase 4) must never land in the single-uvicorn web image
-# — it is ~1 GB of packages the request path never uses, and the whole point of the split
-# is that the ML-heavy process holds no Supabase key and no social secrets.
+# Why a separate file: the worker's ML stack (Kokoro TTS + torch-cpu + misaki/spaCy) must never
+# land in the single-uvicorn web image — it is ~1 GB of packages the request path never uses, and
+# the whole point of the split is that the ML-heavy process holds no Supabase key and no social
+# secrets.
 #
-# Phase 1 keeps this minimal: the worker is stdlib + httpx. Phase 3 adds (from the CPU index,
-# `--index-url https://download.pytorch.org/whl/cpu`, so the 184 MB torch wheel is chosen
-# over the 767 MB CUDA one): torch==2.6.0, kokoro==0.9.4 (misaki[en] bundles espeak-ng);
-# Phase 4 adds Pillow (pinned — it is only transitive in requirements.txt today).
+# torch is installed by the Dockerfile FROM THE CPU INDEX before this file
+# (`--index-url https://download.pytorch.org/whl/cpu`): the 184 MB CPU wheel instead of the
+# 767 MB CUDA one, and the Dockerfile asserts no nvidia-* package slipped in. The pin here keeps
+# the resolver from replacing it.
+#
+# Versions are the ones measured together in the 2026-09-26 spike (backend/venv_marketing):
+# kokoro 0.9.4 + misaki 0.9.4 gave the token shapes marketing/timings.py is written against —
+# bump them together with voice.PIPELINE_VERSION and re-run `python -m marketing.preview`.
 httpx[socks]==0.28.1
+torch==2.6.0
+kokoro==0.9.4
+misaki[en]==0.9.4
+numpy==2.4.6
+# misaki loads spaCy's English model; baked here (hash-checked) so a cron container never
+# downloads it at run time (HF_HUB_OFFLINE / no network is the steady state).
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
+# Caption measuring + glyph coverage (and the Phase 4 card renderer). Pinned to the web venv's.
+pillow==12.0.0
+fonttools==4.62.1

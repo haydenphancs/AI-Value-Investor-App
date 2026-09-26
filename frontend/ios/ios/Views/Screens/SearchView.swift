@@ -12,7 +12,7 @@
 //
 //  TWO STATES, and keeping them apart is the point:
 //    field has text → live Results
-//    field empty    → Recent Searches (durable history)
+//    field empty    → Recent Searches (durable history), then the trending chips
 //  They used to share one array, which is why "Recent Searches" was never a history at all.
 //
 //  Deliberately no news section. Market news lives on the Updates tab, and duplicating a feed
@@ -59,12 +59,22 @@ struct SearchView: View {
                         }
 
                         if trimmedQuery.isEmpty {
-                            // Nothing typed → the durable history.
-                            RecentSearchesSection(
-                                entries: history.entries,
-                                onClearAll: viewModel.clearAllHistory,
-                                onEntryTapped: handleHistoryTapped,
-                                onEntryRemoved: viewModel.removeHistoryEntry
+                            // Nothing typed → the durable history, then the trending chips.
+                            // With no history the Recent section would only draw its tall
+                            // "Tickers you open show up here" placeholder above the chips,
+                            // so it is shown only when there is something to show.
+                            let trendingSections = viewModel.trendingSections
+                            if !history.entries.isEmpty || trendingSections.isEmpty {
+                                RecentSearchesSection(
+                                    entries: history.entries,
+                                    onClearAll: viewModel.clearAllHistory,
+                                    onEntryTapped: handleHistoryTapped,
+                                    onEntryRemoved: viewModel.removeHistoryEntry
+                                )
+                            }
+                            SearchTrendingChipsSection(
+                                sections: trendingSections,
+                                onItemTapped: viewModel.openTrendingItem
                             )
                         } else {
                             SearchResultsSection(
@@ -86,6 +96,7 @@ struct SearchView: View {
         }
         .navigationBarHidden(true)
         .backSwipe { handleBackTapped() }
+        .task { await viewModel.prefetchTrending() }
         .fullScreenCover(item: $viewModel.selectedSearchSelection) { selection in
             NavigationStack {
                 AssetDetailRouter(selection: selection)

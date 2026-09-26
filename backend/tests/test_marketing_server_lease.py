@@ -115,10 +115,50 @@ def test_the_lease_outlives_one_call_and_still_fits_one_worker_poll_session():
     assert ss.LEASE_SECONDS < 15 * 60
 
 
+def _independent_worst_case_generation_seconds() -> float:
+    """A whole generation, recomputed HERE from the retry constants the loops use and from
+    postgrest's own client timeout (not via `generation_budget`): acquire (read + conditional
+    UPDATE) + the run-date read + per model call (one lease refresh + the call) + one terminal
+    write with its re-read. `test_marketing_residuals_lease.py` drives the real loops to prove
+    these counts are what the code does."""
+    from postgrest.constants import DEFAULT_POSTGREST_CLIENT_TIMEOUT
+    from app.services.marketing.generation_budget import MODEL_CALLS_PER_GENERATION
+
+    stmt = float(DEFAULT_POSTGREST_CLIENT_TIMEOUT)
+    refresh = (ss._REFRESH_ATTEMPTS * stmt
+               + sum(ss._REFRESH_BACKOFF_SECONDS * k for k in range(1, ss._REFRESH_ATTEMPTS)))
+    terminal = (ss._FINISH_ATTEMPTS * stmt
+                + sum(ss._FINISH_BACKOFF_SECONDS * k for k in range(1, ss._FINISH_ATTEMPTS))
+                + stmt)  # the `_landed` re-read after a retry matched nothing
+    per_call = ss.worst_case_model_call_seconds() + refresh
+    return 2 * stmt + stmt + MODEL_CALLS_PER_GENERATION * per_call + terminal
+
+
 def test_an_in_process_owner_counts_as_alive_for_a_whole_generation_and_no_longer():
     """`_advance` leaves a lapsed lease alone while its owner is a live task in the same process
-    (OWNER_ALIVE_SECONDS). It must cover a whole generation — two worst-case model calls behind
-    two leases — or a slow live owner at the cap is closed out from under; and it must be finite,
-    or one wedged task wedges the day in that process."""
-    assert ss.OWNER_ALIVE_SECONDS >= 2 * ss.worst_case_model_call_seconds() + ss.LEASE_MARGIN_SECONDS
-    assert ss.OWNER_ALIVE_SECONDS <= 4 * ss.LEASE_SECONDS
+    (OWNER_ALIVE_SECONDS). It must cover a whole generation — every model call behind its own
+    lease refresh, every ledger statement to the PostgREST timeout, the terminal write with its
+    retries and re-read — or a slow LIVE owner at the cap is closed out from under and its paid
+    package is fenced out. It used to be 3 × LEASE_SECONDS (1896 s) against a real worst case of
+    ~2710 s with two calls, 4577 s with four. It must also be finite and tight (the bound plus
+    the margin, rounded up), or one wedged task wedges the day in that process."""
+    generation = _independent_worst_case_generation_seconds()
+    assert ss.worst_case_generation_seconds() == pytest.approx(generation)
+    assert ss.OWNER_ALIVE_SECONDS >= generation + ss.LEASE_MARGIN_SECONDS
+    assert ss.OWNER_ALIVE_SECONDS < generation + ss.LEASE_MARGIN_SECONDS + 1
+    if (settings.GEMINI_REQUEST_TIMEOUT_SECONDS, settings.GEMINI_QUOTA_MAX_RETRIES,
+            settings.GEMINI_TIMEOUT_MAX_RETRIES, settings.GEMINI_QUOTA_RETRY_DELAY_SECONDS) == (90, 2, 0, 5.0):
+        # 3 × 120 + 4 × (572 + 361.5) + 483, at the shipped defaults (PostgREST 120 s, 4 calls)
+        assert generation == 4577.0 and ss.OWNER_ALIVE_SECONDS == 4637
+    # The lease stays PER CALL: it is the cross-process takeover window, refreshed before each.
+    assert ss.LEASE_SECONDS < ss.OWNER_ALIVE_SECONDS
+
+
+def test_the_per_run_model_call_bound():
+    """Two caps × (draft, judge, repair, judge): (4 + 4 - 1) generations × 4 calls = 28."""
+    from app.services.marketing.generation_budget import MODEL_CALLS_PER_GENERATION
+
+    assert MODEL_CALLS_PER_GENERATION == 4
+    assert ss.MAX_MODEL_CALLS_PER_RUN == (
+        (ss.MAX_GENERATIONS + ss.MAX_WRITER_FAILURES - 1) * MODEL_CALLS_PER_GENERATION
+    ) == 28

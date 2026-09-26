@@ -284,6 +284,9 @@ def test_strict_endpoints_are_signInRequired(case_name):
         # problem: `/stocks/{t}/holders` and `/stocks/{t}/news/enrich` served FMP data to
         # anyone on the internet.
         "getHoldersData", "enrichStockNews",
+        # The search-screen chips (2026-09-26): FMP-derived names, and a pick needs an account
+        # by product decision — born gated.
+        "getSearchTrending", "recordSearchPick",
     ],
 )
 def test_account_only_endpoints_are_gated(case_name):

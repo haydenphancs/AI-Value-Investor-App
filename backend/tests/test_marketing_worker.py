@@ -59,7 +59,7 @@ _ROOT_UNTRACKED = {"out", "models", ".cache"}
 _ANY_DEPTH_UNTRACKED = {"__pycache__", ".cache"}
 #: Calls that import by NAME: a literal target is checked like an import statement, anything
 #: else fails closed (it could not be checked).
-_NAME_IMPORTERS = {"import_module", "__import__", "run_module"}
+_NAME_IMPORTERS = {"import_module", "__import__", "run_module", "resolve_name"}
 #: Calls that load code by PATH or from source text: the worker has no reason to, and a path
 #: can point straight at app/config.py — always a problem.
 _CODE_LOADERS = {"run_path", "spec_from_file_location", "spec_from_loader", "SourceFileLoader",
@@ -286,6 +286,12 @@ def test_the_worker_package_imports_in_a_tree_without_app(tmp_path):
         "import importlib.util, json, sys\n"
         "assert importlib.util.find_spec('app') is None, 'app is importable: the check is vacuous'\n"
         "import marketing.main\n"
+        # EVERY module of the package, not just the entrypoint: main imports the voice stage
+        # lazily, and `python -m marketing.voice child` is the image's second entrypoint.
+        "import pkgutil, importlib, marketing\n"
+        "mods = [m.name for m in pkgutil.iter_modules(marketing.__path__)]\n"
+        "assert {'main', 'voice', 'timings', 'captions', 'preview'} <= set(mods), mods\n"
+        "[importlib.import_module('marketing.' + m) for m in mods]\n"
         "print(json.dumps(sorted(sys.modules)))\n"
     )
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -294,7 +300,8 @@ def test_the_worker_package_imports_in_a_tree_without_app(tmp_path):
                           text=True, timeout=120, env=env)
     assert proc.returncode == 0, proc.stderr[-2000:]
     loaded = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert "marketing.main" in loaded
+    assert {"marketing.main", "marketing.voice", "marketing.timings", "marketing.captions",
+            "marketing.preview"} <= set(loaded)
     assert [n for n in loaded if n == "app" or n.startswith("app.")] == []
 
 
@@ -428,6 +435,30 @@ def test_sha256_hex(m):
 # ── the conversation with the backend ─────────────────────────────────────────
 
 
+_CONTENT_TYPES = {"json": "application/json", "m4a": "audio/mp4", "mp3": "audio/mpeg",
+                  "mp4": "video/mp4", "png": "image/png", "jpg": "image/jpeg"}
+
+
+def _fake_narration_runner(lines, *, voice, speed, out_dir, heartbeat=None):
+    """Stands in for the Kokoro child: timed words for exactly the narrated lines."""
+    from marketing import timings as tm
+    from marketing import voice as vc
+
+    per_line = [(tm.proportional(line.split(), 0.0, 1.0), 1.0) for line in lines]
+    words = tm.as_table(tm.assemble(lines, per_line))
+    return vc.Narration(Path(out_dir) / "narration.wav", words, 1.0 * len(lines), speed, len(lines))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_voice(monkeypatch):
+    """No test here loads torch: the voice stage's synthesis child and ffmpeg encode are faked
+    (their own tests live in tests/test_marketing_voice.py)."""
+    from marketing import voice as vc
+
+    monkeypatch.setattr(vc, "run_child", _fake_narration_runner)
+    monkeypatch.setattr(vc, "encode_m4a", lambda wav, out: (b"fake-m4a:" + wav.name.encode(), 2.0))
+
+
 class FakeBackend:
     """Answers the internal API and the Storage signed-upload PUT; records every call."""
 
@@ -457,6 +488,7 @@ class FakeBackend:
         self.assets: Dict[str, Dict[str, Any]] = {}
         self.registered: List[Dict[str, Any]] = []
         self.claim_bodies: List[Dict[str, Any]] = []
+        self.claim_headers: List[Any] = []
         self.run = {"id": "run-1", "run_date": "2026-09-17", "status": "in_progress", "stage": "planned",
                     "content_class": "A", "attempts": 1, "dry_run": True, "timings": {}, "metadata": {}}
 
@@ -469,15 +501,25 @@ class FakeBackend:
             assert request.method == "PUT"
             assert request.headers.get("x-upsert") == "false"
             body = request.read()
-            assert b'name="file"' in body and b"Content-Type: application/json" in body
+            (asset,) = [a for a in self.assets.values() if path.endswith(a["storage_path"])]
+            assert b'name="file"' in body and f"Content-Type: {asset['content_type']}".encode() in body
             self.uploaded[path] = body
             return httpx.Response(200, json={"Key": path})
         assert request.headers.get("x-marketing-worker-token") == "tok"
         if path.endswith("/runs/claim"):
             if self.claim_status_codes:
                 return httpx.Response(self.claim_status_codes.pop(0), json={"error_code": "X", "message": "boom"})
+            nonce = self.claim_bodies[-1].get("claim_nonce")
+            if self.claim_reason == "claimed":
+                self.run["metadata"] = {**self.run.get("metadata", {}), "claim_nonce": nonce}
             return httpx.Response(200, json={"claimed": self.claim_reason == "claimed",
                                              "reason": self.claim_reason, "run": self.run})
+        # Like the real router (`require_caller_claim`): every call after the claim presents it.
+        expected = f"{self.run.get('attempts')}.{(self.run.get('metadata') or {}).get('claim_nonce')}"
+        self.claim_headers.append(request.headers.get("x-marketing-claim"))
+        if request.headers.get("x-marketing-claim") != expected:
+            return httpx.Response(422, json={"error_code": "MARKETING_REQUEST_INVALID",
+                                             "message": "X-Marketing-Claim: missing or not the run's"})
         if path.endswith("/assets") and request.method == "POST":
             body = json.loads(request.content)
             self.registered.append(body)
@@ -485,7 +527,7 @@ class FakeBackend:
             asset = self.assets.get(storage_path)
             if asset is None:  # first registration wins, metadata included
                 asset = {"id": f"asset-{len(self.assets) + 1}", "run_id": "run-1", "kind": body["kind"],
-                         "content_type": "application/json", "storage_path": storage_path,
+                         "content_type": _CONTENT_TYPES[body["ext"]], "storage_path": storage_path,
                          "sha256": body["sha256"], "status": "pending_upload",
                          "metadata": body.get("metadata") or {}}
                 self.assets[storage_path] = asset
@@ -494,7 +536,12 @@ class FakeBackend:
             return httpx.Response(200, json={"asset": asset, "upload": {
                 "method": "PUT", "url": f"https://sb.example/object/upload/sign/marketing-media/{asset['storage_path']}?token=t",
                 "token": "t", "bucket": "marketing-media", "path": asset["storage_path"],
-                "content_type": "application/json"}})
+                "content_type": asset["content_type"]}})
+        if path.endswith("/assets") and request.method == "GET":
+            ready = [dict(a) for a in self.assets.values() if a["status"] == "ready"]
+            pointer = (self.run.get("metadata") or {}).get("voice_asset_id")
+            voice = pointer if any(a["id"] == pointer and a["kind"] == "audio" for a in ready) else None
+            return httpx.Response(200, json={"voice_asset_id": voice, "assets": ready})
         if path.endswith("/complete"):
             if self.complete_status != 200:
                 return httpx.Response(self.complete_status, json={"error_code": "MARKETING", "message": "not in bucket"})
@@ -536,6 +583,9 @@ def _wire(m, monkeypatch, backend: FakeBackend):
 
     monkeypatch.setattr(m, "httpx", Shim)
     monkeypatch.setattr(m, "ffmpeg_version", lambda: "ffmpeg version 5.1.9 (fake)")
+    # This venv has no torch/kokoro: report the image as voice-ready (the check itself is
+    # tested in test_the_voice_readiness_check_names_every_missing_piece).
+    monkeypatch.setattr(m, "voice_readiness", lambda fonts_dir: {"ready": True, "problems": []})
     monkeypatch.setattr(m, "time", _FastTime())
 
 
@@ -555,22 +605,30 @@ def test_happy_path_selects_polls_the_script_and_closes_phase2_honestly(m, monke
     tails = [(meth, p.rsplit("/", 1)[-1]) for meth, p in be.calls]
     assert tails[:2] == [("POST", "claim"), ("POST", "assets")]
     assert tails[2][0] == "PUT" and tails[2][1].startswith("manifest-") and tails[2][1].endswith(".json")
-    assert tails[3:] == [
+    assert tails[3:9] == [
         ("POST", "complete"), ("PATCH", "run-1"),          # preflight
         ("POST", "script"), ("PATCH", "run-1"),            # stage `selected` (the first kick)
         ("POST", "script"), ("PATCH", "run-1"),            # stage `scripted` (poll → accepted)
-        ("PATCH", "run-1"),                                # close
     ]
-    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["selected", "scripted"]
-    # Phase 2 has no media: the run must NOT claim media_ready.
+    assert tails[9:11] == [("GET", "assets"), ("POST", "assets")]          # voice: reuse check, register
+    assert tails[11][0] == "PUT" and tails[11][1].startswith("audio-") and tails[11][1].endswith(".m4a")
+    assert tails[12:] == [("POST", "complete"), ("PATCH", "run-1"),       # voiced checkpoint
+                          ("PATCH", "run-1")]                             # close
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["selected", "scripted", "voiced"]
+    voiced = next(p for p in be.patches if p.get("stage") == "voiced")
+    audio = next(a for a in be.assets.values() if a["kind"] == "audio")
+    # The pointer rides in the SAME PATCH as the checkpoint.
+    assert voiced["metadata"] == {"voice_asset_id": audio["id"]}
+    assert [w["w"] for w in audio["metadata"]["words"]] == ["h", "a", "line."]
+    # Phase 3 renders nothing yet: the run must NOT claim media_ready.
     assert be.run["status"] == "skipped"
-    assert be.run["metadata"]["skip_reason"] == m.PHASE_CLOSE_REASON == "phase2_script_only"
+    assert be.run["metadata"]["skip_reason"] == m.PHASE_CLOSE_REASON == "phase3_voice_only"
     # The manifest that went up is real JSON describing the image.
-    (body,) = be.uploaded.values()
+    (body,) = [b for p, b in be.uploaded.items() if "/manifest-" in p]
     start, end = body.find(b"{"), body.rfind(b"}") + 1
     manifest = json.loads(body[start:end])
-    assert manifest["worker_version"] == "phase2" and manifest["run_date"] == "2026-09-17"
-    assert manifest["stages_implemented"] == ["selected", "scripted"]
+    assert manifest["worker_version"] == "phase3" and manifest["run_date"] == "2026-09-17"
+    assert manifest["stages_implemented"] == ["selected", "scripted", "voiced"]
     assert manifest["ffmpeg"].startswith("ffmpeg")
 
 
@@ -696,6 +754,8 @@ def test_a_worker_api_error_carries_the_structured_code(m, monkeypatch, env):
     be = FakeBackend(script_http_status=409, script_error_code="MARKETING_SCRIPT_NOT_READY")
     _wire(m, monkeypatch, be)
     client = m.BackendClient("https://backend.example", "tok")
+    be.run["metadata"] = {"claim_nonce": "ab" * 16}
+    client.hold(be.run, "ab" * 16)          # as main() does after its claim
     try:
         with pytest.raises(m.WorkerAPIError) as info:
             client.kick_script("run-1")
@@ -836,20 +896,30 @@ def test_resume_after_selected_goes_straight_to_polling(m, monkeypatch, env):
     be.run["stage"] = "selected"
     _wire(m, monkeypatch, be)
     assert m.main() == 0
-    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["scripted"]
-    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["scripted", "voiced"]
+    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
 
 
-def test_resume_after_scripted_closes_without_kicking_again(m, monkeypatch, env):
-    """Phase 2 has no stage after `scripted`, so nothing needs the script and nothing re-kicks.
-    Once one exists, `run_pipeline` re-derives the script first — pinned by
-    test_a_stage_after_scripted_gets_the_script_on_a_fresh_run_and_on_every_resume."""
-    be = FakeBackend()
+def test_resume_after_scripted_re_derives_the_script_once_and_voices_it(m, monkeypatch, env):
+    """A resume past `scripted` skips the stage that filled ctx["script"]: `run_pipeline`
+    re-derives it with ONE idempotent kick (never a poll) before the voice stage runs."""
+    be = FakeBackend(script_states=[{"status": "accepted", "script": FakeBackend._SCRIPT}])
     be.run["stage"] = "scripted"
     _wire(m, monkeypatch, be)
     assert m.main() == 0
+    assert sum(p.endswith("/script") for _, p in be.calls) == 1
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["voiced"]
+    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
+
+
+def test_resume_after_voiced_closes_without_kicking_or_voicing_again(m, monkeypatch, env):
+    be = FakeBackend()
+    be.run["stage"] = "voiced"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
     assert not any(p.endswith("/script") for _, p in be.calls)
-    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+    assert not [b for b in be.registered if b["kind"] == "audio"]
+    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
 
 
 def test_unexpected_script_status_fails_the_run_loudly(m, monkeypatch, env):
@@ -954,7 +1024,8 @@ def _with_a_later_stage(m, monkeypatch) -> List[Any]:
     def stage_voice(api, run, ctx):
         seen.append(ctx["script"])
 
-    monkeypatch.setattr(m, "MEDIA_STAGES", list(m.MEDIA_STAGES) + [("voiced", stage_voice)])
+    monkeypatch.setattr(m, "MEDIA_STAGES",
+                        [s for s in m.MEDIA_STAGES if s[0] != "voiced"] + [("voiced", stage_voice)])
     return seen
 
 
@@ -1016,13 +1087,17 @@ def test_a_reclaimed_run_reuses_its_manifest_instead_of_minting_a_new_object(m, 
 
     manifests = [b for b in be.registered if b["kind"] == "manifest"]
     assert len(manifests) == 2 and manifests[0]["sha256"] == manifests[1]["sha256"]
-    assert len(be.assets) == 1 and len(be.uploaded) == 1
-    assert sum(p.endswith("/complete") for _, p in be.calls) == 1  # tick 2 took the "already ready" branch
+    manifest_assets = [a for a in be.assets.values() if a["kind"] == "manifest"]
+    assert len(manifest_assets) == 1
+    assert sum("/manifest-" in p for p in be.uploaded) == 1
+    manifest_completes = [p for _, p in be.calls if p.endswith("/complete")
+                          and p.rsplit("/", 2)[-2] == manifest_assets[0]["id"]]
+    assert len(manifest_completes) == 1  # tick 2 took the "already ready" branch
     # the time is not lost — it rides in the (unhashed) asset metadata, first registration wins
-    (asset,) = be.assets.values()
+    (asset,) = manifest_assets
     assert asset["status"] == "ready" and asset["metadata"]["generated_at"].startswith("2026-09-17T")
     assert manifests[0]["metadata"]["generated_at"] != manifests[1]["metadata"]["generated_at"]
-    assert be.run["metadata"]["skip_reason"] == "phase2_script_only"
+    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
 
 
 def test_worker_deadlines_fit_inside_the_backend_stale_window(m):
@@ -1036,3 +1111,69 @@ def test_worker_deadlines_fit_inside_the_backend_stale_window(m):
     assert m.SCRIPT_POLL_BUDGET_SECONDS <= m.WORKER_DEADLINE_SECONDS
     assert m.SCRIPT_POLL_BUDGET_SECONDS > script_service.LEASE_SECONDS
     assert m.SCRIPT_POLL_SECONDS < script_service.LEASE_SECONDS
+
+
+
+# ── the caller-claim header and the stage deadline (rules marketing.md §2) ─────
+
+
+def test_every_call_after_the_claim_presents_it(m, monkeypatch, env):
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    nonce = be.claim_bodies[0]["claim_nonce"]
+    assert len(nonce) == 32 and all(c in "0123456789abcdef" for c in nonce)
+    assert be.claim_headers and set(be.claim_headers) == {f"1.{nonce}"}
+    # …and the claim itself carried none (it is how one is obtained).
+    assert len(be.claim_headers) == len([c for c in be.calls
+                                         if c[0] != "PUT" and not c[1].endswith("/runs/claim")])
+
+
+def test_a_zombie_refused_by_the_claim_fence_exits_zero_without_a_failure_write(m, monkeypatch, env):
+    """The server fences every write on the caller's claim; a 409 MARKETING_RUN_NOT_HELD means
+    another tick holds the run now. Nothing is ours to record — no failure PATCH."""
+    be = FakeBackend(script_http_status=409, script_error_code="MARKETING_RUN_NOT_HELD")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert not [p for p in be.patches if p.get("status") == "failed"]
+
+
+def test_a_stage_never_starts_too_late_in_the_tick(m, monkeypatch, env):
+    """A stage may start only with STAGE_START_MARGIN_SECONDS of the tick left, so no stage can
+    outlive MARKETING_RUN_STALE_SECONDS and meet a re-claimer mid-write."""
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    clock = {"t": 1000.0}
+
+    class LateTime(_FastTime):
+        @staticmethod
+        def monotonic():
+            clock["t"] += m.WORKER_DEADLINE_SECONDS  # every reading is far past the budget
+            return clock["t"]
+
+    monkeypatch.setattr(m, "time", LateTime())
+    assert m.main() == 0
+    assert not [p for p in be.patches if p.get("stage")], "a stage started past the deadline"
+    assert any(p.get("status") == "failed" and "too late to start" in (p.get("last_error") or "")
+               for p in be.patches)
+    assert m.STAGE_START_MARGIN_SECONDS < m.WORKER_DEADLINE_SECONDS
+
+
+
+def test_the_voice_readiness_check_names_every_missing_piece(m, monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    out = m.voice_readiness(str(tmp_path / "nofonts"))
+    assert out["ready"] is False
+    assert any("Kokoro weights" in p for p in out["problems"])
+    assert any("Inter-Bold.ttf" in p for p in out["problems"])
+    snap = tmp_path / "hf" / "hub" / "models--hexgrad--Kokoro-82M" / "snapshots" / "abc123" / "voices"
+    snap.mkdir(parents=True)
+    fonts = _PKG / "assets" / "fonts"
+    out = m.voice_readiness(str(fonts))
+    assert any("af_heart" in p and "not baked" in p for p in out["problems"])   # no voice file yet
+    (snap / "af_heart.pt").write_bytes(b"x")
+    out = m.voice_readiness(str(fonts))
+    assert not any("Kokoro weights" in p or "Inter-Bold" in p or "not baked" in p for p in out["problems"])
+    monkeypatch.setenv("MARKETING_TTS_VOICE", "am_michael")       # configured but never baked
+    out = m.voice_readiness(str(fonts))
+    assert any("am_michael" in p for p in out["problems"])

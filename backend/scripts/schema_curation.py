@@ -724,6 +724,14 @@ CURATION: dict[str, TableDoc] = {
     "public.analytics_events": T("ops",
         key=("identity_key", "session_id", "event", "props", "app_version", "client_ts",
              "server_ts")),
+    "public.search_pick_daily": T("ops",
+        purpose="Anonymous daily counters behind the search screens' 'Trending searches' chips.",
+        key=("day", "ticker", "asset_type", "picks"),
+        note="Migration 179. One +1 per search-RESULT tap by a signed-in account, de-duplicated "
+             "per account per ticker per 7 ET days on the device and in server memory BEFORE "
+             "the write (increment_search_pick). No user, device or IP column exists or may be "
+             "added. Read through get_search_trending (floor of 3 inside SQL); swept after 14 "
+             "days. service_role only."),
     "public.ai_insight_budget": T("ops",
         purpose="Global per-day generation cap for Updates insights — the cost ceiling.",
         key=("budget_day", "gen_count"),

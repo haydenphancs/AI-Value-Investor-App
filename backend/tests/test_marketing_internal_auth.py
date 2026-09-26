@@ -33,6 +33,8 @@ _TODAY = date(2026, 9, 17)
 _YESTERDAY = _TODAY - timedelta(days=1)
 _SRC = Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "marketing_internal.py"
 _TOKEN = "s3cret-worker-token"
+_NONCE = "0123456789abcdef0123456789abcdef"
+_CLAIM = f"1.{_NONCE}"
 
 
 @pytest.fixture(autouse=True)
@@ -88,12 +90,12 @@ class _FakeService:
         return asset, {"method": "PUT", "url": "https://x/y?token=t", "token": "t", "bucket": "marketing-media",
                        "path": "p", "content_type": "application/json"}
 
-    async def complete_asset(self, asset_id):
+    async def complete_asset(self, asset_id, *, claim):
         self.calls.append(("complete", asset_id))
         return {"id": asset_id, "run_id": "r", "kind": "manifest", "storage_path": "p", "content_type": "application/json",
                 "sha256": "a" * 64, "status": "ready"}
 
-    async def create_posts(self, run_id, specs):
+    async def create_posts(self, run_id, specs, *, claim):
         self.calls.append(("posts", run_id, specs))
         return [{"id": f"p{i}", "run_id": run_id, "platform": s["platform"], "format": s["format"],
                  "status": "pending_review", "idempotency_key": f"k{i}"} for i, s in enumerate(specs)]
@@ -110,7 +112,7 @@ def fake_service(monkeypatch):
 
 
 def test_missing_header_is_401_AUTH_REQUIRED(client, token):
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t"})
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t", "claim_nonce": _NONCE})
     assert r.status_code == 401, r.text
     body = r.json()
     assert body["error_code"] == "AUTH_REQUIRED"
@@ -119,7 +121,7 @@ def test_missing_header_is_401_AUTH_REQUIRED(client, token):
 
 
 def test_wrong_token_is_403_AUTH_FORBIDDEN(client, token):
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t"},
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t", "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": "nope"})
     assert r.status_code == 403, r.text
     assert r.json()["error_code"] == "AUTH_FORBIDDEN"
@@ -136,7 +138,7 @@ def test_a_near_miss_token_is_403_and_reaches_nothing(client, token, fake_servic
     """'nope' alone would pass a comparator that accepts any PREFIX of the secret — and a
     one-character header would then reach kick_script's paid generation."""
     assert near_miss != _TOKEN
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": _TODAY.isoformat(), "worker_version": "t"},
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": near_miss})
     assert r.status_code == 403, (near_miss, r.text)
     assert r.json()["error_code"] == "AUTH_FORBIDDEN"
@@ -146,24 +148,24 @@ def test_a_near_miss_token_is_403_and_reaches_nothing(client, token, fake_servic
 def test_the_claim_window_is_evaluated_on_the_endpoints_clock(client, token, fake_service):
     h = {"X-Marketing-Worker-Token": token}
     for ok in (_TODAY, _YESTERDAY):
-        r = client.post(f"{_BASE}/runs/claim", json={"run_date": ok.isoformat(), "worker_version": "t"}, headers=h)
+        r = client.post(f"{_BASE}/runs/claim", json={"run_date": ok.isoformat(), "worker_version": "t", "claim_nonce": _NONCE}, headers=h)
         assert r.status_code == 200, (ok, r.text)
     for bad in (_TODAY + timedelta(days=1), _TODAY - timedelta(days=2)):
-        r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad.isoformat(), "worker_version": "t"}, headers=h)
+        r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad.isoformat(), "worker_version": "t", "claim_nonce": _NONCE}, headers=h)
         assert r.status_code == 422 and r.json()["error_code"] == "INVALID_INPUT", bad
 
 
 def test_unset_server_secret_fails_closed_with_403(client, monkeypatch):
     monkeypatch.setattr(settings, "MARKETING_WORKER_TOKEN", None)
     monkeypatch.setattr(mod, "_unset_warned", False)
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t"},
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t", "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": "anything"})
     assert r.status_code == 403, r.text
     assert r.json()["error_code"] == "AUTH_FORBIDDEN"
 
 
 def test_non_ascii_header_is_a_mismatch_not_a_500(client, token):
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t"},
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": "2026-09-17", "worker_version": "t", "claim_nonce": _NONCE},
                     headers={b"X-Marketing-Worker-Token": "s\xe9cret".encode("latin-1")})
     # Starlette decodes header bytes as latin-1 → a non-ASCII str; `compare_digest` on str
     # would raise TypeError and 500. The gate compares bytes, so it is a plain mismatch.
@@ -192,7 +194,7 @@ def test_every_route_in_the_module_is_gated(client, token, fake_service):
 
 def test_claim_round_trip_and_extra_columns_are_ignored(client, token, fake_service):
     r = client.post(f"{_BASE}/runs/claim",
-                    json={"run_date": _TODAY.isoformat(), "worker_version": "phase1", "dry_run": False},
+                    json={"run_date": _TODAY.isoformat(), "worker_version": "phase1", "dry_run": False, "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": token})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -204,14 +206,14 @@ def test_claim_round_trip_and_extra_columns_are_ignored(client, token, fake_serv
 
 @pytest.mark.parametrize("bad", ["2026/09/17", "17-09-2026", "2026-13-01", "today", ""])
 def test_claim_rejects_a_malformed_date_with_422(client, token, fake_service, bad):
-    r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad, "worker_version": "t"},
+    r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad, "worker_version": "t", "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": token})
     assert r.status_code == 422, r.text
     assert fake_service.calls == []
 
 
 def test_update_validates_stage_and_status_before_touching_the_ledger(client, token, fake_service):
-    h = {"X-Marketing-Worker-Token": token}
+    h = {"X-Marketing-Worker-Token": token, "X-Marketing-Claim": _CLAIM}
     assert client.patch(f"{_BASE}/runs/r1", json={"stage": "teleported"}, headers=h).status_code == 422
     assert client.patch(f"{_BASE}/runs/r1", json={"status": "gone"}, headers=h).status_code == 422
     assert client.patch(f"{_BASE}/runs/r1", json={"content_class": "B"}, headers=h).status_code == 422
@@ -224,7 +226,7 @@ def test_update_validates_stage_and_status_before_touching_the_ledger(client, to
 
 
 def test_register_asset_validates_kind_ext_and_sha(client, token, fake_service):
-    h = {"X-Marketing-Worker-Token": token}
+    h = {"X-Marketing-Worker-Token": token, "X-Marketing-Claim": _CLAIM}
     ok = {"kind": "manifest", "ext": ".JSON", "sha256": "A" * 64, "bytes": 10}
     for field, bad in [("kind", "selfie"), ("ext", "exe"), ("sha256", "abc"), ("bytes", -1)]:
         r = client.post(f"{_BASE}/runs/r1/assets", json={**ok, field: bad}, headers=h)
@@ -238,7 +240,7 @@ def test_register_asset_validates_kind_ext_and_sha(client, token, fake_service):
 
 
 def test_posts_validates_platform_and_format_and_caps_batch(client, token, fake_service):
-    h = {"X-Marketing-Worker-Token": token}
+    h = {"X-Marketing-Worker-Token": token, "X-Marketing-Claim": _CLAIM}
     r = client.post(f"{_BASE}/runs/r1/posts", json={"posts": [{"platform": "myspace", "format": "text"}]}, headers=h)
     assert r.status_code == 422
     r = client.post(f"{_BASE}/runs/r1/posts", json={"posts": []}, headers=h)
@@ -257,7 +259,7 @@ def test_posts_validates_platform_and_format_and_caps_batch(client, token, fake_
 
 def test_resume_only_claim_with_nothing_to_resume_returns_no_run(client, token, fake_service):
     r = client.post(f"{_BASE}/runs/claim",
-                    json={"run_date": _YESTERDAY.isoformat(), "worker_version": "t", "resume_only": True},
+                    json={"run_date": _YESTERDAY.isoformat(), "worker_version": "t", "resume_only": True, "claim_nonce": _NONCE},
                     headers={"X-Marketing-Worker-Token": token})
     assert r.status_code == 200, r.text
     assert r.json() == {"claimed": False, "reason": "no_run", "run": None}
@@ -275,7 +277,8 @@ def test_known_ledger_failures_log_at_warning_not_error(client, token, monkeypat
     monkeypatch.setattr(mod, "get_marketing_run_service", lambda: Blip())
     _logging.disable(_logging.NOTSET)
     with caplog.at_level(_logging.WARNING, logger=mod.logger.name):
-        r = client.patch(f"{_BASE}/runs/r1", json={"stage": "selected"}, headers={"X-Marketing-Worker-Token": token})
+        r = client.patch(f"{_BASE}/runs/r1", json={"stage": "selected"},
+                         headers={"X-Marketing-Worker-Token": token, "X-Marketing-Claim": _CLAIM})
     assert r.status_code == 503 and r.json()["error_code"] == "MARKETING_LEDGER_ERROR"
     levels = {rec.levelno for rec in caplog.records if "update_run" in rec.getMessage()}
     assert levels == {_logging.WARNING}
@@ -283,12 +286,13 @@ def test_known_ledger_failures_log_at_warning_not_error(client, token, monkeypat
 
 def test_ledger_errors_surface_as_the_error_contract_not_a_bare_500(client, token, monkeypatch):
     class Boom:
-        async def complete_asset(self, asset_id):
+        async def complete_asset(self, asset_id, *, claim):
             from app.services.marketing.run_service import MarketingAssetMissingInStorage
             raise MarketingAssetMissingInStorage("asset a1 at p is not in bucket marketing-media")
 
     monkeypatch.setattr(mod, "get_marketing_run_service", lambda: Boom())
-    r = client.post(f"{_BASE}/assets/a1/complete", headers={"X-Marketing-Worker-Token": token})
+    r = client.post(f"{_BASE}/assets/a1/complete",
+                    headers={"X-Marketing-Worker-Token": token, "X-Marketing-Claim": _CLAIM})
     # 409, terminal for the stage: the worker must NOT retry the same call — it fails the
     # run and the next hourly tick re-registers + re-uploads.
     assert r.status_code == 409, r.text
@@ -344,3 +348,78 @@ def test_the_module_touches_no_fmp_client():
     ledger, not a data source."""
     src = _stripped_source()
     assert "integrations.fmp" not in src and "fmp_client" not in src.lower()
+
+
+# ── the caller-claim header (rules marketing.md §2) ───────────────────────────
+
+
+def _worker_routes():
+    return [r for r in mod.router.routes if not r.path.endswith("/runs/claim")]
+
+
+def test_every_route_but_the_claim_needs_the_claim_header_and_the_claim_route_does_not(client, token, fake_service):
+    """Declared on the ROUTER (`require_caller_claim`), so a route added tomorrow is covered; a
+    missing or malformed claim is a 422 contract breach the worker never retries."""
+    routes = _worker_routes()
+    assert len(routes) >= 6, [r.path for r in routes]   # patch, assets, complete, script, posts, GET assets
+    for r in routes:
+        method = sorted(r.methods)[0]
+        path = f"{_BASE}{r.path}".replace("{run_id}", "r1").replace("{asset_id}", "a1")
+        for bad in (None, "", "garbage", "0.abc", "1.xyz", f"x.{_NONCE}", "1." + "0" * 8):
+            headers = {"X-Marketing-Worker-Token": token}
+            if bad is not None:
+                headers["X-Marketing-Claim"] = bad
+            resp = client.request(method, path, headers=headers, json={})
+            assert resp.status_code == 422, (method, path, bad, resp.status_code)
+            assert resp.json()["error_code"] == "MARKETING_REQUEST_INVALID", (path, bad)
+    assert fake_service.calls == []
+    # The claim route needs no claim (it is how one is obtained).
+    ok = client.post(f"{_BASE}/runs/claim", json={"run_date": _TODAY.isoformat(), "worker_version": "t",
+                                                   "claim_nonce": _NONCE},
+                     headers={"X-Marketing-Worker-Token": token})
+    assert ok.status_code == 200
+
+
+def test_the_token_gate_still_answers_first(client, fake_service):
+    """No token → 401 even with a claim; the claim check never runs for an unauthenticated call."""
+    r = client.patch(f"{_BASE}/runs/r1", json={"stage": "selected"}, headers={"X-Marketing-Claim": _CLAIM})
+    assert r.status_code == 401 and r.json()["error_code"] == "AUTH_REQUIRED"
+
+
+@pytest.mark.parametrize("nonce", [None, "", "short", "NOT-HEX-" * 4, "g" * 32])
+def test_a_claim_needs_a_hex_nonce(client, token, fake_service, nonce):
+    body = {"run_date": _TODAY.isoformat(), "worker_version": "t"}
+    if nonce is not None:
+        body["claim_nonce"] = nonce
+    r = client.post(f"{_BASE}/runs/claim", json=body, headers={"X-Marketing-Worker-Token": token})
+    assert r.status_code == 422 and fake_service.calls == []
+
+
+def test_a_run_id_of_claim_does_not_borrow_the_claim_routes_exemption(client, token, fake_service):
+    """The exemption is the matched POST route, never a path suffix: `PATCH /runs/claim` is the
+    update route (run_id="claim") and needs a claim like any other — a typed 422, not a 5xx."""
+    r = client.patch(f"{_BASE}/runs/claim", json={"stage": "selected"},
+                     headers={"X-Marketing-Worker-Token": token})
+    assert r.status_code == 422 and r.json()["error_code"] == "MARKETING_REQUEST_INVALID", r.text
+    assert fake_service.calls == []
+
+
+def test_the_exemption_itself_is_the_matched_post_claim_route():
+    """Unit-level: the dependency exempts exactly POST on the claim route's TEMPLATE (the typed
+    `_claim` dependency is a second line behind it, so the endpoint test alone cannot tell)."""
+    import pytest as _pytest
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    def req(method, path, template):
+        route = type("R", (), {"path": template})()
+        return Request({"type": "http", "method": method, "path": path, "headers": [],
+                        "query_string": b"", "route": route})
+
+    assert mod.require_caller_claim(req("POST", f"{_BASE}/runs/claim", f"{_BASE}/runs/claim"), None) is None
+    for method, path, template in (("PATCH", f"{_BASE}/runs/claim", f"{_BASE}/runs/{{run_id}}"),
+                                   ("POST", f"{_BASE}/runs/claim/assets", f"{_BASE}/runs/{{run_id}}/assets"),
+                                   ("GET", f"{_BASE}/runs/claim", f"{_BASE}/runs/claim")):
+        with _pytest.raises(HTTPException) as err:
+            mod.require_caller_claim(req(method, path, template), None)
+        assert err.value.status_code == 422, (method, path)

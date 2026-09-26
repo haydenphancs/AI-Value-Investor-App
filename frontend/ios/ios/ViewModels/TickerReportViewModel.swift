@@ -71,7 +71,7 @@ class TickerReportViewModel: ObservableObject {
         DeepDiveModule(title: "Hidden Market Signals", iconName: "eye.fill", type: .hiddenMarketSignals),
         DeepDiveModule(title: "Industry & Competitive Moat", iconName: "shield.fill", type: .moatCompetition),
         DeepDiveModule(title: "Macro-Economic & Geopolitical", iconName: "globe", type: .macroGeopolitical),
-        DeepDiveModule(title: "Wall Street Consensus", iconName: "building.columns.fill", type: .wallStreetConsensus)
+        DeepDiveModule(title: "Valuation & Institutions", iconName: "building.columns.fill", type: .wallStreetConsensus)
     ]
 
     // MARK: - Initialization

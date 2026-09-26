@@ -28,6 +28,10 @@ from typing import Any, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.services import pdf_charts
+from app.services.dcf_report_gate import (
+    strip_caydex_if_disabled,
+    wall_street_insight_is_for_this_card,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,20 +61,9 @@ _VITAL_LABELS: list[tuple[str, str]] = [
     ("revenue", "Revenue Quality"),
     ("forecast", "Forecast"),
     ("moat", "Competitive Moat"),
-    ("wall_street", "Wall Street"),
     ("insider", "Insider Activity"),
     ("capital_allocation", "Capital Allocation"),
     ("macro", "Macro Resilience"),
-]
-
-
-# Analyst-rating legend order + colours (match analyst_consensus_stacked_bar).
-_CONSENSUS_ORDER: list[tuple[str, str, str]] = [
-    ("strong_buy", "Strong Buy", "#1E3A8A"),
-    ("buy", "Buy", "#60A5FA"),
-    ("hold", "Hold", "#F59E0B"),
-    ("sell", "Sell", "#F87171"),
-    ("strong_sell", "Strong Sell", "#B91C1C"),
 ]
 
 
@@ -160,6 +153,60 @@ def _num(v: Any) -> Optional[float]:
             return None
     f = float(v)
     return f if math.isfinite(f) else None
+
+
+def _price_gap(value: Optional[float], price: Optional[float], noun: str) -> tuple[Optional[float], str]:
+    """(price-vs-value gap %, neutral words) — "Price 12% below the estimate" / "Price in line
+    with the estimate" inside ±0.5 %. Never a verdict (hard rule 4,
+    documents/research/dcf-methodology-v1.md §5). (None, "—") when either side is missing or
+    not positive."""
+    if not (value and price and value > 0 and price > 0):
+        return None, "—"
+    gap = (price / value - 1) * 100.0
+    if abs(gap) < 0.5:
+        return gap, f"Price in line with {noun}"
+    return gap, f"Price {abs(gap):.0f}% {'below' if gap < 0 else 'above'} {noun}"
+
+
+def _published_estimate(ws: dict, current_price: Optional[float], symbol: str = "") -> dict:
+    """The Caydex Fair Value Estimate as PUBLISHED on the report (model dcf-v1), normalised for
+    the PDF. One reading for the hero card and section 09, so the two can never disagree.
+
+    state "ok"      — value AND range (a value is never shown without its range, §5), with
+                      the neutral gap against the report's price;
+    state "refused" — "Not modelled" + the model's one-sentence reason;
+    state "none"    — no block: an analyst-era report, a report built with the switch off, or
+                      a block the kill switch stripped (`build_context` applies
+                      `strip_caydex_if_disabled` first). A malformed ok block degrades here too.
+    """
+    block = ws.get("caydex_fair_value") if isinstance(ws, dict) else None
+    if not isinstance(block, dict):
+        return {"state": "none"}
+    status = block.get("status")
+    if status == "refused":
+        reason = block.get("refusal_reason")
+        return {"state": "refused", "refusal_reason": reason.strip() if isinstance(reason, str) else ""}
+    if status != "ok":
+        logger.warning("pdf: Caydex estimate for %s has unknown status %r — shown as unavailable",
+                       symbol, status)
+        return {"state": "none"}
+    fv = _num(block.get("fair_value"))
+    lo, hi = _num(block.get("range_low")), _num(block.get("range_high"))
+    if not (fv and lo and hi and 0 < lo <= fv <= hi):
+        logger.warning("pdf: Caydex estimate for %s is malformed (value=%r range=%r–%r) — "
+                       "shown as unavailable", symbol, fv, lo, hi)
+        return {"state": "none"}
+    gap_pct, gap_word = _price_gap(fv, current_price, "the estimate")
+    as_of = block.get("as_of")
+    return {
+        "state": "ok",
+        "fair_value": fv,
+        "range_low": lo,
+        "range_high": hi,
+        "price_gap_pct": gap_pct,
+        "gap_word": gap_word if gap_pct is not None else "",
+        "as_of": as_of[:10] if isinstance(as_of, str) else "",
+    }
 
 
 _MONTH_ABBR = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -279,7 +326,9 @@ def build_context(
 ) -> dict:
     """Flatten the frozen report JSONB into a flat, template-friendly context and
     pre-render every chart to an SVG string. Tolerant of missing fields."""
-    data = data or {}
+    # Kill switch (settings.DCF_ENABLED off): drop a stored Caydex estimate, and on a report BUILT
+    # with it the insight that quotes it, before anything below reads the block.
+    data = strip_caydex_if_disabled(data or {})
     scoring = data.get("_scoring_inputs") or {}
 
     # ── Headline score ────────────────────────────────────────────────────────
@@ -300,18 +349,18 @@ def build_context(
     # ── Fair value / margin of safety ─────────────────────────────────────────
     price_action = data.get("price_action") or {}
     current_price = _num(price_action.get("current_price"))
-    # Fair value prefers the Wall Street analyst consensus target and falls back to
-    # our own DCF-derived estimate when the consensus has no target. The hero card
-    # MUST state which one it actually used — labeling our own estimate as analyst
-    # consensus misattributes it to third parties (and is affirmatively misleading).
-    ws_block = data.get("wall_street_consensus") or {}
-    ws_target = _num(ws_block.get("target_price"))
+    # The hero shows the published Caydex estimate, or — on a report that predates it — the
+    # model value that report was built with, labelled as such. Never an analyst price target:
+    # those are unlicensed FMP data, removed from every surface on 2026-09-26 (owner), and a
+    # target under a "Fair Value" heading is the placement rule inverted.
+    ws_block = data.get("wall_street_consensus")
+    ws_block = ws_block if isinstance(ws_block, dict) else {}
     # The Caydex Fair Value Estimate as published on the report (model dcf-v1). Only this
     # value may be labelled "Caydex": a bare `fair_value_estimate` without the block is FMP's
     # model (reports generated with DCF_ENABLED off, and every older report).
-    caydex = ws_block.get("caydex_fair_value") if settings.DCF_ENABLED else None   # kill switch
-    caydex = caydex if isinstance(caydex, dict) and caydex.get("status") == "ok" else None
-    caydex_value = _num(caydex.get("fair_value")) if caydex else None
+    estimate = _published_estimate(
+        ws_block, current_price, str(data.get("symbol") or data.get("ticker") or ""))
+    caydex_value = estimate["fair_value"] if estimate["state"] == "ok" else None
     own_estimate = _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
     # Reports persisted between the FMP rebuild and 2026-09-12 carry a FABRICATED
     # `fair_value_estimate` equal to the frozen current price (the collector wrote
@@ -321,17 +370,17 @@ def build_context(
     # that lands on the price to the cent is not a number worth a hero card either.
     if own_estimate is not None and current_price and abs(own_estimate - current_price) < 0.005:
         own_estimate = None
-    if ws_target:
-        fair_value = ws_target
-        fair_value_basis = "Per Wall Street consensus"
-        gap_noun = "target"
-    elif caydex_value:
+    # On a report BUILT with the Caydex model, `fair_value_estimate` (the research_reports
+    # column production passes in) IS the Caydex value. It may appear only through the
+    # published block above, with its range — never re-labelled as a bare "model value" after
+    # the kill switch stripped the block, or when the block is malformed.
+    if ws_block.get("dcf_source") == "caydex":
+        own_estimate = None
+    if caydex_value:
         fair_value = caydex_value
-        lo, hi = _num(caydex.get("range_low")), _num(caydex.get("range_high"))
         fair_value_basis = ("Caydex Fair Value Estimate · DCF model estimate, not a price target, "
-                            "not a recommendation")
-        if lo and hi:
-            fair_value_basis += f" · range ${lo:,.0f}–${hi:,.0f}"
+                            "not a recommendation"
+                            f" · range ${estimate['range_low']:,.0f}–${estimate['range_high']:,.0f}")
         gap_noun = "the estimate"
     elif own_estimate:
         fair_value = own_estimate
@@ -344,18 +393,11 @@ def build_context(
     # NEUTRAL wording only (hard rule 4, documents/research/dcf-methodology-v1.md §5): the
     # hero used to print Undervalued / Overvalued at a ±1 % gap, in green and red — a verdict
     # on a model number. It now states the gap, in a neutral colour.
-    mos_pct = None
-    price_gap_pct = None
-    valuation_word = "—"
     valuation_color = pdf_charts.MUTED
-    if fair_value and current_price:
-        mos_pct = (fair_value - current_price) / current_price * 100.0
-        price_gap_pct = (current_price / fair_value - 1) * 100.0
-        if abs(price_gap_pct) < 0.5:
-            valuation_word = f"Price in line with {gap_noun}"
-        else:
-            where = "below" if price_gap_pct < 0 else "above"
-            valuation_word = f"Price {abs(price_gap_pct):.0f}% {where} {gap_noun}"
+    price_gap_pct, valuation_word = _price_gap(fair_value, current_price, gap_noun)
+    mos_pct = (
+        (fair_value - current_price) / current_price * 100.0 if price_gap_pct is not None else None
+    )
 
     # ── Vitals ────────────────────────────────────────────────────────────────
     vitals = []
@@ -368,21 +410,15 @@ def build_context(
             {"label": label, "score": int(round(s)), "color": pdf_charts.band_color(s)}
         )
 
-    # ── Wall Street consensus ─────────────────────────────────────────────────
-    wsc = data.get("wall_street_consensus") or {}
-    consensus_counts = {
-        "strong_buy": wsc.get("analyst_strong_buy"),
-        "buy": wsc.get("analyst_buy"),
-        "hold": wsc.get("analyst_hold"),
-        "sell": wsc.get("analyst_sell"),
-        "strong_sell": wsc.get("analyst_strong_sell"),
-    }
-    # Legend rows for the PDF — only rating levels with at least one analyst.
-    consensus_legend = [
-        {"label": lbl, "color": col, "count": int(consensus_counts.get(k) or 0)}
-        for k, lbl, col in _CONSENSUS_ORDER
-        if (consensus_counts.get(k) or 0) >= 1
-    ]
+    # ── Valuation & Institutions (section 09, formerly "Wall Street Consensus") ──
+    # The analyst half (ratings, price targets, momentum) is unlicensed FMP data and is gone
+    # from the section; it shows the published estimate, the 13F flow and the insight.
+    wsc = ws_block
+    ws_insight = wsc.get("wall_street_insight")
+    ws_insight = ws_insight.strip() if isinstance(ws_insight, str) else ""
+    # Only beside the estimate it was written with (same rule as the app and chat).
+    if ws_insight and not wall_street_insight_is_for_this_card(wsc):
+        ws_insight = ""
 
     # ── Bull / bear thesis ────────────────────────────────────────────────────
     thesis = data.get("core_thesis") or {}
@@ -569,8 +605,6 @@ def build_context(
         "short_interest": pdf_charts.axed_bars(
             si_bar_items, colors=["#D97706"], width=320, height=104, fmt="num"),
         "radar": pdf_charts.moat_radar(dims, size=210, max_score=radar_max),
-        "consensus": pdf_charts.analyst_consensus_stacked_bar(
-            consensus_counts, width=330, height=22),
         "institution_flow": pdf_charts.diverging_bars(inst_flow_items, width=330, height=118),
     }
 
@@ -593,12 +627,6 @@ def build_context(
         "price_gap_pct": price_gap_pct,
         "valuation_word": valuation_word,
         "valuation_color": valuation_color,
-        "target_price": _num(wsc.get("target_price")),
-        "low_target": _num(wsc.get("low_target")),
-        "high_target": _num(wsc.get("high_target")),
-        "consensus_counts": {k: (v or 0) for k, v in consensus_counts.items()},
-        "consensus_legend": consensus_legend,
-        "consensus_total": sum((v or 0) for v in consensus_counts.values()),
         "price_change_pct": _num(price_action.get("change_pct")),
         "window_label": price_action.get("window_label") or "12M",
         "growth_metric_label": growth_metric_label,
@@ -685,13 +713,8 @@ def build_context(
         },
         "sources": sources_list,
         "wall_street": {
-            "rating": (wsc.get("rating") or "").replace("_", " ").title(),
-            "valuation_status": wsc.get("valuation_status") or "",
-            "discount_percent": _num(wsc.get("discount_percent")),
-            "momentum_upgrades": wsc.get("momentum_upgrades") or 0,
-            "momentum_downgrades": wsc.get("momentum_downgrades") or 0,
-            "momentum_maintains": wsc.get("momentum_maintains") or 0,
-            "insight": wsc.get("wall_street_insight") or "",
+            "estimate": estimate,
+            "insight": ws_insight,
         },
         "factors": data.get("critical_factors") or [],
         "charts": charts,

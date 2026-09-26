@@ -235,9 +235,17 @@ async def test_ticker_report_grounds_recent_price_movement(resolver, monkeypatch
     assert "semiconductor oversupply fears following TSMC's earnings" in block
 
 
+# A published estimate: the section's insight reaches the chat only beside one
+# (dcf_report_gate.wall_street_insight_is_for_this_card — the rule the app and PDF use).
+_PUBLISHED = {"status": "ok", "fair_value": 100.0, "range_low": 90.0, "range_high": 110.0}
+
+
 @pytest.mark.asyncio
 async def test_ticker_report_dumps_every_module(resolver, monkeypatch):
     """Every visible module's text grounds the chat (values reach the block; labels are key-paths)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+
     async def fake_get(ticker, persona):
         return {
             "company_name": "X", "executive_summary_text": "s",
@@ -245,7 +253,8 @@ async def test_ticker_report_dumps_every_module(resolver, monkeypatch):
             "revenue_engine": {"analysis_note": "Cloud is now the largest segment."},
             "moat_competition": {"competitive_insight": "Switching costs anchor the moat."},
             "key_management": {"ownership_insight": "Founder-led with high insider ownership."},
-            "wall_street_consensus": {"wall_street_insight": "Analysts see modest upside."},
+            "wall_street_consensus": {"wall_street_insight": "Institutions kept adding.",
+                                      "caydex_fair_value": dict(_PUBLISHED)},
             "macro_data": {"headline": "Rates are the swing factor.", "intelligence_brief": "Watch CPI."},
         }
 
@@ -255,12 +264,15 @@ async def test_ticker_report_dumps_every_module(resolver, monkeypatch):
     block = await resolver.resolve("TICKER_REPORT", "X|warren_buffett", None)
     for phrase in ("Growth reaccelerates on AI demand.", "Beat 6 of 8", "Cloud is now the largest segment.",
                    "Switching costs anchor the moat.", "Founder-led with high insider ownership.",
-                   "Analysts see modest upside.", "Rates are the swing factor.", "Watch CPI."):
+                   "Institutions kept adding.", "Rates are the swing factor.", "Watch CPI."):
         assert phrase in block, phrase
 
 
 @pytest.mark.asyncio
 async def test_ticker_report_outliers_never_crash_or_leak_none(resolver, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+
     async def fake_get(ticker, persona):
         return {
             "company_name": "X",
@@ -268,7 +280,8 @@ async def test_ticker_report_outliers_never_crash_or_leak_none(resolver, monkeyp
             "price_action": "oops-not-a-dict",                            # malformed → no lead, skip_top'd
             "revenue_engine": {"analysis_note": None},                    # null field → skipped
             "moat_competition": {"competitive_insight": ""},              # empty → skipped
-            "wall_street_consensus": {"wall_street_insight": "Real analyst view."},  # valid → dumped
+            "wall_street_consensus": {"wall_street_insight": "Real institutional view.",  # valid → dumped
+                                      "caydex_fair_value": dict(_PUBLISHED)},
         }
 
     import app.services.ticker_report_cache as trc
@@ -279,7 +292,7 @@ async def test_ticker_report_outliers_never_crash_or_leak_none(resolver, monkeyp
     assert "base summary." in block
     assert "None" not in block
     assert "oops-not-a-dict" not in block            # malformed price_action skipped
-    assert "Real analyst view." in block             # a valid module still dumped
+    assert "Real institutional view." in block       # a valid module still dumped
 
 
 @pytest.mark.asyncio
@@ -723,6 +736,8 @@ async def test_ticker_report_history_arrays_dropped_narratives_survive(resolver,
     """The HIGH bug: the frozen per-metric history arrays (annual/quarterly/sector history) sit early
     (fundamental_metrics) and ate the whole dump budget, starving the moat/Wall-Street/macro insights
     OUT of the block. They're now dropped AND the narratives are emitted first."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
     big_history = [{"period": f"20{i:02d}", "value": i * 1.1} for i in range(40)]
     async def fake_get(ticker, persona):
         return {
@@ -733,7 +748,8 @@ async def test_ticker_report_history_arrays_dropped_narratives_survive(resolver,
                  "sector_annual_history": big_history, "sector_quarterly_history": big_history}
                 for m in range(6)]} for c in range(6)],
             "moat_competition": {"competitive_insight": "MOATMARK switching costs anchor it."},
-            "wall_street_consensus": {"wall_street_insight": "WALLMARK analysts split."},
+            "wall_street_consensus": {"wall_street_insight": "WALLMARK institutions split.",
+                                      "caydex_fair_value": dict(_PUBLISHED)},
             "macro_data": {"headline": "MACROMARK rates swing it."},
         }
 
@@ -1018,3 +1034,145 @@ def test_a_read_stance_stays_in_the_report_dump(stance):
 def test_guidance_strip_tolerates_garbage(report):
     from app.services.chat_context_resolver import _without_unmeasured_guidance
     assert _without_unmeasured_guidance(report) == report
+
+
+# ── 2026-09-26: "Wall Street Consensus" → "Valuation & Institutions" ──
+#
+# The analyst half of the section (rating, price targets, rating distribution, momentum) is
+# unlicensed FMP data the user no longer sees, and valuation_status / discount_percent /
+# dcf_measured are verdict-shaped FMP-DCF leftovers. The dump is labelled "data the user can
+# see", so none of it may reach the model — but ONLY inside that section: the flattener serves
+# every screen and `rating` / `target_price` are generic names.
+
+_ANALYST_ERA_WS = {
+    "rating": "strong_buy", "current_price": 172.4, "target_price": 205.5,
+    "low_target": 150.5, "high_target": 260.5, "valuation_status": "deep_undervalued",
+    "discount_percent": 15.9, "dcf_measured": True, "dcf_source": "caydex",
+    "momentum_upgrades": 6, "momentum_downgrades": 2, "momentum_maintains": 5,
+    "analyst_strong_buy": 8, "analyst_buy": 22, "analyst_hold": 12, "analyst_sell": 2,
+    "analyst_strong_sell": 1,
+    "caydex_fair_value": {"symbol": "ORCL", "status": "ok", "fair_value": 180.25,
+                          "range_low": 150.75, "range_high": 210.75, "analyst_years": 3},
+    "hedge_fund_smart_money": {"net_flow_label": "INSTFLOWMARK"},
+    "wall_street_insight": "WSINSIGHTMARK institutions added.",
+}
+
+_WS_DROPPED = ("rating", "target_price", "low_target", "high_target", "valuation_status",
+               "discount_percent", "dcf_measured")
+
+
+def _ws_keys(dump: str) -> list:
+    """The key-paths of every grounding line that sits directly under wall_street_consensus."""
+    prefix = "wall_street_consensus."
+    return [line.split(":", 1)[0][len(prefix):] for line in dump.splitlines()
+            if line.startswith(prefix)]
+
+
+def test_flatten_drops_the_analyst_half_of_the_valuation_section_only():
+    payload = {
+        "rating": "A+",                                          # top-level: another meaning
+        "moat_competition": {"rating": "wide", "target_price": 99.5, "momentum_score": 7,
+                             "analyst_note": "MOATNOTE", "valuation_status": "moatval"},
+        "wall_street_consensus": dict(_ANALYST_ERA_WS),
+    }
+    out = _flatten_for_grounding(payload, 4000)
+    keys = _ws_keys(out)
+    for k in keys:
+        assert k.split(".", 1)[0] not in _WS_DROPPED, k
+        assert not k.startswith(("analyst_", "momentum_")), k
+    for leaked in ("strong_buy", "205.5", "150.5", "260.5", "deep_undervalued", "15.9"):
+        assert leaked not in out, leaked
+    # Kept: the price, the published estimate (incl. its nested `analyst_years` — direct
+    # children only), the 13F flow and the insight.
+    assert "wall_street_consensus.current_price: 172.4" in out
+    assert "wall_street_consensus.caydex_fair_value.fair_value: 180.25" in out
+    assert "wall_street_consensus.caydex_fair_value.range_low: 150.75" in out
+    assert "wall_street_consensus.caydex_fair_value.analyst_years: 3" in out
+    assert "INSTFLOWMARK" in out and "WSINSIGHTMARK" in out
+    # Anti-vacuity: the same names OUTSIDE the section are untouched.
+    assert "rating: A+" in out.splitlines()
+    assert "moat_competition.rating: wide" in out
+    assert "moat_competition.target_price: 99.5" in out
+    assert "moat_competition.momentum_score: 7" in out
+    assert "moat_competition.analyst_note: MOATNOTE" in out
+    assert "moat_competition.valuation_status: moatval" in out
+
+
+def test_flatten_section_drop_is_case_insensitive_and_tolerates_garbage():
+    out = _flatten_for_grounding({"Wall_Street_Consensus": {"Rating": "buy", "Target_Price": 9.5,
+                                                            "Momentum_Upgrades": 3, "keep": "yes"}}, 2000)
+    assert out == "Wall_Street_Consensus.keep: yes"
+    # A non-dict section (list of scalars / dicts) must not raise and is not filtered further.
+    assert _flatten_for_grounding({"wall_street_consensus": ["a", "b"]}, 2000) == \
+        "wall_street_consensus: a, b"
+    assert "x: 1" in _flatten_for_grounding({"wall_street_consensus": [{"rating": "buy", "x": 1}]}, 2000)
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_chat_never_sees_the_analyst_half(resolver, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+
+    async def fake_get(ticker, persona):
+        return {"company_name": "Oracle", "executive_summary_text": "s", "rating": "TOPRATING",
+                "wall_street_consensus": dict(_ANALYST_ERA_WS)}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|warren_buffett", None)
+    for leaked in ("strong_buy", "205.5", "260.5", "deep_undervalued", "momentum_", "analyst_buy"):
+        assert leaked not in block, leaked
+    assert "180.25" in block and "TOPRATING" in block
+    # The analyst-era insight was written for the analyst card ("Buy-rated with a $190 target…"):
+    # the app and the PDF hide it, so the model must not see it either.
+    assert "WSINSIGHTMARK" not in block
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_chat_keeps_the_insight_written_beside_the_estimate(resolver, monkeypatch):
+    """Anti-vacuity twin: with no analyst coverage and a published estimate, the insight IS
+    the one on the user's screen and must ground the chat — so "drop every insight" fails."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+    ws = {k: v for k, v in _ANALYST_ERA_WS.items()
+          if not k.startswith(("analyst_", "momentum_")) and k not in ("target_price", "low_target", "high_target")}
+
+    async def fake_get(ticker, persona):
+        return {"company_name": "Oracle", "executive_summary_text": "s", "wall_street_consensus": ws,
+                "_scoring_inputs": {"wall_street": {"price_target": 777.25},
+                                    "valuation": {"status": "SCORINGVERDICT"}},
+                "key_vitals": {"valuation": {"status": "LEGACYVERDICT"}}}
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    block = await resolver.resolve("TICKER_REPORT", "ORCL|warren_buffett", None)
+    assert "WSINSIGHTMARK" in block and "180.25" in block
+    # Internal scoring inputs are not "data the user can see" (they re-label the estimate a
+    # "price_target" and carry a valuation verdict), and the vendor stamp is not either.
+    for leaked in ("777.25", "SCORINGVERDICT", "LEGACYVERDICT", "_scoring_inputs", "dcf_source"):
+        assert leaked not in block, leaked
+
+
+@pytest.mark.asyncio
+async def test_ticker_report_chat_drops_a_withdrawn_estimates_insight(resolver, monkeypatch):
+    """Kill switch through the chat door: a caydex-built report loses its estimate AND the
+    insight that quotes it. An FMP-built one loses its insight too — since 2026-09-26 an insight
+    is shown (app, PDF, chat) only beside the estimate it was written with."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "DCF_ENABLED", False)
+    reports = {
+        "CAYX": {"company_name": "C", "executive_summary_text": "s",
+                 "wall_street_consensus": dict(_ANALYST_ERA_WS)},
+        "FMPX": {"company_name": "F", "executive_summary_text": "s",
+                 "wall_street_consensus": {**_ANALYST_ERA_WS, "dcf_source": "fmp"}},
+    }
+
+    async def fake_get(ticker, persona):
+        return reports[ticker]
+
+    import app.services.ticker_report_cache as trc
+    monkeypatch.setattr(trc, "get_cached_report", fake_get)
+    caydex = await resolver.resolve("TICKER_REPORT", "CAYX|warren_buffett", None)
+    assert "180.25" not in caydex and "WSINSIGHTMARK" not in caydex
+    fmp = await resolver.resolve("TICKER_REPORT", "FMPX|warren_buffett", None)
+    assert "180.25" not in fmp and "WSINSIGHTMARK" not in fmp

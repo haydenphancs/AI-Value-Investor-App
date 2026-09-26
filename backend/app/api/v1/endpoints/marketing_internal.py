@@ -35,7 +35,7 @@ import secrets
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from app.api.error_response import (
     ErrorCode,
@@ -53,6 +53,8 @@ from app.schemas.marketing import (
     MarketingRun,
     PostsCreateRequest,
     PostsCreateResponse,
+    MarketingAssetView,
+    RunAssetsResponse,
     RunClaimRequest,
     RunClaimResponse,
     RunUpdateRequest,
@@ -60,6 +62,7 @@ from app.schemas.marketing import (
     SignedUpload,
 )
 from app.services.marketing.run_service import (
+    CallerClaim,
     claim_window_ok,
     get_marketing_run_service,
     run_date_et,
@@ -110,7 +113,51 @@ def require_marketing_worker(
         )
 
 
-router = APIRouter(dependencies=[Depends(require_marketing_worker)])
+_CLAIM_HEADER = "X-Marketing-Claim"
+#: The one route a caller reaches BEFORE it holds a claim (POST only).
+_CLAIM_ROUTE_PATH = "/runs/claim"
+
+
+def require_caller_claim(
+    request: Request,
+    x_marketing_claim: Optional[str] = Header(default=None, alias=_CLAIM_HEADER),
+) -> None:
+    """Router-level, after the token gate: every route except the claim itself must present
+    the claim it holds (`<attempts>.<nonce>`), parsed onto `request.state.marketing_claim`
+    for the ledger to fence its writes on (rules marketing.md §2). Declared on the ROUTER so a
+    route added tomorrow cannot forget it. A missing or malformed claim is a contract breach,
+    never retried: 422 MARKETING_REQUEST_INVALID."""
+    route = request.scope.get("route")
+    # The route's path TEMPLATE (prefix included once mounted): the update route's template is
+    # `…/runs/{run_id}`, so a run_id of "claim" can never match this.
+    if request.method == "POST" and str(getattr(route, "path", "")).endswith(_CLAIM_ROUTE_PATH):
+        # Exempt by the MATCHED route and method, never by a path suffix: `PATCH /runs/claim`
+        # is the update route with run_id="claim" and must present a claim like any other.
+        return
+    try:
+        request.state.marketing_claim = CallerClaim.parse(x_marketing_claim)
+    except ValueError as e:
+        logger.warning("marketing worker call without a valid %s (%s) path=%s", _CLAIM_HEADER, e,
+                       request.url.path)
+        raise _claim_error(str(e))
+
+
+def _claim_error(why: str) -> HTTPException:
+    return HTTPException(status_code=422, detail={
+        "error_code": ErrorCode.MARKETING_REQUEST_INVALID.value,
+        "message": f"{_CLAIM_HEADER}: {why}",
+        "user_message": "The marketing worker request breaks the internal API contract.",
+    })
+
+
+def _claim(request: Request) -> CallerClaim:
+    claim = getattr(request.state, "marketing_claim", None)
+    if claim is None:  # a handler reached without the dependency having parsed a claim
+        raise _claim_error("missing claim")
+    return claim
+
+
+router = APIRouter(dependencies=[Depends(require_marketing_worker), Depends(require_caller_claim)])
 
 
 def _log_ledger_failure(op: str, exc: BaseException, **ids: object) -> None:
@@ -174,7 +221,7 @@ _SERVER_OWNED_RUN_FIELDS = ("content_class", "template_id", "source_ref")
 
 
 @router.patch("/runs/{run_id}", response_model=MarketingRun)
-async def update_run(run_id: str, body: RunUpdateRequest):
+async def update_run(run_id: str, body: RunUpdateRequest, claim: CallerClaim = Depends(_claim)):
     ignored = [f for f in _SERVER_OWNED_RUN_FIELDS if getattr(body, f) is not None]
     if ignored:
         logger.warning("marketing update_run: ignoring server-owned field(s) %s from the worker "
@@ -194,6 +241,7 @@ async def update_run(run_id: str, body: RunUpdateRequest):
             metadata=body.metadata,
             finished=body.finished,
             worker=True,
+            claim=claim,
         )
     except Exception as e:
         _log_ledger_failure("update_run", e, run_id=run_id)
@@ -202,7 +250,7 @@ async def update_run(run_id: str, body: RunUpdateRequest):
 
 
 @router.post("/runs/{run_id}/assets", response_model=AssetRegisterResponse)
-async def register_asset(run_id: str, body: AssetRegisterRequest):
+async def register_asset(run_id: str, body: AssetRegisterRequest, claim: CallerClaim = Depends(_claim)):
     """Insert the asset row and mint a signed upload URL. The worker PUTs the bytes to
     `upload.url` itself; nothing large ever transits this process."""
     svc = get_marketing_run_service()
@@ -215,6 +263,7 @@ async def register_asset(run_id: str, body: AssetRegisterRequest):
             size_bytes=body.bytes,
             duration_seconds=body.duration_seconds,
             metadata=body.metadata,
+            claim=claim,
         )
     except Exception as e:
         _log_ledger_failure("register_asset", e, run_id=run_id, kind=body.kind)
@@ -226,11 +275,11 @@ async def register_asset(run_id: str, body: AssetRegisterRequest):
 
 
 @router.post("/assets/{asset_id}/complete", response_model=AssetCompleteResponse)
-async def complete_asset(asset_id: str):
+async def complete_asset(asset_id: str, claim: CallerClaim = Depends(_claim)):
     """Verify the object landed (HEAD on the bucket) and mark the row `ready`."""
     svc = get_marketing_run_service()
     try:
-        row = await svc.complete_asset(asset_id)
+        row = await svc.complete_asset(asset_id, claim=claim)
     except Exception as e:
         _log_ledger_failure("complete_asset", e, asset_id=asset_id)
         return error_response_from_exception(e, step="marketing_complete_asset")
@@ -238,12 +287,12 @@ async def complete_asset(asset_id: str):
 
 
 @router.post("/runs/{run_id}/script", response_model=ScriptKickResponse)
-async def kick_script(run_id: str):
+async def kick_script(run_id: str, claim: CallerClaim = Depends(_claim)):
     """Idempotent kick-and-poll for the day's script (see `script_service`). Answers at once —
     the Gemini work runs in the background, never inside this request."""
     svc = get_marketing_script_service()
     try:
-        state = await svc.kick(run_id)
+        state = await svc.kick(run_id, claim=claim)
     except Exception as e:
         _log_ledger_failure("kick_script", e, run_id=run_id)
         return error_response_from_exception(e, step="marketing_kick_script")
@@ -251,14 +300,29 @@ async def kick_script(run_id: str):
 
 
 @router.post("/runs/{run_id}/posts", response_model=PostsCreateResponse)
-async def create_posts(run_id: str, body: PostsCreateRequest):
+async def create_posts(run_id: str, body: PostsCreateRequest, claim: CallerClaim = Depends(_claim)):
     """Record the day's outlets. Rows are born `pending_review` (or `approved` under
     MARKETING_AUTO_PUBLISH, text-only); the publisher loop in the web lifespan does the rest.
     Captions come from the run's accepted script, not from this request (`create_posts`)."""
     svc = get_marketing_run_service()
     try:
-        rows = await svc.create_posts(run_id, [p.model_dump() for p in body.posts])
+        rows = await svc.create_posts(run_id, [p.model_dump() for p in body.posts],
+                                      claim=claim)
     except Exception as e:
         _log_ledger_failure("create_posts", e, run_id=run_id)
         return error_response_from_exception(e, step="marketing_create_posts")
     return PostsCreateResponse(posts=[MarketingPost.model_validate(r) for r in rows])
+
+
+@router.get("/runs/{run_id}/assets", response_model=RunAssetsResponse)
+async def list_run_assets(run_id: str, claim: CallerClaim = Depends(_claim)):
+    """The run's `ready` assets (with public URLs) and its verified narration pointer — how a
+    resumed or re-claimed stage re-derives media instead of trusting an earlier stage's memory."""
+    svc = get_marketing_run_service()
+    try:
+        voice, rows = await svc.list_ready_assets(run_id, claim=claim)
+    except Exception as e:
+        _log_ledger_failure("list_run_assets", e, run_id=run_id)
+        return error_response_from_exception(e, step="marketing_list_run_assets")
+    return RunAssetsResponse(voice_asset_id=voice,
+                             assets=[MarketingAssetView.model_validate(r) for r in rows])

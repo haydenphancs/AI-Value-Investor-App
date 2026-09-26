@@ -24,7 +24,7 @@ Environment (all MARKETING_* so they never collide with the web service's variab
   MARKETING_API_BASE_URL     https://<backend host>  (Railway private: http://<svc>.railway.internal:PORT)
   MARKETING_WORKER_TOKEN     shared secret, same value as the web service's setting
   MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's run; default 16
-  MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase2"
+  MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase3"
   MARKETING_DRY_RUN          "true" (default) — recorded on the run; the publisher honours it
   MARKETING_FORCE            "1" bypasses the hour gate (manual runs, local testing)
   MARKETING_RUN_DATE         YYYY-MM-DD override of the ET date to claim
@@ -81,7 +81,7 @@ _HTTP_ATTEMPTS = 3
 
 #: Phase 2 stops after the script: voice/render are Phases 3-4. A run that got this far is
 #: closed `skipped` with this reason, never `media_ready` (no media, no posts exist).
-PHASE_CLOSE_REASON = "phase2_script_only"
+PHASE_CLOSE_REASON = "phase3_voice_only"
 #: Poll cadence and budget for the day's script. One generation is a draft plus at most one
 #: repair, and one `generate_json` call can take ~572 s in the worst case (the web side's
 #: `script_service.LEASE_SECONDS` is sized from it), so a slow generation can outlast this
@@ -92,6 +92,10 @@ SCRIPT_POLL_BUDGET_SECONDS = 15 * 60
 #: Hard ceiling on one tick, kept BELOW the backend's MARKETING_RUN_STALE_SECONDS (2700) so a
 #: live tick can never be mistaken for an abandoned one and re-claimed underneath itself.
 WORKER_DEADLINE_SECONDS = 30 * 60
+#: A stage may START only with at least this much of the tick left: the longest stage (voice:
+#: model load + synthesis + encode under its own child-process timeout) must be able to finish
+#: before WORKER_DEADLINE_SECONDS, or it is deferred to the next tick instead.
+STAGE_START_MARGIN_SECONDS = 10 * 60
 
 
 # ── pure helpers (unit-tested) ────────────────────────────────────────────────
@@ -202,9 +206,8 @@ class WorkerAPIError(RuntimeError):
 
 #: 409 from the backend: this tick no longer holds the run (it was closed, re-claimed after
 #: going stale, or its date left the today/yesterday ET window). Nothing is ours to record:
-#: on a closed run a failure PATCH is refused with the same 409 (a misleading ERROR), and on a
-#: run another tick re-claimed it would write `failed` over that tick's live run — the server
-#: does not yet fence a PATCH on the caller's claim (a Phase 3-4 item).
+#: every write after the claim carries `X-Marketing-Claim` and the server fences it on that
+#: claim (attempts + nonce), so a failure PATCH would be refused with the same 409.
 RUN_NOT_HELD = "MARKETING_RUN_NOT_HELD"
 
 
@@ -233,6 +236,12 @@ class BackendClient:
             headers={"X-Marketing-Worker-Token": token, "User-Agent": "caydex-marketing-worker"},
             timeout=timeout,
         )
+
+    def hold(self, run: Dict[str, Any], claim_nonce: str) -> None:
+        """Present THIS claim on every later call (`X-Marketing-Claim: <attempts>.<nonce>`).
+        The server fences each write on it, so a tick whose run was re-claimed meanwhile gets
+        409 MARKETING_RUN_NOT_HELD instead of writing over the new holder."""
+        self._client.headers["X-Marketing-Claim"] = f"{int(run.get('attempts') or 0)}.{claim_nonce}"
 
     def close(self) -> None:
         self._client.close()
@@ -278,6 +287,10 @@ class BackendClient:
         if claim_nonce:
             body["claim_nonce"] = claim_nonce
         return self._call("POST", "/runs/claim", json=body)
+
+    def list_assets(self, run_id: str) -> Dict[str, Any]:
+        """`{voice_asset_id, assets}`: the run's READY assets, as the server verified them."""
+        return self._call("GET", f"/runs/{run_id}/assets")
 
     def update_run(self, run_id: str, **fields: Any) -> Dict[str, Any]:
         return self._call("PATCH", f"/runs/{run_id}", json=fields)
@@ -354,12 +367,63 @@ def stage_preflight(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]
         logger.info("preflight manifest uploaded path=%s bytes=%d", asset["storage_path"], len(payload))
     else:
         logger.info("preflight manifest already ready path=%s", asset["storage_path"])
+    voice_env = voice_readiness(ctx["fonts_dir"])
+    if not voice_env["ready"]:
+        # Loud before the day is spent: the voice stage would fail on exactly this later.
+        logger.error("preflight: the voice stage cannot run in this image: %s", voice_env["problems"])
     api.update_run(
         run["id"],
+        # Run metadata (service-role only), NOT the public manifest: the memory limit and model
+        # revisions describe this container, and the manifest must stay deterministic.
         metadata={"preflight": {"ffmpeg": manifest["ffmpeg"], "fonts": manifest["fonts"],
-                                "python": manifest["python"]}},
+                                "python": manifest["python"], "voice": voice_env}},
         timings={"preflight_s": round(time.monotonic() - ctx["t0"], 3)},
     )
+
+
+def voice_readiness(fonts_dir: str) -> Dict[str, Any]:
+    """What the `voiced` stage needs, checked WITHOUT importing torch: the Kokoro package and
+    spaCy model are installed, the baked weights are in HF_HOME, the caption face is present;
+    plus the container's memory limit (cgroup v2) and the baked model revisions."""
+    import importlib.util
+
+    problems: List[str] = []
+    for mod in ("kokoro", "misaki", "en_core_web_sm"):
+        if importlib.util.find_spec(mod) is None:
+            problems.append(f"python package {mod} missing")
+    hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+    weights = os.path.join(hf_home, "hub", "models--hexgrad--Kokoro-82M")
+    voice_name = (os.environ.get("MARKETING_TTS_VOICE") or "af_heart").strip() or "af_heart"
+    if not os.path.isdir(weights):
+        problems.append(f"Kokoro weights not baked under {hf_home}")
+    else:
+        # The image bakes ONE voice (the Dockerfile's warm-up); with HF_HUB_OFFLINE any other
+        # MARKETING_TTS_VOICE fails every tick with a misleading "check your connection".
+        snapshots = os.path.join(weights, "snapshots")
+        try:
+            baked = any(os.path.isfile(os.path.join(snapshots, rev, "voices", f"{voice_name}.pt"))
+                        for rev in os.listdir(snapshots))
+        except OSError:
+            baked = False
+        if not baked:
+            problems.append(f"voice {voice_name!r} is not baked into the image (voices/{voice_name}.pt)")
+    if not os.path.isfile(os.path.join(fonts_dir, "Inter-Bold.ttf")):
+        problems.append("Inter-Bold.ttf missing from the fonts dir")
+    memory = None
+    try:
+        with open("/sys/fs/cgroup/memory.max", encoding="utf-8") as f:
+            raw = f.read().strip()
+        memory = raw if raw == "max" else f"{int(raw) // (1024 * 1024)} MiB"
+    except (OSError, ValueError):
+        pass
+    revisions = None
+    try:
+        with open(os.path.join(hf_home, "revisions.json"), encoding="utf-8") as f:
+            revisions = json.load(f)
+    except (OSError, ValueError):
+        pass
+    return {"ready": not problems, "problems": problems, "memory_limit": memory,
+            "hf_offline": os.environ.get("HF_HUB_OFFLINE") == "1", "revisions": revisions}
 
 
 #: `rejected` kick body `reason` → the run's `metadata.skip_reason`. A `rejected` day is not
@@ -481,9 +545,18 @@ def stage_script(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
 # A stage never trusts `ctx` for what an EARLIER stage produced — a resumed run skipped that
 # stage. `run_pipeline` re-derives the script (`accepted_script`) before any stage after
 # `scripted`; media a later stage needs comes from the server's `ready` asset rows.
-MEDIA_STAGES: List[Tuple[str, Callable[[BackendClient, Dict[str, Any], Dict[str, Any]], None]]] = [
+def stage_voice(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Phase 3: Kokoro narration + word timings (marketing/voice.py). Imported here, lazily,
+    so a tick that never reaches this stage never imports even the light half of it."""
+    from marketing import voice
+
+    return voice.stage_voice(api, run, ctx, skip=SkipRun, uploader=upload_signed, hasher=sha256_hex)
+
+
+MEDIA_STAGES: List[Tuple[str, Callable[[BackendClient, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]]] = [
     ("selected", stage_select),
     ("scripted", stage_script),
+    ("voiced", stage_voice),
 ]
 
 
@@ -507,14 +580,25 @@ def run_pipeline(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
             # (a no-op on a fresh run). Outside the SkipRun catch on purpose: past the checkpoint
             # the script is accepted and immutable, so anything else is a failure, not a verdict.
             accepted_script(api, run, ctx)
+        elapsed = time.monotonic() - ctx["t0"]
+        if elapsed > WORKER_DEADLINE_SECONDS - STAGE_START_MARGIN_SECONDS:
+            # Every stage starts inside the tick's budget, so no stage can run past
+            # MARKETING_RUN_STALE_SECONDS and meet a re-claimer mid-write (the claim fence
+            # would refuse its writes anyway — this keeps it from spending the work).
+            raise WorkerDeferred(f"{elapsed:.0f}s into the tick, too late to start stage {name}")
         t = time.monotonic()
         logger.info("stage %s: start", name)
         try:
-            fn(api, run, ctx)
+            produced = fn(api, run, ctx)
         except SkipRun as skip:
             # Caught BEFORE the checkpoint: a skip is a verdict on the day, not a finished stage.
             return _close_skipped(api, run, skip.reason)
-        api.update_run(run["id"], stage=name, timings={f"{name}_s": round(time.monotonic() - t, 3)})
+        checkpoint: Dict[str, Any] = {"stage": name, "timings": {f"{name}_s": round(time.monotonic() - t, 3)}}
+        if produced:
+            # What the stage produced rides in the SAME PATCH as its checkpoint (e.g. the voiced
+            # stage's voice_asset_id): a resume can never see the stage without its output.
+            checkpoint["metadata"] = produced
+        api.update_run(run["id"], **checkpoint)
         completed = name
         logger.info("stage %s: done in %.1fs", name, time.monotonic() - t)
 
@@ -536,7 +620,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     run_hour = int(os.environ.get("MARKETING_RUN_HOUR_ET", "16"))
-    worker_version = os.environ.get("MARKETING_WORKER_VERSION", "phase2").strip() or "phase2"
+    worker_version = os.environ.get("MARKETING_WORKER_VERSION", "phase3").strip() or "phase3"
     dry_run = env_flag("MARKETING_DRY_RUN", True)
     force = env_flag("MARKETING_FORCE", False)
     now_et = datetime.now(ET)
@@ -585,6 +669,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "run_date=%s CLAIMED run_id=%s attempt=%s resume_after=%s dry_run=%s",
             run_date, run["id"], run.get("attempts"), run.get("stage"), dry_run,
         )
+        api.hold(run, claim_nonce)
         try:
             final = run_pipeline(api, run, ctx)
         except WorkerDeferred as e:

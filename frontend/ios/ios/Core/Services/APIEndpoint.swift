@@ -180,6 +180,14 @@ enum APIEndpoint: Sendable {
     case updatePriceAlert(id: String, threshold: Double?, isActive: Bool?, repeatMode: String?)
     case deletePriceAlert(id: String)
 
+    // MARK: - Search chips
+    /// "Trending searches" / "Most added" / "Popular" chips for every search screen's empty
+    /// state. Impersonal, cached an hour server-side; fetched by `SearchTrendingStore`.
+    case getSearchTrending
+    /// A tap on a search RESULT row — never a chip or a recent-search row. Fire-and-forget;
+    /// the server always answers 204 and keeps only an anonymous daily counter.
+    case recordSearchPick(symbol: String, type: String)
+
     // MARK: - Stocks
     case searchStocks(query: String, limit: Int)
     case getStock(ticker: String)
@@ -494,6 +502,12 @@ enum APIEndpoint: Sendable {
         case .deletePriceAlert(let id):
             return "/api/v1/alerts/price/\(id)"
 
+        // Search chips
+        case .getSearchTrending:
+            return "/api/v1/search/trending"
+        case .recordSearchPick:
+            return "/api/v1/search/picks"
+
         // Stocks
         case .searchStocks:
             return "/api/v1/stocks/search"
@@ -767,7 +781,8 @@ enum APIEndpoint: Sendable {
              .updateAvatar,
              .createPortfolio, .regenerateResearchReportPDF,
              .prewarmReportCollection,
-             .claimGuestData:
+             .claimGuestData,
+             .recordSearchPick:
             return .POST
 
         case .updateProfile, .updateChatSession:
@@ -1071,6 +1086,9 @@ enum APIEndpoint: Sendable {
         case .reorderPortfolios(let ids):
             return ReorderPortfoliosRequestBody(portfolioIds: ids)
 
+        case .recordSearchPick(let symbol, let type):
+            return SearchPickRequest(symbol: symbol, type: type)
+
         default:
             return nil
         }
@@ -1177,6 +1195,11 @@ enum APIEndpoint: Sendable {
         //
         // A tokenless call is refused by `APIClient.buildRequest` before it goes out, and
         // surfaces through `AppActions.reportMutationFailure` → the sign-in wall.
+
+        // Search chips. The item names are FMP-derived (auth.md §1a), and a pick needs an
+        // account by product decision — an anonymous caller could mint picks at will.
+        case .getSearchTrending, .recordSearchPick:
+            return .signInRequired
 
         // Stock market data.
         case .searchStocks, .getStock, .getStockOverview, .getStockOverviewCore, .getStockQuote,

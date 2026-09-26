@@ -228,7 +228,9 @@ def test_a_word_brand_used_as_a_word_is_no_company(key, text):
 
 
 @pytest.mark.parametrize("key, text", [
-    (AS, "Discover ways to sell without letting emotion take over."),
+    # Was journey:art_of_selling, EXCLUDED 2026-09-26 (a post needs an eligible item); the
+    # word-brand shape ("Discover" as a verb) is item-independent.
+    (CM, "Discover ways to sell without letting emotion take over."),
     (FO, "Don't Chase Hot Stocks"),
     (IS, "Lemonade stands have revenue and costs too."),
 ])

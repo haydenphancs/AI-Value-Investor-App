@@ -251,6 +251,7 @@ supabase/.temp/
 
 # --- Book narration / voice-clone local artifacts (large + regenerable; never commit) ---
 backend/venv_clone/
+backend/venv_marketing/
 backend/data/book_audio/orig/
 backend/data/book_audio/orig_speed/
 backend/data/book_audio/.cache_*/

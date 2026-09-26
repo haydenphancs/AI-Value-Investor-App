@@ -72,6 +72,7 @@ from typing import Dict, FrozenSet, Iterable, List, Sequence, Tuple
 
 from app.services.chat_security import normalize_text
 from app.services.marketing.numbers import has_non_ascii_digit, words_to_digits
+from app.services.marketing.tlds import is_non_tld_tail
 
 logger = logging.getLogger(__name__)
 
@@ -738,15 +739,97 @@ def _given_name_hits(text: str, strict: bool = False,
             if (nlow in _NAME_VERBS or (len(nlow) >= 5 and nlow.endswith("ed"))
                     or (nlow in _AUXILIARIES and low not in _NOUN_GIVEN)):
                 hits.append(m.group(1))              # "Ben invented", "Warren would"
+        mentions: List[List[Tuple[str, int, int]]] = []   # at most once per sentence
         for m in _FULL_NAME_RE.finditer(sent):
             if m.group(1).lower() not in given:
                 continue
             pm = _PREV_WORD_RE.search(sent[max(0, m.start() - 30):m.start()])
             prev = pm.group(1).strip("\"'([{").rstrip(".").lower() if pm else ""
             verb = (m.group(3) or "").lower()
-            if prev in _NAME_PREFIXES or verb in _HUMAN_VERBS:
+            if prev in _NAME_PREFIXES or verb in _HUMAN_VERBS or _title_case_person(
+                    sent, m, title, mentions, company_terms):
                 hits.append(f"{m.group(1)} {m.group(2)}")
     return hits
+
+
+#: Round 4 (residual f): a Title-Case headline capitalises the verb after a name too, so rule 2's
+#: lower-case verb slot never saw it ("Why Frank Knight Mattered", "What Frank Knight Taught
+#: Investors"). The capitalised verbs rule 2 accepts there: a verb only a person does, plus the
+#: headline verbs any subject takes (`_TITLE_ANY_SUBJECT_VERBS`) — never a participle a headline
+#: uses as a noun-phrase SUFFIX ("Grace Period Explained", "Pearl Harbor Remembered", "Lessons
+#: Learned").
+#: Round 5: the present tense ("Why Frank Knight Matters", "How Frank Knight Shapes Risk",
+#: "Frank Knight Warns Investors") — the round-4 list had "mattered" only.
+_TITLE_ANY_SUBJECT_VERBS = frozenset({"matters", "mattered", "shapes", "shaped"})
+_TITLE_PERSON_VERBS = (_HUMAN_VERBS - frozenset({
+    "explained", "defined", "remembered", "recalled", "observed", "labeled", "labelled",
+    "distinguished", "studied", "learned",
+})) | frozenset({"warns", "explains", "invents"}) | _TITLE_ANY_SUBJECT_VERBS
+#: Given names that are also everyday words — a noun, adjective or verb that opens a headline
+#: noun phrase ("Why Angel Funding Mattered", "Why Frank Talk Matters", "Why Grace Periods
+#: Mattered", "What Angel Investors Taught Founders"). Round 4 read each as a person. After one
+#: of these, the capitalised word must be a KNOWN surname (`known_surnames`) — "Frank Knight" is.
+_WORD_GIVEN = frozenset({
+    "amber", "angel", "art", "august", "autumn", "basil", "bishop", "bud", "buddy", "candy",
+    "carol", "cash", "chance", "clay", "coral", "crystal", "dale", "dawn", "dean", "don", "duke",
+    "dusty", "earl", "frank", "gene", "ginger", "glen", "grace", "guy", "hank", "harry", "hazel",
+    "heather", "herb", "holly", "homer", "honey", "hunter", "iris", "ivy", "jade", "jay", "jean",
+    "jimmy", "joy", "king", "kit", "lance", "lee", "lily", "lucky", "major", "martin", "mason",
+    "mike", "misty", "olive", "pearl", "penny", "pony", "prince", "randy", "rich", "rick", "rob",
+    "robin", "rocky", "rose", "rosemary", "ruby", "rusty", "sage", "sally", "sandy", "sherry",
+    "sky", "sol", "sonny", "star", "sterling", "storm", "sue", "summer", "toby", "tom", "tony",
+    "troy", "victor", "viola", "violet", "wade", "warren",
+})
+
+
+@lru_cache(maxsize=1)
+def known_surnames() -> FrozenSet[str]:
+    """Lower-case surnames of every listed person (the App Store list, the corpus people, the
+    misspellings, the whale registry, the quote authors) plus the everyday-word surnames the
+    ambiguous-surname rules know ("knight", "wood", "cook"). Never raises."""
+    out = {s.lower() for s in AMBIGUOUS_SURNAMES} | {s.lower() for s in _NOUN_SURNAMES}
+    for name in (APP_STORE_NAMES + CORPUS_PEOPLE + MISSPELLINGS + _registry_names()
+                 + _author_names()):
+        parts = name.split()
+        if len(parts) >= 2 and parts[-1].isalpha() and len(parts[-1]) >= 3:
+            out.add(parts[-1].lower())
+    return frozenset(out)
+
+
+def _title_case_person(sent: str, m: "re.Match[str]", title: List[bool],
+                       mentions: List[List[Tuple[str, int, int]]],
+                       company_terms: FrozenSet[str]) -> bool:
+    """In a Title-Case line, first name + capitalised surname + a CAPITALISED person verb from
+    `_TITLE_PERSON_VERBS` is a full name ("Why Frank Knight Mattered"). Narrow on purpose — the
+    semantic judge is the main gate for a person described in a headline: never a noun first
+    name ("Mark Your Calendar", "Pay the Bill First"), an initial or a possessive for a surname,
+    and never a pair the company scan reads as a company ("Why Louis Vuitton Mattered", "Why
+    Charles Schwab Mattered") or whose words are the item's own company terms. Round 5: a verb
+    ANY subject takes ("Matters", "Shapes": "Why Henry Hub Matters", "Why Kelly Criterion
+    Mattered") or a first name that is an everyday word (`_WORD_GIVEN`: "Why Angel Funding
+    Mattered") needs a KNOWN surname ("Why Frank Knight Matters"). `title` and `mentions`
+    memoise the sentence's Title-Case test and company scan (each at most once)."""
+    first, sur = m.group(1), m.group(2)
+    if sur.endswith(".") or first.lower() in _NOUN_GIVEN:
+        return False
+    nm = _NEXT_WORD_RE.match(sent, m.end(2), m.end(2) + 30)
+    if nm is None or not nm.group(1)[:1].isupper() \
+            or nm.group(1).lower() not in _TITLE_PERSON_VERBS:
+        return False
+    if ((nm.group(1).lower() in _TITLE_ANY_SUBJECT_VERBS or first.lower() in _WORD_GIVEN)
+            and sur.lower() not in known_surnames()):
+        return False
+    if not title:
+        title.append(_title_cased(sent))
+    if not title[0]:
+        return False
+    if (_is_company_word(first.lower(), company_terms)
+            or _is_company_word(sur.lower(), company_terms)):
+        return False
+    if not mentions:
+        mentions.append(sentence_company_mentions(sent))
+    a, b = m.start(1), m.end(2)
+    return not any(s < b and a < e for _n, s, e in mentions[0])
 
 
 #: A fame word + a person noun, singular (a plural "great investors" is generic teaching).
@@ -4040,14 +4123,32 @@ _CASED_GTLD_RE = re.compile(
     r"\.(?i:" + _CASED_GTLDS + r")(?![A-Za-z0-9\-])")
 
 
+#: Round 4 (residual d): a glued abbreviation with a Title- or upper-case tail ("U.S.Markets",
+#: "e.g.Bank", "vs.Best"). X autolinks a TLD in any case, but `BARE_DOMAIN_RE` needs a lower-case
+#: TLD and `_CASED_GTLDS` lists a few gTLDs only, so these reached neither the validator nor the X
+#: counter. Only an abbreviation-run HEAD (two or more one-letter labels, or a known
+#: abbreviation), so a plain missing space ("sell.Then", "day.The", "calm.So") is untouched;
+#: `_is_abbreviation_run` then exempts it only when its tail is KNOWN not to be a TLD.
+_ABBREV_HEADS = "|".join(sorted(_LINK_ABBREVIATIONS, key=len, reverse=True))
+_CASED_ABBREV_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9.\-])(?:(?:[A-Za-z]\.){2,8}|(?i:" + _ABBREV_HEADS + r")\.)[A-Za-z]{2,24}"
+    r"(?![A-Za-z0-9\-])")
+#: Every domain-shaped span a reader's autolinker (and X) may link — the validator and the X
+#: length counter (`post_copy`) iterate the same tuple, so they agree on what a link is.
+DOMAIN_SHAPE_RES = (BARE_DOMAIN_RE, _CASED_GTLD_RE, _CASED_ABBREV_RUN_RE)
+
+
 def _is_abbreviation_run(domain: str) -> bool:
     """A typo, not a domain: an initialism glued to a word ("U.S.dollar", "e.g.the", "i.e.the":
-    two or more one-letter labels) or a known abbreviation ("vs.the") — and only when the "TLD"
-    is not a real one, so "x.y.com" and "vs.com" stay links. One one-letter label is still a
+    two or more one-letter labels) or a known abbreviation ("vs.the") — and only when the tail
+    is KNOWN not to be a TLD (`tlds.NON_TLD_TAILS`, case-insensitive). Round 4 (residual d)
+    inverted the test: it used to exempt any tail missing from the short spoken-TLD list, and
+    ".markets", ".bank", ".one", ".you", ".best" are real gTLDs X links ("U.S.markets",
+    "e.g.bank", "vs.best"). "x.y.com" and "vs.com" stay links; one one-letter label is still a
     real host ("t.co", "x.com")."""
     labels = domain.split(".")
-    head, tld = labels[:-1], labels[-1]
-    if tld in _KNOWN_TLDS:
+    head, tail = labels[:-1], labels[-1]
+    if not is_non_tld_tail(tail):
         return False
     if len(head) >= 2 and all(len(label) == 1 for label in head):
         return True
@@ -4057,7 +4158,7 @@ def _is_abbreviation_run(domain: str) -> bool:
 def _link_hit(view: str) -> str:
     for rx in _LINK_RES:
         if rx is BARE_DOMAIN_RE:
-            for bare in (BARE_DOMAIN_RE, _CASED_GTLD_RE):
+            for bare in DOMAIN_SHAPE_RES:
                 for m in bare.finditer(view):
                     if not _is_abbreviation_run(m.group(0).lower()):
                         return m.group(0)
@@ -4090,6 +4191,11 @@ _MARKUP_RES = (
     re.compile(r"(?<![\w*_~])([*_~]{1,2})(?=[^\s*_~])[^\n]{0,200}?(?<=[^\s*_~])\1(?![\w*_~])"),
     # A character reference that survived `clean()`'s single decode ("&amp;lt;").
     _ENTITY_RE,
+    # Round 4 (residual h): an ASS/libass override. Phase 3 burns captions through libass, where
+    # "{…}" is an override block ("{\p1}m 0 0{\p0}" draws a shape, "{\alpha&HFF&}" hides text)
+    # and "\N", "\n", "\h" are line and space escapes. None of the three characters has a use in
+    # this copy, so each is refused in EVERY field — the same text feeds captions and cards.
+    re.compile(r"[{}\\]"),
 )
 _HASHTAG_RE = re.compile(r"(?<![A-Za-z0-9&])#[A-Za-z][A-Za-z0-9_]*")
 _CASHTAG_RE = re.compile(r"(?<![A-Za-z0-9$])\$\s?[A-Za-z]{1,6}(?![A-Za-z])")

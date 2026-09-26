@@ -546,22 +546,11 @@ struct TickerSearchSheet: View {
     @State private var searchTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
 
-    /// Shown before the user types anything. These are a genuine starting
-    /// point, not search results — everything below the fold comes from the
-    /// live `/stocks/search` endpoint, so the user is not limited to 15 names.
-    private let popularTickers: [TickerSearchItem] = [
-        TickerSearchItem(ticker: "AAPL", companyName: "Apple Inc.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "MSFT", companyName: "Microsoft Corp.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "GOOGL", companyName: "Alphabet Inc.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "AMZN", companyName: "Amazon.com Inc.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "TSLA", companyName: "Tesla Inc.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "NVDA", companyName: "NVIDIA Corp.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "META", companyName: "Meta Platforms Inc.", exchange: "NASDAQ", type: "stock"),
-        TickerSearchItem(ticker: "BRK.B", companyName: "Berkshire Hathaway", exchange: "NYSE", type: "stock"),
-    ]
-
-    private var filteredResults: [TickerSearchItem] {
-        searchText.isEmpty ? popularTickers : searchResults
+    /// Nothing typed: the shared trending chips (stocks only — this sheet feeds the equity
+    /// news feed). They replaced a hardcoded list of eight whose `BRK.B` chip never worked:
+    /// FMP spells it `BRK-B`, so that add silently went nowhere.
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Debounced live search. The previous implementation filtered a hardcoded
@@ -636,7 +625,25 @@ struct TickerSearchSheet: View {
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.sm)
 
-                    if !searchText.isEmpty && filteredResults.isEmpty {
+                    if trimmedSearch.isEmpty {
+                        // A chip adds the ticker like a result would, but is not recorded as
+                        // a search pick (the list would feed itself).
+                        ScrollView {
+                            SearchTrendingChipsSection(
+                                sections: SearchTrendingStore.shared.sections(for: .stocksOnly),
+                                onItemTapped: { item in
+                                    onSelectTicker?(TickerSearchItem(
+                                        ticker: item.symbol,
+                                        companyName: item.name.isEmpty ? item.symbol : item.name,
+                                        exchange: "",
+                                        type: item.type
+                                    ))
+                                }
+                            )
+                            .padding(.top, AppSpacing.md)
+                        }
+                        .scrollDismissesKeyboard(.interactively)
+                    } else if searchResults.isEmpty && !isSearching {
                         Spacer()
                         Text("No results found")
                             .font(AppTypography.body)
@@ -644,12 +651,16 @@ struct TickerSearchSheet: View {
                         Spacer()
                     } else {
                         List {
-                            Section(header: Text(searchText.isEmpty ? "Popular" : "Results")
+                            Section(header: Text("Results")
                                 .font(AppTypography.caption)
                                 .foregroundColor(AppColors.textMuted)
                             ) {
-                                ForEach(filteredResults) { item in
+                                ForEach(searchResults) { item in
                                     Button {
+                                        // A real search pick — only a result row records one.
+                                        SearchTrendingStore.shared.recordPick(
+                                            symbol: item.ticker, type: item.type
+                                        )
                                         onSelectTicker?(item)
                                     } label: {
                                         HStack {
@@ -678,6 +689,7 @@ struct TickerSearchSheet: View {
             }
             .navigationTitle("Add Ticker")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await SearchTrendingStore.shared.prefetch() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {

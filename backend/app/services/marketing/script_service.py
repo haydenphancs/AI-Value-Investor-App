@@ -53,11 +53,17 @@ from typing import Any, Dict, List, Optional, Set
 from app.config import settings
 from app.schemas.marketing import SCRIPT_REJECT_REASONS
 from app.services.marketing import content_pool, selection
+from app.services.marketing.generation_budget import (
+    LEDGER_STATEMENT_SECONDS,
+    MODEL_CALLS_PER_GENERATION,
+)
 from app.services.marketing.run_service import (
+    CallerClaim,
     MarketingRunError,
     MarketingRunNotFound,
     MarketingRunNotHeld,
     MarketingRunService,
+    claim_problem,
     get_marketing_run_service,
     held_problem,
     run_date_et,
@@ -65,16 +71,20 @@ from app.services.marketing.run_service import (
 
 logger = logging.getLogger(__name__)
 
-#: CONTENT generations (draft + one repair each) the validators may reject before the run is
-#: `rejected` for the day with reason `content`.
+#: CONTENT generations (each at most MODEL_CALLS_PER_GENERATION model calls: draft, judge,
+#: one repair, judge) the validators may reject before the run is `rejected` for the day with
+#: reason `content`.
 MAX_GENERATIONS = 4
 #: Generations that may end WITHOUT a content verdict (Gemini failure, ledger blip, crash,
 #: cancellation, an owner that died) before the run is `rejected` with reason
 #: `writer_unavailable`. Counted as `generations - content_rejections`. Its own bound, NOT a
 #: free pass: a timeout still bills, and a retired model or a crash-looping container would
 #: otherwise buy a generation every tick. Together the caps bound a run at
-#: MAX_GENERATIONS + MAX_WRITER_FAILURES - 1 generations of at most two model calls each.
+#: MAX_GENERATIONS + MAX_WRITER_FAILURES - 1 generations of at most MODEL_CALLS_PER_GENERATION
+#: model calls each — MAX_MODEL_CALLS_PER_RUN.
 MAX_WRITER_FAILURES = 4
+#: (4 + 4 - 1) × 4 = 28 model calls per run at most.
+MAX_MODEL_CALLS_PER_RUN = (MAX_GENERATIONS + MAX_WRITER_FAILURES - 1) * MODEL_CALLS_PER_GENERATION
 
 #: `GeminiClient.generate_json`'s generic-error budget — its decorator is
 #: `@async_retry(max_attempts=2, delay=2.0)`, which is code, not settings, so it is mirrored
@@ -112,23 +122,75 @@ def worst_case_model_call_seconds() -> float:
 #: crashed owner blocks the run for at most this long — well inside the worker's 15-min poll
 #: budget (tests/test_marketing_worker.py pins that).
 LEASE_SECONDS = int(math.ceil(worst_case_model_call_seconds() + LEASE_MARGIN_SECONDS))
+
+#: Attempts of a lease refresh (`_refresh_lease`) and of a terminal write (`_finish_attempts`),
+#: and the linear back-off slept after each failed attempt but the last (refresh 0.5 s, 1 s;
+#: terminal 1 s, 2 s). The loops use exactly these, and so does the worst-case arithmetic below.
+_REFRESH_ATTEMPTS = 3
+_FINISH_ATTEMPTS = 3
+_REFRESH_BACKOFF_SECONDS = 0.5
+_FINISH_BACKOFF_SECONDS = 1.0
+#: Statements a generation's task issues outside the model calls, refreshes and terminal write:
+#: `_acquire` reads the row and takes it with one conditional UPDATE; `_run_date_of` reads the run
+#: when the script row carries no run_date.
+_ACQUIRE_STATEMENTS = 2
+_RUN_DATE_STATEMENTS = 1
+
+
+def _linear_backoff_total(attempts: int, step: float) -> float:
+    """Sleep of a loop that backs off `step * (attempt + 1)` after every attempt but the last."""
+    n = max(int(attempts) - 1, 0)
+    return float(step) * n * (n + 1) / 2
+
+
+def worst_case_refresh_seconds() -> float:
+    """The longest ONE `_refresh_lease` can take: every attempt runs its UPDATE to the PostgREST
+    timeout (raising, or landing too late), plus every back-off. 361.5 s at defaults."""
+    return (_REFRESH_ATTEMPTS * LEDGER_STATEMENT_SECONDS
+            + _linear_backoff_total(_REFRESH_ATTEMPTS, _REFRESH_BACKOFF_SECONDS))
+
+
+def worst_case_terminal_write_seconds() -> float:
+    """The longest ONE terminal write (`_finish`) can take: every attempt to the PostgREST
+    timeout, every back-off, and the one `_landed` re-read after a retry matched nothing
+    (attempts 1-2 raise, attempt 3 matches nothing → re-read). 483 s at defaults."""
+    return ((_FINISH_ATTEMPTS + 1) * LEDGER_STATEMENT_SECONDS
+            + _linear_backoff_total(_FINISH_ATTEMPTS, _FINISH_BACKOFF_SECONDS))
+
+
+def worst_case_generation_seconds() -> float:
+    """The longest ONE generation task (`_generate`) can live: acquire (read + conditional
+    UPDATE) + the run-date read + MODEL_CALLS_PER_GENERATION × (one lease refresh + one model
+    call, each at its worst) + one terminal write at its worst. 4577 s at defaults with four model
+    calls (it was ~2710 s with two, which OWNER_ALIVE_SECONDS = 3 × the lease = 1896 s did not
+    cover). Every await in it is bounded by one of those terms; the cancel paths share the 5-s
+    shutdown budget. A crash after a WRITTEN terminal write sends one more fenced write, but by
+    then the row is final and the owner's age decides nothing."""
+    return (
+        (_ACQUIRE_STATEMENTS + _RUN_DATE_STATEMENTS) * LEDGER_STATEMENT_SECONDS
+        + MODEL_CALLS_PER_GENERATION * (worst_case_model_call_seconds() + worst_case_refresh_seconds())
+        + worst_case_terminal_write_seconds()
+    )
+
+
 #: How long a generation task in THIS process counts as its run's live owner even after the
-#: lease lapsed (`_owner_state`): two model calls, each covered by one lease, and one more
-#: lease of slack for the ledger round trips around them. Every await in a generation is bounded
+#: lease lapsed (`_owner_state`): the whole worst-case generation (above) plus the lease margin.
+#: It used to be 3 × LEASE_SECONDS (1896 s), shorter than a real generation's worst case, so at a
+#: cap a slow but LIVE owner was declared wedged, the day closed `writer_unavailable` under it, and
+#: its paid, possibly publishable package was SUPERSEDED. Every await in a generation is bounded
 #: (Gemini per attempt, PostgREST per statement, the hand-back), so a task older than this is
 #: presumed wedged. What that CHANGES is only at a cap: the day is closed under it (its late
 #: write is fenced out) instead of waiting on it. Below the caps there is nothing to take over —
 #: the task is still this process's owner and `_spawn` will not start a second one (that would be
 #: a parallel paid generation) — so the kick waits for it to end, or for the process to restart.
-OWNER_ALIVE_SECONDS = 3 * LEASE_SECONDS
+#: LEASE_SECONDS stays per model call: it is the takeover window ACROSS processes, refreshed
+#: before every call; this is the in-process verdict only.
+OWNER_ALIVE_SECONDS = int(math.ceil(worst_case_generation_seconds() + LEASE_MARGIN_SECONDS))
 #: Back-off after a generation that ended without a verdict. Longer than one worker poll
 #: session, shorter than the hourly cron period, so the next tick retries.
 RETRY_AFTER_GEMINI_FAILURE = timedelta(minutes=30)
 #: The cancellation hand-back must finish inside the lifespan's 5 s shutdown budget.
 HAND_BACK_TIMEOUT_SECONDS = 3.0
-#: Linear back-off between attempts of a terminal write (1 s, 2 s) and of a lease refresh.
-_FINISH_BACKOFF_SECONDS = 1.0
-_REFRESH_BACKOFF_SECONDS = 0.5
 #: How many recent picks selection must not repeat.
 RECENT_LIMIT = selection.RECENT_WINDOW
 
@@ -314,14 +376,19 @@ class MarketingScriptService:
 
     # ── kick ─────────────────────────────────────────────────────────────────
 
-    async def kick(self, run_id: str) -> Dict[str, Any]:
+    async def kick(self, run_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
         """Idempotent; safe to call as often as the worker likes. Never raises for a CONTENT
         outcome — only for a ledger failure, or MarketingRunNotHeld when the kick would START
         writer spend (select, or spawn a generation) for a run no live claim holds. A final row
-        (rest_day / accepted / rejected) answers idempotently whatever the run's state."""
+        (rest_day / accepted / rejected) answers idempotently whatever the run's STATUS — but only
+        to the caller whose claim the run carries (`claim`): a zombie tick is refused before
+        anything, `_heal_mirror` included (its write bumps `updated_at`, the claim's liveness)."""
         run = await self.runs.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
+        problem = claim_problem(run, claim)
+        if problem is not None:
+            raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         row = await self.runs.get_script(run_id)
         if row is None:
             self._require_held(run)
@@ -674,7 +741,7 @@ class MarketingScriptService:
         makes the call, as before."""
         need = worst_case_model_call_seconds()
         last: Optional[BaseException] = None
-        for attempt in range(3):
+        for attempt in range(_REFRESH_ATTEMPTS):
             until = _now() + timedelta(seconds=LEASE_SECONDS)
             try:
                 ok = await self.runs.update_script_where(
@@ -685,7 +752,7 @@ class MarketingScriptService:
                 last = e
                 logger.warning("marketing script: lease refresh failed run_id=%s generation=%s "
                                "attempt=%d (%s: %s)", run_id, gen_id, attempt + 1, type(e).__name__, e)
-                if attempt < 2:
+                if attempt < _REFRESH_ATTEMPTS - 1:
                     await asyncio.sleep(_REFRESH_BACKOFF_SECONDS * (attempt + 1))
                 continue
             if ok is None:
@@ -747,7 +814,7 @@ class MarketingScriptService:
     async def _finish_attempts(self, run_id: str, gen_id: str, patch: Dict[str, Any], *,
                                what: str, slot: Optional[_TerminalWrite]) -> str:
         raised = False
-        for attempt in range(3):
+        for attempt in range(_FINISH_ATTEMPTS):
             try:
                 if slot is None:
                     done = await self.runs.update_script_where(
@@ -766,7 +833,7 @@ class MarketingScriptService:
                     slot.raised = True
                 logger.warning("marketing script: %s failed run_id=%s generation=%s attempt=%d "
                                "(%s: %s)", what, run_id, gen_id, attempt + 1, type(e).__name__, e)
-                if attempt < 2:
+                if attempt < _FINISH_ATTEMPTS - 1:
                     await asyncio.sleep(_FINISH_BACKOFF_SECONDS * (attempt + 1))
                 continue
             if done is not None:
@@ -1054,6 +1121,9 @@ class MarketingScriptService:
             result = await generate(
                 item, template, run_date, generation_id=gen_id,
                 allow_x_url=bool(settings.MARKETING_X_ALLOW_URLS),
+                # The semantic compliance judge (judge.py). No default in the writer: the mode is
+                # always stated here, and anything unrecognised means `enforce`.
+                judge_mode=settings.MARKETING_JUDGE_MODE,
                 before_call=lambda: self._refresh_lease(run_id, gen_id),
             )
         except LeaseLost as e:

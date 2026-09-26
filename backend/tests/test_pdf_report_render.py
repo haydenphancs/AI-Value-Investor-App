@@ -102,11 +102,14 @@ def test_build_context_full_sample():
     ctx = build_context(_sample(), fair_value_estimate=196.0)
     assert ctx["quality_score"] == 72
     assert ctx["persona_name"] == "Quality Agent"
-    assert ctx["fair_value"] == 205.0  # Wall Street consensus target, not the passed estimate
-    assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4
+    # The model value the report was built with — never its analyst target (205, 2026-09-26).
+    assert ctx["fair_value"] == 196.0
+    assert ctx["margin_of_safety_pct"] > 0  # 196 vs 172.4
     # Neutral gap wording, never a verdict (hard rule 4 — dcf-methodology-v1.md §5).
-    assert ctx["valuation_word"] == "Price 16% below target"
-    assert len(ctx["vitals"]) == 9
+    assert ctx["valuation_word"] == "Price 12% below the model value"
+    # Eight: the "Wall Street" row (analyst conviction) left with the analyst half.
+    assert len(ctx["vitals"]) == 8
+    assert "Wall Street" not in [v["label"] for v in ctx["vitals"]]
     assert ctx["bull_case"] and ctx["bear_case"]
 
 
@@ -131,15 +134,17 @@ def test_quality_label_matches_ios_band_and_persona_lens():
     assert build_context(wood, 196.0)["quality_label"] == "Excellent Growth Profile"
 
 
-def test_fair_value_prefers_wall_street_target():
-    """Fair value = Wall Street consensus target (the hero card is labeled
-    'Per Wall Street consensus'); the passed estimate is only a fallback."""
-    ctx = build_context(_sample(), fair_value_estimate=196.0)
-    assert ctx["fair_value"] == 205.0  # consensus target wins over the estimate
-    sample = _sample()
-    sample["wall_street_consensus"]["target_price"] = None
-    ctx2 = build_context(sample, fair_value_estimate=196.0)
-    assert ctx2["fair_value"] == 196.0  # no consensus target → fall back to the estimate
+def test_the_hero_never_shows_an_analyst_target():
+    """Until 2026-09-26 the hero preferred the analyst consensus target ("Per Wall Street
+    consensus") and printed "Analyst target $X" under the price. Analyst targets are unlicensed
+    and removed from every surface; a target under "Fair Value" is the placement rule inverted."""
+    ctx = build_context(_sample(), fair_value_estimate=196.0)     # the sample HAS a $205 target
+    assert ctx["fair_value"] == 196.0
+    assert "target_price" not in ctx
+    html = render_html(ctx)
+    for gone in ("Per Wall Street consensus", "Analyst target", "$205"):
+        assert gone not in html, gone
+    assert build_context(_sample(), fair_value_estimate=None)["fair_value"] is None
 
 
 def test_a_fair_value_equal_to_the_price_is_no_estimate():
@@ -244,3 +249,137 @@ def test_unknown_guidance_renders_as_a_dash_not_a_stance():
                                   "management_guidance": "unknown", "projections": []}
     ctx = build_context(sample, fair_value_estimate=196.0)
     assert ctx["forecast"]["management_guidance"] == ""
+
+
+# ── Section 09 "Valuation & Institutions" (was "Wall Street Consensus", 2026-09-26) ──────────
+#
+# The analyst half (ratings distribution, price targets, momentum) is unlicensed FMP data and is
+# gone. The section leads with the Caydex Fair Value Estimate RANGE, the point estimate as its
+# middle mark, the neutral gap, and the "not a price target" line; then the 13F flow and the
+# insight. Strings mirror the iOS card (title, "Estimate range", the nil and refused states).
+
+_EST_NONE = "No Caydex Fair Value Estimate is available for this report."
+_EST_NOTICE = "DCF model estimate · not a price target · not a recommendation"
+
+
+def _section_09(html: str) -> str:
+    """Brace-bound the assertions to section 09 (the hero above it still has its own card)."""
+    start = html.index("Valuation &amp; Institutions")
+    return html[start:html.index("Factors to Watch", start)]
+
+
+def _estimate_report(*, price=130.0, dcf_source="caydex", insight="Institutions added on dips.",
+                     **est) -> dict:
+    block = {"symbol": "EXMP", "status": "ok", "fair_value": 150.0, "range_low": 120.0,
+             "range_high": 180.0, "as_of": "2026-09-25", **est}
+    return {
+        "symbol": "EXMP", "company_name": "Example Corp", "quality_score": 60,
+        "price_action": {"current_price": price},
+        "wall_street_consensus": {
+            "rating": "hold", "current_price": price, "target_price": None,
+            "valuation_status": "fairly_valued", "discount_percent": 0.0,
+            "momentum_upgrades": 0, "momentum_downgrades": 0, "momentum_maintains": 0,
+            "dcf_source": dcf_source, "wall_street_insight": insight,
+            "caydex_fair_value": block,
+            "hedge_fund_flow_data": [{"month": "06/2025", "buy_volume": 5, "sell_volume": 3}],
+        },
+    }
+
+
+@pytest.fixture
+def dcf_on(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+
+
+def test_section_09_is_valuation_and_institutions_with_no_analyst_block(dcf_on):
+    # _sample() is an ANALYST-ERA report: rating, targets, distribution and momentum all set.
+    html = render_html(build_context(_sample(), 196.0))
+    assert "Wall Street Consensus" not in html
+    sec = _section_09(html)
+    assert sec.startswith("Valuation &amp; Institutions")
+    for gone in ("Price Target", "Analyst Ratings", "Momentum", "Upgrades", "Maintains",
+                 "Downgrades", "analysts", "Strong Buy", "No analyst coverage",
+                 "$150", "$260"):          # low/high analyst targets of the sample
+        assert gone not in sec, gone
+    assert _EST_NONE in sec                # no published estimate on an analyst-era report
+    # The context no longer carries the analyst section's inputs at all.
+    ctx = build_context(_sample(), 196.0)
+    for key in ("low_target", "high_target", "consensus_counts", "consensus_legend",
+                "consensus_total"):
+        assert key not in ctx, key
+    assert "consensus" not in ctx["charts"]
+    assert set(ctx["wall_street"]) == {"estimate", "insight"}
+
+
+def test_section_09_leads_with_the_range_then_the_estimate_then_the_gap(dcf_on):
+    sec = _section_09(render_html(build_context(_estimate_report())))
+    assert "Caydex Fair Value Estimate" in sec and "Estimate range" in sec
+    order = [sec.index("$120.00 – $180.00"), sec.index("Estimate $150.00"),
+             sec.index("Price 13% below the estimate"), sec.index(_EST_NOTICE)]
+    assert order == sorted(order), order
+    assert "as of 2026-09-25" in sec
+    assert _EST_NONE not in sec and "Not modelled" not in sec
+
+
+def test_section_09_gap_words_track_the_reports_price(dcf_on):
+    def gap(price):
+        return build_context(_estimate_report(price=price))["wall_street"]["estimate"]["gap_word"]
+
+    assert gap(165.0) == "Price 10% above the estimate"
+    assert gap(150.0) == "Price in line with the estimate"
+    assert gap(150.6) == "Price in line with the estimate"   # inside the ±0.5 % band
+    assert gap(151.0) == "Price 1% above the estimate"       # just outside it
+    assert gap(None) == ""                                    # no price → no gap line, value stays
+    sec = _section_09(render_html(build_context(_estimate_report(price=None))))
+    assert "$120.00 – $180.00" in sec and "Price " not in sec
+
+
+def test_section_09_refused_state_says_not_modelled_with_the_reason(dcf_on):
+    reason = "Banks and insurers are not modelled by a cash-flow DCF."
+    sec = _section_09(render_html(build_context(_estimate_report(
+        status="refused", fair_value=150.0, refusal_reason=reason))))
+    assert "Not modelled" in sec and reason in sec
+    assert "$150.00" not in sec and "Estimate range" not in sec and _EST_NONE not in sec
+
+
+def test_section_09_nil_state_for_an_old_report_and_with_the_switch_off(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    old = _estimate_report()
+    old["wall_street_consensus"].pop("caydex_fair_value")
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    assert _EST_NONE in _section_09(render_html(build_context(old)))
+    # Kill switch: a stored estimate is not rendered while DCF_ENABLED is off.
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", False)
+    # Production passes the research_reports column, which on a Caydex-built report IS the
+    # estimate: it must not come back on the hero re-labelled "DCF model value", rangeless.
+    ctx = build_context(_estimate_report(), fair_value_estimate=150.0)
+    assert ctx["fair_value"] is None
+    html = render_html(ctx)
+    sec = _section_09(html)
+    assert _EST_NONE in sec
+    assert "$120.00" not in sec and "$150.00" not in sec and "Estimate range" not in sec
+    assert "$150" not in html and "model value" not in html
+
+
+@pytest.mark.parametrize("est", [
+    {"range_low": None},                                   # a value never without its range
+    {"range_high": float("nan")},
+    {"fair_value": float("inf")},
+    {"fair_value": 0.0},
+    {"range_low": 200.0},                                  # value outside its own range
+    {"range_low": -5.0, "fair_value": 150.0},
+    {"status": "pending"},                                 # unknown status
+])
+def test_a_malformed_estimate_degrades_to_the_nil_state_in_both_places(dcf_on, est):
+    # fair_value_estimate=150.0 is what production passes (the column holds the Caydex value).
+    ctx = build_context(_estimate_report(**est), fair_value_estimate=150.0)
+    assert ctx["wall_street"]["estimate"] == {"state": "none"}
+    assert ctx["fair_value"] is None                       # the hero does not use it either
+    sec = _section_09(render_html(ctx))
+    assert _EST_NONE in sec and "$nan" not in sec.lower() and "$inf" not in sec.lower()
+
+
+def test_section_09_keeps_the_institutional_flow_chart(dcf_on):
+    sec = _section_09(render_html(build_context(_estimate_report())))
+    assert "Institutional (13F) Net Flow" in sec and "<svg" in sec

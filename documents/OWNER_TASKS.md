@@ -61,6 +61,7 @@ admin recomputes, and marketing script generation.
 - **Marketing worker** (`backend/marketing/railway.toml`), **not created yet**:
   - Cron `15 * * * *` (UTC); starts a day's run from 16:00 ET.
   - Stays dry-run unless `MARKETING_DRY_RUN` is changed.
+  - Phase 3 (2026-09-26, uncommitted): it now narrates the script (Kokoro voice, baked into the image) and stops there, closing each run as `phase3_voice_only`. Give the service **4 GB of memory**; the voice step peaks near 2 GB.
 
 ### 1C. Database (Supabase)
 
@@ -108,7 +109,7 @@ admin recomputes, and marketing script generation.
 - [ ] **Migration 177 check** (the demo-tier code is live in 95ea9b25). In Studio: `SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='comp_tier';` should return 1 row, and `SELECT email, comp_tier FROM public.users WHERE comp_tier IS NOT NULL;` should show the App Review demo account as `premium`.
 - [ ] **App Review:** 1.0 (10) was resubmitted 2026-09-24. If it's rejected again: `./venv/bin/python scripts/asc_review_resubmit.py --video <mov>` (dry run), then add `--apply` (**⚠️ ASC**).
 - [x] **Demo-tier fix is deployed.** `def effective_tier` is in deployed commit 95ea9b25; the database side is checked by the migration 177 item above.
-- [ ] **Apply migration 176** (`backend/database/migrations/176_marketing_scripts_caps_and_run_date.sql`) in Studio, then run its VERIFY block. The marketing worker fails without it.
+- [x] **Migration 176 is applied** (verified live 2026-09-26: `marketing_scripts.run_date`, `content_rejections` and `reject_reason` exist). The marketing worker needed it.
 - [ ] **Migration 172** (data-only 'N/A' sector cleanup): run its two VERIFY counts. Both must be 0; if not, apply it.
 - [ ] **Migration 166 constraint:** run the count query in `166_…sql`. If it returns 0, run `ALTER TABLE public.credit_transactions VALIDATE CONSTRAINT credit_transactions_split_sums;`.
 - [x] **Trillion Club go-live.** Seed done 2026-09-24. Both flags are on. The daily job ran OK on 2026-09-25 (19 members evaluated). One filing, Alphabet 2025-Q3, is marked degraded because of an ambiguous CUSIP (`91864C107`) and is retried daily; check around 2026-10-03 that it cleared.
@@ -141,13 +142,21 @@ admin recomputes, and marketing script generation.
 - [ ] **Check whether the FMP key ever leaked into stored reports.** In Supabase Studio, search `research_reports` for text containing `apikey=` (for example `full_report::text ILIKE '%apikey=%'`). If any row matches, rotate the FMP API key and clean those rows. Until 2026-09-25 a failed FMP call inside the deep-research tools could pass the raw request URL, key included, to the model.
 - [ ] **Orphaned guest-era report PDFs.** Reports claimed from guest mode before 2026-09-25 left their PDF under `research-pdfs/reports/<install-id>/` with no handle, so account deletion can't find them. If you want them gone, ask Claude for a one-off cleanup script. It would move each file to its account's folder, or delete it when no account owns it.
 - [ ] **Decide on a small migration** to close the last credit-pack refund gap: a refund that arrives before the grant, for a transaction with no usable account token, can't be recorded (`credit_purchases.user_id` is NOT NULL). Options: a nullable `user_id`, or a separate refund-tombstone table.
-- [ ] **Caydex Fair Value Estimate go-live** (built 2026-09-25, OFF by default; details in `documents/research/dcf-fair-value.md` §9 and `dcf-methodology-v1.md`). Two switches: `DCF_SHADOW` records the estimate for every Analysis-tab view and shows it to NOBODY; `DCF_ENABLED` publishes it to EVERY client at once (App Store builds included — there is no per-build gate). In order:
+- [ ] **Caydex Fair Value Estimate go-live** (built 2026-09-25; details in `documents/research/dcf-fair-value.md` §9 and `dcf-methodology-v1.md`). Two switches: `DCF_SHADOW` records the estimate for every Analysis-tab view and shows it to NOBODY; `DCF_ENABLED` publishes it to EVERY client at once (App Store builds included — there is no per-build gate).
+  **Status, checked 2026-09-26:** steps 1, 2, 3 and 5 are DONE. Production runs commit `68be3cc6` with `DCF_SHADOW=true`, `DCF_ENABLED=true` and `FRED_API_KEY` set, and both tables exist. The 2–3 week shadow watch was skipped: both switches went on the same morning. **Step 4 is NOT done.** App Store Connect's newest build is 1.0 (10), uploaded 2026-09-24, before the DCF code, so testers see neither the Caydex row nor FMP's DCF row on the Analysis tab. The build number is bumped to 11 in all four places; archive and upload it. The weekly `dcf_fair_value_history` summary is still worth asking for.
+  **Also 2026-09-26 (uncommitted, not deployed):** the report's Wall Street section became "Valuation & Institutions" (range first, range chart, no analyst UI), the Analysis-tab Valuation card got the same chart, and a launch-day bug was fixed. The bug (Sentry, `/research/generate`: "DcfFairValueResponse is not JSON serializable") meant the report-data cache has saved nothing since `DCF_ENABLED` went on, so every report re-fetches all of its data. Commit and **deploy the backend**, then archive build 11 (it contains the new screens). The original steps:
   1. Apply migration 178 (`backend/database/migrations/178_dcf_fair_value.sql`) in Studio. It adds `dcf_fair_value_cache` and the append-only `dcf_fair_value_history`. Check that `FRED_API_KEY` is set on Railway: the model cannot run without the 10-year Treasury history.
   2. Deploy the backend. The switches are still off, but three wording changes ship regardless: the PDF hero and the stored `valuation_analysis` state a neutral price gap instead of Undervalued/Overvalued, persona prompts no longer tell the AI to compute its own intrinsic value, and the sign-in screen states assent to the Terms.
   3. Set `DCF_SHADOW=true` on Railway. Live watch, 2–3 weeks, invisible to users: ask Claude weekly to summarise `dcf_fair_value_history` (value jumps and their causes, refusal mix, anything odd).
   4. Ship an iOS build with the new row through TestFlight and the App Store (it shows the row only when the backend sends it).
   5. Set `DCF_ENABLED=true`. For ALL users at once: FMP's DCF disappears from the Analysis tab (App Store builds without the new row show no DCF row); NEW AI reports carry the estimate and derive their valuation from it; the PDF hero, report narratives and chat quote it.
   - To turn it off: set `DCF_ENABLED=false`. New reports stop carrying it; every stored-report read path (report screens, chat grounding) and newly rendered PDFs drop the estimate block; report caches treat reports built with it as misses; cached snapshots rebuild on their own. NOT withdrawn: PDF files already rendered (served from Storage as they are), and valuation figures inside a user's saved report that were derived from the estimate (saved reports are frozen snapshots).
+- [ ] **Search-screen chips go-live** ("Trending searches" / "Most added" / "Popular" on every search screen; built 2026-09-26):
+  1. Apply migration 179 (`backend/database/migrations/179_search_trending.sql`) in Studio, then run its VERIFY queries (anon/authenticated must NOT execute the three functions; RLS on).
+  2. Deploy the backend. Order is forgiving: before 179 the chips show the curated "Popular" list and picks are dropped (one ERROR log line), and search itself is untouched.
+  3. **Before submitting the iOS build that includes the chips:** App Store Connect → App Privacy → add **Search History**, *not linked*, *App Functionality*, *not tracking* (it must match `PrivacyInfo.xcprivacy` and `documents/legal/app-privacy-answers.md`). The updated privacy policy (dated September 26, 2026) goes live at `caydexinvest.com/privacy` with the backend deploy in step 2 — the backend serves `app/templates/legal/privacy.html`, kept byte-equal to `documents/legal/privacy.html` and to the in-app `PrivacyPolicyView` by `tests/test_legal_pages.py`.
+  4. Next schema re-dump: remove `public.search_pick_daily` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
+  - The curated fallback and a `blocked` list live in `backend/data/search_trending_popular.json` — edit + deploy to change them, no app update.
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen
@@ -202,12 +211,14 @@ admin recomputes, and marketing script generation.
 - **Give an account a comp tier:** `scripts/set_comp_tier.py --email … --tier premium`, then add `--apply` (**⚠️ PROD**).
 - **Chat starter questions edited:** `scripts/seed_chat_starters.py --dry-run` → run it (**⚠️ PROD**).
 - **Marketing go-live, when you decide:**
-  1. Apply 176.
-  2. Create the Railway worker service: root `/backend`, config `/backend/marketing/railway.toml`.
-  3. Set the same `MARKETING_WORKER_TOKEN` on both services.
-  4. Keep `MARKETING_DRY_RUN=true` and `MARKETING_AUTO_PUBLISH=false`.
-  5. Read the drafts: `scripts/marketing_preview.py --all-items`.
-  6. After launch, set `MARKETING_APP_STORE_URL`.
+  1. ~~Apply 176~~ (done, verified 2026-09-26).
+  2. Commit and **deploy the web service FIRST**. Since 2026-09-26 every worker call after the daily claim must carry the `X-Marketing-Claim` header, and the voice step reads assets back through a new route; an old web service would refuse the new worker. Leave `MARKETING_JUDGE_MODE` unset on the web service (the default is `enforce`; `shadow` only records the judge's verdicts).
+  3. Create the Railway worker service: root `/backend`, config `/backend/marketing/railway.toml`, **4 GB memory**.
+  4. Set the same `MARKETING_WORKER_TOKEN` on both services. On the worker also set `MARKETING_API_BASE_URL=https://caydexinvest.com` and `MARKETING_RUN_HOUR_ET` (default 16). Optional: `MARKETING_TTS_VOICE` (default `af_heart`), `MARKETING_TTS_SPEED`, `MARKETING_TTS_THREADS`, `MARKETING_MAX_VIDEO_SECONDS` (default 75).
+  5. Keep `MARKETING_DRY_RUN=true` and `MARKETING_AUTO_PUBLISH=false`. The semantic judge does not yet meet its own calibration bar (it misses present-tense restatements of a past deal price), so a human reads every post.
+  6. Check the first run: its row in `marketing_runs` should end `skipped` with `metadata.skip_reason = phase3_voice_only` (no video or posts exist yet, by design), and its metadata should show `preflight.voice.ready = true` and a `voice_asset_id`.
+  7. Read the drafts: `scripts/marketing_preview.py --all-items` (or `--next 9`).
+  8. After launch, set `MARKETING_APP_STORE_URL`.
 - **Flags that need evidence before turning on:**
   - `CHAT_MODEL_ROUTING_ENABLED`: run `scripts/eval_model_routing.py` first.
   - `CHAT_RAG_ENABLED`: needs an ingestion pipeline.

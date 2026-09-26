@@ -1344,18 +1344,19 @@ struct AddAssetSheet: View {
                                 .foregroundColor(AppColors.textSecondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if searchText.isEmpty {
-                        VStack(spacing: AppSpacing.md) {
-                            Image(systemName: "magnifyingglass")
-                                .font(AppTypography.iconHero)
-                                .foregroundColor(AppColors.textMuted)
-
-                            Text("Search for a stock to add to your watchlist")
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textSecondary)
-                                .multilineTextAlignment(.center)
+                    } else if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // Nothing typed → the trending chips. A chip ADDS the ticker, through
+                        // the same `addAsset` a result row uses, but is not recorded as a
+                        // search pick (the list would feed itself).
+                        ScrollView {
+                            SearchTrendingChipsSection(
+                                sections: SearchTrendingStore.shared.sections(for: .all),
+                                onItemTapped: { item in addAsset(item.stockSearchResult) }
+                            )
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .scrollDismissesKeyboard(.interactively)
+                        // Beats the trailing Spacer for the free height (it split it in half).
+                        .layoutPriority(1)
                     } else if isSearching {
                         ProgressView()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1375,6 +1376,11 @@ struct AddAssetSheet: View {
                             LazyVStack(spacing: AppSpacing.sm) {
                                 ForEach(searchResults) { result in
                                     Button {
+                                        // A real search pick. Recorded HERE, never inside
+                                        // `addAsset` — the chips call that too.
+                                        SearchTrendingStore.shared.recordPick(
+                                            symbol: result.ticker, type: result.type
+                                        )
                                         addAsset(result)
                                     } label: {
                                         HStack(spacing: AppSpacing.md) {
@@ -1440,6 +1446,7 @@ struct AddAssetSheet: View {
         .onChange(of: searchText) { _, newValue in
             debounceSearch(newValue)
         }
+        .task { await SearchTrendingStore.shared.prefetch() }
     }
 
     private func debounceSearch(_ query: String) {

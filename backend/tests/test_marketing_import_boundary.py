@@ -57,7 +57,7 @@ FORBIDDEN_NAME = "generate_grounded_research"
 #: The pure modules the plan requires to be FMP-free even transitively.
 PURE_MODULES = (
     "numbers", "compliance", "grounding", "content_pool", "selection", "post_copy",
-    "writer_prompts", "smart_link",
+    "writer_prompts", "smart_link", "judge", "generation_budget",
 )
 EXEMPT_MODULE = "app.services.marketing.writer_service"
 

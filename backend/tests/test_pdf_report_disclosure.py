@@ -6,10 +6,10 @@ that both of them depend on:
 1. The full disclaimer must render in the document body. The ``@page`` footer
    carries a one-line notice, but the PDF leaves the app via the share sheet with
    every verdict on it, so the complete text has to travel with it.
-2. The "Fair Value" hero card must state which basis it actually used. It prefers
-   the Wall Street analyst consensus target and falls back to our own DCF-derived
-   estimate; labeling the latter as analyst consensus misattributes our own number
-   to third parties.
+2. The "Fair Value" hero card must state which basis it actually used: the published
+   Caydex estimate (with its range), or on an older report the model value it was built
+   with. It never shows an analyst price target (unlicensed; removed 2026-09-26), and it
+   never attributes our own number to third parties.
 3. ``_num`` must treat NaN/Inf as ABSENT. A non-finite value renders as "$nan" and
    silently defeats the margin-of-safety comparisons (NaN is truthy, and both
    ``nan >= 1`` and ``nan <= -1`` are False, so it would land on "Fairly Valued").
@@ -19,6 +19,7 @@ lives in ``render_pdf_bytes``, which these tests never call).
 """
 
 import math
+import re
 
 from app.services.pdf_report_service import build_context, render_html
 
@@ -69,11 +70,12 @@ def test_disclaimer_uses_report_supplied_text_when_present():
 
 # ── 2. Fair-value attribution ─────────────────────────────────────────────────
 
-def test_basis_is_wall_street_when_analyst_target_present():
+def test_an_analyst_target_never_reaches_the_hero():
     ctx = build_context(_data(ws_target=150.0), fair_value_estimate=120.0)
-    assert ctx["fair_value"] == 150.0, "analyst target must win over our estimate"
-    assert ctx["fair_value_basis"] == _WALL_STREET_LABEL
-    assert _WALL_STREET_LABEL in render_html(ctx)
+    assert ctx["fair_value"] == 120.0, "the analyst target is ignored"
+    assert ctx["fair_value_basis"] == "DCF model value · not a price target"
+    html = render_html(ctx)
+    assert _WALL_STREET_LABEL not in html and "Analyst target" not in html
 
 
 def test_basis_labels_a_bare_estimate_as_a_model_value():
@@ -158,14 +160,16 @@ def test_valuation_word_boundaries():
     """The gap is PRICE vs fair value, in neutral words, with a ±0.5 % "in line" band. It was
     Undervalued / Overvalued / Fairly Valued at ±1 % until 2026-09-25 (hard rule 4)."""
     def word(fv, price):
-        return build_context(_data(ws_target=fv, current_price=price))["valuation_word"]
+        return build_context(_data(current_price=price), fair_value_estimate=fv)["valuation_word"]
 
-    assert word(150.0, 100.0) == "Price 33% below target"
-    assert word(50.0, 100.0) == "Price 100% above target"
-    assert word(100.0, 100.0) == "Price in line with target"
-    assert word(100.4, 100.0) == "Price in line with target"   # inside the band
-    assert word(101.5, 100.0) == "Price 1% below target"       # outside it
-    assert word(98.5, 100.0) == "Price 2% above target"
+    assert word(150.0, 100.0) == "Price 33% below the model value"
+    assert word(50.0, 100.0) == "Price 100% above the model value"
+    assert word(100.4, 100.0) == "Price in line with the model value"   # inside the band
+    assert word(99.7, 100.0) == "Price in line with the model value"
+    assert word(101.5, 100.0) == "Price 1% below the model value"       # outside it
+    assert word(98.5, 100.0) == "Price 2% above the model value"
+    # An estimate equal to the price to the cent is the old fabricated one: no gap at all.
+    assert word(100.0, 100.0) == "—"
 
 
 def test_zero_current_price_does_not_divide_by_zero():
@@ -228,10 +232,123 @@ def test_no_verdict_words_on_any_basis(monkeypatch):
     cases = [
         build_context(_with_caydex(), fair_value_estimate=150.0),
         build_context(_data(ws_target=None), fair_value_estimate=120.0),
-        build_context(_data(ws_target=150.0), fair_value_estimate=None),
+        build_context(_data(ws_target=150.0), fair_value_estimate=110.0),   # target ignored
     ]
     for ctx in cases:
         html = render_html(ctx).lower()
         for word in ("undervalued", "overvalued", "fairly valued", "margin of safety"):
             assert word not in html, word
         assert ctx["valuation_word"].startswith("Price ")
+
+
+# ── 5. Section 09 "Valuation & Institutions": which insight may travel ────────
+#
+# An analyst-era report's `wall_street_insight` was written FOR the analyst card ("Buy-rated
+# with a $190 target (~14% upside)…"); that card is gone, so the text would be an unlicensed
+# price target with a verdict attached. And on a report BUILT with the Caydex estimate, the
+# insight quotes the estimate — when the kill switch withdraws the estimate, the insight goes
+# too (dcf_report_gate.strip_caydex_if_disabled).
+
+_ANALYST_ERA_INSIGHT = "Buy-rated with a $190 target (~14% upside) as institutions keep adding."
+_CAYDEX_INSIGHT = "The price sits 13% under the estimate while institutions trimmed."
+_VERDICT_WORDS = re.compile(
+    r"\b(undervalued|overvalued|cheap|buy|sell|strong buy|strong sell|upside|downside)\b", re.I)
+
+
+def _section_09(html: str) -> str:
+    start = html.index("Valuation &amp; Institutions")
+    return html[start:html.index("Factors to Watch", start)]
+
+
+def _analyst_era(insight=_ANALYST_ERA_INSIGHT, **ws):
+    d = _data(ws_target=190.0)
+    d["wall_street_consensus"].update({
+        "rating": "buy", "low_target": 160.0, "high_target": 220.0,
+        "analyst_buy": 12, "analyst_hold": 3, "momentum_upgrades": 2,
+        "wall_street_insight": insight, **ws,
+    })
+    return d
+
+
+def _caydex_built(insight=_CAYDEX_INSIGHT, dcf_source="caydex"):
+    d = _with_caydex()
+    d["wall_street_consensus"].update({"dcf_source": dcf_source, "wall_street_insight": insight,
+                                       "rating": "hold", "momentum_upgrades": 0})
+    return d
+
+
+def test_an_analyst_era_insight_is_never_rendered(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    for enabled in (True, False):
+        monkeypatch.setattr(pdf.settings, "DCF_ENABLED", enabled)
+        ctx = build_context(_analyst_era())
+        assert ctx["wall_street"]["insight"] == ""
+        assert "Buy-rated" not in render_html(ctx)
+    # Coverage by momentum alone (no target) is still analyst-era text.
+    d = _analyst_era(target_price=None, analyst_buy=0, analyst_hold=0)
+    assert build_context(d)["wall_street"]["insight"] == ""
+
+
+def test_the_kill_switch_hides_the_insight_of_a_caydex_built_report(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", False)
+    stored = _caydex_built()
+    html = render_html(build_context(stored))
+    assert "13% under the estimate" not in html
+    assert stored["wall_street_consensus"]["wall_street_insight"] == _CAYDEX_INSIGHT, (
+        "the frozen report dict must not be mutated by the PDF build"
+    )
+    # Every insight goes with the switch off: one is shown only beside the estimate it was
+    # written with (dcf_report_gate.wall_street_insight_is_for_this_card), and no estimate is.
+    for src in ("fmp", None):
+        ctx = build_context(_caydex_built(insight="Institutions trimmed for a second quarter.",
+                                          dcf_source=src))
+        assert ctx["wall_street"]["insight"] == ""
+
+
+def test_an_fmp_era_insight_is_not_rendered_under_the_nil_state(monkeypatch):
+    """The simulator case (2026-09-26): an AAPL report from 09-19 printed "…diverges from our
+    model which suggests the stock is overpriced" right under "No Caydex Fair Value Estimate is
+    available for this report." The FMP-era prompt fed it the FMP DCF verdict."""
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    d = _data(ws_target=None)
+    d["wall_street_consensus"].update({
+        "dcf_source": "fmp", "valuation_status": "overvalued",
+        "wall_street_insight": "Institutions bought, which diverges from our model which "
+                               "suggests the stock is overpriced."})
+    ctx = build_context(d, fair_value_estimate=135.8)
+    assert ctx["wall_street"]["insight"] == ""
+    assert "overpriced" not in render_html(ctx)
+
+
+def test_a_caydex_insight_renders_while_the_switch_is_on(monkeypatch):
+    """Anti-vacuity: hiding the insight unconditionally would pass both tests above."""
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    sec = _section_09(render_html(build_context(_caydex_built())))
+    assert _CAYDEX_INSIGHT in sec
+
+
+def test_section_09_is_verdict_word_free_in_every_state(monkeypatch):
+    """Hard rule 4 (dcf-methodology-v1.md §5): never Undervalued / Overvalued / Cheap / Buy / Sell
+    / upside / downside — and always the "not a price target" notice beside a value."""
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    refused = _with_caydex(status="refused", fair_value=None,
+                           refusal_reason="Banks are not modelled by a cash-flow DCF.")
+    cases = {
+        "ok": _caydex_built(),
+        "ok-above": _with_caydex(fair_value=80.0, range_low=70.0, range_high=90.0),
+        "refused": refused,
+        "analyst-era": _analyst_era(),
+        "empty": {},
+    }
+    for name, report in cases.items():
+        sec = _section_09(render_html(build_context(report)))
+        hit = _VERDICT_WORDS.search(sec)
+        assert hit is None, (name, hit and hit.group(0))
+        if "Estimate range" in sec:
+            assert "DCF model estimate · not a price target · not a recommendation" in sec, name
+    above = _section_09(render_html(build_context(cases["ok-above"])))
+    assert "Price 25% above the estimate" in above

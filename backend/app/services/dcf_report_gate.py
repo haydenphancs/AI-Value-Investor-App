@@ -11,9 +11,13 @@ import them without a cycle (the collector, the report caches, the endpoints, th
   copied into new rows. A mismatch is a cache miss.
 
 * `strip_caydex_if_disabled(payload)` — while the switch is off, the published estimate block is
-  dropped from any STORED report on its way out (report endpoints, chat grounding). Stored rows
-  are never rewritten: a user's saved report is a frozen snapshot, and a PDF file already
-  generated is not re-rendered (documents/OWNER_TASKS.md §2.1 says so).
+  dropped from any STORED report on its way out (report endpoints, chat grounding, the PDF
+  context). On a report BUILT with the estimate (`dcf_source == "caydex"`) the section's
+  `wall_street_insight` goes with it: that insight was written from the estimate ("the price is
+  N% above the estimate"), so serving it alone would quote a number the switch has withdrawn.
+  An FMP-built report keeps its insight. The input is never mutated (a shallow copy is
+  returned). Stored rows are never rewritten: a user's saved report is a frozen snapshot, and a
+  PDF file already generated is not re-rendered (documents/OWNER_TASKS.md §2.1 says so).
 """
 
 from __future__ import annotations
@@ -38,11 +42,32 @@ def report_dcf_source_matches(payload: Any) -> bool:
     return (built or FMP_SOURCE) == current_dcf_source()
 
 
+def wall_street_insight_is_for_this_card(ws: Any) -> bool:
+    """Whether the "Valuation & Institutions" section's AI insight may be shown (app, PDF,
+    chat grounding — one rule). It is shown only beside the estimate it was written with:
+    every older insight was written for a card the section no longer draws —
+    * analyst era: "Buy-rated with a $190 target (~14% upside)…";
+    * FMP-DCF era (2026-09-03 → 09-26): "…diverges from our model, which suggests the stock
+      is overpriced", which sat right under "No Caydex Fair Value Estimate is available"
+      (simulator, 2026-09-26).
+    A stripped block (kill switch) is absent, so its insight goes too. The analyst check stays
+    as a second lock, with the predicate that chose the analyst-era prompt."""
+    if not isinstance(ws, dict) or not isinstance(ws.get("caydex_fair_value"), dict):
+        return False
+    from app.services.agents.narrative_prompts import (  # noqa: PLC0415 — heavy, lazy
+        wall_street_has_analyst_coverage,
+    )
+    return not wall_street_has_analyst_coverage(ws)
+
+
 def strip_caydex_if_disabled(payload: Any) -> Any:
     if settings.DCF_ENABLED or not isinstance(payload, dict):
         return payload
     ws = payload.get("wall_street_consensus")
     if not isinstance(ws, dict) or ws.get("caydex_fair_value") is None:
         return payload
-    return {**payload, "wall_street_consensus": {**ws, "caydex_fair_value": None}}
+    stripped = {**ws, "caydex_fair_value": None}
+    if ws.get("dcf_source") == CAYDEX_SOURCE:
+        stripped["wall_street_insight"] = None   # it quotes the estimate just withdrawn
+    return {**payload, "wall_street_consensus": stripped}
 

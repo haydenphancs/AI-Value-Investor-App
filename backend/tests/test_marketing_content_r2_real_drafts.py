@@ -104,3 +104,16 @@ def test_a_reclassified_timed_trade_is_rejected(case):
     item = content_pool.get_item(case["item"])
     got = {v.code for v in ws._scan("f", case["text"], item, allow_emoji=case["emoji"])}
     assert set(case["codes"]) <= got, (case["text"], got)
+
+
+# ── 2026-09-26: lines only the semantic judge rejects (pre-registered) ────────────────────────
+
+
+def test_the_judge_must_reject_lines_are_out_of_the_honest_set():
+    """Moved out of `items` by the user's 2026-09-26 decisions, before any judge run; the
+    calibration script requires the judge to flag each (the regex does not)."""
+    rows = json.loads(FIXTURE.read_text(encoding="utf-8"))["judge_must_reject"]
+    assert len(rows) >= 15
+    honest = {t for _k, t, _e in _CASES}
+    assert not honest & {r["text"] for r in rows}
+    assert all(r["rule"].startswith("judge_") and "2026-09-26" in r["why"] for r in rows)

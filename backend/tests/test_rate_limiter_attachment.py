@@ -40,7 +40,7 @@ from fastapi.params import Depends as DependsParam
 
 import app.dependencies as deps
 from app.api.v1.endpoints import (
-    chat, commodities, crypto, etfs, indices, stocks, ticker_report, tracking, users,
+    chat, commodities, crypto, etfs, indices, search, stocks, ticker_report, tracking, users,
     watchlist, widget,
 )
 from app.core.security import rate_limiter
@@ -54,6 +54,8 @@ from app.dependencies import (
     ProfileRateLimit,
     RateLimitChecker,
     ReportRateLimit,
+    SearchPickRateLimit,
+    SearchTrendingRateLimit,
     StandardRateLimit,
     WidgetRateLimit,
     WidgetRateLimitChecker,
@@ -102,6 +104,10 @@ GUARDED_ROUTES = [
     (stocks, "get_stock_fundamentals", "router", MarketFanoutRateLimit),
     (stocks, "get_stock_financials_full", "router", MarketFanoutRateLimit),
     (stocks, "get_revenue_breakdown", "router", MarketFanoutRateLimit),
+    # The search-screen chips and the pick counter. The pick limit is one of three bounds on
+    # how far one account can push "Trending searches" (with the service's de-dup and cap).
+    (search, "get_search_trending", "router", SearchTrendingRateLimit),
+    (search, "record_search_pick", "router", SearchPickRateLimit),
 ]
 
 #: Every market-data router carries the per-account ceiling at ROUTER level, so a new route

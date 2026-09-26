@@ -1017,6 +1017,11 @@ class Settings(BaseSettings):
     # X bills per post that carries a URL, so X captions are link-free unless this is flipped
     # (read by the writer's X caption composer, post_copy.py). Fail-closed.
     MARKETING_X_ALLOW_URLS: bool = False
+    # The semantic compliance judge (services/marketing/judge.py), the second gate after the
+    # regex validators: `enforce` (a verdict fails the round / drops the outlet), `shadow`
+    # (verdicts recorded, never block — safe while no run creates posts), `off`. Anything
+    # unrecognised is treated as `enforce` (fail closed). Web-side only: the worker never writes copy.
+    MARKETING_JUDGE_MODE: str = "enforce"
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

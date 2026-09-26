@@ -39,3 +39,8 @@ data/money_moves_audio_gemini_bak/
 data/money_moves_audio_clone/
 data/voice_samples/
 data/voice_clone/
+
+# Local-only virtualenvs and worker output (never in git, so Railway never sees them either).
+venv_marketing/
+venv_clone/
+marketing/out/

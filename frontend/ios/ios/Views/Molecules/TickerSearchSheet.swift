@@ -48,18 +48,21 @@ struct TickerLiveSearchSheet: View {
                     )
                     .padding(.horizontal, AppSpacing.lg)
 
-                    if searchText.isEmpty {
-                        VStack(spacing: AppSpacing.md) {
-                            Image(systemName: "magnifyingglass")
-                                .font(AppTypography.iconHero)
-                                .foregroundColor(AppColors.textMuted)
-
-                            Text("Search stocks, crypto, ETFs...")
-                                .font(AppTypography.body)
-                                .foregroundColor(AppColors.textSecondary)
-                                .multilineTextAlignment(.center)
+                    if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // Nothing typed → the trending chips, directly under the field: the
+                        // keyboard rises the moment this sheet opens and hides the bottom half.
+                        // A chip opens the ticker like a result would, but is NOT recorded as
+                        // a search pick (the list would feed itself).
+                        ScrollView {
+                            SearchTrendingChipsSection(
+                                sections: SearchTrendingStore.shared.sections(for: .all),
+                                onItemTapped: { item in onTickerSelected?(item.selection) }
+                            )
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .scrollDismissesKeyboard(.interactively)
+                        // Beats the trailing Spacer for the free height — without it the stack
+                        // split the space in half and cut the second section off.
+                        .layoutPriority(1)
                     } else if isSearching {
                         ProgressView()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -99,16 +102,24 @@ struct TickerLiveSearchSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Full height from the first frame, like the Home search sheet. With a `.medium`
+        // detent it opened at half height and then jumped to full when `SearchBar`'s
+        // auto-focus raised the keyboard 0.35 s later — a two-step open for a screen
+        // whose only job is typing.
+        .presentationDetents([.large])
         .onChange(of: searchText) { _, newValue in
             debounceSearch(newValue)
         }
+        .task { await SearchTrendingStore.shared.prefetch() }
     }
 
     @ViewBuilder
     private func resultRow(_ result: StockSearchResult) -> some View {
         HStack(spacing: AppSpacing.sm) {
             Button {
+                // A real search pick — the ONLY place this sheet records one (not the star,
+                // not a chip).
+                SearchTrendingStore.shared.recordPick(symbol: result.ticker, type: result.type)
                 onTickerSelected?(SearchSelection(
                     symbol: result.ticker,
                     type: result.type ?? "stock"

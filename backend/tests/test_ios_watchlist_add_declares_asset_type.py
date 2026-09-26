@@ -100,9 +100,13 @@ def test_the_search_sheet_maps_the_type_through_and_hands_over_the_item():
     assert "onSelectTicker?(item)" in sheet, "the sheet must hand the whole item up, not just the symbol"
     assert "onSelectTicker?(item.ticker)" not in sheet
     assert "var onSelectTicker: ((TickerSearchItem) -> Void)?" in sheet
-    popular = _block(sheet, "private let popularTickers", where="TickerSearchSheet")
-    assert popular.count('type: "stock"') == popular.count("TickerSearchItem(") >= 1, (
-        "every curated popular ticker is an equity and must say so"
+    # The hardcoded `popularTickers` list became the shared trending chips (2026-09-26). The
+    # premise is unchanged: an item built from a chip must still DECLARE its type, and the
+    # chips must be the equities-only variant this sheet requires.
+    assert "popularTickers" not in sheet, "the hardcoded list (with its broken BRK.B) is gone"
+    assert "sections(for: .stocksOnly)" in sheet, "the chips must be the stocks-only variant"
+    assert re.search(r"TickerSearchItem\([^)]*type:\s*item\.type", sheet, re.S), (
+        "a chip-built item must carry `type` — an undeclared add is how LTC became Litecoin"
     )
 
 

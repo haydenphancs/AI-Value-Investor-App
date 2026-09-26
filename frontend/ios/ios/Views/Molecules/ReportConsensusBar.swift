@@ -2,7 +2,18 @@
 //  ReportConsensusBar.swift
 //  ios
 //
-//  Molecule: Wall Street consensus rating bar with price targets
+//  Molecule: the report's "Valuation & Institutions" section (wire key and type names keep
+//  their old "Wall Street consensus" spelling) — the Caydex Fair Value Estimate, RANGE FIRST,
+//  over the price chart with the estimate's range as a pole; then the Institutions (13F) flow
+//  and the AI insight.
+//
+//  The analyst half this card used to draw (the "Analyst Price Target" heading, the
+//  Buy/Hold/Sell bar, the target line, the target pole, Momentum) is GONE for every report,
+//  old ones included — the owner's decision of 2026-09-26. Analyst ratings and price targets
+//  are outside the signed FMP licence, so it only ever said "No analyst price targets are
+//  available", and a model estimate must never sit under a price-target heading or a coloured
+//  BUY/HOLD/SELL line (documents/research/dcf-methodology-v1.md §5). The DTO still decodes
+//  every analyst field; only `insightWasWrittenForAnalystCard` reads them.
 //
 
 import SwiftUI
@@ -12,31 +23,6 @@ struct ReportConsensusBar: View {
 
     /// Tapped quarter in the hedge-fund net-flow chart; nil → show the latest.
     @State private var selectedFlowIndex: Int? = nil
-
-    /// Every price the chart must keep on-screen: the analyst targets (when
-    /// present), the live current price, and the historical line. Targets are
-    /// optional — when absent (no analyst coverage) the chart scales to the
-    /// price line + current price alone.
-    private var priceUniverse: [Double] {
-        let targets = [consensus.lowTarget, consensus.targetPrice, consensus.highTarget].compactMap { $0 }
-        return targets + [consensus.currentPrice] + chartPrices
-    }
-
-    private var minPrice: Double {
-        let allPrices = priceUniverse
-        let minValue = allPrices.min() ?? consensus.currentPrice
-        let maxValue = allPrices.max() ?? consensus.currentPrice
-        let range = maxValue - minValue
-        return minValue - (range * 0.1) // Padding below the lowest point
-    }
-
-    private var maxPrice: Double {
-        let allPrices = priceUniverse
-        let maxValue = allPrices.max() ?? consensus.currentPrice
-        let minValue = allPrices.min() ?? consensus.currentPrice
-        let range = maxValue - minValue
-        return maxValue + (range * 0.07) // Padding above the highest point
-    }
 
     /// Format month string from "MM/YYYY" to "MM/YY"
     private func formatMonthLabel(_ month: String) -> String {
@@ -53,51 +39,32 @@ struct ReportConsensusBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The Caydex Fair Value Estimate published with this report, in its OWN block ABOVE
-            // the analyst section — never under the "Analyst Price Target" heading or a coloured
-            // BUY/HOLD/SELL line, where a model estimate would read as a price target. The gap
-            // is against the price frozen with the report, so it says so.
+            // The estimate IS this section's headline: the range, its middle mark, the gap
+            // against the price frozen with the report (so it says "at report time"), and
+            // the "not a price target" line.
             if let estimate = consensus.caydexFairValue {
                 CaydexFairValueRow(estimate: estimate, currentPrice: consensus.currentPrice,
                                    priceContext: "at report time")
-                    .padding(AppSpacing.md)
-                    .background(
-                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
-                            .cardFill(AppColors.cardBackgroundNested)
-                    )
+                    .padding(.bottom, AppSpacing.lg)
+            } else {
+                // A report saved before the estimate existed, or served while it is off.
+                Text(CaydexFairValue.notInReport)
+                    .font(AppTypography.label)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, AppSpacing.lg)
             }
 
-            // Title + "Based on N analysts" + colored consensus rating.
-            analystPriceTargetHeader
-                .padding(.bottom, AppSpacing.sm)
+            // Price line + the estimate's range as a pole (Low / Estimate / High).
+            CaydexFairValueRangeChart(prices: chartSeries.prices, currentPrice: consensus.currentPrice,
+                                      estimate: consensus.caydexFairValue, periodLabel: chartSeries.label,
+                                      priceLegend: "Price at report time")
 
-            // Buy / Hold / Sell analyst consensus distribution (segmented bar + %).
-            consensusDistributionSection
-
-            // Target + range — moved below the distribution bar, above "2-Year Flow".
-            analystTargetLine
-
-            // Period label for the price chart + volume bars below.
-            Text(flowPeriodLabel)
-                .font(AppTypography.labelSmall)
-                .foregroundColor(AppColors.textMuted)
-                .padding(.bottom, AppSpacing.xs)
-
-            // Price line + Min/Avg/Max pole + dashed current-price line
-            analystPriceChart
-
-            // Buy/Sell volume bars (no second price line — the price line
-            // lives in the analyst chart above)
+            // Net institutional flow bars, aligned under the price line.
             hedgeFundsSection
                 .padding(.top, AppSpacing.md)
 
-            // Momentum
-            momentumSection
-                .padding(.top, AppSpacing.xl)
-
-            // Wall Street insight — AI synthesis of price targets, institutions,
-            // and momentum, rendered as its own labeled section at the bottom.
+            // AI insight — institutional positioning read against the estimate.
             insightSection
                 .padding(.top, AppSpacing.xl)
         }
@@ -106,491 +73,39 @@ struct ReportConsensusBar: View {
         .onTapGesture { selectedFlowIndex = nil }
     }
 
-    /// Period label for the merged view (e.g. "2-Year Flow"), shown once at
-    /// the top since both the price chart and the volume bars span it.
-    private var flowPeriodLabel: String {
-        if let sm = consensus.hedgeFundSmartMoney,
-           sm.flowData.contains(where: { $0.hasActivity }) {
-            return "\(sm.summary.periodDescription) Flow"
-        }
-        return "12-Month Flow"
-    }
-
-    // MARK: - Analyst Price Target Header
-
-    private var analystPriceTargetHeader: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Analyst Price Target")
-                .font(AppTypography.bodySmallEmphasis)
-                .foregroundColor(AppColors.textSecondary)
-
-            if consensus.hasAnalystDistribution || consensus.hasAnalystTargets {
-                // One line: "Based on N analysts, one-year price forecast: BUY" —
-                // the rating colored by sentiment (green BUY / amber HOLD / red SELL).
-                let forecastText = Text(forecastPrefix)
-                    .foregroundColor(AppColors.textSecondary)
-                let ratingText = Text(consensus.rating.rawValue.uppercased())
-                    .foregroundColor(consensus.rating.color).fontWeight(.bold)
-                Text("\(forecastText)\(ratingText)")
-                    .font(AppTypography.label)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("No analyst price targets are available for this company yet.")
-                    .font(AppTypography.label)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// Leading copy before the colored rating word. Includes the analyst count
-    /// when we have a rating distribution; otherwise just the forecast lead-in.
-    private var forecastPrefix: String {
-        consensus.analystTotalRatings > 0
-            ? "Based on \(consensus.analystTotalRatings) analysts, one-year forecast: "
-            : "One-year forecast: "
-    }
-
-    // MARK: - Analyst Consensus Distribution (Buy / Hold / Sell)
-
-    /// Proportional Buy/Hold/Sell bar + one-row % legend, mirroring the Holders
-    /// tab's Shareholder Breakdown. Hidden when there's no analyst coverage.
-    @ViewBuilder
-    private var consensusDistributionSection: some View {
-        if consensus.hasAnalystDistribution {
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                GeometryReader { geo in
-                    HStack(spacing: 0) {
-                        // 5 levels (Strong Buy → Strong Sell), same colors as the
-                        // Analysis tab. Zero-count levels are omitted.
-                        ForEach(consensus.analystLevels.filter { $0.count > 0 }, id: \.label) { level in
-                            Rectangle().fill(level.color)
-                                .frame(width: geo.size.width * CGFloat(consensus.analystPercent(level.count)) / 100)
-                        }
-                    }
-                    .frame(height: 14)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                }
-                .frame(height: 14)
-
-                // All 5 levels stretched edge-to-edge to match the bar width:
-                // "Strong Sell" sits at the left edge, "Strong Buy" at the right,
-                // with flexible gaps between. No dots; each label+% is colored.
-                HStack(spacing: 0) {
-                    ForEach(Array(consensus.analystLevels.enumerated()), id: \.element.label) { index, level in
-                        consensusLegendItem(
-                            color: level.color,
-                            label: level.label,
-                            percent: String(format: "%.0f%%", consensus.analystPercent(level.count))
-                        )
-                        if index < consensus.analystLevels.count - 1 {
-                            Spacer(minLength: AppSpacing.xs)
-                        }
-                    }
-                }
-            }
-            .padding(.bottom, AppSpacing.sm)
-        }
-    }
-
-    /// One legend entry — "Buy 65%" with the label + % both in the level's color,
-    /// same regular weight, no dot, so all five fit on a single row.
-    private func consensusLegendItem(color: Color, label: String, percent: String) -> some View {
-        Text("\(label) \(percent)")
-            .font(AppTypography.caption)
-            .foregroundColor(color)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-    }
-
-    /// Target + range line, centered below the distribution bar (above "2-Year
-    /// Flow"). Cents-aware via `formatTargetPrice`: shows $248.20 when there are
-    /// cents, whole dollars ($160 / $320) when there aren't — matching the chart
-    /// badges. Only with real analyst price-target coverage.
-    @ViewBuilder
-    private var analystTargetLine: some View {
-        if consensus.hasAnalystTargets {
-            Text("Target \(formatTargetPrice(consensus.targetPrice ?? 0)) (range \(formatTargetPrice(consensus.lowTarget ?? 0)) - \(formatTargetPrice(consensus.highTarget ?? 0)))")
-                .font(AppTypography.label)
-                .foregroundColor(AppColors.textSecondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, AppSpacing.sm)
-                // 6 (not AppSpacing.sm=8): a text→text gap reads ~2pt taller than
-                // the rectangle→text gap between the distribution bar and the
-                // 5-levels row at the same nominal spacing, so 6pt here makes the
-                // Target→"2-Year Flow" gap visually match that bar→levels `sm` gap.
-                .padding(.bottom, 6)
-        }
-    }
-
-    // MARK: - Analyst Price Chart
-
-    private var analystPriceChart: some View {
-        GeometryReader { geometry in
-            let leadingPadding: CGFloat = 8 // Stretch the line toward the left edge
-            let chartWidth = geometry.size.width - 60 - leadingPadding // Reserve 60pts for the pole + badges (with breathing room) on the right
-
-            // Single coordinate system: every element below resolves its y
-            // through `yPosition(for:in:)` in the GeometryReader's top-origin
-            // space, and its x relative to `leadingPadding`. The price line,
-            // dashed line, current-price pill, pole, and badges therefore
-            // share one vertical scale — so the line terminates exactly at the
-            // current-price pill and the dashed line crosses the pole at the
-            // current-price level.
-            ZStack {
-                // Price line chart — nudged up a hair so its endpoint reads
-                // as meeting the gray current-price dot. Purely cosmetic; the
-                // dot, dashed line, pole, and badges stay anchored to their
-                // true price y so nothing misrepresents the data.
-                if !chartPrices.isEmpty {
-                    priceLineChart(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
-                }
-
-                // Current price indicator and dashed line
-                currentPriceIndicator(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
-
-                // Target pole with points (far right)
-                targetPole(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
-
-                // Target badges on the right
-                targetBadges(chartWidth: chartWidth, leadingPadding: leadingPadding, in: geometry)
-            }
-        }
-        .frame(height: 200)
-    }
-
-    // MARK: - Chart Components
-
-    /// Price series for the analyst price-target line. Prefers the detailed
-    /// ~2-year daily series carried by the hedge-fund smart-money payload —
-    /// the SAME data the Hedge Funds chart below plots — then its quarterly
-    /// series, then the legacy monthly series. The last point is pinned to
-    /// the live `currentPrice` so the line terminates exactly at the gray
-    /// current-price dot.
-    private var chartPrices: [Double] {
-        let source: [Double]
+    /// The price series the chart draws, and the label for its window. Prefers the ~2-year
+    /// daily series carried by the 13F payload — the SAME data the Institutions chart below
+    /// plots — then its quarterly closes, then the legacy monthly series. The chart pins the
+    /// last point to the report-time price.
+    private var chartSeries: (prices: [Double], label: String?) {
         if let daily = consensus.hedgeFundSmartMoney?.dailyPrices, daily.count >= 10 {
-            source = daily.map { $0.price }
-        } else if let quarterly = consensus.hedgeFundSmartMoney?.priceData, !quarterly.isEmpty {
-            source = quarterly.map { $0.price }
-        } else {
-            source = consensus.hedgeFundPriceData.map { $0.price }
+            return (daily.map { $0.price },
+                    CaydexFairValue.pricePeriodLabel(from: daily.first?.date, to: daily.last?.date))
         }
-        guard !source.isEmpty else { return [] }
-        var prices = source
-        prices[prices.count - 1] = consensus.currentPrice
-        return prices
-    }
-
-    private func priceLineChart(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        Path { path in
-            let prices = chartPrices
-            guard !prices.isEmpty else { return }
-
-            // End the line short of the Min/Avg/Max pole so its endpoint just
-            // touches the dashed current-price line without crowding the pole.
-            // The dashed line continues from here across to the pole.
-            let poleGap: CGFloat = 24
-            let lineWidth = max(chartWidth - poleGap, 1)
-            let xStep = lineWidth / CGFloat(max(prices.count - 1, 1))
-
-            // Start path
-            let firstY = yPosition(for: prices[0], in: geometry)
-            path.move(to: CGPoint(x: leadingPadding, y: firstY))
-
-            // Draw line through all points
-            for (index, price) in prices.enumerated() {
-                let x = leadingPadding + CGFloat(index) * xStep
-                let y = yPosition(for: price, in: geometry)
-                path.addLine(to: CGPoint(x: x, y: y))
-            }
+        if let quarterly = consensus.hedgeFundSmartMoney?.priceData, !quarterly.isEmpty {
+            return (quarterly.map { $0.price }, "Price · quarter-end closes")
         }
-        .stroke(AppColors.primaryBlue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-    }
-
-    private func currentPriceIndicator(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        let yPos = yPosition(for: consensus.currentPrice, in: geometry)
-
-        // Dashed horizontal line at the current-price y, read straight across
-        // to the gray current-price dot on the target pole (see `targetPole`).
-        // Gray to match that dot, distinct from the blue price-history line and
-        // the blue Avg marker.
-        return Path { path in
-            path.move(to: CGPoint(x: leadingPadding, y: yPos))
-            path.addLine(to: CGPoint(x: leadingPadding + chartWidth, y: yPos))
+        if !consensus.hedgeFundPriceData.isEmpty {
+            return (consensus.hedgeFundPriceData.map { $0.price }, "Price · month-end closes")
         }
-        .stroke(AppColors.textSecondary, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+        return ([], nil)
     }
 
-    @ViewBuilder
-    private func targetPole(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        if let highTarget = consensus.highTarget,
-           let targetPrice = consensus.targetPrice,
-           let lowTarget = consensus.lowTarget {
-            let xPos = leadingPadding + chartWidth - 3 // Position slightly left of the edge
-            let highY = yPosition(for: highTarget, in: geometry)
-            let avgY = yPosition(for: targetPrice, in: geometry)
-            let lowY = yPosition(for: lowTarget, in: geometry)
+    // MARK: - Insight (AI synthesis of the section)
 
-            // Extend the pole beyond the points
-            let poleExtension: CGFloat = 20
-            let extendedHighY = highY - poleExtension
-            let extendedLowY = lowY + poleExtension
-
-            Group {
-                // Thick vertical pole from low to high (extended)
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(AppColors.textMuted.opacity(0.4))
-                    .frame(width: 6, height: max(extendedLowY - extendedHighY, 1))
-                    .position(x: xPos, y: (extendedHighY + extendedLowY) / 2)
-
-                // High target point (green) - smaller
-                Circle()
-                    .fill(AppColors.bullish)
-                    .frame(width: 10, height: 10)
-                    .position(x: xPos, y: highY)
-
-                // Average target point (blue) - smaller
-                Circle()
-                    .fill(AppColors.primaryBlue)
-                    .frame(width: 10, height: 10)
-                    .position(x: xPos, y: avgY)
-
-                // Low target point (red) - smaller
-                Circle()
-                    .fill(AppColors.bearish)
-                    .frame(width: 10, height: 10)
-                    .position(x: xPos, y: lowY)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func targetBadges(chartWidth: CGFloat, leadingPadding: CGFloat, in geometry: GeometryProxy) -> some View {
-        if let highTarget = consensus.highTarget,
-           let targetPrice = consensus.targetPrice,
-           let lowTarget = consensus.lowTarget {
-            let badgeGutter: CGFloat = 50  // badge frame width
-            let badgeGap: CGFloat = 7      // breathing room between the pole and the badge text
-            let badgeCenterX = leadingPadding + chartWidth + badgeGutter / 2 + badgeGap
-            // The dots stay at their true price y. The badges are anchored so the
-            // COLOURED PERCENT — the value read as "the" label — sits level with its
-            // own dot, and are nudged apart when a short pole would stack them
-            // (TestFlight 2026-09-02, research_reports E4: centring the whole
-            // price-over-percent badge put every percent half a line BELOW its dot,
-            // butting against the next badge's price, so +61.0% read as the label
-            // of the $461.50 dot beneath it).
-            // Pair each badge with its dot's y and SORT by y before resolving, so the
-            // top badge always belongs to the top dot even on an inverted feed (a
-            // consensus above the "high" target): the resolver spreads outward by
-            // position, not by name, and an unsorted feed put a badge on the far side
-            // of the pole from its own dot (review finding, 2026-09-19).
-            let items: [(y: CGFloat, price: String, percent: String, color: Color)] = [
-                (yPosition(for: highTarget, in: geometry), formatTargetPrice(highTarget),
-                 consensus.formattedHighTargetPercent, AppColors.bullish),
-                (yPosition(for: targetPrice, in: geometry), formatTargetPrice(targetPrice),
-                 consensus.formattedAvgTargetPercent, AppColors.primaryBlue),
-                (yPosition(for: lowTarget, in: geometry), formatTargetPrice(lowTarget),
-                 consensus.formattedLowTargetPercent, AppColors.bearish),
-            ].sorted { $0.y < $1.y }
-            // `high` / `avg` / `low` here mean top / middle / bottom on screen.
-            let anchors = Self.resolvedBadgeAnchors(
-                high: items[0].y,
-                avg: items[1].y,
-                low: items[2].y,
-                minGap: badgeMinGap,
-                topInset: badgeTopInset,
-                bottomInset: badgeBottomInset,
-                height: geometry.size.height
-            )
-
-            Group {
-                // Top badge — percent level with the top dot
-                targetBadge(price: items[0].price, percent: items[0].percent, color: items[0].color)
-                    .frame(width: badgeGutter, alignment: .leading)
-                    .position(x: badgeCenterX, y: anchors.high - badgeLineOffset)
-
-                // Middle badge — percent level with the middle dot
-                targetBadge(price: items[1].price, percent: items[1].percent, color: items[1].color)
-                    .frame(width: badgeGutter, alignment: .leading)
-                    .position(x: badgeCenterX, y: anchors.avg - badgeLineOffset)
-
-                // Bottom badge — percent level with the bottom dot
-                targetBadge(price: items[2].price, percent: items[2].percent, color: items[2].color)
-                    .frame(width: badgeGutter, alignment: .leading)
-                    .position(x: badgeCenterX, y: anchors.low - badgeLineOffset)
-            }
-        }
-    }
-
-    // MARK: Badge geometry
-
-    /// Spacing between the price line and the percent line inside a badge.
-    private static let badgeLineSpacing: CGFloat = 2
-
-    /// One badge text line, scaled the way `AppTypography.caption` (11pt) scales, so
-    /// the anchoring below stays true at every Dynamic Type size.
-    private var badgeLineHeight: CGFloat {
-        AppTypography.scaledSize(13, .caption2, maxScale: AppTypography.readingCap)
-    }
-
-    /// A badge is price OVER percent. `.position` places the badge's centre, and the
-    /// percent line's centre sits `(line + spacing) / 2` below that — so subtracting
-    /// this from the dot's y puts the PERCENT, not the badge, level with the dot.
-    private var badgeLineOffset: CGFloat {
-        (badgeLineHeight + Self.badgeLineSpacing) / 2
-    }
-
-    /// Two badges cannot share a vertical band: consecutive anchors need the full
-    /// badge height (two lines + spacing) plus 2pt of air.
-    private var badgeMinGap: CGFloat {
-        2 * badgeLineHeight + Self.badgeLineSpacing + 2
-    }
-
-    /// The highest anchor whose badge still starts inside the chart: the price line
-    /// (one line + spacing) sits above the percent, and half a line of the percent
-    /// itself sits above the anchor.
-    private var badgeTopInset: CGFloat {
-        1.5 * badgeLineHeight + Self.badgeLineSpacing
-    }
-
-    /// The lowest anchor whose percent line still ends inside the chart.
-    private var badgeBottomInset: CGFloat {
-        badgeLineHeight / 2
-    }
-
-    /// Where the three badges' PERCENT lines go, given the true dot positions.
-    ///
-    /// The average keeps its dot's y; the high badge is pushed up and the low badge
-    /// pushed down until each is at least `minGap` from its neighbour, then all three
-    /// are kept inside `[topInset, height - bottomInset]` — cascading the others when a
-    /// clamp would otherwise re-stack them. Pure and static so the maths is testable.
-    static func resolvedBadgeAnchors(
-        high: CGFloat, avg: CGFloat, low: CGFloat,
-        minGap: CGFloat, topInset: CGFloat, bottomInset: CGFloat, height: CGFloat
-    ) -> (high: CGFloat, avg: CGFloat, low: CGFloat) {
-        let top = topInset
-        let bottom = max(top, height - bottomInset)
-        let gap = max(0, minGap)
-
-        // Spread outward from the average (the dot the user reads first).
-        var h = min(high, avg - gap)
-        var a = avg
-        var l = max(low, avg + gap)
-
-        // Keep the high badge on the chart; if that pushes it down onto the
-        // average, the average and low give way beneath it.
-        if h < top {
-            h = top
-            a = max(a, h + gap)
-            l = max(l, a + gap)
-        }
-        // Same from the bottom edge, cascading upward.
-        if l > bottom {
-            l = bottom
-            a = min(a, l - gap)
-            h = min(h, a - gap)
-        }
-        // A chart too short for three badges cannot satisfy both edges; the top
-        // wins so the high badge is never cut off, and the rest is clamped.
-        h = min(max(h, top), bottom)
-        a = min(max(a, top), bottom)
-        l = min(max(l, top), bottom)
-        return (h, a, l)
-    }
-
-    /// Target price for the badges — shows cents only when the value actually
-    /// has them ("$249.53"); whole numbers stay clean ("$400").
-    private func formatTargetPrice(_ value: Double) -> String {
-        // Four-digit targets drop their cents: "$5,800.50" does not fit the 50pt
-        // gutter and wrapped the badge to three lines, which broke the two-line
-        // anchoring below (review finding, 2026-09-19).
-        if value == value.rounded() || abs(value) >= 1000 {
-            return String(format: "$%.0f", value)
-        }
-        return String(format: "$%.2f", value)
-    }
-
-    /// Price OVER percent, each on exactly one line — the anchoring maths assumes it.
-    private func targetBadge(price: String, percent: String, color: Color) -> some View {
-        VStack(alignment: .center, spacing: 2) {
-            Text(price)
-                .font(AppTypography.caption).fontWeight(.bold)
-                .foregroundColor(AppColors.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-
-            Text(percent)
-                .font(AppTypography.caption).fontWeight(.bold)
-                .foregroundColor(color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-    }
-
-    /// Every element (line, current-price pill, pole, dots, badges) maps through this
-    /// one function. With analyst targets on the chart it maps into the plot rect
-    /// inset by the badge geometry — the 7 % headroom in `maxPrice` alone put the high
-    /// dot at y≈12 on the TER screenshot, above `badgeTopInset` (21.5), so the high
-    /// badge was always clamped below its dot and the cascade pushed the others down
-    /// (review finding, 2026-09-19). Without targets the full height is used.
-    private func yPosition(for price: Double, in geometry: GeometryProxy) -> CGFloat {
-        let priceRange = maxPrice - minPrice
-        let top: CGFloat = consensus.hasAnalystTargets ? badgeTopInset : 0
-        let bottom: CGFloat = consensus.hasAnalystTargets ? badgeBottomInset : 0
-        let plotHeight = max(geometry.size.height - top - bottom, 1)
-        guard priceRange > 0 else { return top + plotHeight / 2 }
-
-        let normalizedValue = (price - minPrice) / priceRange
-        return top + plotHeight * (1 - normalizedValue)
-    }
-
-    // MARK: - Momentum Section
-
-    /// Hidden entirely when there is no analyst data to count actions from.
-    ///
-    /// ⚠️ Gated on whether analyst coverage EXISTS, not on whether the counts are non-zero.
-    /// A genuine "0 upgrades, 0 downgrades over 12 months" is a real, useful fact about a
-    /// covered stock and must keep rendering. What must NOT render is the identical strip when
-    /// `grades` is unentitled — there every count is zero for every ticker in the market, and
-    /// "0 upgrades · 0 maintains · 0 downgrades" reads as "no analyst moved on this company"
-    /// when the truth is that we cannot see analyst actions at all. Same predicate the rating
-    /// badge above uses, so the two halves of the card can never disagree.
-    @ViewBuilder
-    private var momentumSection: some View {
-        if consensus.hasAnalystDistribution || consensus.hasAnalystTargets {
-            VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                // Period label disambiguates from the chart's "2-Year Flow": these
-                // analyst actions are counted over the trailing 12 months
-                // (analyst_service._compute_actions_summary, 365-day cutoff).
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Momentum")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textSecondary)
-                    Text("Past 12 Months")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
-
-                // Upgrades · Maintains · Downgrades in ONE gray card with "|"
-                // dividers (same ReportMetricsStrip as Capital Allocation / Congress
-                // / Short Selling). Count on top, label below; value colored by
-                // direction (green up / red down) in place of the old arrow icons.
-                ReportMetricsStrip(metrics: [
-                    ReportMetricItem(label: "Upgrades", value: "\(consensus.momentumUpgrades)", valueColor: AppColors.bullish),
-                    ReportMetricItem(label: "Maintains", value: "\(consensus.momentumMaintains)", valueColor: AppColors.textPrimary),
-                    ReportMetricItem(label: "Downgrades", value: "\(consensus.momentumDowngrades)", valueColor: AppColors.bearish),
-                ])
-            }
-        }
-    }
-
-    // MARK: - Wall Street Insight (AI synthesis across all three sub-sections)
-
+    /// Shown only on a report that carries the Caydex block, i.e. only beside the estimate the
+    /// insight was written against. Every older insight was written for a card this section
+    /// no longer draws, and would sit under the new heading with nothing behind it:
+    /// • analyst era — "Buy-rated with a $190 target…";
+    /// • FMP-DCF era (2026-09-03 → 09-26) — "diverges from our model, which suggests the stock
+    ///   is overpriced", right under "No Caydex Fair Value Estimate is available" (seen on the
+    ///   simulator, 2026-09-26).
+    /// The analyst-era check stays as a second lock in case a block is ever back-filled.
     @ViewBuilder
     private var insightSection: some View {
-        if let insight = consensus.wallStreetInsight, !insight.isEmpty {
+        if consensus.caydexFairValue != nil,
+           !consensus.insightWasWrittenForAnalystCard,
+           let insight = consensus.wallStreetInsight, !insight.isEmpty {
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
                 HStack(spacing: AppSpacing.xs) {
                     Image(systemName: AppSymbols.ai)
@@ -663,9 +178,9 @@ struct ReportConsensusBar: View {
                 flowQuarterPopup(smartMoney.flowData)
                     .transition(.scale.combined(with: .opacity))
 
-                // Net-flow bars drawn in the analyst chart's exact coordinate
+                // Net-flow bars drawn in the price chart's exact coordinate
                 // system, so the y-axis lands in the same gutter as the
-                // Min/Avg/Max badges and the bars span under the price line.
+                // estimate pole's badges and the bars span under the price line.
                 volumeBarsChart(smartMoney.flowData)
 
                 SmartMoneyFlowLegend(buyLabel: "Net Buying", sellLabel: "Net Selling", font: AppTypography.label, labelColor: AppColors.textMuted)
@@ -740,15 +255,15 @@ struct ReportConsensusBar: View {
     // MARK: - Hedge Fund Volume Bars (custom-aligned)
 
     /// Buy/sell volume bars drawn in the SAME coordinate system as
-    /// `analystPriceChart`: bars span the price line's x-range and the billions
-    /// y-axis labels sit in the identical right-hand gutter as the Min/Avg/Max
+    /// `CaydexFairValueRangeChart`: bars span the price line's x-range and the
+    /// y-axis labels sit in the identical right-hand gutter as the estimate pole's
     /// badges. Custom (not `SmartMoneyFlowChart`) so the axis aligns with the
-    /// price targets exactly — Swift Charts' auto-placed axis can't guarantee it.
+    /// chart above exactly — Swift Charts' auto-placed axis can't guarantee it.
     private func volumeBarsChart(_ bars: [SmartMoneyFlowDataPoint]) -> some View {
         GeometryReader { geometry in
-            let leadingPadding: CGFloat = 8
-            let chartWidth = geometry.size.width - 60 - leadingPadding
-            let poleGap: CGFloat = 24
+            let leadingPadding = CaydexFairValueRangeChart.Layout.leadingPadding
+            let chartWidth = geometry.size.width - CaydexFairValueRangeChart.Layout.trailingGutter - leadingPadding
+            let poleGap = CaydexFairValueRangeChart.Layout.poleGap
             let span = max(chartWidth - poleGap, 1)            // == price line's x-span
             let count = max(bars.count, 1)
             let slot = span / CGFloat(count)
@@ -766,7 +281,8 @@ struct ReportConsensusBar: View {
             // <=30% of the plot while the Holders tab drew the same data
             // full-height. Floor only when there is genuinely nothing to scale to.
             let axisMax = dataMax > 0 ? niceAxisMax(dataMax) : 1
-            let gutterCenterX = leadingPadding + chartWidth + 25   // == targetBadges center
+            // Axis labels start at the SAME x as the price chart's label column above them.
+            let gutterCenterX = leadingPadding + chartWidth + CaydexFairValueRangeChart.Layout.labelGap + 25
 
             ZStack(alignment: .topLeading) {
                 // Gridlines + billions y-axis labels (in the badge gutter)
@@ -783,7 +299,7 @@ struct ReportConsensusBar: View {
                     Text(formatVolumeAxis(tick))
                         .font(AppTypography.caption)
                         .foregroundColor(AppColors.textMuted)
-                        .frame(width: 50, alignment: .center)
+                        .frame(width: 50, alignment: .leading)
                         .position(x: gutterCenterX, y: y)
                 }
 
@@ -873,35 +389,46 @@ struct ReportConsensusBar: View {
     }
 }
 
-#Preview {
+#Preview("Estimate") {
     ReportConsensusBar(consensus: TickerReportData.sampleOracle.wallStreetConsensus)
         .padding()
         .background(AppColors.cardBackground)
 }
 
-#Preview("No analyst coverage") {
+#Preview("Refused, and an analyst-era report") {
     let base = TickerReportData.sampleOracle.wallStreetConsensus
-    return ReportConsensusBar(consensus: ReportWallStreetConsensus(
-        rating: base.rating,
-        currentPrice: base.currentPrice,
-        targetPrice: nil,
-        lowTarget: nil,
-        highTarget: nil,
-        valuationStatus: base.valuationStatus,
-        discountPercent: base.discountPercent,
-        wallStreetInsight: base.wallStreetInsight,
-        hedgeFundPriceData: base.hedgeFundPriceData,
-        hedgeFundFlowData: base.hedgeFundFlowData,
-        hedgeFundSmartMoney: base.hedgeFundSmartMoney,
-        momentumUpgrades: base.momentumUpgrades,
-        momentumDowngrades: base.momentumDowngrades,
-        momentumMaintains: base.momentumMaintains,
-        analystStrongBuy: base.analystStrongBuy,
-        analystBuy: base.analystBuy,
-        analystHold: base.analystHold,
-        analystSell: base.analystSell,
-        analystStrongSell: base.analystStrongSell
-    ))
-    .padding()
+    func variant(_ estimate: CaydexFairValue?, targets: Bool) -> ReportWallStreetConsensus {
+        ReportWallStreetConsensus(
+            rating: base.rating,
+            currentPrice: base.currentPrice,
+            targetPrice: targets ? 190 : nil,
+            lowTarget: targets ? 150 : nil,
+            highTarget: targets ? 230 : nil,
+            valuationStatus: base.valuationStatus,
+            discountPercent: base.discountPercent,
+            wallStreetInsight: targets
+                ? "Buy-rated with a $190 target — this text must NOT render."
+                : base.wallStreetInsight,
+            hedgeFundPriceData: base.hedgeFundPriceData,
+            hedgeFundFlowData: base.hedgeFundFlowData,
+            hedgeFundSmartMoney: base.hedgeFundSmartMoney,
+            momentumUpgrades: 0,
+            momentumDowngrades: 0,
+            momentumMaintains: 0,
+            analystStrongBuy: 0,
+            analystBuy: 0,
+            analystHold: 0,
+            analystSell: 0,
+            analystStrongSell: 0,
+            caydexFairValue: estimate
+        )
+    }
+    return ScrollView {
+        VStack(spacing: 32) {
+            ReportConsensusBar(consensus: variant(.sampleRefused, targets: false))
+            ReportConsensusBar(consensus: variant(nil, targets: true))
+        }
+        .padding()
+    }
     .background(AppColors.cardBackground)
 }

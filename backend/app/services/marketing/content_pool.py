@@ -94,7 +94,46 @@ EXCLUDED: Dict[str, str] = {
     # The article's lesson IS whether a named company's stock was cheap (a value trap). The
     # user's rule for Money Moves (2026-09-23): companies as case studies, never their value.
     "money_moves:the-fall-of-sears": "the lesson is a valuation verdict on a named company",
+    # The lesson IS when and how to sell, so every retelling ends in a sell directive ("Consider
+    # selling in stages", "Consider Trimming Positions"). User decision 2026-09-26.
+    "journey:art_of_selling": "the lesson is a sell-timing directive",
 }
+
+#: Source sentences dropped by POLICY rather than by the output scan, each with its reason.
+#: `load_corpus` already drops every sentence the regex scan would reject, so the writer is never
+#: handed a line the gate refuses; these are the lines only the semantic gate (`judge.py`)
+#: refuses, and they must go for the same reason — a fact sheet that says "It's a calm, simple
+#: way to…" invites exactly the forbidden copy. Matching is a case-sensitive SUBSTRING of one
+#: flattened sentence; `test_marketing_content_pool.py` fails on an entry that matches no
+#: sentence or more than one (a stale or ambiguous drop is a silent policy hole).
+#: Pre-registered 2026-09-26 from the user's decisions, BEFORE any judge output was read.
+SOURCE_SENTENCE_DROPS: Dict[str, Dict[str, str]] = {
+    "journey:etfs_101": {
+        # Own-voice risk-softening about a product category (decision 2). The sibling "many
+        # people use a broad ETF as the calm, steady core of their plan" is ATTRIBUTED usage,
+        # which the user ruled honest, and stays.
+        "It's a calm, simple way to plant your money": "calls a product category calm, in the "
+                                                      "text's own voice",
+    },
+    "journey:portfolio_gardening": {
+        # Trade directives in the garden metaphor (decision 3): water = add to, prune = sell.
+        # The conditional description ("If a holding's story has truly broken … trimming it
+        # frees up room") is a consequence, not an instruction, and stays.
+        "Water your winners.": "an imperative to add to holdings",
+        "Prune the weak ones.": "an imperative to sell holdings",
+        "Pull a weed, water a winner": "imperatives to sell and add to holdings",
+        "which are winners to water, and which are weeds to prune": "asks the reader to sort "
+                                                                    "holdings to buy and sell",
+        # 2026-09-26 preview: the lesson's subtitle frames it as trade TIMING, and the writer
+        # turned it into headings ("Prune When Needed", "Prune Strategically") that the judge
+        # read as a directive only some of the time.
+        "when to water, prune, or uproot": "frames the lesson as when to add to, sell or exit "
+                                           "holdings",
+    },
+}
+
+#: The `dropped` code recorded for a SOURCE_SENTENCE_DROPS line.
+SOURCE_POLICY_DROP = "source_policy"
 
 _BOLD_RE = re.compile(r"\*\*|__")
 _SENTENCE_END_RE = re.compile(r"[.!?]$")
@@ -333,7 +372,11 @@ def load_corpus() -> Dict[str, ContentItem]:
         companies = proper_nouns(sents, base, roots) if strict_instruments(kind) else frozenset()
         kept: List[str] = []
         dropped: List[Tuple[str, str]] = []
+        policy_drops = SOURCE_SENTENCE_DROPS.get(key, {})
         for s in sents:
+            if any(fragment in s for fragment in policy_drops):
+                dropped.append((s, SOURCE_POLICY_DROP))
+                continue
             violations = scan_text("source", s, allow_emoji=True,
                                    strict_instruments=strict_instruments(kind),
                                    company_terms=companies)

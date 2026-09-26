@@ -93,6 +93,8 @@ _MUST_BE_401_PREFIXES = (
     "/api/v1/whales", "/api/v1/watchlist", "/api/v1/tracking", "/api/v1/portfolios",
     "/api/v1/learn", "/api/v1/chat", "/api/v1/research", "/api/v1/users",
     "/api/v1/alerts",
+    # the search-screen chips (FMP-derived names) and the pick counter
+    "/api/v1/search",
     # the marketing worker API: no credential → 401 AUTH_REQUIRED, never 403 (auth.md §2)
     "/api/v1/internal",
 )

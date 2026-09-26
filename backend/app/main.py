@@ -723,6 +723,17 @@ async def _run_news_pre_warmer():
 
         await _step("analytics_events sweep", _analytics)
 
+        # And search_pick_daily (migration 179) — the anonymous counters behind the
+        # "Trending searches" chips. Only the last 7 days are ever read; 14 are kept so a
+        # late reader or an investigation still has the window. One DELETE, no cadence of
+        # its own.
+        async def _search_picks():
+            from app.services.search_trending_service import get_search_trending_service
+
+            await asyncio.to_thread(get_search_trending_service().sweep_expired)
+
+        await _step("search_pick_daily sweep", _search_picks)
+
         # And notification_events + push_send_log (migrations 119 / 109) — the inbox,
         # dedup ledger and cap ledger. This is the one whose growth is invisible until
         # the inbox query slows down.

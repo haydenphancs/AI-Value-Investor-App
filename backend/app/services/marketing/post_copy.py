@@ -27,9 +27,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from app.services.marketing.compliance import BARE_DOMAIN_RE, Violation
-# The cased-gTLD form ("Learn.Money") — X autolinks TLDs case-insensitively.
-from app.services.marketing.compliance import _CASED_GTLD_RE, _is_abbreviation_run
+from app.services.marketing.compliance import Violation
+# Every domain shape the link validator reads — a lower-case bare domain, the cased-gTLD form
+# ("Learn.Money") and a cased glued abbreviation ("U.S.Markets"): X autolinks TLDs
+# case-insensitively, and the counter must agree with the validator on what a link is.
+from app.services.marketing.compliance import DOMAIN_SHAPE_RES, _is_abbreviation_run
 
 PUBLISHER = "Caydex"
 LINK_BASE_URL = "https://caydexinvest.com/go"
@@ -58,6 +60,8 @@ _BODY_CAPS: Dict[str, int] = {
     "facebook": 900, "linkedin": 1200,
 }
 _COMPUTED_BUDGET = frozenset({"x", "threads", "bluesky"})
+#: Public name for the prompt side (`writer_prompts.caption_target`).
+COMPUTED_BUDGET_FIELDS = _COMPUTED_BUDGET
 
 #: Characters an outlet's API REFUSES in a field (a deterministic 400 no retry can fix), checked
 #: on the composed text — which is built from `clean()`ed bodies, so NFKC has already turned a
@@ -186,37 +190,24 @@ def x_weighted_length(text: str) -> int:
     return total
 
 
-#: The last label of a glued-abbreviation typo that X can NOT autolink: common English words
-#: checked against the IANA root zone (tlds-alpha-by-domain, version 2026072500) — none is a TLD.
-#: Round 3 (W3VAC-10, W3-SWW-3). Deliberately narrower than the link validator's exemption
-#: (`compliance._is_abbreviation_run`, which trusts its own short TLD list): "U.S.markets",
-#: "e.g.bank", "i.e.one", "e.g.you" and "vs.best" end in real gTLDs that X DOES link, so they keep
-#: the URL weight. Over-counting costs a `too_long` the repair round can fix; under-counting would
-#: let X refuse an approved post at publish time.
-_NON_TLD_TAILS = frozenset("""
-the and but for nor yet not its our their this that these those with from into onto than then
-when what why who whom whose which while where was were are has had have will can may all any
-some each such same own other also just only even still very well yes via per etc of or on an
-he she his her him we they them let dollar dollars economy economies stock stocks shares share
-price prices cost costs sales fee fees rate rates bonds oil index dow firms firm companies banks
-consumers consumer government federal treasury treasuries inflation interest debt job wages wage
-housing home rents taxes growth gdp exports imports trades retailers retail
-""".split())
-
-
 def _plain_typo(span: str) -> bool:
-    """A glued abbreviation ("U.S.dollar", "e.g.the", "vs.the") that the link validator lets
-    through AND X does not autolink: counted character by character, as X counts it."""
-    low = span.lower()
-    return _is_abbreviation_run(low) and low.rsplit(".", 1)[-1] in _NON_TLD_TAILS
+    """A glued abbreviation ("U.S.dollar", "e.g.the", "vs.the", "U.S.Economy") that X does not
+    autolink: counted character by character, as X counts it. Round 3 (W3VAC-10, W3-SWW-3) kept
+    its own list of tails known not to be TLDs here; round 4 (residual d) moved that list to
+    `tlds.NON_TLD_TAILS` and made the link validator's exemption (`_is_abbreviation_run`) use
+    it too, so the two agree: "U.S.markets", "U.S.Markets", "e.g.bank", "i.e.one", "e.g.you" and
+    "vs.best" end in real gTLDs X DOES link — the validator rejects them and this counter weighs
+    them as URLs. Over-counting costs a `too_long` the repair round can fix; under-counting would
+    let X refuse an approved post at publish time."""
+    return _is_abbreviation_run(span.lower())
 
 
 def _weigh_with_bare_domains(token: str) -> int:
     """X autolinks a bare domain ("investor.gov") too and counts it as 23 whatever its length.
-    The validators reject a domain in a body (`link`) EXCEPT a glued abbreviation
-    (`compliance._is_abbreviation_run`: "U.S.dollar", "e.g.the"); the ones X cannot link either
+    The validators reject a domain in a body (`link`) EXCEPT a glued abbreviation whose tail is
+    known not to be a TLD (`compliance._is_abbreviation_run`: "U.S.dollar", "e.g.the"); those
     are counted as text (`_plain_typo`), every other domain-shaped span as a URL."""
-    spans = [m.span() for rx in (BARE_DOMAIN_RE, _CASED_GTLD_RE) for m in rx.finditer(token)
+    spans = [m.span() for rx in DOMAIN_SHAPE_RES for m in rx.finditer(token)
              if not _plain_typo(m.group(0))]
     if not spans:
         return sum(_x_char_weight(c) for c in token)

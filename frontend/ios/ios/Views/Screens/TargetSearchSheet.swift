@@ -61,6 +61,7 @@ struct TargetSearchSheet: View {
             .onChange(of: query) { _, newValue in
                 scheduleSearch(for: newValue)
             }
+            .task { await SearchTrendingStore.shared.prefetch() }
         }
     }
 
@@ -71,7 +72,21 @@ struct TargetSearchSheet: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.isEmpty {
-            emptyState
+            // Nothing typed → trending COMPANIES (stocks only: this picker feeds the company
+            // research pipeline). A chip picks the target like a result would, but is not
+            // recorded as a search pick (the list would feed itself).
+            ScrollView {
+                SearchTrendingChipsSection(
+                    sections: SearchTrendingStore.shared.sections(for: .stocksOnly),
+                    onItemTapped: { item in
+                        onSelect(item.stockSearchResult)
+                        dismiss()
+                    }
+                )
+            }
+            .scrollDismissesKeyboard(.interactively)
+            // Beats the body's trailing Spacer for the free height (it split it in half).
+            .layoutPriority(1)
         } else if isSearching && results.isEmpty {
             searchingState
         } else if let error {
@@ -81,22 +96,6 @@ struct TargetSearchSheet: View {
         } else {
             resultsList
         }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: AppSpacing.sm) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 28))
-                .foregroundColor(AppColors.textMuted)
-            Text("Search any U.S.-listed company")
-                .font(AppTypography.bodySmall)
-                .foregroundColor(AppColors.textSecondary)
-            Text("Try a ticker (AAPL) or a name (Microsoft)")
-                .font(AppTypography.caption)
-                .foregroundColor(AppColors.textMuted)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, AppSpacing.xxxl)
     }
 
     private var searchingState: some View {
@@ -145,6 +144,8 @@ struct TargetSearchSheet: View {
             LazyVStack(spacing: 0) {
                 ForEach(results) { result in
                     Button {
+                        // A real search pick — recorded only for a result row, never a chip.
+                        SearchTrendingStore.shared.recordPick(symbol: result.ticker, type: result.type)
                         onSelect(result)
                         dismiss()
                     } label: {

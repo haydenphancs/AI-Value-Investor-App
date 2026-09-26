@@ -31,6 +31,7 @@ final class SearchViewModel: ObservableObject {
     // MARK: - Dependencies
     private let stockRepository: StockRepository
     private let history: SearchHistoryStore
+    private let trending: SearchTrendingStore
 
     private static let log = Logger(subsystem: "com.phan.caydex", category: "search")
 
@@ -39,9 +40,14 @@ final class SearchViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
-    init(stockRepository: StockRepository? = nil, history: SearchHistoryStore? = nil) {
+    init(
+        stockRepository: StockRepository? = nil,
+        history: SearchHistoryStore? = nil,
+        trending: SearchTrendingStore? = nil
+    ) {
         self.stockRepository = stockRepository ?? .shared
         self.history = history ?? .shared
+        self.trending = trending ?? .shared
 
         // Starter questions shown as chips in the empty state → tapped, they seed a Cay AI
         // conversation (handled in SearchView), turning the empty search into a lightweight
@@ -139,7 +145,31 @@ final class SearchViewModel: ObservableObject {
     func selectSearchResult(_ item: SearchResultItem) {
         guard let ticker = item.ticker, !ticker.isEmpty else { return }
         history.record(ticker: ticker, name: item.name, rawType: item.rawType)
+        // A real search pick feeds "Trending searches" (anonymously, once a week per
+        // ticker). Only HERE — never from a chip or a history row, which would feed the
+        // list its own output.
+        trending.recordPick(symbol: ticker, type: item.rawType)
         selectedSearchSelection = SearchSelection(symbol: ticker, type: item.rawType)
+    }
+
+    // MARK: - Trending chips
+
+    /// The chips for the empty state. Read inside `SearchView.body`, so the `@Observable`
+    /// store redraws the screen when its fetch lands.
+    var trendingSections: [SearchTrendingSection] {
+        trending.sections(for: .all)
+    }
+
+    func prefetchTrending() async {
+        await trending.prefetch()
+    }
+
+    /// Open a trending chip. Recorded in the user's OWN Recent list (local, like any ticker
+    /// they open) — but NOT as a search pick: a chip tap counting towards the chips is the
+    /// feedback loop the list must not have.
+    func openTrendingItem(_ item: SearchTrendingItem) {
+        history.record(ticker: item.symbol, name: item.name, rawType: item.type)
+        selectedSearchSelection = item.selection
     }
 
     /// Re-open a ticker straight from the history list.

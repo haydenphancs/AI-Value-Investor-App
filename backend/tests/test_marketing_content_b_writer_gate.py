@@ -598,6 +598,11 @@ def _emitted_codes() -> set:
     codes |= set(re.findall(r'\(_[A-Z_]+_RE, "([a-z_]+)"\)', src))    # (_BANNED_RE, "banned_phrase")
     codes |= {f"class_b_{code}" for code, _p, _s in c.CLASS_B_TIER1}
     codes |= {f"class_b_{code}" for code, _p in c._COMPANY_ROWS}
+    # The semantic judge's rubric codes (judge.py builds them from RULE_CODES at runtime, so no
+    # source regex above can see them) — every one lands in a round's violations in `enforce`.
+    from app.services.marketing import judge
+
+    codes |= set(judge.EMITTED_CODES)
     codes.discard("code")
     return codes
 
@@ -608,6 +613,7 @@ def test_every_violation_code_the_scanners_emit_has_a_repair_hint():
     assert {"person_named", "ungrounded_number", "number_context", "class_b_valuation",
             "class_b_forward", "return_figure", "promissory", "schema", "not_json",
             "over_platform_limit", "grounding_error", "identity_leak", "brand_mention",
-            "misattribution"} <= codes, sorted(codes)
+            "misattribution", "judge_directive", "judge_risk_softening",
+            "judge_unclassified"} <= codes, sorted(codes)
     missing = sorted(code for code in codes if code not in wp.REPAIR_HINTS)
     assert missing == [], missing

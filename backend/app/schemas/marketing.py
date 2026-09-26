@@ -12,6 +12,8 @@ strings — the same conventions as every other schema in this folder.
 
 from __future__ import annotations
 
+import json
+import math
 from datetime import date
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
@@ -125,6 +127,58 @@ SCRIPT_REJECT_REASONS = ("content", "writer_unavailable", "empty_pool", "source_
 
 _SHA256_HEX_LEN = 64
 
+#: The most a worker may put in one metadata object (a run PATCH or an asset registration).
+#: The least-trusted process in the engine writes these JSONB columns; unbounded, it could fill
+#: the database. 64 KiB carries a 400-word timing table with room to spare.
+METADATA_MAX_BYTES = 64 * 1024
+#: Word-timing table carried by an `audio` asset (Phase 3, `metadata.words`).
+AUDIO_WORDS_MAX = 400
+AUDIO_WORD_MAX_CHARS = 48
+#: Slack between the last word's end and the audio's measured duration (encoder padding).
+AUDIO_TAIL_SLACK_SECONDS = 0.5
+
+
+def capped_metadata(v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if v is None:
+        return v
+    try:
+        size = len(json.dumps(v, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"metadata is not plain JSON ({type(e).__name__})") from None
+    if size > METADATA_MAX_BYTES:
+        raise ValueError(f"metadata is {size} bytes (max {METADATA_MAX_BYTES})")
+    return v
+
+
+def validate_audio_words(words: Any, duration_seconds: Optional[float]) -> None:
+    """`metadata.words` of an audio asset: [{"w": text, "s": start, "e": end}, …] in seconds,
+    each word non-empty, 0 ≤ s < e, starts non-decreasing and never before the previous end,
+    and the last end within the audio's duration (+ slack). ValueError names the first fault."""
+    if not isinstance(words, list) or not words:
+        raise ValueError("metadata.words must be a non-empty list")
+    if len(words) > AUDIO_WORDS_MAX:
+        raise ValueError(f"metadata.words has {len(words)} entries (max {AUDIO_WORDS_MAX})")
+    prev_end = 0.0
+    for i, w in enumerate(words):
+        if not isinstance(w, dict) or set(w) - {"w", "s", "e", "line"}:
+            raise ValueError(f"metadata.words[{i}] must be {{w, s, e[, line]}}")
+        text, start, end = w.get("w"), w.get("s"), w.get("e")
+        if not isinstance(text, str) or not text.strip() or len(text) > AUDIO_WORD_MAX_CHARS:
+            raise ValueError(f"metadata.words[{i}].w must be 1-{AUDIO_WORD_MAX_CHARS} characters")
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                   for x in (start, end)):
+            raise ValueError(f"metadata.words[{i}] needs finite numeric s and e")
+        if not 0 <= start < end:
+            raise ValueError(f"metadata.words[{i}]: need 0 <= s < e, got s={start} e={end}")
+        if start < prev_end - 1e-6:
+            raise ValueError(f"metadata.words[{i}] starts at {start} before the previous end {prev_end}")
+        line = w.get("line")
+        if line is not None and (not isinstance(line, int) or isinstance(line, bool) or line < 0):
+            raise ValueError(f"metadata.words[{i}].line must be a non-negative int")
+        prev_end = end
+    if duration_seconds is not None and prev_end > duration_seconds + AUDIO_TAIL_SLACK_SECONDS:
+        raise ValueError(f"the last word ends at {prev_end}s, after the audio ({duration_seconds}s)")
+
 
 class _Row(BaseModel):
     """A row echoed back to the worker. Unknown columns are ignored so a later migration
@@ -192,7 +246,10 @@ class RunClaimRequest(BaseModel):
     # A per-process nonce the worker mints once. If the response to its own successful claim
     # is lost (timeout after the INSERT committed), the retry finds a fresh `in_progress` row
     # carrying its own nonce and is told CLAIMED again instead of "someone else has it".
-    claim_nonce: Optional[str] = Field(default=None, min_length=8, max_length=64)
+    # REQUIRED since the caller-claim fence (2026-09-26): every later worker call presents
+    # `X-Marketing-Claim: <attempts>.<claim_nonce>`, and a claim with no nonce could never be
+    # presented. Lower-case hex, the shape `uuid.uuid4().hex` mints.
+    claim_nonce: str = Field(..., pattern=r"^[0-9a-f]{16,64}$")
     # True = resume an existing resumable run only; never create one. Used by ticks outside
     # the ET window to finish a run killed after the last in-window tick.
     resume_only: bool = False
@@ -227,6 +284,11 @@ class RunUpdateRequest(BaseModel):
     timings: Optional[Dict[str, float]] = None
     metadata: Optional[Dict[str, Any]] = None
     finished: bool = False
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        return capped_metadata(v)
 
     @field_validator("stage")
     @classmethod
@@ -283,11 +345,20 @@ class AssetRegisterRequest(BaseModel):
             raise ValueError("sha256 must be 64 lowercase hex characters")
         return v
 
+    @field_validator("metadata")
+    @classmethod
+    def _metadata(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        return capped_metadata(v) or {}
+
     @model_validator(mode="after")
     def _kind_matches_ext(self) -> "AssetRegisterRequest":
         allowed = ASSET_KIND_EXTENSIONS.get(self.kind, ())
         if self.ext not in allowed:
             raise ValueError(f"a {self.kind!r} asset must be one of {allowed}, not {self.ext!r}")
+        if "words" in self.metadata:
+            if self.kind != "audio":
+                raise ValueError("only an audio asset carries metadata.words")
+            validate_audio_words(self.metadata["words"], self.duration_seconds)
         return self
 
 
@@ -304,6 +375,21 @@ class AssetRegisterResponse(BaseModel):
     asset: MarketingAsset
     # None when the asset was already `ready` (a resumed run re-registering the same bytes).
     upload: Optional[SignedUpload] = None
+
+
+class MarketingAssetView(MarketingAsset):
+    """A `ready` asset as the worker reads it back (`GET /runs/{id}/assets`): the row plus its
+    public URL, so a later stage re-derives media from ready rows (rules marketing.md §2)
+    instead of trusting its own memory of an earlier stage."""
+    public_url: Optional[str] = None
+
+
+class RunAssetsResponse(BaseModel):
+    #: The canonical narration of the run (`metadata.voice_asset_id`, written in the SAME
+    #: PATCH as `stage=voiced`), verified by the server: kind `audio`, `ready`, this run.
+    #: None when the run has none (or the pointer does not verify — logged).
+    voice_asset_id: Optional[str] = None
+    assets: List[MarketingAssetView] = Field(default_factory=list)
 
 
 class AssetCompleteResponse(BaseModel):

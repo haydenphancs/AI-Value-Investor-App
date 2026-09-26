@@ -111,7 +111,7 @@ struct ValuationInfoSheet: View {
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("It is a model estimate, not a price target and not a recommendation. Banks, insurers, REITs, utilities and companies whose data doesn't fit the model get no estimate. Tap the row for its assumptions.")
+            Text("It is a model estimate, not a price target and not a recommendation. Banks, insurers, REITs, utilities and companies whose data doesn't fit the model get no estimate. Tap the estimate for its assumptions.")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

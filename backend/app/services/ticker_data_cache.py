@@ -51,6 +51,8 @@ from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.schemas.growth import GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
+from app.schemas.dcf_fair_value import DcfFairValueResponse
+from app.services.dcf_report_gate import report_dcf_source_matches
 from app.services.sector_aggregates_service import SectorAggregates
 from app.services.industry_tam_service import IndustryTAM
 
@@ -91,6 +93,10 @@ _PYDANTIC_FIELDS: Dict[str, Any] = {
     "snap_valuation": SnapshotItemResponse,
     "growth_chart": GrowthResponse,
     "profit_power": ProfitPowerResponse,
+    # The SAME slip a third time, on launch day of the Caydex Fair Value Estimate
+    # (2026-09-26, Sentry `/api/v1/research/generate`): the field was annotated `Any`, which
+    # the guard cannot see, so it was never registered and every write was skipped.
+    "caydex_dcf": DcfFairValueResponse,
 }
 
 # Flat dataclass fields → (class, [datetime field names needing ISO round-trip]).
@@ -269,9 +275,26 @@ async def get_cached_collection(ticker: str) -> Optional[Any]:
     from app.services.agents.ticker_report_data_collector import CollectedTickerData
     field_names = {f.name for f in dataclasses.fields(CollectedTickerData)}
     out = await asyncio.to_thread(_deserialize, data, field_names)
+    if out is not None and not _built_under_current_dcf(out):
+        # A collection carries the DCF it was built with — the estimate, the fair value and
+        # valuation derived from it, and the `dcf_source` stamp on the Wall Street partial.
+        # Served across a DCF_ENABLED flip, it would build a report under the OTHER setting
+        # (an estimate the kill switch just withdrew, or FMP's DCF beside the Caydex tab)
+        # for up to a day. Same rule as the report caches: a mismatch is a miss.
+        logger.info("ticker_data_cache DCF-SOURCE MISMATCH for %s — treating as a miss", ticker)
+        return None
     if out is not None:
         logger.info("ticker_data_cache HIT for %s", ticker)
     return out
+
+
+def _built_under_current_dcf(out: Any) -> bool:
+    """Whether a cached collection was built under the current DCF setting. A row that
+    predates the stamp was built with FMP's DCF."""
+    partial = getattr(out, "wall_street_consensus_partial", None)
+    return report_dcf_source_matches(
+        {"wall_street_consensus": partial if isinstance(partial, dict) else {}}
+    )
 
 
 async def is_cached_collection_fresh(ticker: str) -> bool:

@@ -23,22 +23,26 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 from app.services.chat_security import neutralize_fences
 from app.services.marketing.compliance import Violation
 from app.services.marketing.content_pool import JOURNEY, MONEY_MOVES, ContentItem
-from app.services.marketing.post_copy import CAPTION_FIELDS, body_budget
+from app.services.marketing.post_copy import CAPTION_FIELDS, COMPUTED_BUDGET_FIELDS, body_budget
 from app.services.marketing.selection import Template
 
 #: Bump when the prompt or schema changes meaningfully; persisted with every accepted package.
-PROMPT_VERSION = "2026-09-24.5"
+PROMPT_VERSION = "2026-09-26.8"
 
 # ── editorial limits ──
 # ENFORCED ceilings (writer_service) sit above what the prompt ASKS for (`_ASK_*`): a model
 # asked for 30 words writes 33, and a one-word overshoot on a carousel slide must not throw
-# away an otherwise clean package. The script's 150 words is the exception that is enforced
-# as asked plus a little: it is what fits a ≤75 s video (MARKETING_MAX_VIDEO_SECONDS).
+# away an otherwise clean package. The script ceiling (165 words) is what fits a ≤75 s video at
+# ~2.5 words/s (MARKETING_MAX_VIDEO_SECONDS; test_marketing_writer.py pins the ratio). Asked for
+# "90 to 140 words" the model wrote up to 179 (2026-09-24: all three rejected generations were
+# over 165), so the script is asked for STRUCTURALLY instead — a line count and a per-line cap,
+# which a model obeys far better than a total — and its obeyed maximum (9 × 16 = 144) sits under
+# the ceiling by construction.
 HOOK_MAX_WORDS = 14
 SCRIPT_MIN_LINES, SCRIPT_MAX_LINES = 4, 16
 SCRIPT_MIN_WORDS, SCRIPT_MAX_WORDS = 60, 165
@@ -49,8 +53,14 @@ SLIDES_MIN, SLIDES_MAX = 5, 8
 SLIDE_TITLE_MAX_WORDS, SLIDE_BODY_MAX_WORDS = 10, 40
 
 _ASK_HOOK_WORDS = 12
-_ASK_SCRIPT_LINES = (6, 12)
-_ASK_SCRIPT_WORDS = (90, 140)
+_ASK_SCRIPT_LINES = (7, 9)
+#: Per-line words asked for: a floor too, since the first structural ask (6-9 lines, ≤16
+#: words) overcorrected — 4 of 34 drafts came back at 49-59 words, under SCRIPT_MIN_WORDS (60),
+#: with short lines. The obeyed floor (7 × 10 = 70) and ceiling (9 × 16 = 144) both sit inside
+#: the enforced 60-165.
+_ASK_SCRIPT_LINE_WORDS_MIN = 10
+_ASK_SCRIPT_LINE_WORDS = 16
+_ASK_SCRIPT_TOTAL_WORDS = 110
 _ASK_CARD = (6, 20)
 _ASK_SLIDE = (8, 30)
 
@@ -124,7 +134,13 @@ SYSTEM_BODY = (
     "sell, hold, own, pick, choose or start with anything - no company, stock, fund, ETF or "
     "index - and never tie a trade to prices or moods (not \"when prices are low, you can "
     "buy\", \"his fear presents a chance to buy\" or \"you might choose to sell\" when prices "
-    "are high; the lesson is that nobody is forced to trade); never call any of them "
+    "are high; the lesson is that nobody is forced to trade), and never tell the reader to "
+    "trade, trim, prune, sell in stages or add to winners - not as \"consider trimming\", "
+    "\"water your winners\" or \"consider trading when his moods…\" (saying what a broken "
+    "business story means is fine); never call a fund, an ETF or any kind of investment calm, "
+    "safe, steady, stable or worry-free, a calm core or a calm way to invest, in your own words "
+    "- saying what many people use it for is fine (\"many people use a broad ETF as the core "
+    "of their plan\"); never call any of them "
     "the right choice, the smart move or the best first step for anyone, or say you can't "
     "go wrong with it. Never hold up what investors do as a model to copy (\"smart investors "
     "simply buy index funds\"); describing what people do is fine (\"many beginners start "
@@ -142,8 +158,12 @@ SYSTEM_BODY = (
     "5. Write every number in digits (47, not forty-seven) and use only numbers the fact "
     "sheet states, in the same context it states them - keep the fact sheet's own words for "
     "what a number measures (\"paid for\", \"founded\", \"subscribers\"). Put dated figures "
-    "in the past tense.\n"
-    "6. No links, web addresses, @handles, hashtags, markdown or HTML. No emoji in the hook, "
+    "in the past tense. Keep numbers and years OUT of titles and headings - a title has no room "
+    "for those words; put the number in the body beside them.\n"
+    "6. No links, web addresses, @handles, hashtags, markdown or HTML, no curly braces { } and "
+    "no backslashes. Write US, UK and EU without dots (\"US markets\"; a dotted \"U.S.\" is "
+    "refused), and always put a space after an abbreviation's final dot (\"e.g. banks\", "
+    "never \"e.g.banks\" - that reads as a web address). No emoji in the hook, "
     "the script, the cards or the slides. The YouTube title and description may not contain "
     "< or > (write it in words, or use an arrow); the YouTube title is one line.\n"
     "7. Never mention yourself, any app, any brand of your own, or any app store as a place "
@@ -181,6 +201,15 @@ SYSTEM_BODY = (
     "they are the historical example that makes the lesson concrete. Describe what the "
     "business did and why it worked or failed; never judge the stock. Name no other company, "
     "not even as an example - an investing lesson names none.\n\n"
+    "PHRASING the checker refuses even when it is honest (write around it): business growth "
+    "as a present-tense habit (\"revenue consistently climbs\", \"profits always grow\") - "
+    "state it in the past tense with its span instead (\"revenue grew year after year\"); and "
+    "any comparison of how safe one kind of investment is against another (\"safer options "
+    "than stocks\") - describe the trade-off instead (\"bonds usually swing less, and usually "
+    "grow less\"); and the words \"no risk\", \"zero risk\" or \"no downside\" anywhere, "
+    "even denied or in a warning (\"rewards with no risk are impossible\") - say it the "
+    "other way round (\"higher rewards come with higher risk\", \"be wary of anyone who "
+    "promises big rewards with little risk\").\n\n"
     "STYLE: concrete, curious, calm. Short sentences. No hype, no hashtags, no clickbait. "
     "Write each platform's caption freshly - do not paste one caption into another. "
     "Explain the business idea or the investing principle; the company is only the example."
@@ -188,19 +217,35 @@ SYSTEM_BODY = (
 
 
 #: Models count words far better than characters, and overshoot a character limit they are
-#: given. So the prompt asks for ~80% of the enforced budget, expressed in words.
-_BUDGET_TARGET = 0.8
-_CHARS_PER_WORD = 6.2
+#: given, so the prompt asks for a fraction of the enforced budget, expressed in words. Measured
+#: 2026-09-24 on 39 real X bodies: 6.47 characters per word, 22/39 over the asked word count and
+#: 4/39 over the ENFORCED budget (Threads, Bluesky, Facebook and LinkedIn overshot too). So the
+#: ratio is tighter than the 0.8 it was, tighter still on the long captions (where the model
+#: overshoots most), and the characters-per-word figure is the measured one plus margin.
+_BUDGET_TARGET_COMPUTED = 0.75     # x, threads, bluesky: the budget is the exact remainder
+_BUDGET_TARGET_LONG = 0.7          # everything with a fixed body cap
+_CHARS_PER_WORD = 6.6
+#: Captions whose platform counts an emoji twice (X's weighted length) or whose budget is small
+#: enough that an emoji is a real share of it.
+_NO_EMOJI_CAPTIONS = frozenset({"x", "bluesky"})
+
+
+def caption_target(field_name: str, limit: int) -> Tuple[int, int]:
+    """(words, characters) the prompt ASKS for, given the enforced body budget `limit`."""
+    ratio = _BUDGET_TARGET_COMPUTED if field_name in COMPUTED_BUDGET_FIELDS else _BUDGET_TARGET_LONG
+    target = int(limit * ratio)
+    return max(6, int(target / _CHARS_PER_WORD)), target
 
 
 def _field_budgets(item: ContentItem, run_date: date, allow_x_url: bool) -> List[str]:
     lines = []
     for f in CAPTION_FIELDS:
         limit = body_budget(f, item.category, run_date, allow_x_url=allow_x_url)
-        target = int(limit * _BUDGET_TARGET)
-        words = max(6, int(target / _CHARS_PER_WORD))
+        words, target = caption_target(f, limit)
         rule = ("; no < or > characters, one line" if f == "youtube_title"
                 else "; no < or > characters" if f == "youtube_description" else "")
+        if f in _NO_EMOJI_CAPTIONS:
+            rule += "; no emoji - each counts double"
         lines.append(f"  - {f}: about {words} words (never more than {target} characters{rule})")
     return lines
 
@@ -235,9 +280,9 @@ def _output_spec(item: ContentItem, run_date: date, allow_x_url: bool) -> str:
     return "\n".join([
         "OUTPUT (JSON matching the schema):",
         f"- hook: one line, at most {_ASK_HOOK_WORDS} words.",
-        f"- video_script: {_ASK_SCRIPT_LINES[0]} to {_ASK_SCRIPT_LINES[1]} lines, one sentence "
-        f"per line, {_ASK_SCRIPT_WORDS[0]} to {_ASK_SCRIPT_WORDS[1]} words in total, written to "
-        "be spoken aloud.",
+        f"- video_script: {_ASK_SCRIPT_LINES[0]} to {_ASK_SCRIPT_LINES[1]} lines, each ONE "
+        f"sentence of {_ASK_SCRIPT_LINE_WORDS_MIN} to {_ASK_SCRIPT_LINE_WORDS} words (about "
+        f"{_ASK_SCRIPT_TOTAL_WORDS} words in total), written to be spoken aloud.",
         f"- cards: {CARDS_MIN} or {CARDS_MAX}; title at most {_ASK_CARD[0]} words, body at most "
         f"{_ASK_CARD[1]} words.",
         f"- carousel_slides: {SLIDES_MIN} to {SLIDES_MAX}; title at most {_ASK_SLIDE[0]} words, "
@@ -268,7 +313,11 @@ def draft_prompt(item: ContentItem, template: Template, run_date: date, *,
 REPAIR_HINTS = {
     "ungrounded_entity": "that name is not in the fact sheet - remove it or use an everyday word; "
                          "name a company only if the fact sheet names it",
-    "ungrounded_acronym": "that abbreviation is not in the fact sheet - spell it out or remove it",
+    # 2026-09-26: every real `ungrounded_acronym` in three preview runs was a dotted "U.S.".
+    # Grounding keeps refusing the dotted form ON PURPOSE: compliance reads "U.S." as a sentence
+    # end, so it glued a frame onto the next sentence and cut every period-bounded row.
+    "ungrounded_acronym": "that abbreviation is not in the fact sheet - spell it out or remove it "
+                          "(write US, UK or EU without dots)",
     "ungrounded_name_number": "that name is not in the fact sheet - remove it",
     "ungrounded_number": "that number or amount is not in the fact sheet - remove it (this "
                          "includes 'billions', 'trillion-dollar' and '-fold')",
@@ -346,16 +395,19 @@ REPAIR_HINTS = {
                    "listener, subscriber, viewer, member, student or expert saying anything, no "
                    "'experts agree' - or say how many people use, like or were changed by "
                    "something ('this lesson changed how thousands invest')",
-    "link": "no links or web addresses",
+    "link": "no links or web addresses - write US, UK and EU without dots (\"US markets\") and "
+            "put a space after any other abbreviation's dot (\"e.g. banks\"): glued together it "
+            "reads as a web address",
     "handle": "no @handles",
-    "markup": "plain text only - no markdown, HTML or backticks",
+    "markup": "plain text only - no markdown, HTML, backticks, curly braces { } or backslashes",
     "hashtag": "no hashtags - they are added separately",
     "cashtag": "no $TICKER symbols",
     "emoji": "no emoji in the hook, script, cards or slides",
     "non_latin": "use plain English characters - no accented or non-Latin letters unless the "
                  "fact sheet spells the word that way",
     "non_ascii_digit": "use the digits 0-9 only",
-    "too_long": "shorten it to the stated limit",
+    "too_long": "shorten it by at least the amount stated - the detail gives the hard limit; "
+                "aim for the shorter length the OUTPUT section asks for",
     # The composed post (`post_copy.check_composed`) and the grounding backstop: a repair prompt
     # must say what to DO for every code a round can carry, not "fix it".
     "over_platform_limit": "shorten that caption - with the hashtags, link and disclaimer "
@@ -365,13 +417,36 @@ REPAIR_HINTS = {
                                "no < or >, and a one-line title) - rephrase in plain words",
     "grounding_error": "rewrite that field in plain words, using only facts from the fact sheet",
     "count": "use the stated number of items",
-    "length": "keep the script within the stated word range",
+    # Direction-neutral on purpose: the detail says which way. The old "cut (or add) … drop a
+    # whole line" read as CUT to a model holding an under-length script, and the 2026-09-26
+    # preview's Amazon repair came back byte-identical at 58 words (minimum 60).
+    "length": "change the script's word count by at least the amount the detail states, in whole "
+              "lines: if it says cut, drop a line; if it says add, write one more one-sentence "
+              "line with a new point from the fact sheet",
     "empty": "fill it in with words - no punctuation-only lines, titles or bodies",
     "schema": "follow the JSON schema exactly",
     "blocked": "write everything in your own words; do not copy source sentences verbatim",
     "truncated": "the answer was cut off - keep every field shorter",
     "not_json": "return one JSON object only",
     "empty_response": "return one JSON object only",
+    # The semantic judge's rubric (judge.RULE_CODES + judge.UNCLASSIFIED); the detail carries the
+    # quoted words and the reviewer's reason.
+    "judge_person": "a reviewer found a real person in it (a name in a heading, a role, an "
+                    "epithet, he/she) - rewrite around the idea or the company, naming nobody",
+    "judge_company_claim": "a reviewer found a verdict, price, worth or forecast about a named "
+                           "company - keep only what the business did and when",
+    "judge_directive": "a reviewer found an instruction to trade (buy, sell, hold, trim, prune, "
+                       "add to winners, or trade when prices or moods move) - describe what "
+                       "people do or why a plan helps instead, and tell nobody to trade",
+    "judge_return_claim": "a reviewer found a return, promise, guarantee or forecast - remove it; "
+                          "a comparison of habits or a labelled myth is fine",
+    "judge_risk_softening": "a reviewer found a fund, ETF or investment called calm, safe, steady "
+                            "or worry-free in your own words - drop the adjective; saying what "
+                            "many people use it for is fine",
+    "judge_disclaimer": "a reviewer found text about advice, disclaimers, fine print or AI - "
+                        "remove it; the publisher adds its own notice",
+    "judge_unclassified": "a reviewer flagged this line as breaking a public-post rule - rewrite "
+                          "it plainly, with no person, verdict, trade instruction or promise",
 }
 
 

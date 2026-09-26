@@ -138,10 +138,18 @@ class FakeClient:
         return [c["prompt"] for c in self.calls]
 
 
+#: These tests pin the WRITER's own mechanics (prompts, parsing, validation, the repair, the
+#: lease hook, token accounting), which do not change with the judge — so they run with the
+#: judge OFF, stated explicitly (`generate_package` has no default). The judge's integration —
+#: enforce/shadow, before_call before each judge call, candidate selection, fail-closed judge
+#: errors, outlet drops — is pinned in tests/test_marketing_judge.py.
+JUDGE_OFF = "off"
+
+
 async def _run(client: FakeClient, *, generation_id: str = "gen-0001", allow_x_url: bool = False):
     return await ws.generate_package(
         _item(), TEMPLATE, RUN_DATE, generation_id=generation_id, client=client,
-        allow_x_url=allow_x_url,
+        allow_x_url=allow_x_url, judge_mode=JUDGE_OFF,
     )
 
 
@@ -1009,7 +1017,7 @@ async def test_whatever_before_call_raises_still_stops_the_generation_and_carrie
             raise _AbortSignal("lease lost")
 
     with pytest.raises(_AbortSignal) as info:
-        await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-abort",
+        await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-abort", judge_mode=JUDGE_OFF,
                                   client=client, before_call=before_call)
     assert len(client.calls) == 1, "a generation told to stop must not spend another call"
     assert getattr(info.value, "marketing_tokens_used") == 70
@@ -1034,7 +1042,7 @@ async def test_a_lease_that_cannot_cover_the_repair_keeps_the_publishable_draft(
     acceptable = _with(_clean_package(), x=BAD_CAPTION)   # publishable, but a repair is due
     client = FakeClient(_result(acceptable, tokens=70))
     before_call, seen = _answers(True, False)
-    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-skip",
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-skip", judge_mode=JUDGE_OFF,
                                     client=client, before_call=before_call)
     assert seen == [True, False]
     assert len(client.calls) == 1, "the repair call ran although the lease could not cover it"
@@ -1050,7 +1058,7 @@ async def test_a_lease_that_cannot_cover_the_call_still_calls_when_nothing_is_pu
     bad["hook"] = BAD_HOOK
     client = FakeClient(_result(bad), _result(_clean_package()))
     before_call, seen = _answers(True, False)
-    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-call",
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-call", judge_mode=JUDGE_OFF,
                                     client=client, before_call=before_call)
     assert seen == [True, False] and len(client.calls) == 2
     assert res.status == "accepted"
@@ -1062,7 +1070,7 @@ async def test_a_before_call_answering_none_or_true_proceeds(verdict):
     acceptable = _with(_clean_package(), x=BAD_CAPTION)
     client = FakeClient(_result(acceptable), _result(_clean_package()))
     before_call, seen = _answers(verdict, verdict)
-    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-go",
+    res = await ws.generate_package(_item(), TEMPLATE, RUN_DATE, generation_id="gen-go", judge_mode=JUDGE_OFF,
                                     client=client, before_call=before_call)
     assert len(client.calls) == 2 and res.status == "accepted"
 

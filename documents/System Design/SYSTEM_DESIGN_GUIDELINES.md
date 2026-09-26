@@ -886,6 +886,13 @@ tier: a restart costs one call, reloading ~27k rows over PostgREST is slower tha
 and persisting a bulk FMP symbol list is the redistribution surface migration 157 avoids.
 Parsing it stalls the single worker ~50 ms per refresh (measured 2026-09-25).
 
+**Tier 1 with no Tier 2, on purpose: the search-screen chips.** `search_trending_service`
+serves `GET /search/trending` ("Trending searches" / "Most added" / the curated "Popular"
+fallback) from an in-process cache — 1 h, 60 s for a degraded answer, `_inflight` for
+concurrent first callers, and each list's last good copy for up to a day if its RPC fails.
+Its upstream IS Supabase (two indexed aggregate RPCs from migration 179), so a Supabase
+tier would cache Supabase in itself. The lists are impersonal — one answer for every caller.
+
 **What may go into Tier 2 — the rule the diagram cannot show.** Tier 2 holds only
 sections that **cannot contain a live price**. A live price belongs in Tier 1 or in no
 cache at all. This is not a style preference: the ETF, index and commodity services were
@@ -1253,6 +1260,7 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
 | UI preferences | `UserDefaults` | `user_settings.preferences` (JSONB), remote-synced | Appearance, notification toggles, Learn progress. |
 | API keys | never present | environment variables | Never in code, never logged (`app/log_redaction.py`). |
+| Search picks (a tap on a search result) | `UserDefaults` `search.trending.counted.v1` — which tickers this device already sent this week (≤300 keys, cleared at session end) | `search_pick_daily` — an **anonymous** daily count per ticker; no user, device, IP or timestamp column (migration 179 — a precise timestamp on a count of 1 would match one access-log line, and its IP) | De-duplicated per account per ticker per 7 ET days on the device and again in server memory (HMAC digests under a per-process key, never persisted), keyed on the security CLASS (crypto vs the rest) because the SQL sums a symbol's stock/etf/fund rows. Chip names come from FMP's active list or the curated file, never from `watchlist_items.company_name` (client-writable). App Privacy: Search History, **not linked**. |
 | Files (avatars, narration, PDFs, art) | `LearnAudioCache` on disk (narration, purged on sign-out); `URLCache` (images) | **Supabase Storage** — nine buckets: `user-avatars` private (short-lived signed URLs); `research-pdfs` private, readable only through the owner-checked `GET /research/reports/{id}/pdf` proxy, never a signed URL; the three narration buckets `journey-media`, `money-moves-media`, `book-media` private since migration 128 (signed by the Learn audio routes); `book-covers`, `journey-images`, `money-moves-images`, `home-theme-media` public | Bucket `public` flags are ROWS in `storage.buckets`, invisible in a `--schema-only` dump; their `storage.objects` policies are in the snapshot. |
 
 **No user DATA survives app termination except the Keychain and `UserDefaults`.** Three on-disk
@@ -1981,7 +1989,8 @@ What follows is the set with no other home.
 | Every paged Supabase read orders on a unique column, and a capped read must not advance a cursor | `app/utils/postgrest_paging.py::fetch_all_rows` clamps `page_size` to the server cap and `tests/test_postgrest_paging_order_key.py` fails the build on a non-unique `order_by`. The 2026-09-13 pass found five more single-page reads AFTER the paging sweep (`portfolio_items`, the two watchlist seed reads, the Tracking feed's watchlist, both push bulk counts, the whale phase, the profile-match tier read) — PostgREST clamps every answer to ~1,000 rows and `.order` makes the loss deterministic, so a >1,000-item user's next whole-list `PUT /tickers` DELETED the rows the client never saw. | A capped read on a non-chronological key cannot know what it missed. `smart_money_sender` used to HOLD its cursor when every page filled — which parked it forever on the same oldest cap (F17-2, 2026-09-17). It now orders the read by `created_at` then `id`, so the cap is the OLDEST rows since the cursor, and resumes from the highest stamp strictly below the last one read (`_capped_cursor`): the boundary tie group is re-read (the dedup claim makes that harmless) and nothing past it is ever skipped. |
 | A `*_known` flag must reach every asset class that shares the shape | `change_known` shipped on the index header only (2026-09-11); crypto, commodity and ETF still did `change = … or 0`, so a CoinGecko `price_change_24h: null`, a FRED series with one observation or an ETF profile row without a change rendered a green `+$0.00 (+0.00%)` with the dashed baseline on the live price. All four classes now carry it on core, detail and quote (`test_change_known_across_asset_classes.py`), and the chat market card carries `pe_known` for the same reason. | The flag is `is not None`, never truthiness: an explicit 0.0 move is a KNOWN flat day. |
 | The report's fair value was the current price | FMP's stable profile endpoint carries no `dcf` (the v3 field the collector read), so every report since the FMP rebuild persisted `fair_value_estimate == current_price` and the PDF hero printed "Margin of Safety +0.0% Fairly Valued" beside a bear case saying "no margin of safety" (a live AAPL report on 2026-09-12). The DCF now comes from the entitled `discounted-cash-flow` path; when FMP has no model the value is NULL end to end and the PDF prints "—". | Rows persisted before the fix are immutable, so `pdf_report_service.build_context` treats an estimate equal to the frozen price to the cent as no estimate. |
-| FMP's DCF is being replaced by the Caydex Fair Value Estimate | Built 2026-09-25 behind two fail-closed switches, `DCF_SHADOW` (compute and record, show nobody) and `DCF_ENABLED` (publish to every client; off again = kill switch at serve time): `app/services/dcf_fair_value_service.py`, a 2-stage FCFE model frozen in `documents/research/dcf-methodology-v1.md` (model `dcf-v1`), with migration 178's cache and append-only history tables. With the switch on, FMP's `discounted-cash-flow` is not fetched: the valuation snapshot carries `caydex_estimate`, attached at serve time and never frozen into its 24 h row (never the `dcf` slot shipped builds label as FMP's), the report collector derives fair value, persona margin of safety and `fair_value_estimate` from it, and the report's Wall Street block carries it as published. One value per (ticker, date, model version) for every caller. | Off until migration 178 is applied and a TestFlight live watch is reviewed (`documents/OWNER_TASKS.md` §2.1). The PDF hero's Undervalued/Overvalued verdict was replaced by a neutral price-vs-fair-value gap on 2026-09-25 regardless of the switch. |
+| FMP's DCF is replaced by the Caydex Fair Value Estimate | Built 2026-09-25 behind two fail-closed switches, `DCF_SHADOW` (compute and record, show nobody) and `DCF_ENABLED` (publish to every client; off again = kill switch at serve time): `app/services/dcf_fair_value_service.py`, a 2-stage FCFE model frozen in `documents/research/dcf-methodology-v1.md` (model `dcf-v1`), with migration 178's cache and append-only history tables. With the switch on, FMP's `discounted-cash-flow` is not fetched: the valuation snapshot carries `caydex_estimate`, attached at serve time and never frozen into its 24 h row (never the `dcf` slot shipped builds label as FMP's), the report collector derives fair value, persona margin of safety and `fair_value_estimate` from it, and the report's `wall_street_consensus` block carries it as published. One value per (ticker, date, model version) for every caller. On iOS both surfaces show it RANGE FIRST (`CaydexFairValueRow`) over a price chart whose right-edge pole is the range, Low / Estimate / High (`CaydexFairValueRangeChart`): the Analysis tab's Valuation card, and the report section renamed "Valuation & Institutions" (2026-09-26), which no longer draws any analyst UI — heading, Buy/Hold/Sell, targets, Momentum. The section's AI insight is shown (app, PDF, chat grounding) only beside the estimate it was written with (`dcf_report_gate.wall_street_insight_is_for_this_card`), so analyst-era and FMP-DCF-era insights stay hidden; the PDF's section 09 and hero match (no analyst target anywhere). The collection cache (`ticker_data_cache`) registers `caydex_dcf` and treats a row built under the other DCF setting as a miss. | Live since 2026-09-26 (both switches on; the TestFlight shadow watch was skipped). Kill switch: `DCF_ENABLED=false` drops the block and a Caydex-built report's insight on every stored-report read path and in new PDFs; PDF files already rendered are not withdrawn. The PDF hero's Undervalued/Overvalued verdict was replaced by a neutral price-vs-fair-value gap on 2026-09-25 regardless of the switch. |
+| "At least 3" behind Trending searches is de-duplicated picks, not proven people | The counters store no identity by design, so the server cannot count distinct people. An account counts once per ticker per 7 ET days (device + in-memory de-dup, keyed on the security class), but the server's memory resets on every deploy: a client that bypasses the app's own de-dup, or a second device, can count again after a restart, and colluding accounts can reach the floor. The first minute after a deploy is also served without the active-listing directory (grammar rules only), cached as degraded. "Most added" is exact (distinct accounts over `watchlist_items`, onboarding's first 24 h and admins excluded). | The user chose anonymous counters over per-user rows (2026-09-26). Mitigations: sign-in, a 30/min pick limit, a 50/day per-account cap, active-listing validation, the floor inside SQL, and the server-side `blocked` list in `backend/data/search_trending_popular.json`. |
 | `monitorResearch(reportId:)` is dead | `TaskPollingManager` exposes it; nothing calls it | Recovery is the 5 s reports-list poll (§5.4). Delete or wire. |
 | The Tracking feed and the watchlist had no per-account bound | One scripted free account could star 2,000 tickers (a profile call each) and poll `GET /tracking/assets` — one insider call per ticker per build, plus a chart call every 2 min — for ~4,000–6,000 FMP requests a minute from one identity, surfacing `FMP_RATE_LIMITED` on every other user's screens (F15-3, 2026-09-17). Now: `WATCHLIST_MAX_ITEMS` on BOTH insert paths (`POST /watchlist` and `POST /tracking/holdings`), `TRACKING_FEED_MAX_TICKERS` on the per-ticker sparkline/insider passes (every row still renders), a per-user `_feed_inflight` future so two clients of one account share one build, a 16-wide semaphore on the per-ticker gathers, a 10-min tier-1 insider cache, and `StandardRateLimit` on `GET /tracking/assets` / `POST /watchlist`. The five market-data routers carry `MarketRateLimit` (300/min per account, token-keyed, no DB read) and the ~5-call-on-miss stock handlers `MarketFanoutRateLimit` (60/min) — S04-3. | Cost is metered per REQUEST, not per cache miss; a per-user token bucket consumed only on a Tier-1/Tier-2 miss would be tighter and is the next step if abuse appears. |
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
@@ -2124,8 +2133,9 @@ a podcast feed and a blog, and publishes them on a schedule. Researched and plan
 (62-agent verified feasibility study; the plan is the authority for Phases 3-8). What has
 SHIPPED: the foundation — ledger, process split, worker API, switches (Phase 1, 2026-09-17) —
 and class-A content — selection, writer, validators, server-authored captions, the smart link
-and the landing page (Phase 2, 2026-09-23; §12.5-12.6). Nothing is voiced, rendered or
-published yet.
+and the landing page (Phase 2, 2026-09-23; §12.5-12.6) — then, on 2026-09-26, the semantic
+compliance judge (§12.5), the caller-claim fence and asset read-back (§12.2) and the narration
+with word timings (Phase 3, §12.7). Nothing is rendered or published yet.
 
 ### 12.1 The content is gated by licence and regulation, not by tooling
 
@@ -2187,17 +2197,37 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   whatever `MARKETING_AUTO_PUBLISH` says (the server cannot yet verify what a rendered video
   says — Phase 7). The worker also may not set the run's selection fields (`source_ref`,
   `template_id`, `content_class`), register copy-shaped assets, or claim a date outside
-  today/yesterday ET. Its authority over its own run is narrow and fenced (2026-09-24):
+  today/yesterday ET. Its authority over its own run is narrow and fenced (2026-09-24,
+  caller-claim fence 2026-09-26):
+  - **every call after the claim names the claim it holds** — `X-Marketing-Claim:
+    <attempts>.<nonce>`, required by a ROUTER-level dependency (`require_caller_claim`) so a
+    route added tomorrow cannot forget it (missing or malformed: 422
+    `MARKETING_REQUEST_INVALID`), and the claim itself requires a hex nonce. The ledger checks
+    the CALLER's pair against the row (`claim_problem`) and fences the conditional UPDATE on it
+    (`attempts` and `metadata->>claim_nonce`). The fence it replaced compared the row with the
+    `attempts` it had just read, so a zombie tick whose run was re-claimed before that read
+    passed it and wrote over the new holder. The pair, not `attempts` alone: attempts is 1-6
+    per run, collides across runs (`/assets/{id}/complete` carries no run id) and repeats
+    after a manual reset. Asset registration, completion (through the asset's own run), posts,
+    the read-back and the script kick — before `_heal_mirror`, whose write would bump the
+    liveness — all refuse a zombie with 409 `MARKETING_RUN_NOT_HELD`. Registration is
+    check-then-insert (an INSERT cannot be fenced on another row); a zombie that loses the
+    claim in between leaves only an orphan `pending_upload` row, which completion refuses.
   - a PATCH writes only an `in_progress` run, only the statuses `failed`, `skipped` and
     `media_ready`, moves `stage` only to the observed or the requested value (never "any
-    stage ahead"), is fenced on the observed `attempts`, and may not write
-    `metadata.claim_nonce`. A terminal PATCH whose effect is already present (the same
+    stage ahead"), and may not write `metadata.claim_nonce`. A terminal PATCH whose effect is already present (the same
     status, and the same stage if one is named) answers 200 and writes nothing — the worker
     retries a PATCH whose response was lost, so a 409 there logged a failure for a write
     that had landed. Anything else on a run that is not `in_progress` answers 409
     `MARKETING_RUN_NOT_HELD`; a malformed request is 422 `MARKETING_REQUEST_INVALID`.
   - assets register only on an `in_progress` run, and an asset's kind and extension are
-    paired (`ASSET_KIND_EXTENSIONS` in `app/schemas/marketing.py`).
+    paired (`ASSET_KIND_EXTENSIONS` in `app/schemas/marketing.py`). Every worker metadata
+    object is capped at 64 KiB (`capped_metadata`), and an `audio` asset's word-timing table
+    is validated (`validate_audio_words`) and must be exactly the accepted script's hook and
+    lines (§12.7) — the first server-side check of what a video says.
+  - a later stage re-derives its media from the server's `ready` rows, never from an earlier
+    stage's memory: `GET /runs/{id}/assets` returns them with their public URLs and the run's
+    narration pointer, resolved and verified by the server (§12.7).
   - `create_posts` accepts only the (platform, format) pairs of `POST_FORMATS_BY_PLATFORM`,
     requires a `ready` asset of a matching kind for every media format, validates every
     spec before inserting any (a 409 on the fifth post used to leave four behind), and
@@ -2284,8 +2314,13 @@ attribution removed) and split into sentences, and every sentence the OUTPUT com
 would reject is dropped before the writer sees it, so prompt, fact sheet and validator agree.
 Hand exclusions carry reasons (`EXCLUDED`): items built around a real investor, the one that
 names the model vendor, unsourced statistics, crypto promotion, the FMP-relayed 13F feature,
-misconduct stories centred on identifiable people, and the value-trap lesson whose subject IS a
-named company's valuation. The user's rule for Money Moves (2026-09-23): companies appear as
+misconduct stories centred on identifiable people, the value-trap lesson whose subject IS a
+named company's valuation, and (2026-09-26) the selling lesson, whose every retelling ends in a
+sell directive. A second, sentence-level list (`SOURCE_SENTENCE_DROPS`) removes source lines that
+only the semantic judge would refuse — "It's a calm, simple way to plant your money…",
+"Water your winners.", the gardening lesson's subtitle "when to water, prune, or uproot" (the
+writer turned it into "Prune When Needed" headings) — so the writer is never handed the
+forbidden line; each entry must match exactly one sentence. The user's rule for Money Moves (2026-09-23): companies appear as
 historical case studies; no real person, share price, valuation, cheap/expensive, buy/sell or
 prediction, ever.
 
@@ -2309,6 +2344,15 @@ and Instagram "Link in bio", X link-free unless `MARKETING_X_ALLOW_URLS`, everyt
 own smart link; the composed caption must END with its disclaimer, fit the platform and carry no
 character the outlet's API refuses — YouTube titles and descriptions refuse `<` and `>` and the
 title is one line — checked on the cleaned composed text and never stripped at publish time).
+Lengths are asked for so the model can meet them (2026-09-26): the script as 7-9 lines of 10-16
+words each (asked "90 to 140 words" it wrote up to 179, over the 165 ceiling; asked "6-9 lines of
+at most 16 words" it undershot, 4 of 34 scripts at 49-59 words against the 60 floor — so the ask
+carries a per-line floor, and its obeyed range, 70-144, sits inside the enforced 60-165), each
+caption at 70-75% of its exact budget in words at a measured 6.6 characters a word, and a length
+violation's detail names the hard limit and the cut ("216 characters … the hard limit is 199;
+cut at least 17"), once — the repair used to show two ceilings for one caption. The script's
+repair hint is direction-neutral ("if it says cut, drop a line; if it says add, write one more"):
+worded as a cut, it sent a 58-word script back byte-identical.
 Validation is scoped: the shared parts must be clean; a failing caption drops only its outlet; a
 hook or caption with no word in it is `empty`. A rejected generation records EVERY round's
 violations, each tagged with its round. If the lease can no longer cover a call, a publishable
@@ -2356,7 +2400,73 @@ cannot come back as a profit. A YEAR binds more loosely — on any shared word i
 unless its clause's verb is a different kind of event — because a date cannot carry a price or
 value claim. Every capitalised token must be ordinary English (the corpus vocabulary plus the
 roots of Webster's 1934 dictionary, `backend/data/english_roots_web2.txt.gz`, copyright lapsed)
-or present in the item's fact sheet, and every company named must be one the sheet names.
+or present in the item's fact sheet, and every company named must be one the sheet names. A
+DOTTED acronym ("U.S.", "C.E.O.") stays refused on purpose, and the prompt asks for "US", "UK",
+"EU" instead (the voice says them identically). A 2026-09-26 fix that accepted "U.S." showed
+what this refusal masks: compliance reads the dot as a sentence end, so a frame in one clause
+reached a promise after it ("Don't panic in the U.S. The market always recovers."), every
+period-bounded row gap stopped at it ("Costco shares in the U.S. keep climbing."), a dotted
+name read as a sentence start ("U.S. Grant said…"), and a dotted role escaped the role rule.
+The same glue exists for "vs." and "Wall St." — a known regex residual; the semantic judge,
+which reads the package as prose rather than split sentences, is the second check on it.
+
+**The semantic judge** (`app/services/marketing/judge.py`, 2026-09-26) is the second gate: one
+`gemini-3.8-flash` call (thinking off, temperature 0 — a different model from the writer, so the
+grader does not share its blind spots) grades each candidate package against a written rubric of
+six rules the regex is weakest at — a real person (including by role or in a title-case
+heading), a verdict, price, worth or forecast about a named company (including present-value
+claims), a trade directive (soft forms, metaphors, trades timed to prices or moods), a return
+claim or promise, own-voice risk-softening about a product category ("a calm core"; reported
+usage — "many people use a broad ETF as the core of their plan" — is fine, by the user's call),
+and disclaimer talk. It reads the cleaned package with captions split into sentences (a single
+bad sentence inside a 1,000-character caption was what it missed otherwise); a shared-field
+verdict fails the round and leads the repair list, a caption verdict drops only that outlet —
+from the stored `posts` too, since `create_posts` copies captions from the accepted package.
+It can never fail open: an unreadable answer raises `MarketingJudgeUnavailable` (a writer
+failure, never a pass and never a content verdict), a verdict on an unknown field or rule is
+still a violation, only a JUDGED candidate can be accepted in `enforce`, and `judge_mode` is a
+required argument of the writer (no default). `MARKETING_JUDGE_MODE` is `enforce` by default
+(`shadow` records and never blocks; anything unrecognised means `enforce`). A generation makes at
+most four model calls — draft, judge, repair, judge (`MODEL_CALLS_PER_GENERATION`).
+The split is deliberate: the regex stays the precise, lexical layer, and semantic policy —
+risk-softening, directives in verbs no row lists, the residual shapes the regex cannot reach
+without collateral damage — goes to the rubric instead of new rows, because every regex
+relaxation in three rounds reopened a bypass.
+Calibration before gating (`backend/scripts/marketing_judge_calibrate.py`, writes nothing): the
+must-fail lines were PRE-REGISTERED from the user's decisions before any judge output was read
+(`judge_true_positives` in the corpus fixture; three found later by a judge run were moved by
+precedent and are disclosed as such), the rubric's examples never appear in a calibration list
+(a test enforces it), and a HOLDOUT set written after the rubric froze was run once. Result for
+`gemini-3.8-flash`, three samples: every must-fail line flagged (201 of 201, holdout included),
+zero false positives on 3,525 honest shared lines and 912 caption lines, no verdict flipping
+between samples, p95 latency 2.8 s. `gemini-2.5-flash` traded recall for false positives with
+every rubric change (34-52 of 52 caught, 0.25-1.7% of honest lines flagged).
+Re-calibrated the same day on a fresh run of real packages
+(`backend/tests/data/marketing_judge_packages_2026_09_26.json`, pre-registered before any verdict
+was read) and rubric 2026-09-26.9, which adds one clause — a heading that is itself a trade
+command breaks the rule by its own words, even over a body that only describes the action (the
+in-sample misses were "Prune When Needed" / "Prune Strategically", caught in 3 of 6 samples).
+Three samples: the fresh packages' true positives 21 of 21; a third holdout written before that
+clause (six directive headings inside otherwise honest packages, each beside an honest twin
+heading) 18 of 18 with no twin flagged; 0 of 1,752 caption lines and 2 of 6,573 shared lines
+flagged — both the same line, "…turns your plans into profits", a real promise the
+pre-registration had missed (moved to the true positives, disclosed as post-run). **The
+pre-registered gate is NOT met:** the second holdout (present-tense restatements of a past deal
+price, which grounding passes because the amount is on the sheet — the regex fix for it was
+reverted as over-blocking, so the judge owns it) is 27 of 33 — "A buyer pays $6.9 billion for Mellanox" and "Mellanox
+is sold for about $6.9 billion" pass in every sample, the judge reading them as history. They
+are reported, not tuned on; human review stays the publication gate. Ten lines the keyword
+pre-registration had marked as directives ("resist selling for small gains", "trimming frees up
+room") have the exact shape of honest lines in the 09-24 corpus and of the rubric's own NEVER
+list, both older than the run; they were corrected toward honest after it, are disclosed in the
+fixture (`reclassified_by_precedent`), and are scored on neither side.
+Acceptance with the judge enforcing (all 34 eligible items): 34 of 34 accepted at prompt
+2026-09-26.7 (24 clean on the first draft, one LinkedIn caption dropped) and again at
+2026-09-26.8 (25 clean, one YouTube outlet dropped, no dotted "U.S." left), no script-length
+rejection in either; both times the judge's seven verdicts were all on one item (portfolio
+gardening's trim/prune headings and captions — the lesson invites them) and its repair passed.
+The judge is NECESSARY, not sufficient, for `MARKETING_AUTO_PUBLISH`: what a rendered video
+shows is still unverified, and that remains a Phase 7 decision.
 
 **Acceptance evidence.** Three adversarial review rounds (2026-09-24) confirmed 73, 49 and 38
 defects, most of them validator bypasses in natural phrasing — and in rounds two and three, a
@@ -2389,8 +2499,8 @@ The state machine's invariants (hardened 2026-09-24 by two adversarial review ro
   generations the validators REJECTED (`content_rejections`); `MAX_WRITER_FAILURES` (4) counts
   generations that ended with no verdict — a model error, a ledger blip, a crash, a
   cancellation, an owner that died (`generations - content_rejections`). A writer outage
-  therefore never burns the day's content attempts, and the worst case is 7 generations
-  (≤14 flash calls) per run. A `rejected` body carries a `reason` — `content`,
+  therefore never burns the day's content attempts, and the worst case is 7 generations of at
+  most `MODEL_CALLS_PER_GENERATION` (4) model calls — ≤28 per run. A `rejected` body carries a `reason` — `content`,
   `writer_unavailable`, `empty_pool`, `source_ineligible` — and only `content` is a compliance
   verdict with violations; the worker records it as `metadata.skip_reason` (`content_rejected`,
   `writer_unavailable`, …). Tokens spent by a generation that later failed are recorded too
@@ -2402,7 +2512,12 @@ The state machine's invariants (hardened 2026-09-24 by two adversarial review ro
   that just refreshed cannot be taken over. A cap reached under an expired lease is closed by
   the next kick — found five times independently, a dead final owner used to leave the row
   `generating` forever — but a lapsed lease whose owner is a live task in THIS process is left
-  alone for up to `OWNER_ALIVE_SECONDS` (3 × the lease), after which it counts as wedged. A
+  alone for up to `OWNER_ALIVE_SECONDS`, after which it counts as wedged. That is a whole
+  worst-case generation plus a minute (`worst_case_generation_seconds`, 4,637 s at defaults):
+  the acquire and run-date read, four model calls each preceded by a lease refresh, and the
+  terminal write with its re-read, every PostgREST statement bounded only by the client's 120 s
+  timeout. It used to be 3 × the lease (1,896 s), shorter than a real generation, so at a cap a
+  slow LIVE owner was declared wedged and its paid package fenced out. A
   lease refresh retries a Supabase blip and, if every attempt fails, continues while the lease
   it last wrote still covers a model call (the terminal write is fenced anyway) — a blip used
   to throw away a paid, publishable draft.
@@ -2443,6 +2558,73 @@ Connect's `ct` data is the attribution record. Both routes are root routes, outs
 (which scans `/api/v1` only), so `tests/test_marketing_smart_link.py` pins an explicit
 allow-list of every unauthenticated root route with its reason.
 
+
+### 12.7 Voice and word-timed captions (Phase 3, 2026-09-26)
+
+The `voiced` stage (`backend/marketing/voice.py`) narrates the accepted script — the hook, then
+every script line — with Kokoro-82M (Apache-2.0, CPU, voice `af_heart`) and publishes it as the
+run's canonical `audio` asset: an AAC m4a (48 kHz stereo, 160 kbps, faststart) whose word
+timings ride in the asset's metadata. Phase 4 renders the video from it; until then a run that
+reaches `voiced` closes `skipped` with `phase3_voice_only`.
+
+- **The model runs in a child process** (`python -m marketing.voice child …`) under an 8-minute
+  timeout, while the parent sends a heartbeat PATCH every minute to keep the claim live. torch
+  needs 1.5-2 GB (1.7 GB peak measured); if the container's limit kills it, only the child dies
+  and the run fails as `VoiceOOM` to be retried by the next tick — and a wedged model call can
+  never hold the cron slot (Railway skips every tick while one lives). Threads come from the
+  container's CPU quota (cgroup `cpu.max`), not the host's core count.
+- **Seeded and bit-exact.** Kokoro's vocoder draws random noise, so two unseeded runs of one
+  line differ; seeded per line, the same image makes the same samples, and the AAC encode is
+  `bitexact` — a re-claimed attempt re-registers the SAME content-addressed object instead of
+  minting a second public file. A ready narration whose metadata carries the same script hash,
+  `PIPELINE_VERSION` and voice is reused without synthesising at all.
+- **The pointer travels with the checkpoint.** `metadata.voice_asset_id` is written in the SAME
+  PATCH as `stage=voiced` (`run_pipeline` merges what a stage returns into its checkpoint), and
+  a later stage reads it back through `GET /runs/{id}/assets`, which returns it only if it names
+  a `ready` `audio` asset of the same run.
+- **The narration must fit the video.** Budget = `MARKETING_MAX_VIDEO_SECONDS` (the worker
+  mirrors the web setting; a test pins the defaults equal) minus the disclaimer card. Over it,
+  the script is re-synthesised once at the speed that fits (at most 1.15×); still over, the day
+  is skipped (`narration_too_long`) rather than published clipped.
+
+**Timings** (`backend/marketing/timings.py`, pure). A caption shows the SCRIPT's words — a
+whitespace split of each line — never the engine's. Kokoro's G2P tokenises differently
+(punctuation is its own token, `$` comes back untimed because it is spoken after the number,
+`2019` carries the duration of its spoken expansion), so engine tokens only supply times: they
+are grouped on their whitespace flag, each group's first known start and last known end become
+that word's window, and a line whose groups do not reconstruct its words falls back to
+proportional timing inside the span the engine did time. Lines are placed with a fixed pause
+between them; the table is monotonic, every word at least 120 ms where the timeline allows, and
+never past the encoded audio (an overrun is scaled down and the table rebuilt in whole
+milliseconds, so rounding can never make a word start before the previous one ends — a table
+the server would refuse on every retry). The writer refuses any narrated word longer than a
+table entry may be (48 characters, e.g. a chain of words joined by dashes) as content, before
+the day's voice stage could fail on it every attempt. The server re-checks it at registration: shape and bounds
+(`validate_audio_words`), and that its words, case- and edge-punctuation-folded, are EXACTLY the
+accepted script's hook and lines (`narration_words`) — the worker cannot choose what the video
+says any more than what the caption says.
+
+**Captions** (`backend/marketing/captions.py`) become an ASS file for libass: 1080×1920, one
+line of 2-5 words in the lower middle, the active word in the brand's primary blue and the rest
+white on a dark outline, one event per word window with each event ending exactly when the next
+begins. Colour only — scaling the active word shifts a centred line. Phrases never cross a
+narrated line, end at sentence and clause marks, never end on a function word when full, keep
+abbreviations together ("Mr.", "U.S."), and a word wider than the frame is squeezed, not
+wrapped. Braces and backslashes are ASS override syntax, so they are neutralised here and
+refused upstream by the compliance markup rule. The face is Inter Bold, the static cut (libass
+fakes bold on a variable font), vendored with its OFL licence; a glyph check runs before a file
+is written, since a missing glyph silently falls back to DejaVu.
+
+**The image** (`backend/marketing/Dockerfile`) installs torch from the CPU index first and fails
+the build if any `nvidia-*` package slips in, pins kokoro, misaki and a hash-checked spaCy model,
+and bakes the Kokoro weights and the voice at build time with `HF_HUB_OFFLINE=1` at run time, so a
+missing file fails loudly instead of downloading on a cron tick. The preflight reports what the
+voice stage needs (packages, weights, font, the memory limit, the baked model revision) into the
+run's metadata. Give the Railway worker 4 GB. The non-commercial aligner the Learn read-along
+uses has no place here: Kokoro's own timestamps make an aligner unnecessary, and a test fails
+if the worker tree references it or the `scripts` tree. Local check: `python -m marketing.preview`
+(from `backend/` with the ML venv) renders a solid-background MP4 of the narration and captions
+into the gitignored `marketing/out/` — measured 0.28× realtime on an M1 with two threads.
 ---
 
 ## Appendix A: Where things live

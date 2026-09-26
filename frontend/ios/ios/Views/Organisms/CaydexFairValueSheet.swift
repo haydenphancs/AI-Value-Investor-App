@@ -56,13 +56,18 @@ struct CaydexFairValueSheet: View {
                 .foregroundColor(AppColors.textPrimary)
             switch estimate.state {
             case .estimate:
-                Text(estimate.formattedValue ?? "—")
+                // Range first, the estimate as its middle mark — same order as the row.
+                Text(CaydexFairValue.rangeLabel)
+                    .font(AppTypography.label)
+                    .foregroundColor(AppColors.textMuted)
+                Text(estimate.formattedRangeBounds ?? "—")
                     .font(AppTypography.titleCompact)
                     .foregroundColor(AppColors.textPrimary)
-                if let range = estimate.formattedRange {
-                    Text(range)
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(AppColors.textSecondary)
+                    .accessibilityLabel(estimate.rangeAccessibilityLabel ?? CaydexFairValue.rangeLabel)
+                if let mid = estimate.formattedEstimate {
+                    Text(mid)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
                 }
                 if let gap = estimate.formattedGap(versus: currentPrice) {
                     Text(priceContext.map { "\(gap) (\($0))" } ?? gap)
@@ -147,18 +152,5 @@ struct CaydexFairValueSheet: View {
 }
 
 #Preview {
-    CaydexFairValueSheet(
-        estimate: CaydexFairValue(
-            state: .estimate(value: 229.53, low: 187.17, high: 269.29),
-            alternativeValue: 210.39,
-            assumptions: [
-                .init(label: "Discount rate (cost of equity)", value: "8.75%"),
-                .init(label: "Terminal growth", value: "3.82%"),
-                .init(label: "Stock-based pay", value: "Counted as a cost"),
-            ],
-            asOf: "2026-09-25",
-            notes: []
-        ),
-        currentPrice: 341.07
-    )
+    CaydexFairValueSheet(estimate: .sampleEstimate, currentPrice: 341.07)
 }

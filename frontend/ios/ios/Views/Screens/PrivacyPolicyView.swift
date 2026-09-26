@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
     var body: some View {
         LegalDocumentView(
             title: "Privacy Policy",
-            lastUpdated: "August 13, 2026",
+            lastUpdated: "September 26, 2026",
             // The summary is deliberately FIRST and in the intro rather than as a numbered
             // section: "we don't sell your data" is the single thing users most want to know,
             // and burying it in §5 (where it lived) meant almost nobody ever read it. The
@@ -48,6 +48,7 @@ struct PrivacyPolicyView: View {
                 "Account information: if you create an account, we collect your email address and any display name you provide.",
                 "Usage information: content you create or request in the App, such as watchlists, portfolios, generated research reports, saved items, chat messages, and preferences.",
                 "Learning preferences: if you answer the optional questions during setup or in Settings, we store how you described your experience level, how technical you want explanations to be, how long you want answers, which subjects interest you, and what you want to get better at. We use them only to choose what to show you first and how to word an explanation \u{2014} never to change our analysis, ratings, or estimates, which are the same for every user. We do not ask for your finances, risk tolerance, time horizon, tax situation, or investment objectives. Personalized explanations are off until you turn them on, and you can turn them off again at any time in Settings.",
+                "Search activity (anonymous): when you tap a result in a search screen, the App tells us which ticker you picked so we can show everyone the tickers people search for most. We keep only a daily count per ticker \u{2014} never who picked it: no account, device, IP address, or time of day is stored with the count, and repeat picks of the same ticker by one account are de-duplicated for a week. The words you type into search are sent only to run that search; they are not stored with your account or in these counts, though, like any request, they can appear briefly in our server and error-monitoring logs, which are kept only for those providers\u{2019} short retention periods.",
                 "Holdings you enter: if you use Portfolio Insights, the share counts or position values you type in. These are self-reported by you \u{2014} we never connect to a brokerage and never see your actual account.",
                 "Support reports you send us: if you use Help Us Improve, what you type and \u{2014} only if you choose to attach one \u{2014} a screenshot you pick yourself. Nothing is read from your photo library unless you select an image, you can see the whole message in your mail app before it sends, and we use it solely to reproduce and fix the problem.",
                 "Device information: app version, device type, IP address, and general technical/log data used for reliability, security, and abuse prevention. A push notification token if you enable notifications.",
@@ -60,7 +61,8 @@ struct PrivacyPolicyView: View {
             paragraphs: [
                 "To provide and operate the App\u{2019}s features, including generating AI research, syncing your preferences and content across devices, and maintaining your credit balance and subscription.",
                 "To secure the App, prevent abuse, debug issues, and improve features and performance.",
-                "To send you notifications you have enabled, and to communicate with you about your account or the service."
+                "To send you notifications you have enabled, and to communicate with you about your account or the service.",
+                "To show anonymous, aggregated lists in search \u{2014} \u{201C}Trending searches\u{201D} and \u{201C}Most added\u{201D} over the last 7 days. A ticker appears in \u{201C}Most added\u{201D} only when at least three accounts added it, and in \u{201C}Trending searches\u{201D} only after at least three de-duplicated picks; the lists never show who, and never show counts. They describe activity in the App and are not a recommendation."
             ]
         ),
         LegalSection(
@@ -90,7 +92,7 @@ struct PrivacyPolicyView: View {
             heading: "Data Retention",
             paragraphs: [
                 "Content you create \u{2014} chat conversations, generated research reports, watchlists, holdings, learning progress, and bookmarks \u{2014} is kept until you delete it or delete your account. We do not expire it on a timer, so that your saved research stays available. You can delete individual conversations and reports at any time.",
-                "Short-lived operational records are cleared automatically: fair-usage counters are deleted after 7 days, and cached market data expires on its own schedule.",
+                "Short-lived operational records are cleared automatically: fair-usage counters are deleted after 7 days, anonymous search counts after 14 days, and cached market data expires on its own schedule.",
                 "Deleting your account removes your account record and everything linked to it: chat conversations and messages, research reports and their generated PDF files, watchlists, portfolios and holdings, saved items, followed entities, settings, learning progress, notification tokens, credit balance, and credit history. This happens immediately, not on a delay. Error-monitoring records may persist for a short retention period at our monitoring provider; these contain diagnostic information and a pseudonymous account identifier, not your name or email.",
                 "You can delete your account in the App under Profile \u{2192} Settings \u{2192} Delete Account."
             ]

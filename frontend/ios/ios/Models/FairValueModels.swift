@@ -88,6 +88,11 @@ struct CaydexFairValue: Equatable {
     static let title = "Caydex Fair Value Estimate"
     static let subtitle = "DCF model estimate · not a price target · not a recommendation"
     static let refusedGeneric = "Our model doesn't produce an estimate for this company."
+    /// The label over the range, which is the headline: the estimate is its middle mark.
+    static let rangeLabel = "Estimate range"
+    static let refusedHeadline = "Not modelled"
+    /// A report saved before the estimate existed, or one served while it is switched off.
+    static let notInReport = "No Caydex Fair Value Estimate is available for this report."
 
     let state: State
     let alternativeValue: Double?
@@ -148,6 +153,39 @@ struct CaydexFairValue: Equatable {
         return "Range \(Self.money(lo)) – \(Self.money(hi))"
     }
 
+    /// Low, estimate and high together, or nil. The chart reads ONLY this, so it can never
+    /// draw an estimate without its range.
+    var bounds: (low: Double, value: Double, high: Double)? {
+        guard case let .estimate(v, lo, hi) = state else { return nil }
+        return (lo, v, hi)
+    }
+
+    /// The headline: "$187.17 – $269.29".
+    var formattedRangeBounds: String? {
+        guard let b = bounds else { return nil }
+        return "\(Self.money(b.low)) – \(Self.money(b.high))"
+    }
+
+    /// The range's middle mark: "Estimate $229.53".
+    var formattedEstimate: String? {
+        value.map { "Estimate \(Self.money($0))" }
+    }
+
+    /// VoiceOver does not reliably read an en dash as "to".
+    var rangeAccessibilityLabel: String? {
+        guard let b = bounds else { return nil }
+        return "Estimate range from \(Self.money(b.low)) to \(Self.money(b.high))"
+    }
+
+    /// Where a price sits against the range, for the chart's VoiceOver label. Neutral: a
+    /// position, never a verdict.
+    func pricePosition(of price: Double?) -> String? {
+        guard let b = bounds, let price, price.isFinite, price > 0 else { return nil }
+        if price > b.high { return "above the estimate range" }
+        if price < b.low { return "below the estimate range" }
+        return "within the estimate range"
+    }
+
     /// Percent gap of PRICE versus the estimate (negative = price below the estimate).
     /// `nil` unless both are positive finite numbers — never a fabricated 0%.
     func priceGapPercent(versus price: Double?) -> Double? {
@@ -183,6 +221,49 @@ struct CaydexFairValue: Equatable {
 
     static func money(_ v: Double) -> String {
         moneyFormatter.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
+    }
+
+    private static let wholeMoneyFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .currency
+        f.currencyCode = "USD"
+        f.locale = Locale(identifier: "en_US")
+        f.maximumFractionDigits = 0
+        f.minimumFractionDigits = 0
+        return f
+    }()
+
+    /// "$5,812" — for a chart badge, where cents do not fit.
+    static func wholeMoney(_ v: Double) -> String {
+        wholeMoneyFormatter.string(from: NSNumber(value: v)) ?? String(format: "$%.0f", v)
+    }
+
+    private static let isoDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let monthYearFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "MMM yyyy"
+        return f
+    }()
+
+    /// "Price · Sep 2024 – Sep 2026" from the first and last "yyyy-MM-dd" dates of the series
+    /// a chart draws, so the label says the window the line actually covers. Shared by the
+    /// report and the Analysis tab. nil when either date does not parse.
+    static func pricePeriodLabel(from first: String?, to last: String?) -> String? {
+        guard let first, let last,
+              let start = isoDayFormatter.date(from: String(first.prefix(10))),
+              let end = isoDayFormatter.date(from: String(last.prefix(10))) else { return nil }
+        let a = monthYearFormatter.string(from: start)
+        let b = monthYearFormatter.string(from: end)
+        return a == b ? "Price · \(a)" : "Price · \(a) – \(b)"
     }
 
     private static func pct(_ v: Double?, digits: Int = 2) -> String? {
@@ -224,4 +305,25 @@ struct CaydexFairValue: Equatable {
         add("Estimated on", d.asOf)
         return out
     }
+}
+
+// MARK: - Preview samples
+
+extension CaydexFairValue {
+    static let sampleEstimate = CaydexFairValue(
+        state: .estimate(value: 229.53, low: 187.17, high: 269.29),
+        alternativeValue: 210.39,
+        assumptions: [
+            Assumption(label: "Discount rate (cost of equity)", value: "8.75%"),
+            Assumption(label: "Terminal growth", value: "3.82%"),
+            Assumption(label: "Stock-based pay", value: "Counted as a cost"),
+        ],
+        asOf: "2026-09-25"
+    )
+
+    static let sampleRefused = CaydexFairValue(
+        state: .refused(reason: "Banks, insurers, asset managers and shell companies don't fit a cash-flow model."),
+        assumptions: [Assumption(label: "Checked on", value: "2026-09-25")],
+        asOf: "2026-09-25"
+    )
 }

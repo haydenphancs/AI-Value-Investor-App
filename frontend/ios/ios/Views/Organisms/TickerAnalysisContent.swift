@@ -17,6 +17,12 @@ struct TickerAnalysisContent: View {
     var valuationSnapshot: SnapshotItem? = nil
     /// Live header price for the DCF gap; nil renders the model value without a gap.
     var currentPrice: Double? = nil
+    /// ~2 years of daily closes for the Caydex Fair Value chart (the view model derives it
+    /// from data it already fetched); empty → the estimate shows as text alone.
+    var valuationPriceHistory: [Double] = []
+    var valuationPriceHistoryLabel: String? = nil
+    /// True while that history may still arrive, so the card can reserve the chart's space.
+    var isValuationPriceHistoryLoading: Bool = false
     var fearGreedData: CryptoFearGreedData? = nil
     let isAnalystLoaded: Bool
     var isFearGreedLoaded: Bool = true
@@ -49,7 +55,10 @@ struct TickerAnalysisContent: View {
             // consensus and price target, and reusing it here would put a HOLD at $0.00 back
             // on screen for a client that cannot update.
             if let snapshot = valuationSnapshot {
-                ValuationMeterSection(snapshot: snapshot, currentPrice: currentPrice)
+                ValuationMeterSection(snapshot: snapshot, currentPrice: currentPrice,
+                                      priceHistory: valuationPriceHistory,
+                                      priceHistoryLabel: valuationPriceHistoryLabel,
+                                      isPriceHistoryLoading: isValuationPriceHistoryLoading)
             }
 
             // Fear & Greed Index (crypto) OR Analyst Ratings (stocks)

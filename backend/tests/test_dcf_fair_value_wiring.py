@@ -408,6 +408,44 @@ def test_the_report_gate_helpers(monkeypatch):
     assert caydex_report["wall_street_consensus"]["caydex_fair_value"], "never mutates the stored row"
 
 
+def test_the_kill_switch_also_drops_the_insight_that_quotes_the_estimate(monkeypatch):
+    """A report BUILT with the estimate (`dcf_source == "caydex"`) has a `wall_street_insight`
+    written from it ("the price is N% above the estimate"). Stripping the estimate but serving that
+    sentence would quote a withdrawn number, so the insight goes with it. An FMP-built report's
+    insight never saw the estimate and stays."""
+    import copy
+    from app.services import dcf_report_gate as gate
+    insight = "The price is 12% above the estimate while institutions trimmed."
+    caydex_report = {"symbol": "AAPL", "wall_street_consensus": {
+        "dcf_source": "caydex", "caydex_fair_value": _OK.model_dump(),
+        "wall_street_insight": insight, "current_price": 280.0}}
+    frozen = copy.deepcopy(caydex_report)
+
+    monkeypatch.setattr(gate.settings, "DCF_ENABLED", False)
+    out = gate.strip_caydex_if_disabled(caydex_report)
+    ws = out["wall_street_consensus"]
+    assert ws["caydex_fair_value"] is None and ws["wall_street_insight"] is None
+    assert ws["current_price"] == 280.0 and ws["dcf_source"] == "caydex" and out["symbol"] == "AAPL"
+    assert caydex_report == frozen, "never mutates the stored row"
+
+    # FMP-built (explicit) and legacy (no dcf_source = "fmp"): the estimate goes, the insight stays.
+    for built in ({"dcf_source": "fmp"}, {}):
+        report = {"wall_street_consensus": {**built, "caydex_fair_value": _REFUSED.model_dump(),
+                                            "wall_street_insight": insight}}
+        ws = gate.strip_caydex_if_disabled(report)["wall_street_consensus"]
+        assert ws["caydex_fair_value"] is None and ws["wall_street_insight"] == insight, built
+
+    # Nothing published (the estimate was missing when it was built): nothing quoted, nothing to do.
+    no_block = {"wall_street_consensus": {"dcf_source": "caydex", "caydex_fair_value": None,
+                                          "wall_street_insight": insight}}
+    assert gate.strip_caydex_if_disabled(no_block) is no_block
+
+    # Switch on: a no-op — the same object, insight and estimate intact.
+    monkeypatch.setattr(gate.settings, "DCF_ENABLED", True)
+    assert gate.strip_caydex_if_disabled(caydex_report) is caydex_report
+    assert caydex_report == frozen
+
+
 def _code_of(rel: str) -> str:
     path = Path(__file__).resolve().parents[1] / rel
     return re.sub(r"\s+", " ", _code(path))
@@ -469,3 +507,23 @@ async def test_shadow_persistence_is_behavioural(monkeypatch):
         await svc.get_fair_value("AAPL")
         await _a.sleep(0.05)
         assert len([c for c in calls if c in ("write", "history")]) == expect, (enabled, shadow, calls)
+
+
+def test_the_insight_rule_needs_the_estimate_and_no_analyst_coverage():
+    """dcf_report_gate.wall_street_insight_is_for_this_card — the one rule the app card, the PDF
+    and chat grounding share: an insight is shown only beside the estimate it was written with.
+    Each half is tested ALONE, so neither can be dropped while the other hides the case."""
+    from app.services.dcf_report_gate import wall_street_insight_is_for_this_card as ok
+
+    published = {"status": "ok", "fair_value": 150.0, "range_low": 120.0, "range_high": 180.0}
+    refused = {"status": "refused", "refusal_reason": "Banks are not modelled."}
+    assert ok({"caydex_fair_value": published, "wall_street_insight": "x"})
+    assert ok({"caydex_fair_value": refused})
+    # No estimate block: an FMP-era or analyst-era insight, or a stripped (kill switch) one.
+    assert not ok({"wall_street_insight": "…our model suggests the stock is overpriced."})
+    assert not ok({"caydex_fair_value": None})
+    # An estimate block but analyst coverage: the insight was written for the analyst card.
+    for coverage in ({"target_price": 190.0}, {"analyst_buy": 3}, {"momentum_upgrades": 1}):
+        assert not ok({"caydex_fair_value": published, **coverage}), coverage
+    for junk in (None, "x", [], {"caydex_fair_value": "not-a-dict"}):
+        assert not ok(junk)

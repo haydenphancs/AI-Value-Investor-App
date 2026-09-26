@@ -130,6 +130,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 178: the Caydex Fair Value Estimate — its Tier-2 cache and its append-only history. Both
     # hold FMP-derived statements and consensus; iOS reaches the value only via the backend.
     "178": ("dcf_fair_value_cache", "dcf_fair_value_history"),
+    # 179: anonymous search-pick counters behind the "Trending searches" chips. No per-user
+    # column, but still backend-only: the app reads the lists through /search/trending.
+    "179": ("search_pick_daily",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

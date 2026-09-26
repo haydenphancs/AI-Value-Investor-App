@@ -2,10 +2,12 @@
 //  CaydexFairValueRow.swift
 //  ios
 //
-//  Molecule: the Caydex Fair Value Estimate as ONE row — value, range, the gap of the price
-//  against the estimate, the "model estimate · not a price target" line, and a tap-through
-//  to the assumptions. Used by the Analysis tab's Valuation card and the report's Wall
-//  Street card, so both say exactly the same thing.
+//  Molecule: the Caydex Fair Value Estimate's header — RANGE FIRST (the owner's rule,
+//  2026-09-26: "not only the exact price"), the estimate as the range's middle mark, the gap
+//  of the price against the estimate, the "model estimate · not a price target" line, and a
+//  tap-through to the assumptions. Used by the Analysis tab's Valuation card and the report's
+//  "Valuation & Institutions" section, so both say exactly the same thing; the chart under
+//  it is `CaydexFairValueRangeChart`.
 //
 //  ⚠️ Wording is pinned by backend/tests/test_ios_fair_value.py: never Undervalued /
 //  Overvalued / Buy / Sell, and never a value without its range.
@@ -44,19 +46,9 @@ struct CaydexFairValueRow: View {
         VStack(alignment: .leading, spacing: AppSpacing.xs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(CaydexFairValue.title)
-                    .font(AppTypography.bodySmall)
+                    .font(AppTypography.bodySmallEmphasis)
                     .foregroundColor(AppColors.textSecondary)
                 Spacer(minLength: AppSpacing.md)
-                switch estimate.state {
-                case .estimate:
-                    Text(estimate.formattedValue ?? "—")
-                        .font(AppTypography.bodySmallEmphasis)
-                        .foregroundColor(AppColors.textPrimary)
-                case .refused:
-                    Text("Not modelled")
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textMuted)
-                }
                 Image(systemName: "info.circle")
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
@@ -65,20 +57,33 @@ struct CaydexFairValueRow: View {
 
             switch estimate.state {
             case .estimate:
-                if let range = estimate.formattedRange {
-                    Text(range)
-                        .font(AppTypography.caption)
-                        .foregroundColor(AppColors.textSecondary)
+                // The RANGE is the headline; the estimate is its middle mark.
+                Text(CaydexFairValue.rangeLabel)
+                    .font(AppTypography.label)
+                    .foregroundColor(AppColors.textMuted)
+                Text(estimate.formattedRangeBounds ?? "—")
+                    .font(AppTypography.dataTitle)
+                    .foregroundColor(AppColors.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .accessibilityLabel(estimate.rangeAccessibilityLabel ?? CaydexFairValue.rangeLabel)
+                if let mid = estimate.formattedEstimate {
+                    Text(mid)
+                        .font(AppTypography.bodySmallEmphasis)
+                        .foregroundColor(AppColors.textPrimary)
                 }
                 if let gap = estimate.formattedGap(versus: currentPrice) {
                     Text(priceContext.map { "\(gap) (\($0))" } ?? gap)
-                        .font(AppTypography.caption)
+                        .font(AppTypography.label)
                         .foregroundColor(AppColors.textSecondary)
                 }
                 Text(CaydexFairValue.subtitle)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
             case .refused(let reason):
+                Text(CaydexFairValue.refusedHeadline)
+                    .font(AppTypography.bodySmallEmphasis)
+                    .foregroundColor(AppColors.textSecondary)
                 Text(reason)
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textMuted)
@@ -92,21 +97,8 @@ struct CaydexFairValueRow: View {
     ZStack {
         AppColors.background.ignoresSafeArea()
         VStack(spacing: AppSpacing.lg) {
-            CaydexFairValueRow(
-                estimate: CaydexFairValue(
-                    state: .estimate(value: 229.53, low: 187.17, high: 269.29),
-                    alternativeValue: 210.39,
-                    assumptions: [.init(label: "Discount rate (cost of equity)", value: "8.75%")],
-                    asOf: "2026-09-25"
-                ),
-                currentPrice: 341.07
-            )
-            CaydexFairValueRow(
-                estimate: CaydexFairValue(state: .refused(
-                    reason: "Banks, insurers and asset managers earn on their balance sheet, so a cash-flow model doesn't fit them."
-                )),
-                currentPrice: 300
-            )
+            CaydexFairValueRow(estimate: .sampleEstimate, currentPrice: 341.07)
+            CaydexFairValueRow(estimate: .sampleRefused, currentPrice: 300)
         }
         .padding()
         .cardSurface(cornerRadius: AppCornerRadius.large)

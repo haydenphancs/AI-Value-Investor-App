@@ -89,10 +89,28 @@ def test_the_fixture_is_the_whole_run():
     assert _DOC["true_positives"], "a gate with nothing to reject proves nothing"
 
 
+#: Items the pool EXCLUDED after the fixture was vendored, each with the decision. Their rows stay
+#: in the fixture (it is never edited to make a test pass) and are still scanned against their own
+#: grounding below — an excluded item still has a fact sheet — but they are no longer eligible.
+EXCLUDED_AFTER_VENDORING = {
+    "journey:art_of_selling": "user decision 2026-09-26: the lesson is a sell-timing directive",
+}
+
+
 def test_every_item_in_the_fixture_is_still_eligible():
     keys = sorted({h[0] for h in _honest()} | {t["item"] for t in _DOC["true_positives"]})
-    bad = [k for k in keys if not (content_pool.get_item(k) and content_pool.get_item(k).eligible)]
+    bad = [k for k in keys if k not in EXCLUDED_AFTER_VENDORING
+           and not (content_pool.get_item(k) and content_pool.get_item(k).eligible)]
     assert bad == [], bad
+
+
+def test_an_item_excluded_after_vendoring_is_really_excluded_and_still_in_the_fixture():
+    keys = {h[0] for h in _honest()}
+    for key, why in EXCLUDED_AFTER_VENDORING.items():
+        item = content_pool.get_item(key)
+        assert key in keys, f"{key} is not in the fixture - drop it from EXCLUDED_AFTER_VENDORING"
+        assert item is not None and not item.eligible, (key, why)
+        assert key in content_pool.EXCLUDED, (key, why)
 
 
 def _by_item() -> Dict[str, List[Tuple[str, str, bool, bool]]]:
@@ -119,3 +137,35 @@ def test_the_true_positives_of_the_run_are_still_rejected(case):
     got = {v.code for v in ws._scan(case["field"], case["text"], item, allow_emoji=case["emoji"],
                                     myth_framed=case["myth_framed"])}
     assert set(case["codes"]) <= got, (case["text"], got)
+
+
+# ── 2026-09-26: lines only the semantic judge rejects (pre-registered) ────────────────────────
+
+#: The rule ids the judge rubric uses (`app/services/marketing/judge.py`).
+_JUDGE_RULES = {"judge_person", "judge_company_claim", "judge_directive", "judge_return_claim",
+                "judge_risk_softening", "judge_disclaimer"}
+
+
+def test_the_judge_true_positives_are_out_of_honest_and_carry_a_rule_and_a_reason():
+    """Pre-registered from the user's decisions BEFORE any judge output was read: own-voice
+    risk-softening about a product category ("A calm core for investing") and trim/prune/water
+    directives the regex's verb list lacks. The regex gate does not assert them (it passes most of
+    them); `scripts/marketing_judge_calibrate.py` requires the judge to flag every one."""
+    rows = _DOC["judge_true_positives"]
+    assert len(rows) >= 15, len(rows)
+    honest = {h[2] for h in _honest()}
+    for r in rows:
+        assert r["rule"] in _JUDGE_RULES, r
+        assert r["why"] and "2026-09-26" in r["why"], r
+        assert r["text"] not in honest, r["text"][:80]
+        assert content_pool.get_item(r["item"]) is not None, r["item"]
+    rules = {r["rule"] for r in rows}
+    assert {"judge_risk_softening", "judge_directive"} <= rules
+    # The user's boundary calls (2026-09-26) stay honest: attributed usage, a behaviour
+    # comparison, a business metaphor and a hedged generic signal.
+    for boundary in ("Many people use broad ETFs as a steady core of their investment plan.",
+                     "Steady and sensible investing often quietly beats clever and reckless "
+                     "approaches.",
+                     "Think of a castle, safe behind its wide moat.",
+                     "A steady dividend can suggest stability, though not all companies pay one."):
+        assert any(boundary in t for t in honest), boundary

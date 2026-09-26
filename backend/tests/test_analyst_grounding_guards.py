@@ -436,18 +436,19 @@ def test_grounding_lines_are_gated_on_BOTH_flags():
     assert "return nil" in block[guard:block.index("\n", guard) + 60]
 
 
-def test_the_report_momentum_strip_is_gated():
-    """"0 upgrades · 0 maintains · 0 downgrades" reads as "no analyst moved on this company"
-    when the truth is that we cannot see analyst actions at all. Gated on whether coverage
-    EXISTS, not on the counts — a genuine zero over 12 months is a real fact worth rendering."""
+def test_the_report_momentum_strip_is_gone():
+    """The strip used to be GATED on coverage ("0 upgrades · 0 maintains · 0 downgrades" read as
+    "no analyst moved" when we could not see analyst actions at all). Since 2026-09-26 the card is
+    "Valuation & Institutions" and the whole analyst half — Momentum included — is removed for
+    every report, old ones too (owner's decision; unlicensed FMP data). Brace-bound to the live
+    view struct, so the `#Preview` mocks that still construct the DTO's momentum fields don't count."""
     block = _decl_block(
-        _strip_comments(_CONSENSUS_BAR.read_text()), "private var momentumSection: some View"
+        _strip_comments(_CONSENSUS_BAR.read_text()), "struct ReportConsensusBar: View"
     )
-    assert "hasAnalystDistribution" in block and "hasAnalystTargets" in block, (
-        "the Momentum strip renders unconditionally again"
-    )
-    strip = block.index("ReportMetricsStrip")
-    assert block.index("hasAnalystDistribution") < strip, "the gate is after the render"
+    assert "hedgeFundsSection" in block, "brace-bound the wrong declaration"   # anti-vacuity
+    for banned in ("momentumSection", "ReportMetricsStrip", "momentumUpgrades",
+                   "momentumMaintains", "momentumDowngrades"):
+        assert banned not in block, f"the report card renders analyst momentum again ({banned})"
 
 
 def test_the_scanners_are_not_vacuous():
@@ -475,6 +476,10 @@ def test_the_scanners_are_not_vacuous():
 #       -> test_grounding_lines_are_gated_on_BOTH_flags FAILED ✅
 #  3. `momentumSection`'s gate replaced with `if true`
 #       -> test_the_report_momentum_strip_is_gated FAILED ✅
+#     (2026-09-26: the strip was removed outright; the guard is now
+#      test_the_report_momentum_strip_is_gone — a `momentumSection` computed property re-added
+#      inside `struct ReportConsensusBar`, on a temp copy of the file -> FAILED ✅; the real file,
+#      whose #Preview mocks still pass `momentumUpgrades: 0`, passes)
 #  4. Stage-A prompt reverted to `if out.analyst_analysis:` — truthy on a response that is
 #     ALWAYS present and always zeroed, which is the original bug verbatim
 #       -> test_the_report_prompt_carries_no_fabricated_consensus FAILED ✅

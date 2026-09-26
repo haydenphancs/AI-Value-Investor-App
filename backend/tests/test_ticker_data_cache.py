@@ -27,6 +27,7 @@ from app.services.industry_tam_service import IndustryTAM
 from app.services.sector_aggregates_service import SectorAggregates
 from app.schemas.profit_power import ProfitPowerResponse, ProfitPowerDataPointSchema
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
+from app.schemas.dcf_fair_value import DcfFairValueResponse
 
 
 def _field_names():
@@ -77,6 +78,13 @@ def _sample() -> CollectedTickerData:
         category="Price", rating=3,
         metrics=[SnapshotMetricResponse(name="P/E (1.2x sector avg 22)", value="27.59")],
     )
+    # The Caydex Fair Value Estimate — populated because an unregistered one killed every
+    # write on launch day (Sentry, 2026-09-26), and the stamp the read side checks.
+    out.caydex_dcf = DcfFairValueResponse(
+        symbol="ORCL", status="ok", fair_value=213.29, range_low=176.2, range_high=266.46,
+        as_of="2026-09-26", model_version="dcf-v1",
+    )
+    out.wall_street_consensus_partial = {"dcf_source": "caydex"}
     return out
 
 
@@ -142,6 +150,68 @@ def test_roundtrip_reconstructs_registered_pydantic_models():
 
     assert isinstance(back.snap_valuation, SnapshotItemResponse)
     assert back.snap_valuation.metrics[0].value == "27.59"
+
+    assert isinstance(back.caydex_dcf, DcfFairValueResponse)
+    assert back.caydex_dcf == out.caydex_dcf
+    assert back.caydex_dcf.model_dump()["range_low"] == 176.2   # what the collector reads
+
+
+def test_no_field_hides_a_model_behind_any():
+    """The guard above reads ANNOTATIONS, so a field typed `Any` is invisible to it. That is
+    exactly how `caydex_dcf` (a DcfFairValueResponse) shipped unregistered and made every
+    collection write fail on 2026-09-26. A bare `Any` field must be registered or listed
+    here with a reason."""
+    import typing
+
+    allowed = {"industry_tam": "IndustryTAM, imported lazily — registered in _DATACLASS_FIELDS"}
+    hints = typing.get_type_hints(CollectedTickerData)
+    opaque = []
+    for f in dataclasses.fields(CollectedTickerData):
+        annotation = hints.get(f.name)
+        args = typing.get_args(annotation) or (annotation,)
+        if any(a is typing.Any for a in args) and typing.get_origin(annotation) in (None, typing.Union):
+            if f.name not in allowed and f.name not in _PYDANTIC_FIELDS and f.name not in _DATACLASS_FIELDS:
+                opaque.append(f.name)
+    assert not opaque, f"fields typed Any that no registry covers: {opaque}"
+    assert "industry_tam" in _DATACLASS_FIELDS, allowed["industry_tam"]
+
+
+def _fake_supabase(row):
+    class _Q:
+        def __getattr__(self, _name):
+            return lambda *a, **k: self
+        def execute(self):
+            return type("R", (), {"data": [row]})()
+    return type("SB", (), {"table": lambda self, _n: _Q()})()
+
+
+def test_a_collection_built_under_the_other_dcf_setting_is_a_miss(monkeypatch):
+    """A collection carries its DCF (the estimate, the fair value derived from it, the
+    stamp). Across a DCF_ENABLED flip it would build reports under the other setting for
+    up to a day — the kill switch withdrawing nothing, or FMP's DCF beside the Caydex tab."""
+    import asyncio
+    import app.services.ticker_data_cache as tdc
+    from app.config import settings
+
+    blob = _serialize(_sample())                         # stamped "caydex"
+    monkeypatch.setattr(tdc, "get_supabase", lambda: _fake_supabase(
+        {"collected_data": blob, "cached_at": "2026-09-26T14:00:00+00:00"}))
+    monkeypatch.setattr(tdc, "is_cache_fresh", lambda _at: True)
+
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+    hit = asyncio.run(tdc.get_cached_collection("ORCL"))
+    assert hit is not None and isinstance(hit.caydex_dcf, DcfFairValueResponse)   # anti-vacuity
+
+    monkeypatch.setattr(settings, "DCF_ENABLED", False)
+    assert asyncio.run(tdc.get_cached_collection("ORCL")) is None
+
+    # A row from before the stamp existed was built with FMP's DCF.
+    legacy = dict(blob, wall_street_consensus_partial={})
+    monkeypatch.setattr(tdc, "get_supabase", lambda: _fake_supabase(
+        {"collected_data": legacy, "cached_at": "2026-09-26T14:00:00+00:00"}))
+    assert asyncio.run(tdc.get_cached_collection("ORCL")) is not None
+    monkeypatch.setattr(settings, "DCF_ENABLED", True)
+    assert asyncio.run(tdc.get_cached_collection("ORCL")) is None
 
 
 def test_a_populated_unregistered_model_field_kills_the_whole_write():

@@ -27,6 +27,9 @@ struct FlowOptionChips<Option: Hashable>: View {
     let title: (Option) -> String
     let isSelected: (Option) -> Bool
     let onTap: (Option) -> Void
+    /// What VoiceOver reads when the chip's visible title is terse — the search chips draw
+    /// "NVDA" but should be read as "NVDA, NVIDIA Corporation". nil keeps the default label.
+    var accessibilityLabel: ((Option) -> String)? = nil
 
     var body: some View {
         FlowLayout(spacing: AppSpacing.sm) {
@@ -49,7 +52,22 @@ struct FlowOptionChips<Option: Hashable>: View {
                     )
                 }
                 .buttonStyle(PlainButtonStyle())
+                .modifier(OptionalAccessibilityLabel(label: accessibilityLabel?(option)))
             }
+        }
+    }
+}
+
+/// Applies an accessibility label only when one is given, so existing callers keep the
+/// label SwiftUI derives from the chip's contents.
+private struct OptionalAccessibilityLabel: ViewModifier {
+    let label: String?
+
+    func body(content: Content) -> some View {
+        if let label {
+            content.accessibilityLabel(label)
+        } else {
+            content
         }
     }
 }

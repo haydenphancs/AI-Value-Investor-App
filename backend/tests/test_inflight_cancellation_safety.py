@@ -132,6 +132,10 @@ _INFLIGHT_MODULES = [
     # stops a burst of keystrokes starting duplicate 70k-row fetches, and the entry must
     # clear from the task's own completion (`add_done_callback`).
     "stock_search_service.py",
+    # Added 2026-09-26 with the search-screen chips. Future-based: the first search sheet to
+    # open computes the two lists and every concurrent opener joins it under `shield`, so a
+    # sheet dismissed mid-fetch cannot cancel the computation the others are waiting on.
+    "search_trending_service.py",
     # Added 2026-09-25 with the Caydex Fair Value Estimate (model dcf-v1). Future-based,
     # profit_power shape: the leader resolves or fails the shared future, a cancelled leader
     # hands joiners a RuntimeError, and joiners attach through asyncio.shield.

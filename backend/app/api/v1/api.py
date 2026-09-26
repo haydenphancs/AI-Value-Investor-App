@@ -28,6 +28,7 @@ from app.api.v1.endpoints import (
     widget,
     analytics,
     marketing_internal,
+    search,
 )
 
 api_router = APIRouter()
@@ -37,6 +38,9 @@ api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(billing.router, prefix="/billing", tags=["Billing"])
 api_router.include_router(stocks.router, prefix="/stocks", tags=["Stocks"])
+# Search-screen chips (Trending searches / Most added). Its own prefix: the stocks router
+# ends in a `/{ticker}` catch-all.
+api_router.include_router(search.router, prefix="/search", tags=["Search"])
 api_router.include_router(ticker_report.router, prefix="/stocks", tags=["Ticker Report"])
 api_router.include_router(indices.router, prefix="/indices", tags=["Indices"])
 api_router.include_router(etfs.router, prefix="/etfs", tags=["ETFs"])

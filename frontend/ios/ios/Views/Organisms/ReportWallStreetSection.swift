@@ -2,7 +2,9 @@
 //  ReportWallStreetSection.swift
 //  ios
 //
-//  Organism: Wall Street Consensus deep dive content
+//  Organism: "Valuation & Institutions" deep dive content (wire key and type name keep the
+//  old "Wall Street consensus" spelling) — the Caydex Fair Value Estimate, its range chart,
+//  the Institutions (13F) flow and the AI insight. See ReportConsensusBar.
 //
 
 import SwiftUI

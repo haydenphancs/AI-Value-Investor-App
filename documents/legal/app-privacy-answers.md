@@ -51,6 +51,7 @@ and **Purposes**. Answer *Used for tracking = No* for every row.
 | Usage Data → **Product Interaction** | Yes | App Functionality | Watchlist contents, lesson/book completion, bookmarks, followed entities, and the optional learning preferences (experience level, explanation style, answer length, topics of interest) in `user_investor_profile` |
 | Purchases → **Purchase History** | Yes | App Functionality | StoreKit 2 subscriptions + the four consumable credit packs. Every verified transaction is written to `credit_purchases` with a **NOT NULL `user_id`** alongside `transaction_id` / `product_id` / `price_cents`; subscriptions also set `users.tier`. Linked, therefore — see the note below |
 | Diagnostics → **Crash Data** | **No** | App Functionality | Sentry. `sendDefaultPii = false` and `SentrySDK.setUser` is never called, so crash reports carry no identity |
+| Search History → **Search History** | **No** | App Functionality | A tap on a search RESULT row feeds the "Trending searches" chips. The server keeps only an anonymous daily count per ticker (`search_pick_daily`, migration 179) — no user, device, IP or timestamp column exists. De-duplicated before the write, on the device and in server memory (a keyed digest never persisted). Typed queries are sent only to the search call itself (they can appear in server/Sentry logs like any request line) |
 
 Notes on the non-obvious ones:
 
@@ -74,7 +75,7 @@ Notes on the non-obvious ones:
 Payment Info · Credit Info · Precise Location · Coarse Location · Physical Address ·
 Phone Number · Other Contact Info · Health · Fitness · Sensitive Info · Contacts ·
 Audio Data · Gameplay Content · Customer Support · Emails or Text
-Messages · Search History · Browsing History · Advertising Data · Performance Data ·
+Messages · Browsing History · Advertising Data · Performance Data ·
 Other Diagnostic Data
 
 Notes on the non-obvious ones:
@@ -84,7 +85,11 @@ Notes on the non-obvious ones:
   address, no bank detail ever reaches us. Declare Purchase History, never Payment Info.
 - **Performance Data** — Sentry runs with `tracesSampleRate = 0.0`, so none is transmitted.
   If you ever raise that value, add Performance Data here *and* to the manifest.
-- **Search History** — the in-app search is ticker/entity lookup and is not stored per user.
+- **Search History** — MOVED to "select" on 2026-09-26 with the search-screen chips (§3
+  table), as **not linked**. It is still not stored per user: only anonymous per-ticker daily
+  counts. Declared anyway, because a tap on a result now leaves the device and is kept (as a
+  count) beyond the request — Apple's test for "collected". `PrivacyInfo.xcprivacy` carries
+  the same entry; `tests/test_ios_search_trending_guards.py` fails the build if the two drift.
 - **Browsing History** — no `WKWebView` and no URL history collection.
 
 ---

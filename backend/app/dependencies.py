@@ -803,6 +803,14 @@ MarketRateLimit = Depends(
 MarketFanoutRateLimit = Depends(
     UserIdRateLimitChecker("market_fanout", settings.MARKET_FANOUT_RATE_LIMIT_PER_MINUTE, 60)
 )
+#: The search-screen chips (`GET /search/trending`). Their own bucket: opening a search sheet
+#: must never spend the account's market-data allowance. The answer is cached for an hour,
+#: so 20/min is only ever reached by a loop.
+SearchTrendingRateLimit = Depends(UserIdRateLimitChecker("search_trending", 20, 60))
+#: Search picks (`POST /search/picks`) — a tap on a search result. One of the three limits on
+#: how far one account can push "Trending searches" (with the per-ticker de-dup and the
+#: per-day cap in `search_pick_service`).
+SearchPickRateLimit = Depends(UserIdRateLimitChecker("search_pick", 30, 60))
 
 # A report generation is ~20x the cost of a chat turn (~17 Gemini + ~20 FMP calls
 # on a cache miss), so its window is far tighter than chat's. This is the ONLY

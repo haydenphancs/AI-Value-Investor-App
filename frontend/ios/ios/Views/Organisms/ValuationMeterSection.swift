@@ -14,8 +14,11 @@
 //  model is negative, and nothing at all when FMP has no model. Never "fair value".
 //
 //  When the snapshot carries the Caydex Fair Value Estimate (backend DCF_ENABLED), that
-//  row — `CaydexFairValueRow`, with its range and "not a price target" line — REPLACES the
-//  FMP row; the backend then sends no `dcf` at all.
+//  estimate REPLACES the FMP row; the backend then sends no `dcf` at all. It is shown range
+//  first (`CaydexFairValueRow`) with the price-vs-range chart under it
+//  (`CaydexFairValueRangeChart`) — the same two views the report's "Valuation &
+//  Institutions" section uses. The chart's closes come from data the screen already fetched;
+//  until they arrive its space is reserved, so the card does not jump under the reader.
 //
 
 import SwiftUI
@@ -24,6 +27,11 @@ struct ValuationMeterSection: View {
     let snapshot: SnapshotItem
     /// The live header price the DCF gap is measured against (nil → no gap, no caveat).
     let currentPrice: Double?
+    /// ~2 years of daily closes for the estimate's chart; fewer than 2 → text only.
+    var priceHistory: [Double] = []
+    var priceHistoryLabel: String? = nil
+    /// True while `priceHistory` may still arrive.
+    var isPriceHistoryLoading: Bool = false
 
     @State private var showInfoSheet: Bool = false
 
@@ -55,6 +63,14 @@ struct ValuationMeterSection: View {
                     Divider().overlay(AppColors.divider)
                         .padding(.bottom, AppSpacing.xs)
                     CaydexFairValueRow(estimate: estimate, currentPrice: currentPrice)
+                    if estimate.isEstimate && priceHistory.count >= 2 {
+                        CaydexFairValueRangeChart(prices: priceHistory, currentPrice: currentPrice,
+                                                  estimate: estimate, periodLabel: priceHistoryLabel,
+                                                  priceLegend: "Current price", height: 180)
+                            .padding(.top, AppSpacing.md)
+                    } else if estimate.isEstimate && isPriceHistoryLoading {
+                        chartPlaceholder
+                    }
                 }
             } else if let dcf = snapshot.dcf {
                 dcfRow(dcf)
@@ -71,6 +87,17 @@ struct ValuationMeterSection: View {
             ValuationInfoSheet(showsCaydexEstimate: snapshot.caydexEstimate != nil,
                                showsFmpDcf: snapshot.dcf != nil)
         }
+    }
+
+    /// Holds the chart's place while its closes load, so the card does not grow by
+    /// ~230pt under the reader when they land.
+    private var chartPlaceholder: some View {
+        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+            .cardFill(AppColors.cardBackgroundNested)
+            .frame(height: 210)
+            .overlay(ProgressView())
+            .padding(.top, AppSpacing.md)
+            .accessibilityLabel("Loading the price chart")
     }
 
     // MARK: - Multiples

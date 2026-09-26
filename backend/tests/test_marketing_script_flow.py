@@ -209,9 +209,10 @@ class FakeWriter:
         self.honor_skip = honor_skip
         self.between_rounds = None  # optional callable(generation_id), run after a round's call
 
-    async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, before_call=None):
+    async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
+                       before_call=None):
         self.calls.append({"item": item.key, "template": template.id, "generation_id": generation_id,
-                           "run_date": run_date})
+                           "run_date": run_date, "judge_mode": judge_mode})
         for i in range(self.rounds):
             if before_call is not None:
                 ok = await before_call()
@@ -253,14 +254,34 @@ def _iso_ahead(**kw) -> str:
     return (datetime.now(timezone.utc) + timedelta(**kw)).isoformat()
 
 
+#: The claim nonce every seeded run carries (what claim_run writes into metadata).
+NONCE = "0123456789abcdef0123456789abcdef"
+
+
 def _run(sb: FakeSB, day: date, **extra) -> str:
     """A run the worker HOLDS: in_progress and claimed just now (what claim_run writes)."""
     rid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     sb.tables[mrs.RUNS].rows.append({"id": rid, "run_date": day.isoformat(), "status": "in_progress",
-                                     "stage": "planned", "metadata": {}, "timings": {}, "attempts": 1,
+                                     "stage": "planned", "metadata": {"claim_nonce": NONCE},
+                                     "timings": {}, "attempts": 1,
                                      "dry_run": True, "started_at": now, "updated_at": now, **extra})
     return rid
+
+
+def _holder_of(runs: Any, run_id: str) -> mrs.CallerClaim:
+    return _holder(type("S", (), {"runs": runs})(), run_id)
+
+
+def _holder(svc: Any, run_id: str) -> mrs.CallerClaim:
+    """The claim of whoever holds `run_id` NOW (its row's attempts + nonce) — the caller every
+    kick in this file speaks as, so these tests keep exercising the held/state logic behind the
+    caller-claim fence. The fence itself is tested below with a zombie's claim."""
+    for r in svc.runs.sb.tables[mrs.RUNS].rows:
+        if r.get("id") == run_id:
+            meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+            return mrs.CallerClaim(int(r.get("attempts") or 1), meta.get("claim_nonce") or NONCE)
+    return mrs.CallerClaim(1, NONCE)
 
 
 def _seed(sb: FakeSB, rid: str, **fields) -> Dict[str, Any]:
@@ -291,7 +312,7 @@ async def _kick_until_final(svc, sb, rid, *, limit=20) -> List[Dict[str, Any]]:
     """Kick, let the generation finish, and clear the back-off (= the next hourly tick)."""
     seen = []
     for _ in range(limit):
-        state = await svc.kick(rid)
+        state = await svc.kick(rid, claim=_holder(svc, rid))
         seen.append(state)
         await _drain(svc)
         _script_row(sb, rid)["retry_not_before"] = None
@@ -309,10 +330,10 @@ async def test_rest_day_selects_nothing_and_never_calls_the_writer(world):
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, REST_DAY)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert state["status"] == "rest_day" and writer.calls == []
-    assert (await svc.kick(rid))["status"] == "rest_day"  # final, idempotent
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "rest_day"  # final, idempotent
     assert _script_row(sb, rid)["run_date"] == REST_DAY.isoformat()
 
 
@@ -322,7 +343,7 @@ async def test_first_kick_selects_once_and_mirrors_onto_the_run(world):
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "generating" and state["source_ref"] in content_pool.eligible_keys()
     row = _script_row(sb, rid)
     assert row["fact_sheet"]["key"] == state["source_ref"] and row["fact_sheet"]["sentences"]
@@ -330,7 +351,7 @@ async def test_first_kick_selects_once_and_mirrors_onto_the_run(world):
     run = _run_row(sb, rid)
     assert run["source_ref"] == state["source_ref"] and run["content_class"] == "A"
     await _drain(svc)
-    again = await svc.kick(rid)
+    again = await svc.kick(rid, claim=_holder(svc, rid))
     assert again["status"] == "accepted" and again["source_ref"] == state["source_ref"]
     assert len(sb.tables[mrs.SCRIPTS].rows) == 1  # selection happened exactly once
 
@@ -348,7 +369,7 @@ async def test_selection_skips_recent_picks_read_from_the_script_rows(world):
           reject_reason="content")
     assert _run_row(sb, yrid).get("source_ref") is None
     rid = _run(sb, POSTING_DAY)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert state["source_ref"] != first
 
@@ -368,12 +389,12 @@ async def test_a_lost_mirror_write_is_healed_by_the_next_kick_and_recent_never_n
 
     svc = ss.MarketingScriptService(Flaky(supabase=sb), writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert _run_row(sb, rid).get("source_ref") is None          # the mirror write was lost
     # Tomorrow's selection already sees today's pick (script row), mirror or not.
     assert await runs.recent_source_refs(POSTING_DAY + timedelta(days=1), 5) == [state["source_ref"]]
     await _drain(svc)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     assert _run_row(sb, rid)["source_ref"] == state["source_ref"]  # healed by the next poll
 
 
@@ -394,8 +415,8 @@ async def test_a_lost_insert_response_is_adopted_and_still_mirrored(world):
     svc = ss.MarketingScriptService(LostResponse(supabase=sb), writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with pytest.raises(mrs.MarketingRunError):
-        await svc.kick(rid)
-    state = await svc.kick(rid)  # the worker's 5xx retry adopts the committed row
+        await svc.kick(rid, claim=_holder(svc, rid))
+    state = await svc.kick(rid, claim=_holder(svc, rid))  # the worker's 5xx retry adopts the committed row
     assert state["status"] == "generating"
     assert _run_row(sb, rid)["source_ref"] == state["source_ref"] == _script_row(sb, rid)["source_ref"]
     await _drain(svc)
@@ -408,7 +429,7 @@ async def test_empty_pool_is_a_loud_final_rejection(world, monkeypatch, caplog):
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level("ERROR"):
-        state = await svc.kick(rid)
+        state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "rejected" and state["reason"] == "empty_pool" and state["violations"] == []
     assert any("EMPTY content pool" in r.getMessage() for r in caplog.records)
 
@@ -418,7 +439,7 @@ async def test_unknown_run_raises_the_not_found_class(world):
     _sb, runs = world
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     with pytest.raises(mrs.MarketingRunNotFound):
-        await svc.kick(str(uuid.uuid4()))
+        await svc.kick(str(uuid.uuid4()), claim=mrs.CallerClaim(1, NONCE))
 
 
 # ── kick: only a HELD run may start writer spend ─────────────────────────────
@@ -440,13 +461,40 @@ async def test_a_kick_never_starts_spend_for_a_run_nobody_holds(world, label, da
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY + timedelta(days=day_offset), **extra)
     with pytest.raises(mrs.MarketingRunNotHeld):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert writer.calls == [], label
     assert sb.tables[mrs.SCRIPTS].rows == [], label        # no selection either
     # No script row exists, so this cannot reach `_heal_mirror`; the mirror's own held gate is
     # pinned by `test_a_kick_on_an_unheld_run_neither_mirrors_nor_revives_it` below.
     assert _run_row(sb, rid).get("source_ref") is None, label
+
+
+@pytest.mark.parametrize("zombie", [
+    mrs.CallerClaim(2, NONCE),                             # a later attempt number
+    mrs.CallerClaim(1, "f" * 32),                          # the right attempts, another nonce
+], ids=["wrong-attempts", "wrong-nonce"])
+@pytest.mark.parametrize("with_row", [False, True], ids=["fresh", "selected-row"])
+@pytest.mark.asyncio
+async def test_a_zombie_kick_is_refused_before_any_selection_mirror_or_spend(world, zombie, with_row):
+    """The caller-claim check runs FIRST in `kick` (review 2026-09-26: moving it after
+    `_select` or `_heal_mirror` passed every test, and on a rest day even after `_advance`).
+    Pinned on the fixed POSTING_DAY, so the result does not depend on today's weekday: no
+    script row is selected, the run's mirror and liveness are untouched, the writer never runs."""
+    sb, runs = world
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    rid = _run(sb, POSTING_DAY, updated_at=_iso_ago(minutes=5))
+    if with_row:
+        _seed(sb, rid)
+    before_run = copy.deepcopy(_run_row(sb, rid))
+    before_rows = copy.deepcopy(sb.tables[mrs.SCRIPTS].rows)
+    with pytest.raises(mrs.MarketingRunNotHeld):
+        await svc.kick(rid, claim=zombie)
+    await _drain(svc)
+    assert writer.calls == []
+    assert sb.tables[mrs.SCRIPTS].rows == before_rows
+    assert _run_row(sb, rid) == before_run
 
 
 @pytest.mark.asyncio
@@ -456,7 +504,7 @@ async def test_yesterdays_held_run_still_resumes(world):
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY - timedelta(days=1))
-    assert (await svc.kick(rid))["status"] in ("generating", "rest_day")
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] in ("generating", "rest_day")
 
 
 @pytest.mark.asyncio
@@ -468,7 +516,7 @@ async def test_a_selected_row_of_an_unheld_run_does_not_spawn(world):
     _seed(sb, rid)
     touched = _run_row(sb, rid)["updated_at"]
     with pytest.raises(mrs.MarketingRunNotHeld):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert writer.calls == [] and _script_row(sb, rid)["status"] == "selected"
     assert _run_row(sb, rid).get("source_ref") is None and _run_row(sb, rid)["updated_at"] == touched
@@ -483,7 +531,7 @@ async def test_an_expired_lease_of_an_unheld_run_is_not_taken_over(world):
     _seed(sb, rid, status="generating", generation_id="dead", generations=1, lease_until=_iso_ago(hours=1))
     touched = _run_row(sb, rid)["updated_at"]
     with pytest.raises(mrs.MarketingRunNotHeld):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert writer.calls == [] and _script_row(sb, rid)["generation_id"] == "dead"
     assert _run_row(sb, rid).get("source_ref") is None and _run_row(sb, rid)["updated_at"] == touched
@@ -496,7 +544,7 @@ async def test_final_rows_answer_idempotently_whatever_the_run_state(world):
     rid = _run(sb, POSTING_DAY - timedelta(days=90), status="skipped")
     _seed(sb, rid, status="accepted", output=_package(KEY), generation_id=str(uuid.uuid4()))
     touched = _run_row(sb, rid)["updated_at"]
-    assert (await svc.kick(rid))["status"] == "accepted"
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "accepted"
     assert _run_row(sb, rid).get("source_ref") is None and _run_row(sb, rid)["updated_at"] == touched
 
 
@@ -508,9 +556,9 @@ async def test_accepted_script_returns_only_the_worker_subset(world):
     sb, runs = world
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     script = state["script"]
     assert set(script) == {"hook", "video_script", "cards", "carousel_slides", "disclaimer_card", "outlets"}
     assert script["outlets"] == ["x", "youtube"]
@@ -534,7 +582,7 @@ async def test_the_accepted_row_records_the_fact_sheet_it_was_grounded_on(world,
     monkeypatch.setattr(ss.content_pool, "get_item", lambda k: edited if k == KEY else real_get(k))
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     row = _script_row(sb, rid)
     assert row["status"] == "accepted"
@@ -549,7 +597,7 @@ async def test_concurrent_kicks_start_exactly_one_generation(world):
     writer.gate = asyncio.Event()
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY)
-    states = await asyncio.gather(*(svc.kick(rid) for _ in range(5)))
+    states = await asyncio.gather(*(svc.kick(rid, claim=_holder(svc, rid)) for _ in range(5)))
     for _ in range(5):
         await asyncio.sleep(0)
     assert {s["status"] for s in states} == {"generating"}
@@ -567,13 +615,13 @@ async def test_a_second_process_cannot_steal_a_live_lease(world):
     w1.gate = asyncio.Event()
     a, b = ss.MarketingScriptService(runs, writer=w1), ss.MarketingScriptService(runs, writer=w2)
     rid = _run(sb, POSTING_DAY)
-    await a.kick(rid)
+    await a.kick(rid, claim=_holder(a, rid))
     for _ in range(200):
         if w1.calls:
             break
         await asyncio.sleep(0.01)
     assert _script_row(sb, rid)["status"] == "generating"
-    assert (await b.kick(rid))["status"] == "generating"
+    assert (await b.kick(rid, claim=_holder(b, rid)))["status"] == "generating"
     await _drain(b)
     assert w2.calls == []  # live lease: B must not generate
     w1.gate.set()
@@ -590,7 +638,7 @@ async def test_an_expired_lease_is_taken_over_and_the_old_result_is_fenced_out(w
           lease_until=_iso_ago(minutes=1))
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
-    assert (await svc.kick(rid))["status"] == "generating"
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "generating"
     await _drain(svc)
     row = _script_row(sb, rid)
     assert len(writer.calls) == 1 and row["status"] == "accepted"
@@ -633,14 +681,16 @@ async def test_losing_the_lease_mid_generation_stops_the_spend_not_just_the_writ
     rid = _run(sb, POSTING_DAY)
 
     class Thief(FakeWriter):
-        async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, before_call=None):
+        async def __call__(self, item, template, run_date, *, generation_id, allow_x_url, judge_mode,
+                           before_call=None):
             _script_row(sb, rid)["generation_id"] = "someone-else"  # a takeover happened
             return await super().__call__(item, template, run_date, generation_id=generation_id,
-                                          allow_x_url=allow_x_url, before_call=before_call)
+                                          allow_x_url=allow_x_url, judge_mode=judge_mode,
+                                          before_call=before_call)
 
     thief = Thief(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=thief)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert thief.model_calls == 0  # the refresh raised LeaseLost BEFORE the model call
     assert _script_row(sb, rid)["status"] == "generating"  # untouched by the loser
@@ -668,7 +718,7 @@ async def test_a_ledger_blip_on_the_lease_refresh_keeps_the_generation(world, ca
     svc = ss.MarketingScriptService(LedgerDownFromSecondRefresh(supabase=sb), writer=writer)
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     assert writer.model_calls == 2 and _script_row(sb, rid)["status"] == "accepted"
     assert any("lease NOT refreshed" in r.getMessage() for r in caplog.records)
@@ -687,7 +737,7 @@ async def test_content_rejection_retries_then_rejects_for_the_day(world):
     row = _script_row(sb, rid)
     assert row["status"] == "rejected" and row["violations"][0]["code"] == "person_named"
     assert row["reject_reason"] == "content" and row["content_rejections"] == ss.MAX_GENERATIONS
-    assert (await svc.kick(rid))["violations"] == ["person_named"]
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["violations"] == ["person_named"]
 
 
 @pytest.mark.asyncio
@@ -698,9 +748,9 @@ async def test_a_gemini_failure_defers_with_a_retry_time(world):
     writer = FakeWriter([GeminiTimeoutError("slow"), "accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "deferred" and state["retry_after_seconds"] > 60
     row = _script_row(sb, rid)
     assert row["status"] == "selected" and "GeminiTimeoutError" in row["last_error"]
@@ -764,7 +814,7 @@ async def test_a_failed_generation_records_the_tokens_it_already_spent(world):
     setattr(err, "marketing_tokens_used", 777)
     svc = ss.MarketingScriptService(runs, writer=FakeWriter([err, "accepted"]))
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert _script_row(sb, rid)["tokens_used"] == 777
 
@@ -789,7 +839,7 @@ async def test_a_dead_owner_at_the_failure_cap_is_closed_rejected_on_the_first_k
     svc = ss.MarketingScriptService(runs, writer=writer)
     states = []
     for _ in range(3):
-        states.append(await svc.kick(rid))
+        states.append(await svc.kick(rid, claim=_holder(svc, rid)))
         await _drain(svc)
     assert [s["status"] for s in states] == ["rejected"] * 3
     assert states[0]["reason"] == "writer_unavailable" and states[0]["violations"] == []
@@ -809,7 +859,7 @@ async def test_a_dead_owner_below_the_caps_is_taken_over_without_burning_a_conte
           content_rejections=3, lease_until=_iso_ago(minutes=10))
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
-    assert (await svc.kick(rid))["status"] == "generating"
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "generating"
     await _drain(svc)
     row = _script_row(sb, rid)
     assert len(writer.calls) == 1 and row["status"] == "accepted" and row["generations"] == 5
@@ -824,7 +874,7 @@ async def test_a_live_owner_at_the_cap_is_left_alone(world):
           content_rejections=3, lease_until=_iso_ahead(minutes=5))
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
-    assert (await svc.kick(rid))["status"] == "generating"
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "generating"
     await _drain(svc)
     row = _script_row(sb, rid)
     assert writer.calls == [] and row["status"] == "generating" and row["generation_id"] == gen
@@ -845,7 +895,7 @@ async def test_a_lost_terminal_write_on_the_last_failure_is_closed_by_the_next_k
     svc = ss.MarketingScriptService(LoseRejected(supabase=sb), writer=writer)
     rid = _run(sb, POSTING_DAY)
     for _ in range(ss.MAX_WRITER_FAILURES):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
         _script_row(sb, rid)["retry_not_before"] = None
     row = _script_row(sb, rid)
@@ -854,7 +904,7 @@ async def test_a_lost_terminal_write_on_the_last_failure_is_closed_by_the_next_k
     monkeypatch.setattr(ss, "_now", lambda: later)
     run = _run_row(sb, rid)
     run["started_at"] = run["updated_at"] = later.isoformat()
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "rejected" and state["reason"] == "writer_unavailable"
     assert len(writer.calls) == ss.MAX_WRITER_FAILURES
 
@@ -890,7 +940,7 @@ async def test_a_finalize_that_loses_to_a_live_owners_accept_answers_accepted(wo
             return await super().update_script_where(run_id, patch, expect=expect)
 
     svc = ss.MarketingScriptService(AliveOwner(supabase=sb), writer=FakeWriter(["accepted"]))
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "accepted" and _script_row(sb, rid)["status"] == "accepted"
 
 
@@ -914,7 +964,7 @@ async def test_a_finalize_is_fenced_on_the_observed_lease(world):
             return await super().update_script_where(run_id, patch, expect=expect)
 
     svc = ss.MarketingScriptService(RefreshFirst(supabase=sb), writer=FakeWriter(["accepted"]))
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "generating" and _script_row(sb, rid)["status"] == "generating"
 
 
@@ -926,14 +976,14 @@ async def test_a_shutdown_hand_back_at_the_cap_is_finalized_by_the_next_kick(wor
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY)
     _seed(sb, rid, generations=ss.MAX_WRITER_FAILURES - 1)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     for _ in range(200):
         if writer.calls:
             break
         await asyncio.sleep(0.01)
     await svc.shutdown(timeout=2)
     assert _script_row(sb, rid)["status"] == "selected"
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "rejected" and state["reason"] == "writer_unavailable"
 
 
@@ -1029,7 +1079,7 @@ async def test_a_landed_write_whose_response_was_lost_is_logged_as_written(world
     svc = ss.MarketingScriptService(LandThenRaise(supabase=sb), writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     msgs = [r.getMessage() for r in caplog.records]
     assert _script_row(sb, rid)["status"] == "accepted"
@@ -1051,7 +1101,7 @@ async def test_a_lost_accepted_write_is_never_logged_as_accepted(world, caplog):
     svc = ss.MarketingScriptService(AlwaysRaise(supabase=sb), writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert not any(m.startswith("marketing script ACCEPTED") for _, m in msgs)
@@ -1074,7 +1124,7 @@ async def test_a_failed_hand_back_during_shutdown_is_logged(world, monkeypatch, 
     writer.gate = asyncio.Event()
     svc = ss.MarketingScriptService(HandBackFails(supabase=sb), writer=writer)
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     for _ in range(200):
         if writer.calls:
             break
@@ -1096,7 +1146,7 @@ async def test_a_bug_after_the_lease_is_taken_hands_the_run_back(world, monkeypa
     _seed(sb, rid)
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     with caplog.at_level(logging.ERROR, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     row = _script_row(sb, rid)
     assert row["status"] == "selected" and row["lease_until"] is None and row["retry_not_before"]
@@ -1122,7 +1172,7 @@ async def test_a_ledger_blip_before_the_model_call_hands_the_run_back(world, cap
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(RunReadBlip(supabase=sb), writer=writer)
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     assert writer.calls == [] and _script_row(sb, rid)["status"] == "selected"
     assert any("ledger FAILED before the model call" in r.getMessage() for r in caplog.records)
@@ -1135,10 +1185,10 @@ async def test_an_item_that_became_ineligible_is_rejected_not_generated(world, m
     _seed(sb, rid, source_ref="money_moves:warren-buffetts-early-days", template_id="case_story")
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert writer.calls == [] and _script_row(sb, rid)["status"] == "rejected"
-    state = await svc.kick(rid)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["reason"] == "source_ineligible" and state["violations"] == []
 
 
@@ -1149,7 +1199,7 @@ async def test_shutdown_hands_the_run_back(world):
     writer.gate = asyncio.Event()  # never set: the generation hangs until cancelled
     svc = ss.MarketingScriptService(runs, writer=writer)
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     for _ in range(200):  # until the generation is inside the writer (thread hops take time)
         if writer.calls:
             break
@@ -1166,7 +1216,7 @@ async def test_shutdown_hands_the_run_back(world):
 async def _accepted_run(sb, runs) -> str:
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     return rid
 
@@ -1183,7 +1233,7 @@ async def test_create_posts_refuses_before_the_script_is_accepted(world):
     sb, runs = world
     rid = _run(sb, POSTING_DAY)
     with pytest.raises(mrs.MarketingScriptNotReady):
-        await runs.create_posts(rid, [{"platform": "x", "format": "text"}])
+        await runs.create_posts(rid, [{"platform": "x", "format": "text"}], claim=_holder_of(runs, rid))
 
 
 @pytest.mark.asyncio
@@ -1194,7 +1244,7 @@ async def test_create_posts_uses_the_accepted_copy_not_the_workers(world):
         "platform": "youtube", "format": "video", "title": "WORKER TITLE",
         "caption": "buy $AAPL now", "metadata": {"made_with_ai": False},
         "asset_ids": [_asset(sb, rid)],
-    }])
+    }], claim=_holder_of(runs, rid))
     assert post["caption"] == "server YT copy" and post["title"] == "Server title"
     assert post["metadata"]["source_ref"] and "made_with_ai" not in post["metadata"]
     assert post["metadata"]["dry_run"] is True
@@ -1205,7 +1255,7 @@ async def test_create_posts_refuses_an_outlet_the_script_dropped(world):
     sb, runs = world
     rid = await _accepted_run(sb, runs)
     with pytest.raises(mrs.MarketingScriptNotReady):
-        await runs.create_posts(rid, [{"platform": "threads", "format": "text"}])
+        await runs.create_posts(rid, [{"platform": "threads", "format": "text"}], claim=_holder_of(runs, rid))
 
 
 @pytest.mark.asyncio
@@ -1214,10 +1264,10 @@ async def test_create_posts_requires_ready_assets_of_the_same_run(world):
     rid = await _accepted_run(sb, runs)
     other = _asset(sb, str(uuid.uuid4()))
     with pytest.raises(mrs.MarketingAssetMissingInStorage):
-        await runs.create_posts(rid, [{"platform": "youtube", "format": "video", "asset_ids": [other]}])
+        await runs.create_posts(rid, [{"platform": "youtube", "format": "video", "asset_ids": [other]}], claim=_holder_of(runs, rid))
     mine = _asset(sb, rid, status="pending_upload")
     with pytest.raises(mrs.MarketingAssetMissingInStorage):
-        await runs.create_posts(rid, [{"platform": "youtube", "format": "video", "asset_ids": [mine]}])
+        await runs.create_posts(rid, [{"platform": "youtube", "format": "video", "asset_ids": [mine]}], claim=_holder_of(runs, rid))
     assert sb.tables[mrs.POSTS].rows == []
 
 
@@ -1230,7 +1280,7 @@ async def test_media_posts_are_never_auto_approved(world, monkeypatch):
     video, text = await runs.create_posts(rid, [
         {"platform": "youtube", "format": "video", "asset_ids": [_asset(sb, rid)]},
         {"platform": "x", "format": "text"},
-    ])
+    ], claim=_holder_of(runs, rid))
     assert video["status"] == "pending_review"
     assert text["status"] == "approved" and text["approved_by"] == "auto"
 
@@ -1248,7 +1298,7 @@ def client(monkeypatch):
     return TestClient(app)
 
 
-_H = {"X-Marketing-Worker-Token": "tok"}
+_H = {"X-Marketing-Worker-Token": "tok", "X-Marketing-Claim": f"1.{NONCE}"}
 _BASE = "/api/v1/internal/marketing"
 
 
@@ -1258,7 +1308,8 @@ def test_claim_window_refuses_future_and_old_dates(client, monkeypatch):
     pinned = date(2026, 9, 17)
     monkeypatch.setattr(mi, "run_date_et", lambda now=None: pinned)
     for bad in (pinned + timedelta(days=1), pinned - timedelta(days=2)):
-        r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad.isoformat(), "worker_version": "t"}, headers=_H)
+        r = client.post(f"{_BASE}/runs/claim", json={"run_date": bad.isoformat(), "worker_version": "t",
+                                                     "claim_nonce": NONCE}, headers=_H)
         assert r.status_code == 422 and r.json()["error_code"] == "INVALID_INPUT"
     assert mi.claim_window_ok(pinned, pinned) and mi.claim_window_ok(pinned - timedelta(days=1), pinned)
     assert mi.claim_window_ok is mrs.claim_window_ok  # the kick's held check uses the same window
@@ -1268,7 +1319,7 @@ def test_kick_endpoint_answers_body_states(client, monkeypatch):
     import app.api.v1.endpoints.marketing_internal as mi
 
     class Svc:
-        async def kick(self, run_id):
+        async def kick(self, run_id, *, claim):
             return {"status": "generating", "source_ref": "journey:x", "template_id": "checklist"}
 
     monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc())
@@ -1280,7 +1331,7 @@ def test_kick_endpoint_carries_the_rejection_reason(client, monkeypatch):
     import app.api.v1.endpoints.marketing_internal as mi
 
     class Svc:
-        async def kick(self, run_id):
+        async def kick(self, run_id, *, claim):
             return {"status": "rejected", "source_ref": "journey:x", "reason": "writer_unavailable",
                     "violations": []}
 
@@ -1297,7 +1348,7 @@ def test_kick_endpoint_maps_ledger_failures_to_marketing_codes(client, monkeypat
     import app.api.v1.endpoints.marketing_internal as mi
 
     class Svc:
-        async def kick(self, run_id):
+        async def kick(self, run_id, *, claim):
             raise exc
 
     monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc())
@@ -1348,12 +1399,20 @@ def test_every_marketing_exception_class_classifies_to_a_marketing_code():
     import inspect
 
     from app.api.error_response import classify_exception
-    from app.services.marketing import run_service, script_service
+    import importlib
+    import pkgutil
 
+    import app.services.marketing as pkg
+    from app.services.marketing import script_service
+
+    # EVERY module of the package (pkgutil), not a hand list: a new exception class in a new
+    # module (judge.py's MarketingJudgeUnavailable, 2026-09-26) is walked the day it lands.
+    mods = [importlib.import_module(f"{pkg.__name__}.{m.name}") for m in pkgutil.iter_modules(pkg.__path__)]
     classes = [
-        obj for mod in (run_service, script_service) for _, obj in inspect.getmembers(mod, inspect.isclass)
+        obj for mod in mods for _, obj in inspect.getmembers(mod, inspect.isclass)
         if issubclass(obj, Exception) and obj.__module__ == mod.__name__
     ]
+    assert any(c.__name__ == "MarketingJudgeUnavailable" for c in classes)
     assert len(classes) >= 7
     for cls in classes:
         if cls is script_service.LeaseLost:
@@ -1384,7 +1443,7 @@ async def test_a_kick_on_an_unheld_run_neither_mirrors_nor_revives_it(world, lab
     before = dict(_run_row(sb, rid))
     for _ in range(2):
         with pytest.raises(mrs.MarketingRunNotHeld):
-            await svc.kick(rid)
+            await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     after = _run_row(sb, rid)
     assert after.get("source_ref") is None and after["updated_at"] == before["updated_at"], label
@@ -1415,10 +1474,10 @@ async def test_tokens_used_accumulates_across_generations(world, second, total, 
     outcome = _timeout_spending(777) if second == "timeout" else second
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["rejected", outcome]))
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert _script_row(sb, rid)["tokens_used"] == 99  # read the live row after each drain
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     row = _script_row(sb, rid)
     assert row["generations"] == 2 and row["status"] == status
@@ -1460,7 +1519,7 @@ async def test_a_retry_that_finds_another_generations_accept_is_not_written(worl
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     msgs = _msgs(caplog)
     assert _script_row(sb, rid)["generation_id"] == "g2"
@@ -1483,7 +1542,7 @@ async def test_a_retry_that_finds_another_generations_same_rejection_is_not_writ
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["rejected"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     msgs = _msgs(caplog)
     assert not any(m.startswith("marketing script generation REJECTED") for _, m in msgs)
@@ -1507,7 +1566,7 @@ async def test_a_retry_that_finds_the_row_finalized_under_our_id_is_not_written(
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["accepted"]))
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     msgs = _msgs(caplog)
     assert _script_row(sb, rid)["status"] == "rejected"
@@ -1561,7 +1620,7 @@ async def test_a_single_blip_on_the_lease_refresh_is_retried_and_extends_the_lea
     svc = ss.MarketingScriptService(ledger, writer=writer)
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     assert writer.model_calls == 2 and _script_row(sb, rid)["status"] == "accepted"
     assert not any("lease NOT refreshed" in r.getMessage() for r in caplog.records)
@@ -1596,7 +1655,7 @@ async def test_a_failed_refresh_asks_the_writer_to_skip_a_call_the_lease_cannot_
     writer.between_rounds = the_draft_took_a_while
     rid = _run(sb, POSTING_DAY)
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _drain(svc)
     assert writer.refreshes == [True, False] and writer.model_calls == 1
     assert _script_row(sb, rid)["status"] == "accepted"
@@ -1624,7 +1683,7 @@ async def test_the_acquires_lease_is_on_record_when_every_refresh_fails(world, c
 
     writer.between_rounds = the_draft_took_a_while
     rid = _run(sb, POSTING_DAY)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert writer.refreshes == [True, False] and writer.model_calls == 1
     assert _script_row(sb, rid)["status"] == "accepted"
@@ -1677,7 +1736,7 @@ async def test_a_refresh_that_lands_late_is_retried_for_a_full_lease(world, monk
 
 
 async def _generation_in_flight(sb, svc, writer, rid):
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     for _ in range(300):
         if writer.calls:
             return
@@ -1700,7 +1759,7 @@ async def test_a_lapsed_lease_under_a_live_owner_at_the_cap_is_left_alone(world)
     row = _script_row(sb, rid)
     assert row["status"] == "generating" and ss._cap_verdict(row) == ss.REASON_WRITER_UNAVAILABLE
     row["lease_until"] = ss._iso(datetime.now(timezone.utc) - timedelta(seconds=5))  # lapsed
-    assert (await svc.kick(rid))["status"] == "generating"
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "generating"
     assert _script_row(sb, rid)["status"] == "generating"
     writer.gate.set()
     await _drain(svc)
@@ -1721,7 +1780,7 @@ async def test_a_wedged_task_does_not_wedge_the_day(world, caplog):
     _script_row(sb, rid)["lease_until"] = ss._iso(datetime.now(timezone.utc) - timedelta(seconds=5))
     svc._spawned_at[rid] = datetime.now(timezone.utc) - timedelta(seconds=ss.OWNER_ALIVE_SECONDS + 1)
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        state = await svc.kick(rid)
+        state = await svc.kick(rid, claim=_holder(svc, rid))
     assert state["status"] == "rejected" and state["reason"] == "writer_unavailable"
     assert any("treating it as wedged" in r.getMessage() for r in caplog.records)
     writer.gate.set()
@@ -1764,7 +1823,7 @@ async def test_a_cancel_during_an_in_flight_acquire_hands_back_after_it_lands(wo
     entered = _hold_the_acquire(sb, 0.3)
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(runs, writer=writer)
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _until(entered)
     await svc.shutdown(timeout=2)
     await asyncio.sleep(0.5)  # any statement still in flight has landed by now
@@ -1792,7 +1851,7 @@ async def test_an_acquire_still_in_flight_after_the_budget_is_not_raced(world, m
 
     svc = ss.MarketingScriptService(Recording(supabase=sb), writer=FakeWriter(["accepted"]))
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _until(entered)
         await svc.shutdown(timeout=2)
         await asyncio.sleep(0.6)
@@ -1810,7 +1869,7 @@ async def test_a_cancel_before_the_acquire_write_takes_nothing(world):
     rid = _run(sb, POSTING_DAY)
     _seed(sb, rid)
     svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     entered = threading.Event()
 
     def slow_read(_payload):
@@ -1898,7 +1957,7 @@ async def test_a_cancel_during_an_in_flight_terminal_write_waits_for_it(world, c
     ledger = _Recording(supabase=sb)
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter([outcome]))
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _until(entered)
         await svc.shutdown(timeout=2)
     await asyncio.sleep(0.5)  # anything still in flight has landed by now
@@ -1930,7 +1989,7 @@ async def test_a_terminal_write_still_in_flight_after_the_budget_is_not_raced(
     ledger = _Recording(supabase=sb)
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["accepted"]))
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _until(entered)
         await svc.shutdown(timeout=2)
         await asyncio.sleep(0.6)
@@ -1954,7 +2013,7 @@ async def test_a_terminal_write_that_answered_with_an_error_is_re_sent_not_hande
                           then_raise=mrs.MarketingRunError("update_script failed: APIError: 520"))
     ledger = _Recording(supabase=sb)
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["accepted"]))
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _until(entered)
     await svc.shutdown(timeout=2)
     row = _script_row(sb, rid)
@@ -1974,7 +2033,7 @@ async def test_a_cancel_between_terminal_attempts_re_sends_the_package(world, mo
                 then_raise=mrs.MarketingRunError("update_script failed: APIError: 520"))
     ledger = _Recording(supabase=sb)
     svc = ss.MarketingScriptService(ledger, writer=FakeWriter(["accepted"]))
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     for _ in range(300):  # until the first accepted attempt answered and `_finish` is sleeping
         if [p for p in ledger.sent if p.get("status") == "accepted"] and svc._terminal \
                 and next(iter(svc._terminal.values())).fut.done():
@@ -2011,7 +2070,7 @@ async def test_when_the_re_send_fails_too_the_hand_back_gets_only_what_is_left_o
 
     svc._hand_back = recording_hand_back  # instance attribute: restored with the instance
     with caplog.at_level(logging.WARNING, logger=ss.logger.name):
-        await svc.kick(rid)
+        await svc.kick(rid, claim=_holder(svc, rid))
         await _until(entered)
         await svc.shutdown(timeout=2)
     assert len(timeouts) == 1 and timeouts[0] is not None, timeouts
@@ -2046,7 +2105,7 @@ async def test_the_acquire_settle_hands_back_inside_the_shared_budget(world, mon
         return await real_hand_back(run_id, gen_id, why, timeout=timeout)
 
     svc._hand_back = recording_hand_back
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _until(entered)
     await svc.shutdown(timeout=2)
     assert len(timeouts) == 1 and timeouts[0] is not None, timeouts
@@ -2073,7 +2132,7 @@ async def test_per_generation_bookkeeping_is_dropped_when_the_task_ends(world):
     writer = FakeWriter(["accepted"])
     svc = ss.MarketingScriptService(Peek(supabase=sb), writer=writer)
     writer.between_rounds = lambda gen_id: seen.setdefault("leases", (gen_id, dict(svc._leases)))
-    await svc.kick(rid)
+    await svc.kick(rid, claim=_holder(svc, rid))
     await _drain(svc)
     assert _script_row(sb, rid)["status"] == "accepted"
     gen_id, leases = seen["leases"]
@@ -2108,7 +2167,7 @@ async def test_a_wedged_task_below_the_caps_is_reported_once_and_left_to_finish(
     tasks = set(svc._tasks)
     try:
         with caplog.at_level(logging.INFO, logger=ss.logger.name):
-            states = [(await svc.kick(rid))["status"] for _ in range(4)]
+            states = [(await svc.kick(rid, claim=_holder(svc, rid)))["status"] for _ in range(4)]
     finally:
         writer.gate.set()
     assert states == ["generating"] * 4
@@ -2135,9 +2194,26 @@ async def test_a_young_owner_with_a_lapsed_lease_logs_no_wedge(world, caplog):
     _script_row(sb, rid)["lease_until"] = ss._iso(datetime.now(timezone.utc) - timedelta(seconds=5))
     with caplog.at_level(logging.INFO, logger=ss.logger.name):
         for _ in range(3):
-            assert (await svc.kick(rid))["status"] == "generating"
+            assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "generating"
     msgs = [r.getMessage() for r in caplog.records]
     assert sum("owner is alive in this process" in m for m in msgs) == 3
     assert not any("OWNER_ALIVE_SECONDS" in m for m in msgs), msgs
     writer.gate.set()
     await _drain(svc)
+
+
+
+@pytest.mark.asyncio
+async def test_the_service_passes_the_configured_judge_mode_to_the_writer(world, monkeypatch):
+    """The writer has no default for `judge_mode` (a default is how a fail-open "off" slips in);
+    the service always states it, from MARKETING_JUDGE_MODE."""
+    from app.config import settings
+
+    sb, runs = world
+    rid = _run(sb, POSTING_DAY)
+    monkeypatch.setattr(settings, "MARKETING_JUDGE_MODE", "shadow")
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert [c["judge_mode"] for c in writer.calls] == ["shadow"]

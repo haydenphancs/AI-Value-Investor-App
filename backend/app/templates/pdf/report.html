@@ -115,6 +115,7 @@
   .strip td + td { border-left: 1px solid var(--grid); }
   .strip .k { color: var(--muted); font-size: 8.5px; text-transform: uppercase; letter-spacing: .5px; font-weight: 700; }
   .strip .v { font-size: 15px; font-weight: 800; margin-top: 2px; }
+  .est-line { font-size: 10.5px; font-weight: 700; color: #334155; margin-top: 3px; }
 
   /* ── Tables ── */
   table.kv { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 10px; }
@@ -219,7 +220,7 @@
           <tr>
             <td><div class="stat"><div class="k">Fair Value</div><div class="v">{{ money(fair_value) }}</div><div class="range">{{ fair_value_basis }}</div></div></td>
             <td><div class="stat"><div class="k">Price vs Fair Value</div><div class="v" style="color:{{ valuation_color }}">{{ pct(price_gap_pct) }}</div><div class="note" style="color:{{ valuation_color }}">{{ valuation_word }}</div></div></td>
-            <td><div class="stat"><div class="k">Current Price</div><div class="v">{{ money(current_price) }}</div>{% if target_price %}<div class="range">Analyst target {{ money(target_price, 0) }}</div>{% endif %}</div></td>
+            <td><div class="stat"><div class="k">Current Price</div><div class="v">{{ money(current_price) }}</div></div></td>
           </tr>
         </table>
       </td>
@@ -509,34 +510,28 @@
   </div>
   {% endfor %}
 
-  <!-- ═══ 11. Wall Street Consensus ═══ -->
-  <div class="section-bar"><span class="n">09</span>Wall Street Consensus{% if consensus_total %}<span class="hint">{{ consensus_total }} analysts</span>{% endif %}</div>
-  <table class="two-col">
-    <td class="col-l">
-      <div class="sub-h">Analyst Ratings{% if wall_street.rating %} · {{ wall_street.rating }}{% endif %}</div>
-      {% if charts.consensus %}{{ charts.consensus | safe }}
-      <table class="kv" style="margin-top:6px"><tbody>
-      {% for r in consensus_legend %}{% if loop.index0 % 2 == 0 %}<tr>{% endif %}<td><span class="sw" style="background:{{ r.color }};display:inline-block;width:9px;height:9px;border-radius:2px"></span> {{ r.label }}</td><td class="r">{{ r.count }}</td>{% if loop.index % 2 == 0 or loop.last %}</tr>{% endif %}{% endfor %}
-      </tbody></table>{% else %}<div class="no-data">No analyst coverage.</div>{% endif %}
-    </td>
-    <td class="col-r">
-      <div class="sub-h">Price Targets &amp; Momentum</div>
-      <table class="strip" style="margin-top:0">
-        <tr>
-          <td><div class="k">Low</div><div class="v">{{ money(low_target, 0) }}</div></td>
-          <td><div class="k">Target</div><div class="v" style="color:var(--accent)">{{ money(target_price, 0) }}</div></td>
-          <td><div class="k">High</div><div class="v">{{ money(high_target, 0) }}</div></td>
-        </tr>
-      </table>
-      <table class="strip">
-        <tr>
-          <td><div class="k">Upgrades</div><div class="v" style="color:#2563EB">{{ wall_street.momentum_upgrades }}</div></td>
-          <td><div class="k">Maintains</div><div class="v">{{ wall_street.momentum_maintains }}</div></td>
-          <td><div class="k">Downgrades</div><div class="v" style="color:#DC2626">{{ wall_street.momentum_downgrades }}</div></td>
-        </tr>
-      </table>
-    </td>
+  <!-- ═══ 11. Valuation & Institutions ═══ -->
+  {# Formerly the analyst section: ratings, price targets and momentum are unlicensed FMP data
+     and are gone. Range first, the point estimate as its middle mark, neutral gap words only
+     (documents/research/dcf-methodology-v1.md §5). A Jinja comment, so it never ships. #}
+  <div class="section-bar"><span class="n">09</span>Valuation &amp; Institutions</div>
+  {% set est = wall_street.estimate %}
+  <div class="sub-h">Caydex Fair Value Estimate</div>
+  {% if est.state == "ok" %}
+  <table class="strip" style="margin-top:0">
+    <tr><td>
+      <div class="k">Estimate range</div>
+      <div class="v" style="color:var(--accent)">{{ money(est.range_low) }} – {{ money(est.range_high) }}</div>
+      <div class="est-line">Estimate {{ money(est.fair_value) }}</div>
+      {% if est.gap_word %}<div class="est-line">{{ est.gap_word }}</div>{% endif %}
+      <div class="caption-note">DCF model estimate · not a price target · not a recommendation{% if est.as_of %} · as of {{ est.as_of }}{% endif %}</div>
+    </td></tr>
   </table>
+  {% elif est.state == "refused" %}
+  <div class="no-data"><b>Not modelled</b>{% if est.refusal_reason %} · {{ est.refusal_reason }}{% endif %}</div>
+  {% else %}
+  <div class="no-data">No Caydex Fair Value Estimate is available for this report.</div>
+  {% endif %}
   {% if charts.institution_flow %}
   <div class="sub-h" style="margin-top:8px">Institutional (13F) Net Flow</div>
   <div class="chart-wrap">{{ charts.institution_flow | safe }}</div>

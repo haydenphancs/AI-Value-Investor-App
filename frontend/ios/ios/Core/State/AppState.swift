@@ -1106,6 +1106,10 @@ final class AppState {
         // it. Left behind, the next account to sign in on this phone reads the previous user's
         // searches — and re-taps them straight into their own session.
         SearchHistoryStore.shared.reset()
+        // The search-pick de-dup set is the same kind of thing: the ended user's own picks on a
+        // device-global key. Left behind, the next account's first week of picks would be
+        // silently skipped — and a pick still in flight must not land in their state.
+        SearchTrendingStore.shared.clearForEndedSession()
         // Narration entitlement is device-global state in the same sense: the ended session's
         // tier must not carry into the next account, and any Learn audio still playing is
         // now unentitled. `.free` is the safe direction — it locks, never unlocks.

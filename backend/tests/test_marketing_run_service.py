@@ -7,6 +7,7 @@ No network: the fake below stands in for `get_supabase()` (conftest blocks socke
 
 from __future__ import annotations
 
+import copy
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -173,6 +174,16 @@ def _same_value(stored: Any, wanted: Any) -> bool:
     return False
 
 
+def _col(row: Dict[str, Any], col: str) -> Any:
+    """A column, or a PostgREST `json->>key` text path into a JSONB column."""
+    if "->>" in col:
+        base, key = col.split("->>", 1)
+        doc = row.get(base)
+        value = doc.get(key) if isinstance(doc, dict) else None
+        return None if value is None else str(value)
+    return row.get(col)
+
+
 class _Query:
     def __init__(self, table: "_Table", op: str, payload=None):
         self.t, self.op, self.payload = table, op, payload
@@ -193,8 +204,9 @@ class _Query:
         # SQL: `NULL = x` is never true, so a NULL column matches no eq filter. A timestamptz
         # compares by INSTANT, not by text: `…+00:00` stored and `…Z` filtered are equal, as in
         # Postgres (the service renders filter timestamps in the `Z` form, see `_ts_filter`).
+        # `metadata->>claim_nonce` is PostgREST's JSON text path (the caller-claim fence).
         assert not self._negate, "the fake models not_ only in front of is_"
-        self.filters.append(lambda r, c=col, v=val: r.get(c) is not None and _same_value(r.get(c), v))
+        self.filters.append(lambda r, c=col, v=val: _col(r, c) is not None and _same_value(_col(r, c), v))
         return self
 
     def in_(self, col, values):
@@ -344,6 +356,32 @@ def _server_copy(platform: str) -> Dict[str, Any]:
             "caption": f"server copy for {platform}"}
 
 
+_NONCES = iter(f"{i:032x}" for i in range(1, 10**6))
+
+
+def _n() -> str:
+    """A fresh claim nonce (hex, the shape the worker mints) — distinct per claim, so two
+    claims in one test are two processes unless the test passes the same one on purpose."""
+    return next(_NONCES)
+
+
+def _holder(svc, run_id: str) -> mrs.CallerClaim:
+    """The claim of whoever holds `run_id` NOW (its row's attempts + nonce): the caller every
+    worker write in this file speaks as. Zombie claims are built explicitly where tested."""
+    for r in svc.fake.tables[mrs.RUNS].rows:
+        if r.get("id") == run_id:
+            meta = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+            return mrs.CallerClaim(int(r.get("attempts") or 0), meta.get("claim_nonce") or "")
+    return mrs.CallerClaim(1, "0" * 32)
+
+
+def _asset_holder(svc, asset_id: str) -> mrs.CallerClaim:
+    for a in svc.fake.tables[mrs.ASSETS].rows:
+        if a.get("id") == asset_id:
+            return _holder(svc, a.get("run_id"))
+    return mrs.CallerClaim(1, "0" * 32)
+
+
 async def _accept_script(svc, run_id: str, platforms, **extra) -> Dict[str, Any]:
     """Seed the run's ACCEPTED script (migration 173) carrying composed copy for `platforms` —
     what `create_posts` requires before it records any post (the caption is server-authored)."""
@@ -360,9 +398,9 @@ async def _accept_script(svc, run_id: str, platforms, **extra) -> Dict[str, Any]
 
 async def _ready_asset(svc, run_id: str, sha: str = SHA) -> Dict[str, Any]:
     """A `ready` asset of `run_id`: registered, uploaded (object in the fake bucket), verified."""
-    asset, _ = await svc.register_asset(run_id, kind="video", ext="mp4", sha256=sha, size_bytes=1)
+    asset, _ = await svc.register_asset(run_id, kind="video", ext="mp4", sha256=sha, size_bytes=1, claim=_holder(svc, run_id))
     svc.fake.objects.add(asset["storage_path"])
-    return await svc.complete_asset(asset["id"])
+    return await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
 
 
 # ── claim ─────────────────────────────────────────────────────────────────────
@@ -370,18 +408,18 @@ async def _ready_asset(svc, run_id: str, sha: str = SHA) -> Dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_first_claim_inserts_and_second_claim_sees_in_progress(svc):
-    row, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == CLAIMED and row["status"] == "in_progress" and row["attempts"] == 1
-    again, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    again, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason2 == IN_PROGRESS and again["id"] == row["id"]
     assert len(svc.fake.tables[mrs.RUNS].rows) == 1
 
 
 @pytest.mark.asyncio
 async def test_failed_run_is_reclaimed_with_attempts_bumped_and_error_cleared(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await svc.update_run(row["id"], status="failed", last_error="boom", finished=True)
-    re, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t2", dry_run=False, now=NOW)
+    re, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t2", dry_run=False, now=NOW, claim_nonce=_n())
     assert reason == CLAIMED
     assert re["attempts"] == 2 and re["last_error"] is None and re["finished_at"] is None
     assert re["worker_version"] == "t2" and re["dry_run"] is False
@@ -389,21 +427,21 @@ async def test_failed_run_is_reclaimed_with_attempts_bumped_and_error_cleared(sv
 
 @pytest.mark.asyncio
 async def test_stale_in_progress_is_reclaimed_but_fresh_is_not(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=3))
-    re, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=3), claim_nonce=_n())
+    re, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == CLAIMED and re["attempts"] == 2
-    _, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    _, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason2 == IN_PROGRESS
 
 
 @pytest.mark.asyncio
 async def test_terminal_runs_are_never_reclaimed(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await svc.update_run(row["id"], status="skipped", finished=True)
-    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == ALREADY_DONE
     await svc.update_run(row["id"], status="media_ready")
-    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == MEDIA_READY
 
 
@@ -439,7 +477,7 @@ async def test_two_claimers_on_one_stale_snapshot_yield_exactly_one_winner(svc, 
 async def test_the_fake_ands_update_filters(svc):
     """Self-check of the fake the CAS tests stand on: a conditional UPDATE on a stale
     snapshot matches nothing once another writer bumped `attempts`."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=3))
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=3), claim_nonce=_n())
     table = svc.fake.tables[mrs.RUNS]
     # Interleave: both read the same stale snapshot, then both write.
     snap_a = dict(table.rows[0]); snap_b = dict(table.rows[0])
@@ -468,25 +506,25 @@ async def test_lost_claim_response_is_recovered_by_nonce(svc):
 
 @pytest.mark.asyncio
 async def test_resume_only_never_creates_and_resumes_a_failed_yesterday(svc):
-    run, reason = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW, resume_only=True)
+    run, reason = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW, resume_only=True, claim_nonce=_n())
     assert run is None and reason == NO_RUN
     assert svc.fake.tables[mrs.RUNS].rows == []
-    row, _ = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5))
+    row, _ = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5), claim_nonce=_n())
     await svc.update_run(row["id"], status="failed", last_error="killed", finished=True)
-    re, reason = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW, resume_only=True)
+    re, reason = await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=True, now=NOW, resume_only=True, claim_nonce=_n())
     assert reason == CLAIMED and re["id"] == row["id"] and re["attempts"] == 2
 
 
 @pytest.mark.asyncio
 async def test_attempts_are_capped(svc, monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", 3)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     for _ in range(2):
         await svc.update_run(row["id"], status="failed", finished=True)
-        _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+        _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
         assert reason == CLAIMED
     await svc.update_run(row["id"], status="failed", finished=True)
-    cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == ATTEMPTS_EXHAUSTED and cur["attempts"] == 3
 
 
@@ -508,18 +546,19 @@ async def test_raw_ledger_errors_are_wrapped_not_leaked(svc, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_update_merges_timings_and_metadata_instead_of_replacing(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await svc.update_run(row["id"], stage="selected", timings={"select_s": 1.5}, metadata={"a": 1})
     upd = await svc.update_run(row["id"], stage="scripted", timings={"script_s": 2}, metadata={"b": 2})
     assert upd["stage"] == "scripted"
     assert upd["timings"] == {"select_s": 1.5, "script_s": 2.0}
-    assert upd["metadata"] == {"a": 1, "b": 2}
+    # The claim's own nonce stays alongside (the merge never drops a key it was not given).
+    assert upd["metadata"] == {"a": 1, "b": 2, "claim_nonce": row["metadata"]["claim_nonce"]}
     assert upd.get("finished_at") is None
 
 
 @pytest.mark.asyncio
 async def test_update_rejects_unknown_stage_and_missing_run(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     with pytest.raises(ValueError):
         await svc.update_run(row["id"], stage="teleported")
     with pytest.raises(ValueError):
@@ -530,7 +569,7 @@ async def test_update_rejects_unknown_stage_and_missing_run(svc):
 
 @pytest.mark.asyncio
 async def test_last_error_is_truncated_to_the_column_budget(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     upd = await svc.update_run(row["id"], status="failed", last_error="x" * 5000)
     assert len(upd["last_error"]) == 2000
 
@@ -540,17 +579,17 @@ async def test_last_error_is_truncated_to_the_column_budget(svc):
 
 @pytest.mark.asyncio
 async def test_register_then_complete_asset_requires_the_object_to_exist(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-    asset, upload = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    asset, upload = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12, claim=_holder(svc, row["id"]))
     assert asset["status"] == "pending_upload"
     assert asset["storage_path"] == "2026-09-17/manifest-aaaaaaaaaaaaaaaa.json"
     assert upload["path"] == asset["storage_path"] and upload["token"] == "t"
     assert upload["content_type"] == "application/json" and upload["bucket"] == "marketing-media"
     # The worker claims it uploaded, but nothing is in the bucket → refuse.
     with pytest.raises(MarketingAssetMissingInStorage):
-        await svc.complete_asset(asset["id"])
+        await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
     svc.fake.objects.add(asset["storage_path"])
-    done = await svc.complete_asset(asset["id"])
+    done = await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
     assert done["status"] == "ready"
 
 
@@ -558,27 +597,27 @@ async def test_register_then_complete_asset_requires_the_object_to_exist(svc):
 async def test_storage_outage_on_complete_is_a_ledger_error_not_asset_missing(svc, monkeypatch):
     """storage3.exists() answers False for ANY non-200 HEAD, so a 5xx used to read as 'the
     worker never uploaded' (409, terminal). The LIST confirmation raises on an outage."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-    asset, _ = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    asset, _ = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
 
     def outage(self, prefix, options=None):
         raise RuntimeError("storage 520")
 
     monkeypatch.setattr(_Bucket, "list", outage)
     with pytest.raises(mrs.MarketingRunError, match="LIST failed"):
-        await svc.complete_asset(asset["id"])
+        await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
 
 
 @pytest.mark.asyncio
 async def test_re_registering_identical_bytes_returns_the_row_without_a_new_upload(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-    a1, up1 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    a1, up1 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     # Not yet ready: a resumed run gets a FRESH signed URL for the same row.
-    a2, up2 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+    a2, up2 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a2["id"] == a1["id"] and up2 is not None
     svc.fake.objects.add(a1["storage_path"])
-    await svc.complete_asset(a1["id"])
-    a3, up3 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+    await svc.complete_asset(a1["id"], claim=_asset_holder(svc, a1["id"]))
+    a3, up3 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a3["id"] == a1["id"] and a3["status"] == "ready" and up3 is None
     assert len(svc.fake.tables[mrs.ASSETS].rows) == 1
 
@@ -587,31 +626,31 @@ async def test_re_registering_identical_bytes_returns_the_row_without_a_new_uplo
 async def test_pending_row_whose_object_already_landed_is_finished_without_a_new_url(svc):
     """The wedge: PUT succeeded, process died before `complete`. The next tick must not be
     handed a URL it can only 409 against — the row is completed from the bucket's truth."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-    a1, up1 = await svc.register_asset(row["id"], kind="audio", ext="m4a", sha256=SHA, size_bytes=1)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    a1, up1 = await svc.register_asset(row["id"], kind="audio", ext="m4a", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert up1 is not None and a1["status"] == "pending_upload"
     svc.fake.objects.add(a1["storage_path"])          # the bytes landed; complete never ran
-    a2, up2 = await svc.register_asset(row["id"], kind="audio", ext="m4a", sha256=SHA, size_bytes=1)
+    a2, up2 = await svc.register_asset(row["id"], kind="audio", ext="m4a", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a2["id"] == a1["id"] and a2["status"] == "ready" and up2 is None
 
 
 @pytest.mark.asyncio
 async def test_existence_precheck_failure_still_mints_a_url(svc, monkeypatch):
     """A Storage blip on the pre-check must not block the upload path; the PUT will tell."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
 
     def boom(self, path):
         raise RuntimeError("storage 520")
 
     monkeypatch.setattr(_Bucket, "exists", boom)
-    a, up = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+    a, up = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a["status"] == "pending_upload" and up is not None
 
 
 @pytest.mark.asyncio
 async def test_register_asset_on_unknown_run_is_loud(svc):
     with pytest.raises(MarketingRunNotFound):
-        await svc.register_asset(str(uuid.uuid4()), kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+        await svc.register_asset(str(uuid.uuid4()), kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, str(uuid.uuid4())))
 
 
 # ── posts ─────────────────────────────────────────────────────────────────────
@@ -620,14 +659,14 @@ async def test_register_asset_on_unknown_run_is_loud(svc):
 @pytest.mark.asyncio
 async def test_posts_are_born_pending_review_and_recreation_is_idempotent(svc, monkeypatch):
     # A REAL run, so the AUTO_PUBLISH flip below is a live threat, not a dry-run no-op.
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     script = await _accept_script(svc, row["id"], ["x", "bluesky", "tiktok"])
     video = await _ready_asset(svc, row["id"])
     # The worker still sends its own words; the ACCEPTED script's copy is what gets recorded.
     specs = [{"platform": "x", "format": "text", "caption": "hi", "title": "worker title"},
              {"platform": "bluesky", "format": "text", "caption": "hi"},
              {"platform": "tiktok", "format": "video", "caption": "hi", "asset_ids": [video["id"]]}]
-    first = await svc.create_posts(row["id"], specs)
+    first = await svc.create_posts(row["id"], specs, claim=_holder(svc, row["id"]))
     assert [p["status"] for p in first] == ["pending_review"] * 3
     assert [p["approved_by"] for p in first] == [None] * 3
     assert first[0]["idempotency_key"] == "2026-09-17:x:text"
@@ -643,7 +682,7 @@ async def test_posts_are_born_pending_review_and_recreation_is_idempotent(svc, m
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)
     rerender = await _ready_asset(svc, row["id"], sha="b" * 64)
     before = [dict(r) for r in svc.fake.tables[mrs.POSTS].rows]
-    again = await svc.create_posts(row["id"], [*specs[:2], {**specs[2], "asset_ids": [rerender["id"]]}])
+    again = await svc.create_posts(row["id"], [*specs[:2], {**specs[2], "asset_ids": [rerender["id"]]}], claim=_holder(svc, row["id"]))
     assert [p["id"] for p in again] == [p["id"] for p in first]
     assert [p["status"] for p in again] == ["approved", "pending_review", "pending_review"]
     assert again[0]["approved_by"] == "admin" and again[2]["asset_ids"] == [video["id"]]
@@ -654,9 +693,9 @@ async def test_posts_are_born_pending_review_and_recreation_is_idempotent(svc, m
 async def test_auto_publish_births_posts_approved(svc, monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)
     # A real (non-dry-run) run is the only one auto-publish may approve.
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     await _accept_script(svc, row["id"], ["bluesky"])
-    posts = await svc.create_posts(row["id"], [{"platform": "bluesky", "format": "text"}])
+    posts = await svc.create_posts(row["id"], [{"platform": "bluesky", "format": "text"}], claim=_holder(svc, row["id"]))
     assert posts[0]["status"] == "approved" and posts[0]["approved_by"] == "auto"
     assert posts[0]["approved_at"] and posts[0]["caption"] == "server copy for bluesky"
 
@@ -664,17 +703,16 @@ async def test_auto_publish_births_posts_approved(svc, monkeypatch):
 @pytest.mark.asyncio
 async def test_a_dry_run_day_never_auto_approves_and_marks_every_row(svc, monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await _accept_script(svc, row["id"], ["x"])
     # `metadata` is not the worker's to write: it cannot talk a rehearsal out of dry-run.
     (post,) = await svc.create_posts(
-        row["id"], [{"platform": "x", "format": "text", "metadata": {"dry_run": False}}]
-    )
+        row["id"], [{"platform": "x", "format": "text", "metadata": {"dry_run": False}}], claim=_holder(svc, row["id"]))
     assert post["status"] == "pending_review" and post["metadata"]["dry_run"] is True
     assert post["approved_by"] is None and post["approved_at"] is None
-    real, _ = await svc.claim_run(date(2026, 9, 18), worker_version="t", dry_run=False, now=NOW)
+    real, _ = await svc.claim_run(date(2026, 9, 18), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     await _accept_script(svc, real["id"], ["x"])
-    (p2,) = await svc.create_posts(real["id"], [{"platform": "x", "format": "text"}])
+    (p2,) = await svc.create_posts(real["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, real["id"]))
     assert p2["status"] == "approved" and p2["metadata"]["dry_run"] is False
 
 
@@ -695,26 +733,26 @@ async def test_a_dry_run_day_never_auto_approves_and_marks_every_row(svc, monkey
 )
 @pytest.mark.asyncio
 async def test_create_posts_refuses_an_unusable_script_and_writes_nothing(svc, script):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     await svc.insert_script({"run_id": row["id"], **script})
     # Even a worker caption cannot stand in for the missing server copy.
     with pytest.raises(mrs.MarketingScriptNotReady):
-        await svc.create_posts(row["id"], [{"platform": "x", "format": "text", "caption": "hi"}])
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text", "caption": "hi"}], claim=_holder(svc, row["id"]))
     assert svc.fake.tables[mrs.POSTS].rows == []
 
 
 @pytest.mark.asyncio
 async def test_create_posts_on_an_unknown_run_is_not_found(svc):
     with pytest.raises(MarketingRunNotFound):
-        await svc.create_posts(str(uuid.uuid4()), [{"platform": "x", "format": "text"}])
+        await svc.create_posts(str(uuid.uuid4()), [{"platform": "x", "format": "text"}], claim=_holder(svc, str(uuid.uuid4())))
     assert svc.fake.tables[mrs.POSTS].rows == []
 
 
 @pytest.mark.asyncio
 async def test_mark_post_rejects_unknown_columns_and_statuses(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await _accept_script(svc, row["id"], ["x"])
-    (post,) = await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}])
+    (post,) = await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
     with pytest.raises(ValueError, match="not writable"):
         await svc.mark_post(post["id"], "published", run_id="other")
     with pytest.raises(ValueError, match="unknown post status"):
@@ -725,9 +763,9 @@ async def test_mark_post_rejects_unknown_columns_and_statuses(svc):
 
 @pytest.mark.asyncio
 async def test_claim_post_is_atomic_on_status(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await _accept_script(svc, row["id"], ["x"])
-    (post,) = await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}])
+    (post,) = await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
     assert await svc.claim_post(post["id"]) is None  # pending_review is not claimable
     await svc.mark_post(post["id"], "approved")
     first = await svc.claim_post(post["id"])
@@ -741,7 +779,7 @@ async def test_claim_post_is_atomic_on_status(svc):
 
 @pytest.mark.asyncio
 async def test_insert_script_is_first_write_wins(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     mine, ours = await svc.insert_script({"run_id": row["id"], "status": "selected",
                                           "source_ref": "journey:a"})
     assert ours and mine["generations"] == 0 and "id" not in mine  # PK is run_id
@@ -752,7 +790,7 @@ async def test_insert_script_is_first_write_wins(svc):
 
 @pytest.mark.asyncio
 async def test_update_script_where_is_a_cas_on_the_observed_columns_null_included(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
     await svc.insert_script({"run_id": rid, "status": "selected"})
     lease = {"status": "generating", "generation_id": "g1", "lease_until": NOW.isoformat()}
@@ -780,10 +818,10 @@ async def test_recent_source_refs_are_newest_first_strictly_before_the_day_and_s
     days = [("2026-09-11", "b"), ("2026-09-15", "future"), ("2026-09-10", "a"),
             ("2026-09-14", "today"), ("2026-09-13", None), ("2026-09-12", "c")]
     for d, ref in days:
-        run, _ = await svc.claim_run(date.fromisoformat(d), worker_version="t", dry_run=True, now=NOW)
+        run, _ = await svc.claim_run(date.fromisoformat(d), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
         await svc.insert_script({"run_id": run["id"], "run_date": d,
                                  "status": "selected" if ref else "rest_day", "source_ref": ref})
-    ghost, _ = await svc.claim_run(date(2026, 9, 9), worker_version="t", dry_run=True, now=NOW)
+    ghost, _ = await svc.claim_run(date(2026, 9, 9), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     await svc.update_run(ghost["id"], source_ref="mirror-only")
     before = date(2026, 9, 14)
     assert await svc.recent_source_refs(before, 2) == ["c", "b"]
@@ -1030,12 +1068,12 @@ async def test_an_abandoned_run_at_the_cap_is_closed_failed_exactly_once(svc, mo
     import logging
 
     monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", 2)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5))
-    _, r2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=4))
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5), claim_nonce=_n())
+    _, r2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=4), claim_nonce=_n())
     assert r2 == CLAIMED  # attempt 2 … which is killed too: stale in_progress at the cap
     with caplog.at_level(logging.INFO, logger=mrs.logger.name):
-        cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-        again, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+        cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+        again, reason2 = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == reason2 == ATTEMPTS_EXHAUSTED
     stored = svc.fake.tables[mrs.RUNS].rows[0]
     assert stored["status"] == "failed" and stored["finished_at"] and stored["attempts"] == 2
@@ -1047,8 +1085,8 @@ async def test_an_abandoned_run_at_the_cap_is_closed_failed_exactly_once(svc, mo
 @pytest.mark.asyncio
 async def test_a_live_run_at_the_cap_is_never_closed_under_its_worker(svc, monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", 1)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
-    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == IN_PROGRESS and svc.fake.tables[mrs.RUNS].rows[0]["status"] == "in_progress"
 
 
@@ -1057,7 +1095,7 @@ async def test_closing_an_exhausted_run_loses_cleanly_to_a_late_workers_own_writ
     """The close is a CAS on the observed (status, attempts): a late worker that recorded its
     own `failed` in between keeps its last_error."""
     monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", 1)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5))
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW - timedelta(hours=5), claim_nonce=_n())
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])  # stale in_progress, attempts 1
     svc.fake.tables[mrs.RUNS].rows[0].update({"status": "failed", "last_error": "late worker: boom"})
 
@@ -1065,7 +1103,7 @@ async def test_closing_an_exhausted_run_loses_cleanly_to_a_late_workers_own_writ
         return dict(snapshot)
 
     monkeypatch.setattr(svc, "get_run_by_date", stale_read)
-    cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    cur, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == ATTEMPTS_EXHAUSTED and cur["last_error"] == "late worker: boom"
     assert svc.fake.tables[mrs.RUNS].rows[0]["last_error"] == "late worker: boom"
 
@@ -1078,22 +1116,22 @@ async def test_the_worker_writes_only_its_own_in_progress_run(svc):
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
                                  claim_nonce="nonce-real")
     rid = row["id"]
-    upd = await svc.update_run(rid, stage="selected", worker=True)
+    upd = await svc.update_run(rid, stage="selected", worker=True, claim=_holder(svc, rid))
     assert upd["stage"] == "selected"
     for bad in ("in_progress", "planned", "published"):
         with pytest.raises(MarketingRequestInvalid):
-            await svc.update_run(rid, status=bad, worker=True)
+            await svc.update_run(rid, status=bad, worker=True, claim=_holder(svc, rid))
     with pytest.raises(MarketingRequestInvalid):
-        await svc.update_run(rid, stage="planned", worker=True)  # backwards
+        await svc.update_run(rid, stage="planned", worker=True, claim=_holder(svc, rid))  # backwards
     # claim_nonce is trusted by decide_claim AHEAD of the attempts cap: never the worker's to set
-    upd = await svc.update_run(rid, metadata={"claim_nonce": "forged-nonce", "preflight": {"ok": 1}}, worker=True)
+    upd = await svc.update_run(rid, metadata={"claim_nonce": "forged-nonce", "preflight": {"ok": 1}}, worker=True, claim=_holder(svc, rid))
     assert upd["metadata"]["claim_nonce"] == "nonce-real" and upd["metadata"]["preflight"] == {"ok": 1}
     _, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
                                     claim_nonce="forged-nonce")
     assert reason == IN_PROGRESS
-    await svc.update_run(rid, status="skipped", finished=True, worker=True)
+    await svc.update_run(rid, status="skipped", finished=True, worker=True, claim=_holder(svc, rid))
     with pytest.raises(MarketingRunNotHeld):
-        await svc.update_run(rid, status="failed", worker=True)  # a closed day stays closed
+        await svc.update_run(rid, status="failed", worker=True, claim=_holder(svc, rid))  # a closed day stays closed
     assert svc.fake.tables[mrs.RUNS].rows[0]["status"] == "skipped"
     # the SERVER's own writes (the selection mirror) are not fenced
     await svc.update_run(rid, source_ref="journey:x")
@@ -1101,7 +1139,7 @@ async def test_the_worker_writes_only_its_own_in_progress_run(svc):
 
 @pytest.mark.asyncio
 async def test_the_worker_fence_is_in_the_update_not_only_in_the_read(svc, monkeypatch):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])
     svc.fake.tables[mrs.RUNS].rows[0]["status"] = "skipped"  # closed between the read and the write
 
@@ -1110,19 +1148,19 @@ async def test_the_worker_fence_is_in_the_update_not_only_in_the_read(svc, monke
 
     monkeypatch.setattr(svc, "get_run", stale)
     with pytest.raises(MarketingRunNotHeld):
-        await svc.update_run(row["id"], status="failed", last_error="zombie", worker=True)
+        await svc.update_run(row["id"], status="failed", last_error="zombie", worker=True, claim=_holder(svc, row["id"]))
     assert svc.fake.tables[mrs.RUNS].rows[0]["status"] == "skipped"
 
 
 @pytest.mark.asyncio
 async def test_assets_and_posts_are_refused_on_a_closed_run(svc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     await _accept_script(svc, row["id"], ["x"])
     await svc.update_run(row["id"], status="skipped", finished=True)
     with pytest.raises(MarketingRunNotHeld):
-        await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1)
+        await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     with pytest.raises(MarketingRunNotHeld):
-        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}])
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
     assert svc.fake.tables[mrs.ASSETS].rows == [] and svc.fake.tables[mrs.POSTS].rows == []
 
 
@@ -1130,11 +1168,11 @@ async def test_assets_and_posts_are_refused_on_a_closed_run(svc):
 
 
 async def _asset_of(svc, run_id, kind, ext, sha, *, ready=True):
-    asset, _ = await svc.register_asset(run_id, kind=kind, ext=ext, sha256=sha, size_bytes=1)
+    asset, _ = await svc.register_asset(run_id, kind=kind, ext=ext, sha256=sha, size_bytes=1, claim=_holder(svc, run_id))
     if not ready:
         return asset
     svc.fake.objects.add(asset["storage_path"])
-    return await svc.complete_asset(asset["id"])
+    return await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
 
 
 @pytest.mark.parametrize("label, bad_spec, exc", [
@@ -1152,7 +1190,7 @@ async def _asset_of(svc, run_id, kind, ext, sha, *, ready=True):
 ])
 @pytest.mark.asyncio
 async def test_create_posts_validates_every_spec_before_writing_any(svc, label, bad_spec, exc):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     rid = row["id"]
     await _accept_script(svc, rid, ["x", "bluesky", "tiktok"])
     ids = {
@@ -1164,14 +1202,14 @@ async def test_create_posts_validates_every_spec_before_writing_any(svc, label, 
     bad = {**bad_spec, "asset_ids": [ids[a] for a in bad_spec.get("asset_ids", [])]}
     good = [{"platform": "x", "format": "text"}, {"platform": "bluesky", "format": "text"}]
     with pytest.raises(exc):
-        await svc.create_posts(rid, [*good, bad])  # the invalid spec is LAST
+        await svc.create_posts(rid, [*good, bad], claim=_holder(svc, rid))  # the invalid spec is LAST
     assert svc.fake.tables[mrs.POSTS].rows == [], label
 
 
 @pytest.mark.asyncio
 async def test_only_a_media_less_text_post_is_born_approved(svc, monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_AUTO_PUBLISH", True)
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
     rid = row["id"]
     await _accept_script(svc, rid, ["facebook", "x", "instagram"])
     video = await _asset_of(svc, rid, "video", "mp4", "1" * 64)
@@ -1181,7 +1219,7 @@ async def test_only_a_media_less_text_post_is_born_approved(svc, monkeypatch):
         {"platform": "facebook", "format": "video", "asset_ids": [video["id"]]},
         {"platform": "x", "format": "text", "asset_ids": [card["id"]]},
         {"platform": "instagram", "format": "carousel", "asset_ids": [card["id"]]},
-    ])
+    ], claim=_holder(svc, rid))
     assert [p["status"] for p in posts] == ["approved", "pending_review", "pending_review", "pending_review"]
     # one caption per platform, at most as many posts as the server's format map allows
     assert {p["caption"] for p in posts if p["platform"] == "facebook"} == {"server copy for facebook"}
@@ -1213,17 +1251,17 @@ def test_the_format_map_covers_exactly_the_outlets_the_writer_composes():
 @pytest.mark.parametrize("terminal", ["failed", "skipped", "media_ready"])
 @pytest.mark.asyncio
 async def test_a_retried_terminal_patch_replays_and_writes_nothing(svc, terminal):
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
     first = await svc.update_run(rid, status=terminal, finished=True, last_error="deferred: slow",
-                                 metadata={"skip_reason": "rest_day"}, timings={"a_s": 1.0}, worker=True)
+                                 metadata={"skip_reason": "rest_day"}, timings={"a_s": 1.0}, worker=True, claim=_holder(svc, rid))
     assert first["status"] == terminal
     before = dict(svc.fake.tables[mrs.RUNS].rows[0])
     # The same request again (the retry), and one that carries different fields: both are replays
     # of an effect that is already there, and neither may merge anything into the closed run.
     for extra in ({"last_error": "deferred: slow", "metadata": {"skip_reason": "rest_day"}},
                   {"last_error": "a different error", "metadata": {"other": 1}, "timings": {"b_s": 2.0}}):
-        again = await svc.update_run(rid, status=terminal, finished=True, worker=True, **extra)
+        again = await svc.update_run(rid, status=terminal, finished=True, worker=True, **extra, claim=_holder(svc, rid))
         assert again["status"] == terminal and again["id"] == rid
         assert svc.fake.tables[mrs.RUNS].rows[0] == before  # not even updated_at moved
 
@@ -1231,10 +1269,10 @@ async def test_a_retried_terminal_patch_replays_and_writes_nothing(svc, terminal
 @pytest.mark.asyncio
 async def test_a_replay_is_only_the_same_terminal_state(svc):
     """The fence still holds for everything that is NOT the effect already present."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
-    await svc.update_run(rid, stage="selected", worker=True)
-    await svc.update_run(rid, status="skipped", finished=True, worker=True)
+    await svc.update_run(rid, stage="selected", worker=True, claim=_holder(svc, rid))
+    await svc.update_run(rid, status="skipped", finished=True, worker=True, claim=_holder(svc, rid))
     before = dict(svc.fake.tables[mrs.RUNS].rows[0])
     for kw in ({"status": "failed"},                        # skipped → failed
                {"status": "media_ready"},                   # skipped → media_ready
@@ -1242,9 +1280,9 @@ async def test_a_replay_is_only_the_same_terminal_state(svc):
                {"stage": "selected"},                       # …even one naming the stage it holds
                {"status": "skipped", "stage": "scripted"}):  # the status matches, the stage does not
         with pytest.raises(MarketingRunNotHeld):
-            await svc.update_run(rid, worker=True, **kw)
+            await svc.update_run(rid, worker=True, **kw, claim=_holder(svc, rid))
     with pytest.raises(MarketingRequestInvalid):
-        await svc.update_run(rid, status="in_progress", worker=True)  # a reopen is never a replay
+        await svc.update_run(rid, status="in_progress", worker=True, claim=_holder(svc, rid))  # a reopen is never a replay
     assert svc.fake.tables[mrs.RUNS].rows[0] == before
 
 
@@ -1252,10 +1290,10 @@ async def test_a_replay_is_only_the_same_terminal_state(svc):
 async def test_a_retry_whose_read_raced_its_own_first_attempt_replays(svc, monkeypatch):
     """The retry READ the run while attempt 1 was still in flight (in_progress); attempt 1 then
     committed `failed`, so the retry's fenced UPDATE matches nothing. That is the same replay."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])
-    await svc.update_run(rid, status="failed", finished=True, last_error="boom", worker=True)
+    await svc.update_run(rid, status="failed", finished=True, last_error="boom", worker=True, claim=_holder(svc, rid))
     real_get = svc.get_run
     reads = []
 
@@ -1264,12 +1302,12 @@ async def test_a_retry_whose_read_raced_its_own_first_attempt_replays(svc, monke
         return dict(snapshot) if len(reads) == 1 else await real_get(run_id)
 
     monkeypatch.setattr(svc, "get_run", first_read_is_stale)
-    again = await svc.update_run(rid, status="failed", finished=True, last_error="boom", worker=True)
+    again = await svc.update_run(rid, status="failed", finished=True, last_error="boom", worker=True, claim=_holder(svc, rid))
     assert again["status"] == "failed" and len(reads) == 2
     # …and a different terminal status in the same race is still refused
     reads.clear()
     with pytest.raises(MarketingRunNotHeld):
-        await svc.update_run(rid, status="skipped", worker=True)
+        await svc.update_run(rid, status="skipped", worker=True, claim=_holder(svc, rid))
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1316,7 @@ async def test_a_retried_checkpoint_whose_read_raced_its_first_attempt_lands(svc
     on the observed stage ONLY missed and 409'd a live run (the worker exits, the day waits out
     the stale window). The fence is the observed stage OR the requested one — never "any stage
     ahead": a newer holder that moved further on is not written over."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])  # stage planned
     svc.fake.tables[mrs.RUNS].rows[0]["stage"] = "selected"  # attempt 1 committed after the read
@@ -1287,12 +1325,12 @@ async def test_a_retried_checkpoint_whose_read_raced_its_first_attempt_lands(svc
         return dict(snapshot)
 
     monkeypatch.setattr(svc, "get_run", stale)
-    upd = await svc.update_run(rid, stage="selected", timings={"selected_s": 1.5}, worker=True)
+    upd = await svc.update_run(rid, stage="selected", timings={"selected_s": 1.5}, worker=True, claim=_holder(svc, rid))
     assert upd["stage"] == "selected" and upd["timings"] == {"selected_s": 1.5}
     # A newer holder already at `scripted`: the same stale request must not drag it back.
     svc.fake.tables[mrs.RUNS].rows[0]["stage"] = "scripted"
     with pytest.raises(MarketingRunNotHeld):
-        await svc.update_run(rid, stage="selected", worker=True)
+        await svc.update_run(rid, stage="selected", worker=True, claim=_holder(svc, rid))
     assert svc.fake.tables[mrs.RUNS].rows[0]["stage"] == "scripted"
 
 
@@ -1300,7 +1338,7 @@ async def test_a_retried_checkpoint_whose_read_raced_its_first_attempt_lands(svc
 async def test_a_reclaim_between_the_workers_read_and_write_is_not_written_over(svc, monkeypatch):
     """The stage `in_` accepts the stage we ask for; a newer holder that re-claimed the run (still
     in_progress) and reached that stage must not have its row merged over by our stale read."""
-    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW)
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     rid = row["id"]
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])  # attempts 1, stage planned
     svc.fake.tables[mrs.RUNS].rows[0].update(
@@ -1311,8 +1349,37 @@ async def test_a_reclaim_between_the_workers_read_and_write_is_not_written_over(
 
     monkeypatch.setattr(svc, "get_run", stale)
     with pytest.raises(MarketingRunNotHeld):
-        await svc.update_run(rid, stage="selected", timings={"selected_s": 1.0}, worker=True)
+        await svc.update_run(rid, stage="selected", timings={"selected_s": 1.0}, worker=True, claim=_holder(svc, rid))
     assert svc.fake.tables[mrs.RUNS].rows[0]["timings"] == {"newer_s": 9.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reclaimed_attempts", [2, 1], ids=["new-attempts", "same-attempts-new-nonce"])
+async def test_the_update_itself_is_fenced_on_the_callers_claim(svc, monkeypatch, reclaimed_attempts):
+    """The WRITE-side fence (review 2026-09-26: deleting it left every test green). The zombie's
+    claim is fixed BEFORE the re-claim and its read is stale, so the read-side `claim_problem`
+    passes; only the conditional UPDATE's `attempts` + `metadata->>claim_nonce` filters stop it.
+    The same-attempts case pins the NONCE half (attempts alone collide after a manual reset)."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
+                                 claim_nonce=_n())
+    rid = row["id"]
+    zombie = _holder(svc, rid)                            # (1, A): taken before the re-claim
+    snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])     # what the zombie read
+    stored = svc.fake.tables[mrs.RUNS].rows[0]
+    stored.update({"attempts": reclaimed_attempts, "stage": "selected",
+                   "timings": {"newer_s": 9.0}, "worker_version": "newer",
+                   "metadata": {**(stored.get("metadata") or {}), "claim_nonce": _n()}})
+    before = copy.deepcopy(stored)
+
+    async def stale(_rid):
+        return dict(snapshot)
+
+    monkeypatch.setattr(svc, "get_run", stale)
+    assert mrs.claim_problem(snapshot, zombie) is None     # the read-side check is satisfied
+    with pytest.raises(MarketingRunNotHeld):
+        await svc.update_run(rid, stage="selected", timings={"zombie_s": 1.0}, worker=True,
+                             claim=zombie)
+    assert stored == before
 
 
 # ── runs abandoned OUTSIDE the claim window are closed by the next claim of any date ──
@@ -1348,9 +1415,9 @@ async def test_a_run_abandoned_outside_the_window_is_closed_once_by_the_next_cla
     handed_over = _seed_run(svc, _TODAY - timedelta(days=5), "media_ready", touched=long_ago)
     closed = _seed_run(svc, _TODAY - timedelta(days=6), "failed", touched=long_ago, last_error="boom")
     with caplog.at_level(logging.INFO, logger=mrs.logger.name):
-        today_row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW)
+        today_row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
         await svc.claim_run(_TODAY - timedelta(days=1), worker_version="t", dry_run=True, now=NOW,
-                            resume_only=True)
+                            resume_only=True, claim_nonce=_n())
     assert reason == CLAIMED and today_row["run_date"] == _TODAY.isoformat()
     for row in (dead, never):
         stored = _stored(svc, row["id"])
@@ -1385,7 +1452,7 @@ async def test_the_sweep_close_is_fenced_on_the_row_it_judged(svc, monkeypatch, 
         return res
 
     monkeypatch.setattr(mrs, "_exec", late)
-    await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW)
+    await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     stored = _stored(svc, dead["id"])
     assert "abandoned outside" not in str(stored.get("last_error")), label
     assert not stored.get("finished_at"), label
@@ -1405,7 +1472,7 @@ async def test_a_sweep_failure_never_fails_the_claim(svc, monkeypatch, caplog):
 
     monkeypatch.setattr(mrs, "_exec", flaky)
     with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
-        row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW)
+        row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == CLAIMED and row["status"] == "in_progress"
     assert any("sweep could not read" in r.getMessage() for r in caplog.records)
 
@@ -1425,7 +1492,7 @@ async def test_one_sweep_closes_at_most_the_limit_and_the_oldest_first(svc):
     seeded = {_seed_run(svc, _TODAY - timedelta(days=d), "in_progress", touched=long_ago)["id"]: d
               for d in days_back}
     assert list(seeded.values()) != sorted(seeded.values(), reverse=True), "sentinel: shuffled"
-    _row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW)
+    _row, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
     assert reason == CLAIMED
     closed = sorted(d for rid, d in seeded.items() if _stored(svc, rid)["status"] == "failed")
     oldest = sorted(days_back)[-mrs._SWEEP_LIMIT:]

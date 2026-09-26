@@ -185,6 +185,7 @@ POLICY_EXCLUSIONS = {
     "money_moves:theranos-blood-and-lies": "misconduct, identifiable people",
     "money_moves:weworks-unraveling": "founder conduct, identifiable person",
     "money_moves:the-fall-of-sears": "valuation verdict on a named company",
+    "journey:art_of_selling": "sell-timing directive (user, 2026-09-26)",
 }
 
 
@@ -769,3 +770,44 @@ def test_the_real_corpus_is_back_after_a_swap():
     pool (a leaked synthetic corpus would break every other marketing test in the session)."""
     assert len(cp.eligible_keys()) >= 25
     assert cp.get_item("journey:mr_market") is not None
+
+
+# ── SOURCE_SENTENCE_DROPS (2026-09-26): policy drops only the semantic judge would refuse ──────
+
+
+def _raw_sentences(key: str):
+    for k, _kind, _slug, _title, _cat, sents in cp._raw_items():
+        if k == key:
+            return sents
+    raise AssertionError(key)
+
+
+def test_every_source_policy_drop_matches_exactly_one_sentence_and_is_dropped():
+    """A drop that matches nothing is stale (the lesson was reworded and the forbidden line is
+    back in the sheet); one that matches two is ambiguous. Either is a silent policy hole."""
+    corpus = cp.load_corpus()
+    for key, drops in cp.SOURCE_SENTENCE_DROPS.items():
+        assert key in corpus, key
+        sents = _raw_sentences(key)
+        item = corpus[key]
+        for fragment, reason in drops.items():
+            hits = [s for s in sents if fragment in s]
+            assert len(hits) == 1, (key, fragment, hits)
+            assert len(reason.strip()) >= 10, (key, fragment)
+            assert (hits[0], cp.SOURCE_POLICY_DROP) in item.dropped, (key, fragment)
+            assert hits[0] not in item.fact_sentences
+
+
+def test_the_source_policy_drops_keep_the_attributed_usage_and_the_items_eligible():
+    """The user ruled attributed usage honest ("many people use a broad ETF as … core"), and the
+    conditional trim sentence is a consequence, not an instruction — both stay in the sheet."""
+    etf = cp.get_item("journey:etfs_101")
+    assert etf.eligible
+    assert any("many people use a broad ETF as the calm, steady core" in s
+               for s in etf.fact_sentences)
+    assert not any("It's a calm, simple way" in s for s in etf.fact_sentences)
+    garden = cp.get_item("journey:portfolio_gardening")
+    assert garden.eligible
+    assert any("trimming it frees up room" in s for s in garden.fact_sentences)
+    assert not any(s.strip() in ("Water your winners.", "Prune the weak ones.")
+                   for s in garden.fact_sentences)

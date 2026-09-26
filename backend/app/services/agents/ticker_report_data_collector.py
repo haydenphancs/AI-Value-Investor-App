@@ -78,6 +78,7 @@ from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
 from app.schemas.growth import GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
+from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services._insider_common import (
     classify_insider_transaction,
     ensure_insider_label,
@@ -322,9 +323,12 @@ class CollectedTickerData:
     # legacy v3 profile carried `dcf` inline; the stable profile does not. Empty when FMP
     # has no model — fair value is then UNMEASURED, never the current price.
     dcf: Dict[str, Any] = field(default_factory=dict)
-    # The Caydex Fair Value Estimate (DcfFairValueResponse), fetched INSTEAD of `dcf` while
-    # settings.DCF_ENABLED. None when disabled or when its inputs were unavailable.
-    caydex_dcf: Any = None
+    # The Caydex Fair Value Estimate, fetched INSTEAD of `dcf` while settings.DCF_ENABLED.
+    # None when disabled or when its inputs were unavailable. Typed (not `Any`) so
+    # tests/test_ticker_data_cache.py's registry guard can SEE it: as `Any` it slipped past
+    # that guard, was never registered in ticker_data_cache._PYDANTIC_FIELDS, and every
+    # collection write failed to serialize on launch day (Sentry, 2026-09-26).
+    caydex_dcf: Optional[DcfFairValueResponse] = None
     quote: Dict[str, Any] = field(default_factory=dict)
     income: List[Dict[str, Any]] = field(default_factory=list)
     balance: List[Dict[str, Any]] = field(default_factory=list)

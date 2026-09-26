@@ -220,6 +220,13 @@ _DEBT_ISSUER_GATE_RE = re.compile(
 )
 
 
+def is_mutual_fund_symbol(sym: str) -> bool:
+    """A NASDAQ open-end mutual-fund designator (5 letters ending X), for callers that have
+    a symbol but no exchange — the search-chip counters. NYSE and AMEX issue no 5-letter
+    primary symbol of that form, so without an exchange the shape alone decides."""
+    return bool(_NASDAQ_MUTUAL_FUND_RE.match((sym or "").upper()))
+
+
 def _grammar_drop_reason(row: StockSearchResult, sym: str) -> Optional[str]:
     """Why a row is a non-common listing by its symbol or name alone, or None."""
     if _DASH_PREFERRED_RE.match(sym):

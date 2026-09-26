@@ -693,6 +693,9 @@ _PENDING_MIGRATION_TABLES: set[str] = {
     # remove these two after the re-dump.
     "public.dcf_fair_value_cache",
     "public.dcf_fair_value_history",
+    # 2026-09-26: migration 179 (search-screen chips) written, not yet applied — remove
+    # after the re-dump.
+    "public.search_pick_daily",
 }
 # 2026-09-18: 170's four tables (marketing_runs / marketing_assets / marketing_posts /
 # podcast_episodes) were applied and re-dumped, so they left the list — the guard below

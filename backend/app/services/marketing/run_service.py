@@ -30,6 +30,8 @@ Supabase is reached through `sb_exec` (never a bare `.execute()` on the loop —
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -177,6 +179,72 @@ def held_problem(
     if now - touched >= timedelta(seconds=max(stale_seconds, 0)):
         return f"the claim went stale (last touched {touched.isoformat()})"
     return None
+
+
+@dataclass(frozen=True)
+class CallerClaim:
+    """The claim a worker call says it holds: the run's `attempts` at its claim and the nonce it
+    minted for that claim (`X-Marketing-Claim: <attempts>.<nonce>`, SYSTEM_DESIGN_GUIDELINES
+    §12.2). Every successful claim yields a distinct `attempts` (a re-claim increments it with a
+    compare-and-swap; nonce recovery returns the same row), and the nonce is per process — so
+    the PAIR identifies the holder even across runs (attempts alone is 1-6 per run) and after a
+    manual reset brings an old attempts value back."""
+    attempts: int
+    nonce: str
+
+    _NONCE_RE = re.compile(r"^[0-9a-f]{16,64}$")
+
+    @classmethod
+    def parse(cls, header: Optional[str]) -> "CallerClaim":
+        """`<attempts>.<nonce>` → CallerClaim, or ValueError naming what is wrong."""
+        if not header:
+            raise ValueError("missing claim")
+        head, sep, nonce = header.strip().partition(".")
+        if not sep or not head.isdigit() or len(head) > 6:
+            raise ValueError("malformed claim (expected <attempts>.<nonce>)")
+        attempts = int(head)
+        nonce = nonce.lower()
+        if attempts < 1 or not cls._NONCE_RE.match(nonce):
+            raise ValueError("malformed claim (attempts ≥ 1, nonce 16-64 hex)")
+        return cls(attempts, nonce)
+
+    def header(self) -> str:
+        return f"{self.attempts}.{self.nonce}"
+
+
+def claim_problem(run: Dict[str, Any], claim: CallerClaim) -> Optional[str]:
+    """Why `run` is not held by `claim`, or None. Pure. Compares the CALLER's claim with the
+    row's — the old fence compared the row with itself (the `attempts` it had just read), so a
+    zombie tick whose run was re-claimed before its read passed it and wrote over the new
+    holder (rules marketing.md §2)."""
+    meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if int(run.get("attempts") or 0) != claim.attempts:
+        return f"the run is at claim attempt {run.get('attempts')}, the caller holds {claim.attempts}"
+    if meta.get("claim_nonce") != claim.nonce:
+        return "the run's claim nonce is not the caller's"
+    return None
+
+
+_WORD_EDGE_PUNCT = "\"'“”‘’()[]{}.,;:!?…—–-"
+
+
+def spoken_words(text: str) -> List[str]:
+    """Whitespace words, edge punctuation stripped and case-folded: the unit the narration's
+    word timings are compared in (a timing table is display words, one per whitespace word)."""
+    out = []
+    for tok in (text or "").split():
+        w = tok.strip(_WORD_EDGE_PUNCT).casefold()
+        if w:
+            out.append(w)
+    return out
+
+
+def narration_words(script_output: Dict[str, Any]) -> List[str]:
+    """What the voice stage narrates: the hook, then every script line, in order."""
+    words = spoken_words(str(script_output.get("hook") or ""))
+    for line in script_output.get("video_script") or []:
+        words += spoken_words(str(line))
+    return words
 
 
 def next_stage(stage: str) -> Optional[str]:
@@ -638,6 +706,7 @@ class MarketingRunService:
         metadata: Optional[Dict[str, Any]] = None,
         finished: bool = False,
         worker: bool = False,
+        claim: Optional[CallerClaim] = None,
     ) -> Dict[str, Any]:
         """Write the fields that were given; merge `timings`/`metadata` into the JSONB
         rather than replacing it, so each stage reports only its own numbers.
@@ -662,6 +731,8 @@ class MarketingRunService:
         if status is not None and status not in RUN_STATUSES:
             raise ValueError(f"unknown status {status!r}")
         if worker:
+            if claim is None:
+                raise MarketingRequestInvalid(f"run {run_id}: a worker write must name its claim")
             if status is not None and status not in WORKER_RUN_STATUSES:
                 raise MarketingRequestInvalid(
                     f"run {run_id}: the worker may set status to {WORKER_RUN_STATUSES}, not {status!r}"
@@ -678,6 +749,11 @@ class MarketingRunService:
             raise MarketingRunNotFound(f"run {run_id} not found")
         observed_stage = current.get("stage")
         if worker:
+            # The CALLER's claim first, whatever the status: a zombie tick is refused even for
+            # a replay (it did not write the terminal state it would "confirm").
+            problem = claim_problem(current, claim)
+            if problem is not None:
+                raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
             if current.get("status") != "in_progress":
                 if _is_worker_replay(current, status=status, stage=stage):
                     return _replayed(run_id, current)
@@ -718,13 +794,11 @@ class MarketingRunService:
         query = self.sb.table(RUNS).update(patch).eq("id", run_id)
         if worker:
             # The fence lives in the UPDATE: a re-check after the read would let a claim or a
-            # close that lands in between be overwritten.
+            # close that lands in between be overwritten. It is the CALLER's claim — attempts
+            # and nonce — so a re-claim between the read and this write (it keeps `in_progress`,
+            # and may already stand at the stage we ask for) matches nothing.
             query = query.eq("status", "in_progress")
-            # …and on the observed `attempts`: a re-claim between our read and this write (it keeps
-            # `in_progress`, and may already stand at the stage we ask for) is a newer holder, not
-            # us. It does not prove the read itself was ours — the claim-nonce fence (Phase 3-4)
-            # does that — but it keeps the stage `in_` below from widening that window.
-            query = query.eq("attempts", int(current.get("attempts") or 0))
+            query = query.eq("attempts", claim.attempts).eq("metadata->>claim_nonce", claim.nonce)
             if stage is not None and observed_stage is not None:
                 query = (query.eq("stage", stage) if observed_stage == stage
                          else query.in_("stage", [observed_stage, stage]))
@@ -732,7 +806,7 @@ class MarketingRunService:
         if updated is None:
             fresh = await self.get_run(run_id) if worker else None
             if fresh is not None:
-                if _is_worker_replay(fresh, status=status, stage=stage):
+                if claim_problem(fresh, claim) is None and _is_worker_replay(fresh, status=status, stage=stage):
                     return _replayed(run_id, fresh)
                 raise MarketingRunNotHeld(f"run {run_id} changed under the worker's write; nothing written")
             raise MarketingRunNotFound(f"run {run_id} vanished during update")
@@ -754,6 +828,7 @@ class MarketingRunService:
         size_bytes: int,
         duration_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        claim: CallerClaim,
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """Insert the asset row and mint a signed upload URL for it.
 
@@ -768,7 +843,15 @@ class MarketingRunService:
             # Media is rendered inside the worker's live tick; a closed or never-claimed run
             # gets no new object in the PUBLIC bucket.
             raise MarketingRunNotHeld(f"run {run_id} is {run.get('status')!r}; assets register only on an in_progress run")
+        # Check-then-insert (an INSERT cannot be fenced on another row): a zombie that loses the
+        # claim between this read and its INSERT leaves an orphan pending_upload row, which is
+        # harmless — completing it is fenced, and only `ready` rows are ever used.
+        problem = claim_problem(run, claim)
+        if problem is not None:
+            raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
+        if kind == "audio" and isinstance(metadata, dict) and metadata.get("words"):
+            await self._check_timed_words(run_id, metadata["words"])
         try:
             path = storage_path_for(run_date, kind, sha256, ext)
         except ValueError as e:
@@ -860,6 +943,50 @@ class MarketingRunService:
         )
         return asset, upload
 
+    async def _check_timed_words(self, run_id: str, words: List[Dict[str, Any]]) -> None:
+        """The first check of WHAT THE VIDEO SAYS: an audio asset's timing table (one entry per
+        spoken display word) must be exactly the accepted script's hook + lines. The worker
+        cannot choose the words it narrates any more than the captions it posts. The request
+        schema already validated the table's shape (`validate_audio_words`)."""
+        script = await self.get_script(run_id)
+        output = (script or {}).get("output")
+        if not script or script.get("status") != "accepted" or not isinstance(output, dict):
+            raise MarketingScriptNotReady(f"run {run_id}: no accepted script to check the narration against")
+        expected = narration_words(output)
+        got = [w for entry in words for w in spoken_words(str(entry.get("w", "")))]
+        if got != expected:
+            at = next((i for i, (a, b) in enumerate(zip(got, expected)) if a != b), min(len(got), len(expected)))
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the narration's timed words are not the accepted script "
+                f"({len(got)} vs {len(expected)} words; first difference at word {at})")
+
+    async def list_ready_assets(self, run_id: str, *, claim: CallerClaim) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        """(voice_asset_id, ready assets with their public URL) for the run's HOLDER — the
+        read-back a resumed or re-claimed stage derives its media from (rules marketing.md §2).
+        `voice_asset_id` comes from the run's metadata and is returned only if it names a
+        `ready` `audio` asset of THIS run; anything else is logged and returned as None."""
+        run = await self.get_run(run_id)
+        if run is None:
+            raise MarketingRunNotFound(f"run {run_id} not found")
+        problem = claim_problem(run, claim)
+        if problem is not None:
+            raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
+        ready = [a for a in await self.list_assets(run_id) if a.get("status") == "ready"]
+        base = f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{settings.MARKETING_MEDIA_BUCKET}"
+        for a in ready:
+            a["public_url"] = f"{base}/{a.get('storage_path')}"
+        meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        pointer = meta.get("voice_asset_id")
+        voice = None
+        if pointer:
+            match = next((a for a in ready if a.get("id") == pointer), None)
+            if match is not None and match.get("kind") == "audio":
+                voice = pointer
+            else:
+                logger.warning("marketing run %s: metadata.voice_asset_id=%r is not a ready audio "
+                               "asset of this run — ignored", run_id, pointer)
+        return voice, ready
+
     async def _object_exists(self, path: str) -> bool:
         """Is `path` in the media bucket? Distinguishes ABSENT from OUTAGE.
 
@@ -887,10 +1014,11 @@ class MarketingRunService:
             ) from e
         return any((item or {}).get("name") == name for item in (listing or []))
 
-    async def complete_asset(self, asset_id: str) -> Dict[str, Any]:
+    async def complete_asset(self, asset_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
         """Flip `pending_upload` → `ready` ONLY after the object is verifiably in the bucket.
         The worker's word is not enough: a `ready` row whose object 404s would publish a
-        broken post, and nothing downstream re-checks."""
+        broken post, and nothing downstream re-checks. Only the holder of the asset's RUN may
+        complete it (the route carries no run id, so the asset's own run is the one checked)."""
         asset = _one(
             await _exec(
                 self.sb.table(ASSETS).select("*").eq("id", asset_id).limit(1),
@@ -899,8 +1027,18 @@ class MarketingRunService:
         )
         if asset is None:
             raise MarketingAssetNotFound(f"asset {asset_id} not found")
+        run = await self.get_run(str(asset.get("run_id")))
+        if run is None:
+            raise MarketingRunNotFound(f"asset {asset_id}: run {asset.get('run_id')} not found")
+        problem = claim_problem(run, claim)
+        if problem is not None:
+            raise MarketingRunNotHeld(f"asset {asset_id}: run {run.get('id')} is not held by this caller: {problem}")
         if asset.get("status") == "ready":
             return asset
+        if run.get("status") != "in_progress":
+            raise MarketingRunNotHeld(
+                f"asset {asset_id}: run {run.get('id')} is {run.get('status')!r}; assets complete "
+                "only on an in_progress run")
         path = asset["storage_path"]
         if not await self._object_exists(path):
             raise MarketingAssetMissingInStorage(
@@ -927,7 +1065,7 @@ class MarketingRunService:
     # posts -----------------------------------------------------------------
 
     async def create_posts(
-        self, run_id: str, specs: List[Dict[str, Any]]
+        self, run_id: str, specs: List[Dict[str, Any]], *, claim: CallerClaim
     ) -> List[Dict[str, Any]]:
         """One ledger row per (platform, format). Born `pending_review` unless
         MARKETING_AUTO_PUBLISH is on. Re-creating an existing pair returns the existing row
@@ -957,6 +1095,9 @@ class MarketingRunService:
                 f"run {run_id} is {run.get('status')!r}; posts are recorded only for an in_progress "
                 "or media_ready run"
             )
+        problem = claim_problem(run, claim)
+        if problem is not None:
+            raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
         script = await self.get_script(run_id)
         output = (script or {}).get("output")

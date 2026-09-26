@@ -1,0 +1,24 @@
+{
+  "_comment": "Curated fallback for the search-screen chips (app/services/search_trending_service.py). Shown, labelled 'Popular', only while too little real activity qualifies for 'Trending searches' / 'Most added'. Changing it needs a backend deploy, not an app update. 'all' feeds Home search, the ticker-search sheet and the Tracking add sheet; 'stocks' feeds the company picker and the Updates 'Add Ticker' sheet (type must be 'stock'). Symbols are FMP spellings: BRK-B, never BRK.B. 'blocked' removes a ticker from every list (abuse, delisting) without an app release.",
+  "all": [
+    {"symbol": "AAPL", "name": "Apple Inc.", "type": "stock"},
+    {"symbol": "NVDA", "name": "NVIDIA Corporation", "type": "stock"},
+    {"symbol": "MSFT", "name": "Microsoft Corporation", "type": "stock"},
+    {"symbol": "SPY", "name": "SPDR S&P 500 ETF Trust", "type": "etf"},
+    {"symbol": "TSLA", "name": "Tesla, Inc.", "type": "stock"},
+    {"symbol": "AMZN", "name": "Amazon.com, Inc.", "type": "stock"},
+    {"symbol": "BTC", "name": "Bitcoin", "type": "crypto"},
+    {"symbol": "GOOGL", "name": "Alphabet Inc.", "type": "stock"}
+  ],
+  "stocks": [
+    {"symbol": "AAPL", "name": "Apple Inc.", "type": "stock"},
+    {"symbol": "MSFT", "name": "Microsoft Corporation", "type": "stock"},
+    {"symbol": "NVDA", "name": "NVIDIA Corporation", "type": "stock"},
+    {"symbol": "AMZN", "name": "Amazon.com, Inc.", "type": "stock"},
+    {"symbol": "GOOGL", "name": "Alphabet Inc.", "type": "stock"},
+    {"symbol": "META", "name": "Meta Platforms, Inc.", "type": "stock"},
+    {"symbol": "TSLA", "name": "Tesla, Inc.", "type": "stock"},
+    {"symbol": "BRK-B", "name": "Berkshire Hathaway Inc.", "type": "stock"}
+  ],
+  "blocked": []
+}

@@ -1249,6 +1249,7 @@ class GeminiClient:
         response_schema: Optional[Any] = None,
         thinking_budget: Optional[int] = None,
         usage_tag: Optional[str] = None,
+        temperature: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
@@ -1269,12 +1270,19 @@ class GeminiClient:
         `usage_tag` only labels the `GEMINI_USAGE` line (e.g. `marketing_writer`) so one
         caller's spend can be told apart from every other `generate_json` caller. It is
         deliberately NOT in the cache key: it changes no output.
+
+        `temperature` overrides the client default (`GEMINI_TEMPERATURE`) for this call; a
+        grader wants 0 so a borderline verdict does not flip between samples. It joins the
+        cache key ONLY when set, so every existing caller's key is byte-identical to before.
         """
-        key = _cache_key(
+        parts = [
             "json", prompt, system_instruction or "", model_name or "",
             "" if response_schema is None else f"schema={response_schema!r}",
             "" if thinking_budget is None else f"tb={thinking_budget}",
-        )
+        ]
+        if temperature is not None:
+            parts.append(f"temp={float(temperature)!r}")
+        key = _cache_key(*parts)
         cached = self._response_cache.get(key)
         if cached is not None:
             logger.debug("Gemini generate_json cache HIT")
@@ -1287,6 +1295,7 @@ class GeminiClient:
                     contents=prompt,
                     config=self._config(
                         system_instruction=system_instruction,
+                        temperature=temperature,
                         response_mime_type="application/json",
                         response_schema=response_schema,
                         thinking_config=_thinking_config(thinking_budget),

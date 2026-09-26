@@ -799,17 +799,20 @@ enum ValuationStatus: String {
     }
 }
 
+/// The report's "Valuation & Institutions" section (wire key `wall_street_consensus`).
+/// The analyst fields (rating, targets, momentum, rating counts) are still DECODED so old
+/// reports keep parsing, but nothing draws them any more — analyst ratings and price
+/// targets are outside the FMP licence. Only `insightWasWrittenForAnalystCard` reads them.
 struct ReportWallStreetConsensus {
     let rating: ConsensusRating
     let currentPrice: Double
-    // nil when there's no real analyst coverage. The view renders an honest
-    // "no analyst price targets" state instead of fabricated numbers.
+    // Analyst price targets — nil on every report written since the licence change.
     let targetPrice: Double?
     let lowTarget: Double?
     let highTarget: Double?
     let valuationStatus: ValuationStatus
-    let discountPercent: Double         // "Trading 33.4% below fair value estimate"
-    // AI "Insight": synthesis across price targets, institutions, and momentum.
+    let discountPercent: Double         // decoded, never displayed (a verdict-shaped number)
+    // AI "Insight": institutional (13F) positioning read against the estimate.
     let wallStreetInsight: String?
     // NAMING: `hedgeFund*` = FMP 13F institutional-ownership data, rendered in the
     // report's "Institutions" section (SmartMoneyTab.hedgeFunds = "Institutions").
@@ -822,8 +825,7 @@ struct ReportWallStreetConsensus {
     let momentumUpgrades: Int
     let momentumDowngrades: Int
     let momentumMaintains: Int  // analyst "maintain"/reiterate count (trailing 12mo)
-    // Analyst rating distribution (one grade per firm), aggregated to Buy/Hold/Sell
-    // below for the consensus bar.
+    // Analyst rating distribution (one grade per firm) — decoded, never displayed.
     let analystStrongBuy: Int
     let analystBuy: Int
     let analystHold: Int
@@ -832,83 +834,15 @@ struct ReportWallStreetConsensus {
     /// The Caydex Fair Value Estimate published with this report (nil on older reports).
     var caydexFairValue: CaydexFairValue? = nil
 
-    // MARK: Analyst consensus distribution (5 levels)
-    var analystTotalRatings: Int {
-        analystStrongBuy + analystBuy + analystHold + analystSell + analystStrongSell
-    }
-    var hasAnalystDistribution: Bool { analystTotalRatings > 0 }
-
-    /// The 5 rating levels with the SAME colors as the Analysis tab
-    /// (`StockRepository` distColors). Reuses `AnalystRatingDistribution` so the
-    /// report bar and the Analysis tab share one model + palette and stay in sync.
-    var analystLevels: [AnalystRatingDistribution] {
-        // Ordered most-bearish → most-bullish: Strong Sell on the left, Strong Buy
-        // on the right, Hold in the middle. Colors travel with each level, so this
-        // reorders both the bar and the legend together.
-        [
-            AnalystRatingDistribution(label: "Strong Sell", count: analystStrongSell, color: AppColors.loss),
-            AnalystRatingDistribution(label: "Sell", count: analystSell, color: AppColors.bearish),
-            AnalystRatingDistribution(label: "Hold", count: analystHold, color: AppColors.neutral),
-            AnalystRatingDistribution(label: "Buy", count: analystBuy, color: AppColors.gain),
-            AnalystRatingDistribution(label: "Strong Buy", count: analystStrongBuy, color: AppColors.bullish),
-        ]
-    }
-
-    /// Percentage (0–100) of total ratings for a bucket count.
-    func analystPercent(_ count: Int) -> Double {
-        analystTotalRatings > 0 ? Double(count) / Double(analystTotalRatings) * 100 : 0
-    }
-
-    /// True only when the backend returned a real analyst consensus range.
-    /// The pole, target badges, and forecast copy are gated on this.
-    var hasAnalystTargets: Bool {
-        targetPrice != nil && lowTarget != nil && highTarget != nil
-    }
-
-    var formattedCurrentPrice: String {
-        String(format: "$%.0f", currentPrice)
-    }
-
-    var formattedTargetPrice: String {
-        guard let targetPrice else { return "—" }
-        return String(format: "$%.0f", targetPrice)
-    }
-
-    var formattedHighTarget: String {
-        guard let highTarget else { return "—" }
-        return String(format: "$%.0f", highTarget)
-    }
-
-    var formattedLowTarget: String {
-        guard let lowTarget else { return "—" }
-        return String(format: "$%.0f", lowTarget)
-    }
-
-    /// Upside vs the frozen close, or "—" when it cannot be expressed.
-    ///
-    /// `currentPrice` is guarded because these three are the only mirrors of this
-    /// math that are not: the backend computes the same ratio behind
-    /// `if target_price > 0 and current_price > 0` (ticker_report_data_collector),
-    /// while a frozen report whose price fell all the way through
-    /// `_latest_completed_close` → `previousClose` → `price` carries 0.0 here — and
-    /// `patch_wall_street_consensus_live` is a deliberate no-op, so a stored 0 is
-    /// never repaired on serve. Dividing by it yields `inf`, which `String(format:)`
-    /// renders literally as "+inf%".
-    private func targetPercent(_ target: Double?) -> String {
-        guard let target, currentPrice > 0 else { return "—" }
-        let percent = ((target - currentPrice) / currentPrice) * 100
-        guard percent.isFinite else { return "—" }
-        return String(format: "%+.1f%%", percent)
-    }
-
-    var formattedHighTargetPercent: String { targetPercent(highTarget) }
-
-    var formattedAvgTargetPercent: String { targetPercent(targetPrice) }
-
-    var formattedLowTargetPercent: String { targetPercent(lowTarget) }
-
-    var formattedDiscount: String {
-        "Trading \(String(format: "%.1f", discountPercent))% below fair value estimate"
+    /// True for a report written while analyst ratings were licensed. Its insight was
+    /// written for the analyst card this section no longer draws ("Buy-rated with a $190
+    /// target…"), so the view hides it. Mirrors the backend's
+    /// `wall_street_has_analyst_coverage` — the predicate that chose that insight's prompt.
+    var insightWasWrittenForAnalystCard: Bool {
+        if let targetPrice, targetPrice > 0 { return true }
+        let ratings = analystStrongBuy + analystBuy + analystHold + analystSell + analystStrongSell
+        let actions = momentumUpgrades + momentumMaintains + momentumDowngrades
+        return ratings > 0 || actions > 0
     }
 }
 
@@ -1845,14 +1779,14 @@ extension TickerReportData {
             lastUpdated: "Updated Feb 8, 2026"
         ),
         wallStreetConsensus: ReportWallStreetConsensus(
-            rating: .strongBuy,
+            rating: .hold,
             currentPrice: 142,
-            targetPrice: 190,
-            lowTarget: 140,
-            highTarget: 250,
-            valuationStatus: .deepUndervalued,
-            discountPercent: 33.4,
-            wallStreetInsight: "Buy-rated with a $190 target (~14% upside), institutions added $430M last quarter, and upgrades lead downgrades 8-to-3 — analysts, funds, and the rating trend all lean bullish.",
+            targetPrice: nil,
+            lowTarget: nil,
+            highTarget: nil,
+            valuationStatus: .fairValue,
+            discountPercent: 0,
+            wallStreetInsight: "Institutions added shares in five of the last eight quarters, a net build of about 14M shares, while the price sits 16% below the Caydex model estimate — positioning and the model point the same way, though the estimate's range is wide.",
             hedgeFundPriceData: [
                 StockPriceDataPoint(month: "02/2025", price: 163.20),
                 StockPriceDataPoint(month: "03/2025", price: 162.80),
@@ -1882,14 +1816,16 @@ extension TickerReportData {
                 SmartMoneyFlowDataPoint(month: "01/2026", buyVolume: 55.8, sellVolume: 31.2)
             ],
             hedgeFundSmartMoney: SmartMoneyData.hedgeFundsSampleData,
-            momentumUpgrades: 8,
-            momentumDowngrades: 3,
-            momentumMaintains: 12,
-            analystStrongBuy: 18,
-            analystBuy: 14,
-            analystHold: 6,
-            analystSell: 2,
-            analystStrongSell: 0
+            momentumUpgrades: 0,
+            momentumDowngrades: 0,
+            momentumMaintains: 0,
+            analystStrongBuy: 0,
+            analystBuy: 0,
+            analystHold: 0,
+            analystSell: 0,
+            analystStrongSell: 0,
+            caydexFairValue: CaydexFairValue(state: .estimate(value: 168.40, low: 139.10, high: 201.75),
+                                             asOf: "2026-09-26")
         ),
         criticalFactors: [
             CriticalFactor(

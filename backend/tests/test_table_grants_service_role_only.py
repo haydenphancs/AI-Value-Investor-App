@@ -127,6 +127,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # snapshots (FMP-licensed holdings, auth.md §1a). iOS has no Supabase client; only the
     # backend reads them, as service_role.
     "175": ("trillion_club_companies", "trillion_club_stakes", "trillion_club_filings"),
+    # 178: the Caydex Fair Value Estimate — its Tier-2 cache and its append-only history. Both
+    # hold FMP-derived statements and consensus; iOS reaches the value only via the backend.
+    "178": ("dcf_fair_value_cache", "dcf_fair_value_history"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

@@ -13,6 +13,10 @@
 //  the gap against the LIVE price, a caveat beyond ±50%, "No DCF" for a loss-maker whose
 //  model is negative, and nothing at all when FMP has no model. Never "fair value".
 //
+//  When the snapshot carries the Caydex Fair Value Estimate (backend DCF_ENABLED), that
+//  row — `CaydexFairValueRow`, with its range and "not a price target" line — REPLACES the
+//  FMP row; the backend then sends no `dcf` at all.
+//
 
 import SwiftUI
 
@@ -46,7 +50,13 @@ struct ValuationMeterSection: View {
                 multiplesRows
             }
 
-            if let dcf = snapshot.dcf {
+            if let estimate = snapshot.caydexEstimate {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Divider().overlay(AppColors.divider)
+                        .padding(.bottom, AppSpacing.xs)
+                    CaydexFairValueRow(estimate: estimate, currentPrice: currentPrice)
+                }
+            } else if let dcf = snapshot.dcf {
                 dcfRow(dcf)
             }
 
@@ -58,7 +68,8 @@ struct ValuationMeterSection: View {
         .padding(AppSpacing.lg)
         .cardSurface(cornerRadius: AppCornerRadius.large)
         .sheet(isPresented: $showInfoSheet) {
-            ValuationInfoSheet()
+            ValuationInfoSheet(showsCaydexEstimate: snapshot.caydexEstimate != nil,
+                               showsFmpDcf: snapshot.dcf != nil)
         }
     }
 

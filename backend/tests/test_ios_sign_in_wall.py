@@ -226,3 +226,26 @@ def test_the_sign_in_sheet_does_not_claim_the_app_works_signed_out():
 #       -> test_the_widget_snapshot_is_wiped_when_a_session_ends FAILED  ✅
 #  5. Anti-vacuity: the banned sentence written back into a COMMENT in SignInRequiredSheet with
 #     the user-visible string left correct. -> still passed ✅ (the scan reads code, not prose)
+
+
+def test_the_sign_in_screen_states_assent_to_the_terms():
+    """Sign-in-wrap, not browsewrap (2026-09-25 legal review, documents/research/
+    dcf-fair-value.md §9.4). Berman v. Freedom Financial rejected small grey text below the fold,
+    so the line must sit DIRECTLY under the submit button, above the Apple / Google buttons it
+    names, in readable body text — and the Terms / Privacy links must stay reachable."""
+    import re as _re
+    from pathlib import Path as _Path
+    src = (_Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios" / "Views" /
+           "Screens" / "SignInView.swift").read_text(encoding="utf-8")
+    code = "\n".join(_re.sub(r"(?<!:)//.*$", "", l)
+                     for l in _re.sub(r"/\*.*?\*/", "", src, flags=_re.S).splitlines())
+    assert ('static let assentLine = "By tapping Sign In or Create Account, or continuing with '
+            'Apple or Google, you agree to the Terms of Use and acknowledge the Privacy Policy."') in code
+    at = code.index("Text(Self.assentLine)")
+    after = code[at: at + 400]
+    assert "AppTypography.bodySmall" in after and "AppColors.textSecondary" in after
+    submit = code.index(".disabled(!canSubmit || isSubmitting)")
+    social = code.index("socialSignInSection", at)
+    assert submit < at < social, "submit button → assent line → Apple / Google buttons"
+    footer = code[code.index("private var legalFooter: some View"):]
+    assert "legalDocument = .terms" in footer[:1500] and "legalDocument = .privacy" in footer[:1500]

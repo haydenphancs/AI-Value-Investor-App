@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from app.services.dcf_report_gate import report_dcf_source_matches, strip_caydex_if_disabled
 from app.api.error_response import (
     ErrorCode,
     error_response_from_exception,
@@ -341,6 +342,9 @@ def _validate_report(report: dict, ticker: str, persona: str):
     drift — so callers return a structured DATA_INCOMPLETE instead of a Pydantic
     500. model_dump() also strips internal-only fields (e.g. _scoring_inputs).
     """
+    # Kill switch: every return of a stored or cached report passes through here, so the
+    # published estimate is dropped while settings.DCF_ENABLED is off (dcf_report_gate).
+    report = strip_caydex_if_disabled(report)
     try:
         validated = TickerReportResponse(**report)
     except ValidationError as ve:
@@ -405,6 +409,12 @@ async def _check_legacy_report_cache(ticker: str, persona: str):
                 logger.info(
                     f"Legacy report for {ticker}/{persona} has short-interest "
                     f"change_3m but empty history — skipping stale row"
+                )
+                return None
+            if not report_dcf_source_matches(rpt):
+                logger.info(
+                    f"Legacy report for {ticker}/{persona} was built under the other "
+                    f"DCF_ENABLED setting — skipping"
                 )
                 return None
             return rpt

@@ -13,12 +13,14 @@ On ANY failure → status = "failed", error_message saved to DB.
 """
 
 import asyncio
+import math
 import copy
 import logging
 import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 
+from app.services.dcf_report_gate import report_dcf_source_matches
 from app.config import settings
 from app.database import get_supabase
 from app.integrations.gemini import get_gemini_client
@@ -889,6 +891,12 @@ class ResearchService:
                             ticker, persona_key, stale_degraded,
                         )
                         return None
+                    if not report_dcf_source_matches(blob):
+                        logger.info(
+                            "Shared cache row for %s/%s was built under the other "
+                            "DCF_ENABLED setting — treating as a miss", ticker, persona_key,
+                        )
+                        return None
                     return blob
                 return None
             except Exception as e:
@@ -953,18 +961,24 @@ class ResearchService:
         ).get("valuation") or {}
         if not val:
             return None
-        status = val.get("status", "fair_value")
-        rating_map = {
-            "overpriced": "Overvalued",
-            "fair_value": "Fair Value",
-            "underpriced": "Undervalued",
-            "deep_undervalued": "Undervalued",
-        }
+        # NEUTRAL wording only (documents/research/dcf-methodology-v1.md §5, hard rule 4). This
+        # used to persist and serve "Undervalued" / "Overvalued" and "N% upside" — a verdict on
+        # a model value (and, with no DCF, on a synthetic upside mapped from the snapshot rating).
+        # Now: no rating label, and the gap stated as price vs the model value when one exists.
+        fair_value = val.get("fair_value")
+        price = val.get("current_price")
+        gap_text = None
+        if (isinstance(fair_value, (int, float)) and isinstance(price, (int, float))
+                and not isinstance(fair_value, bool) and fair_value > 0 and price > 0
+                and math.isfinite(fair_value) and math.isfinite(price)):
+            gap = (price / fair_value - 1) * 100
+            gap_text = ("Price in line with the model estimate" if abs(gap) < 0.5 else
+                        f"Price {abs(gap):.0f}% {'below' if gap < 0 else 'above'} the model estimate")
         return {
-            "valuation_rating": rating_map.get(status, "Fair Value"),
+            "valuation_rating": None,
             "key_metrics": {},
             "historical_context": "",
-            "margin_of_safety": f"{val.get('upside_potential', 0):.1f}% upside",
+            "margin_of_safety": gap_text,
         }
 
     def _extract_risk(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
+from app.services.dcf_report_gate import report_dcf_source_matches
 from app.database import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -398,6 +399,12 @@ async def get_cached_report(
 
             data = entry.get("ticker_report_data")
             if not isinstance(data, dict):
+                return None
+            if not report_dcf_source_matches(data):
+                logger.info(
+                    f"ticker_report_cache DCF-SOURCE MISMATCH for {ticker}/{persona} "
+                    f"(built under the other DCF_ENABLED setting) — regenerating"
+                )
                 return None
             if _short_interest_payload_stale(data):
                 logger.info(

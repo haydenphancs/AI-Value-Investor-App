@@ -183,6 +183,9 @@ PACKAGE_OF: Dict[str, str] = {
     "search-cusip": "Search & Directory (unnamed, serves 200)",
     "company-screener": "Search & Directory (unnamed, serves 200)",
     "stock-list": "Search & Directory (unnamed, serves 200)",
+    # Verified 200 on 2026-09-25 (70,318 rows). The liveness whitelist for ticker search
+    # (`stock_search_service`); `stock-list` cannot serve that — it still lists AVGOP.
+    "actively-trading-list": "Search & Directory (unnamed, serves 200)",
     "available-industries": "Search & Directory (unnamed, serves 200)",
     "available-sectors": "Search & Directory (unnamed, serves 200)",
     # -- Valuation / scoring (unnamed but serving 200) ------------------------------

@@ -67,3 +67,21 @@ def test_extract_moat_and_valuation_handle_none_slots(key):
     # Score layer None entirely must also be safe.
     assert svc._extract_moat({key: None}) is None
     assert svc._extract_valuation({key: None}) is None
+
+
+@pytest.mark.parametrize("fv,price,expected", [
+    (250.0, 200.0, "Price 20% below the model estimate"),
+    (200.0, 250.0, "Price 25% above the model estimate"),
+    (200.0, 200.4, "Price in line with the model estimate"),
+    (None, 200.0, None), (float("nan"), 200.0, None), (0.0, 200.0, None),
+])
+def test_valuation_analysis_states_a_gap_never_a_verdict(fv, price, expected):
+    """Hard rule 4 (dcf-methodology-v1.md §5): no Undervalued / Overvalued / "N% upside"."""
+    svc = _svc()
+    out = svc._extract_valuation({"_scoring_inputs": {"valuation": {
+        "status": "deep_undervalued", "fair_value": fv, "current_price": price,
+        "upside_potential": 35.0}}})
+    assert out["valuation_rating"] is None
+    assert out["margin_of_safety"] == expected
+    for word in ("undervalued", "overvalued", "upside"):
+        assert word not in str(out).lower().replace("deep_undervalued", "")

@@ -15,6 +15,14 @@ import pytest
 
 import app.api.v1.endpoints.stocks as stocks_module
 from app.integrations.fmp import FMPClient
+from app.services import stock_search_service
+
+
+@pytest.fixture(autouse=True)
+def _no_active_listing_directory(monkeypatch):
+    """The handler tests here pin the crypto/equity merge, not liveness: None is the
+    fail-open path, and without it the search would schedule a real list fetch."""
+    monkeypatch.setattr(stock_search_service, "get_active_listings", lambda: None)
 
 
 def _row(symbol: str, name: str, exchange: str = "NASDAQ",
@@ -140,7 +148,7 @@ async def test_major_coins_survive_a_ticker_collision(monkeypatch, coin, equity_
     shares its ticker — which is exactly why a spot check missed this.
     """
     class _Stub:
-        async def search_stocks(self, q, limit):
+        async def search_stocks(self, q, limit, **kwargs):
             return [_row(coin, equity_name, "AMEX", equity_type)]
 
     monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: _Stub())
@@ -185,7 +193,7 @@ async def test_a_ticker_collision_is_two_rows_the_ios_identity_can_tell_apart(
     symbol would collide again, and nothing else would notice.
     """
     class _Stub:
-        async def search_stocks(self, q, limit):
+        async def search_stocks(self, q, limit, **kwargs):
             return [_row(coin, equity_name, "AMEX", equity_exchange_full)]
 
     monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: _Stub())
@@ -214,7 +222,7 @@ async def test_non_exact_crypto_is_still_dropped_when_an_equity_owns_the_ticker(
     the crypto map; only a symbol the user typed exactly earns the exemption.
     """
     class _Stub:
-        async def search_stocks(self, q, limit):
+        async def search_stocks(self, q, limit, **kwargs):
             return [_row("STX", "Seagate Technology"), _row("STXM", "Some ETF")]
 
     monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: _Stub())
@@ -223,3 +231,62 @@ async def test_non_exact_crypto_is_still_dropped_when_an_equity_owns_the_ticker(
     assert ("STX", "crypto") not in {(r.symbol, r.type) for r in out}, (
         "a crypto that merely substring-matches must stay suppressed by the equity"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug 3 — a prefix hit the endpoint DISCARDS suppressed the name search (2026-09-25)
+# ─────────────────────────────────────────────────────────────────────────────
+# Same family as Bug 1, found by the duplicate-row sweep: "sirius" came back from
+# `search-symbol` as only SIRIUSUSD (a crypto the endpoint drops), and "micro" / "bank" /
+# "3m" as only foreign rows (MICRO.BK, BANK.L, 3MF.AX). Each is a genuine PREFIX hit, so
+# `search-name` never ran — and every one returned ZERO US results. Sirius XM, Microsoft
+# and Micron were unfindable by name. Driven through the handler with the REAL
+# `FMPClient.search_stocks`, because the rule lives in the endpoint and is applied inside
+# the integration: testing either half alone would miss the wiring.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,symbol_rows,name_rows,expected", [
+    ("sirius",
+     [_row("SIRIUSUSD", "FIRST USD", "CRYPTO", "CCC")],
+     [_row("SIRI", "Sirius XM Holdings Inc.")],
+     "SIRI"),
+    ("micro",
+     [_row("MICRO.BK", "Micro Leasing PCL", "SET", "Thailand"),
+      _row("MICROSE.BO", "Micro Sec", "BSE", "Bombay")],
+     [_row("MSFT", "Microsoft Corporation"), _row("MU", "Micron Technology, Inc.")],
+     "MSFT"),
+    ("3m",
+     [_row("3MF.AX", "3M Foo", "ASX", "ASX")],
+     [_row("MMM", "3M Company", "NYSE", "New York Stock Exchange")],
+     "MMM"),
+])
+async def test_a_discarded_prefix_hit_does_not_suppress_the_name_search(
+    monkeypatch, query, symbol_rows, name_rows, expected
+):
+    client = _RecordingClient({"search-symbol": symbol_rows, "search-name": name_rows})
+    monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: client)
+    out = await stocks_module.search_stocks(q=query, limit=10)
+
+    assert client.calls == ["search-symbol", "search-name"], "the name search must run"
+    assert expected in [r.symbol for r in out], f"{expected} must be findable by name"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,symbol_rows", [
+    ("AAPL", [_row("AAPL", "Apple Inc."), _row("AAPL.DE", "Apple Inc.", "XETRA", "Xetra")]),
+    # An exact coin the endpoint serves from its own map IS a ticker hit — one call.
+    ("DOGE", [_row("DOGEUSD", "Dogecoin USD", "CRYPTO", "CCC")]),
+])
+async def test_a_kept_prefix_hit_still_costs_one_call(monkeypatch, query, symbol_rows):
+    client = _RecordingClient({"search-symbol": symbol_rows})
+    monkeypatch.setattr(stocks_module, "get_fmp_client", lambda: client)
+    await stocks_module.search_stocks(q=query, limit=10)
+    assert client.calls == ["search-symbol"]
+
+
+def test_the_prefix_rule_is_optional_and_applied_per_row():
+    rows = [_row("BANK.L", "Bank plc", "LSE", "London"), _row("BANKX", "Bank Fund", "NASDAQ")]
+    assert FMPClient._has_symbol_prefix_match("bank", rows) is True, "None = old behaviour"
+    only_us = lambda r: "." not in r["symbol"]  # noqa: E731
+    assert FMPClient._has_symbol_prefix_match("bank", rows, only_us) is True
+    assert FMPClient._has_symbol_prefix_match("bank", rows[:1], only_us) is False

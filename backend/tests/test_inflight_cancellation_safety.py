@@ -127,6 +127,15 @@ _INFLIGHT_MODULES = [
     "signals_service.py",
     "valuation_snapshot_service.py",
     "widget_movers_service.py",
+    # Added 2026-09-25 with the search listing rules. Task-based and never joined: search
+    # is a keystroke, so no caller awaits the active-listing refresh — `_inflight` only
+    # stops a burst of keystrokes starting duplicate 70k-row fetches, and the entry must
+    # clear from the task's own completion (`add_done_callback`).
+    "stock_search_service.py",
+    # Added 2026-09-25 with the Caydex Fair Value Estimate (model dcf-v1). Future-based,
+    # profit_power shape: the leader resolves or fails the shared future, a cancelled leader
+    # hands joiners a RuntimeError, and joiners attach through asyncio.shield.
+    "dcf_fair_value_service.py",
     # Added 2026-09-01 with the Apple/Google set-password work. Reads the
     # `account_auth_methods` RPC on the `GET /users/me` path, which runs on every session
     # restore — so a cold cache with several restores in flight would fan out one RPC each.

@@ -83,9 +83,9 @@ admin recomputes, and marketing script generation.
 
 ### 1E. This Mac (Claude Code hooks, `.claude/hooks/`)
 
-- **Session start** — prints context and starts the Swift memory watchdog.
+- **Session start** — prints context. It does not start the watchdog.
 - **Build guard** — blocks an iOS build without `-jobs 2`, a second concurrent build, and any build when swap is nearly full.
-- **Swift memory watchdog** — kills a compiler at 10 GB, or at 7 GB when RAM is under pressure (a normal Archive build peaks at about 5.3 GB); logs to `~/Library/Logs/caydex-swift-watchdog.log`.
+- **Swift memory watchdog** — runs only while a Swift build is running (yours or Claude's, ⌘B included), and stops about 30 s after it. A macOS LaunchAgent checks for builds every 5 s; check or remove it with `bash .claude/hooks/install-swift-build-watchdog-agent.sh status` (or `uninstall`). The watchdog kills a compiler at 10 GB, or at 7 GB when RAM is under pressure (a normal Archive build peaks at about 5.3 GB). It logs to `~/Library/Logs/caydex-swift-watchdog.log`.
 - **After each edit** — Python syntax check; SQL migration lint; iOS theme parity tests; design-doc parity test.
 - **FMP URL guard** — blocks a `/api/v3` URL.
 
@@ -141,6 +141,13 @@ admin recomputes, and marketing script generation.
 - [ ] **Check whether the FMP key ever leaked into stored reports.** In Supabase Studio, search `research_reports` for text containing `apikey=` (for example `full_report::text ILIKE '%apikey=%'`). If any row matches, rotate the FMP API key and clean those rows. Until 2026-09-25 a failed FMP call inside the deep-research tools could pass the raw request URL, key included, to the model.
 - [ ] **Orphaned guest-era report PDFs.** Reports claimed from guest mode before 2026-09-25 left their PDF under `research-pdfs/reports/<install-id>/` with no handle, so account deletion can't find them. If you want them gone, ask Claude for a one-off cleanup script. It would move each file to its account's folder, or delete it when no account owns it.
 - [ ] **Decide on a small migration** to close the last credit-pack refund gap: a refund that arrives before the grant, for a transaction with no usable account token, can't be recorded (`credit_purchases.user_id` is NOT NULL). Options: a nullable `user_id`, or a separate refund-tombstone table.
+- [ ] **Caydex Fair Value Estimate go-live** (built 2026-09-25, OFF by default; details in `documents/research/dcf-fair-value.md` §9 and `dcf-methodology-v1.md`). Two switches: `DCF_SHADOW` records the estimate for every Analysis-tab view and shows it to NOBODY; `DCF_ENABLED` publishes it to EVERY client at once (App Store builds included — there is no per-build gate). In order:
+  1. Apply migration 178 (`backend/database/migrations/178_dcf_fair_value.sql`) in Studio. It adds `dcf_fair_value_cache` and the append-only `dcf_fair_value_history`. Check that `FRED_API_KEY` is set on Railway: the model cannot run without the 10-year Treasury history.
+  2. Deploy the backend. The switches are still off, but three wording changes ship regardless: the PDF hero and the stored `valuation_analysis` state a neutral price gap instead of Undervalued/Overvalued, persona prompts no longer tell the AI to compute its own intrinsic value, and the sign-in screen states assent to the Terms.
+  3. Set `DCF_SHADOW=true` on Railway. Live watch, 2–3 weeks, invisible to users: ask Claude weekly to summarise `dcf_fair_value_history` (value jumps and their causes, refusal mix, anything odd).
+  4. Ship an iOS build with the new row through TestFlight and the App Store (it shows the row only when the backend sends it).
+  5. Set `DCF_ENABLED=true`. For ALL users at once: FMP's DCF disappears from the Analysis tab (App Store builds without the new row show no DCF row); NEW AI reports carry the estimate and derive their valuation from it; the PDF hero, report narratives and chat quote it.
+  - To turn it off: set `DCF_ENABLED=false`. New reports stop carrying it; every stored-report read path (report screens, chat grounding) and newly rendered PDFs drop the estimate block; report caches treat reports built with it as misses; cached snapshots rebuild on their own. NOT withdrawn: PDF files already rendered (served from Storage as they are), and valuation figures inside a user's saved report that were derived from the estimate (saved reports are frozen snapshots).
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen
@@ -161,6 +168,7 @@ admin recomputes, and marketing script generation.
 | **Quarterly** | Skim `documents/System Design/SYSTEM_DESIGN_GUIDELINES.md` for drift | — |
 | **Optional, after each 13F season** | Warm the institutions chart | `-m scripts.hydrate_hedge_fund_flow --dry-run`, then the real run (**⚠️ PROD**) |
 | **Every 120 days** — by **2027-01-22** | Re-verify the Trillion Club stakes and bump `verified_on`. All 130 are dated 2026-09-24 and flag stale on 01-23. | Seed JSON → `--apply --update` (**⚠️ PROD**) |
+| **Yearly**, early January | Update the fair value's rate pair when Damodaran publishes his 1 Jan implied equity risk premium (pages.stern.nyu.edu/~adamodar → Implied ERP). Change `ERP_PCT` and `RF_AT_ERP_PCT` together, bump `MODEL_VERSION`, and update `dcf-methodology-v1.md`. Values will step once. | Ask Claude |
 | **Yearly** | Apple Paid Apps Agreement / membership (current term ends **2027-02-17**) | developer.apple.com |
 | **Yearly** (first 2027 submission) | ASC copyright year (`COPYRIGHT` in `scripts/asc_review_resubmit.py`) | ASC |
 | **Yearly** | Add the next NYSE holidays. **iOS** `MarketHoursUtil.swift` stops at **2027**: add 2028 in an app release before 2028-01-17. **Backend** `app/utils/market_hours.py` runs to 2028, and a test fails on **2028-01-02** until 2029 is added. | Code change |

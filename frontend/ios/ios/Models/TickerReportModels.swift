@@ -829,6 +829,8 @@ struct ReportWallStreetConsensus {
     let analystHold: Int
     let analystSell: Int
     let analystStrongSell: Int
+    /// The Caydex Fair Value Estimate published with this report (nil on older reports).
+    var caydexFairValue: CaydexFairValue? = nil
 
     // MARK: Analyst consensus distribution (5 levels)
     var analystTotalRatings: Int {

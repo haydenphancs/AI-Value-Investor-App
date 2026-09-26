@@ -18,6 +18,7 @@ crashing app boot. The CPU-bound render + the sync Storage upload are pushed to
 
 from __future__ import annotations
 
+from app.config import settings
 import logging
 import math
 from datetime import datetime, timezone
@@ -303,7 +304,14 @@ def build_context(
     # our own DCF-derived estimate when the consensus has no target. The hero card
     # MUST state which one it actually used — labeling our own estimate as analyst
     # consensus misattributes it to third parties (and is affirmatively misleading).
-    ws_target = _num((data.get("wall_street_consensus") or {}).get("target_price"))
+    ws_block = data.get("wall_street_consensus") or {}
+    ws_target = _num(ws_block.get("target_price"))
+    # The Caydex Fair Value Estimate as published on the report (model dcf-v1). Only this
+    # value may be labelled "Caydex": a bare `fair_value_estimate` without the block is FMP's
+    # model (reports generated with DCF_ENABLED off, and every older report).
+    caydex = ws_block.get("caydex_fair_value") if settings.DCF_ENABLED else None   # kill switch
+    caydex = caydex if isinstance(caydex, dict) and caydex.get("status") == "ok" else None
+    caydex_value = _num(caydex.get("fair_value")) if caydex else None
     own_estimate = _num(fair_value_estimate) or _num(data.get("fair_value_estimate"))
     # Reports persisted between the FMP rebuild and 2026-09-12 carry a FABRICATED
     # `fair_value_estimate` equal to the frozen current price (the collector wrote
@@ -316,23 +324,38 @@ def build_context(
     if ws_target:
         fair_value = ws_target
         fair_value_basis = "Per Wall Street consensus"
+        gap_noun = "target"
+    elif caydex_value:
+        fair_value = caydex_value
+        lo, hi = _num(caydex.get("range_low")), _num(caydex.get("range_high"))
+        fair_value_basis = ("Caydex Fair Value Estimate · DCF model estimate, not a price target, "
+                            "not a recommendation")
+        if lo and hi:
+            fair_value_basis += f" · range ${lo:,.0f}–${hi:,.0f}"
+        gap_noun = "the estimate"
     elif own_estimate:
         fair_value = own_estimate
-        fair_value_basis = "Caydex estimate · no analyst target"
+        fair_value_basis = "DCF model value · not a price target"
+        gap_noun = "the model value"
     else:
         fair_value = None
         fair_value_basis = ""
+        gap_noun = ""
+    # NEUTRAL wording only (hard rule 4, documents/research/dcf-methodology-v1.md §5): the
+    # hero used to print Undervalued / Overvalued at a ±1 % gap, in green and red — a verdict
+    # on a model number. It now states the gap, in a neutral colour.
     mos_pct = None
+    price_gap_pct = None
     valuation_word = "—"
     valuation_color = pdf_charts.MUTED
     if fair_value and current_price:
         mos_pct = (fair_value - current_price) / current_price * 100.0
-        if mos_pct >= 1:
-            valuation_word, valuation_color = "Undervalued", pdf_charts._GOOD
-        elif mos_pct <= -1:
-            valuation_word, valuation_color = "Overvalued", pdf_charts._RED
+        price_gap_pct = (current_price / fair_value - 1) * 100.0
+        if abs(price_gap_pct) < 0.5:
+            valuation_word = f"Price in line with {gap_noun}"
         else:
-            valuation_word, valuation_color = "Fairly Valued", pdf_charts._AMBER
+            where = "below" if price_gap_pct < 0 else "above"
+            valuation_word = f"Price {abs(price_gap_pct):.0f}% {where} {gap_noun}"
 
     # ── Vitals ────────────────────────────────────────────────────────────────
     vitals = []
@@ -567,6 +590,7 @@ def build_context(
         "fair_value_basis": fair_value_basis,
         "current_price": current_price,
         "margin_of_safety_pct": mos_pct,
+        "price_gap_pct": price_gap_pct,
         "valuation_word": valuation_word,
         "valuation_color": valuation_color,
         "target_price": _num(wsc.get("target_price")),

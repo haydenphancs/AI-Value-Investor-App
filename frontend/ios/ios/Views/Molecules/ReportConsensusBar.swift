@@ -53,6 +53,21 @@ struct ReportConsensusBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // The Caydex Fair Value Estimate published with this report, in its OWN block ABOVE
+            // the analyst section — never under the "Analyst Price Target" heading or a coloured
+            // BUY/HOLD/SELL line, where a model estimate would read as a price target. The gap
+            // is against the price frozen with the report, so it says so.
+            if let estimate = consensus.caydexFairValue {
+                CaydexFairValueRow(estimate: estimate, currentPrice: consensus.currentPrice,
+                                   priceContext: "at report time")
+                    .padding(AppSpacing.md)
+                    .background(
+                        RoundedRectangle(cornerRadius: AppCornerRadius.medium)
+                            .cardFill(AppColors.cardBackgroundNested)
+                    )
+                    .padding(.bottom, AppSpacing.lg)
+            }
+
             // Title + "Based on N analysts" + colored consensus rating.
             analystPriceTargetHeader
                 .padding(.bottom, AppSpacing.sm)

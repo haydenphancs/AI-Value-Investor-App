@@ -266,13 +266,22 @@ def test_normalize_company_name():
 # ── Endpoint-level: crypto must not shadow a same-ticker stock; row resilience ─
 
 import app.api.v1.endpoints.stocks as stocks_ep
+from app.services import stock_search_service
+
+
+@pytest.fixture(autouse=True)
+def _no_active_listing_directory(monkeypatch):
+    """These tests pin the handler's own merge and resilience, not liveness. With no
+    stub the search would schedule a real actively-trading-list fetch (conftest blocks
+    the network and fails the session on the attempt); None is the fail-open path."""
+    monkeypatch.setattr(stock_search_service, "get_active_listings", lambda: None)
 
 
 class _FakeFMP:
     def __init__(self, rows):
         self._rows = rows
 
-    async def search_stocks(self, query, limit=10):
+    async def search_stocks(self, query, limit=10, **kwargs):
         return self._rows
 
 

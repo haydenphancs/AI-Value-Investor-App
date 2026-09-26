@@ -9,6 +9,13 @@
 import SwiftUI
 
 struct ValuationInfoSheet: View {
+    /// True when the card shows the Caydex Fair Value Estimate instead of FMP's DCF row: the
+    /// sheet must then describe THAT model (dcf-methodology-v1), not the one it replaced.
+    var showsCaydexEstimate: Bool = false
+    /// True when FMP's DCF row is on the card (the switch is off). With neither row, the sheet
+    /// explains neither model.
+    var showsFmpDcf: Bool = true
+
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -17,7 +24,11 @@ struct ValuationInfoSheet: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xxl) {
                     headerSection
                     meterSection
-                    dcfSection
+                    if showsCaydexEstimate {
+                        caydexSection
+                    } else if showsFmpDcf {
+                        dcfSection
+                    }
                 }
                 .padding(AppSpacing.lg)
             }
@@ -82,6 +93,25 @@ struct ValuationInfoSheet: View {
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text("The figure shown is a mechanical model built from past free cash flow. Fast-growing companies usually trade far above it, and a company with negative cash flow has no meaningful DCF value at all. Treat it as one reference point among several, never as a target.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppSpacing.lg)
+        .background(RoundedRectangle(cornerRadius: AppCornerRadius.large).cardFill())
+    }
+
+    /// Mirrors documents/research/dcf-methodology-v1.md; the row's own sheet has the details.
+    private var caydexSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            Text("The Caydex Fair Value Estimate")
+                .font(AppTypography.headingSmall)
+                .foregroundColor(AppColors.textPrimary)
+            Text("A discounted-cash-flow (DCF) model estimate of what the company's future free cash flow to shareholders is worth today. The first years come from analysts' consensus forecasts; it is shown as a range, because small changes in the assumptions move it a lot.")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("It is a model estimate, not a price target and not a recommendation. Banks, insurers, REITs, utilities and companies whose data doesn't fit the model get no estimate. Tap the row for its assumptions.")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

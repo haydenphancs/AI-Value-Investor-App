@@ -1356,8 +1356,40 @@ def _dcf_measured(ws: Dict[str, Any]) -> bool:
     return ws.get("dcf_measured") is not False
 
 
+# Wording rule for the Caydex Fair Value Estimate (hard rule 4 in
+# documents/research/dcf-methodology-v1.md §5): a model estimate, stated as a gap; never a verdict.
+_CAYDEX_ESTIMATE_RULE = (
+    "Refer to the Caydex Fair Value Estimate only as a model estimate: say the price is N% "
+    "below or above the estimate. Never call the stock undervalued, overvalued, cheap or "
+    "expensive because of it, never call it a price target, and never suggest buying or selling."
+)
+
+
+def _caydex_estimate_line(ws: Dict[str, Any]) -> Optional[str]:
+    """The published Caydex estimate as the card shows it, or None when there is none.
+
+    The percent is computed here (the model is bad at arithmetic) against the card's price."""
+    est = ws.get("caydex_fair_value")
+    if not isinstance(est, dict) or est.get("status") != "ok":
+        return None
+    fv, lo, hi = est.get("fair_value"), est.get("range_low"), est.get("range_high")
+    price = ws.get("current_price")
+    if not all(isinstance(v, (int, float)) and v > 0 for v in (fv, lo, hi, price)):
+        return None
+    gap = (price / fv - 1) * 100
+    where = ("in line with" if abs(gap) < 0.5
+             else f"{abs(gap):.0f}% {'below' if gap < 0 else 'above'}")
+    return (
+        f"Caydex Fair Value Estimate (a DCF model estimate, shown on this card): ${fv:,.2f}, "
+        f"range ${lo:,.2f}–${hi:,.2f}; the current price is {where} the estimate"
+    )
+
+
 def _valuation_line_for(ws: Dict[str, Any]) -> str:
     """DCF valuation lens — DISTINCT from the analyst-target upside."""
+    caydex = _caydex_estimate_line(ws)
+    if caydex:
+        return caydex
     val_status = str(ws.get("valuation_status") or "").replace("_", " ")
     disc = ws.get("discount_percent")
     if val_status and _dcf_measured(ws):
@@ -1391,9 +1423,16 @@ def _institutional_flow_insight_prompt(
     persona: PersonaConfig, evidence: str, ws: Dict[str, Any]
 ) -> str:
     institutions_line = _institutions_line_for(ws)
+    caydex = _caydex_estimate_line(ws)
     # The DCF lens is a model value computed from the report's data; the card does
     # not render it, and when no DCF exists there is nothing to reconcile against.
-    if _dcf_measured(ws) and ws.get("valuation_status"):
+    # EXCEPT the Caydex estimate, which the card DOES render (below).
+    if caydex:
+        context_block = (
+            f"- {caydex}\n\n{_CAYDEX_ESTIMATE_RULE}\n"
+        )
+        reconcile = "; then say whether the model estimate agrees or diverges with that positioning"
+    elif _dcf_measured(ws) and ws.get("valuation_status"):
         valuation_line = _valuation_line_for(ws).replace(
             " (model-implied, distinct from the analyst target)", " (model-implied)"
         )
@@ -1417,10 +1456,10 @@ EVIDENCE (for catalyst context only — financings, acquisitions, guidance chang
 {_style_block(persona)}
 {_length_brief(2, 45)}
 
-Lead with the institutional signal and cite its concrete number (the net shares){reconcile}. If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Give the verdict that ties them together — do NOT just restate the lines.
+Lead with the institutional signal and cite its concrete number (the net shares){reconcile}. If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Give the {"synthesis" if caydex else "verdict"} that ties them together — do NOT just restate the lines.
 
 {_displayed_values_grounding("DISPLAYED VALUES block")}
-The card shows the price chart and institutional (13F) flow ONLY. Do not mention analysts, analyst ratings, consensus, price targets, upgrades or downgrades — and do not say that any of them are unavailable, missing or lacking. Write as if that topic does not exist.
+The card shows {"the Caydex Fair Value Estimate, " if caydex else ""}the price chart and institutional (13F) flow ONLY. Do not mention analysts, analyst ratings, consensus, price targets, upgrades or downgrades — and do not say that any of them are unavailable, missing or lacking. Write as if that topic does not exist.
 
 If the data doesn't show a clear pattern, write the literal word: NULL"""
 
@@ -1520,7 +1559,7 @@ EVIDENCE (for catalyst context only — financings, acquisitions, guidance chang
 Synthesize the THREE signals — price target, institutions (13F), and rating momentum: where do they AGREE or DIVERGE? Lead with the dominant signal and cite a concrete number from the DISPLAYED VALUES (the target, the upside %, net institutional shares, or an upgrade count). If a specific catalyst sits in the evidence (a financing, acquisition, guidance change), name it. Do NOT just list the three — give the verdict that ties them together.
 
 {_displayed_values_grounding("DISPLAYED VALUES block")}
-The analyst-target upside and the DCF valuation are DIFFERENT lenses — do not merge them; if they disagree, that divergence IS worth calling out.
+The analyst-target upside and the DCF valuation are DIFFERENT lenses — do not merge them; if they disagree, that divergence IS worth calling out.{(chr(10) + _CAYDEX_ESTIMATE_RULE) if _caydex_estimate_line(ws) else ""}
 If analyst coverage is absent (target shows "no analyst coverage"), do not fabricate a target — pivot the read to institutions + momentum.
 
 If the data doesn't show a clear pattern, write the literal word: NULL"""
@@ -2321,7 +2360,12 @@ def _digest_wall_street(report: Dict[str, Any]) -> List[str]:
         bits.append(f"target ${tgts} ({ups}% vs current)")
     # Same class as the defaulted "hold": "fair_value" with no DCF behind it is
     # not a verdict the executive summary may lean on.
-    if ws.get("valuation_status") and _dcf_measured(ws):
+    caydex = _caydex_estimate_line(ws)
+    if caydex:
+        # The published estimate as a GAP, never the internal verdict label (hard rule 4).
+        bits.append(caydex.replace(" (a DCF model estimate, shown on this card)", "")
+                    + " (a published model estimate, not a verdict: state it only as this gap)")
+    elif ws.get("valuation_status") and _dcf_measured(ws):
         bits.append(str(ws["valuation_status"]))
     up, down = ws.get("momentum_upgrades"), ws.get("momentum_downgrades")
     if isinstance(up, int) and isinstance(down, int) and (up or down):

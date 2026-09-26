@@ -35,6 +35,13 @@ from app.schemas.news import (
     sanitize_article_ids,
 )
 from app.schemas.stock import StockSearchResult
+from app.services import stock_search_service
+from app.services.stock_search_service import (  # noqa: F401 — re-exported, see search
+    _CORP_ENTITY_RE,
+    _dedupe_secondary_listings,
+    _normalize_company_name,
+    _secondary_base_symbol,
+)
 from app.schemas.stock_overview import StockOverviewResponse, StockOverviewCoreResponse
 from app.schemas.analyst import AnalystAnalysisResponse
 from app.schemas.sentiment import SentimentAnalysisResponse
@@ -235,21 +242,20 @@ def _is_crypto(item: Dict[str, Any]) -> bool:
 # "ETF"/"ETN"/"Fund" as WHOLE WORDS (singular OR plural — "ETNs", "Funds"). A
 # substring test wrongly matched company names, and a substring "trust" matched
 # real REITs/banks (see the corporate-entity override below).
-_ETF_NAME_RE = re.compile(r"\b(?:etfs?|etns?)\b", re.IGNORECASE)
+# "ADRhedged" is Toyota's currency-hedged ETF (TMH, "Toyota Motor Corporation
+# ADRhedged"): without it the "Corporation" override typed it "stock", a second
+# Toyota company row beside TM.
+_ETF_NAME_RE = re.compile(r"\b(?:etfs?|etns?|adrhedged)\b", re.IGNORECASE)
 _FUND_NAME_RE = re.compile(r"\bfunds?\b", re.IGNORECASE)
 
-# Corporate-entity markers (whole word). Their presence means the row is the
-# ISSUER'S OWN OPERATING STOCK, not one of its funds — this is what rescues
-# Invesco Ltd. (IVZ), The Charles Schwab Corporation (SCHW), and Northern Trust
+# Corporate-entity markers (whole word) — `_CORP_ENTITY_RE`, now defined in
+# `stock_search_service` and imported above, which also uses it. Their presence means
+# the row is the ISSUER'S OWN OPERATING STOCK, not one of its funds — this is what
+# rescues Invesco Ltd. (IVZ), The Charles Schwab Corporation (SCHW), and Northern Trust
 # Corporation (NTRS) from being mislabeled "etf"/"fund" (via the issuer-brand /
 # "trust" keywords below) and silently dropped from the company picker, which
 # filters to type == "stock". This override runs BEFORE the issuer-brand check,
 # so a brand keyword can never hide the operating company that owns the brand.
-_CORP_ENTITY_RE = re.compile(
-    r"\b(?:inc|incorporated|corp|corporation|co|company|plc|ltd|limited|"
-    r"bancorp|bancshares|holdings?|group|ag|se|sa|nv|llc|lp)\b",
-    re.IGNORECASE,
-)
 
 # Fund-family brands. Many fund/ETP names carry NO "ETF"/"Fund" word — e.g.
 # "Invesco QQQ Trust, Series 1" (QQQ, the 3rd-largest ETF), "Sprott Physical Gold
@@ -301,91 +307,12 @@ def _get_asset_type(item: Dict[str, Any]) -> Optional[str]:
     return "stock"
 
 
-# ── Secondary-listing de-duplication ────────────────────────────────────
-# FMP search returns corporate-action securities alongside the primary listing,
-# all sharing the issuer's company name — confusing identical rows, and (worse)
-# they classify as "stock" so a user could pick a warrant/unit/right and run the
-# company pipeline on it. Two encodings occur:
-#   • NASDAQ 5th-letter: when-issued "V" (SNDK→SNDKV), warrant "W" (BGRY→BGRYW),
-#     unit "U" (SVNA→SVNAU), right "R" (RFAC→RFACR).
-#   • NYSE dash form: "-WT"/"-WS" warrant, "-UN"/"-U" unit, "-RT"/"-R" right,
-#     "-WI" when-issued (APCA → APCA-WT / APCA-UN).
-# We drop such a row ONLY when its BASE symbol (the row minus the suffix) is ALSO
-# present with the SAME normalized name + exchange + type — i.e. it's a redundant
-# twin of a listing we already show. This never collapses legitimate dual-class
-# shares: GOOGL/GOOG differ by "L" (not a suffix) and BRK-A/BRK-B by "-A"/"-B"
-# (not an action suffix); Z/ZG carry distinct names. A standalone V/W/U/R ticker
-# with no same-named base (Visa "V", Veritiv "VRTV", Nu "NU", Baidu "BIDU",
-# Progressive "PGR") is untouched — its base is a DIFFERENT company.
-_SECONDARY_SUFFIXES = ("V", "W", "U", "R")
-_DASH_ACTION_SUFFIX_RE = re.compile(r"[.\-](?:wt|ws|un|u|rt|r|wi|w)$", re.IGNORECASE)
-# Security-class / corporate-action descriptors FMP appends INCONSISTENTLY across
-# a company's securities — e.g. the common is "RF Acquisition Corp II Ordinary
-# Shares" while its unit/right rows are just "RF Acquisition Corp II". Stripping
-# these so both key to the same company is SAFE: a twin only collapses when it
-# ALSO carries a V/W/U/R (or dash-action) suffix, which legitimate dual-class
-# shares (GOOGL/GOOG, Zillow "Class A"/"Class C") never do — so the name key is
-# only a confirmation, never the sole trigger.
-_NAME_DESCRIPTOR_RE = re.compile(
-    r"\b(?:units?|warrants?|rights?|when[\s-]?issued|wi"
-    r"|ordinary\s+shares?|common\s+stock|common\s+shares?"
-    r"|depositary\s+shares?|class\s+[a-z])\b",
-    re.IGNORECASE,
-)
-
-
-def _normalize_company_name(name: Optional[str]) -> str:
-    """Lowercase, drop trailing corporate-action descriptors + punctuation, and
-    collapse whitespace — so a twin ("IB Acquisition Corp. Unit") keys to the
-    same company as its base ("IB Acquisition Corp.")."""
-    n = (name or "").lower()
-    n = _NAME_DESCRIPTOR_RE.sub(" ", n)
-    n = re.sub(r"[.,]", " ", n)
-    return " ".join(n.split())
-
-
-def _secondary_base_symbol(sym: str) -> Optional[str]:
-    """The primary/base ticker a corporate-action symbol derives from, or None.
-
-    ``APCA-WT``/``APCA-UN`` → ``APCA``; ``SNDKV``/``SVNAU``/``RFACR`` → drop the
-    5th letter. Returns None for a symbol with no recognized action suffix.
-    """
-    m = _DASH_ACTION_SUFFIX_RE.search(sym)
-    if m:
-        return sym[:m.start()]
-    if len(sym) >= 2 and sym[-1] in _SECONDARY_SUFFIXES:
-        return sym[:-1]
-    return None
-
-
-def _dedupe_secondary_listings(
-    results: List[StockSearchResult],
-    keep_symbol: str = "",
-) -> List[StockSearchResult]:
-    """Remove when-issued / warrant / unit / right twins that duplicate a
-    primary listing.
-
-    ``keep_symbol`` (upper-case) is never dropped — protects a ticker the user
-    typed verbatim.
-    """
-    keep = (keep_symbol or "").upper()
-    present: Dict[tuple, set] = {}
-    for r in results:
-        key = (_normalize_company_name(r.name),
-               (r.exchange_short_name or "").upper(), r.type)
-        present.setdefault(key, set()).add((r.symbol or "").upper())
-
-    deduped: List[StockSearchResult] = []
-    for r in results:
-        sym = (r.symbol or "").upper()
-        base = _secondary_base_symbol(sym) if sym != keep else None
-        if base:
-            key = (_normalize_company_name(r.name),
-                   (r.exchange_short_name or "").upper(), r.type)
-            if base in present.get(key, ()):
-                continue  # redundant secondary twin of a primary we're showing
-        deduped.append(r)
-    return deduped
+# ── Which search rows a person sees ─────────────────────────────────────
+# The listing rules — preferreds, notes, dead listings, mutual funds, corporate-action
+# and same-issuer twins, ranking — live in `app/services/stock_search_service.py`. Its
+# `_dedupe_secondary_listings` / `_normalize_company_name` / `_secondary_base_symbol`
+# used to be defined here and are imported above, so existing imports of them from this
+# module keep working.
 
 
 @router.get("/search", response_model=List[StockSearchResult])
@@ -433,7 +360,48 @@ async def search_stocks(
         )
 
         # ── FMP search for stocks/ETFs ──
-        raw = await fmp.search_stocks(q, limit=max(limit * 3, 30))
+        # A wide upstream window: the listing rules below drop preferreds, notes and dead
+        # listings AFTER the fetch, and FMP ranks them first on name queries — 'bank of
+        # america' put six preferreds before BAC, and 'acquisition corp' filled a 30-row
+        # window with dead SPACs while live ones sat further down. Measured 2026-09-25:
+        # ~0.3 s at 30, 100 and 250 rows alike.
+        #
+        # `_counts_as_ticker_match`: only a row this handler KEEPS may suppress the
+        # name-search fallback. 'sirius' → SIRIUSUSD and 'micro' → MICRO.BK gave zero US
+        # rows; 'visa' → the mutual fund VISAX (hidden below) gave zero rows too. One
+        # directory snapshot serves this check AND the listing rules, so they agree.
+        directory = stock_search_service.current_directory(query_upper)
+
+        def _counts_as_ticker_match(row: Dict[str, Any]) -> bool:
+            symbol = row.get("symbol")
+            if not isinstance(symbol, str):
+                return False
+            try:
+                if _is_crypto(row):
+                    return query_upper in _CRYPTO_NAMES
+                asset_type = _get_asset_type(row)
+                if asset_type is None:
+                    return False  # international — dropped below
+                return stock_search_service.would_keep(
+                    StockSearchResult(
+                        symbol=symbol,
+                        name=str(row.get("name") or ""),
+                        exchange_short_name=_get_exchange_short_name(row),
+                        type=asset_type,
+                    ),
+                    query_upper,
+                    directory,
+                )
+            except Exception:
+                # A malformed row (non-str exchange) is not a ticker hit. The per-row loop
+                # below meets the same row and logs it when it skips it.
+                return False
+
+        raw = await fmp.search_stocks(
+            q,
+            limit=min(max(limit * 10, 100), 250),
+            counts_as_symbol_match=_counts_as_ticker_match,
+        )
 
         stock_results: List[StockSearchResult] = []
         seen_stock_symbols: set = set()
@@ -476,11 +444,13 @@ async def search_stocks(
                 )
                 continue
 
-        # Drop when-issued / warrant / unit / right twins that duplicate a
-        # primary listing (SNDK vs SNDKV). keep_symbol protects a ticker the user
-        # typed exactly — if they asked for "SNDKV", show it, don't swap it.
-        stock_results = _dedupe_secondary_listings(
-            stock_results, keep_symbol=query_upper
+        # One company, one row: drop preferreds (AVGOP, BAC-PE), notes (TBB), dead or
+        # renamed listings (FI beside FISV), NASDAQ mutual funds, and corporate-action /
+        # same-issuer twins (SNDKV, AGNCL); rank the exact ticker and its share classes
+        # first. The ticker the user typed exactly is never dropped — if they asked for
+        # "AVGOP", show it. Fails open to the old twin dedupe; never 502s the search.
+        stock_results = stock_search_service.apply_listing_rules(
+            stock_results, query_upper, directory
         )
 
         # A real company must NEVER be shadowed by a crypto sharing its ticker:
@@ -497,8 +467,8 @@ async def search_stocks(
         # Verified live before the fix.
         #
         # Keeping the exact match satisfies the invariant above in full: nothing is
-        # shadowed, because BOTH now appear. `_dedupe_secondary_listings` already takes
-        # the identical `keep_symbol=query_upper` escape hatch for the same reason.
+        # shadowed, because BOTH now appear. The listing rules above already take the
+        # identical exact-symbol escape hatch for the same reason.
         crypto_symbols_before = {c.symbol.upper() for c in crypto_results}
         stock_symbols = {r.symbol.upper() for r in stock_results}
         crypto_results = [

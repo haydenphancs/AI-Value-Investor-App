@@ -1018,6 +1018,26 @@ class Settings(BaseSettings):
     # (read by the writer's X caption composer, post_copy.py). Fail-closed.
     MARKETING_X_ALLOW_URLS: bool = False
 
+    # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
+    # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):
+    #
+    # DCF_SHADOW — compute and RECORD the estimate (dcf_fair_value_cache + the append-only
+    #   dcf_fair_value_history) for every valuation snapshot served, in the background, while
+    #   showing it to NOBODY and leaving FMP's DCF in place. This is the live watch.
+    #
+    # DCF_ENABLED — PUBLISH it, to every client at once (App Store builds included — there is
+    #   no per-build gate): the valuation snapshot carries `caydex_estimate` instead of FMP's
+    #   `dcf`; new reports carry `wall_street_consensus.caydex_fair_value` and derive fair value,
+    #   persona margin of safety and `research_reports.fair_value_estimate` from it; the Stage
+    #   A/B evidence, the PDF hero and the chat context quote it. Turning it OFF again is a kill
+    #   switch: the report read hooks and the PDF drop any stored estimate block at serve time.
+    #
+    # The model's constants are NOT settings: they live in the service, versioned as
+    # MODEL_VERSION and frozen in documents/research/dcf-methodology-v1.md, so an environment
+    # variable can never change a published value without a model-version change.
+    DCF_SHADOW: bool = False
+    DCF_ENABLED: bool = False
+
     # Disclaimer
     LEGAL_DISCLAIMER: str = (
         "For educational purposes only. Not financial advice. "

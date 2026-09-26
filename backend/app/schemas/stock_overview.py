@@ -6,6 +6,8 @@ stock-specific snapshot / sector / profile models.
 """
 
 from pydantic import BaseModel
+
+from app.schemas.dcf_fair_value import DcfFairValueResponse
 from typing import Any, Dict, Optional, List
 
 from app.schemas.etf import (
@@ -61,6 +63,11 @@ class SnapshotItemResponse(BaseModel):
     # Only the "Price" (valuation) snapshot fills this; Optional on the wire and in Swift
     # (shipped builds and the other four snapshot categories never carry it).
     dcf: Optional[DcfEstimateResponse] = None
+    # The Caydex Fair Value Estimate (model dcf-v1, documents/research/dcf-methodology-v1.md).
+    # Filled only when settings.DCF_ENABLED, and then `dcf` (FMP's model) is None: shipped
+    # builds label `dcf` "FMP discounted-cash-flow model", so our value must never travel in
+    # that slot. Optional end to end: builds predating it ignore the key.
+    caydex_estimate: Optional[DcfFairValueResponse] = None
 
 
 class SectorIndustryResponse(BaseModel):

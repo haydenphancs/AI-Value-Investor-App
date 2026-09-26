@@ -23,6 +23,8 @@ struct SignInView: View {
     @State private var showForgotPassword = false
     /// Terms / Privacy, readable BEFORE an account exists. See `legalFooter`.
     @State private var legalDocument: SignInLegalDocument?
+    /// Sign-in-wrap assent, shown under every sign-in / sign-up button. See `legalFooter`.
+    static let assentLine = "By tapping Sign In or Create Account, or continuing with Apple or Google, you agree to the Terms of Use and acknowledge the Privacy Policy."
     /// Set after a signup that needs email confirmation — the view then shows a
     /// terminal "check your inbox" state instead of pretending the user is signed in.
     @State private var pendingConfirmationMessage: String?
@@ -122,6 +124,16 @@ struct SignInView: View {
                     .disabled(!canSubmit || isSubmitting)
                     .padding(.top, 8)
 
+                    // Sign-in-wrap assent, directly under the button it covers and above the
+                    // Apple / Google buttons it also names — in readable body text, never below
+                    // the fold (see `legalFooter` for the why).
+                    Text(Self.assentLine)
+                        .font(AppTypography.bodySmall)
+                        .foregroundColor(AppColors.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
                     socialSignInSection
 
                     // Recovery. Sign-in only: on the sign-up form there is no account to
@@ -209,14 +221,24 @@ struct SignInView: View {
     /// the form that collects email, name and password. The in-app copies of both documents
     /// were reachable only from Profile and the paywall — both behind sign-in — so nobody
     /// could read them before handing the data over.
+    ///
+    /// The assent line makes this sign-IN-wrap rather than browsewrap: the Terms' arbitration
+    /// clause, class-action waiver and liability cap are far more likely to bind a user who was
+    /// told, next to the button they tapped, that continuing means agreeing (Berman v. Freedom
+    /// Financial, 9th Cir. 2022). Found by the 2026-09-25 legal review
+    /// (documents/research/dcf-fair-value.md §9.4). The assent line itself sits directly under
+    /// the submit button (Berman rejected small grey text below the fold); this footer keeps the
+    /// links to both documents.
     private var legalFooter: some View {
-        HStack(spacing: AppSpacing.xs) {
-            Button { legalDocument = .terms } label: {
-                Text("Terms of Use").foregroundColor(AppColors.primaryBlue)
-            }
-            Text("·").foregroundColor(AppColors.textMuted)
-            Button { legalDocument = .privacy } label: {
-                Text("Privacy Policy").foregroundColor(AppColors.primaryBlue)
+        VStack(spacing: AppSpacing.xs) {
+            HStack(spacing: AppSpacing.xs) {
+                Button { legalDocument = .terms } label: {
+                    Text("Terms of Use").foregroundColor(AppColors.primaryBlue)
+                }
+                Text("·").foregroundColor(AppColors.textMuted)
+                Button { legalDocument = .privacy } label: {
+                    Text("Privacy Policy").foregroundColor(AppColors.primaryBlue)
+                }
             }
         }
         .font(AppTypography.caption)

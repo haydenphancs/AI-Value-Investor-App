@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
@@ -69,6 +70,11 @@ _CACHE_TTL = 300  # 5 minutes
 #     Valuation Meter. Cached rows without it would render the meter with no DCF row.
 _SNAPSHOT_PAYLOAD_VERSION = 4
 _VERSION_KEY = "_schema_v"
+# Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
+# False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
+# so flipping the switch takes effect within the in-memory TTL instead of after 24 h — and a
+# row never serves FMP's number once ours is on, or ours once it is off.
+_DCF_SOURCE_KEY = "_caydex_dcf"
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -283,7 +289,23 @@ class ValuationSnapshotService:
         self.supabase = get_supabase()
 
     async def get_valuation_snapshot(self, ticker: str) -> SnapshotItemResponse:
-        """Public entry point with two-tier caching and in-flight dedup."""
+        """Public entry point: the cached snapshot, plus — while settings.DCF_ENABLED — the
+        Caydex Fair Value Estimate attached on EVERY serve.
+
+        The estimate is never frozen into this 24 h row: it has its own caches (keyed to the ET
+        date), and freezing it here stacked a second 24 h on top, so the Analysis tab could show
+        yesterday's value while a report generated today showed today's. A fetch failure
+        degrades to no row for this serve only."""
+        snapshot = await self._get_snapshot_cached(ticker)
+        if not settings.DCF_ENABLED:
+            if settings.DCF_SHADOW:
+                _shadow_record(_validate_ticker(ticker))
+            return snapshot
+        estimate = await caydex_estimate_or_none(_validate_ticker(ticker))
+        return snapshot.model_copy(update={"caydex_estimate": estimate, "dcf": None})
+
+    async def _get_snapshot_cached(self, ticker: str) -> SnapshotItemResponse:
+        """Two-tier caching and in-flight dedup of the multiples snapshot."""
         ticker = _validate_ticker(ticker)
         cache_key = f"val_snapshot:{ticker}"
 
@@ -377,6 +399,13 @@ class ValuationSnapshotService:
                 return None
             json_data = dict(entry["response_json"] or {})
             version = json_data.pop(_VERSION_KEY, 1)
+            caydex_row = bool(json_data.pop(_DCF_SOURCE_KEY, False))
+            if caydex_row != bool(settings.DCF_ENABLED):
+                logger.info(
+                    "Valuation snapshot DCF source (caydex=%s) != DCF_ENABLED=%s for %s — rebuilding",
+                    caydex_row, settings.DCF_ENABLED, ticker,
+                )
+                return None
             if version != _SNAPSHOT_PAYLOAD_VERSION:
                 # Written by a build that formatted these strings differently — see the
                 # version's comment. Rebuild rather than serve a row that disagrees with
@@ -399,8 +428,9 @@ class ValuationSnapshotService:
                     "ticker": ticker,
                     "category": "Price",
                     "response_json": {
-                        **result.model_dump(),
+                        **result.model_dump(exclude={"caydex_estimate"}),
                         _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
+                        _DCF_SOURCE_KEY: bool(settings.DCF_ENABLED),
                     },
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
@@ -446,7 +476,8 @@ class ValuationSnapshotService:
             self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
             # FMP's DCF (entitled). `{}` when there is no model — the Valuation Meter then
             # simply has no DCF row; it must never fall back to "fair value = price".
-            self.fmp.get_dcf(ticker),
+            # RETIRED while settings.DCF_ENABLED: the Caydex estimate replaces it (below).
+            self.fmp.get_dcf(ticker) if not settings.DCF_ENABLED else _no_dcf(),
             return_exceptions=True,
         )
 
@@ -505,8 +536,45 @@ class ValuationSnapshotService:
             fr=fr, km=km, cf=cf, inc=inc, bs=bs, profile=profile,
             bench=cur_bench, ticker=ticker,
         )
-        snapshot.dcf = dcf_estimate_from_row(dcf_row)
+        # While DCF_ENABLED, FMP's DCF is retired and the Caydex estimate is attached at SERVE
+        # time (get_valuation_snapshot), never stored in this row.
+        snapshot.dcf = None if settings.DCF_ENABLED else dcf_estimate_from_row(dcf_row)
         return snapshot, degraded
+
+
+async def _no_dcf() -> Dict[str, Any]:
+    return {}
+
+
+# Strong references to in-flight shadow computations: a bare create_task can be garbage-collected
+# before it finishes.
+_shadow_tasks: "set[asyncio.Task]" = set()
+
+
+def _shadow_record(ticker: str) -> None:
+    """DCF_SHADOW: compute (and so record, in the service's cache + history) today's estimate in
+    the background without touching the response. The service's date-keyed caches make this at
+    most one computation per ticker per day."""
+    task = asyncio.get_running_loop().create_task(caydex_estimate_or_none(ticker))
+    _shadow_tasks.add(task)
+    task.add_done_callback(_shadow_tasks.discard)
+
+
+async def caydex_estimate_or_none(ticker: str):
+    """The Caydex Fair Value Estimate, or None when its inputs are unavailable right now.
+
+    A refusal IS returned (the card says why there is no number); only a failure to fetch
+    the inputs degrades to None, logged — the Valuation Meter still renders without the row.
+    """
+    from app.services.dcf_fair_value_service import get_dcf_fair_value_service
+    try:
+        return await get_dcf_fair_value_service().get_fair_value(ticker)
+    except Exception as e:
+        logger.warning(
+            "[caydex-dcf-unavailable] %s: %s: %s — rendering without the fair value row",
+            ticker, type(e).__name__, e,
+        )
+        return None
 
 
 def dcf_estimate_from_row(row: Any) -> Optional[DcfEstimateResponse]:

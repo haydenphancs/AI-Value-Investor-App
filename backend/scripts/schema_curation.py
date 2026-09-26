@@ -483,6 +483,21 @@ CURATION: dict[str, TableDoc] = {
         purpose="Margin and return metrics behind the Profitability section.",
         key=("ticker", "response_json", "next_earnings_date"),
         note="The reference implementation of the two-tier + _inflight cache pattern."),
+    # ------------------------------------------ Caydex Fair Value Estimate (178)
+    "public.dcf_fair_value_cache": T("research",
+        purpose="Tier-2 cache (24 h) of the Caydex Fair Value Estimate, a 2-stage FCFE DCF.",
+        key=("ticker", "model_version", "response_json", "computed_at"),
+        note="Migration 178. A row whose model_version differs from the running model is "
+             "ignored, so a model change is a miss. GLOBAL and impersonal: no per-user column "
+             "may exist (spec: documents/research/dcf-methodology-v1.md). service_role only."),
+    "public.dcf_fair_value_history": T("research",
+        purpose="Append-only record of every fair-value estimate computed, with its inputs.",
+        key=("ticker", "as_of_date", "model_version", "status", "refusal_code", "fair_value",
+             "inputs"),
+        note="Migration 178. One row per (ticker, ET date, model version); the service upserts "
+             "with ignore-duplicates and never updates or deletes. FMP keeps no consensus "
+             "history, so this is the only record of what the forecast was on a given day. "
+             "service_role only."),
     "public.revenue_breakdown_cache": T("market-cache",
         purpose="Revenue split by product and geography, from FMP segmentation.",
         key=("ticker", "response_json", "next_earnings_date")),

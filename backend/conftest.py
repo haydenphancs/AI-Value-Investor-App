@@ -209,3 +209,31 @@ def _isolate_price_cache():
     _cache.clear()
     yield
     _cache.clear()
+
+
+def _reset_stock_search_directory() -> None:
+    from app.services import stock_search_service as svc
+
+    svc._cache.clear()
+    for task in list(svc._inflight.values()):
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass  # its event loop is already closed; nothing left to cancel
+    svc._inflight.clear()
+    svc._consecutive_failures = 0
+    svc._refine_failures_logged_at.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_stock_search_directory():
+    """Reset `stock_search_service`'s active-listing directory between tests.
+
+    Same leak as the price cache above, plus one worse: its background refresh is a Task
+    in `_inflight`. pytest-asyncio gives each test its own loop, so a task one test left
+    pending would sit there forever — every later search would see a refresh "already in
+    flight", never schedule one, and run with the liveness rules silently off.
+    """
+    _reset_stock_search_directory()
+    yield
+    _reset_stock_search_directory()

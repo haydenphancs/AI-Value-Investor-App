@@ -103,8 +103,9 @@ def test_build_context_full_sample():
     assert ctx["quality_score"] == 72
     assert ctx["persona_name"] == "Quality Agent"
     assert ctx["fair_value"] == 205.0  # Wall Street consensus target, not the passed estimate
-    assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4 → undervalued
-    assert ctx["valuation_word"] == "Undervalued"
+    assert ctx["margin_of_safety_pct"] > 0  # 205 vs 172.4
+    # Neutral gap wording, never a verdict (hard rule 4 — dcf-methodology-v1.md §5).
+    assert ctx["valuation_word"] == "Price 16% below target"
     assert len(ctx["vitals"]) == 9
     assert ctx["bull_case"] and ctx["bear_case"]
 
@@ -160,7 +161,7 @@ def test_a_fair_value_equal_to_the_price_is_no_estimate():
     # A genuinely different estimate is still used.
     ctx2 = build_context(sample, fair_value_estimate=price * 1.2)
     assert ctx2["fair_value"] == price * 1.2
-    assert ctx2["valuation_word"] == "Undervalued"
+    assert ctx2["valuation_word"] == "Price 17% below the model value"
     # No price at all → the estimate stands (nothing to compare against).
     sample2 = _sample()
     sample2["wall_street_consensus"]["target_price"] = None

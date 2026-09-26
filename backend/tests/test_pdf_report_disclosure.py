@@ -76,12 +76,14 @@ def test_basis_is_wall_street_when_analyst_target_present():
     assert _WALL_STREET_LABEL in render_html(ctx)
 
 
-def test_basis_credits_caydex_when_no_analyst_target():
-    """The regression this test exists for: falling back to our own DCF while the
-    card still claimed Wall Street consensus."""
+def test_basis_labels_a_bare_estimate_as_a_model_value():
+    """The regression this test exists for: falling back to a DCF while the card still
+    claimed Wall Street consensus. A bare `fair_value_estimate` (no Caydex block) is FMP's
+    model — it used to be labelled "Caydex estimate", which misattributed it too."""
     ctx = build_context(_data(ws_target=None), fair_value_estimate=120.0)
     assert ctx["fair_value"] == 120.0
-    assert "Caydex" in ctx["fair_value_basis"]
+    assert ctx["fair_value_basis"] == "DCF model value · not a price target"
+    assert "Caydex" not in ctx["fair_value_basis"]
     html = render_html(ctx)
     assert _WALL_STREET_LABEL not in html, (
         "our own estimate must never be attributed to Wall Street consensus"
@@ -99,7 +101,7 @@ def test_zero_analyst_target_is_not_treated_as_a_target():
     """A $0 price target is nonsense data, not a valuation — fall through."""
     ctx = build_context(_data(ws_target=0.0), fair_value_estimate=120.0)
     assert ctx["fair_value"] == 120.0
-    assert "Caydex" in ctx["fair_value_basis"]
+    assert "not a price target" in ctx["fair_value_basis"]
 
 
 # ── 3. Non-finite guards ──────────────────────────────────────────────────────
@@ -107,7 +109,7 @@ def test_zero_analyst_target_is_not_treated_as_a_target():
 def test_nan_analyst_target_falls_back_instead_of_rendering_nan():
     ctx = build_context(_data(ws_target=float("nan")), fair_value_estimate=120.0)
     assert ctx["fair_value"] == 120.0
-    assert "Caydex" in ctx["fair_value_basis"]
+    assert "not a price target" in ctx["fair_value_basis"]
     _assert_no_nonfinite(render_html(ctx))
 
 
@@ -153,16 +155,17 @@ def test_num_coercion_edge_cases():
 
 
 def test_valuation_word_boundaries():
-    """+/-1% is the dead band around fair value."""
+    """The gap is PRICE vs fair value, in neutral words, with a ±0.5 % "in line" band. It was
+    Undervalued / Overvalued / Fairly Valued at ±1 % until 2026-09-25 (hard rule 4)."""
     def word(fv, price):
         return build_context(_data(ws_target=fv, current_price=price))["valuation_word"]
 
-    assert word(150.0, 100.0) == "Undervalued"
-    assert word(50.0, 100.0) == "Overvalued"
-    assert word(100.0, 100.0) == "Fairly Valued"
-    assert word(100.5, 100.0) == "Fairly Valued"   # inside the band
-    assert word(101.5, 100.0) == "Undervalued"     # outside it
-    assert word(98.5, 100.0) == "Overvalued"
+    assert word(150.0, 100.0) == "Price 33% below target"
+    assert word(50.0, 100.0) == "Price 100% above target"
+    assert word(100.0, 100.0) == "Price in line with target"
+    assert word(100.4, 100.0) == "Price in line with target"   # inside the band
+    assert word(101.5, 100.0) == "Price 1% below target"       # outside it
+    assert word(98.5, 100.0) == "Price 2% above target"
 
 
 def test_zero_current_price_does_not_divide_by_zero():
@@ -176,3 +179,59 @@ def test_render_survives_a_completely_empty_report():
     html = render_html(build_context({}))
     assert "Important disclaimer" in html
     assert math.isfinite(1.0)  # sanity
+
+
+# ── 4. The Caydex Fair Value Estimate (model dcf-v1) ──────────────────────────
+
+def _with_caydex(**est):
+    d = _data(ws_target=None)
+    d.setdefault("wall_street_consensus", {})
+    d["wall_street_consensus"]["caydex_fair_value"] = {
+        "symbol": "TEST", "status": "ok", "fair_value": 150.0,
+        "range_low": 120.0, "range_high": 180.0, **est,
+    }
+    return d
+
+
+def test_the_caydex_estimate_is_labelled_with_its_range(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    ctx = build_context(_with_caydex(), fair_value_estimate=150.0)
+    assert ctx["fair_value"] == 150.0
+    assert ctx["fair_value_basis"].startswith("Caydex Fair Value Estimate")
+    assert "not a price target" in ctx["fair_value_basis"]
+    assert "not a recommendation" in ctx["fair_value_basis"]
+    assert "$120–$180" in ctx["fair_value_basis"]
+    assert ctx["valuation_word"].endswith("the estimate")
+
+
+def test_the_kill_switch_drops_a_stored_estimate_from_the_pdf(monkeypatch):
+    """DCF_ENABLED off after reports were generated with it on: the PDF must stop showing it."""
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", False)
+    ctx = build_context(_with_caydex(), fair_value_estimate=None)
+    assert ctx["fair_value"] is None and "Caydex" not in ctx["fair_value_basis"]
+
+
+def test_a_refused_caydex_estimate_is_not_a_value(monkeypatch):
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    # a non-null fair_value on a REFUSED block: the status check must be what excludes it
+    ctx = build_context(_with_caydex(status="refused", fair_value=150.0), fair_value_estimate=None)
+    assert ctx["fair_value"] is None and ctx["valuation_word"] == "—"
+
+
+def test_no_verdict_words_on_any_basis(monkeypatch):
+    """Hard rule 4: the hero states a gap, never Undervalued / Overvalued / Fairly Valued."""
+    from app.services import pdf_report_service as pdf
+    monkeypatch.setattr(pdf.settings, "DCF_ENABLED", True)
+    cases = [
+        build_context(_with_caydex(), fair_value_estimate=150.0),
+        build_context(_data(ws_target=None), fair_value_estimate=120.0),
+        build_context(_data(ws_target=150.0), fair_value_estimate=None),
+    ]
+    for ctx in cases:
+        html = render_html(ctx).lower()
+        for word in ("undervalued", "overvalued", "fairly valued", "margin of safety"):
+            assert word not in html, word
+        assert ctx["valuation_word"].startswith("Price ")

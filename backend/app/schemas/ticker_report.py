@@ -7,6 +7,8 @@ Backend sends snake_case; Swift DTOs use explicit CodingKeys.
 """
 
 from pydantic import BaseModel, Field
+
+from app.schemas.dcf_fair_value import DcfFairValueResponse
 from typing import Any, Dict, Optional, List
 
 from app.schemas.growth import GrowthResponse
@@ -424,6 +426,13 @@ class WallStreetConsensusResponse(BaseModel):
     # False when no DCF value existed and `valuation_status` is only its default;
     # absent on reports frozen before 2026-09-19. Optional: iOS ignores it.
     dcf_measured: Optional[bool] = None
+    # The Caydex Fair Value Estimate as PUBLISHED when this report was generated (reports are
+    # frozen snapshots). Present only when settings.DCF_ENABLED; a refusal is carried too, so
+    # the card can say why there is no number. Optional: older reports and builds ignore it.
+    caydex_fair_value: Optional[DcfFairValueResponse] = None
+    # Which DCF this report was BUILT with: "caydex" | "fmp" (None on older reports = "fmp").
+    # Report caches treat a mismatch with settings.DCF_ENABLED as a miss (dcf_report_gate).
+    dcf_source: Optional[str] = None
     # AI "Insight" — a big-picture synthesis across the whole Wall Street Consensus
     # card: analyst price targets + institutions (13F) + momentum. Written by the
     # Stage-B narrative pass. Optional/defaulted so legacy persisted reports (which

@@ -216,10 +216,14 @@ struct SnapshotItemDTO: Decodable {
     let metrics: [SnapshotMetricDTO]
     let fullReportAvailable: Bool
     let dcf: DcfEstimateDTO?
+    /// The Caydex Fair Value Estimate (valuation snapshot only, when the backend enables
+    /// it — FMP's `dcf` is then absent). Optional: older backends never send it.
+    let caydexEstimate: CaydexFairValueDTO?
 
     enum CodingKeys: String, CodingKey {
         case category, rating, metrics, dcf
         case fullReportAvailable = "full_report_available"
+        case caydexEstimate = "caydex_estimate"
     }
 }
 
@@ -327,7 +331,8 @@ extension StockOverviewResponseDTO {
                 rating: rating,
                 metrics: metrics,
                 fullReportAvailable: dto.fullReportAvailable,
-                dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) }
+                dcf: dto.dcf.flatMap { DcfEstimate(dto: $0) },
+                caydexEstimate: dto.caydexEstimate.flatMap { CaydexFairValue(dto: $0) }
             )
         }
 

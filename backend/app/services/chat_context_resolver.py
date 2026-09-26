@@ -392,6 +392,9 @@ class ChatContextResolver:
             report = await self._stored_report_for_user(report_id, user_id)
         if not report:
             report = await ticker_report_cache.get_cached_report(ticker, persona)
+        # Kill switch: never ground the chat on a published estimate the switch has withdrawn.
+        from app.services.dcf_report_gate import strip_caydex_if_disabled
+        report = strip_caydex_if_disabled(report)
         if not report:
             logger.info(
                 "chat_context: no report for %s/%s (report_id=%s) — chat proceeds ungrounded",

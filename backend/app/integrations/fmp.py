@@ -12,7 +12,7 @@ import json
 import re
 import httpx
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 import logging
 
 from app.config import settings
@@ -1601,7 +1601,10 @@ class FMPClient:
     # ── Search ──────────────────────────────────────────────────────
 
     async def search_stocks(
-        self, query: str, limit: int = 10
+        self,
+        query: str,
+        limit: int = 10,
+        counts_as_symbol_match: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for stocks by name or ticker.
@@ -1609,6 +1612,9 @@ class FMPClient:
         Uses the stable search-symbol endpoint.  Falls back to
         search-name if the first call returns no results (handles
         cases where the user types a company name instead of a ticker).
+
+        ``counts_as_symbol_match`` is the CALLER's rule for which rows may count as a
+        ticker hit (see `_has_symbol_prefix_match`); None keeps every row eligible.
         """
         symbol_hits = await self._make_request(
             "search-symbol",
@@ -1616,7 +1622,7 @@ class FMPClient:
         )
         symbol_hits = symbol_hits if isinstance(symbol_hits, list) else []
 
-        if self._has_symbol_prefix_match(query, symbol_hits):
+        if self._has_symbol_prefix_match(query, symbol_hits, counts_as_symbol_match):
             return symbol_hits
 
         # No real ticker match, so this is a NAME query. Merge both sources rather than
@@ -1647,7 +1653,11 @@ class FMPClient:
         return merged[:limit]
 
     @staticmethod
-    def _has_symbol_prefix_match(query: str, rows: List[Dict[str, Any]]) -> bool:
+    def _has_symbol_prefix_match(
+        query: str,
+        rows: List[Dict[str, Any]],
+        counts_as_symbol_match: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    ) -> bool:
         """Did `search-symbol` actually match a TICKER, or just a substring of one?
 
         ⚠️ This predicate is the whole fix for a live bug: `search-symbol` matches
@@ -1658,15 +1668,39 @@ class FMPClient:
 
         A genuine ticker match starts with what the user typed. Anything else means they
         were typing a company name, so the name search has to run.
+
+        ⚠️ A prefix hit the caller will DISCARD must not count either (2026-09-25):
+        "sirius" came back as only `SIRIUSUSD` (a crypto the endpoint drops), and
+        "micro" / "bank" / "3m" as only foreign `.BK` / `.L` / `.AX` rows, so the name
+        search never ran and Sirius XM, Microsoft and Micron were unfindable — zero US
+        results. ``counts_as_symbol_match`` lets the caller say which rows it keeps; the
+        decision stays with the caller.
         """
         q = (query or "").strip().upper()
         if not q:
             return False
         return any(
-            (row.get("symbol") or "").upper().startswith(q)
+            str(row.get("symbol") or "").upper().startswith(q)
+            and (counts_as_symbol_match is None or counts_as_symbol_match(row))
             for row in rows
             if isinstance(row, dict)
         )
+
+    async def get_actively_trading_list(self) -> List[Dict[str, Any]]:
+        """Every actively trading symbol, all exchanges: ``[{"symbol", "name"}]``.
+
+        One call, ~70k rows (1.2 MB gzip, ~0.8 s; measured 2026-09-25). No exchange or
+        type field. Agreed 14/14 with ``profile.isActivelyTrading``, which is why it is the
+        liveness source for search. Raises ``FMPUnavailableException`` on a non-list body
+        rather than returning ``[]``: an empty whitelist would hide every listing, so a
+        failure must stay distinguishable from an answer.
+        """
+        data = await self._make_request("actively-trading-list")
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"actively-trading-list returned {type(data).__name__}, not a list"
+            )
+        return data
 
     async def search_isin(self, isin: str) -> List[Dict[str, Any]]:
         """Securities for an ISIN (``search-isin``): ``[{"symbol", "name", "isin", ...}]``.

@@ -415,13 +415,16 @@ struct SnapshotItem: Identifiable {
     let fullReportAvailable: Bool
     /// Only the valuation (`.price`) snapshot carries a DCF; see `DcfEstimate`.
     var dcf: DcfEstimate? = nil
+    /// The Caydex Fair Value Estimate — when present it replaces FMP's `dcf` row.
+    var caydexEstimate: CaydexFairValue? = nil
 
-    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil) {
+    init(category: SnapshotCategory, rating: SnapshotRatingLevel, metrics: [SnapshotMetric], fullReportAvailable: Bool = true, dcf: DcfEstimate? = nil, caydexEstimate: CaydexFairValue? = nil) {
         self.category = category
         self.rating = rating
         self.metrics = metrics
         self.fullReportAvailable = fullReportAvailable
         self.dcf = dcf
+        self.caydexEstimate = caydexEstimate
     }
 }
 

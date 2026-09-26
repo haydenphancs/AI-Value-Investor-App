@@ -1823,10 +1823,23 @@ class TickerDetailViewModel: ObservableObject {
                 }
                 parts.append(line)
             }
-            if let dcf = snapshot.dcf {
+            if let estimate = snapshot.caydexEstimate {
+                // The published Caydex estimate, quoted exactly as the card shows it — the
+                // chat must quote it, never compute its own (spec hard rule 3).
+                switch estimate.state {
+                case .estimate:
+                    var line = "\(CaydexFairValue.title) (a DCF model estimate — not a price target, not a recommendation)"
+                    if let v = estimate.formattedValue { line += ": \(v)" }
+                    if let range = estimate.formattedRange { line += ", \(range.lowercased())" }
+                    if let gap = estimate.formattedGap(versus: tickerData?.currentPrice) { line += ". \(gap)" }
+                    parts.append(line)
+                case .refused(let reason):
+                    parts.append("\(CaydexFairValue.title): none — \(reason)")
+                }
+            } else if let dcf = snapshot.dcf {
                 switch dcf.status {
                 case .ok:
-                    var dcfLine = "DCF model value (FMP discounted cash flow, an intrinsic-value estimate — not a price target)"
+                    var dcfLine = "DCF model value (a third-party discounted-cash-flow model, an intrinsic-value estimate — not a price target)"
                     if let v = dcf.formattedValue { dcfLine += ": \(v)" }
                     if let gap = dcf.formattedGap(versus: tickerData?.currentPrice) { dcfLine += ", \(gap)" }
                     if dcf.needsCaveat(versus: tickerData?.currentPrice) {

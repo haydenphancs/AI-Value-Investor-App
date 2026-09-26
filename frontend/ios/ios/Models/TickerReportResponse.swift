@@ -695,9 +695,13 @@ struct WallStreetConsensusDTO: Codable {
     let analystHold: Int?
     let analystSell: Int?
     let analystStrongSell: Int?
+    /// The Caydex Fair Value Estimate as published when the report was generated. Optional:
+    /// reports frozen before it existed, or generated with it disabled, decode it as nil.
+    let caydexFairValue: CaydexFairValueDTO?
 
     enum CodingKeys: String, CodingKey {
         case rating
+        case caydexFairValue = "caydex_fair_value"
         case currentPrice = "current_price"
         case targetPrice = "target_price"
         case lowTarget = "low_target"
@@ -1044,7 +1048,8 @@ extension TickerReportAPIResponse {
             analystBuy: wallStreetConsensus.analystBuy ?? 0,
             analystHold: wallStreetConsensus.analystHold ?? 0,
             analystSell: wallStreetConsensus.analystSell ?? 0,
-            analystStrongSell: wallStreetConsensus.analystStrongSell ?? 0
+            analystStrongSell: wallStreetConsensus.analystStrongSell ?? 0,
+            caydexFairValue: wallStreetConsensus.caydexFairValue.flatMap { CaydexFairValue(dto: $0) }
         )
 
         // Critical Factors

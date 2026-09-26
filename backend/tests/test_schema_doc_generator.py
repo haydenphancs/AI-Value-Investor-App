@@ -689,6 +689,10 @@ _PENDING_MIGRATION_TABLES: set[str] = {
     "public.trillion_club_companies",
     "public.trillion_club_stakes",
     "public.trillion_club_filings",
+    # 2026-09-25: migration 178 (Caydex Fair Value Estimate) written, not yet applied —
+    # remove these two after the re-dump.
+    "public.dcf_fair_value_cache",
+    "public.dcf_fair_value_history",
 }
 # 2026-09-18: 170's four tables (marketing_runs / marketing_assets / marketing_posts /
 # podcast_episodes) were applied and re-dumped, so they left the list — the guard below

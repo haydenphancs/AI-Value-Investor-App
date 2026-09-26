@@ -62,7 +62,9 @@ from app.services.price_volatility import (  # noqa: E402  (import-after-import 
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
+from app.config import settings
 from app.integrations.fmp import FMPClient, get_fmp_client
+from app.services.dcf_report_gate import current_dcf_source, strip_caydex_if_disabled
 from app.utils.period_labels import quarterly_period_label
 from app.services._analyst_common import analyst_is_usable
 from app.schemas.analyst import (
@@ -320,6 +322,9 @@ class CollectedTickerData:
     # legacy v3 profile carried `dcf` inline; the stable profile does not. Empty when FMP
     # has no model — fair value is then UNMEASURED, never the current price.
     dcf: Dict[str, Any] = field(default_factory=dict)
+    # The Caydex Fair Value Estimate (DcfFairValueResponse), fetched INSTEAD of `dcf` while
+    # settings.DCF_ENABLED. None when disabled or when its inputs were unavailable.
+    caydex_dcf: Any = None
     quote: Dict[str, Any] = field(default_factory=dict)
     income: List[Dict[str, Any]] = field(default_factory=list)
     balance: List[Dict[str, Any]] = field(default_factory=list)
@@ -489,6 +494,13 @@ def _settle_pass1_result(out: Any, attr: str, result: Any, default: Any, ticker:
         setattr(out, attr, default)
         return
     setattr(out, attr, result if result is not None else default)
+
+
+async def _caydex_dcf(ticker: str):
+    """The Caydex Fair Value Estimate for the collector. Failures propagate to `_assign`, which
+    logs them and leaves `caydex_dcf` None (fair value then unmeasured)."""
+    from app.services.dcf_fair_value_service import get_dcf_fair_value_service
+    return await get_dcf_fair_value_service().get_fair_value(ticker)
 
 
 class TickerReportDataCollector:
@@ -728,7 +740,10 @@ class TickerReportDataCollector:
         # Each entry: (attribute_name, awaitable, default_on_failure)
         tasks: List[Tuple[str, Any, Any]] = [
             ("profile", self.fmp.get_company_profile(ticker), {}),
-            ("dcf", self.fmp.get_dcf(ticker), {}),
+            # FMP's DCF is RETIRED while settings.DCF_ENABLED: the Caydex Fair Value Estimate
+            # (documents/research/dcf-methodology-v1.md) drives fair value instead.
+            (("caydex_dcf", _caydex_dcf(ticker), None) if settings.DCF_ENABLED
+             else ("dcf", self.fmp.get_dcf(ticker), {})),
             ("quote", price_source(self).get_quote(ticker), {}),
             # 10y annual depth (was 5) so the Fundamentals & Growth cards'
             # tap-to-expand history charts a full decade. All downstream
@@ -1588,10 +1603,17 @@ class TickerReportDataCollector:
         # back-compat read of old cached rows. A stable profile never carries `dcf`, so
         # before the dedicated fetch existed this was None for EVERY ticker and the
         # valuation vital fabricated fair_value = current_price (2026-09-12).
-        dcf_row = out.dcf if isinstance(out.dcf, dict) else {}
-        dcf = _num_or_none(dcf_row.get("dcf"))
-        if dcf is None:
-            dcf = _num_or_none(profile.get("dcf"))
+        if settings.DCF_ENABLED:
+            # The Caydex estimate — one value for every reader (hard rule 1). A refusal or a
+            # failed fetch leaves fair value UNMEASURED, never the current price.
+            est = out.caydex_dcf
+            dcf = (_num_or_none(getattr(est, "fair_value", None))
+                   if getattr(est, "status", None) == "ok" else None)
+        else:
+            dcf_row = out.dcf if isinstance(out.dcf, dict) else {}
+            dcf = _num_or_none(dcf_row.get("dcf"))
+            if dcf is None:
+                dcf = _num_or_none(profile.get("dcf"))
         c["fair_value"] = dcf if dcf and dcf > 0 else None
         c["upside_pct"] = _safe_pct_change(c["fair_value"], current_price) \
             if c["fair_value"] is not None else None
@@ -1765,6 +1787,13 @@ class TickerReportDataCollector:
                 fair_value,
                 c.get("monthly_prices") or [],
             )
+        # The published estimate rides on the Wall Street card (it replaces the dead analyst
+        # price-target block). A refusal is carried as well, so the card can say why.
+        if settings.DCF_ENABLED and out.caydex_dcf is not None:
+            out.wall_street_consensus_partial["caydex_fair_value"] = out.caydex_dcf.model_dump()
+        # Stamp the DCF source so a report cache never serves this report under the other
+        # setting (dcf_report_gate.report_dcf_source_matches).
+        out.wall_street_consensus_partial["dcf_source"] = current_dcf_source()
         # Macro vital seed: real risk factor count placeholder (fully
         # populated after AI risk_factors arrive in assemble_report).
         out.macro_vital_seed = {
@@ -3778,8 +3807,13 @@ async def patch_wall_street_consensus_live(
     retained in `refresh_wall_street_consensus_block` below in case we
     later want an opt-in "refresh, but never fall back to estimates" mode;
     it is simply no longer wired into the read paths.
+
+    The one thing it DOES change: while settings.DCF_ENABLED is off, a stored
+    `wall_street_consensus.caydex_fair_value` block is dropped from the served copy. Turning
+    the switch off is the kill switch for the Caydex Fair Value Estimate, and reports generated
+    while it was on must stop showing it too. The stored row itself is untouched.
     """
-    return payload
+    return strip_caydex_if_disabled(payload)
 
 
 def _build_revenue_segments(
@@ -8050,8 +8084,29 @@ def build_financial_context(out: CollectedTickerData) -> str:
     parts.append(f"ROE: {_fmt_pct_or_na(c.get('roe'))}")
     parts.append(f"D/E: {_fmt_or_na(c.get('debt_equity'))}")
     parts.append(f"Current Ratio: {_fmt_or_na(c.get('current_ratio'))}")
-    parts.append(f"DCF Fair Value: {_fmt_currency_or_na(c.get('fair_value'))}")
-    parts.append(f"DCF Upside: {_fmt_pct_or_na(c.get('upside_pct'))}")
+    if settings.DCF_ENABLED:
+        # The PUBLISHED Caydex Fair Value Estimate, worded exactly as the card shows it, with
+        # the wording rule — never a bare "fair value" + "upside" (hard rules 3-4,
+        # documents/research/dcf-methodology-v1.md §5). Lazy import: narrative_prompts is
+        # heavier and imports this module's neighbours.
+        from app.services.agents.narrative_prompts import (
+            _CAYDEX_ESTIMATE_RULE, _caydex_estimate_line,
+        )
+        est = out.caydex_dcf
+        line = _caydex_estimate_line({
+            "caydex_fair_value": est.model_dump() if est is not None else None,
+            "current_price": _num_or_none((quote or {}).get("price")) or _num_or_none(profile.get("price")),
+        })
+        if line:
+            parts.append(line)
+            parts.append(_CAYDEX_ESTIMATE_RULE)
+        elif est is not None and getattr(est, "status", None) == "refused":
+            parts.append(f"Caydex Fair Value Estimate: not published — {est.refusal_reason}")
+        else:
+            parts.append("Caydex Fair Value Estimate: unavailable")
+    else:
+        parts.append(f"DCF Fair Value: {_fmt_currency_or_na(c.get('fair_value'))}")
+        parts.append(f"DCF Upside: {_fmt_pct_or_na(c.get('upside_pct'))}")
     parts.append(
         f"Revenue CAGR (analyst est.): {_fmt_pct_or_na(c.get('revenue_cagr'))}"
     )

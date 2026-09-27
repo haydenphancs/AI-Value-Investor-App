@@ -69,6 +69,12 @@ _OPENERS_THE_PROMPTS_ONCE_ASKED_FOR = [
     "ultimately",
     "so",
     "so what",
+    # 2026-09-27: the prompts asked the final bullet to explain "why an everyday investor
+    # should care", and 14 of 31 live cards echoed it.
+    "investors should care because",
+    "everyday investors should care because",
+    "why it matters",
+    "for investors",
 ]
 
 
@@ -105,17 +111,37 @@ def _decl_block(src: str, header: str) -> str:
                          ids=["insights-card", "per-article"])
 def test_neither_prompt_still_requests_a_lead_in(path):
     src = path.read_text()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+    assert "everyday investor should care" not in code, (
+        f"{path.name} asks for 'why an everyday investor should care' again — the model "
+        "echoes it as 'Investors should care because…'"
+    )
     assert "NO LEAD-IN" in src, (
         f"{path.name} no longer forbids the conclusion lead-in — the model will go back to "
         "writing 'The takeaway,' in front of a bullet the app already marks with an icon"
     )
 
 
+def _swift_stem_rows(src: str, name: str) -> set:
+    """Parse one `private let <name>: [[String]] = [ … ]` into a set of word tuples."""
+    m = re.search(rf"let {name}: \[\[String\]\] = \[(.*?)\n\]", src, re.S)
+    assert m, f"{name} not found — this scan has drifted"
+    return {tuple(re.findall(r'"([^"]*)"', row)) for row in re.findall(r"\[([^\[\]]*)\]", m.group(1))}
+
+
 def test_the_stem_list_covers_every_opener_the_prompts_once_asked_for():
-    """If the prompts named it, the stripper must know it — cached text still has them."""
+    """If the prompts named it, the stripper must know it — cached text still has them.
+
+    Parsed as whole ROWS: the old check only looked for each opener's last word in quotes
+    anywhere in the file, so deleting `["the", "takeaway"]` still passed on `["takeaway"]`.
+    """
     src = _strip_comments(_FORMAT.read_text())
-    missing = [o for o in _OPENERS_THE_PROMPTS_ONCE_ASKED_FOR
-               if f'"{o.split()[-1]}"' not in src.lower()]
+    rows = (
+        _swift_stem_rows(src, "conclusionLeadInExactStems")
+        | _swift_stem_rows(src, "conclusionLeadInOpenNounStems")
+        | _swift_stem_rows(src, "conclusionLeadInPhraseStems")
+    )
+    missing = [o for o in _OPENERS_THE_PROMPTS_ONCE_ASKED_FOR if tuple(o.split()) not in rows]
     assert not missing, f"stems missing for openers the prompts used to request: {missing}"
     # The production form: "The takeaway for everyday investors," — matched via the
     # open-noun class, which allows a continuation after the stem.
@@ -158,6 +184,35 @@ def test_a_degenerate_remainder_is_left_alone():
     )
 
 
+def test_the_phrase_class_runs_before_the_clause_test():
+    """"Investors should care because the Fed cut rates." has no `,` `:` or `—`, so a
+    phrase check placed after the clause guard would never run."""
+    body = _decl_block(_FORMAT.read_text(), "func strippingConclusionLeadIn")
+    phrase_at = body.find("conclusionRemainderAfterLeadingPhrase(")
+    clause_at = body.find("let clauseEnd")
+    assert phrase_at != -1, "the phrase class is no longer consulted"
+    assert clause_at != -1
+    assert phrase_at < clause_at, "the phrase check sits after the clause guard and never fires"
+
+
+def test_the_remainder_guards_are_applied_on_both_paths():
+    body = _decl_block(_FORMAT.read_text(), "func strippingConclusionLeadIn")
+    assert "isPlausibleConclusionRemainder(" in body, (
+        "the clause path no longer checks the remainder — 'What this means, in practice, is "
+        "higher rates' would become 'In practice, is higher rates'"
+    )
+    helper = _decl_block(_FORMAT.read_text(), "private func conclusionRemainderAfterLeadingPhrase")
+    assert "split(whereSeparator:" in helper and "isLetter" in helper
+    assert "rest.count >= 20" in helper
+    assert "isPlausibleConclusionRemainder(" in helper
+    assert "conclusionLeadInPhrasePronouns" in helper
+
+
+def test_capitalisation_keeps_internally_cased_words():
+    body = _decl_block(_FORMAT.read_text(), "fileprivate func capitalisingConclusionStart")
+    assert "isUppercase" in body, "'iPhone demand' would render as 'IPhone demand'"
+
+
 # ── 3. Every conclusion-rendering surface routes through it ───────────
 
 
@@ -180,6 +235,22 @@ def test_the_last_bullet_is_stripped_on_every_surface(path, header):
         f"{path.name} still calls the old colon-only normaliser, which leaves the words in "
         "place next to the icon that replaced them"
     )
+
+
+@pytest.mark.parametrize(
+    "path,header",
+    [(_CARD, "var body: some View"), (_DETAIL, "private var summarySection")],
+    ids=["insights-card", "insights-detail"],
+)
+def test_only_ai_cards_mark_and_strip_a_conclusion(path, header):
+    """The fallback card's bullets are verbatim headlines: its last one is not a
+    conclusion, and a real headline must never be rewritten."""
+    block = _decl_block(path.read_text(), header)
+    loop = block[block.find("ForEach(Array(visibleBullets"):]
+    assert "let isConclusion = summary.isAIGenerated && index == visibleBullets.count - 1" in loop
+    assert "SummaryBulletGlyph(isConclusion: isConclusion)" in loop
+    assert "SummaryBulletGlyph(isConclusion: isLast)" not in loop
+    assert "isConclusion ? point.strippingConclusionLeadIn() : point" in loop
 
 
 # ── 4. The marker itself ──────────────────────────────────────────────

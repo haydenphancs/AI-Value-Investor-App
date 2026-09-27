@@ -1,4 +1,8 @@
-"""`earnings_window_service` — the one-call-per-ET-day lookup behind the cap boost.
+"""`earnings_window_service` — the once-per-ET-day calendar round behind the cap boost.
+
+Since 2026-09-27 the round is ONE CALL PER DAY over the context window (D-4..D+3):
+FMP's calendar silently truncates at 4,000 rows keeping the newest dates, so the old
+single D-2..D+1 request lost D-2 and D-1 in peak season.
 
 Everything here is hermetic: the service takes its FMP client as a keyword argument
 and the tests hand it a fake. The autouse fixture resets the process singleton before
@@ -21,6 +25,7 @@ from app.services.earnings_window_service import (
     EARNINGS_WINDOW_DAYS_AHEAD,
     EARNINGS_WINDOW_DAYS_BACK,
     EarningsWindowService,
+    context_days,
     earnings_window_bounds,
     et_date,
     get_earnings_window_service,
@@ -41,6 +46,9 @@ def _fresh_singleton():
 
 
 class _Fake:
+    """Returns ALL its rows for every call — the service must keep each row only
+    under its own date, so a lenient upstream cannot duplicate them."""
+
     def __init__(self, rows=None, raises=None, delay=0.0):
         self.rows = [] if rows is None else rows
         self.raises = raises
@@ -54,6 +62,11 @@ class _Fake:
         if self.raises:
             raise self.raises
         return self.rows
+
+
+def _day_calls(today):
+    """The 8 single-day requests of one context round for ``today``."""
+    return [(d.isoformat(), d.isoformat()) for d in context_days(today)]
 
 
 # ── pure helpers ─────────────────────────────────────────────────────────────
@@ -134,13 +147,15 @@ def test_et_date_reads_a_naive_now_as_utc():
 
 
 @pytest.mark.asyncio
-async def test_one_market_wide_call_per_et_day():
+async def test_one_context_round_of_single_day_calls_per_et_day():
     fake = _Fake([{"symbol": "ORCL", "date": "2026-09-09"}])
     svc = EarningsWindowService()
     a = await svc.symbols_in_window(NOW, fmp=fake)
     b = await svc.symbols_in_window(NOW + timedelta(hours=3), fmp=fake)
     assert a == b == frozenset({"ORCL"})
-    assert fake.calls == [("2026-09-09", "2026-09-12")]
+    assert sorted(fake.calls) == sorted(_day_calls(TODAY))
+    assert len(fake.calls) == 8
+    assert all(f == t for f, t in fake.calls), "every request covers exactly one day"
 
 
 @pytest.mark.asyncio
@@ -149,7 +164,7 @@ async def test_an_empty_calendar_is_a_successful_empty_day():
     svc = EarningsWindowService()
     assert await svc.symbols_in_window(NOW, fmp=fake) == frozenset()
     assert await svc.symbols_in_window(NOW + timedelta(hours=5), fmp=fake) == frozenset()
-    assert len(fake.calls) == 1, "an empty day must be cached, not refetched every sweep"
+    assert len(fake.calls) == 8, "an empty day must be cached, not refetched every sweep"
 
 
 @pytest.mark.asyncio
@@ -161,11 +176,11 @@ async def test_a_non_list_response_is_a_failure_with_a_negative_ttl(caplog):
     assert "no ticker is boosted" in caplog.text
     # Inside the retry window: served from the negative cache, no call.
     assert await svc.symbols_in_window(NOW + timedelta(minutes=5), fmp=fake) == frozenset()
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 8
     # Past it: retried.
     fake.rows = [{"symbol": "ORCL", "date": "2026-09-09"}]
     assert await svc.symbols_in_window(NOW + timedelta(minutes=16), fmp=fake) == frozenset({"ORCL"})
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 16
 
 
 @pytest.mark.asyncio
@@ -198,7 +213,8 @@ async def test_et_day_rollover_refetches_with_the_new_window():
     assert late.astimezone(timezone.utc).date() == early.astimezone(timezone.utc).date()
     await svc.symbols_in_window(late, fmp=fake)
     await svc.symbols_in_window(early, fmp=fake)
-    assert fake.calls == [("2026-09-09", "2026-09-12"), ("2026-09-10", "2026-09-13")]
+    assert sorted(fake.calls[:8]) == sorted(_day_calls(date(2026, 9, 11)))
+    assert sorted(fake.calls[8:]) == sorted(_day_calls(date(2026, 9, 12)))
 
 
 @pytest.mark.asyncio
@@ -206,7 +222,7 @@ async def test_a_naive_now_is_read_as_utc():
     fake = _Fake([])
     svc = EarningsWindowService()
     await svc.symbols_in_window(datetime(2026, 9, 12, 3, 0), fmp=fake)   # 11th in ET
-    assert fake.calls == [("2026-09-09", "2026-09-12")]
+    assert sorted(fake.calls) == sorted(_day_calls(date(2026, 9, 11)))
 
 
 @pytest.mark.asyncio
@@ -215,7 +231,7 @@ async def test_concurrent_callers_share_one_fetch():
     svc = EarningsWindowService()
     results = await asyncio.gather(*[svc.symbols_in_window(NOW, fmp=fake) for _ in range(5)])
     assert all(r == frozenset({"ORCL"}) for r in results)
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 8, "five concurrent callers share ONE round"
 
 
 @pytest.mark.asyncio
@@ -264,5 +280,5 @@ async def test_a_cancelled_joiner_does_not_cancel_the_leaders_fetch():
         await joiner_a
     assert await leader == frozenset({"ORCL"})
     assert await joiner_b == frozenset({"ORCL"})
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 8
     assert svc._inflight == {}

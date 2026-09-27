@@ -38,7 +38,7 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 | 11 | Whale profile pre-warm | once, after the first politician sweep | `WHALE_PREWARM_ENABLED` (on) | Rebuilds `whale_profile_cache`. |
 | 12 | Research refunds | every 5 min | always | Refunds reports stuck over 15 min and sends a "research failed" push. |
 | 13 | Subscription expiry | hourly | always | Expires lapsed subscriptions and drops the tier, even if Apple's notification was lost. |
-| 14 | Updates insights | every 5 min, 04:00–20:00 ET; crypto-only every 30 min otherwise | always | "Why it moved" cards and `ticker_move` pushes for the top 200. |
+| 14 | Updates insights | every 5 min, 04:00–20:00 ET; crypto-only every 30 min otherwise | always | "Why it moved" cards and `ticker_move` pushes for the top 200. Reads the FMP earnings calendar: 8 single-day calls per ET day, plus today and the previous trading day every 20 min only while a watched ticker's results are pending. A ticker gets +6 cards on its report day, held back until the close or until its results appear. |
 | 15 | Chat starters | every 15 min while the market is active | `CHAT_STARTER_WARM_ENABLED` (on) | Pre-answers the suggested chat questions, at most 60 a day. |
 | 16 | Theme rotation | 1st US trading day of the month, 18:30 ET; catch-up for 7 days | **`THEME_ROTATION_ENABLED` (OFF)**. Also `THEME_ROTATION_DRY_RUN` (off = publishes for real). | Re-scores every Emerging Frontiers list and changes at most 30%. |
 | 17 | Theme insights | trading days 18:15 ET | **`THEME_INSIGHTS_ENABLED` (OFF)** | Daily performance plus a "why it's moving" note per theme. |
@@ -110,6 +110,11 @@ admin recomputes, and marketing script generation.
 - [ ] **App Review:** 1.0 (10) was resubmitted 2026-09-24. If it's rejected again: `./venv/bin/python scripts/asc_review_resubmit.py --video <mov>` (dry run), then add `--apply` (**⚠️ ASC**).
 - [x] **Demo-tier fix is deployed.** `def effective_tier` is in deployed commit 95ea9b25; the database side is checked by the migration 177 item above.
 - [x] **Migration 176 is applied** (verified live 2026-09-26: `marketing_scripts.run_date`, `content_rejections` and `reject_reason` exist). The marketing worker needed it.
+- [ ] **Insights card v6 (conclusion + earnings-aware, 2026-09-27) — deploy checks.** No migration.
+  1. Before deploying, check Railway for an `INSIGHT_AI_MODEL` variable. It is now read (it was silently ignored before); any value re-keys every card and switches the model. Delete it unless intended.
+  2. Deploy after 20:00 ET. `PROMPT_VERSION` 6 regenerates every card once, bounded by the per-cycle and daily caps, so the wave runs from 04:00 ET.
+  3. The next day, search the Railway logs for `conclusion_guard:` (a card rejected for a made-up figure or an unrelated story; nothing is written and the old card stays up) and read the `reasons=` histogram on the `Insight sweep (` summary lines for `failure_cooldown` and `earnings_reserved`. (`updates_insight_state` only keeps each scope's latest value, so it cannot give a daily count.) More than a handful of rejections a day means the guard needs tuning.
+  4. On the next after-close reporter in your watchlist, open its card at about 17:00 ET: it should describe the results, not "set to report".
 - [ ] **Migration 172** (data-only 'N/A' sector cleanup): run its two VERIFY counts. Both must be 0; if not, apply it.
 - [ ] **Migration 166 constraint:** run the count query in `166_…sql`. If it returns 0, run `ALTER TABLE public.credit_transactions VALIDATE CONSTRAINT credit_transactions_split_sums;`.
 - [x] **Trillion Club go-live.** Seed done 2026-09-24. Both flags are on. The daily job ran OK on 2026-09-25 (19 members evaluated). One filing, Alphabet 2025-Q3, is marked degraded because of an ambiguous CUSIP (`91864C107`) and is retried daily; check around 2026-10-03 that it cleared.
@@ -210,6 +215,7 @@ admin recomputes, and marketing script generation.
 - **New TestFlight tester:** edit `scripts/testflight_testers.local.json` → `seed_testflight_testers.py --dry-run` → run it (**⚠️ PROD**).
 - **Give an account a comp tier:** `scripts/set_comp_tier.py --email … --tier premium`, then add `--apply` (**⚠️ PROD**).
 - **Chat starter questions edited:** `scripts/seed_chat_starters.py --dry-run` → run it (**⚠️ PROD**).
+- **FMP marketing consent (requested 2026-09-27, awaiting reply):** until FMP returns a consent signed by an authorized officer and countersigned by you, marketing posts and screenshots carry no FMP data (prices, charts, ratios, news, insider/13F/congressional filings). When it arrives: save the signed PDF in `documents/legal/`, then ask Claude to update the marketing rules. Congressional-trade posts additionally need a lawyer's OK (5 U.S.C. §13107(c)). Keep the App Store version on **manual release** until then, because the screenshots show real market data.
 - **Marketing go-live, when you decide:**
   1. ~~Apply 176~~ (done, verified 2026-09-26).
   2. Commit and **deploy the web service FIRST**. Since 2026-09-26 every worker call after the daily claim must carry the `X-Marketing-Claim` header, and the voice step reads assets back through a new route; an old web service would refuse the new worker. Leave `MARKETING_JUDGE_MODE` unset on the web service (the default is `enforce`; `shadow` only records the judge's verdicts).
@@ -260,6 +266,7 @@ admin recomputes, and marketing script generation.
 **Read-only against production (safe):**
 - `asc_audit`, `pull_testflight_feedback`, `check_money_moves_published`, `check_function_grants`
 - `fmp_entitlement_probe`, `preview_trillion_club`, `preview_theme_rotation` (without `--record`)
+- `preview_insight_card` (replays an Insights card as of a moment; a few Flash-Lite calls, no writes)
 - `marketing_preview`, `error_digest`
 - `dump_schema.sh` (writes only the local snapshot file)
 
@@ -272,6 +279,7 @@ admin recomputes, and marketing script generation.
 These were found in the 2026-09-25 sweep and deliberately not changed. The last five came from the whole-app sweep's fixes:
 - The whale hydrator's database writes briefly block the web server.
 - An empty earnings calendar from FMP is read as a holiday.
+- The same 4,000-row calendar truncation the Insights sweeper now avoids (one call per day) still affects `tracking_service`, `home_service`, `signals_service`, `earnings_sender` and `widget_movers_service` in peak season (found 2026-09-27; follow-up).
 - A theme rotation that failed twice retries just after midnight ET.
 - During a database outage the Updates sweeper refreshes news 3× as often.
 - Price alerts write every rule every minute: fine now, slow near 5,000 rules.

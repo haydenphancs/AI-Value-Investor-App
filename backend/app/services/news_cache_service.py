@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional
 
 from app.database import get_supabase
 from app.services.agents.persona_config import neutral_system_instruction
+from app.services.conclusion_lead_in import lead_in_remainder
 from app.integrations.apewisdom import get_all_mentions
 from app.integrations.fmp import (
     EmptyAfterFailure,
@@ -1167,8 +1168,15 @@ class NewsCacheService:
                     if isinstance(t, str) and t.strip()
                 )
             )[:8]
+            bullets = list((item.get("bullets", []) or [])[:5])
+            if bullets and isinstance(bullets[-1], str):
+                # The conclusion's lead-in ("Investors should care because …") is
+                # stripped HERE too, so newly enriched rows are clean for every app
+                # version and for the widget's key points. Cached rows are never
+                # re-enriched, which is why iOS still strips at display time.
+                bullets[-1] = lead_in_remainder(bullets[-1])
             result[pos] = {
-                "bullets": (item.get("bullets", []) or [])[:5],
+                "bullets": bullets,
                 "sentiment": NewsCacheService._normalize_sentiment(item.get("sentiment", "")),
                 "confidence": _clamp_confidence(item.get("confidence", 0)),
                 "related_tickers": cleaned_tickers,
@@ -1214,8 +1222,8 @@ For EACH article, provide:
 1. Summary bullet points following these rules:
    - Minimum 2, maximum 5 bullet points
    - Each bullet must be under 25 words — short and punchy
-   - The FINAL bullet must always explain why an everyday investor should care, in plain English
-   - NO LEAD-IN. Start that final bullet with the point itself. Do NOT open it with a transition of any kind: not "So,", "In short,", "Ultimately,", "The takeaway,", "The takeaway for everyday investors,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?" or "So what:". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 25-word budget.
+   - The FINAL bullet is the conclusion: one sentence on what this article's points add up to for the company, asset or market it covers — built only from the bullets above it, with no new fact, figure or name. Its subject is the company, asset or market, never a group of people.
+   - NO LEAD-IN. Start that final bullet with the point itself. Never open it with "Investors", "Everyday investors", "For investors,", "Investors should care because", "This matters because" or "Why it matters", and never with a transition of any kind: not "So,", "In short,", "Ultimately,", "The takeaway,", "The takeaway for everyday investors,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?" or "So what:". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 25-word budget.
    - No introductory phrases like "This article discusses..." or "The key points are..."
 2. Sentiment classification — the NET directional lean for the stock, one of these three exact values:
    - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
@@ -1229,7 +1237,7 @@ For EACH article, provide:
 
 Return a JSON array with one object per article in order. Each object must have:
 - "index": the article number (0-based)
-- "bullets": array of 2-5 strings (last one explains why investors should care — stated directly, with NO lead-in transition)
+- "bullets": array of 2-5 strings (the last one is the conclusion — stated directly, with NO lead-in and no people-subject)
 - "sentiment": exactly one of "bullish" | "bearish" | "neutral"
 - "confidence": integer 0-100
 - "related_tickers": array of uppercase ticker symbol strings (max 8)

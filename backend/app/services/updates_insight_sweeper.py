@@ -43,6 +43,14 @@ SPEND CEILINGS (defence in depth)
                       of the allowance for the rest of the trading day, 09:30-
                       20:00 ET; also holds in the small hours before a session,
                       where the crypto pass runs)
+  report-day allowance (updates_materiality.AFTER_CLOSE_EARNINGS_RESERVE — +6 on
+                      a ticker's earnings date, held back through the regular
+                      session while the results are pending, 30-minute cooldown
+                      after the close; the same `daily_cap_for(report_day=…)`
+                      feeds the gate AND the claim RPC)
+  failure cooldown    (a scope whose last generation FAILED waits one cooldown,
+                      so a repeatable rejection cannot spend the failure
+                      allowance within the hour)
   per-cycle cap       (_PER_CYCLE_REGEN_CAP, priority-ordered by move size)
   concurrency         (_GEN_CONCURRENCY)
   durable global cap  (_GLOBAL_DAILY_CAP, enforced in Postgres)
@@ -63,7 +71,13 @@ from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
 from app.services.coingecko_adapter import crypto_base_symbol
 from app.services.crypto_names import display_name_for_row
-from app.services.earnings_window_service import symbols_in_earnings_window
+from app.services.earnings_window_service import (
+    earnings_gate_inputs,
+    earnings_is_hot,
+    earnings_statuses_for,
+    et_date,
+    symbols_in_earnings_window,
+)
 from app.services.news_cache_service import (
     MARKET_SCOPE,
     get_news_cache_service,
@@ -157,8 +171,15 @@ _CATALYST_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
 # "checking" at 12:46). `cooldown` is deliberately ABSENT: that scope WILL
 # regenerate within 15 minutes, so the flag is telling the truth there. `no_corpus`
 # / `mwcb_market_only` / `gate_error` are not verdicts about the card at all.
+#
+# `earnings_reserved` joins them for the same reason as `premarket_reserved`: a
+# report-day ticker held at its ordinary cap through the regular session has been
+# checked, and policy has ruled out a refresh until a known moment (the close, or
+# the results landing). `failure_cooldown` is ABSENT like `cooldown`: that scope
+# WILL retry within one cooldown.
 _VERIFIED_CURRENT_REASONS = frozenset({
     "fingerprint_unchanged", "daily_cap", "attempt_cap", "premarket_reserved",
+    "earnings_reserved",
 })
 
 # ── Proactive per-article enrichment (news pass) ──────────────────────
@@ -334,6 +355,7 @@ class InsightSweeper:
         now: datetime,
         is_market_scope: bool,
         earnings_window: bool = False,
+        report_day: bool = False,
     ) -> bool:
         """Atomically claim the right to generate ``scope``'s card.
 
@@ -351,7 +373,8 @@ class InsightSweeper:
         forever, burning a per-cycle admission slot each time, and the one
         diagnostic that explained the freeze (`last_skip_reason = 'daily_cap'`)
         disappeared. The two ceilings must be fed from the same function — and
-        with the same ``earnings_window``, which is why it is threaded here.
+        with the same ``earnings_window`` and ``report_day``, which is why both
+        are threaded here.
 
         This CANNOT be done client-side. Read-then-write has an ABA bug that
         silently defeats the daily cap: another instance can complete a whole
@@ -372,8 +395,12 @@ class InsightSweeper:
         # generation + an under-counted daily cap. (The sweep-start `now` is still
         # used for gate consistency elsewhere; the claim clock must be real-time.)
         claim_now = datetime.now(timezone.utc)
-        daily_cap = daily_cap_for(is_market_scope, earnings_window=earnings_window)
-        attempt_cap = attempt_cap_for(is_market_scope, earnings_window=earnings_window)
+        daily_cap = daily_cap_for(
+            is_market_scope, earnings_window=earnings_window, report_day=report_day,
+        )
+        attempt_cap = attempt_cap_for(
+            is_market_scope, earnings_window=earnings_window, report_day=report_day,
+        )
         try:
             result = self.supabase.rpc(
                 "claim_updates_insight_scope",
@@ -398,9 +425,9 @@ class InsightSweeper:
                 # this path either.
                 logger.info(
                     "Insight claim denied for %s (daily_cap=%d attempt_cap=%d "
-                    "earnings_window=%s) — already at ceiling, or claimed by "
-                    "another instance",
-                    scope, daily_cap, attempt_cap, earnings_window,
+                    "earnings_window=%s report_day=%s) — already at ceiling, or "
+                    "claimed by another instance",
+                    scope, daily_cap, attempt_cap, earnings_window, report_day,
                 )
             return granted
         except Exception as e:
@@ -981,6 +1008,35 @@ class InsightSweeper:
                 )
         boosted = sum(1 for s in scopes if s in earnings_scopes)
 
+        # 1d. Earnings STATUS per equity ticker (reported / due today / upcoming) —
+        #     the prompt's EARNINGS line, the report-day allowance and the one-shot
+        #     "results just landed" trigger. Same snapshot as the boost; the hot
+        #     refresh of today + the previous trading day only runs while a ticker
+        #     in THIS universe still has results pending. Best-effort: a failure
+        #     means no status, i.e. exactly the pre-2026-09-27 behaviour.
+        statuses: Dict[str, Any] = {}
+        if not crypto_only:
+            equities = [
+                s for s in scopes if s != MARKET_SCOPE and not is_crypto_scope(s)
+            ]
+            if equities:
+                try:
+                    statuses = await earnings_statuses_for(
+                        now, fmp=self.fmp, symbols=equities,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Earnings statuses unavailable this sweep (%s: %s) — no "
+                        "earnings context", type(e).__name__, e,
+                    )
+                    statuses = {}
+        today_et = et_date(now)
+        gate_inputs = {
+            scope: earnings_gate_inputs(statuses.get(scope), today_et)
+            for scope in scopes
+        }
+        hot = {scope: earnings_is_hot(statuses.get(scope), today_et) for scope in scopes}
+
         # 2. News — force-refresh so a story that broke minutes ago is visible.
         #    The 6h read TTL on ticker_news_cache would otherwise hide it.
         if refresh_news:
@@ -1044,6 +1100,9 @@ class InsightSweeper:
                 ),
                 session_phase=phase,
                 earnings_window=scope in earnings_scopes,
+                report_day=gate_inputs[scope][0],
+                earnings_pending_today=gate_inputs[scope][1],
+                earnings_reported_at=gate_inputs[scope][2],
             )
             reasons[decision.reason] += 1
             if decision.action == ACTION_GENERATE:
@@ -1077,8 +1136,17 @@ class InsightSweeper:
             # `cycle_touch`. One batched write, not one per scope.
             await asyncio.to_thread(self._mark_cycle_touched, touches, now)
 
-        # 6. Admit by priority: the biggest moves first, then the market card.
-        pending.sort(key=lambda p: (p[0] != MARKET_SCOPE, -p[1].score))
+        # 6. Admit by priority: the market card, then the URGENT scopes — tickers
+        #    reporting today (or that reported on the previous trading day; the
+        #    after-hours move of an after-close report is not in `changePercentage`,
+        #    so `score` alone ranks the release behind every ordinary mover) AND big
+        #    movers in a catalyst tier (their watchers' `ticker_move` alert waits on
+        #    this card, so a peak earnings day must not starve a -15% name) — each
+        #    group by move size.
+        def _urgent(scope: str, decision: Decision) -> bool:
+            return bool(hot.get(scope)) or decision.price_band in _CATALYST_TIERS
+
+        pending.sort(key=lambda p: (p[0] != MARKET_SCOPE, not _urgent(*p), -p[1].score))
         admitted = pending[:_PER_CYCLE_REGEN_CAP]
         dropped = len(pending) - len(admitted)
         if dropped > 0:
@@ -1102,7 +1170,8 @@ class InsightSweeper:
                 # producing a single card.
                 is_market = scope == MARKET_SCOPE
                 if not await asyncio.to_thread(
-                    self._claim, scope, now, is_market, scope in earnings_scopes
+                    self._claim, scope, now, is_market, scope in earnings_scopes,
+                    gate_inputs.get(scope, (False, False, None))[0],
                 ):
                     return False
                 if not await asyncio.to_thread(self._consume_global_budget, now):
@@ -1150,7 +1219,18 @@ class InsightSweeper:
                         # Merge the catalyst's outside web sources into the card's
                         # `sources` list (None when no big-move catalyst ran).
                         catalyst_sources=(price_move or {}).get("web_sources"),
+                        # The prompt's clock is the moment of generation, not the
+                        # sweep start (a sweep can run for minutes).
+                        now=datetime.now(timezone.utc),
+                        earnings=statuses.get(scope),
                     )
+                    if card is None:
+                        # "conclusion_guard: figure $5,000" is a very different
+                        # diagnosis from a Gemini outage; both used to read
+                        # "generation returned no card".
+                        pop_reason = getattr(self.insights, "pop_failure_reason", None)
+                        if callable(pop_reason):
+                            error = pop_reason(scope)
                 except asyncio.CancelledError:
                     # A deploy/shutdown cancels the sweeper mid-generation.
                     # CancelledError is a BaseException, so `except Exception`
@@ -1217,10 +1297,12 @@ class InsightSweeper:
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
             "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
+            "earnings_status=%d earnings_hot=%d "
             "market=%s active=%s phase=%s reasons=%s",
             ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
             enriched_rows, enrich_deferred, prior_session, boosted,
+            len(statuses), sum(1 for v in hot.values() if v),
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )
@@ -1229,6 +1311,7 @@ class InsightSweeper:
             "touched": len(touches), "deferred": dropped,
             "enriched": enriched_rows, "enrich_deferred": enrich_deferred,
             "earnings_boosted": boosted,
+            "earnings_status": len(statuses),
         }
 
     async def _refresh_news(self, scopes: List[str]) -> None:

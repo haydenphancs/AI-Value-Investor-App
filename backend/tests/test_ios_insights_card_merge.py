@@ -106,13 +106,26 @@ def test_the_catalyst_is_the_first_bullet_of_the_body():
     )
 
 
-def test_the_card_never_grows_past_five_body_rows():
-    """The catalyst takes a bullet slot, so the model's budget shrinks by one."""
-    body = _decl_block(_CARD.read_text(), "private var visibleBullets")
-    assert "prefix(catalyst == nil ? 5 : 4)" in body, (
+@pytest.mark.parametrize("path", [_CARD, _DETAIL], ids=["card", "detail"])
+def test_the_card_never_grows_past_five_body_rows(path):
+    """The catalyst takes a bullet slot, so the model's budget shrinks by one — and the
+    trim keeps the LAST bullet (the conclusion): `prefix` used to drop it and put the
+    arrow on a plain fact."""
+    body = _decl_block(path.read_text(), "private var visibleBullets")
+    assert "keepingConclusion(limit: catalyst == nil ? 5 : 4)" in body, (
         "the bullet cap is gone or changed: with a catalyst the card would render "
-        "1 + up to 5 = six rows."
+        "1 + up to 5 = six rows, or the trim drops the conclusion again."
     )
+    assert ".prefix(" not in body, (
+        "a plain prefix cap is back — it cuts off the conclusion whenever a card carries "
+        "more bullets than the catalyst layout has room for"
+    )
+
+
+def test_card_and_detail_trim_bullets_identically():
+    card = re.sub(r"\s+", " ", _decl_block(_CARD.read_text(), "private var visibleBullets"))
+    detail = re.sub(r"\s+", " ", _decl_block(_DETAIL.read_text(), "private var visibleBullets"))
+    assert card == detail
 
 
 # ── 2. The header signposts it ────────────────────────────────────────

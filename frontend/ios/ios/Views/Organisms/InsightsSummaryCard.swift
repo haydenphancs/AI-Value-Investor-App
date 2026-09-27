@@ -38,12 +38,13 @@ struct InsightsSummaryCard: View {
     /// How many model-written bullets fit beside the catalyst.
     ///
     /// The catalyst occupies the first bullet slot when there is one, so the
-    /// budget shrinks by one and the card can never grow past five rows. The
-    /// backend still validates 2-5 bullets for every card, catalyst or not — a
-    /// calm ticker is unaffected, so the cap lives here rather than in the
-    /// shared MAX_BULLETS every scope is generated against.
-    private var visibleBullets: ArraySlice<String> {
-        summary.bulletPoints.prefix(catalyst == nil ? 5 : 4)
+    /// budget shrinks by one and the card can never grow past five rows. When a
+    /// card carries more bullets than that, the points are trimmed and the LAST
+    /// bullet — the conclusion — is kept: `prefix` used to drop it and put the
+    /// arrow on a plain fact. The backend now writes at most three points beside
+    /// a catalyst, so this only matters for cards written before that.
+    private var visibleBullets: [String] {
+        summary.bulletPoints.keepingConclusion(limit: catalyst == nil ? 5 : 4)
     }
 
     /// The "why it moved" catalyst, when this card has one. Never on the
@@ -148,14 +149,16 @@ struct InsightsSummaryCard: View {
                     // any "The takeaway," lead-in is stripped from the text — cached
                     // bullets still carry it (the per-article prompt has no version
                     // to invalidate them) and it would otherwise sit right next to
-                    // the icon that replaced it.
-                    // Measured against the TRUNCATED list, so a card whose tail was
-                    // dropped by the cap does not mark a mid-list bullet.
-                    let isLast = index == visibleBullets.count - 1
+                    // the icon that replaced it. `visibleBullets` always keeps the
+                    // real last bullet, so this is the model's conclusion.
+                    // AI cards only: the fallback card's bullets are verbatim
+                    // headlines, and its last one is not a conclusion — nor may a
+                    // real headline be rewritten ("So, what's next…" → "What's next…").
+                    let isConclusion = summary.isAIGenerated && index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        SummaryBulletGlyph(isConclusion: isLast)
+                        SummaryBulletGlyph(isConclusion: isConclusion)
 
-                        Text(isLast ? point.strippingConclusionLeadIn() : point)
+                        Text(isConclusion ? point.strippingConclusionLeadIn() : point)
                             .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

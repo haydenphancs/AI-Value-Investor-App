@@ -51,8 +51,8 @@ struct InsightsDetailView: View {
         summary.isAIGenerated ? summary.priceMove : nil
     }
 
-    private var visibleBullets: ArraySlice<String> {
-        summary.bulletPoints.prefix(catalyst == nil ? 5 : 4)
+    private var visibleBullets: [String] {
+        summary.bulletPoints.keepingConclusion(limit: catalyst == nil ? 5 : 4)
     }
 
     private var summarySection: some View {
@@ -87,10 +87,10 @@ struct InsightsDetailView: View {
                 }
 
                 ForEach(Array(visibleBullets.enumerated()), id: \.offset) { index, point in
-                    let isLast = index == visibleBullets.count - 1
+                    let isConclusion = summary.isAIGenerated && index == visibleBullets.count - 1
                     HStack(alignment: .top, spacing: AppSpacing.sm) {
-                        SummaryBulletGlyph(isConclusion: isLast)
-                        Text(isLast ? point.strippingConclusionLeadIn() : point)
+                        SummaryBulletGlyph(isConclusion: isConclusion)
+                        Text(isConclusion ? point.strippingConclusionLeadIn() : point)
                             .font(AppTypography.bodySmall)
                             .foregroundColor(AppColors.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

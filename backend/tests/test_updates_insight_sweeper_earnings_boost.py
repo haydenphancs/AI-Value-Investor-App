@@ -28,6 +28,18 @@ from app.services.updates_materiality import ACTION_GENERATE, ACTION_SKIP, Decis
 from _price_fakes import PriceFromFMPFake
 
 
+@pytest.fixture(autouse=True)
+def _fresh_earnings_singleton():
+    """The sweep now also reads per-ticker STATUSES through the real singleton when a
+    test patches only the boost seam; with `fmp = None` that records a failure
+    (negative TTL on the real clock) that must not leak into later tests."""
+    from app.services.earnings_window_service import get_earnings_window_service
+
+    get_earnings_window_service().reset()
+    yield
+    get_earnings_window_service().reset()
+
+
 class _Stub(InsightSweeper):
     """No network clients (see .claude/rules/testing.md). Every corpus is one row,
     so the gate has something to decide on; `_claim` is replaced per test."""
@@ -75,8 +87,10 @@ class _Stub(InsightSweeper):
     async def mark_verified_current(self, scopes, market_active):
         self.verified = (list(scopes), market_active)
 
-    def _claim(self, scope, now, is_market_scope, earnings_window=False):
+    def _claim(self, scope, now, is_market_scope, earnings_window=False, report_day=False):
         self.claims.append((scope, is_market_scope, earnings_window))
+        self.report_days = getattr(self, "report_days", {})
+        self.report_days[scope] = report_day
         return False    # never generate — nothing paid in these tests
 
     def _consume_global_budget(self, now):
@@ -178,7 +192,12 @@ async def test_the_crypto_pass_never_reads_the_earnings_calendar(monkeypatch):
         calls.append(now)
         return frozenset({"BTCUSD"})
 
+    async def _statuses(now, *, fmp, symbols):
+        calls.append(("statuses", now))
+        return {}
+
     monkeypatch.setattr(mod, "symbols_in_earnings_window", _window)
+    monkeypatch.setattr(mod, "earnings_statuses_for", _statuses)
     monkeypatch.setattr(mod, "decide", lambda **kw: Decision(action=ACTION_SKIP, reason="no_corpus"))
     monkeypatch.setattr(mod, "is_market_active", lambda: False)
     result = await _Stub(universe=(MARKET_SCOPE, "AAPL", "BTCUSD")).run_sweep(
@@ -208,6 +227,7 @@ async def test_the_stub_corpus_reaches_the_real_gate_non_empty(monkeypatch):
 def test_the_verified_current_reason_set_is_pinned():
     assert _VERIFIED_CURRENT_REASONS == {
         "fingerprint_unchanged", "daily_cap", "attempt_cap", "premarket_reserved",
+        "earnings_reserved",
     }
 
 
@@ -216,7 +236,8 @@ async def test_capped_scopes_are_stamped_current_and_pending_ones_are_not(monkey
     reasons = {
         "FP": "fingerprint_unchanged", "DC": "daily_cap", "AC": "attempt_cap",
         "CD": "cooldown", "PR": "premarket_reserved", "NC": "no_corpus",
-        "MW": "mwcb_market_only", "GE": "gate_error",
+        "MW": "mwcb_market_only", "GE": "gate_error", "ER": "earnings_reserved",
+        "FC": "failure_cooldown",
     }
 
     def _decide(**kwargs):
@@ -233,7 +254,7 @@ async def test_capped_scopes_are_stamped_current_and_pending_ones_are_not(monkey
     await stub.run_sweep(refresh_news=False)
 
     scopes, market_active = stub.verified
-    assert sorted(scopes) == ["AC", "DC", "FP", "PR"]
+    assert sorted(scopes) == ["AC", "DC", "ER", "FP", "PR"]
     assert market_active is True
     # Every skip is still recorded on the state row, stamped or not.
     assert sorted(s for s, _ in stub.skips_recorded) == sorted([MARKET_SCOPE, *reasons])

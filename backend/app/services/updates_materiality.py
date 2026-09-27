@@ -54,9 +54,11 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 # pure and exhaustively testable.
 from app.utils.market_hours import (
     ET,
+    SESSION_AFTERHOURS,
     SESSION_CLOSED,
     SESSION_PREMARKET,
     SESSION_REGULAR,
+    US_MARKET_EARLY_CLOSES,
     is_trading_day,
 )
 # Volatility-relative tier vocabulary + the pure z→tier map, shared with the
@@ -97,7 +99,14 @@ logger = logging.getLogger(__name__)
 # contract changed → one controlled regen wave. NOTE this lever only reaches the
 # INSIGHTS card; the per-article enrichment prompt in news_cache_service has no
 # version at all, which is why iOS also strips the phrase at display time.
-PROMPT_VERSION = 5
+# v6: the conclusion became its OWN model field (`points[]` + `conclusion`, stored
+# as `bullets = points + [conclusion]`) that must be built only from the points —
+# TestFlight ETHUSD, 2026-09-10: the "conclusion" was a fourth unrelated fact (a
+# "$5,000 dividend"). The prompt also gained a Now line, ET article stamps and the
+# ticker's EARNINGS status (ORCL the same evening read "set to report" after the
+# release), dropped "why an everyday investor should care" (which the model echoed
+# as "Investors should care because…"), and bans people-framed openers.
+PROMPT_VERSION = 6
 
 
 # ── Thresholds ────────────────────────────────────────────────────────
@@ -199,8 +208,34 @@ PER_SCOPE_ATTEMPT_CAP = PER_SCOPE_DAILY_CAP + PER_SCOPE_FAILURE_ALLOWANCE
 # `claim_updates_insight_scope` (migration 089) too — they must agree.
 PREMARKET_CAP_DIVISOR = 3
 
+# Extra successes a ticker gets on its REPORT DAY, spendable only once the
+# results can exist. TestFlight (ORCL, Thu 2026-09-10): the card was written that
+# morning — accurate then — and froze on `daily_cap` before the 16:10 ET release,
+# so the evening read "Oracle is set to report" over a completed report. Measured
+# 2026-09-25: busy tickers still hit their cap around noon ET, earnings-window
+# ones included, because nothing was held back for after the close.
+#
+# ADDED to the cap rather than carved out of it: carving six out of 16 left five
+# regular-session slots, gone by ~10:45 ET, and froze the card from then until
+# 16:00 on the most-read day of the quarter. While the report is still pending
+# (`earnings_pending_today`), the regular session is held at the ordinary cap
+# (`earnings_reserved`); after the close — or the moment the results appear —
+# the extra six are spendable. Same `daily_cap_for` feeds the gate AND the
+# claim RPC, so the two ceilings still agree.
+AFTER_CLOSE_EARNINGS_RESERVE = 6
 
-def daily_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
+# Cooldown for a report-day ticker in after-hours. At the 15-minute session
+# cooldown the six extra slots would be gone by ~17:20 ET, before the call and
+# the first analyst notes; 30 minutes spreads them over ~16:05-18:35.
+REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS = 1800
+
+
+def daily_cap_for(
+    is_market_scope: bool,
+    *,
+    earnings_window: bool = False,
+    report_day: bool = False,
+) -> int:
     """The per-scope success ceiling for one day.
 
     A ticker inside its EARNINGS WINDOW (an earnings date within D-1..D+2 of
@@ -212,24 +247,38 @@ def daily_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> in
     ⚠️ The daily cap is enforced TWICE — here (advisory, in `decide`) and
     authoritatively by the `claim_updates_insight_scope` RPC (`p_daily_cap`).
     Every caller MUST derive both numbers from this function with the SAME
-    `earnings_window`, or the DB silently overrules the gate and the scope
-    re-trips every cycle with nothing logged (the 6-vs-16 market incident).
+    `earnings_window` AND `report_day`, or the DB silently overrules the gate and
+    the scope re-trips every cycle with nothing logged (the 6-vs-16 market
+    incident).
+
+    ``report_day`` (the ticker's earnings date is TODAY, pending or reported)
+    ADDS `AFTER_CLOSE_EARNINGS_RESERVE` on top — never to the market scope, and
+    never below the ticker's ordinary cap, so a missing boost cannot shrink it.
     """
     if is_market_scope or earnings_window:
-        return PER_SCOPE_DAILY_CAP_MARKET
-    return PER_SCOPE_DAILY_CAP
+        cap = PER_SCOPE_DAILY_CAP_MARKET
+    else:
+        cap = PER_SCOPE_DAILY_CAP
+    if report_day and not is_market_scope:
+        cap += AFTER_CLOSE_EARNINGS_RESERVE
+    return cap
 
 
-def attempt_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
+def attempt_cap_for(
+    is_market_scope: bool,
+    *,
+    earnings_window: bool = False,
+    report_day: bool = False,
+) -> int:
     """The per-scope ATTEMPT ceiling for one day: successes + a failure allowance.
 
     Strictly above `daily_cap_for` for the same scope by construction, so the
     attempt cap can only ever bind when generations have FAILED — the job it
     exists for — and never silently shortens the success ceiling.
     """
-    return daily_cap_for(is_market_scope, earnings_window=earnings_window) + (
-        PER_SCOPE_FAILURE_ALLOWANCE
-    )
+    return daily_cap_for(
+        is_market_scope, earnings_window=earnings_window, report_day=report_day,
+    ) + PER_SCOPE_FAILURE_ALLOWANCE
 
 
 def premarket_cap_for(is_market_scope: bool, *, earnings_window: bool = False) -> int:
@@ -272,6 +321,26 @@ def reserve_applies(now: datetime, session_phase: str) -> bool:
     if not is_trading_day(local.date()):
         return False
     return (local.hour, local.minute) < (9, 30)
+
+
+def earnings_reserve_applies(
+    now: datetime, session_phase: str, earnings_pending_today: bool
+) -> bool:
+    """Is a report-day ticker's after-close allowance being held back right now?
+
+    Only in the REGULAR session of a ticker whose report is due today and whose
+    results have not appeared yet. Not in pre-market (the pre-market reserve
+    already binds far lower), not after the close (that is what the allowance is
+    FOR), and never on a half-day: `session_phase` reads CLOSED from 13:00 ET and
+    the equity sweep stops, so an allowance held until the close could never be
+    spent. A naive ``now`` is read as UTC.
+    """
+    if not earnings_pending_today or session_phase != SESSION_REGULAR:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local = now.astimezone(ET)
+    return (local.year, local.month, local.day) not in US_MARKET_EARLY_CLOSES
 
 
 # ── Decision ──────────────────────────────────────────────────────────
@@ -535,7 +604,14 @@ def corpus_article_ids(corpus: Sequence[Dict[str, Any]]) -> list:
 
 # ── The gate ──────────────────────────────────────────────────────────
 
-def _cooldown_seconds(market_active: bool) -> int:
+def _cooldown_seconds(
+    market_active: bool,
+    *,
+    report_day: bool = False,
+    session_phase: str = SESSION_REGULAR,
+) -> int:
+    if report_day and session_phase == SESSION_AFTERHOURS:
+        return REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS
     return COOLDOWN_SESSION_SECONDS if market_active else COOLDOWN_CLOSED_SECONDS
 
 
@@ -567,12 +643,30 @@ def decide(
     sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
     earnings_window: bool = False,
+    report_day: bool = False,
+    earnings_pending_today: bool = False,
+    earnings_reported_at: Optional[datetime] = None,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
     Returns a :class:`Decision` whose ``reason`` is always populated. Never
     raises: any unexpected input degrades to ``skip("gate_error")`` so a single
     malformed FMP row cannot break the whole sweep or 500 the Updates screen.
+
+    The three earnings inputs come from `earnings_window_service` via the
+    sweeper and are all no-ops at their defaults:
+
+    * ``report_day`` — the ticker reports TODAY (pending or already reported):
+      `AFTER_CLOSE_EARNINGS_RESERVE` extra successes, and a 30-minute cooldown
+      in after-hours.
+    * ``earnings_pending_today`` — reports today, results not in yet: the extra
+      allowance is held back through the regular session (`earnings_reserved`).
+    * ``earnings_reported_at`` — when THIS process first saw the results land.
+      A card generated before that instant is regenerated once, even with an
+      unchanged corpus and through both reserves (`earnings_reported`), but never
+      past the daily cap, the attempt cap or the cooldown. Deliberately NOT a
+      fingerprint input: a status in the fingerprint re-keyed every card on each
+      calendar-fetch failure and whenever two instances disagreed.
     """
     try:
         return _decide_inner(
@@ -582,6 +676,9 @@ def decide(
             market_active=market_active, is_market_scope=is_market_scope,
             sigma_daily=sigma_daily, session_phase=session_phase,
             earnings_window=earnings_window,
+            report_day=report_day,
+            earnings_pending_today=earnings_pending_today,
+            earnings_reported_at=earnings_reported_at,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -606,8 +703,15 @@ def _decide_inner(
     sigma_daily: Optional[float] = None,
     session_phase: str = SESSION_REGULAR,
     earnings_window: bool = False,
+    report_day: bool = False,
+    earnings_pending_today: bool = False,
+    earnings_reported_at: Optional[datetime] = None,
 ) -> Decision:
     state = state or {}
+    # A ticker-only concept: the market scope has no earnings date.
+    if is_market_scope:
+        report_day = earnings_pending_today = False
+        earnings_reported_at = None
 
     # ── 0. Empty corpus: never hand Gemini nothing ──
     # With no articles the model has no grounding and will confabulate a
@@ -642,16 +746,27 @@ def _decide_inner(
         corpus_article_ids(corpus), canonical_band(band), model
     )
 
+    # Results landed after this card was written: the one change the corpus
+    # fingerprint cannot see (the prompt's EARNINGS line flips to "reported").
+    last_gen = _parse_ts(state.get("last_generated_at"))
+    reported_at = earnings_reported_at
+    if reported_at is not None and reported_at.tzinfo is None:
+        reported_at = reported_at.replace(tzinfo=timezone.utc)
+    earnings_trigger = reported_at is not None and (
+        last_gen is None or last_gen < reported_at
+    )
+
     # ── 1. Fingerprint short-circuit — the money-saver ──
     # Checked BEFORE every other branch: if the inputs are identical the output
-    # is provably identical, so there is nothing to buy at any price.
+    # is provably identical, so there is nothing to buy at any price. The one
+    # exception is `earnings_trigger` — the inputs the fingerprint covers are
+    # identical, but the prompt's EARNINGS line is not.
     stale_refresh = False
-    if inputset_id == state.get("last_inputset_id"):
+    if inputset_id == state.get("last_inputset_id") and not earnings_trigger:
         # Max-staleness floor for the MARKET default tab: if the card is older
         # than MAX_STALENESS_SECONDS, DON'T short-circuit — fall through to the
         # cap/cooldown checks and regenerate so the tab is never stale-looking
         # during a session. Everything else keeps the $0 touch/skip. MARKET only.
-        last_gen = _parse_ts(state.get("last_generated_at"))
         stale_refresh = (
             is_market_scope
             and last_gen is not None
@@ -698,7 +813,10 @@ def _decide_inner(
     successes = int(state.get("regen_count_today") or 0) if same_day else 0
     attempts = int(state.get("attempts_today") or 0) if same_day else 0
 
-    if successes >= daily_cap_for(is_market_scope, earnings_window=earnings_window):
+    daily_cap = daily_cap_for(
+        is_market_scope, earnings_window=earnings_window, report_day=report_day,
+    )
+    if successes >= daily_cap:
         return Decision(
             action=ACTION_SKIP, reason="daily_cap",
             inputset_id=inputset_id, price_band=band,
@@ -708,8 +826,11 @@ def _decide_inner(
     # articles that drove it are still in the corpus. `reserve_applies` covers
     # pre-market AND the small hours before it on a trading day (the crypto
     # off-hours pass evaluates coins in `closed`), never a weekend or holiday.
+    # A before-the-open report that just landed (`earnings_trigger`) is worth one
+    # card now rather than at 09:30.
     if (
-        reserve_applies(now, session_phase)
+        not earnings_trigger
+        and reserve_applies(now, session_phase)
         and successes >= premarket_cap_for(
             is_market_scope, earnings_window=earnings_window
         )
@@ -718,23 +839,56 @@ def _decide_inner(
             action=ACTION_SKIP, reason="premarket_reserved",
             inputset_id=inputset_id, price_band=band,
         )
-    if attempts >= attempt_cap_for(is_market_scope, earnings_window=earnings_window):
+    if attempts >= attempt_cap_for(
+        is_market_scope, earnings_window=earnings_window, report_day=report_day,
+    ):
         return Decision(
             action=ACTION_SKIP, reason="attempt_cap",
             inputset_id=inputset_id, price_band=band,
         )
+    # Report day, results not in yet: hold the after-close allowance back through
+    # the regular session so the card can still change once the report lands.
+    # Checked AFTER the attempt cap so the reason that lasts all day is reported.
+    if (
+        not earnings_trigger
+        and earnings_reserve_applies(now, session_phase, earnings_pending_today)
+        and successes >= max(1, daily_cap - AFTER_CLOSE_EARNINGS_RESERVE)
+    ):
+        return Decision(
+            action=ACTION_SKIP, reason="earnings_reserved",
+            inputset_id=inputset_id, price_band=band,
+        )
 
     # ── 4. Cooldown ──
-    last_gen = _parse_ts(state.get("last_generated_at"))
+    cooldown = _cooldown_seconds(
+        market_active, report_day=report_day, session_phase=session_phase,
+    )
     if last_gen is not None:
         elapsed = (now - last_gen).total_seconds()
         # A negative elapsed means clock skew or a future timestamp; treat it as
         # "just generated" and wait, rather than regenerating in a tight loop.
-        if elapsed < _cooldown_seconds(market_active):
+        if elapsed < cooldown:
             return Decision(
                 action=ACTION_SKIP, reason="cooldown",
                 inputset_id=inputset_id, price_band=band,
             )
+    # A generation that FAILED recently waits one cooldown too. Without this a
+    # repeatable failure (a card the conclusion guard rejects twice for the same
+    # corpus) re-trips every 5-minute cycle and spends the whole failure
+    # allowance within the hour, freezing the scope for the day — the very
+    # symptom the caps above exist to prevent. Only a failure NEWER than the last
+    # success counts. Deliberately not a "verified current" reason: the scope
+    # WILL retry within one cooldown.
+    last_fail = _parse_ts(state.get("last_failure_at"))
+    if (
+        last_fail is not None
+        and (last_gen is None or last_fail > last_gen)
+        and (now - last_fail).total_seconds() < cooldown
+    ):
+        return Decision(
+            action=ACTION_SKIP, reason="failure_cooldown",
+            inputset_id=inputset_id, price_band=band,
+        )
 
     # ── 5. Regenerate — describe WHY ──
     prev_band = state.get("last_price_band")
@@ -750,6 +904,8 @@ def _decide_inner(
     if stale_refresh:
         # Unchanged inputs, but the MARKET card aged past the staleness floor.
         reasons.append("stale_refresh")
+    if earnings_trigger and state.get("last_inputset_id") is not None:
+        reasons.append("earnings_reported")
     if not reasons:
         reasons.append(f"new_articles ({len(corpus)})")
 
@@ -768,10 +924,13 @@ __all__ = [
     "PER_SCOPE_DAILY_CAP_MARKET",
     "PER_SCOPE_ATTEMPT_CAP",
     "PER_SCOPE_FAILURE_ALLOWANCE",
+    "AFTER_CLOSE_EARNINGS_RESERVE",
+    "REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS",
     "daily_cap_for",
     "attempt_cap_for",
     "premarket_cap_for",
     "reserve_applies",
+    "earnings_reserve_applies",
     "COOLDOWN_SESSION_SECONDS",
     "COOLDOWN_CLOSED_SECONDS",
     "MAX_STALENESS_SECONDS",

@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     GEMINI_MAX_TOKENS: int = 8192
     GEMINI_TEMPERATURE: float = 0.7
     GEMINI_CACHE_TTL: int = 3600  # seconds to cache API responses (saves quota)
+    # Updates-screen Insights card model (news_insight_service.INSIGHT_MODEL).
+    # None → gemini-2.5-flash-lite. It was read with getattr() but never declared,
+    # so `extra="ignore"` dropped the variable and the override never worked. The
+    # model id is part of every card's fingerprint: changing it re-keys every scope
+    # (one controlled regeneration wave, bounded by the per-cycle and daily caps).
+    INSIGHT_AI_MODEL: Optional[str] = None
 
     # Price-catalyst grounding (Gemini web-search "why did it move" for big moves)
     PRICE_CATALYST_AI_ENABLED: bool = True       # kill switch; false → FMP fallback

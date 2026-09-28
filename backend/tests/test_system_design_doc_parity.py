@@ -422,6 +422,10 @@ _CURATED_TABLES = {
     "short_interest_cache", "crypto_coin_id_cache", "competitor_intel_cache",
     "moat_intel_cache", "ip_intel_cache", "ai_insight_cache",
     "user_learn_progress", "push_send_log",
+    # 2026-09-27: 173-181 applied and re-dumped. The document already named these tables;
+    # now that the snapshot holds them they are curated, so a DROP fails here.
+    "marketing_scripts", "marketing_link_hits", "theme_rotation_runs", "theme_daily_insights",
+    "trillion_club_stakes", "search_pick_daily", "news_sentiment_log", "news_sentiment_backfill",
 }
 
 

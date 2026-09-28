@@ -9,6 +9,7 @@ Architecture:
   3. Background pre-warmer keeps popular watchlist tickers warm (raw cache only).
 """
 
+import hashlib
 import json
 import logging
 import asyncio
@@ -31,6 +32,7 @@ from app.integrations.fmp import (
 from app.integrations.gemini import get_gemini_client
 from app.services.news_llm import (
     generate_news_json,
+    is_content_refusal,
     is_transient_news_llm_error,
     news_model_name,
 )
@@ -90,6 +92,10 @@ REFRESH_LOOKBACK_HOURS = 96
 # We treat the top-N ApeWisdom-ranked symbols as "trending". Best-effort only.
 _BUZZ_TOP_N = 40
 _BUZZ_TIMEOUT_SECONDS = 2.0
+
+
+#: Article sets a provider's moderation refused, logged at ERROR once per process.
+_REFUSED_BATCHES: set = set()
 
 
 def article_external_id(raw: Dict[str, Any], index: int) -> str:
@@ -1055,6 +1061,34 @@ class NewsCacheService:
             update_tasks.append(self._update_enrichment_row(row["id"], update_data))
             update_indices.append(i)
 
+        # Keep a history of the labels (migration 180) — the ONE place a live label is
+        # written, so every enrich path (sweeper, pre-warmer, every screen's enrich endpoint)
+        # feeds the Updates sentiment timeline. Best-effort, never raises.
+        #
+        # BEFORE the cache updates, not after: the updates run in worker threads that commit
+        # even when this task is cancelled (the sweeper is, on every Railway deploy), and a
+        # row marked ai_processed=True is never enriched — or labelled — again. Logged after,
+        # a cancel between the two lost the label for good. Logged first, a row whose update
+        # then fails is simply re-enriched later, and first-label-wins ignores the repeat.
+        # Only labels the model actually gave (`sentiment_valid`): a missing or off-list one
+        # shows as neutral on the badge but is not a "neutral" headline on the chart.
+        labelled = [
+            needs_enrichment[i] for i in update_indices
+            if (enrichments.get(i) or {}).get("sentiment_valid", True)
+        ]
+        if len(labelled) < len(update_indices):
+            logger.warning(
+                "news enrichment: %d of %d label(s) for %s were not a valid sentiment — "
+                "kept off the news-tone log", len(update_indices) - len(labelled),
+                len(update_indices), ticker,
+            )
+        if labelled:
+            from app.services.news_sentiment_trend_service import record_labels
+
+            await record_labels(
+                getattr(self, "supabase", None), ticker, labelled, model=news_model_name(),
+            )
+
         # Execute all DB updates concurrently
         if update_tasks:
             results = await asyncio.gather(*update_tasks, return_exceptions=True)
@@ -1062,21 +1096,6 @@ class NewsCacheService:
             for j, r in enumerate(results):
                 if isinstance(r, Exception):
                     logger.error(f"Failed to update enrichment for article {update_indices[j]}: {r}")
-            # Keep a history of the labels (migration 180) — the ONE place a label is
-            # written, so every enrich path (sweeper, pre-warmer, every screen's enrich
-            # endpoint) feeds the Updates sentiment timeline. Only rows whose own update
-            # landed; best-effort and never raises (the feed must not depend on it).
-            labelled = [
-                needs_enrichment[update_indices[j]]
-                for j, r in enumerate(results)
-                if not isinstance(r, Exception)
-            ]
-            if labelled:
-                from app.services.news_sentiment_trend_service import record_labels
-
-                await record_labels(
-                    getattr(self, "supabase", None), ticker, labelled, model=news_model_name(),
-                )
         else:
             success_count = 0
 
@@ -1230,11 +1249,18 @@ class NewsCacheService:
         """
         if not isinstance(parsed, list) or len(parsed) != expected_count:
             return {}
+        # Typed per element. Gemini's schema guarantees these shapes; an OpenAI-compatible
+        # provider in json_object mode only guarantees "valid JSON", and without these
+        # checks a string `bullets` became its first five CHARACTERS and a string
+        # `related_tickers` one "ticker" per character — persisted to the shared cache.
+        from app.services.news_sentiment_trend_service import normalize_sentiment as strict_sentiment
+
         result: Dict[int, Dict[str, Any]] = {}
         for pos, item in enumerate(parsed):
             if not isinstance(item, dict):
                 continue
-            raw_tickers = item.get("related_tickers", []) or []
+            raw_tickers = item.get("related_tickers")
+            raw_tickers = raw_tickers if isinstance(raw_tickers, list) else []
             # A reserved cache key ("__MARKET__") is never a ticker; the iOS chip row
             # would render it as one. No real symbol starts with an underscore.
             cleaned_tickers = list(
@@ -1244,23 +1270,36 @@ class NewsCacheService:
                     if isinstance(t, str) and t.strip() and not t.strip().startswith("_")
                 )
             )[:8]
-            bullets = list((item.get("bullets", []) or [])[:5])
+            raw_bullets = item.get("bullets")
+            # A malformed `bullets` (a string, a list of objects) leaves the article
+            # unenriched and retryable (`_enrichment_is_usable`), never a garbled summary.
+            bullets = (
+                [b.strip() for b in raw_bullets if isinstance(b, str) and b.strip()][:5]
+                if isinstance(raw_bullets, list) else []
+            )
             if bullets and isinstance(bullets[-1], str):
                 # The conclusion's lead-in ("Investors should care because …") is
                 # stripped HERE too, so newly enriched rows are clean for every app
                 # version and for the widget's key points. Cached rows are never
                 # re-enriched, which is why iOS still strips at display time.
                 bullets[-1] = lead_in_remainder(bullets[-1])
+            raw_sentiment = item.get("sentiment")
             result[pos] = {
                 "bullets": bullets,
-                "sentiment": NewsCacheService._normalize_sentiment(item.get("sentiment", "")),
+                "sentiment": NewsCacheService._normalize_sentiment(
+                    raw_sentiment if isinstance(raw_sentiment, str) else ""
+                ),
+                # Whether the MODEL gave one of the labels. A missing or off-list value
+                # still shows as "neutral" on the badge (display unchanged), but it is
+                # never written to the news-tone log as if the model had said neutral.
+                "sentiment_valid": strict_sentiment(raw_sentiment) is not None,
                 "confidence": _clamp_confidence(item.get("confidence", 0)),
                 "related_tickers": cleaned_tickers,
             }
         return result
 
     async def _batch_enrich_articles(
-        self, articles: List[Dict[str, Any]], ticker: str = ""
+        self, articles: List[Dict[str, Any]], ticker: str = "", _split: bool = True,
     ) -> Dict[int, Dict[str, Any]]:
         """
         Enrich all articles in a single Gemini API call.
@@ -1362,6 +1401,8 @@ Return a JSON array with one object per article in order. Each object must have:
             # circuit-governed, so log at WARNING (not an ERROR-level Sentry page);
             # the batch just isn't enriched this pass. Anything else is unexpected
             # → ERROR with a stack.
+            if is_content_refusal(e):
+                return await self._enrich_after_refusal(articles, ticker, _split)
             if is_transient_news_llm_error(e):
                 logger.warning(
                     f"Gemini batch enrichment degraded (transient) for {ticker or '<mixed>'}: {e}"
@@ -1376,6 +1417,34 @@ Return a JSON array with one object per article in order. Each object must have:
             # 'return unenriched' branch — ai_processed stays False, so the next
             # request retries once Gemini recovers.
             return {}
+
+    async def _enrich_after_refusal(
+        self, articles: List[Dict[str, Any]], ticker: str, split: bool,
+    ) -> Dict[int, Dict[str, Any]]:
+        """A provider's moderation refused the batch — deterministic for that input, so the
+        same batch would be refused on every sweep and ONE article would keep all its
+        neighbours unsummarised (and off the news-tone chart) for days. Split once, as the
+        backfill does; the half still refused stays unenriched (retryable) and is logged at
+        ERROR once per article set per process, so a stall is visible without paging on
+        every 15-minute pass. Keys of the second half are shifted back to batch positions."""
+        if split and len(articles) > 1:
+            mid = len(articles) // 2
+            left = await self._batch_enrich_articles(articles[:mid], ticker=ticker, _split=False)
+            right = await self._batch_enrich_articles(articles[mid:], ticker=ticker, _split=False)
+            return {**left, **{k + mid: v for k, v in right.items()}}
+        marker = hashlib.sha1(
+            "|".join(str(a.get("title", "")) for a in articles).encode("utf-8")
+        ).hexdigest()
+        if marker not in _REFUSED_BATCHES and len(_REFUSED_BATCHES) < 1000:
+            _REFUSED_BATCHES.add(marker)
+            logger.error(
+                "news enrichment: %d article(s) for %s refused by the provider's moderation — "
+                "left unenriched", len(articles), ticker or "<mixed>",
+            )
+        else:
+            logger.warning("news enrichment: %d article(s) for %s refused again by moderation",
+                           len(articles), ticker or "<mixed>")
+        return {}
 
     # ── Private: Cache lookup ─────────────────────────────────────────
 

@@ -40,6 +40,8 @@ from app.config import settings
 from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
 from app.integrations.openai_compat import (
     OpenAICompatClient,
+    OpenAICompatContentRejected,
+    OpenAICompatError,
     is_transient_openai_compat_error,
     parse_extra_body,
     quota_breaker as openai_compat_breaker,
@@ -54,7 +56,10 @@ PROVIDERS = (PROVIDER_GEMINI, PROVIDER_OPENAI_COMPAT)
 #: The key a top-level array is wrapped under for providers whose JSON mode needs an object.
 WRAP_KEY = "items"
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+
 _warned_bad_provider = False
+_warned_bad_gemini_model = False
 
 
 @dataclass(frozen=True)
@@ -65,36 +70,68 @@ class NewsLLMConfig:
     api_key: Optional[str] = field(default=None, repr=False)
     json_mode: str = "json_object"
     extra_body: Dict[str, Any] = field(default_factory=dict)
+    max_tokens: Optional[int] = None
+    max_tokens_field: str = "max_tokens"
+    send_temperature: bool = True
+
+
+def _is_gemini_model(model: str) -> bool:
+    return model.lower().startswith("gemini-")
 
 
 def news_llm_config() -> NewsLLMConfig:
     """Read the settings each call (cheap), so a test or a hot env change is honoured.
 
-    An unknown provider, or an incomplete OpenAI-compatible setup, falls back to Gemini
-    with an ERROR logged once — a typo in Railway must degrade to the working default, not
-    stop every article from being summarised.
+    The model is scoped to the provider, so a half-done switch degrades to the working
+    default instead of stopping every article from being summarised (each logged ERROR once):
+      * an unknown provider, or an openai_compat setup missing its URL, key or its OWN model
+        (unset, or still a ``gemini-`` name), falls back to Gemini flash-lite;
+      * provider gemini with a non-Gemini model — the leftover of rolling back from a switch
+        by changing only NEWS_LLM_PROVIDER — uses flash-lite, not a name Gemini 404s on.
     """
-    global _warned_bad_provider
+    global _warned_bad_provider, _warned_bad_gemini_model
     provider = (getattr(settings, "NEWS_LLM_PROVIDER", None) or PROVIDER_GEMINI).strip().lower()
-    model = (getattr(settings, "NEWS_LLM_MODEL", None) or "gemini-2.5-flash-lite").strip()
+    model = (getattr(settings, "NEWS_LLM_MODEL", None) or "").strip()
     if provider == PROVIDER_OPENAI_COMPAT:
-        base_url = getattr(settings, "NEWS_LLM_BASE_URL", None)
-        api_key = getattr(settings, "NEWS_LLM_API_KEY", None)
-        if base_url and api_key and model:
+        # Stripped: a key pasted with a trailing newline is an illegal header (h11 refuses
+        # it); a URL without a scheme is refused by httpx. Both used to "retry" forever.
+        base_url = (getattr(settings, "NEWS_LLM_BASE_URL", None) or "").strip()
+        api_key = (getattr(settings, "NEWS_LLM_API_KEY", None) or "").strip()
+        url_ok = base_url.lower().startswith(("https://", "http://"))
+        if base_url and api_key and url_ok and model and not _is_gemini_model(model):
+            field_name = (getattr(settings, "NEWS_LLM_MAX_TOKENS_FIELD", None) or "max_tokens").strip()
+            if field_name not in ("max_tokens", "max_completion_tokens"):
+                field_name = "max_tokens"
+            cap = getattr(settings, "NEWS_LLM_MAX_TOKENS", None)
             return NewsLLMConfig(
                 provider=provider, model=model, base_url=base_url, api_key=api_key,
                 json_mode=(getattr(settings, "NEWS_LLM_JSON_MODE", None) or "json_object"),
                 extra_body=parse_extra_body(getattr(settings, "NEWS_LLM_EXTRA_BODY", None)),
+                max_tokens=int(cap) if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0 else None,
+                max_tokens_field=field_name,
+                send_temperature=getattr(settings, "NEWS_LLM_SEND_TEMPERATURE", True) is not False,
             )
-        reason = "NEWS_LLM_BASE_URL / NEWS_LLM_API_KEY missing"
+        if not (base_url and api_key):
+            reason = "NEWS_LLM_BASE_URL / NEWS_LLM_API_KEY missing"
+        elif not url_ok:
+            reason = "NEWS_LLM_BASE_URL must start with https://"
+        else:
+            reason = f"NEWS_LLM_MODEL must name the openai_compat model (got {model or 'nothing'!r})"
     elif provider == PROVIDER_GEMINI:
-        return NewsLLMConfig(provider=PROVIDER_GEMINI, model=model)
+        if model and _is_gemini_model(model):
+            return NewsLLMConfig(provider=PROVIDER_GEMINI, model=model)
+        if model and not _warned_bad_gemini_model:
+            logger.error("news_llm: NEWS_LLM_MODEL %r is not a Gemini model — using %s "
+                         "(unset NEWS_LLM_MODEL after switching back to gemini)",
+                         model, DEFAULT_GEMINI_MODEL)
+            _warned_bad_gemini_model = True
+        return NewsLLMConfig(provider=PROVIDER_GEMINI, model=DEFAULT_GEMINI_MODEL)
     else:
         reason = f"unknown NEWS_LLM_PROVIDER {provider!r}"
     if not _warned_bad_provider:
-        logger.error("news_llm: %s — falling back to Gemini gemini-2.5-flash-lite", reason)
+        logger.error("news_llm: %s — falling back to Gemini %s", reason, DEFAULT_GEMINI_MODEL)
         _warned_bad_provider = True
-    return NewsLLMConfig(provider=PROVIDER_GEMINI, model="gemini-2.5-flash-lite")
+    return NewsLLMConfig(provider=PROVIDER_GEMINI, model=DEFAULT_GEMINI_MODEL)
 
 
 def news_model_name() -> str:
@@ -103,8 +140,21 @@ def news_model_name() -> str:
 
 
 def is_transient_news_llm_error(exc: BaseException) -> bool:
-    """Capacity / quota / 5xx on EITHER provider — expected degradation, logged as WARNING."""
-    return is_transient_gemini_error(exc) or is_transient_openai_compat_error(exc)
+    """Capacity / quota / 5xx on EITHER provider — expected degradation, logged as WARNING.
+
+    An openai_compat error is judged by its own TYPE only: Gemini's classifier matches
+    substrings ("429", "quota"), which would read an exhausted account ("HTTP 429
+    insufficient_quota", deliberately non-transient) as a blip to wait out in silence.
+    """
+    if isinstance(exc, OpenAICompatError):
+        return is_transient_openai_compat_error(exc)
+    return is_transient_gemini_error(exc)
+
+
+def is_content_refusal(exc: BaseException) -> bool:
+    """The provider's moderation refused the prompt — an unusable answer for that batch,
+    handled like Gemini's blocked prompt (never an outage, never a failed run)."""
+    return isinstance(exc, OpenAICompatContentRejected)
 
 
 def quota_tripped() -> bool:
@@ -245,6 +295,8 @@ async def generate_news_json(
     client = OpenAICompatClient(
         base_url=cfg.base_url or "", api_key=cfg.api_key or "",
         extra_body=cfg.extra_body, json_mode=cfg.json_mode,
+        max_tokens_field=cfg.max_tokens_field,
+        send_temperature=cfg.send_temperature,
     )
     result = await client.generate_json(
         prompt=_schema_prompt(prompt, json_schema, wrapped),
@@ -253,6 +305,9 @@ async def generate_news_json(
         json_schema=json_schema,
         temperature=temperature,
         usage_tag=usage_tag,
+        # Gemini always ran with GEMINI_MAX_TOKENS (8192); a provider default of 4K would cut
+        # a 25–50-article enrichment answer mid-JSON and re-bill it on every scroll.
+        max_tokens=cfg.max_tokens,
     )
     if wrapped:
         result = {**result, "text": _unwrap_array_text(result.get("text") or "")}
@@ -260,6 +315,7 @@ async def generate_news_json(
 
 
 __all__ = [
+    "DEFAULT_GEMINI_MODEL",
     "NewsLLMConfig",
     "PROVIDERS",
     "PROVIDER_GEMINI",
@@ -267,6 +323,7 @@ __all__ = [
     "WRAP_KEY",
     "gemini_schema_to_json_schema",
     "generate_news_json",
+    "is_content_refusal",
     "is_transient_news_llm_error",
     "news_llm_config",
     "news_model_name",

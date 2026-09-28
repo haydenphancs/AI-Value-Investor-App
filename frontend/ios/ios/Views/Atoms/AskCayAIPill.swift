@@ -15,6 +15,12 @@ struct AskCayAIPill: View {
     var title: String = "Ask Cay AI"
     let action: () -> Void
 
+    /// The hit frame's floor: the app's in-card target size (`DiversificationCard`'s
+    /// `segmentMinHeight`, ~34 pt — the 44 pt HIG figure read as oversized in a card). The
+    /// old 4 pt pad around a ~21 pt capsule left a ~29 pt target on the Insights card, whose
+    /// own tap opens Sources — a near miss opened the wrong sheet.
+    static let minHitHeight: CGFloat = 18 + 2 * AppSpacing.sm
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: AppSpacing.xs) {
@@ -33,9 +39,11 @@ struct AskCayAIPill: View {
             .overlay(
                 Capsule().strokeBorder(AppColors.primaryBlue.opacity(0.45), lineWidth: 1)
             )
-            // A Button hit-tests what its label draws; the outer padding widens the target
-            // toward 44 pt without growing the visible capsule.
-            .padding(.vertical, AppSpacing.xs)
+            // A Button hit-tests what its label draws, and clips its hit region to its own
+            // frame (a hitSlop / negative padding does not enlarge it). A min-height frame
+            // AFTER the outline keeps the visible capsule its size; `.contentShape` LAST makes
+            // the whole frame tappable.
+            .frame(minHeight: Self.minHitHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

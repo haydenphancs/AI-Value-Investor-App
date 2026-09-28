@@ -337,3 +337,85 @@ def test_history_status_is_decoded_tolerantly():
     assert "let historyStatus: String?" in dto
     ext = _read(MODELS).split("extension SentimentTrend {")[1]
     assert "SentimentHistoryStatus(rawValue: $0.lowercased())" in ext
+
+
+# ── review fixes (2026-09-27 deep-check) ─────────────────────────────────────────
+
+
+def test_a_failed_building_recheck_schedules_the_next_one():
+    """Only `present()` scheduled a re-check, and only after a success: one 503 during a
+    building poll left the spinner up with nothing scheduled."""
+    load = _decl_block(_read(VM), "private func loadTrend(")
+    catch = load[load.index("} catch {"):]
+    kept = catch[catch.index("if let shown = sentimentTrend, shown.scope == scope {"):]
+    kept = kept[:kept.index("} else {")]
+    assert "if shown.isBuildingHistory { scheduleTrendPollIfBuilding(scope: scope) }" in kept
+
+
+def test_exhausted_rechecks_stop_the_spinner_and_its_promise():
+    vm = _read(VM)
+    poll = _decl_block(vm, "private func scheduleTrendPollIfBuilding(")
+    exhausted = poll[poll.index("guard trendPollAttempt < trendPollDelays.count else {"):]
+    assert "trendPollExhausted = true" in exhausted[:exhausted.index("}")]
+    start = _decl_block(vm, "private func startTrendLoad(")
+    head = start[:start.index("let isNewScope")]
+    # A tab return / pull restarts the re-checks but must NOT clear a stalled scope's copy.
+    assert "trendPollExhausted = stalledScopes.contains(scope)" in head
+    assert "trendPollExhausted = false" not in head
+    identity = _decl_block(vm, "func handleIdentityChange(")
+    assert "trendPollExhausted = false" in identity and "stalledScopes.removeAll()" in identity
+    ready = poll[:poll.index("guard trendPollAttempt < trendPollDelays.count else {")]
+    assert "stalledScopes.remove(scope)" in ready, "a ready answer clears the stalled copy"
+    assert "stalledScopes.insert(scope)" in exhausted[:exhausted.index("}")]
+    chart = _read(CHART)
+    placeholder = _decl_block(chart, "private var buildingPlaceholder: some View")
+    assert "if buildingStalled {" in placeholder
+    stalled = placeholder[placeholder.index("if buildingStalled {"):placeholder.index("} else {")]
+    assert "ProgressView" not in stalled, "a stalled build does not spin"
+    view = _read(VIEW)
+    assert "buildingStalled: viewModel.trendPollExhausted" in _strip_comments(view)
+
+
+def test_rechecks_pause_while_the_tab_is_hidden():
+    vm = _read(VM)
+    active = _decl_block(vm, "func setTabActive(")
+    hidden = active[active.index("if !active {"):active.index("} else if")]
+    assert "trendPollTask?.cancel()" in hidden
+    assert "startTrendLoad(scope: trend.scope, force: true)" in active
+    poll = _decl_block(vm, "private func scheduleTrendPollIfBuilding(")
+    assert poll.index("guard isTabActive else { return }") < poll.index("trendPollTask = Task")
+    task = _strip_comments(_read(VIEW))
+    block = task[task.index(".task(id: isActiveTab) {"):]
+    assert block.index("viewModel.setTabActive(isActiveTab)") < block.index("guard isActiveTab else { return }"), \
+        "before the guard, so going hidden is reported too"
+
+
+def test_todays_axis_label_wins_a_collision():
+    axis = _decl_block(_read(CHART), "private var xAxis: some AxisContent")
+    assert "collisionResolution: .greedy(" in axis
+    assert "priority: value.index == value.count - 1 ? 1 : 0" in axis
+
+
+def test_the_chat_is_told_the_window_the_chart_is_drawing():
+    """'Ask about this' on 90D was grounded on a fixed 30 days and quoted numbers the card
+    did not show. The window rides in `context` (a control token), never `referenceId`."""
+    from app.services.chat_context_resolver import updates_trend_window
+
+    opener = _decl_block(_read(VIEW), "private func openUpdatesChat(")
+    assert 'context: visibleTrend.map { "window=\\($0.window.days)" }' in opener
+    assert "referenceId: tab.chatReferenceId" in opener
+    for days in TREND_DAYS:
+        assert updates_trend_window(f"window={days}") == days
+
+
+def test_the_ask_cay_pill_has_an_in_card_tap_target():
+    """~29 pt before: on the Insights card a near miss hit the card's own Sources tap. The
+    frame must come AFTER the outline (else the capsule stretches) and BEFORE the final
+    `.contentShape` (else the hit region stays the small frame)."""
+    pill = _read(IOS / "Views" / "Atoms" / "AskCayAIPill.swift")
+    assert "static let minHitHeight: CGFloat = 18 + 2 * AppSpacing.sm" in pill
+    body = _decl_block(pill, "var body: some View")
+    overlay = body.index(".overlay(")
+    frame = body.index(".frame(minHeight: Self.minHitHeight)")
+    shape = body.index(".contentShape(Rectangle())")
+    assert overlay < frame < shape

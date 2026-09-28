@@ -352,6 +352,14 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            if kwargs.get("service_tier") == "flex":
+                # Google's Flex tier (only the background sentiment backfill asks for it) is
+                # ONE attempt that never touches the shared breaker: a busy Flex answers 429,
+                # and running that through the ladder below cost 3 calls, 15 s of backoff, an
+                # ERROR (a Sentry event) and 3 strikes on the breaker that fails Cay AI chat
+                # and reports fast. The caller falls back to the standard tier itself.
+                result = await func(*args, **kwargs)
+                return result.value if isinstance(result, _CacheHit) else result
             attempt = 0            # generic failures
             quota_attempt = 0      # quota/429 failures
             overload_attempt = 0   # server-overload / 5xx failures

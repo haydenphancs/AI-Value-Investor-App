@@ -25,6 +25,9 @@ struct NewsSentimentTrendChart: View {
     @Binding var window: SentimentTrendWindow
     /// "Ask Cay AI about this trend". Hidden when nil.
     var onAskCay: (() -> Void)? = nil
+    /// The app stopped re-checking a history that is still being built (the backend can queue
+    /// a ticker for hours). The placeholder then stops spinning and stops promising minutes.
+    var buildingStalled: Bool = false
 
     @State private var selectedKey: String?
 
@@ -96,12 +99,20 @@ struct NewsSentimentTrendChart: View {
 
     private var buildingPlaceholder: some View {
         VStack(spacing: AppSpacing.sm) {
-            ProgressView()
-                .tint(AppColors.textMuted)
-            Text("Building 90-day history…")
+            if buildingStalled {
+                Image(systemName: "clock")
+                    .font(AppTypography.iconSmall)
+                    .foregroundColor(AppColors.textMuted)
+            } else {
+                ProgressView()
+                    .tint(AppColors.textMuted)
+            }
+            Text(buildingStalled ? "Still building 90-day history" : "Building 90-day history…")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
-            Text("Usually a minute or two. It fills in newest weeks first.")
+            Text(buildingStalled
+                 ? "This is taking longer than usual. Pull down to check again later."
+                 : "Usually a minute or two. It fills in newest weeks first.")
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textMuted)
                 .multilineTextAlignment(.center)
@@ -228,10 +239,19 @@ struct NewsSentimentTrendChart: View {
             // ran into the trailing y-axis column and was cut to "S". Anchoring that one label
             // at its trailing edge keeps it inside the plot. 7D labels are centred in their
             // day slot (narrow weekday names); 90D drops month ticks near the end instead.
+            //
+            // Greedy collision resolution with today's tick placed FIRST: at large Dynamic
+            // Type, on a 375 pt phone or in a locale with longer month names, the trailing
+            // label now reaches back into the today-7 label, and the neighbour is the one
+            // dropped — never today's.
             AxisValueLabel(
                 format: axisFormat,
                 centered: trend.window == .week,
-                anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil
+                anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil,
+                collisionResolution: .greedy(
+                    priority: value.index == value.count - 1 ? 1 : 0,
+                    minimumSpacing: 4
+                )
             )
             .font(AppTypography.caption)
             .foregroundStyle(AppColors.textMuted)

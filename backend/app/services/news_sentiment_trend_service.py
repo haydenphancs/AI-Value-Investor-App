@@ -309,10 +309,15 @@ def _fmt_day(d: date) -> str:
 
 def summarize_trend(
     series: List[Dict[str, Any]], *, days: int, today: date, tracking_since: Optional[date] = None,
+    history_status: Optional[str] = None,
 ) -> Optional[str]:
     """A compact, figure-exact text of the series for chat grounding, or None when empty.
 
-    Pure and deterministic, so the chat sees exactly the numbers the chart draws.
+    Pure and deterministic, so the chat sees exactly the numbers the chart draws — for the
+    window the chart is showing (`days`). While the 90-day history is still being built
+    (`history_status` "building"), older days are NOT final and the text says so: the chart's
+    own footer says "filling in 90 days…", and the model must not call a trend from a history
+    that is still arriving.
     """
     if not series:
         return None
@@ -344,45 +349,61 @@ def summarize_trend(
             f"Most bullish day: {_fmt_day(d)} ({most_bullish['bullish']} bullish vs "
             f"{most_bullish['bearish']} bearish)."
         )
+    building = history_status == HISTORY_BUILDING
     partial = [d for d in series if d["is_partial"]]
     if partial:
         first = date.fromisoformat(partial[0]["date"])
         parts.append(
             f"Counts from {_fmt_day(first)} on are still filling in (late articles are scored "
-            "overnight and after weekends); earlier days are final."
+            "overnight and after weekends)" + ("." if building else "; earlier days are final.")
+        )
+    if building:
+        parts.append(
+            "This feed's 90-day history is still being built, so older days in this window "
+            "are incomplete: do not read a trend from them yet."
         )
     return " ".join(parts)
 
 
 def history_status_for(supabase: Any, scope: str, today: date) -> Optional[str]:
-    """See ``NewsSentimentTrendService._history_status``. Blocking; never raises."""
+    """See ``NewsSentimentTrendService._history_status``. Blocking; never raises — a failed
+    read is logged at WARNING and answers None."""
+    try:
+        return read_history_status(supabase, scope, today)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("news_sentiment_backfill status read failed for %s (%s: %s)",
+                       scope, type(e).__name__, e)
+        return None
+
+
+def read_history_status(supabase: Any, scope: str, today: date) -> Optional[str]:
+    """``building`` / ``ready`` / None. Blocking; RAISES when the read fails, so a caller can
+    tell "no backfill row" from "could not read it" (the trend cache does)."""
     from app.config import settings
 
     if not getattr(settings, "SENTIMENT_BACKFILL_ENABLED", False):
         return None
     if not scope or scope == "__MARKET__" or supabase is None:
         return None
-    try:
-        result = (
-            supabase.table(BACKFILL_TABLE)
-            .select("status,covered_from,covered_to")
-            .eq("scope", scope)
-            .limit(1)
-            .execute()
-        )
-        rows = getattr(result, "data", None) or []
-    except Exception as e:  # noqa: BLE001
-        logger.debug("news_sentiment_backfill status read failed for %s (%s: %s)",
-                     scope, type(e).__name__, e)
-        return None
+    result = (
+        supabase.table(BACKFILL_TABLE)
+        .select("status,covered_from,covered_to")
+        .eq("scope", scope)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(result, "data", None) or []
     row = rows[0] if rows and isinstance(rows[0], dict) else None
     status = row.get("status") if row else None
     if status not in ("queued", "running", "done", "failed"):
         return None          # no row yet, 'unsupported', or not a backfill row at all
     if status == "done":
         return HISTORY_READY
-    days = int(getattr(settings, "SENTIMENT_BACKFILL_DAYS", 90) or 90)
-    horizon = today - timedelta(days=max(1, days) - 1)
+    # The worker's own horizon (SENTIMENT_BACKFILL_DAYS clamped to 90): a reader with a wider
+    # one would call a finished 90-day history "building" for as long as the setting exceeds 90.
+    from app.services.news_sentiment_backfill_service import horizon_for
+
+    horizon = horizon_for(today)
     covered_from = _as_date(row.get("covered_from"))
     covered_to = _as_date(row.get("covered_to"))
     if (covered_from is not None and covered_to is not None
@@ -433,13 +454,16 @@ def upsert_log_rows(supabase: Any, payload: List[Dict[str, Any]]) -> int:
             .execute()
         )
     except Exception as e:
-        if _model_column_missing or not any("model" in r for r in rows) or not _is_missing_model_column(e):
+        # Judged on THIS call's rows, not the flag: a concurrent batch built with `model` whose
+        # error arrives after another batch set the flag must still retry, not be dropped.
+        if not any("model" in r for r in rows) or not _is_missing_model_column(e):
             raise
+        if not _model_column_missing:
+            logger.warning(
+                "news_sentiment_log: `model` column missing (migration 181 not applied) — "
+                "writing labels without it until restart"
+            )
         _model_column_missing = True
-        logger.warning(
-            "news_sentiment_log: `model` column missing (migration 181 not applied) — "
-            "writing labels without it until restart"
-        )
         rows = [{k: v for k, v in r.items() if k != "model"} for r in payload]
         result = (
             supabase.table(TABLE)
@@ -505,6 +529,9 @@ class NewsSentimentTrendService:
         self._supabase = supabase
         self._cache: Dict[Tuple[str, int, date], Tuple[float, Dict[str, Any]]] = {}
         self._inflight: Dict[Tuple[str, int, date], asyncio.Future] = {}
+        #: Keys whose last backfill-status read FAILED: served on the short TTL, so one blip
+        #: is not pinned for five minutes as "no backfill" (which also stops the app's re-checks).
+        self._status_unknown: set = set()
 
     @property
     def supabase(self) -> Any:
@@ -517,6 +544,7 @@ class NewsSentimentTrendService:
     def reset(self) -> None:
         self._cache.clear()
         self._inflight.clear()
+        self._status_unknown.clear()
 
     async def get_trend(self, scope: str, days: int, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         """``{scope, days, series, tracking_since, history_status}``.
@@ -531,7 +559,8 @@ class NewsSentimentTrendService:
         if cached:
             # A scope whose history is still being built changes minute to minute, so the
             # app's re-checks must see new weeks arrive: 30 s instead of 5 min.
-            ttl = _BUILDING_TTL_SECONDS if cached[1].get("history_status") == HISTORY_BUILDING else _CACHE_TTL_SECONDS
+            short = cached[1].get("history_status") == HISTORY_BUILDING or key in self._status_unknown
+            ttl = _BUILDING_TTL_SECONDS if short else _CACHE_TTL_SECONDS
             if time.monotonic() - cached[0] < ttl:
                 return cached[1]
 
@@ -545,6 +574,7 @@ class NewsSentimentTrendService:
             result = await self._fetch(scope, days, today, now)
             if len(self._cache) >= _CACHE_MAX_ENTRIES:
                 self._cache.clear()
+                self._status_unknown = {key} & self._status_unknown
             self._cache[key] = (time.monotonic(), result)
             # Guarded: `reset()` (tests, or a future caller) may have resolved or dropped it.
             if not fut.done():
@@ -569,7 +599,16 @@ class NewsSentimentTrendService:
         partial_from = min(today, open_since(now or datetime.now(timezone.utc)))
         client = self.supabase
 
-        def _read() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        def _read() -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+            # Status FIRST: a run that completes between the two reads then errs toward
+            # "building" (one more 30 s re-check), never toward a "ready" answer — cached for
+            # minutes on both sides — whose newest labels are missing from the series.
+            try:
+                status, status_ok = self._history_status(scope, today), True
+            except Exception as e:  # noqa: BLE001 — the status never decides whether the chart loads
+                logger.warning("news_sentiment_backfill status read failed for %s (%s: %s)",
+                               scope, type(e).__name__, e)
+                status, status_ok = None, False
             daily = client.rpc(
                 DAILY_RPC, {"p_scope": scope, "p_since": since.isoformat()}
             ).execute()
@@ -583,12 +622,22 @@ class NewsSentimentTrendService:
             )
             first_rows = getattr(first, "data", None) or []
             first_day = first_rows[0].get("et_day") if first_rows and isinstance(first_rows[0], dict) else None
-            return (getattr(daily, "data", None) or []), first_day
+            return (getattr(daily, "data", None) or []), first_day, status, status_ok
 
         try:
-            raw, first_day = await asyncio.to_thread(_read)
+            raw, first_day, history_status, status_ok = await asyncio.to_thread(_read)
         except Exception as e:
             raise SentimentTrendUnavailable(f"{type(e).__name__}: {e}") from e
+
+        key = (scope, days, today)
+        if status_ok:
+            self._status_unknown.discard(key)
+        else:
+            self._status_unknown.add(key)
+            # Keep the last known "building" so the app's re-checks continue through a blip.
+            previous = self._cache.get(key)
+            if previous and previous[1].get("history_status") == HISTORY_BUILDING:
+                history_status = HISTORY_BUILDING
 
         tracking_since: Optional[date] = None
         if first_day:
@@ -601,19 +650,20 @@ class NewsSentimentTrendService:
             "days": days,
             "series": shape_series(raw, today=today, since=since, partial_from=partial_from),
             "tracking_since": tracking_since.isoformat() if tracking_since else None,
-            "history_status": await asyncio.to_thread(self._history_status, scope, today),
+            "history_status": history_status,
         }
 
     def _history_status(self, scope: str, today: date) -> Optional[str]:
-        """``building`` / ``ready`` / None for the scope's 90-day backfill. Best-effort.
+        """``building`` / ``ready`` / None for the scope's 90-day backfill.
 
-        Blocking — called through ``asyncio.to_thread``. Any failure (migration 181 not yet
-        applied, a Supabase blip, a fake client in a test) is None: the status only decides
-        whether the app shows "Building 90-day history…", never whether the chart loads.
-        None while the backfill is switched off, so a leftover queued row cannot promise a
-        history that nothing is building.
+        Blocking — called inside ``_fetch``'s thread. RAISES on a failed read (migration 181
+        not applied, a Supabase blip): ``_fetch`` answers None for it, logs a WARNING, keeps
+        a previous "building", and serves that answer on the short TTL. The status only
+        decides whether the app shows "Building 90-day history…", never whether the chart
+        loads. None while the backfill is switched off, so a leftover queued row cannot
+        promise a history that nothing is building.
         """
-        return history_status_for(self.supabase, scope, today)
+        return read_history_status(self.supabase, scope, today)
 
     def sweep_expired(self, today: Optional[date] = None) -> int:
         """Delete labels older than :data:`RETENTION_DAYS` (ET). Best-effort; returns rows."""
@@ -653,6 +703,7 @@ __all__ = [
     "et_day",
     "get_news_sentiment_trend_service",
     "history_status_for",
+    "read_history_status",
     "upsert_log_rows",
     "SOURCES",
     "net_score",

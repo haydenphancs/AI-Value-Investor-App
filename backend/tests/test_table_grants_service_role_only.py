@@ -696,10 +696,13 @@ def test_every_not_yet_applied_table_is_granted_to_service_role_and_has_rls():
 
 
 def test_the_pending_table_guard_is_not_vacuous():
-    # It sees the not-yet-applied tables of this change (remove a name once 173 is dumped).
-    pending = _pending_tables()
-    assert {"marketing_scripts", "marketing_link_hits"} <= set(pending) or not (
-        _MIGRATIONS / "173_marketing_scripts_and_link_hits.sql").exists(), sorted(pending)
+    # Real data: the scan reads the actual migrations (181's queue is seen with its full
+    # service_role grant and its RLS), and a table the snapshot already holds is not pending.
+    # (It used to assert 173's tables were pending; they were applied and dumped 2026-09-27.)
+    real = _pending_table_state((p.name, p.read_text(encoding="utf-8")) for p in _sql_files())
+    assert real["news_sentiment_backfill"]["rls"], real.get("news_sentiment_backfill")
+    assert _DML <= real["news_sentiment_backfill"]["privs"], real.get("news_sentiment_backfill")
+    assert "news_sentiment_backfill" not in _pending_tables()
 
     # Synthetic discrimination: a dropped GRANT, a dropped RLS, a partial grant, a revoke after
     # a grant, a commented grant, and a table dropped again are each seen for what they are.

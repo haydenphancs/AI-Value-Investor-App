@@ -235,26 +235,36 @@ class _EnrichSelect:
 
 
 @pytest.mark.asyncio
-async def test_the_enrich_path_logs_only_rows_whose_update_landed(monkeypatch):
+async def test_the_enrich_path_logs_labels_before_the_cache_marks_rows_processed(monkeypatch):
+    """The cache updates commit in worker threads even when the task is cancelled (the
+    sweeper is, on every deploy), and an ai_processed row is never enriched again — so a
+    label logged AFTER them was lost for good by a cancel in between. Logged first; a row
+    whose update then fails is re-enriched later and first-label-wins ignores the repeat.
+    A sentiment the model did not give (missing / off-list) never reaches the log."""
     rows = [
         {"id": f"id{i}", "external_id": f"https://x/{i}", "headline": f"H{i}", "summary": "s",
          "published_at": "2026-09-27T13:00:00+00:00", "ai_processed": False, "ticker": "ORCL"}
-        for i in range(3)
+        for i in range(4)
     ]
     svc = object.__new__(NewsCacheService)
     svc.supabase = _EnrichSelect(rows)
+    order = []
 
     async def _enrich(articles, ticker=""):
-        return {i: {"bullets": ["a", "b"], "sentiment": s, "confidence": 70, "related_tickers": []}
-                for i, s in enumerate(["bullish", "bearish", "neutral"])}
+        return NewsCacheService._map_enrichments([
+            {"bullets": ["a", "b"], "sentiment": s, "confidence": 70, "related_tickers": []}
+            for s in ["bullish", "bearish", "neutral", "mixed"]
+        ], 4)
 
     async def _update(row_id, data):
+        order.append(("update", row_id))
         if row_id == "id1":
             raise RuntimeError("update failed")
 
     seen = {}
 
     async def _record(client, scope, labelled, **kw):
+        order.append(("log", None))
         seen["client"], seen["scope"] = client, scope
         seen["rows"] = [(r["id"], r["sentiment"]) for r in labelled]
         return len(labelled)
@@ -263,10 +273,46 @@ async def test_the_enrich_path_logs_only_rows_whose_update_landed(monkeypatch):
     svc._update_enrichment_row = _update
     monkeypatch.setattr(trend, "record_labels", _record)
 
-    await svc._enrich_articles_uncached("orcl", ["id0", "id1", "id2"])
+    out = await svc._enrich_articles_uncached("orcl", ["id0", "id1", "id2", "id3"])
     assert seen["scope"] == "ORCL"
     assert seen["client"] is svc.supabase
-    assert seen["rows"] == [("id0", "bullish"), ("id2", "neutral")]
+    assert order[0] == ("log", None), "the log is written before any cache update"
+    assert seen["rows"] == [("id0", "bullish"), ("id1", "bearish"), ("id2", "neutral")], \
+        "id3's 'mixed' is not a label the model gave"
+    by_id = {r["id"]: r for r in out}
+    assert by_id["id3"]["sentiment"] == "neutral", "the badge keeps its old display default"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_the_cache_updates_keeps_the_labels(monkeypatch):
+    rows = [{"id": "id0", "external_id": "https://x/0", "headline": "H", "summary": "s",
+             "published_at": "2026-09-27T13:00:00+00:00", "ai_processed": False, "ticker": "ORCL"}]
+    svc = object.__new__(NewsCacheService)
+    svc.supabase = _EnrichSelect(rows)
+    logged = []
+    started = asyncio.Event()
+
+    async def _enrich(articles, ticker=""):
+        return NewsCacheService._map_enrichments(
+            [{"bullets": ["a", "b"], "sentiment": "bearish", "confidence": 70}], 1)
+
+    async def _update(row_id, data):
+        started.set()
+        await asyncio.Event().wait()          # the deploy cancels us here
+
+    async def _record(client, scope, labelled, **kw):
+        logged.extend(r["id"] for r in labelled)
+        return len(labelled)
+
+    svc._batch_enrich_articles = _enrich
+    svc._update_enrichment_row = _update
+    monkeypatch.setattr(trend, "record_labels", _record)
+    task = asyncio.create_task(svc._enrich_articles_uncached("orcl", ["id0"]))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert logged == ["id0"]
 
 
 @pytest.mark.asyncio
@@ -684,3 +730,152 @@ async def test_a_joiner_gets_the_typed_failure_not_a_bare_runtime_error(monkeypa
     with pytest.raises(SentimentTrendUnavailable, match="CancelledError"):
         await joiner
     assert svc._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_the_history_status_is_read_before_the_series(monkeypatch):
+    """Read after the series, a run finishing between the two reads was cached (5 min on each
+    side) as 'ready' with its newest labels missing. Read first, the race errs to 'building'."""
+    order = []
+    client = _ReadClient([_raw("2026-09-25", 2, 1, 0)], first="2026-09-20")
+    real_rpc = client.rpc
+
+    def _rpc(name, params):
+        order.append("series")
+        return real_rpc(name, params)
+
+    monkeypatch.setattr(client, "rpc", _rpc)
+    svc = NewsSentimentTrendService(client)
+
+    def _status(scope, today):
+        order.append("status")
+        return "building"
+
+    monkeypatch.setattr(svc, "_history_status", _status)
+    out = await svc.get_trend("ORCL", 30, now=NOW)
+    assert order == ["status", "series"]
+    assert out["history_status"] == "building"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_status_read_is_short_lived_and_keeps_building(monkeypatch, caplog):
+    """A blip on the status read used to answer "no backfill" for 5 minutes (logged at
+    DEBUG), which also stopped the app's "Building…" re-checks."""
+    client = _ReadClient([_raw("2026-09-25", 2, 1, 0)], first="2026-09-20")
+    svc = NewsSentimentTrendService(client)
+    state = {"fail": False}
+
+    def _status(scope, today):
+        if state["fail"]:
+            raise RuntimeError("stale connection")
+        return "building"
+
+    monkeypatch.setattr(svc, "_history_status", _status)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(trend.time, "monotonic", lambda: clock["t"])
+
+    first = await svc.get_trend("ORCL", 30, now=NOW)
+    assert first["history_status"] == "building"
+    clock["t"] += 31                              # past the building TTL
+    state["fail"] = True
+    with caplog.at_level("WARNING"):
+        blip = await svc.get_trend("ORCL", 30, now=NOW)
+    assert blip["history_status"] == "building", "the last known building survives a blip"
+    assert "status read failed for ORCL" in caplog.text
+    assert ("ORCL", 30, first_today()) in svc._status_unknown
+    clock["t"] += 31                              # short TTL, not five minutes
+    state["fail"] = False
+    calls = len(client.rpc_calls)
+    await svc.get_trend("ORCL", 30, now=NOW)
+    assert len(client.rpc_calls) == calls + 1, "re-read after 30 s, not 5 min"
+    assert svc._status_unknown == set()
+
+
+def first_today():
+    from app.services.news_sentiment_trend_service import _today_et
+
+    return _today_et(NOW)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_status_read_without_history_is_none_not_building(monkeypatch):
+    svc = NewsSentimentTrendService(_ReadClient([], first=None))
+
+    def _status(scope, today):
+        raise RuntimeError("blip")
+
+    monkeypatch.setattr(svc, "_history_status", _status)
+    out = await svc.get_trend("ORCL", 7, now=NOW)
+    assert out["history_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_blip_after_ready_is_re_read_in_30_seconds(monkeypatch):
+    client = _ReadClient([_raw("2026-09-25", 2, 1, 0)], first="2026-09-20")
+    svc = NewsSentimentTrendService(client)
+    state = {"fail": False}
+
+    def _status(scope, today):
+        if state["fail"]:
+            raise RuntimeError("blip")
+        return "ready"
+
+    monkeypatch.setattr(svc, "_history_status", _status)
+    clock = {"t": 5000.0}
+    monkeypatch.setattr(trend.time, "monotonic", lambda: clock["t"])
+    await svc.get_trend("ORCL", 30, now=NOW)
+    clock["t"] += 301                             # the ready answer expires
+    state["fail"] = True
+    assert (await svc.get_trend("ORCL", 30, now=NOW))["history_status"] is None
+    state["fail"] = False
+    clock["t"] += 31
+    calls = len(client.rpc_calls)
+    assert (await svc.get_trend("ORCL", 30, now=NOW))["history_status"] == "ready"
+    assert len(client.rpc_calls) == calls + 1, "the failed answer lived 30 s, not 5 min"
+
+
+class _StatusAndReadClient(_ReadClient):
+    """Routes the backfill-status read and the log reads apart, so the REAL
+    `_history_status` → `read_history_status` path runs (no monkeypatch of the method)."""
+
+    def __init__(self, *a, status_row=None, **k):
+        super().__init__(*a, **k)
+        self.status_row, self.status_fails = status_row, False
+        self._status_mode = False
+
+    def table(self, name):
+        if name == trend.BACKFILL_TABLE:
+            self._status_mode = True
+            return self
+        self._status_mode = False
+        return super().table(name)
+
+    def execute(self):
+        if self._status_mode:
+            self._status_mode = False
+            if self.status_fails:
+                raise RuntimeError("stale connection on the status read")
+            return _Result([self.status_row] if self.status_row else [])
+        return super().execute()
+
+
+@pytest.mark.asyncio
+async def test_the_real_status_path_raises_into_the_short_ttl(monkeypatch):
+    """Pins the contract itself: `_history_status` must RAISE on a failed read. Reverted to
+    the swallowing `history_status_for`, a blip reads as "no backfill" for 5 minutes."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "SENTIMENT_BACKFILL_ENABLED", True)
+    client = _StatusAndReadClient([_raw("2026-09-25", 2, 1, 0)], first="2026-09-20",
+                                  status_row={"status": "running", "covered_from": None, "covered_to": None})
+    svc = NewsSentimentTrendService(client)
+    clock = {"t": 9000.0}
+    monkeypatch.setattr(trend.time, "monotonic", lambda: clock["t"])
+    assert (await svc.get_trend("ORCL", 30, now=NOW))["history_status"] == "building"
+    clock["t"] += 31
+    client.status_fails = True
+    with pytest.raises(RuntimeError):
+        trend.read_history_status(client, "ORCL", first_today())
+    out = await svc.get_trend("ORCL", 30, now=NOW)
+    assert out["history_status"] == "building"
+    assert ("ORCL", 30, first_today()) in svc._status_unknown

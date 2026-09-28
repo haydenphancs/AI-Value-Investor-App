@@ -141,3 +141,33 @@ def test_the_scanners_are_not_vacuous():
 
     with pytest.raises(AssertionError):
         _func_block("def a():\n    pass\n", "def not_here")
+
+
+def test_both_writers_key_a_long_url_article_identically():
+    """A >500-char URL: the owner (and the backfill) cut it to 500, SentimentService wrote it
+    whole — two cache rows for one article, both enriched and both logged to the news-tone
+    chart under different keys, so it was billed and counted twice (2026-09-27 deep-check)."""
+    from app.services.news_cache_service import article_external_id
+    from app.services.news_sentiment_trend_service import article_key
+    from app.services.sentiment_service import SentimentService
+
+    long_url = "https://example.com/story?" + "x" * 600
+    raw = {"url": long_url, "title": "t", "publishedDate": "2026-09-27 10:00:00"}
+    captured = {}
+
+    class _Table:
+        def upsert(self, rows, on_conflict=None):
+            captured["rows"] = rows
+            return self
+
+        def execute(self):
+            return None
+
+    svc = SentimentService.__new__(SentimentService)
+    svc.supabase = type("S", (), {"table": lambda _s, _n: _Table()})()
+    svc._persist_articles("ORCL", [raw, {**raw, "title": "same url, second copy"}])
+    [row] = captured["rows"]
+    assert row["external_id"] == article_external_id(raw, 0)
+    assert len(row["external_id"]) == 500
+    assert row["article_url"] == long_url, "the link itself stays whole"
+    assert article_key(row["external_id"]) == article_key(article_external_id(raw, 7))

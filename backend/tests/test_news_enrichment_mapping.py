@@ -285,3 +285,39 @@ async def test_an_article_cannot_close_its_own_fence():
     assert body.count("<<<END_ARTICLE 0>>>") == 1
     assert body.rstrip().endswith("<<<END_ARTICLE 0>>>")
     assert "＜＜＜" not in prompt
+
+
+# ── 2026-09-27 deep-check: typed elements (an OpenAI-compatible provider in json_object
+#    mode guarantees valid JSON, not the shape) ────────────────────────────────────────
+
+@pytest.mark.parametrize("bullets", [
+    "Revenue rose 10%. Margins fell.",        # a string: used to become ['R','e','v','e','n']
+    [{"text": "Point one"}],                  # objects, not strings
+    [1, 2, 3],
+    42,
+    ["", "   "],
+])
+def test_a_malformed_bullets_field_leaves_the_article_retryable(bullets):
+    out = NewsCacheService._map_enrichments(
+        [{"bullets": bullets, "sentiment": "bullish", "confidence": 60}], 1)
+    assert out[0]["bullets"] == []
+    assert not NewsCacheService._enrichment_is_usable(out[0])
+
+
+def test_a_string_related_tickers_is_malformed_not_one_ticker_per_character():
+    out = NewsCacheService._map_enrichments(
+        [{"bullets": ["a", "b"], "sentiment": "bullish", "related_tickers": "ORCL, MSFT"}], 1)
+    assert out[0]["related_tickers"] == []
+
+
+@pytest.mark.parametrize("raw,valid", [
+    ("bullish", True), ("Bearish", True), ("positive", True), ("neutral", True),
+    ("mixed", False), ("", False), (None, False), (7, False), (["bullish"], False),
+])
+def test_only_a_label_the_model_gave_is_marked_valid(raw, valid):
+    item = {"bullets": ["a", "b"], "confidence": 50}
+    if raw is not None:
+        item["sentiment"] = raw
+    out = NewsCacheService._map_enrichments([item], 1)
+    assert out[0]["sentiment_valid"] is valid
+    assert out[0]["sentiment"] in ("bullish", "bearish", "neutral"), "display keeps a value"

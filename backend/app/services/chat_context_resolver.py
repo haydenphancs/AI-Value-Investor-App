@@ -30,6 +30,7 @@ iOS current-tab context, so the resolver defers to that path.
 import asyncio
 import logging
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,21 @@ _DEFAULT_PERSONA = "warren_buffett"
 
 # Treated as "no grounding needed" — fall through to any client context.
 _NO_CONTEXT = {"", "NONE", "GENERAL", "NORMAL"}
+#: Context types whose client string is a CONTROL token for the resolver (Updates sends
+#: `window=90`, the chart's window), never text to ground on: when the resolver builds
+#: nothing, times out or fails, the chat is ungrounded — the token is not passed through.
+_CONTROL_CONTEXT = {"UPDATES_SCOPE"}
+_UPDATES_WINDOW_RE = re.compile(r"window=(\d{1,3})")
+
+
+def updates_trend_window(client_context: Optional[str]) -> int:
+    """The chart window an Updates chat was opened from (`window=7|30|90`), else 30. Strict:
+    anything else — absent, malformed, a window the chart does not offer — is 30."""
+    from app.services.news_sentiment_trend_service import TREND_DAYS
+
+    m = _UPDATES_WINDOW_RE.fullmatch((client_context or "").strip())
+    days = int(m.group(1)) if m else 30
+    return days if days in TREND_DAYS else 30
 
 
 def _cap(text: str, limit: int) -> str:
@@ -398,13 +414,15 @@ class ChatContextResolver:
                 "detail-cache recompute; proceeding ungrounded",
                 _RESOLVE_TIMEOUT_SECONDS, _log_ref(context_type, 64), _log_ref(reference_id, 128),
             )
-            return client_context
+            return None if ctype in _CONTROL_CONTEXT else client_context
         except Exception as e:
             logger.warning(
                 "chat_context: resolve failed for %r/%r: %s: %s — degrading to client context",
                 _log_ref(context_type, 64), _log_ref(reference_id, 128), type(e).__name__, e,
             )
-            return client_context
+            return None if ctype in _CONTROL_CONTEXT else client_context
+        if ctype in _CONTROL_CONTEXT:
+            return block
         return block or client_context
 
     # ── Dispatch table ──────────────────────────────────────────────
@@ -598,7 +616,8 @@ class ChatContextResolver:
         `reference_id` is the scope — a ticker, a coin pair or `__MARKET__` — optionally
         followed by `|ETF` (see `updates_scope_class_hint`). Three cache reads, run together
         and each allowed to fail on its own: the stored Insights card, the feed's in-window
-        headlines (with Cay AI's label where one exists) and the 30-day news-tone trend.
+        headlines (with Cay AI's label where one exists) and the news-tone trend for the
+        window the chart showed (`window=7|30|90` in the client context; else 30).
         Nothing is generated: the card is only ever written by the sweeper, and the trend is
         a GROUP BY over stored labels.
 
@@ -646,12 +665,17 @@ class ChatContextResolver:
             recent, _hours = select_recent_corpus(rows, now)
             return recent
 
+        # The window the chart was SHOWING when "Ask about this" was tapped (iOS sends
+        # `window=N`): the answer must quote the numbers on screen, not a fixed 30 days.
+        window = updates_trend_window(client_context)
+
         async def _trend():
-            data = await get_news_sentiment_trend_service().get_trend(scope, 30, now=now)
+            data = await get_news_sentiment_trend_service().get_trend(scope, window, now=now)
             since = data.get("tracking_since")
             return summarize_trend(
-                data.get("series") or [], days=30, today=now.astimezone(ET).date(),
+                data.get("series") or [], days=window, today=now.astimezone(ET).date(),
                 tracking_since=_date.fromisoformat(since) if since else None,
+                history_status=data.get("history_status"),
             )
 
         card, feed_recent, trend_text = await asyncio.gather(

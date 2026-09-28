@@ -36,6 +36,7 @@ from app.dependencies import (
 )
 from app.services.active_group_service import (
     ActiveGroupUnavailable,
+    fetch_etf_tickers,
     fetch_ticker_metadata,
     get_active_group,
 )
@@ -264,6 +265,14 @@ async def get_updates_tabs(
         )
     ]
     by_ticker = {str(r["ticker"]).upper(): r for r in rows if r.get("ticker")}
+    classes = {t: resolve_asset_class(t, (by_ticker.get(t) or {}).get("asset_type")) for t in tickers}
+    # A legacy ETF row still reads 'Stock' (the column's default, never rewritten): the
+    # cached profile's `isEtf` upgrades it, so "Ask Cay AI" grounds a fund as a fund.
+    stock_like = [t for t, c in classes.items() if c == "stock"]
+    if stock_like:
+        for t in await fetch_etf_tickers(stock_like):
+            if t in classes:
+                classes[t] = "etf"
     for t in tickers:
         row = by_ticker.get(t, {})
         tabs.append(
@@ -275,7 +284,7 @@ async def get_updates_tabs(
                 logo_url=row.get("logo_url"),
                 is_market_tab=False,
                 is_locked=t not in visible_set,
-                asset_type=resolve_asset_class(t, row.get("asset_type")),
+                asset_type=classes.get(t) or resolve_asset_class(t, row.get("asset_type")),
             )
         )
 

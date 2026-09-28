@@ -628,8 +628,13 @@ class SentimentService:
         # owner of this table (NewsCacheService) was given exactly this guard; this
         # second writer never was, so its whole contribution was silently lost.
         seen_external_ids: set = set()
+        # The OWNER's identity for an article (`url[:500]` here, since a row without a url is
+        # skipped). Writing the full URL made a >500-char link a SECOND cache row beside the
+        # owner's truncated one: both were enriched (billed twice) and both logged to the
+        # news-tone chart under different keys, so the article counted twice.
+        from app.services.news_cache_service import article_external_id
 
-        for a in articles:
+        for i, a in enumerate(articles):
             url = a.get("url") or ""
             title = a.get("title") or ""
             text = a.get("text") or ""
@@ -637,9 +642,10 @@ class SentimentService:
 
             if not url or not title:
                 continue
-            if url in seen_external_ids:
+            external_id = article_external_id(a, i)
+            if external_id in seen_external_ids:
                 continue
-            seen_external_ids.add(url)
+            seen_external_ids.add(external_id)
             # `published_at` is timestamptz. An article with no/garbage publishedDate
             # sent "" and Postgres rejected the whole batch with 22007 (invalid input
             # syntax). Drop the value, keep the row — the column is nullable and the
@@ -662,7 +668,7 @@ class SentimentService:
 
             rows.append({
                 "ticker": ticker,
-                "external_id": url,  # Use URL as dedup key
+                "external_id": external_id,  # the owner's key (url, capped at 500)
                 "headline": title[:500],
                 "summary": (text or "")[:2000],
                 # `sentiment` / `sentiment_confidence` are DELIBERATELY NOT WRITTEN.

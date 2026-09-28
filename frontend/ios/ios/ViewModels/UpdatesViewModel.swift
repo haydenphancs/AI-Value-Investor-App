@@ -201,6 +201,17 @@ final class UpdatesViewModel: ObservableObject {
     private var trendPollTask: Task<Void, Never>?
     private var trendPollAttempt = 0
     private let trendPollDelays: [UInt64] = [30, 45, 60, 90, 120, 180, 300]
+    /// True once the re-checks ran out while the history was still building (the backend can
+    /// hold a scope for hours when its daily budget is spent). The card then stops spinning
+    /// and says "still building" instead of promising "a minute or two" indefinitely.
+    @Published private(set) var trendPollExhausted = false
+    /// Scopes whose re-checks ran out while still building. "Stalled" belongs to the SCOPE,
+    /// not to one visit: a tab return, a chip switch or the pull the stalled card asks for
+    /// restart the re-checks (and should), but must not bring back "a minute or two".
+    /// Cleared by an answer that is no longer building, and on identity change.
+    private var stalledScopes: Set<String> = []
+    /// Whether the Updates tab is on screen. Re-checks pause while it is not.
+    private var isTabActive = false
 
     // MARK: - Initialization
 
@@ -288,6 +299,9 @@ final class UpdatesViewModel: ObservableObject {
         sentimentTrend = nil
         userPickedWindow = false
         trendWindow = .month
+        trendPollAttempt = 0
+        trendPollExhausted = false
+        stalledScopes.removeAll()
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -633,6 +647,20 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - News-tone trend
 
+    /// The tab's visibility. A "Building…" re-check has no reader while the tab is hidden, so
+    /// it pauses there, and coming back checks again at once with a fresh set of re-checks.
+    func setTabActive(_ active: Bool) {
+        guard active != isTabActive else { return }
+        isTabActive = active
+        if !active {
+            trendPollTask?.cancel()
+            trendPollTask = nil
+        } else if let trend = sentimentTrend, trend.isBuildingHistory,
+                  trend.scope == selectedTab?.scope {
+            startTrendLoad(scope: trend.scope, force: true)
+        }
+    }
+
     func setTrendWindow(_ window: SentimentTrendWindow) {
         guard window != trendWindow else { return }
         // The user's choice wins for the rest of the session, on every scope.
@@ -647,7 +675,10 @@ final class UpdatesViewModel: ObservableObject {
         trendTask?.cancel()
         trendPollTask?.cancel()
         trendPollTask = nil
-        if !fromPoll { trendPollAttempt = 0 }
+        if !fromPoll {
+            trendPollAttempt = 0
+            trendPollExhausted = stalledScopes.contains(scope)
+        }
         let isNewScope = sentimentTrend?.scope != scope
         // Auto mode opens a NEW scope on 30D; the answer then decides whether to show 7D.
         // Never set from a fetched response: `loadTrend`'s stale-response guard compares
@@ -696,6 +727,10 @@ final class UpdatesViewModel: ObservableObject {
             // that could switch back. Only with nothing of this scope on screen is it hidden.
             if let shown = sentimentTrend, shown.scope == scope {
                 trendWindow = shown.window
+                // A failed re-check of a history still being built must not end the
+                // re-checks: the card would spin with nothing scheduled. The delay list still
+                // bounds them (`trendPollAttempt` survives a poll's own fetch).
+                if shown.isBuildingHistory { scheduleTrendPollIfBuilding(scope: scope) }
             } else {
                 sentimentTrend = nil
             }
@@ -722,8 +757,18 @@ final class UpdatesViewModel: ObservableObject {
     /// "Building…" card turns into the chart without a pull-to-refresh. Stops when the
     /// history is ready, the scope changes, or the delays run out.
     private func scheduleTrendPollIfBuilding(scope: String) {
-        guard sentimentTrend?.isBuildingHistory == true,
-              trendPollAttempt < trendPollDelays.count else { return }
+        guard sentimentTrend?.isBuildingHistory == true else {
+            stalledScopes.remove(scope)
+            trendPollExhausted = false
+            return
+        }
+        guard trendPollAttempt < trendPollDelays.count else {
+            stalledScopes.insert(scope)
+            trendPollExhausted = true
+            return
+        }
+        // Hidden tab: nothing is scheduled; `setTabActive(true)` re-checks on return.
+        guard isTabActive else { return }
         let delay = trendPollDelays[trendPollAttempt]
         trendPollAttempt += 1
         trendPollTask?.cancel()

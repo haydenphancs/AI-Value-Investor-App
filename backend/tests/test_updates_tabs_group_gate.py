@@ -33,7 +33,7 @@ def _user(tier="free", uid=_USER):
 
 
 def _patch(monkeypatch, *, group=None, group_raises=False, watchlist=(),
-           quotes=None, quotes_raise=False, watchlist_raises=False):
+           quotes=None, quotes_raise=False, watchlist_raises=False, etfs=()):
     async def _fake_group(_uid):
         if group_raises:
             raise ActiveGroupUnavailable("supabase down")
@@ -61,8 +61,12 @@ def _patch(monkeypatch, *, group=None, group_raises=False, watchlist=(),
                 return [q for q in quotes if q.get("symbol") in symbols]
             return [{"symbol": s, "changePercentage": 1.0} for s in symbols]
 
+    async def _fake_etfs(tickers):
+        return set(etfs) & set(tickers)
+
     monkeypatch.setattr(up, "get_active_group", _fake_group)
     monkeypatch.setattr(up, "fetch_ticker_metadata", _fake_meta)
+    monkeypatch.setattr(up, "fetch_etf_tickers", _fake_etfs)
     monkeypatch.setattr(up, "get_supabase",
                         lambda: type("S", (), {"table": lambda _s, n: _Tbl()})())
     monkeypatch.setattr(up, "get_fmp_client", lambda: _FMP())
@@ -378,3 +382,97 @@ async def test_quotes_are_one_bounded_call_for_the_whole_strip(monkeypatch):
 
     assert len(asked) == 1
     assert len(asked[0]) == up._MAX_TABS
+
+
+
+# ── the ETF class for "Ask Cay AI" (2026-09-27 deep-check) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_legacy_stock_row_that_is_an_etf_is_declared_an_etf(monkeypatch):
+    """ETFs watched before 2026-09-11 are stored 'Stock', so the chat reference had no |ETF
+    and Cay AI answered about SPY as an operating company."""
+    _patch(monkeypatch, group=_group(["SPY", "ORCL", "BTCUSD"]), etfs={"SPY"})
+    resp = await up.get_updates_tabs(user=_user("max"))
+    classes = {t.scope: t.asset_type for t in resp.tabs if not t.is_market_tab}
+    assert classes == {"SPY": "etf", "ORCL": "stock", "BTCUSD": "crypto"}
+
+
+@pytest.mark.asyncio
+async def test_the_etf_lookup_only_asks_about_stock_like_pills(monkeypatch):
+    asked = []
+    _patch(monkeypatch, group=_group(["QQQ", "ETHUSD"]))
+
+    async def _spy(tickers):
+        asked.extend(tickers)
+        return set()
+
+    monkeypatch.setattr(up, "fetch_etf_tickers", _spy)
+    await up.get_updates_tabs(user=_user("max"))
+    assert asked == ["QQQ"], "a coin is never looked up"
+
+
+@pytest.mark.asyncio
+async def test_fetch_etf_tickers_reads_only_a_definite_isetf(monkeypatch):
+    import app.services.active_group_service as ags
+
+    rows = [
+        {"ticker": "spy", "profile_json": {"isEtf": True}},
+        {"ticker": "PDI", "profile_json": {"isEtf": False, "isFund": True}},   # a CEF: not an ETF
+        {"ticker": "ORCL", "profile_json": {"description": "formatted, no flags"}},
+        {"ticker": "BAD", "profile_json": "not a dict"},
+    ]
+
+    class _Q:
+        def __init__(self):
+            self.args = None
+
+        def table(self, name):
+            assert name == "company_profile_cache"
+            return self
+
+        def select(self, *_a):
+            return self
+
+        def in_(self, col, vals):
+            self.args = (col, list(vals))
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": rows})()
+
+    q = _Q()
+    monkeypatch.setattr(ags, "get_supabase", lambda: q)
+    assert await ags.fetch_etf_tickers(["spy", "SPY", "PDI", "ORCL", "BAD", ""]) == {"SPY"}
+    assert q.args == ("ticker", ["SPY", "PDI", "ORCL", "BAD"])
+
+    def _boom():
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(ags, "get_supabase", _boom)
+    assert await ags.fetch_etf_tickers(["SPY"]) == set(), "a failed lookup keeps the stored class"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ({"isEtf": True, "isFund": False}, {"isEtf": True, "isFund": False}),
+    ({"isEtf": False}, {"isEtf": False}),
+    ({}, {}),                                   # a failed profile fetch: write nothing
+    ({"isEtf": None, "isFund": "yes"}, {}),     # never a non-bool
+    (None, {}), ([], {}),
+])
+def test_the_formatted_profile_write_keeps_the_fund_flags(raw, expected):
+    """stock_overview's formatted write replaced company_profile_cache WHOLE without the
+    flags, so any detail view of SPY undid the Updates tab's ETF upgrade for a week."""
+    from app.services.stock_overview_service import fund_flags
+
+    assert fund_flags(raw) == expected
+
+
+def test_the_overview_write_merges_the_fund_flags():
+    import inspect
+
+    import app.services.stock_overview_service as sos
+
+    src = inspect.getsource(sos.StockOverviewService)
+    write = src[src.index("self._upsert_company_profile_db,"):]
+    write = write[:write.index("        )\n")]
+    assert '**fund_flags(fundamentals.get("profile")),' in write

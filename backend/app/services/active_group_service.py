@@ -139,6 +139,49 @@ async def get_active_group(user_id: str) -> Optional[ActiveGroup]:
         ) from exc
 
 
+async def fetch_etf_tickers(tickers: Sequence[str]) -> set:
+    """Which of `tickers` the locally cached FMP profile says are ETFs (`isEtf` true).
+
+    `watchlist_items.asset_type` defaults to 'Stock' and POST /watchlist did not write the
+    column before 2026-09-11, so every ETF added before then still reads as a stock — and no
+    symbol-shape rule can tell SPY is a fund. Read from `company_profile_cache`, never FMP.
+    Only a definite `isEtf: true` counts (`isFund` also covers closed-end and mutual funds,
+    which the ETF grounding does not serve); a row without the flag — a formatted write by
+    the detail screen drops it — is unknown and stays a stock. One batched read; a failure
+    is logged and answers "none" (the pills keep their class). Never raises.
+    """
+    symbols = [t for t in dict.fromkeys(str(t).strip().upper() for t in tickers or []) if t]
+    if not symbols:
+        return set()
+
+    def _read() -> List[Dict[str, Any]]:
+        return (
+            get_supabase().table("company_profile_cache")
+            .select("ticker, profile_json")
+            .in_("ticker", symbols)
+            .execute()
+            .data
+            or []
+        )
+
+    try:
+        rows = await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warning(
+            "ETF lookup failed for %d symbol(s): %s: %s — keeping their stored class",
+            len(symbols), type(exc).__name__, exc,
+        )
+        return set()
+    out = set()
+    for row in rows:
+        profile = row.get("profile_json") if isinstance(row, dict) else None
+        if isinstance(profile, dict) and profile.get("isEtf") is True:
+            raw = row.get("ticker")
+            if isinstance(raw, str) and raw.strip():
+                out.add(raw.strip().upper())
+    return out
+
+
 async def fetch_ticker_metadata(
     user_id: str, tickers: Sequence[str]
 ) -> Dict[str, Dict[str, Any]]:

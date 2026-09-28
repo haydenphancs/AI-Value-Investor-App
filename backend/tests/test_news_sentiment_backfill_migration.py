@@ -136,3 +136,107 @@ def test_it_is_service_role_only_and_invoker():
 def test_the_queue_holds_no_news_text_and_no_user(column):
     m = re.search(r"CREATE TABLE IF NOT EXISTS public\.news_sentiment_backfill \((.*?)\n\);", CODE, re.S)
     assert not re.search(rf"^\s*{column}\s", m.group(1), re.M)
+
+
+# ── 182: the queue fixes from the 2026-09-27 deep-check ─────────────────────────
+
+_SQL_182 = _SQL.parent / "182_news_sentiment_backfill_fixes.sql"
+
+
+def _code_182() -> str:
+    lines = []
+    for line in _SQL_182.read_text().splitlines():
+        in_str, out, i = False, [], 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "'":
+                in_str = not in_str
+            if not in_str and line.startswith("--", i):
+                break
+            out.append(ch)
+            i += 1
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+CODE_182 = _code_182()
+
+
+def _fn_182(fn: str) -> str:
+    m = re.search(rf"CREATE OR REPLACE FUNCTION public\.{fn}\((.*?)\$\$;", CODE_182, re.S)
+    assert m, f"{fn} not in 182"
+    return m.group(0)
+
+
+def test_182_is_one_idempotent_transaction_of_same_signature_replacements():
+    assert CODE_182.strip().startswith("BEGIN;") and CODE_182.strip().endswith("COMMIT;")
+    assert not re.search(r"CREATE FUNCTION", CODE_182)
+    assert not re.search(r"CREATE INDEX (?!IF NOT EXISTS)", CODE_182)
+    assert "ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMPTZ" in CODE_182
+    assert "SECURITY DEFINER" not in CODE_182
+    for fn, params in ((bf.CLAIM_RPC, ["p_token", "p_limit", "p_lease_seconds", "p_max_attempts"]),
+                       (bf.FINISH_RPC, ["p_scope", "p_token", "p_status", "p_next_run_at", "p_covered_from",
+                                        "p_covered_to", "p_articles", "p_labels", "p_error"]),
+                       (bf.ENQUEUE_RPC, ["p_scopes"])):
+        m = re.search(rf"CREATE OR REPLACE FUNCTION public\.{fn}\((.*?)\)\s*RETURNS", CODE_182, re.S)
+        assert m, fn
+        assert [p.strip().split()[0] for p in m.group(1).split(",") if p.strip()] == params, fn
+        assert re.search(rf"REVOKE ALL ON FUNCTION public\.{fn}\(.*?\)\s+FROM PUBLIC, anon, authenticated;", CODE_182, re.S), fn
+        assert re.search(rf"GRANT EXECUTE ON FUNCTION public\.{fn}\(.*?\) TO service_role;", CODE_182, re.S), fn
+
+
+def test_182_makes_unsupported_scopes_claimable_on_their_recheck():
+    body = _fn_182(bf.CLAIM_RPC)
+    assert "s.status IN ('queued', 'done', 'failed', 'running', 'unsupported')" in body
+    for keep in ("FOR UPDATE SKIP LOCKED", "s.next_run_at <= now()", "attempts       = b.attempts + 1"):
+        assert keep in body, keep
+    assert bf.UNSUPPORTED_RECHECK_DAYS == 30
+
+
+def test_182_the_cap_clock_is_last_failed_at_not_updated_at():
+    claim = _fn_182(bf.CLAIM_RPC)
+    predicate = claim[claim.index("WHERE s.next_run_at"):claim.index("ORDER BY")]
+    assert "updated_at" not in predicate, "a deferral writes updated_at; it must not lock a scope out"
+    assert "s.last_failed_at < now() - interval '24 hours'" in predicate
+    assert "last_failed_at = CASE WHEN b.status = 'running' THEN now() ELSE b.last_failed_at END" in claim, \
+        "a lapsed-lease takeover counts as a failure (crash loops stay once a day)"
+    finish = _fn_182(bf.FINISH_RPC)
+    for arm in ("WHEN p_status = 'failed' THEN now()",
+                "WHEN p_status IN ('done', 'unsupported') THEN NULL",
+                "ELSE last_failed_at"):
+        assert arm in finish, arm
+
+
+def test_182_enqueue_never_touches_the_cap_clock():
+    body = _fn_182(bf.ENQUEUE_RPC)
+    assert "updated_at" not in body and "last_failed_at" not in body
+    assert "next_run_at  = LEAST(b.next_run_at, now())" in body
+    assert "<> '__MARKET__'" in body and "b.covered_to < v_today - 1" in body
+
+
+def test_182_enqueue_turns_a_stale_done_back_to_queued():
+    body = _fn_182(bf.ENQUEUE_RPC)
+    assert "status       = CASE WHEN b.status = 'done' THEN 'queued' ELSE b.status END" in body
+
+
+def test_182_the_claim_compares_tickers_normalized_like_discover():
+    """A legacy 'nvda ' watchlist row was queued as 'NVDA' by discover but the claim compared
+    the raw ticker, so the scope stayed 'queued' — and the app on "Building…" — forever."""
+    claim = _fn_182(bf.CLAIM_RPC)
+    assert "WHERE upper(btrim(w.ticker)) = s.scope" in claim
+    assert "w.ticker = s.scope" not in claim
+    assert "CREATE INDEX IF NOT EXISTS idx_watchlist_items_ticker_norm" in CODE_182
+    assert "ON public.watchlist_items (upper(btrim(ticker)))" in CODE_182
+    # discover (181) stores exactly that form.
+    assert "SELECT DISTINCT upper(btrim(w.ticker))" in CODE
+    # "Watched" stays the codebase-wide universe (guest rows included) on purpose.
+    assert "JOIN public.users" not in CODE_182
+
+
+def test_182_verify_queries_match_a_correct_install():
+    """The owner runs VERIFY by hand, and pg_get_functiondef returns the body WITH its
+    comments: a comment naming updated_at made a correct install read 't'."""
+    raw = _SQL_182.read_text()
+    body = raw[raw.index("CREATE OR REPLACE FUNCTION public.enqueue_sentiment_backfill"):]
+    body = body[:body.index("$$;")]
+    assert "updated_at" not in body.lower()

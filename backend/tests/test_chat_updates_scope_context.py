@@ -1,7 +1,7 @@
 """`UPDATES_SCOPE` — "Ask Cay AI" opened from the Updates tab (card, detail, trend chart).
 
 The resolver grounds the chat on what that tab actually served: the stored Insight card,
-the newest in-window headlines and the 30-day news-tone trend. Hermetic — every service it
+the newest in-window headlines and the news-tone trend for the window the chart showed. Hermetic — every service it
 reads is stubbed at the module the resolver imports it from.
 """
 
@@ -188,11 +188,13 @@ async def test_each_read_fails_on_its_own(monkeypatch, caplog, broken):
 
 
 @pytest.mark.asyncio
-async def test_an_invalid_reference_falls_back_to_the_client_context(monkeypatch, caplog):
+async def test_an_invalid_reference_is_ungrounded_never_the_client_token(monkeypatch, caplog):
+    """The Updates client context is a CONTROL token (`window=90`), not text: when the
+    resolver builds nothing it must not become the chat's grounding."""
     insights, news, trend = _install(monkeypatch)
     with caplog.at_level(logging.WARNING):
-        out = await ChatContextResolver().resolve("UPDATES_SCOPE", "A;DROP", client_context="ctx")
-    assert out == "ctx"
+        out = await ChatContextResolver().resolve("UPDATES_SCOPE", "A;DROP", client_context="window=90")
+    assert out is None
     assert insights.asked == [] and news.asked == [] and trend.asked == []
     assert "invalid UPDATES_SCOPE" in caplog.text
 
@@ -313,3 +315,52 @@ async def test_a_declared_fund_is_grounded_on_its_own_feed(monkeypatch):
     block = await ChatContextResolver().resolve("UPDATES_SCOPE", "SPY|ETF")
     assert insights.asked == [["SPY"]] and news.asked == [(["SPY"], 25)] and trend.asked == [("SPY", 30)]
     assert "news feed for SPY." in block
+
+
+
+# ── the chart's window and a history still being built (2026-09-27 deep-check) ───────────
+
+
+@pytest.mark.parametrize("ctx,days", [
+    ("window=90", 90), ("window=7", 7), (" window=30 ", 30),
+    (None, 30), ("", 30), ("window=14", 30), ("window=90;x", 30), ("90", 30), ("window=-7", 30),
+])
+def test_the_trend_window_is_parsed_strictly(ctx, days):
+    from app.services.chat_context_resolver import updates_trend_window
+
+    assert updates_trend_window(ctx) == days
+
+
+@pytest.mark.asyncio
+async def test_ask_about_this_on_90d_is_grounded_on_90_days(monkeypatch):
+    day = datetime.now(timezone.utc).date() - timedelta(days=60)
+    series = [{"date": day.isoformat(), "bullish": 1, "bearish": 5, "neutral": 0, "total": 6,
+               "net_score": -67, "is_partial": False}]
+    _, _, trend = _install(monkeypatch, news=_News([_row("Story")]),
+                           trend=_Trend({"scope": "ORCL", "days": 90, "series": series,
+                                         "tracking_since": None}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL", client_context="window=90")
+    assert trend.asked == [("ORCL", 90)]
+    assert "over the last 90 days" in block
+    assert "window=90" not in block, "the token is never grounding text"
+
+
+@pytest.mark.asyncio
+async def test_a_building_history_is_never_called_final(monkeypatch):
+    today = datetime.now(timezone.utc).date()
+    series = [{"date": (today - timedelta(days=k)).isoformat(), "bullish": 2, "bearish": 1,
+               "neutral": 0, "total": 3, "net_score": 33, "is_partial": k < 2} for k in range(5)]
+    _install(monkeypatch, news=_News([_row("Story")]), trend=_Trend({
+        "scope": "ORCL", "days": 30, "series": series, "tracking_since": None,
+        "history_status": "building"}))
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", "ORCL")
+    assert "earlier days are final" not in block
+    assert "still being built" in block
+
+
+def test_a_ready_history_keeps_its_final_wording():
+    today = datetime.now(timezone.utc).date()
+    series = [{"date": today.isoformat(), "bullish": 1, "bearish": 0, "neutral": 0, "total": 1,
+               "net_score": 100, "is_partial": True}]
+    text = trend_mod.summarize_trend(series, days=30, today=today, history_status="ready")
+    assert "earlier days are final" in text and "still being built" not in text

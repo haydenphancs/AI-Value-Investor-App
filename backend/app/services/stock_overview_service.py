@@ -226,6 +226,18 @@ def _pct(value: Optional[float], decimals: int = 2) -> str:
     return f"{value:.{decimals}f}%"
 
 
+def fund_flags(raw_profile: Any) -> Dict[str, bool]:
+    """`isEtf` / `isFund` from the RAW FMP profile, for the formatted `company_profile_cache`
+    write. This row is shared with whale_service's raw write (last write wins WHOLE), and
+    readers use the flags to tell a fund from a company (push routing, the Updates tab's
+    "Ask Cay AI" ETF grounding) — without them every detail view of SPY erased "is an ETF"
+    for a week. Only a real bool is copied: a failed profile fetch must never write a
+    False, which readers treat as a definite, cacheable "not a fund". Pure."""
+    if not isinstance(raw_profile, dict):
+        return {}
+    return {k: raw_profile[k] for k in ("isEtf", "isFund") if isinstance(raw_profile.get(k), bool)}
+
+
 def _safe_float(d: Dict, key: str, default: float = 0.0) -> float:
     """Safely extract a FINITE float from a dict.
 
@@ -669,6 +681,7 @@ class StockOverviewService:
                 "industry": response.sector_industry.industry,
                 "sector_performance": response.sector_industry.sector_performance,
                 "industry_rank": response.sector_industry.industry_rank,
+                **fund_flags(fundamentals.get("profile")),
             },
         )
 

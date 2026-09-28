@@ -1047,10 +1047,17 @@ def test_grants_test_lists_the_175_tables():
         assert re.search(rf"ALTER TABLE public\.{t}\s+ENABLE ROW LEVEL SECURITY;", sql), t
 
 
-def test_schema_doc_lists_the_175_tables_as_pending():
-    pending = _literal_assign(BACKEND / "tests" / "test_schema_doc_generator.py",
-                              "_PENDING_MIGRATION_TABLES")
-    assert {f"public.{t}" for t in _NEW_TABLES} <= pending
+def test_the_175_tables_are_applied_and_no_longer_pending():
+    """175 was applied and re-dumped on 2026-09-27: its tables are in the live snapshot, so
+    the atlas's real column checks cover them and they must not be listed as pending."""
+    snapshot = (BACKEND / "database" / "schema_snapshot.sql").read_text(encoding="utf-8")
+    for t in _NEW_TABLES:
+        assert re.search(rf"^CREATE TABLE public\.{t} \(", snapshot, re.M), t
+    src = (BACKEND / "tests" / "test_schema_doc_generator.py").read_text(encoding="utf-8")
+    block = src[src.index("_PENDING_MIGRATION_TABLES: set[str] ="):]
+    block = block[:block.index("\n\n")]
+    for t in _NEW_TABLES:
+        assert f'"public.{t}"' not in block, t
 
 
 def test_atlas_curation_names_only_real_175_columns():

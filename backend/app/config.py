@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     # "gemini" (default) or "openai_compat" (DeepSeek, OpenAI, Qwen, Groq, OpenRouter …).
     # An unknown value or an incomplete openai_compat setup falls back to Gemini, logged.
     NEWS_LLM_PROVIDER: str = "gemini"
+    # Scoped to the provider: on gemini a non-"gemini-" name (a leftover from a switch) falls
+    # back to gemini-2.5-flash-lite, and openai_compat needs its own non-Gemini model name.
     NEWS_LLM_MODEL: str = "gemini-2.5-flash-lite"
     NEWS_LLM_BASE_URL: Optional[str] = None        # e.g. https://api.deepseek.com
     NEWS_LLM_API_KEY: Optional[str] = None
@@ -70,6 +72,18 @@ class Settings(BaseSettings):
     # A JSON object merged into every openai_compat request, e.g. DeepSeek
     # {"thinking": {"type": "disabled"}} or OpenAI {"reasoning_effort": "minimal"}.
     NEWS_LLM_EXTRA_BODY: Optional[str] = None
+    # openai_compat only: the output cap (Gemini's GEMINI_MAX_TOKENS on the default path) and
+    # the field it is sent in — OpenAI's reasoning models refuse "max_tokens" and want
+    # "max_completion_tokens".
+    NEWS_LLM_MAX_TOKENS: int = 8192
+    NEWS_LLM_MAX_TOKENS_FIELD: str = "max_tokens"
+    # False for OpenAI reasoning models (gpt-5, o-series): they refuse any temperature but
+    # their default, so the backfill's temperature 0 would 400 on every batch. The
+    # calibration must then PASS at the model's default temperature.
+    NEWS_LLM_SEND_TEMPERATURE: bool = True
+    # openai_compat only: a TOTAL deadline per call (httpx's timeout bounds each read, and a
+    # busy provider can hold a request open with keep-alive lines). Not retried when hit.
+    NEWS_LLM_REQUEST_TIMEOUT_SECONDS: float = 120.0
 
     # ── 90-day news-sentiment backfill (news_sentiment_backfill_service) ──
     # OFF by default: apply migration 181, deploy, run scripts/calibrate_sentiment_backfill.py,

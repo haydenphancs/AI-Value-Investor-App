@@ -110,12 +110,28 @@ EXPECTED: dict[str, int] = {
     #   +4 tables (non-public) -> Supabase platform upgrade in the same window (realtime /
     #                          storage internals; not ours, not curated)
     #   -1 function            -> 171 dropped add_credit_transaction (the dead ledger door)
-    "tables": 136,
-    "public": 97,
-    "fk": 26,
-    "policies": 106,
-    "rls": 97,
-    "functions": 41,
+    # Refreshed 2026-09-27 after applying 173-181 and re-dumping. Every delta accounted for:
+    #   +14 tables / +14 public / +14 rls -> marketing_scripts, marketing_link_hits (173);
+    #                          theme_rotation_runs, theme_rotation_decisions,
+    #                          theme_relevance_cache, theme_daily_insights (174);
+    #                          trillion_club_companies, _stakes, _filings (175);
+    #                          dcf_fair_value_cache, dcf_fair_value_history (178);
+    #                          search_pick_daily (179); news_sentiment_log (180);
+    #                          news_sentiment_backfill (181)
+    #   +13 policies           -> one service_role policy on each of the 14, minus
+    #                          trending_themes_select_all (174 revoked the public read)
+    #   +3 fk                  -> marketing_scripts.run_id, theme_rotation_decisions.run_id,
+    #                          trillion_club_stakes.company_slug
+    #   +11 functions          -> increment_marketing_link_hits (173), publish_theme_rotation
+    #                          (174), get_search_trending / get_most_added_tickers /
+    #                          increment_search_pick (179), news_sentiment_daily (180),
+    #                          claim / renew / finish / enqueue / discover_sentiment_backfill (181)
+    "tables": 150,
+    "public": 111,
+    "fk": 29,
+    "policies": 119,
+    "rls": 111,
+    "functions": 52,
     "enums": 14,
     "views": 1,
 }

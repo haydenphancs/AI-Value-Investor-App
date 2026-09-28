@@ -115,7 +115,8 @@ struct UpdatesView: View {
                                         get: { viewModel.trendWindow },
                                         set: { viewModel.setTrendWindow($0) }
                                     ),
-                                    onAskCay: { openUpdatesChat(focus: .trend) }
+                                    onAskCay: { openUpdatesChat(focus: .trend) },
+                                    buildingStalled: viewModel.trendPollExhausted
                                 )
                                 .padding(.horizontal, AppSpacing.lg)
                                 .padding(.vertical, AppSpacing.sm)
@@ -174,6 +175,8 @@ struct UpdatesView: View {
             }
             .navigationBarHidden(true)
             .task(id: isActiveTab) {
+                // Before the guard: the news-tone "Building…" re-checks pause while hidden.
+                viewModel.setTabActive(isActiveTab)
                 guard isActiveTab else { return }
                 await viewModel.loadIfNeeded()
             }
@@ -341,11 +344,16 @@ struct UpdatesView: View {
     /// chart — OPENS one chat grounded on the selected feed, empty. `prepareGroundedConversation`
     /// makes no request and spends no credit; the user's first send does. The backend reads the
     /// feed's card, headlines and tone trend itself (`UPDATES_SCOPE`), so nothing on screen is
-    /// shipped as context text.
+    /// shipped as context text — only the chart's window, as a `window=N` token.
     private func openUpdatesChat(focus: UpdatesChatFocus) {
         guard let tab = viewModel.selectedTab else { return }
         updatesChat.prepareGroundedConversation(
             stockId: tab.isMarketTab ? nil : tab.scope,
+            // The window the chart is DRAWING (not a toggle still loading), as a control token
+            // the backend parses — so "Ask about this" on 90D quotes the 90-day numbers on
+            // screen. In `context`, not `referenceId`: the reference is the chat's resume key,
+            // and switching windows must not wipe an open conversation.
+            context: visibleTrend.map { "window=\($0.window.days)" },
             contextType: .updatesScope,
             referenceId: tab.chatReferenceId,
             starterChips: SuggestionChip.forUpdates(

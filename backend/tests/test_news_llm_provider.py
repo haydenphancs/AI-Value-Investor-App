@@ -12,6 +12,7 @@ Hermetic: httpx is replaced by a fake transport; nothing leaves the process.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -323,3 +324,323 @@ def test_chat_and_reports_never_import_the_news_model():
         "services/news_cache_service.py",
         "services/news_sentiment_backfill_service.py",
     }, f"only the news features may use the switchable model: {users}"
+
+
+# ── review fixes (2026-09-27 deep-check) ─────────────────────────────────────
+
+
+def test_rolling_back_to_gemini_with_a_leftover_model_uses_flash_lite(monkeypatch, caplog):
+    """OWNER_TASKS' rollback used to be only NEWS_LLM_PROVIDER=gemini, which kept
+    NEWS_LLM_MODEL=deepseek-flash and sent it to Gemini — a 404 on every news call."""
+    monkeypatch.setattr(settings, "NEWS_LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-flash")
+    monkeypatch.setattr(news_llm, "_warned_bad_gemini_model", False)
+    with caplog.at_level("ERROR"):
+        cfg = news_llm.news_llm_config()
+        news_llm.news_llm_config()
+    assert cfg.provider == "gemini" and cfg.model == "gemini-2.5-flash-lite"
+    assert news_llm.news_model_name() == "gemini-2.5-flash-lite", "the audit column tells the truth"
+    assert caplog.text.count("is not a Gemini model") == 1, "logged once"
+
+
+@pytest.mark.parametrize("model", ["gemini-2.5-flash-lite", "", "  "])
+def test_openai_compat_without_its_own_model_falls_back_to_gemini(monkeypatch, caplog, model):
+    monkeypatch.setattr(settings, "NEWS_LLM_PROVIDER", "openai_compat")
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "k")
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", model)
+    monkeypatch.setattr(news_llm, "_warned_bad_provider", False)
+    with caplog.at_level("ERROR"):
+        cfg = news_llm.news_llm_config()
+    assert cfg.provider == "gemini" and cfg.model == "gemini-2.5-flash-lite"
+    assert "must name the openai_compat model" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+async def test_the_output_cap_is_sent_in_the_configured_field(monkeypatch, field):
+    _openai_settings(monkeypatch)
+    monkeypatch.setattr(settings, "NEWS_LLM_MAX_TOKENS", 8192)
+    monkeypatch.setattr(settings, "NEWS_LLM_MAX_TOKENS_FIELD", field)
+    captured = _install_transport(monkeypatch, lambda r: _chat_response('{"a": 1}'))
+    await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                      response_schema={"type": "OBJECT", "properties": {}})
+    body = json.loads(captured[0].content)
+    assert body[field] == 8192
+    other = {"max_tokens", "max_completion_tokens"} - {field}
+    assert not other & set(body), "only one cap field (reasoning models 400 on max_tokens)"
+
+
+@pytest.mark.asyncio
+async def test_extra_body_cannot_replace_the_fields_the_client_owns(monkeypatch, caplog):
+    with caplog.at_level("ERROR"):
+        _openai_settings(monkeypatch, extra_body=json.dumps({
+            "model": "deepseek-reasoner", "temperature": 0.7, "stream": True,
+            "thinking": {"type": "disabled"},
+        }))
+        captured = _install_transport(monkeypatch, lambda r: _chat_response('{"a": 1}'))
+        await news_llm.generate_news_json(prompt="p", system_instruction=None, temperature=0.0,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    body = json.loads(captured[0].content)
+    assert body["model"] == "deepseek-flash" and body["temperature"] == 0.0
+    assert "stream" not in body and body["thinking"] == {"type": "disabled"}
+    assert "may not set model, stream, temperature" in caplog.text
+    assert oc.parse_extra_body('{"model": "x", "top_p": 1}') == {"top_p": 1}
+    # The client refuses them too, whoever builds it.
+    client = oc.OpenAICompatClient(base_url="https://x", api_key="k", extra_body={"model": "y", "top_p": 1})
+    assert client._extra_body == {"top_p": 1}
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_account_is_a_failure_not_a_wait(monkeypatch):
+    _openai_settings(monkeypatch)
+    _install_transport(monkeypatch, lambda r: httpx.Response(
+        429, json={"error": {"code": "insufficient_quota", "message": "You exceeded your current quota"}}))
+    with pytest.raises(oc.OpenAICompatError) as e:
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert not news_llm.is_transient_news_llm_error(e.value), "callers log it as a failure (ERROR)"
+    assert "insufficient_quota" in str(e.value)
+    assert oc.quota_breaker.tripped
+    oc.quota_breaker.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_run_of_429s_logs_one_error_until_a_success(monkeypatch, caplog):
+    _openai_settings(monkeypatch)
+    status = {"code": 429}
+    _install_transport(monkeypatch, lambda r: httpx.Response(status["code"]) if status["code"] == 429
+                       else _chat_response('{"a": 1}'))
+
+    async def _call():
+        oc.quota_breaker._open_until = 0.0      # let each call through to the wire
+        return await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                                 response_schema={"type": "OBJECT", "properties": {}})
+
+    with caplog.at_level("ERROR", logger="app.integrations.openai_compat"):
+        for _ in range(5):
+            with pytest.raises(oc.OpenAICompatQuotaError):
+                await _call()
+    assert caplog.text.count("quota refusals in a row") == 1, "one alert, latched"
+    status["code"] = 200
+    await _call()
+    assert oc.quota_breaker._trips == 0 and not oc.quota_breaker._alerted, "a success re-arms it"
+    oc.quota_breaker.reset()
+
+
+@pytest.mark.parametrize("base,reason", [
+    ("api.deepseek.com", "must start with https://"),       # no scheme
+    ("   ", "missing"),
+])
+def test_a_schemeless_or_blank_base_url_falls_back_loudly(monkeypatch, caplog, base, reason):
+    monkeypatch.setattr(settings, "NEWS_LLM_PROVIDER", "openai_compat")
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", base)
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "k")
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-flash")
+    monkeypatch.setattr(news_llm, "_warned_bad_provider", False)
+    with caplog.at_level("ERROR"):
+        cfg = news_llm.news_llm_config()
+    assert cfg.provider == "gemini"
+    assert reason in caplog.text
+
+
+def test_a_key_pasted_with_whitespace_is_sent_stripped(monkeypatch):
+    _openai_settings(monkeypatch)
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "  sk-test\n")
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", " https://api.example.test/v1 \n")
+    cfg = news_llm.news_llm_config()
+    assert cfg.provider == "openai_compat"
+    assert cfg.api_key == "sk-test" and cfg.base_url == "https://api.example.test/v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", [
+    httpx.UnsupportedProtocol("Request URL is missing an 'http://' or 'https://' protocol."),
+    httpx.LocalProtocolError("Illegal header value b'Bearer sk-SECRETKEY99\\n'"),
+    httpx.ProxyError("proxy refused"),
+])
+async def test_a_setup_error_is_a_failure_not_a_transient_blip(monkeypatch, exc):
+    _openai_settings(monkeypatch)
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "sk-SECRETKEY99")
+
+    def _raise(request):
+        raise exc
+
+    _install_transport(monkeypatch, _raise)
+    with pytest.raises(oc.OpenAICompatError) as e:
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert not news_llm.is_transient_news_llm_error(e.value)
+    assert "SECRETKEY99" not in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__, "no key via the chained error"
+
+
+@pytest.mark.asyncio
+async def test_a_keepalive_trickle_hits_the_total_deadline_once(monkeypatch):
+    """httpx's timeout bounds each READ; a provider sending a blank line every few seconds
+    never trips it. The total deadline does — once, without a billed retry."""
+    _openai_settings(monkeypatch)
+    monkeypatch.setattr(settings, "NEWS_LLM_REQUEST_TIMEOUT_SECONDS", 0.3)
+    calls = []
+
+    async def _trickle():
+        for _ in range(100):
+            yield b"\n"
+            await asyncio.sleep(0.05)
+
+    def _handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=_trickle())
+
+    _install_transport(monkeypatch, _handler)
+    with pytest.raises(oc.OpenAICompatTimeoutError):
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert len(calls) == 1, "a deadline is not retried (it would bill the generation twice)"
+    assert news_llm.is_transient_news_llm_error(oc.OpenAICompatTimeoutError("x"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"error": {"code": "data_inspection_failed", "message": "Input data may contain inappropriate content."}},
+    {"error": {"code": "invalid_request_error", "message": "Content Exists Risk"}},
+])
+async def test_a_moderation_400_is_a_content_refusal(monkeypatch, body):
+    _openai_settings(monkeypatch)
+    _install_transport(monkeypatch, lambda r: httpx.Response(400, json=body))
+    with pytest.raises(oc.OpenAICompatContentRejected) as e:
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert news_llm.is_content_refusal(e.value)
+
+
+@pytest.mark.asyncio
+async def test_any_other_400_stays_a_plain_failure(monkeypatch):
+    _openai_settings(monkeypatch)
+    _install_transport(monkeypatch, lambda r: httpx.Response(
+        400, json={"error": {"code": "invalid_request_error", "message": "Unknown model deepseek-x"}}))
+    with pytest.raises(oc.OpenAICompatError) as e:
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert not news_llm.is_content_refusal(e.value), "a bad model must never become an accepted gap"
+
+
+@pytest.mark.asyncio
+async def test_a_read_timeout_is_not_retried(monkeypatch):
+    _openai_settings(monkeypatch)
+    calls = []
+
+    def _handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("slow generation")
+
+    _install_transport(monkeypatch, _handler)
+    with pytest.raises(oc.OpenAICompatTimeoutError):
+        await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                          response_schema={"type": "OBJECT", "properties": {}})
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_burst_of_concurrent_429s_is_not_an_outage(monkeypatch, caplog):
+    """Calls already on the wire when the first 429 opened the breaker each got a 429 too:
+    that is ONE rate-limit burst, not three separate refusals."""
+    _openai_settings(monkeypatch)
+    _install_transport(monkeypatch, lambda r: httpx.Response(429, headers={"retry-after": "2"}))
+    breaker = oc.quota_breaker
+    with caplog.at_level("ERROR", logger="app.integrations.openai_compat"):
+        for _ in range(4):                    # four responses of the same burst
+            breaker.trip(2.0, reason="rate_limit_exceeded")
+    assert breaker._trips == 1 and "quota refusals in a row" not in caplog.text
+    oc.quota_breaker.reset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body", [
+    (402, {"error": {"code": "invalid_request_error", "message": "Insufficient Balance"}}),  # DeepSeek
+    (400, {"code": "Arrearage", "error": {"code": "Arrearage", "message": "Access denied"}}), # DashScope
+])
+async def test_an_exhausted_account_outside_a_429_trips_the_breaker(monkeypatch, status, body):
+    _openai_settings(monkeypatch)
+    calls = []
+
+    def _handler(request):
+        calls.append(request)
+        return httpx.Response(status, json=body)
+
+    _install_transport(monkeypatch, _handler)
+    for _ in range(3):
+        with pytest.raises(oc.OpenAICompatError):
+            await news_llm.generate_news_json(prompt="p", system_instruction=None,
+                                              response_schema={"type": "OBJECT", "properties": {}})
+    assert len(calls) == 1, "the breaker holds later calls off the wire"
+    oc.quota_breaker.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_model_can_be_sent_no_temperature(monkeypatch):
+    _openai_settings(monkeypatch)
+    monkeypatch.setattr(settings, "NEWS_LLM_SEND_TEMPERATURE", False)
+    captured = _install_transport(monkeypatch, lambda r: _chat_response('{"a": 1}'))
+    await news_llm.generate_news_json(prompt="p", system_instruction=None, temperature=0.0,
+                                      response_schema={"type": "OBJECT", "properties": {}})
+    assert "temperature" not in json.loads(captured[0].content)
+    monkeypatch.setattr(settings, "NEWS_LLM_SEND_TEMPERATURE", True)
+    captured2 = _install_transport(monkeypatch, lambda r: _chat_response('{"a": 1}'))
+    await news_llm.generate_news_json(prompt="p", system_instruction=None, temperature=0.0,
+                                      response_schema={"type": "OBJECT", "properties": {}})
+    assert json.loads(captured2[0].content)["temperature"] == 0.0, "default keeps temperature 0"
+
+
+@pytest.mark.asyncio
+async def test_one_refused_article_no_longer_stalls_its_live_batch(monkeypatch, caplog):
+    """A moderation 400 for ONE article used to leave all 25 of its batch unsummarised on
+    every sweep. Split once: the clean half is enriched at its own positions."""
+    import app.services.news_cache_service as ncs
+    from app.integrations.openai_compat import OpenAICompatContentRejected
+
+    monkeypatch.setattr(ncs, "_REFUSED_BATCHES", set())
+    articles = [{"title": f"A{i}" + (" FORBIDDEN" if i == 3 else ""), "text": "t"} for i in range(4)]
+    calls = []
+
+    async def _gen(**kw):
+        calls.append(kw["prompt"])
+        if "FORBIDDEN" in kw["prompt"]:
+            raise OpenAICompatContentRejected("400 data_inspection_failed")
+        n = sum(1 for i in range(10) if f"<<<END_ARTICLE {i}>>>" in kw["prompt"])
+        return {"text": json.dumps([{"index": i, "bullets": [f"b{i}", "c"], "sentiment": "bearish",
+                                     "confidence": 70} for i in range(n)])}
+
+    monkeypatch.setattr(ncs, "generate_news_json", _gen)
+    svc = object.__new__(NewsCacheService)
+    with caplog.at_level("WARNING"):
+        out = await svc._batch_enrich_articles(articles, ticker="TSM")
+    assert sorted(out) == [0, 1], "the clean half is enriched, at its batch positions"
+    assert out[0]["bullets"] == ["b0", "c"] and out[1]["bullets"] == ["b1", "c"]
+    assert len(calls) == 3, "one call, then the two halves — no deeper recursion"
+    assert "refused by the provider's moderation" in caplog.text
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        await svc._batch_enrich_articles(articles, ticker="TSM")
+    assert "refused by the provider's moderation" not in caplog.text, "ERROR once per process"
+
+
+@pytest.mark.asyncio
+async def test_the_right_half_keys_shift_back_to_batch_positions(monkeypatch):
+    import app.services.news_cache_service as ncs
+    from app.integrations.openai_compat import OpenAICompatContentRejected
+
+    monkeypatch.setattr(ncs, "_REFUSED_BATCHES", set())
+    articles = [{"title": f"A{i}" + (" FORBIDDEN" if i == 0 else ""), "text": "t"} for i in range(4)]
+
+    async def _gen(**kw):
+        if "FORBIDDEN" in kw["prompt"]:
+            raise OpenAICompatContentRejected("400 content_filter")
+        n = sum(1 for i in range(10) if f"<<<END_ARTICLE {i}>>>" in kw["prompt"])
+        titles = [line.split("Title: ", 1)[1] for line in kw["prompt"].splitlines() if line.startswith("Title: ")]
+        return {"text": json.dumps([{"index": i, "bullets": [titles[i], "x"], "sentiment": "bullish",
+                                     "confidence": 50} for i in range(n)])}
+
+    monkeypatch.setattr(ncs, "generate_news_json", _gen)
+    out = await object.__new__(NewsCacheService)._batch_enrich_articles(articles, ticker="TSM")
+    assert {k: v["bullets"][0] for k, v in out.items()} == {2: "A2", 3: "A3"}

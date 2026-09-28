@@ -42,6 +42,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -84,6 +85,11 @@ UNSUPPORTED_RECHECK_DAYS = 30
 NIGHTLY_HOUR_ET = 21
 _TEXT_CAP = 500                  # the live enrichment's snippet cap — same input as live
 LABEL_TEMPERATURE = 0.0
+#: At the attempt cap a gap is accepted only while it is SMALL — a few articles the model
+#: will never label (a blocked prompt). A systematic failure (a provider answering every
+#: batch unusably) must not end 'done' with 90 days marked covered and nothing labelled.
+GAP_ACCEPT_MIN_ARTICLES = 2
+GAP_ACCEPT_SHARE = 0.02
 
 _LABEL_SCHEMA = {
     "type": "ARRAY",
@@ -134,6 +140,7 @@ class RunStats:
     model_calls: int = 0
     fmp_calls: int = 0
     windows: int = 0
+    unlabelled: int = 0
     truncated_days: List[str] = field(default_factory=list)
 
 
@@ -296,6 +303,18 @@ def parse_labels(text: str, expected: int) -> Optional[List[Tuple[Optional[str],
     return out
 
 
+def _on_covered_day(article: Dict[str, Any], covered_from: Optional[date],
+                    covered_to: Optional[date]) -> bool:
+    """Whether the article's ET day lies inside the coverage the run STARTED with. Pure."""
+    if covered_from is None or covered_to is None:
+        return False
+    try:
+        day = datetime.fromisoformat(str(article.get("published_at"))).astimezone(ET).date()
+    except (TypeError, ValueError):
+        return False
+    return covered_from <= day <= covered_to
+
+
 def next_nightly_run(now: datetime, scope: str) -> datetime:
     """The next 21:00 ET, plus a stable per-scope jitter (0–30 min) so scopes don't stampede."""
     local = now.astimezone(ET)
@@ -310,6 +329,19 @@ def next_et_midnight(now: datetime) -> datetime:
     local = now.astimezone(ET)
     target = datetime.combine(local.date() + timedelta(days=1), dtime(0, 5), tzinfo=ET)
     return target.astimezone(timezone.utc)
+
+
+def _is_flex_tier_refusal(exc: BaseException) -> bool:
+    """A Gemini client error (400/403/404) that names the service tier: the Flex tier is not
+    offered here (model, key or region), so asking again per batch is pointless. Pure."""
+    try:
+        from google.genai import errors as genai_errors
+    except Exception:  # noqa: BLE001 — no SDK, no refusal to recognise
+        return False
+    if not isinstance(exc, genai_errors.ClientError) or getattr(exc, "code", None) not in (400, 403, 404):
+        return False
+    text = str(exc).lower()
+    return "tier" in text or "flex" in text
 
 
 def route_for(scope: str) -> Optional[Tuple[str, str]]:
@@ -354,6 +386,8 @@ class NewsSentimentBackfillService:
         self._labeller = labeller
         self._pace_lock = asyncio.Lock()
         self._last_fmp_call = 0.0
+        #: Set when Flex answers something other than "busy" — see `_call_model`.
+        self._flex_refused = False
 
     # lazy dependencies ------------------------------------------------------
     @property
@@ -443,6 +477,16 @@ class NewsSentimentBackfillService:
         res = await asyncio.to_thread(_do)
         return getattr(res, "data", None) is True
 
+    async def _finish_logged(self, claim: Claim, **kwargs: Any) -> bool:
+        """`_finish` that never raises: a failed close is logged with the scope and the status
+        it meant to write, and the lease simply lapses (the next claim picks the scope up)."""
+        try:
+            return await self._finish(claim, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("news sentiment backfill: finish(%s) failed for %s (%s: %s) — the lease "
+                           "will lapse", kwargs.get("status"), claim.scope, type(e).__name__, e)
+            return False
+
     # FMP -------------------------------------------------------------------
     async def _pace(self) -> None:
         async with self._pace_lock:
@@ -495,10 +539,13 @@ class NewsSentimentBackfillService:
             route, ws - timedelta(days=1), we + timedelta(days=1), MAX_PAGES_PER_WINDOW, stats,
         )
         if capped:
-            # A week too busy for the page cap: fetch it day by day instead.
+            # A week too busy for the page cap: fetch it day by day instead — the same ±1-day
+            # pad as the weekly request (FMP's from/to zone is undocumented), so an article
+            # near an ET midnight is not lost at the edge; the ET-day filter and the run's
+            # key dedupe drop the neighbours' rows again.
             raw = []
-            day = ws
-            while day <= we:
+            day = ws - timedelta(days=1)
+            while day <= we + timedelta(days=1):
                 day_rows, day_capped = await self._fetch_range(route, day, day, MAX_PAGES_PER_DAY, stats)
                 if day_capped:
                     stats.truncated_days.append(day.isoformat())
@@ -556,6 +603,7 @@ class NewsSentimentBackfillService:
         from app.services.news_llm import (
             PROVIDER_GEMINI,
             generate_news_json,
+            is_content_refusal,
             is_transient_news_llm_error,
             news_llm_config,
             quota_tripped,
@@ -566,7 +614,7 @@ class NewsSentimentBackfillService:
         await self._claim_budget(now)
         stats.model_calls += 1
         use_flex = bool(getattr(settings, "SENTIMENT_BACKFILL_FLEX", True)) \
-            and news_llm_config().provider == PROVIDER_GEMINI
+            and news_llm_config().provider == PROVIDER_GEMINI and not self._flex_refused
         kwargs = dict(
             prompt=build_label_prompt(scope, articles),
             system_instruction=neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
@@ -584,13 +632,38 @@ class NewsSentimentBackfillService:
             try:
                 result = await labeller(**kwargs, service_tier="flex" if use_flex else None)
             except Exception as e:
-                if not (use_flex and is_transient_news_llm_error(e)):
+                if not use_flex:
                     raise
-                # Flex refuses when busy and never falls back by itself: one try on standard.
-                logger.info("news sentiment backfill: flex busy for %s — retrying on standard", scope)
+                # Flex is only a discount: whatever it answers, the batch gets one try on the
+                # standard tier. (The Flex attempt is single-shot and never touches the breaker
+                # chat and reports share — `gemini.async_retry`.) Only a DEFINITE "tier not
+                # offered" refusal turns Flex off for this process; a busy tier or a transport
+                # blip (a dropped connection is not "transient" to the Gemini classifier) must
+                # not double the price of every later batch until the next deploy.
+                if _is_flex_tier_refusal(e):
+                    self._flex_refused = True
+                    logger.warning("news sentiment backfill: flex refused (%s: %s) — standard tier "
+                                   "for the rest of this process", type(e).__name__, e)
+                else:
+                    logger.info("news sentiment backfill: flex failed for %s (%s) — retrying on "
+                                "standard", scope, type(e).__name__)
                 result = await labeller(**kwargs, service_tier=None)
+        except asyncio.CancelledError:
+            # Shutdown mid-call: the unit was claimed for a call that never answered.
+            try:
+                await asyncio.wait_for(self._refund_budget(), timeout=2.0)
+            except BaseException:  # noqa: BLE001 — best effort; the cap is only a ceiling
+                pass
+            raise
         except Exception as e:
             await self._refund_budget()
+            if is_content_refusal(e):
+                # Moderation refused THIS prompt: an unusable answer, exactly like Gemini's
+                # blocked prompt — `label_batch` splits once and the rest follows the gap
+                # rule. As a failed run it stalled the scope on the same batch forever.
+                logger.warning("news sentiment backfill: %s — a batch of %d was refused by the "
+                               "provider's moderation", scope, len(articles))
+                return None
             if is_transient_news_llm_error(e):
                 raise _Defer(f"model busy ({type(e).__name__})", DEFER_RATE_LIMIT_SECONDS) from e
             raise _Fail(f"model call failed ({type(e).__name__}: {e})") from e
@@ -633,18 +706,43 @@ class NewsSentimentBackfillService:
         today = now.astimezone(ET).date()
         horizon = horizon_for(today)
         stats = RunStats()
-        coverage: Tuple[Optional[date], Optional[date]] = (claim.covered_from, claim.covered_to)
+        cf, ct = claim.covered_from, claim.covered_to
+        # Coverage that no longer reaches the horizon is not a base to extend: `plan_windows`
+        # plans the whole horizon for it, and merging those windows into the stale range
+        # never touched it — the new block was dropped and the stale range written back, so
+        # the scope re-fetched all 90 days every night. Start clean instead; (None, None)
+        # reaches finish/renew as NULLs, which COALESCE ignores until a window completes.
+        if cf is None or ct is None or ct < cf or ct < horizon:
+            cf, ct = None, None
+        coverage: Tuple[Optional[date], Optional[date]] = (cf, ct)
         route = route_for(claim.scope)
         if route is None:
-            await self._finish(claim, status="unsupported",
-                               next_run_at=now + timedelta(days=UNSUPPORTED_RECHECK_DAYS),
-                               coverage=coverage, stats=stats, error=None)
+            await self._finish_logged(claim, status="unsupported",
+                                      next_run_at=now + timedelta(days=UNSUPPORTED_RECHECK_DAYS),
+                                      coverage=coverage, stats=stats, error=None)
             logger.info("news sentiment backfill: %s unsupported (no backfillable feed)", claim.scope)
             return "unsupported"
 
         pending: Optional[Tuple[date, date]] = None
         seen: set = set()
         status, next_run, error = "done", next_nightly_run(now, claim.scope), None
+        # A window whose articles the model could not all label is NOT covered: recorded as
+        # covered, only the nightly 3-day re-scan would ever look at it again, so the gap
+        # (a blocked answer, a wrong-count reply, a cut-off one) would be permanent — and a
+        # run where every answer failed ended 'done' with zero labels. From the first such
+        # window on, coverage stops advancing; the run still labels every later window (so
+        # the retry re-bills nothing but the gap) and ends 'failed', retried with backoff.
+        # At the attempt cap a SMALL gap is accepted and logged, so one article the model
+        # will never label cannot hold a ticker back forever; a large one keeps failing (the
+        # daily retry re-bills only the gap — labelled articles are skipped by the log).
+        # Only articles on days NOT already covered count: the nightly re-scan of covered
+        # days must not re-fail — and re-run four times — over an article accepted before.
+        stored_cf, stored_ct = cf, ct
+        accept_gaps = claim.attempts >= MAX_ATTEMPTS
+        gap: Optional[Tuple[date, date]] = None
+        gap_articles = 0
+        to_label = 0
+        held: List[Tuple[date, date]] = []      # windows from the gap on, merged only if accepted
         try:
             for window in plan_windows(today, coverage[0], coverage[1], horizon):
                 articles = await self.fetch_window(route, window, stats)
@@ -658,8 +756,15 @@ class NewsSentimentBackfillService:
                 stats.articles += len(fresh)
                 logged = await self.already_logged(claim.scope, [k for k, _ in fresh])
                 todo = [art for key, art in fresh if key not in logged]
+                to_label += len(todo)
+                window_gap = 0
                 for i in range(0, len(todo), LABEL_BATCH):
-                    labelled = await self.label_batch(claim.scope, todo[i:i + LABEL_BATCH], stats, now=now)
+                    chunk = todo[i:i + LABEL_BATCH]
+                    labelled = await self.label_batch(claim.scope, chunk, stats, now=now)
+                    got = {a.get("external_id") for a in labelled}
+                    missed = [a for a in chunk if a.get("external_id") not in got]
+                    stats.unlabelled += len(missed)
+                    window_gap += sum(1 for a in missed if not _on_covered_day(a, stored_cf, stored_ct))
                     payload = build_log_rows(
                         claim.scope, labelled, now=now, source="backfill",
                         max_age_hours=None, undated="skip", oldest_day=horizon,
@@ -667,9 +772,29 @@ class NewsSentimentBackfillService:
                     )
                     if payload:
                         stats.labels += await asyncio.to_thread(upsert_log_rows, self.supabase, payload)
-                coverage, pending = merge_coverage(coverage, window, pending)
+                if window_gap and gap is None:
+                    gap = window
+                gap_articles += window_gap
+                if gap is None:
+                    coverage, pending = merge_coverage(coverage, window, pending)
+                else:
+                    held.append(window)
                 stats.windows += 1
+                # Renewed with the HELD coverage: nothing past a gap is persisted as covered
+                # before the run decides whether to accept it.
                 await self._renew(claim, coverage)
+            if gap is not None:
+                allowance = max(GAP_ACCEPT_MIN_ARTICLES, math.ceil(GAP_ACCEPT_SHARE * to_label))
+                if not (accept_gaps and gap_articles <= allowance):
+                    raise _Fail(
+                        f"{gap_articles} of {to_label} article(s) left unlabelled from {gap[0]}..{gap[1]} "
+                        f"on — coverage held there, retrying (attempt {claim.attempts}/{MAX_ATTEMPTS}"
+                        + ("; too many to accept at the cap" if accept_gaps else "") + ")"
+                    )
+                for window in held:
+                    coverage, pending = merge_coverage(coverage, window, pending)
+                logger.warning("news sentiment backfill: %s — accepting %d unlabelled article(s) of %d "
+                               "after %d attempts", claim.scope, gap_articles, to_label, claim.attempts)
         except _LeaseLost as e:
             logger.warning("news sentiment backfill: %s — lease lost, stopping (%s)", claim.scope, e)
             return "lost"
@@ -683,12 +808,12 @@ class NewsSentimentBackfillService:
             status, error = "failed", f"{type(e).__name__}: {e}"
             next_run = now + timedelta(seconds=FAILURE_BACKOFF_SECONDS * max(1, claim.attempts))
 
-        wrote = await self._finish(claim, status=status, next_run_at=next_run,
-                                   coverage=coverage, stats=stats, error=error)
+        wrote = await self._finish_logged(claim, status=status, next_run_at=next_run,
+                                          coverage=coverage, stats=stats, error=error)
         logger.info(
             "news sentiment backfill: scope=%s status=%s windows=%d articles=%d labels=%d "
-            "model_calls=%d fmp_calls=%d coverage=%s..%s truncated=%s finish_written=%s%s",
-            claim.scope, status, stats.windows, stats.articles, stats.labels,
+            "unlabelled=%d model_calls=%d fmp_calls=%d coverage=%s..%s truncated=%s finish_written=%s%s",
+            claim.scope, status, stats.windows, stats.articles, stats.labels, stats.unlabelled,
             stats.model_calls, stats.fmp_calls, coverage[0], coverage[1],
             ",".join(stats.truncated_days) or "-", wrote,
             f" error={error}" if error else "",
@@ -724,16 +849,21 @@ class NewsSentimentBackfillService:
                 try:
                     await self.process(claim, now=now)
                 except asyncio.CancelledError:
-                    # Shutdown: hand the scope back instead of waiting out the lease.
+                    # Shutdown: hand the scope back instead of waiting out the lease. Coverage
+                    # is sent as NULLs so COALESCE keeps what each finished window already
+                    # renewed — the claim-time range would erase that progress.
                     try:
                         await asyncio.wait_for(self._finish(
                             claim, status="queued", next_run_at=datetime.now(timezone.utc),
-                            coverage=(claim.covered_from, claim.covered_to), stats=RunStats(),
+                            coverage=(None, None), stats=RunStats(),
                             error="deferred at shutdown",
                         ), timeout=3.0)
                     except BaseException:  # noqa: BLE001 — best effort; the lease expires anyway
                         pass
                     raise
+                except Exception:  # noqa: BLE001 — one scope must not orphan its sibling worker
+                    logger.exception("news sentiment backfill: worker error for %s", claim.scope)
+                    continue
                 processed += 1
 
         await asyncio.gather(*(_worker() for _ in range(max(1, workers))))

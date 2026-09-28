@@ -669,39 +669,12 @@ def test_every_public_table_is_curated():
 # An entry here is a promise, not an exemption: once the migration is applied and
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
-# Empty is the healthy steady state — both former entries (157 `market_close_snapshot`,
-# 159 `corporate_action_cache`) are APPLIED and now appear in the snapshot, so the real
-# column-drift check below covers them again.
-#
-# 2026-09-23: migration 173 written, not yet applied. Remove both entries after the user
-# applies it and re-runs `scripts/dump_schema.sh` (the guard below goes red until you do).
-_PENDING_MIGRATION_TABLES: set[str] = {
-    "public.marketing_scripts",
-    "public.marketing_link_hits",
-    # 2026-09-23: migration 174 (Emerging Frontiers rotation + insights) written, not yet
-    # applied — same rule: remove these after the re-dump.
-    "public.theme_rotation_runs",
-    "public.theme_rotation_decisions",
-    "public.theme_relevance_cache",
-    "public.theme_daily_insights",
-    # 2026-09-24: migration 175 (Trillion-Dollar Club Bets) written, not yet applied —
-    # remove these three after the re-dump.
-    "public.trillion_club_companies",
-    "public.trillion_club_stakes",
-    "public.trillion_club_filings",
-    # 2026-09-25: migration 178 (Caydex Fair Value Estimate) written, not yet applied —
-    # remove these two after the re-dump.
-    "public.dcf_fair_value_cache",
-    "public.dcf_fair_value_history",
-    # 2026-09-26: migration 179 (search-screen chips) written, not yet applied — remove
-    # after the re-dump.
-    "public.search_pick_daily",
-    # 2026-09-27: migration 180 (Updates news-sentiment timeline) written, not yet applied —
-    # remove after the re-dump.
-    "public.news_sentiment_log",
-    # 2026-09-27: migration 181 (news-sentiment backfill queue) written, not yet applied.
-    "public.news_sentiment_backfill",
-}
+# Empty is the healthy steady state.
+_PENDING_MIGRATION_TABLES: set[str] = set()
+# 2026-09-27: 173-181's fourteen tables (marketing_scripts / marketing_link_hits,
+# theme_rotation_* / theme_relevance_cache / theme_daily_insights, trillion_club_*,
+# dcf_fair_value_*, search_pick_daily, news_sentiment_log, news_sentiment_backfill) were
+# applied and re-dumped, so they left the list.
 # 2026-09-18: 170's four tables (marketing_runs / marketing_assets / marketing_posts /
 # podcast_episodes) were applied and re-dumped, so they left the list — the guard below
 # went red the moment the snapshot carried them, exactly as designed.

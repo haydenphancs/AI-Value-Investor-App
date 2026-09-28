@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict hGjGqpoMzzAHZqXMCzwM9GSTGkKFOKuMVgMJ51rpT1SauYYu1Hfoz4DoReU6Te1
+\restrict zlDPqhz7KayznnNf5tIxDf5mGPKbbFPp0r8DFc8cfeYR1PXvdPImNvzi9dQ4ChT
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1382,6 +1382,82 @@ $$;
 
 
 --
+-- Name: news_sentiment_backfill; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.news_sentiment_backfill (
+    scope text NOT NULL,
+    status text DEFAULT 'queued'::text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    next_run_at timestamp with time zone DEFAULT now() NOT NULL,
+    claim_token uuid,
+    lease_until timestamp with time zone,
+    attempts integer DEFAULT 0 NOT NULL,
+    covered_from date,
+    covered_to date,
+    articles integer DEFAULT 0 NOT NULL,
+    labels integer DEFAULT 0 NOT NULL,
+    last_run_at timestamp with time zone,
+    last_error text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT news_sentiment_backfill_articles_check CHECK ((articles >= 0)),
+    CONSTRAINT news_sentiment_backfill_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT news_sentiment_backfill_labels_check CHECK ((labels >= 0)),
+    CONSTRAINT news_sentiment_backfill_last_error_check CHECK (((last_error IS NULL) OR (char_length(last_error) <= 500))),
+    CONSTRAINT news_sentiment_backfill_scope_check CHECK (((char_length(scope) >= 1) AND (char_length(scope) <= 32))),
+    CONSTRAINT news_sentiment_backfill_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'running'::text, 'done'::text, 'failed'::text, 'unsupported'::text])))
+);
+
+
+--
+-- Name: TABLE news_sentiment_backfill; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.news_sentiment_backfill IS 'One row per watched ticker for the news-sentiment backfill: status, a fenced lease, the ET-day range already labelled into news_sentiment_log, and when it is next due (a nightly top-up). Worked by app/services/news_sentiment_backfill_service.py through the claim/renew/finish/enqueue/discover_sentiment_backfill functions. Per ticker, never per user.';
+
+
+--
+-- Name: claim_sentiment_backfill(uuid, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) RETURNS SETOF public.news_sentiment_backfill
+    LANGUAGE sql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    UPDATE public.news_sentiment_backfill b
+       SET status      = 'running',
+           claim_token = p_token,
+           lease_until = now() + make_interval(secs => GREATEST(COALESCE(p_lease_seconds, 300), 60)),
+           attempts    = b.attempts + 1,
+           updated_at  = now()
+     WHERE b.scope IN (
+           SELECT s.scope
+             FROM public.news_sentiment_backfill s
+            WHERE s.next_run_at <= now()
+              AND s.status IN ('queued', 'done', 'failed', 'running')
+              -- A running row is claimable only once its lease has lapsed (a dead worker).
+              AND (s.status <> 'running' OR s.lease_until IS NULL OR s.lease_until < now())
+              -- A scope that keeps failing is tried at most once a day, never dropped.
+              AND (s.attempts < GREATEST(COALESCE(p_max_attempts, 5), 1)
+                   OR s.updated_at < now() - interval '24 hours')
+              -- Only tickers someone still watches.
+              AND EXISTS (SELECT 1 FROM public.watchlist_items w WHERE w.ticker = s.scope)
+            ORDER BY s.next_run_at ASC
+            LIMIT LEAST(GREATEST(COALESCE(p_limit, 1), 1), 10)
+            FOR UPDATE SKIP LOCKED
+           )
+    RETURNING b.*;
+$$;
+
+
+--
+-- Name: FUNCTION claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) IS 'Claims up to p_limit (max 10) due, still-watched scopes under token p_token with a lease of p_lease_seconds (min 60) on the database clock. INVOKER: its only caller is service_role.';
+
+
+--
 -- Name: claim_updates_insight_scope(text, timestamp with time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1518,6 +1594,82 @@ $$;
 --
 
 COMMENT ON FUNCTION public.create_user_credits() IS 'AFTER INSERT on public.users: seeds user_credits from plan_credits (never a literal), stamps tier_alloc with the same allocation (140), sets resets_at to the ET month boundary so ensure_credit_period does not treat a fresh row as due, and logs the opening grant with an honest granted/purchased split. Skips the guest sentinel. Fails soft — see 135/140.';
+
+
+--
+-- Name: discover_sentiment_backfill(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.discover_sentiment_backfill() RETURNS integer
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    INSERT INTO public.news_sentiment_backfill (scope, status, requested_at, next_run_at)
+    SELECT DISTINCT upper(btrim(w.ticker)), 'queued', now(), now()
+      FROM public.watchlist_items w
+     WHERE w.ticker IS NOT NULL
+       AND char_length(btrim(w.ticker)) BETWEEN 1 AND 32
+    ON CONFLICT (scope) DO NOTHING;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION discover_sentiment_backfill(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.discover_sentiment_backfill() IS 'Queues every watched ticker that has no backfill row yet. Returns the number queued.';
+
+
+--
+-- Name: enqueue_sentiment_backfill(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) RETURNS integer
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_count INTEGER;
+    v_today DATE := (now() AT TIME ZONE 'America/New_York')::date;
+BEGIN
+    WITH wanted AS (
+        SELECT DISTINCT upper(btrim(s)) AS scope
+          FROM unnest(COALESCE(p_scopes, ARRAY[]::text[])) AS s
+         WHERE s IS NOT NULL
+           AND char_length(btrim(s)) BETWEEN 1 AND 32
+           AND upper(btrim(s)) <> '__MARKET__'
+         LIMIT 100
+    ),
+    upserted AS (
+        INSERT INTO public.news_sentiment_backfill AS b (scope, status, requested_at, next_run_at)
+        SELECT w.scope, 'queued', now(), now()
+          FROM wanted w
+        ON CONFLICT (scope) DO UPDATE
+           SET next_run_at  = LEAST(b.next_run_at, now()),
+               requested_at = now(),
+               updated_at   = now()
+         -- Re-adding a covered ticker is a no-op; only a stale or never-finished one moves up.
+         WHERE b.status IN ('queued', 'done', 'failed')
+           AND (b.covered_to IS NULL OR b.covered_to < v_today - 1)
+        RETURNING 1
+    )
+    SELECT count(*) INTO v_count FROM upserted;
+    RETURN v_count;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION enqueue_sentiment_backfill(p_scopes text[]); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) IS 'Queues (or pulls forward) up to 100 scopes; a scope covered through yesterday is left alone. Returns rows inserted or moved.';
 
 
 --
@@ -1704,6 +1856,144 @@ BEGIN
      WHERE s.job = p_job;
 END;
 $$;
+
+
+--
+-- Name: finish_sentiment_backfill(text, uuid, text, timestamp with time zone, date, date, integer, integer, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) RETURNS boolean
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_status IS NULL OR p_status NOT IN ('queued', 'done', 'failed', 'unsupported') THEN
+        RAISE EXCEPTION 'finish_sentiment_backfill: invalid status %', p_status
+            USING ERRCODE = '22023';  -- invalid_parameter_value
+    END IF;
+
+    UPDATE public.news_sentiment_backfill
+       SET status       = p_status,
+           next_run_at  = COALESCE(p_next_run_at, now() + interval '1 day'),
+           covered_from = COALESCE(p_covered_from, covered_from),
+           covered_to   = COALESCE(p_covered_to, covered_to),
+           articles     = GREATEST(COALESCE(p_articles, 0), 0),
+           labels       = GREATEST(COALESCE(p_labels, 0), 0),
+           -- Success clears the failure count; a deferral gives back the attempt it cost.
+           attempts     = CASE
+                              WHEN p_status IN ('done', 'unsupported') THEN 0
+                              WHEN p_status = 'queued' THEN GREATEST(attempts - 1, 0)
+                              ELSE attempts
+                          END,
+           last_error   = CASE WHEN p_error IS NULL THEN NULL ELSE left(p_error, 500) END,
+           last_run_at  = now(),
+           claim_token  = NULL,
+           lease_until  = NULL,
+           updated_at   = now()
+     WHERE scope = p_scope
+       AND claim_token = p_token;
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) IS 'Closes a run for the holder of p_token: done / failed / unsupported / queued (deferred). false = the claim was lost and nothing was written.';
+
+
+--
+-- Name: get_most_added_tickers(timestamp with time zone, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer DEFAULT 24) RETURNS TABLE(ticker text, asset_type text, adders bigint)
+    LANGUAGE sql STABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    WITH adds AS (
+        SELECT wi.user_id,
+               lower(coalesce(wi.asset_type, 'stock')) AS kind,
+               upper(wi.ticker) AS raw_ticker
+          FROM public.watchlist_items wi
+          JOIN public.users u ON u.id = wi.user_id   -- drops legacy guest rows
+         WHERE wi.added_at >= p_since
+           AND wi.added_at >= u.created_at
+                              + make_interval(hours => GREATEST(COALESCE(p_min_account_age_hours, 24), 0))
+           AND NOT u.is_admin
+           AND lower(coalesce(wi.asset_type, 'stock')) IN ('stock', 'etf', 'crypto')
+    ),
+    normalized AS (
+        SELECT d.user_id,
+               d.kind,
+               -- Coins are stored as the pair (BTCUSD, migration 160); search spells BTC.
+               CASE WHEN d.kind = 'crypto' AND length(d.raw_ticker) > 3
+                         AND right(d.raw_ticker, 3) = 'USD'
+                    THEN left(d.raw_ticker, length(d.raw_ticker) - 3)
+                    ELSE d.raw_ticker
+               END AS symbol
+          FROM adds d
+    )
+    SELECT n.symbol AS ticker,
+           -- One security, rows declared differently by different writers: count them
+           -- together and label by the most common kind (ties → 'etf' before 'stock').
+           mode() WITHIN GROUP (ORDER BY n.kind) AS asset_type,
+           COUNT(DISTINCT n.user_id)::BIGINT AS adders
+      FROM normalized n
+     GROUP BY n.symbol, (n.kind = 'crypto')
+    HAVING COUNT(DISTINCT n.user_id) >= GREATEST(COALESCE(p_min_users, 3), 3)
+     ORDER BY COUNT(DISTINCT n.user_id) DESC, n.symbol ASC
+     LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100);
+$$;
+
+
+--
+-- Name: FUNCTION get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer) IS 'Tickers added to watchlists since p_since by at least 3 distinct real accounts (never fewer, whatever p_min_users says), excluding each account''s first p_min_account_age_hours (onboarding) and admin accounts. A symbol''s stock and etf rows count as one security; a coin is its own row, returned in search spelling (BTCUSD → BTC). Returns no name: company_name is client-writable. Capped at 100 rows.';
+
+
+--
+-- Name: get_search_trending(date, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.get_search_trending(p_since date, p_min_picks integer, p_limit integer) RETURNS TABLE(ticker text, asset_type text, picks bigint)
+    LANGUAGE sql STABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    -- ⚠️ Every column is alias-qualified: the RETURNS TABLE names are OUT parameters, and an
+    -- unqualified `ticker` would be ambiguous.
+    WITH per_type AS (
+        SELECT s.ticker, s.asset_type, SUM(s.picks)::BIGINT AS picks
+          FROM public.search_pick_daily s
+         WHERE s.day >= p_since
+         GROUP BY s.ticker, s.asset_type
+    ),
+    per_asset AS (
+        SELECT p.ticker,
+               -- One security, several declared types: label it by the majority.
+               (array_agg(p.asset_type
+                          ORDER BY p.picks DESC, (p.asset_type = 'stock') DESC, p.asset_type))[1]
+                   AS asset_type,
+               SUM(p.picks)::BIGINT AS picks
+          FROM per_type p
+         GROUP BY p.ticker, (p.asset_type = 'crypto')
+    )
+    SELECT a.ticker, a.asset_type, a.picks
+      FROM per_asset a
+     WHERE a.picks >= GREATEST(COALESCE(p_min_picks, 3), 3)
+     ORDER BY a.picks DESC, a.ticker ASC
+     LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100);
+$$;
+
+
+--
+-- Name: FUNCTION get_search_trending(p_since date, p_min_picks integer, p_limit integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.get_search_trending(p_since date, p_min_picks integer, p_limit integer) IS 'Tickers ranked by de-duplicated search picks since p_since. Never returns a ticker below 3 picks, whatever p_min_picks says. Capped at 100 rows.';
 
 
 --
@@ -1967,6 +2257,78 @@ $$;
 
 
 --
+-- Name: increment_marketing_link_hits(text, date, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_marketing_link_hits(p_campaign text, p_day date, p_count integer) RETURNS bigint
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_hits BIGINT;
+BEGIN
+    IF p_count IS NULL OR p_count < 1 OR p_count > 1000000 THEN
+        RAISE EXCEPTION 'increment_marketing_link_hits: p_count must be between 1 and 1000000, got %',
+            p_count
+            USING ERRCODE = '22023';  -- invalid_parameter_value
+    END IF;
+
+    INSERT INTO public.marketing_link_hits (campaign, day, hits, updated_at)
+    VALUES (p_campaign, p_day, p_count, now())
+    ON CONFLICT (campaign, day) DO UPDATE
+        SET hits = marketing_link_hits.hits + EXCLUDED.hits,
+            updated_at = now()
+    RETURNING hits INTO v_hits;
+
+    RETURN v_hits;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION increment_marketing_link_hits(p_campaign text, p_day date, p_count integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.increment_marketing_link_hits(p_campaign text, p_day date, p_count integer) IS 'Atomic upsert-increment of one (campaign, day) counter; returns the new total. Runs with the caller''s privileges (INVOKER): its only caller is service_role, which holds the table grant. Raises 22023 for a count outside 1..1000000.';
+
+
+--
+-- Name: increment_search_pick(date, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_search_pick(p_day date, p_ticker text, p_asset_type text) RETURNS integer
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_today DATE := (now() AT TIME ZONE 'America/New_York')::date;
+    v_picks INTEGER;
+BEGIN
+    IF p_day IS NULL OR p_day < v_today - 1 OR p_day > v_today + 1 THEN
+        RAISE EXCEPTION 'increment_search_pick: p_day % is not within one day of ET today %',
+            p_day, v_today
+            USING ERRCODE = '22023';  -- invalid_parameter_value
+    END IF;
+
+    INSERT INTO public.search_pick_daily (day, ticker, asset_type, picks)
+    VALUES (p_day, p_ticker, p_asset_type, 1)
+    ON CONFLICT (day, ticker, asset_type) DO UPDATE
+        SET picks = search_pick_daily.picks + 1
+    RETURNING picks INTO v_picks;
+
+    RETURN v_picks;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION increment_search_pick(p_day date, p_ticker text, p_asset_type text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.increment_search_pick(p_day date, p_ticker text, p_asset_type text) IS 'Atomic upsert-increment of one anonymous (day, ticker, asset_type) pick counter; returns the new count. INVOKER: its only caller is service_role. Raises 22023 for a day more than one day from ET today.';
+
+
+--
 -- Name: increment_updates_insight_success(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1984,6 +2346,114 @@ BEGIN
      WHERE scope = p_scope
     RETURNING regen_count_today INTO v_count;
     RETURN COALESCE(v_count, 0);
+END;
+$$;
+
+
+--
+-- Name: news_sentiment_daily(text, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.news_sentiment_daily(p_scope text, p_since date) RETURNS TABLE(day date, bullish bigint, bearish bigint, neutral bigint)
+    LANGUAGE sql STABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    -- ⚠️ Every column is alias-qualified: the RETURNS TABLE names are OUT parameters.
+    -- The floor keeps a bad p_since from walking more than the retention window.
+    SELECT l.et_day                                        AS day,
+           count(*) FILTER (WHERE l.sentiment = 'bullish') AS bullish,
+           count(*) FILTER (WHERE l.sentiment = 'bearish') AS bearish,
+           count(*) FILTER (WHERE l.sentiment = 'neutral') AS neutral
+      FROM public.news_sentiment_log l
+     WHERE l.scope = p_scope
+       AND l.et_day >= GREATEST(
+               COALESCE(p_since, (now() AT TIME ZONE 'America/New_York')::date - 90),
+               (now() AT TIME ZONE 'America/New_York')::date - 400
+           )
+     GROUP BY l.et_day
+     ORDER BY l.et_day ASC;
+$$;
+
+
+--
+-- Name: FUNCTION news_sentiment_daily(p_scope text, p_since date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) IS 'Per-ET-day counts of bullish / bearish / neutral labels for one scope since p_since (never more than 400 days back). Days with no labelled article are absent, not zero. INVOKER: its only caller is service_role.';
+
+
+--
+-- Name: publish_theme_rotation(uuid, jsonb, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.publish_theme_rotation(p_run_id uuid, p_baskets jsonb, p_as_of date) RETURNS text
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_status    TEXT;
+    v_mode      TEXT;
+    v_published TIMESTAMPTZ;
+    v_slug      TEXT;
+    v_entry     JSONB;
+    v_current   TEXT[];
+    v_blocked   TEXT[];
+    v_enabled   BOOLEAN;
+    v_expected  TEXT[];
+    v_new       TEXT[];
+BEGIN
+    SELECT status, mode, published_at INTO v_status, v_mode, v_published
+      FROM theme_rotation_runs WHERE id = p_run_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'theme_rotation_run_not_found:%', p_run_id;
+    END IF;
+    -- published_at as well as status: a failure write that raced a lost publish answer
+    -- must never make a published month publishable again.
+    IF v_status = 'published' OR v_published IS NOT NULL THEN
+        RETURN 'already_published';
+    END IF;
+    IF v_mode <> 'live' OR v_status <> 'computed' THEN
+        RAISE EXCEPTION 'theme_rotation_not_publishable:%:%', v_mode, v_status;
+    END IF;
+
+    FOR v_slug, v_entry IN SELECT key, value FROM jsonb_each(p_baskets) LOOP
+        SELECT tickers, blocked_tickers, rotation_enabled
+          INTO v_current, v_blocked, v_enabled
+          FROM trending_themes WHERE slug = v_slug FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'theme_basket_missing:%', v_slug;
+        END IF;
+        v_expected := ARRAY(SELECT e FROM jsonb_array_elements_text(v_entry -> 'expected')
+                                     WITH ORDINALITY AS t(e, n) ORDER BY n);
+        v_new      := ARRAY(SELECT e FROM jsonb_array_elements_text(v_entry -> 'tickers')
+                                     WITH ORDINALITY AS t(e, n) ORDER BY n);
+        -- Compared sorted, so a reorder in Studio is not a content change. The service
+        -- sends `expected` exactly as it read the array (case and duplicates included).
+        IF (SELECT COALESCE(array_agg(x ORDER BY x), '{}') FROM unnest(v_current) x)
+           IS DISTINCT FROM
+           (SELECT COALESCE(array_agg(x ORDER BY x), '{}') FROM unnest(v_expected) x) THEN
+            RAISE EXCEPTION 'theme_basket_changed:%', v_slug;
+        END IF;
+        IF COALESCE(cardinality(v_new), 0) = 0 THEN
+            RAISE EXCEPTION 'theme_basket_empty:%', v_slug;
+        END IF;
+        -- The editor's overrides win too, not only `tickers`: rotation switched off for the
+        -- theme, or a stock blocked, while the run was computing → refuse (the run retries
+        -- and re-reads them). Blocked entries are compared trimmed and upper-cased, as the
+        -- service reads them.
+        IF NOT COALESCE(v_enabled, TRUE)
+           OR v_new && ARRAY(SELECT upper(btrim(b)) FROM unnest(COALESCE(v_blocked, '{}')) b) THEN
+            RAISE EXCEPTION 'theme_basket_changed:%', v_slug;
+        END IF;
+        UPDATE trending_themes
+           SET tickers = v_new, tickers_as_of = p_as_of, updated_at = NOW()
+         WHERE slug = v_slug;
+    END LOOP;
+
+    UPDATE theme_rotation_runs
+       SET status = 'published', published_at = NOW(), finished_at = NOW()
+     WHERE id = p_run_id;
+    RETURN 'published';
 END;
 $$;
 
@@ -2243,6 +2713,35 @@ BEGIN
     RETURN COALESCE(v_count, 0);
 END;
 $$;
+
+
+--
+-- Name: renew_sentiment_backfill(text, uuid, integer, date, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date) RETURNS boolean
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE public.news_sentiment_backfill
+       SET lease_until  = now() + make_interval(secs => GREATEST(COALESCE(p_lease_seconds, 300), 60)),
+           covered_from = COALESCE(p_covered_from, covered_from),
+           covered_to   = COALESCE(p_covered_to, covered_to),
+           updated_at   = now()
+     WHERE scope = p_scope
+       AND claim_token = p_token
+       AND status = 'running';
+    RETURN FOUND;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date) IS 'Extends the lease and records the covered range — only for the holder of p_token. false = the claim was lost; the worker must stop.';
 
 
 --
@@ -7000,6 +7499,96 @@ COMMENT ON COLUMN public.daily_briefings.priority IS 'Higher priority items appe
 
 
 --
+-- Name: dcf_fair_value_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.dcf_fair_value_cache (
+    ticker text NOT NULL,
+    model_version text NOT NULL,
+    response_json jsonb NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE dcf_fair_value_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.dcf_fair_value_cache IS 'Tier-2 cache (24 h) of the Caydex Fair Value Estimate (DCF). One row per ticker; a row whose model_version differs from the running model is ignored. Global and impersonal: no per-user column may exist. Written and read by app/services/dcf_fair_value_service.py.';
+
+
+--
+-- Name: dcf_fair_value_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.dcf_fair_value_history (
+    id bigint NOT NULL,
+    ticker text NOT NULL,
+    as_of_date date NOT NULL,
+    model_version text NOT NULL,
+    status text NOT NULL,
+    refusal_code text,
+    fair_value double precision,
+    range_low double precision,
+    range_high double precision,
+    alternative_value double precision,
+    price double precision,
+    inputs jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT dcf_fair_value_history_check CHECK (((status = 'ok'::text) = (fair_value IS NOT NULL))),
+    CONSTRAINT dcf_fair_value_history_check1 CHECK (((status = 'refused'::text) = (refusal_code IS NOT NULL))),
+    CONSTRAINT dcf_fair_value_history_status_check CHECK ((status = ANY (ARRAY['ok'::text, 'refused'::text])))
+);
+
+
+--
+-- Name: TABLE dcf_fair_value_history; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.dcf_fair_value_history IS 'Append-only record of every Caydex Fair Value Estimate computed: one row per (ticker, ET date, model version) with the inputs it depended on. FMP keeps no consensus history, so this is the only record of what the forecast was on a given day, and of what was published. Never updated or deleted by the app. Global and impersonal: no per-user column may exist.';
+
+
+--
+-- Name: COLUMN dcf_fair_value_history.as_of_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.dcf_fair_value_history.as_of_date IS 'ET calendar date of the computation (one row per ticker per day per model version).';
+
+
+--
+-- Name: COLUMN dcf_fair_value_history.price; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.dcf_fair_value_history.price IS 'Share price when computed, for later analysis only. The value itself does not use it.';
+
+
+--
+-- Name: COLUMN dcf_fair_value_history.inputs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.dcf_fair_value_history.inputs IS 'Every input: rates, beta, shares, debt, the 5 fiscal years used, the consensus rows.';
+
+
+--
+-- Name: dcf_fair_value_history_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.dcf_fair_value_history_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: dcf_fair_value_history_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.dcf_fair_value_history_id_seq OWNED BY public.dcf_fair_value_history.id;
+
+
+--
 -- Name: device_tokens; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7563,6 +8152,27 @@ COMMENT ON TABLE public.marketing_assets IS 'Every artefact the marketing engine
 
 
 --
+-- Name: marketing_link_hits; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.marketing_link_hits (
+    campaign text NOT NULL,
+    day date NOT NULL,
+    hits bigint DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT marketing_link_hits_campaign_check CHECK ((campaign ~ '^[a-z0-9_-]{1,40}$'::text)),
+    CONSTRAINT marketing_link_hits_hits_check CHECK ((hits >= 0))
+);
+
+
+--
+-- Name: TABLE marketing_link_hits; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.marketing_link_hits IS 'Per-campaign daily tap counts for the smart link GET /go/{campaign}. Hits are batched in-process and flushed every 60 s through increment_marketing_link_hits (one call per campaign and ET day), so the redirect does no I/O. campaign comes from a public URL, so the CHECK repeats the allow-pattern the route enforces before counting.';
+
+
+--
 -- Name: marketing_posts; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7635,6 +8245,94 @@ CREATE TABLE public.marketing_runs (
 --
 
 COMMENT ON TABLE public.marketing_runs IS 'One row per ET calendar day of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS the day by inserting this row (UNIQUE run_date) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
+
+
+--
+-- Name: marketing_scripts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.marketing_scripts (
+    run_id uuid NOT NULL,
+    status text DEFAULT 'selected'::text NOT NULL,
+    source_ref text,
+    template_id text,
+    fact_sheet jsonb DEFAULT '{}'::jsonb NOT NULL,
+    output jsonb,
+    violations jsonb DEFAULT '[]'::jsonb NOT NULL,
+    generation_id uuid,
+    lease_until timestamp with time zone,
+    generations integer DEFAULT 0 NOT NULL,
+    retry_not_before timestamp with time zone,
+    last_error text,
+    model text,
+    prompt_version text,
+    tokens_used integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    run_date date NOT NULL,
+    content_rejections integer DEFAULT 0 NOT NULL,
+    reject_reason text,
+    CONSTRAINT marketing_scripts_content_rejections_nonneg CHECK ((content_rejections >= 0)),
+    CONSTRAINT marketing_scripts_generations_check CHECK ((generations >= 0)),
+    CONSTRAINT marketing_scripts_reject_reason_valid CHECK (((reject_reason IS NULL) OR (reject_reason = ANY (ARRAY['content'::text, 'writer_unavailable'::text, 'empty_pool'::text, 'source_ineligible'::text])))),
+    CONSTRAINT marketing_scripts_status_check CHECK ((status = ANY (ARRAY['rest_day'::text, 'selected'::text, 'generating'::text, 'accepted'::text, 'rejected'::text])))
+);
+
+
+--
+-- Name: TABLE marketing_scripts; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.marketing_scripts IS 'One row per marketing run: the day''s frozen selection (run_date, source_ref, template_id) and the class-A writer''s output with the fact sheet it was grounded on. Written ONLY by the web side (kick-and-poll through the internal API; the worker never writes it). Writer output lives here and never in the public marketing-media bucket or in marketing_runs.metadata, whose key-by-key merge is not atomic and is echoed to the worker on every response. A generation holds the row through lease_until plus a fresh generation_id taken by one conditional UPDATE, and every terminal write is fenced on that generation_id, so a task that lost its lease writes nothing. accepted is terminal and its output immutable: the day''s posts are built from it. Two caps: 4 content rejections (reject_reason content) and 4 generations ending without a verdict (writer_unavailable); a cap reached under an expired lease is closed by the next kick.';
+
+
+--
+-- Name: COLUMN marketing_scripts.fact_sheet; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.fact_sheet IS 'The item''s cleaned fact sheet, for audit: written at selection and REWRITTEN with the accepted package. Each generation grounds against the LIVE bundle, so the accepted row records the sheet its output was actually validated against.';
+
+
+--
+-- Name: COLUMN marketing_scripts.output; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.output IS 'The accepted package. NULL until status = accepted, immutable afterwards.';
+
+
+--
+-- Name: COLUMN marketing_scripts.violations; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.violations IS 'Why the latest generation was repaired or rejected: on rejection, every round of that generation, each entry tagged with its round; on acceptance, the surviving package''s dropped-outlet violations.';
+
+
+--
+-- Name: COLUMN marketing_scripts.generation_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.generation_id IS 'Fencing token. Set by the conditional UPDATE that acquires the lease; every later write of that generation is conditional on it, so a superseded generation cannot land.';
+
+
+--
+-- Name: COLUMN marketing_scripts.run_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.run_date IS 'The run''s ET day, written in the selecting INSERT. Selection''s "recent picks" window reads this table by it, never the best-effort mirror on marketing_runs.';
+
+
+--
+-- Name: COLUMN marketing_scripts.content_rejections; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.content_rejections IS 'Generations the validators rejected (the content cap). generations - content_rejections is the writer-failure count, which has its own cap.';
+
+
+--
+-- Name: COLUMN marketing_scripts.reject_reason; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.reject_reason IS 'Why a rejected row was closed: content (the validators, 4 times) | writer_unavailable (4 generations ended without a verdict) | empty_pool | source_ineligible.';
 
 
 --
@@ -7755,6 +8453,48 @@ COMMENT ON COLUMN public.money_move_articles.audio_url IS 'Public money-moves-me
 --
 
 COMMENT ON COLUMN public.money_move_articles.image_url IS 'Public URL of the 1206x678 hero plate in the money-moves-images bucket. Authoritative over content->>''imageUrl''. NULL means no artwork yet; iOS falls back to heroGradientColors.';
+
+
+--
+-- Name: news_sentiment_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.news_sentiment_log (
+    scope text NOT NULL,
+    article_key uuid NOT NULL,
+    et_day date NOT NULL,
+    sentiment text NOT NULL,
+    confidence smallint,
+    source text DEFAULT 'live'::text NOT NULL,
+    labelled_at timestamp with time zone DEFAULT now() NOT NULL,
+    model text,
+    CONSTRAINT news_sentiment_log_confidence_check CHECK (((confidence >= 0) AND (confidence <= 100))),
+    CONSTRAINT news_sentiment_log_model_check CHECK (((model IS NULL) OR (char_length(model) <= 80))),
+    CONSTRAINT news_sentiment_log_scope_check CHECK (((char_length(scope) >= 1) AND (char_length(scope) <= 32))),
+    CONSTRAINT news_sentiment_log_sentiment_check CHECK ((sentiment = ANY (ARRAY['bullish'::text, 'bearish'::text, 'neutral'::text]))),
+    CONSTRAINT news_sentiment_log_source_check CHECK ((source = ANY (ARRAY['live'::text, 'seed'::text, 'backfill'::text])))
+);
+
+
+--
+-- Name: TABLE news_sentiment_log; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.news_sentiment_log IS 'One row per (scope, article) holding Cay AI''s bullish/bearish/neutral label for a news article and the ET day it was published — the history behind the Updates news-sentiment timeline. Stores NO headline, URL, summary or publisher (migration 104: no long-term copy of news text); article_key is md5(external_id)::uuid. First label wins (ON CONFLICT DO NOTHING). Written by app/services/news_sentiment_trend_service.py (record_labels, called from news_cache_service._enrich_articles_uncached), read through news_sentiment_daily(); rows older than 120 days are swept.';
+
+
+--
+-- Name: COLUMN news_sentiment_log.article_key; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_log.article_key IS 'md5(external_id)::uuid — de-duplicates an article within a scope; cannot recover it.';
+
+
+--
+-- Name: COLUMN news_sentiment_log.model; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.news_sentiment_log.model IS 'The model that produced the label (news_llm.news_model_name()); NULL for rows written before migration 181.';
 
 
 --
@@ -8128,6 +8868,35 @@ CREATE TABLE public.revenue_breakdown_cache (
 
 
 --
+-- Name: search_pick_daily; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.search_pick_daily (
+    day date NOT NULL,
+    ticker text NOT NULL,
+    asset_type text NOT NULL,
+    picks integer DEFAULT 0 NOT NULL,
+    CONSTRAINT search_pick_daily_asset_type_check CHECK ((asset_type = ANY (ARRAY['stock'::text, 'etf'::text, 'fund'::text, 'crypto'::text]))),
+    CONSTRAINT search_pick_daily_picks_check CHECK ((picks >= 0)),
+    CONSTRAINT search_pick_daily_ticker_check CHECK ((ticker ~ '^[A-Z0-9][A-Z0-9.-]{0,9}$'::text))
+);
+
+
+--
+-- Name: TABLE search_pick_daily; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.search_pick_daily IS 'Anonymous daily counters behind the "Trending searches" chips: one row per (ET day, ticker, asset type) with a de-duplicated count of search-result taps by signed-in accounts. No user, device, IP or session column exists and none may ever be added — nothing here is linked to a person — and no timestamp beyond the day, which could be matched against request logs. Written by app/services/search_pick_service.py (increment_search_pick), read by app/services/search_trending_service.py (get_search_trending); rows older than 14 days are swept.';
+
+
+--
+-- Name: COLUMN search_pick_daily.picks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.search_pick_daily.picks IS 'De-duplicated picks (one per account per ticker per 7 ET days, enforced on the device and in server memory) — NOT a proven count of distinct people: a server restart plus a second device or a reinstall can count one person twice.';
+
+
+--
 -- Name: sector_aggregates; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8309,6 +9078,141 @@ COMMENT ON COLUMN public.subscriptions.last_event_at IS 'Apple''s signedDate fro
 
 
 --
+-- Name: theme_daily_insights; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.theme_daily_insights (
+    slug text NOT NULL,
+    as_of date NOT NULL,
+    performance jsonb DEFAULT '{}'::jsonb NOT NULL,
+    series jsonb DEFAULT '{}'::jsonb NOT NULL,
+    summary_headline text,
+    summary_text text,
+    summary_as_of date,
+    drivers jsonb DEFAULT '[]'::jsonb NOT NULL,
+    news_fingerprint text,
+    model text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE theme_daily_insights; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.theme_daily_insights IS 'Per (theme, US trading day): equal-weight performance of the theme''s CURRENT stocks vs the benchmark ETF (1M / YTD / 1Y + index series) and the dated "why it''s moving" summary. Written once per theme after the close by theme_insights_service; served to iOS through the Home theme endpoints. FMP-derived — service_role only.';
+
+
+--
+-- Name: theme_relevance_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.theme_relevance_cache (
+    ticker text NOT NULL,
+    slug text NOT NULL,
+    prompt_version text NOT NULL,
+    definitions_version text NOT NULL,
+    description_hash text NOT NULL,
+    verdict text NOT NULL,
+    pure_play_band text,
+    rationale text,
+    model text,
+    tokens_used integer DEFAULT 0 NOT NULL,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT theme_relevance_cache_verdict_check CHECK ((verdict = ANY (ARRAY['core'::text, 'adjacent'::text, 'not_related'::text])))
+);
+
+
+--
+-- Name: TABLE theme_relevance_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.theme_relevance_cache IS 'Tier-2 cache of the AI verdict on whether a company''s own description is on-theme. A verdict can only BLOCK a stock from joining a theme; it never adds points. Failures are never cached. `rationale` is internal audit text and is never shown to users.';
+
+
+--
+-- Name: theme_rotation_decisions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.theme_rotation_decisions (
+    id bigint NOT NULL,
+    run_id uuid NOT NULL,
+    run_month date NOT NULL,
+    slug text NOT NULL,
+    ticker text NOT NULL,
+    action text NOT NULL,
+    reason_code text NOT NULL,
+    reason_text text,
+    score numeric,
+    score_parts jsonb DEFAULT '{}'::jsonb NOT NULL,
+    rank integer,
+    was_member boolean DEFAULT false NOT NULL,
+    strike boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT theme_rotation_decisions_action_check CHECK ((action = ANY (ARRAY['kept'::text, 'added'::text, 'returned'::text, 'removed'::text, 'deferred'::text, 'rejected'::text, 'bench'::text])))
+);
+
+
+--
+-- Name: TABLE theme_rotation_decisions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.theme_rotation_decisions IS 'Every (run, theme, ticker) decision of the monthly theme rotation with its reason code and score breakdown. Tenure / strikes / returning-stock history is read ONLY from rows of published live runs.';
+
+
+--
+-- Name: theme_rotation_decisions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.theme_rotation_decisions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: theme_rotation_decisions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.theme_rotation_decisions_id_seq OWNED BY public.theme_rotation_decisions.id;
+
+
+--
+-- Name: theme_rotation_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.theme_rotation_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    run_month date NOT NULL,
+    mode text NOT NULL,
+    status text DEFAULT 'in_progress'::text NOT NULL,
+    attempts integer DEFAULT 1 NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    published_at timestamp with time zone,
+    definitions_version text,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    summary jsonb DEFAULT '{}'::jsonb NOT NULL,
+    fmp_calls integer DEFAULT 0 NOT NULL,
+    llm_tokens integer DEFAULT 0 NOT NULL,
+    error text,
+    CONSTRAINT theme_rotation_runs_mode_check CHECK ((mode = ANY (ARRAY['live'::text, 'dry_run'::text, 'preview'::text]))),
+    CONSTRAINT theme_rotation_runs_run_month_check CHECK ((EXTRACT(day FROM run_month) = (1)::numeric)),
+    CONSTRAINT theme_rotation_runs_status_check CHECK ((status = ANY (ARRAY['in_progress'::text, 'computed'::text, 'published'::text, 'failed'::text])))
+);
+
+
+--
+-- Name: TABLE theme_rotation_runs; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.theme_rotation_runs IS 'One row per (month, mode) of the monthly Emerging Frontiers theme rotation (services/theme_rotation). Month-level idempotency record; the concurrency claim is notification_job_state (job theme_rotation_monthly). A preview run is never unique and never published.';
+
+
+--
 -- Name: ticker_data_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8387,7 +9291,11 @@ CREATE TABLE public.trending_themes (
     sort_order integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    subtitle text
+    subtitle text,
+    tickers_as_of date,
+    rotation_enabled boolean DEFAULT true NOT NULL,
+    pinned_tickers text[] DEFAULT '{}'::text[] NOT NULL,
+    blocked_tickers text[] DEFAULT '{}'::text[] NOT NULL
 );
 
 
@@ -8424,6 +9332,188 @@ COMMENT ON COLUMN public.trending_themes.tickers IS 'Curated constituents. Backe
 --
 
 COMMENT ON COLUMN public.trending_themes.subtitle IS 'Editorial tagline shown under the title on the theme detail hero. Editable in Supabase; no app release.';
+
+
+--
+-- Name: COLUMN trending_themes.tickers_as_of; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.tickers_as_of IS 'Date the monthly rotation last reviewed this basket (shown as "Updated <date>"). NULL until the first published run.';
+
+
+--
+-- Name: COLUMN trending_themes.rotation_enabled; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.rotation_enabled IS 'FALSE = the monthly rotation copies this basket unchanged.';
+
+
+--
+-- Name: COLUMN trending_themes.pinned_tickers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.pinned_tickers IS 'Never rotated out (only a delisting removes one). Editor override.';
+
+
+--
+-- Name: COLUMN trending_themes.blocked_tickers; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.trending_themes.blocked_tickers IS 'Never kept or added, and removed on the next run. Editor override; wins over pinned.';
+
+
+--
+-- Name: trillion_club_companies; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trillion_club_companies (
+    slug text NOT NULL,
+    display_name text NOT NULL,
+    ciks text[] DEFAULT '{}'::text[] NOT NULL,
+    card_kind text NOT NULL,
+    use_13f boolean DEFAULT false NOT NULL,
+    cap_symbol text,
+    symbol_aliases text[] DEFAULT '{}'::text[] NOT NULL,
+    detail_symbol text,
+    logo_symbol text,
+    home_country text DEFAULT 'US'::text NOT NULL,
+    cap_source text NOT NULL,
+    manual_cap_usd double precision,
+    manual_cap_as_of date,
+    manual_cap_source_url text,
+    manual_fx_rate double precision,
+    manual_fx_source text,
+    membership_mode text DEFAULT 'auto'::text NOT NULL,
+    is_member boolean DEFAULT false NOT NULL,
+    member_since date,
+    last_market_cap double precision,
+    last_cap_date date,
+    closes_at_or_above integer DEFAULT 0 NOT NULL,
+    closes_below integer DEFAULT 0 NOT NULL,
+    membership_checked_at timestamp with time zone,
+    link_whale boolean DEFAULT false NOT NULL,
+    published boolean DEFAULT false NOT NULL,
+    reviewed_on date,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT trillion_club_13f_needs_cik CHECK (((NOT use_13f) OR ((card_kind = 'thirteen_f'::text) AND (cardinality(ciks) >= 1)))),
+    CONSTRAINT trillion_club_companies_cap_source_check CHECK ((cap_source = ANY (ARRAY['fmp_us'::text, 'fmp_adr'::text, 'manual'::text]))),
+    CONSTRAINT trillion_club_companies_card_kind_check CHECK ((card_kind = ANY (ARRAY['thirteen_f'::text, 'no_thirteen_f'::text, 'non_us'::text, 'whale_link'::text]))),
+    CONSTRAINT trillion_club_companies_ciks_check CHECK (((array_to_string(ciks, ','::text) ~ '^([0-9]{10}(,[0-9]{10})*)?$'::text) AND (array_position(ciks, NULL::text) IS NULL) AND (char_length(array_to_string(ciks, ''::text)) = (10 * cardinality(ciks))))),
+    CONSTRAINT trillion_club_companies_closes_at_or_above_check CHECK ((closes_at_or_above >= 0)),
+    CONSTRAINT trillion_club_companies_closes_below_check CHECK ((closes_below >= 0)),
+    CONSTRAINT trillion_club_companies_display_name_check CHECK (((char_length(display_name) >= 1) AND (char_length(display_name) <= 60))),
+    CONSTRAINT trillion_club_companies_home_country_check CHECK ((home_country ~ '^[A-Z]{2}$'::text)),
+    CONSTRAINT trillion_club_companies_last_market_cap_check CHECK (((last_market_cap IS NULL) OR (last_market_cap > (0)::double precision))),
+    CONSTRAINT trillion_club_companies_manual_cap_source_url_check CHECK (((manual_cap_source_url IS NULL) OR (manual_cap_source_url ~ '^https://'::text))),
+    CONSTRAINT trillion_club_companies_manual_cap_usd_check CHECK (((manual_cap_usd IS NULL) OR (manual_cap_usd > (0)::double precision))),
+    CONSTRAINT trillion_club_companies_manual_fx_rate_check CHECK (((manual_fx_rate IS NULL) OR (manual_fx_rate > (0)::double precision))),
+    CONSTRAINT trillion_club_companies_membership_mode_check CHECK ((membership_mode = ANY (ARRAY['auto'::text, 'force_in'::text, 'force_out'::text]))),
+    CONSTRAINT trillion_club_companies_slug_check CHECK ((slug ~ '^[a-z0-9-]{1,40}$'::text)),
+    CONSTRAINT trillion_club_fmp_cap_has_symbol CHECK (((cap_source = 'manual'::text) OR (cap_symbol IS NOT NULL))),
+    CONSTRAINT trillion_club_manual_cap_is_explicit CHECK (((cap_source <> 'manual'::text) OR ((manual_cap_usd IS NOT NULL) AND (manual_cap_as_of IS NOT NULL) AND (manual_cap_source_url IS NOT NULL) AND (membership_mode = ANY (ARRAY['force_in'::text, 'force_out'::text]))))),
+    CONSTRAINT trillion_club_whale_link_kind CHECK ((link_whale = (card_kind = 'whale_link'::text)))
+);
+
+
+--
+-- Name: TABLE trillion_club_companies; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trillion_club_companies IS 'Trillion-Dollar Club Bets registry (Home section): hand-kept identity + editorial controls; membership written daily from dated FMP market-cap closes. 13F ingestion only when use_13f.';
+
+
+--
+-- Name: trillion_club_filings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trillion_club_filings (
+    cik text NOT NULL,
+    period text NOT NULL,
+    period_end date NOT NULL,
+    filed_on date,
+    amended_on date,
+    accessions text[] DEFAULT '{}'::text[] NOT NULL,
+    total_value double precision,
+    position_count integer DEFAULT 0 NOT NULL,
+    holdings jsonb DEFAULT '[]'::jsonb NOT NULL,
+    changes jsonb DEFAULT '{}'::jsonb NOT NULL,
+    excluded_rows integer DEFAULT 0 NOT NULL,
+    unresolved jsonb DEFAULT '{}'::jsonb NOT NULL,
+    raw_hash text NOT NULL,
+    build_status text NOT NULL,
+    source text DEFAULT 'fmp'::text NOT NULL,
+    built_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT trillion_club_filings_build_status_check CHECK ((build_status = ANY (ARRAY['complete'::text, 'degraded'::text]))),
+    CONSTRAINT trillion_club_filings_changes_check CHECK ((jsonb_typeof(changes) = 'object'::text)),
+    CONSTRAINT trillion_club_filings_cik_check CHECK ((cik ~ '^[0-9]{10}$'::text)),
+    CONSTRAINT trillion_club_filings_excluded_rows_check CHECK ((excluded_rows >= 0)),
+    CONSTRAINT trillion_club_filings_holdings_check CHECK ((jsonb_typeof(holdings) = 'array'::text)),
+    CONSTRAINT trillion_club_filings_period_check CHECK ((period ~ '^[0-9]{4}-Q[1-4]$'::text)),
+    CONSTRAINT trillion_club_filings_position_count_check CHECK ((position_count >= 0)),
+    CONSTRAINT trillion_club_filings_source_check CHECK ((source = ANY (ARRAY['fmp'::text, 'edgar'::text]))),
+    CONSTRAINT trillion_club_filings_total_value_check CHECK (((total_value IS NULL) OR (total_value >= (0)::double precision))),
+    CONSTRAINT trillion_club_filings_unresolved_check CHECK ((jsonb_typeof(unresolved) = 'object'::text))
+);
+
+
+--
+-- Name: TABLE trillion_club_filings; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trillion_club_filings IS 'Trillion-Dollar Club Bets: one built 13F snapshot per (CIK, quarter) — holdings + quarter-over-quarter share changes. accessions[] because FMP folds 13F-HR/A into the original quarter.';
+
+
+--
+-- Name: trillion_club_stakes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.trillion_club_stakes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    company_slug text NOT NULL,
+    kind text NOT NULL,
+    investee_name text NOT NULL,
+    investee_cusip text,
+    investee_us_symbol text,
+    local_listing text,
+    ownership_pct double precision,
+    ownership_basis text,
+    disclosed_value_usd double precision,
+    value_basis text,
+    as_of date NOT NULL,
+    source_title text NOT NULL,
+    source_url text NOT NULL,
+    source_confidence text DEFAULT 'primary'::text NOT NULL,
+    material boolean DEFAULT false NOT NULL,
+    tied_to_deal boolean DEFAULT false NOT NULL,
+    listed_since date,
+    background text,
+    verified_on date NOT NULL,
+    published boolean DEFAULT false NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT trillion_club_commitment_basis CHECK (((kind <> 'commitment'::text) OR (value_basis IS NULL) OR (value_basis = 'committed_up_to'::text))),
+    CONSTRAINT trillion_club_secondary_never_published CHECK ((NOT (published AND (source_confidence = 'secondary'::text)))),
+    CONSTRAINT trillion_club_stake_value_has_basis CHECK (((disclosed_value_usd IS NULL) OR (value_basis IS NOT NULL))),
+    CONSTRAINT trillion_club_stakes_background_check CHECK (((background IS NULL) OR (char_length(background) <= 90))),
+    CONSTRAINT trillion_club_stakes_disclosed_value_usd_check CHECK (((disclosed_value_usd IS NULL) OR (disclosed_value_usd > (0)::double precision))),
+    CONSTRAINT trillion_club_stakes_investee_cusip_check CHECK (((investee_cusip IS NULL) OR (investee_cusip ~ '^[0-9A-Z]{9}$'::text))),
+    CONSTRAINT trillion_club_stakes_investee_name_check CHECK (((char_length(investee_name) >= 1) AND (char_length(investee_name) <= 60))),
+    CONSTRAINT trillion_club_stakes_kind_check CHECK ((kind = ANY (ARRAY['private'::text, 'non_us_listed'::text, 'us_listed_off_13f'::text, 'commitment'::text, 'on_13f_note'::text]))),
+    CONSTRAINT trillion_club_stakes_ownership_pct_check CHECK (((ownership_pct IS NULL) OR ((ownership_pct > (0)::double precision) AND (ownership_pct <= (100)::double precision)))),
+    CONSTRAINT trillion_club_stakes_source_confidence_check CHECK ((source_confidence = ANY (ARRAY['primary'::text, 'secondary'::text]))),
+    CONSTRAINT trillion_club_stakes_source_title_check CHECK (((char_length(source_title) >= 1) AND (char_length(source_title) <= 120))),
+    CONSTRAINT trillion_club_stakes_source_url_check CHECK ((source_url ~ '^https://'::text)),
+    CONSTRAINT trillion_club_stakes_value_basis_check CHECK (((value_basis IS NULL) OR (value_basis = ANY (ARRAY['carrying_value'::text, 'fair_value'::text, 'invested'::text, 'committed_up_to'::text]))))
+);
+
+
+--
+-- Name: TABLE trillion_club_stakes; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.trillion_club_stakes IS 'Trillion-Dollar Club Bets: hand-kept stakes outside the 13F (private, non-US, warrants, commitments), each with a primary source, as-of date and verified_on. Secondary rows never published.';
 
 
 --
@@ -8679,7 +9769,8 @@ CREATE TABLE public.users (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     password_changed_at timestamp with time zone,
-    is_admin boolean DEFAULT false NOT NULL
+    is_admin boolean DEFAULT false NOT NULL,
+    comp_tier public.user_tier
 );
 
 
@@ -8694,7 +9785,7 @@ COMMENT ON TABLE public.users IS 'Core user profiles. id = auth.users.id (direct
 -- Name: COLUMN users.tier; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.users.tier IS 'Entitlement tier (free/pro/premium). Sizes the monthly credit grant via plan_credits and gates feature limits. Written ONLY by iap_service as service_role after Apple verification. Table is service-role-only since migration 163: anon/authenticated hold no privilege on public.users at all, so this column cannot be self-set through PostgREST. Do not GRANT the table back to either role.';
+COMMENT ON COLUMN public.users.tier IS 'Effective tier the app gates on. Written by iap_service.reconcile_user_tier as max(winning subscriptions tier, users.comp_tier); also set by scripts/seed_testflight_testers.py and scripts/set_comp_tier.py for complimentary accounts. ensure_credit_period / grant_tier_upgrade read it for the monthly allocation.';
 
 
 --
@@ -8709,6 +9800,13 @@ COMMENT ON COLUMN public.users.password_changed_at IS 'When the account password
 --
 
 COMMENT ON COLUMN public.users.is_admin IS 'Grants access to /api/v1/admin/*. Set manually — never by registration, signup trigger, or any application code path. Migration 113''s column-level REVOKE was inert while authenticated held table-level UPDATE; migration 163 revoked the TABLE, which is what actually makes this unwritable through PostgREST.';
+
+
+--
+-- Name: COLUMN users.comp_tier; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.comp_tier IS 'Complimentary tier FLOOR (App Review demo account, TestFlight testers). NULL = none. iap_service.reconcile_user_tier writes users.tier = max(winning subscription tier, comp_tier), so a sandbox purchase or its expiry can never demote the account below it. Migration 177.';
 
 
 --
@@ -9396,6 +10494,13 @@ ALTER TABLE ONLY public.credit_transactions ALTER COLUMN id SET DEFAULT nextval(
 
 
 --
+-- Name: dcf_fair_value_history id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dcf_fair_value_history ALTER COLUMN id SET DEFAULT nextval('public.dcf_fair_value_history_id_seq'::regclass);
+
+
+--
 -- Name: device_tokens id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -9456,6 +10561,13 @@ ALTER TABLE ONLY public.price_catalyst_audit ALTER COLUMN id SET DEFAULT nextval
 --
 
 ALTER TABLE ONLY public.signals_cache ALTER COLUMN id SET DEFAULT nextval('public.signals_cache_id_seq'::regclass);
+
+
+--
+-- Name: theme_rotation_decisions id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_rotation_decisions ALTER COLUMN id SET DEFAULT nextval('public.theme_rotation_decisions_id_seq'::regclass);
 
 
 --
@@ -10079,6 +11191,30 @@ ALTER TABLE ONLY public.daily_briefings
 
 
 --
+-- Name: dcf_fair_value_cache dcf_fair_value_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dcf_fair_value_cache
+    ADD CONSTRAINT dcf_fair_value_cache_pkey PRIMARY KEY (ticker);
+
+
+--
+-- Name: dcf_fair_value_history dcf_fair_value_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dcf_fair_value_history
+    ADD CONSTRAINT dcf_fair_value_history_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: dcf_fair_value_history dcf_fair_value_history_ticker_as_of_date_model_version_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dcf_fair_value_history
+    ADD CONSTRAINT dcf_fair_value_history_ticker_as_of_date_model_version_key UNIQUE (ticker, as_of_date, model_version);
+
+
+--
 -- Name: device_tokens device_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10319,6 +11455,14 @@ ALTER TABLE ONLY public.marketing_assets
 
 
 --
+-- Name: marketing_link_hits marketing_link_hits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_link_hits
+    ADD CONSTRAINT marketing_link_hits_pkey PRIMARY KEY (campaign, day);
+
+
+--
 -- Name: marketing_posts marketing_posts_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10359,6 +11503,14 @@ ALTER TABLE ONLY public.marketing_runs
 
 
 --
+-- Name: marketing_scripts marketing_scripts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_scripts
+    ADD CONSTRAINT marketing_scripts_pkey PRIMARY KEY (run_id);
+
+
+--
 -- Name: moat_intel_audit moat_intel_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10380,6 +11532,22 @@ ALTER TABLE ONLY public.moat_intel_cache
 
 ALTER TABLE ONLY public.money_move_articles
     ADD CONSTRAINT money_move_articles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: news_sentiment_backfill news_sentiment_backfill_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.news_sentiment_backfill
+    ADD CONSTRAINT news_sentiment_backfill_pkey PRIMARY KEY (scope);
+
+
+--
+-- Name: news_sentiment_log news_sentiment_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.news_sentiment_log
+    ADD CONSTRAINT news_sentiment_log_pkey PRIMARY KEY (scope, article_key);
 
 
 --
@@ -10551,6 +11719,14 @@ ALTER TABLE ONLY public.revenue_breakdown_cache
 
 
 --
+-- Name: search_pick_daily search_pick_daily_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.search_pick_daily
+    ADD CONSTRAINT search_pick_daily_pkey PRIMARY KEY (day, ticker, asset_type);
+
+
+--
 -- Name: sector_aggregates sector_aggregates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10679,6 +11855,46 @@ ALTER TABLE ONLY public.subscriptions
 
 
 --
+-- Name: theme_daily_insights theme_daily_insights_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_daily_insights
+    ADD CONSTRAINT theme_daily_insights_pkey PRIMARY KEY (slug, as_of);
+
+
+--
+-- Name: theme_relevance_cache theme_relevance_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_relevance_cache
+    ADD CONSTRAINT theme_relevance_cache_pkey PRIMARY KEY (ticker, slug, prompt_version, definitions_version, description_hash);
+
+
+--
+-- Name: theme_rotation_decisions theme_rotation_decisions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_rotation_decisions
+    ADD CONSTRAINT theme_rotation_decisions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: theme_rotation_decisions theme_rotation_decisions_run_id_slug_ticker_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_rotation_decisions
+    ADD CONSTRAINT theme_rotation_decisions_run_id_slug_ticker_key UNIQUE (run_id, slug, ticker);
+
+
+--
+-- Name: theme_rotation_runs theme_rotation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_rotation_runs
+    ADD CONSTRAINT theme_rotation_runs_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: ticker_data_cache ticker_data_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10732,6 +11948,38 @@ ALTER TABLE ONLY public.trending_themes
 
 ALTER TABLE ONLY public.trending_themes
     ADD CONSTRAINT trending_themes_slug_key UNIQUE (slug);
+
+
+--
+-- Name: trillion_club_companies trillion_club_companies_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_companies
+    ADD CONSTRAINT trillion_club_companies_pkey PRIMARY KEY (slug);
+
+
+--
+-- Name: trillion_club_filings trillion_club_filings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_filings
+    ADD CONSTRAINT trillion_club_filings_pkey PRIMARY KEY (cik, period);
+
+
+--
+-- Name: trillion_club_stakes trillion_club_stake_natural_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stakes
+    ADD CONSTRAINT trillion_club_stake_natural_key UNIQUE (company_slug, investee_name, kind);
+
+
+--
+-- Name: trillion_club_stakes trillion_club_stakes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stakes
+    ADD CONSTRAINT trillion_club_stakes_pkey PRIMARY KEY (id);
 
 
 --
@@ -11826,6 +13074,13 @@ CREATE INDEX idx_daily_briefings_active ON public.daily_briefings USING btree (i
 
 
 --
+-- Name: idx_dcf_fair_value_history_ticker_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_dcf_fair_value_history_ticker_date ON public.dcf_fair_value_history USING btree (ticker, as_of_date DESC);
+
+
+--
 -- Name: idx_device_tokens_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12078,6 +13333,13 @@ CREATE INDEX idx_marketing_runs_status ON public.marketing_runs USING btree (sta
 
 
 --
+-- Name: idx_marketing_scripts_run_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_marketing_scripts_run_date ON public.marketing_scripts USING btree (run_date);
+
+
+--
 -- Name: idx_moat_intel_audit_computed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12131,6 +13393,27 @@ CREATE INDEX idx_money_move_articles_sort ON public.money_move_articles USING bt
 --
 
 CREATE INDEX idx_money_moves_category ON public.money_move_articles USING btree (category);
+
+
+--
+-- Name: idx_news_sentiment_backfill_due; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_news_sentiment_backfill_due ON public.news_sentiment_backfill USING btree (next_run_at);
+
+
+--
+-- Name: idx_news_sentiment_log_day; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_news_sentiment_log_day ON public.news_sentiment_log USING btree (et_day);
+
+
+--
+-- Name: idx_news_sentiment_log_scope_day; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_news_sentiment_log_scope_day ON public.news_sentiment_log USING btree (scope, et_day DESC);
 
 
 --
@@ -12400,6 +13683,34 @@ CREATE INDEX idx_subscriptions_txn ON public.subscriptions USING btree (original
 
 
 --
+-- Name: idx_theme_daily_insights_latest; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_theme_daily_insights_latest ON public.theme_daily_insights USING btree (slug, as_of DESC);
+
+
+--
+-- Name: idx_theme_rotation_decisions_history; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_theme_rotation_decisions_history ON public.theme_rotation_decisions USING btree (slug, ticker, run_month DESC);
+
+
+--
+-- Name: idx_theme_rotation_decisions_run; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_theme_rotation_decisions_run ON public.theme_rotation_decisions USING btree (run_id);
+
+
+--
+-- Name: idx_theme_rotation_runs_mode_status_month; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_theme_rotation_runs_mode_status_month ON public.theme_rotation_runs USING btree (mode, status, run_month DESC);
+
+
+--
 -- Name: idx_ticker_data_cache_cached_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12446,6 +13757,27 @@ CREATE INDEX idx_trending_themes_active_sort ON public.trending_themes USING btr
 --
 
 CREATE UNIQUE INDEX idx_trending_themes_slug ON public.trending_themes USING btree (slug);
+
+
+--
+-- Name: idx_trillion_club_companies_published; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trillion_club_companies_published ON public.trillion_club_companies USING btree (published, is_member);
+
+
+--
+-- Name: idx_trillion_club_filings_recent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trillion_club_filings_recent ON public.trillion_club_filings USING btree (cik, period DESC);
+
+
+--
+-- Name: idx_trillion_club_stakes_company; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_trillion_club_stakes_company ON public.trillion_club_stakes USING btree (company_slug, published, sort_order);
 
 
 --
@@ -12502,6 +13834,13 @@ CREATE INDEX idx_users_is_admin ON public.users USING btree (id) WHERE is_admin;
 --
 
 CREATE INDEX idx_users_tier ON public.users USING btree (tier);
+
+
+--
+-- Name: idx_watchlist_items_added_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_watchlist_items_added_at ON public.watchlist_items USING btree (added_at DESC);
 
 
 --
@@ -12670,6 +14009,13 @@ CREATE UNIQUE INDEX uq_commodity_cache_key ON public.commodity_cache USING btree
 --
 
 CREATE UNIQUE INDEX uq_index_cache_key ON public.index_cache USING btree (cache_key);
+
+
+--
+-- Name: uq_theme_rotation_runs_month_mode; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_theme_rotation_runs_month_mode ON public.theme_rotation_runs USING btree (run_month, mode) WHERE (mode = ANY (ARRAY['live'::text, 'dry_run'::text]));
 
 
 --
@@ -13173,6 +14519,14 @@ ALTER TABLE ONLY public.marketing_posts
 
 
 --
+-- Name: marketing_scripts marketing_scripts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_scripts
+    ADD CONSTRAINT marketing_scripts_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.marketing_runs(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: notification_events notification_events_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13210,6 +14564,22 @@ ALTER TABLE ONLY public.price_alerts
 
 ALTER TABLE ONLY public.subscriptions
     ADD CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: theme_rotation_decisions theme_rotation_decisions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.theme_rotation_decisions
+    ADD CONSTRAINT theme_rotation_decisions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.theme_rotation_runs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: trillion_club_stakes trillion_club_stakes_company_slug_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.trillion_club_stakes
+    ADD CONSTRAINT trillion_club_stakes_company_slug_fkey FOREIGN KEY (company_slug) REFERENCES public.trillion_club_companies(slug) ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 --
@@ -13834,6 +15204,32 @@ CREATE POLICY daily_briefings_service_all ON public.daily_briefings TO service_r
 
 
 --
+-- Name: dcf_fair_value_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.dcf_fair_value_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dcf_fair_value_cache dcf_fair_value_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY dcf_fair_value_cache_service_all ON public.dcf_fair_value_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: dcf_fair_value_history; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.dcf_fair_value_history ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dcf_fair_value_history dcf_fair_value_history_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY dcf_fair_value_history_service_all ON public.dcf_fair_value_history TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: device_tokens; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14134,6 +15530,19 @@ CREATE POLICY marketing_assets_service_all ON public.marketing_assets TO service
 
 
 --
+-- Name: marketing_link_hits; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.marketing_link_hits ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: marketing_link_hits marketing_link_hits_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY marketing_link_hits_service_all ON public.marketing_link_hits TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: marketing_posts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14157,6 +15566,19 @@ ALTER TABLE public.marketing_runs ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY marketing_runs_service_all ON public.marketing_runs TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: marketing_scripts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.marketing_scripts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: marketing_scripts marketing_scripts_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY marketing_scripts_service_all ON public.marketing_scripts TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -14203,6 +15625,32 @@ CREATE POLICY money_moves_select_all ON public.money_move_articles FOR SELECT US
 --
 
 CREATE POLICY money_moves_service_all ON public.money_move_articles USING ((auth.role() = 'service_role'::text));
+
+
+--
+-- Name: news_sentiment_backfill; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.news_sentiment_backfill ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: news_sentiment_backfill news_sentiment_backfill_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY news_sentiment_backfill_service_all ON public.news_sentiment_backfill TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: news_sentiment_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.news_sentiment_log ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: news_sentiment_log news_sentiment_log_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY news_sentiment_log_service_all ON public.news_sentiment_log TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -14382,6 +15830,19 @@ CREATE POLICY revenue_breakdown_cache_service_all ON public.revenue_breakdown_ca
 
 
 --
+-- Name: search_pick_daily; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.search_pick_daily ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: search_pick_daily search_pick_daily_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY search_pick_daily_service_all ON public.search_pick_daily TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: sector_aggregates; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14499,6 +15960,58 @@ CREATE POLICY subscriptions_service_all ON public.subscriptions TO service_role 
 
 
 --
+-- Name: theme_daily_insights; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.theme_daily_insights ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: theme_daily_insights theme_daily_insights_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY theme_daily_insights_service_all ON public.theme_daily_insights TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: theme_relevance_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.theme_relevance_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: theme_relevance_cache theme_relevance_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY theme_relevance_cache_service_all ON public.theme_relevance_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: theme_rotation_decisions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.theme_rotation_decisions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: theme_rotation_decisions theme_rotation_decisions_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY theme_rotation_decisions_service_all ON public.theme_rotation_decisions TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: theme_rotation_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.theme_rotation_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: theme_rotation_runs theme_rotation_runs_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY theme_rotation_runs_service_all ON public.theme_rotation_runs TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: ticker_data_cache; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -14557,17 +16070,49 @@ CREATE POLICY ticker_volatility_cache_service_write ON public.ticker_volatility_
 ALTER TABLE public.trending_themes ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: trending_themes trending_themes_select_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY trending_themes_select_all ON public.trending_themes FOR SELECT TO authenticated, anon USING (true);
-
-
---
 -- Name: trending_themes trending_themes_service_all; Type: POLICY; Schema: public; Owner: -
 --
 
 CREATE POLICY trending_themes_service_all ON public.trending_themes TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trillion_club_companies; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trillion_club_companies ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trillion_club_companies trillion_club_companies_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trillion_club_companies_service_all ON public.trillion_club_companies TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trillion_club_filings; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trillion_club_filings ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trillion_club_filings trillion_club_filings_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trillion_club_filings_service_all ON public.trillion_club_filings TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: trillion_club_stakes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.trillion_club_stakes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: trillion_club_stakes trillion_club_stakes_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY trillion_club_stakes_service_all ON public.trillion_club_stakes TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -14841,13 +16386,6 @@ CREATE POLICY journey_images_service_write ON storage.objects TO service_role US
 --
 
 CREATE POLICY journey_media_service_write ON storage.objects TO service_role USING ((bucket_id = 'journey-media'::text)) WITH CHECK ((bucket_id = 'journey-media'::text));
-
-
---
--- Name: objects marketing_media_public_read; Type: POLICY; Schema: storage; Owner: -
---
-
-CREATE POLICY marketing_media_public_read ON storage.objects FOR SELECT TO authenticated, anon USING ((bucket_id = 'marketing-media'::text));
 
 
 --
@@ -15621,6 +17159,21 @@ GRANT ALL ON FUNCTION public.claim_scheduled_job(p_job text, p_now timestamp wit
 
 
 --
+-- Name: TABLE news_sentiment_backfill; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.news_sentiment_backfill TO service_role;
+
+
+--
+-- Name: FUNCTION claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_sentiment_backfill(p_token uuid, p_limit integer, p_lease_seconds integer, p_max_attempts integer) TO service_role;
+
+
+--
 -- Name: FUNCTION claim_updates_insight_scope(p_scope text, p_now timestamp with time zone, p_stale_seconds integer, p_attempt_cap integer, p_daily_cap integer); Type: ACL; Schema: public; Owner: -
 --
 
@@ -15649,6 +17202,22 @@ GRANT ALL ON FUNCTION public.cleanup_old_social_mentions() TO service_role;
 --
 
 REVOKE ALL ON FUNCTION public.create_user_credits() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION discover_sentiment_backfill(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.discover_sentiment_backfill() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.discover_sentiment_backfill() TO service_role;
+
+
+--
+-- Name: FUNCTION enqueue_sentiment_backfill(p_scopes text[]); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.enqueue_sentiment_backfill(p_scopes text[]) TO service_role;
 
 
 --
@@ -15681,6 +17250,30 @@ GRANT ALL ON FUNCTION public.finish_notification_job(p_job text, p_now timestamp
 
 REVOKE ALL ON FUNCTION public.finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer, p_error text, p_timezone text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.finish_scheduled_job(p_job text, p_now timestamp with time zone, p_success boolean, p_items integer, p_error text, p_timezone text) TO service_role;
+
+
+--
+-- Name: FUNCTION finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.finish_sentiment_backfill(p_scope text, p_token uuid, p_status text, p_next_run_at timestamp with time zone, p_covered_from date, p_covered_to date, p_articles integer, p_labels integer, p_error text) TO service_role;
+
+
+--
+-- Name: FUNCTION get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.get_most_added_tickers(p_since timestamp with time zone, p_min_users integer, p_limit integer, p_min_account_age_hours integer) TO service_role;
+
+
+--
+-- Name: FUNCTION get_search_trending(p_since date, p_min_picks integer, p_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.get_search_trending(p_since date, p_min_picks integer, p_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.get_search_trending(p_since date, p_min_picks integer, p_limit integer) TO service_role;
 
 
 --
@@ -15738,11 +17331,43 @@ REVOKE ALL ON FUNCTION public.increment_chat_message_count() FROM PUBLIC;
 
 
 --
+-- Name: FUNCTION increment_marketing_link_hits(p_campaign text, p_day date, p_count integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.increment_marketing_link_hits(p_campaign text, p_day date, p_count integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.increment_marketing_link_hits(p_campaign text, p_day date, p_count integer) TO service_role;
+
+
+--
+-- Name: FUNCTION increment_search_pick(p_day date, p_ticker text, p_asset_type text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.increment_search_pick(p_day date, p_ticker text, p_asset_type text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.increment_search_pick(p_day date, p_ticker text, p_asset_type text) TO service_role;
+
+
+--
 -- Name: FUNCTION increment_updates_insight_success(p_scope text); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.increment_updates_insight_success(p_scope text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.increment_updates_insight_success(p_scope text) TO service_role;
+
+
+--
+-- Name: FUNCTION news_sentiment_daily(p_scope text, p_since date); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) TO service_role;
+
+
+--
+-- Name: FUNCTION publish_theme_rotation(p_run_id uuid, p_baskets jsonb, p_as_of date); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.publish_theme_rotation(p_run_id uuid, p_baskets jsonb, p_as_of date) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.publish_theme_rotation(p_run_id uuid, p_baskets jsonb, p_as_of date) TO service_role;
 
 
 --
@@ -15775,6 +17400,14 @@ GRANT ALL ON FUNCTION public.release_chat_turn(p_user_id uuid, p_day date) TO se
 
 REVOKE ALL ON FUNCTION public.release_guest_report(p_bucket_key uuid, p_period date) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.release_guest_report(p_bucket_key uuid, p_period date) TO service_role;
+
+
+--
+-- Name: FUNCTION renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid, p_lease_seconds integer, p_covered_from date, p_covered_to date) TO service_role;
 
 
 --
@@ -16510,6 +18143,27 @@ GRANT ALL ON TABLE public.daily_briefings TO service_role;
 
 
 --
+-- Name: TABLE dcf_fair_value_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.dcf_fair_value_cache TO service_role;
+
+
+--
+-- Name: TABLE dcf_fair_value_history; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.dcf_fair_value_history TO service_role;
+
+
+--
+-- Name: SEQUENCE dcf_fair_value_history_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.dcf_fair_value_history_id_seq TO service_role;
+
+
+--
 -- Name: TABLE device_tokens; Type: ACL; Schema: public; Owner: -
 --
 
@@ -16708,6 +18362,13 @@ GRANT ALL ON TABLE public.marketing_assets TO service_role;
 
 
 --
+-- Name: TABLE marketing_link_hits; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.marketing_link_hits TO service_role;
+
+
+--
 -- Name: TABLE marketing_posts; Type: ACL; Schema: public; Owner: -
 --
 
@@ -16719,6 +18380,13 @@ GRANT ALL ON TABLE public.marketing_posts TO service_role;
 --
 
 GRANT ALL ON TABLE public.marketing_runs TO service_role;
+
+
+--
+-- Name: TABLE marketing_scripts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.marketing_scripts TO service_role;
 
 
 --
@@ -16749,6 +18417,13 @@ GRANT ALL ON TABLE public.moat_intel_cache TO service_role;
 GRANT SELECT ON TABLE public.money_move_articles TO anon;
 GRANT SELECT ON TABLE public.money_move_articles TO authenticated;
 GRANT ALL ON TABLE public.money_move_articles TO service_role;
+
+
+--
+-- Name: TABLE news_sentiment_log; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.news_sentiment_log TO service_role;
 
 
 --
@@ -16845,6 +18520,13 @@ GRANT ALL ON TABLE public.revenue_breakdown_cache TO service_role;
 
 
 --
+-- Name: TABLE search_pick_daily; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.search_pick_daily TO service_role;
+
+
+--
 -- Name: TABLE sector_aggregates; Type: ACL; Schema: public; Owner: -
 --
 
@@ -16923,6 +18605,41 @@ GRANT ALL ON TABLE public.subscriptions TO service_role;
 
 
 --
+-- Name: TABLE theme_daily_insights; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.theme_daily_insights TO service_role;
+
+
+--
+-- Name: TABLE theme_relevance_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.theme_relevance_cache TO service_role;
+
+
+--
+-- Name: TABLE theme_rotation_decisions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.theme_rotation_decisions TO service_role;
+
+
+--
+-- Name: SEQUENCE theme_rotation_decisions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.theme_rotation_decisions_id_seq TO service_role;
+
+
+--
+-- Name: TABLE theme_rotation_runs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.theme_rotation_runs TO service_role;
+
+
+--
 -- Name: TABLE ticker_data_cache; Type: ACL; Schema: public; Owner: -
 --
 
@@ -16954,9 +18671,28 @@ GRANT ALL ON TABLE public.ticker_volatility_cache TO service_role;
 -- Name: TABLE trending_themes; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT ON TABLE public.trending_themes TO anon;
-GRANT SELECT ON TABLE public.trending_themes TO authenticated;
 GRANT ALL ON TABLE public.trending_themes TO service_role;
+
+
+--
+-- Name: TABLE trillion_club_companies; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.trillion_club_companies TO service_role;
+
+
+--
+-- Name: TABLE trillion_club_filings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.trillion_club_filings TO service_role;
+
+
+--
+-- Name: TABLE trillion_club_stakes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.trillion_club_stakes TO service_role;
 
 
 --
@@ -17110,7 +18846,8 @@ GRANT ALL ON TABLE public.whales TO service_role;
 -- Name: TABLE messages; Type: ACL; Schema: realtime; Owner: -
 --
 
-GRANT ALL ON TABLE realtime.messages TO postgres;
+GRANT REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE realtime.messages TO postgres;
+GRANT SELECT,INSERT ON TABLE realtime.messages TO postgres WITH GRANT OPTION;
 GRANT ALL ON TABLE realtime.messages TO dashboard_user;
 GRANT SELECT,INSERT,UPDATE ON TABLE realtime.messages TO anon;
 GRANT SELECT,INSERT,UPDATE ON TABLE realtime.messages TO authenticated;
@@ -17349,7 +19086,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON
 -- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: realtime; Owner: -
 --
 
-ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLES TO postgres;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT SELECT,INSERT ON TABLES TO postgres WITH GRANT OPTION;
 ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA realtime GRANT ALL ON TABLES TO dashboard_user;
 
 
@@ -17439,5 +19177,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict hGjGqpoMzzAHZqXMCzwM9GSTGkKFOKuMVgMJ51rpT1SauYYu1Hfoz4DoReU6Te1
+\unrestrict zlDPqhz7KayznnNf5tIxDf5mGPKbbFPp0r8DFc8cfeYR1PXvdPImNvzi9dQ4ChT
 

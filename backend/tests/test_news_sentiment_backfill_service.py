@@ -647,3 +647,321 @@ def test_labels_are_written_without_model_until_181_exists(monkeypatch, caplog):
 def test_the_row_builder_rejects_unknown_sources():
     with pytest.raises(ValueError):
         trend.build_log_rows("ORCL", [], now=NOW, source="guess")
+
+
+# ── review fixes (2026-09-27 deep-check) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_stale_coverage_is_replaced_not_kept_forever():
+    """A scope whose coverage ends before the horizon (dormant 90+ days) used to re-fetch all
+    90 days every night: the new newest-first block never touched the stale range, so it was
+    dropped and the stale range written back."""
+    sb = _FakeSupabase()
+    fmp = _FakeFMP({TODAY: [_article(TODAY, 0)]})
+    status = await _svc(fmp, sb=sb).process(
+        _claim(cf=date(2026, 4, 20), ct=date(2026, 6, 19)), now=NOW)
+    assert status == "done"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert (finish["p_covered_from"], finish["p_covered_to"]) == (HORIZON.isoformat(), TODAY.isoformat())
+    # The next night is then only the recent re-scan, not the whole horizon again.
+    assert plan_windows(TODAY, HORIZON, TODAY, HORIZON) == [(date(2026, 9, 25), TODAY)]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_stale_run_leaves_the_stored_range_to_coalesce():
+    sb = _FakeSupabase()
+    fmp = _FakeFMP({}, rate_limit_on=TODAY)
+    status = await _svc(fmp, sb=sb).process(_claim(cf=date(2026, 4, 20), ct=date(2026, 6, 19)), now=NOW)
+    assert status == "queued"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_covered_from"] is None and finish["p_covered_to"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_day_split_keeps_the_one_day_pad(monkeypatch):
+    monkeypatch.setattr(bf, "MAX_PAGES_PER_WINDOW", 1)
+    monkeypatch.setattr(bf, "PAGE_SIZE", 3)
+    edge = TODAY - timedelta(days=3)       # the day BEFORE the recent window (Sep 25..27)
+    fmp = _FakeFMP({TODAY: [_article(TODAY, n) for n in range(5)]}, page_size=3)
+    await _svc(fmp, sb=_FakeSupabase()).process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    day_calls = sorted({c[2] for c in fmp.calls if c[2] == c[3]})
+    assert day_calls[0] == edge.isoformat(), "padded on the old side"
+    assert day_calls[-1] == (TODAY + timedelta(days=1)).isoformat(), "padded on the new side"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_hands_back_without_erasing_renewed_coverage_and_refunds():
+    started = asyncio.Event()
+
+    class _Hangs(_Labeller):
+        async def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            started.set()
+            await asyncio.Event().wait()
+
+    sb = _FakeSupabase()
+    queue = [{"scope": "ORCL", "covered_from": HORIZON.isoformat(), "covered_to": TODAY.isoformat(), "attempts": 1}]
+    sb.rpc_results[bf.CLAIM_RPC] = lambda params: [queue.pop(0)] if queue else []
+    budget = _FakeBudget()
+    svc = _svc(_FakeFMP({TODAY: [_article(TODAY, 0)]}), sb=sb, budget=budget, labeller=_Hangs())
+    task = asyncio.create_task(svc.run_one_tick(now=NOW, workers=1))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_status"] == "queued"
+    assert finish["p_covered_from"] is None and finish["p_covered_to"] is None, \
+        "NULLs: COALESCE keeps what renew already saved"
+    assert budget.claims == 1 and budget.refunds == 1, "the unanswered call's unit is given back"
+
+
+@pytest.mark.asyncio
+async def test_one_scope_blowing_up_does_not_escape_the_tick(monkeypatch, caplog):
+    real_route = bf.route_for
+
+    def _route(scope):
+        if scope == "BOOM":
+            raise RuntimeError("unexpected")
+        return real_route(scope)
+
+    monkeypatch.setattr(bf, "route_for", _route)
+    sb = _FakeSupabase()
+    queue = [{"scope": "BOOM", "attempts": 1},
+             {"scope": "ORCL", "covered_from": HORIZON.isoformat(), "covered_to": TODAY.isoformat(), "attempts": 1}]
+    sb.rpc_results[bf.CLAIM_RPC] = lambda params: [queue.pop(0)] if queue else []
+    with caplog.at_level(logging.ERROR):
+        processed = await _svc(_FakeFMP({}), sb=sb).run_one_tick(now=NOW, workers=1)
+    assert processed == 1, "the worker went on to the next scope"
+    assert "worker error for BOOM" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_finish_is_logged_not_raised(caplog):
+    sb = _FakeSupabase()
+    sb.rpc_errors[bf.FINISH_RPC] = RuntimeError("connection reset")
+    with caplog.at_level(logging.WARNING):
+        status = await _svc(_FakeFMP({}), sb=sb).process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    assert status == "done"
+    assert "finish(done) failed for ORCL" in caplog.text
+
+
+def _tier_refusal():
+    from google.genai import errors as genai_errors
+
+    return genai_errors.ClientError(400, {"error": {
+        "code": 400, "status": "INVALID_ARGUMENT",
+        "message": "service_tier FLEX is not supported for this model"}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blip", [
+    RuntimeError("Server disconnected"),
+    ConnectionResetError("[Errno 104] Connection reset by peer"),
+    ValueError("400 INVALID_ARGUMENT: service tier not supported"),   # not a genai ClientError
+])
+async def test_a_flex_blip_falls_back_once_but_keeps_flex(blip):
+    arts = {TODAY: [_article(TODAY, n) for n in range(3)]}
+    labeller = _Labeller(exc_first=blip)
+    svc = _svc(_FakeFMP(arts), labeller=labeller)
+    await svc.process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    assert [c["service_tier"] for c in labeller.calls] == ["flex", None]
+    svc._supabase = _FakeSupabase()
+    await svc.process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    assert labeller.calls[-1]["service_tier"] == "flex", "one blip must not double every later price"
+
+
+@pytest.mark.asyncio
+async def test_a_flex_refusal_that_is_not_busy_turns_flex_off_for_the_process():
+    arts = {TODAY: [_article(TODAY, n) for n in range(3)]}
+    labeller = _Labeller(exc_first=_tier_refusal())
+    svc = _svc(_FakeFMP(arts), labeller=labeller)
+    await svc.process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    assert [c["service_tier"] for c in labeller.calls] == ["flex", None]
+    svc._supabase = _FakeSupabase()          # nothing logged yet: the next run labels again
+    await svc.process(_claim(ct=TODAY, cf=HORIZON), now=NOW)
+    assert len(labeller.calls) == 3
+    assert labeller.calls[-1]["service_tier"] is None, "no second refusal per batch"
+
+
+@pytest.mark.asyncio
+async def test_a_flex_429_is_one_call_off_the_shared_breaker(monkeypatch, caplog):
+    from app.integrations import gemini
+
+    gemini._quota_circuit._consecutive = 0
+    gemini._quota_circuit._opened_at = 0.0
+    calls = []
+
+    @gemini.async_retry(max_attempts=2, delay=0.0)
+    async def _fake_generate(**kwargs):
+        calls.append(kwargs.get("service_tier"))
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: flex capacity")
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        await _fake_generate(service_tier="flex")
+    assert calls == ["flex"], "exactly one Flex attempt"
+    assert gemini._quota_circuit._consecutive == 0, "the breaker chat and reports share is untouched"
+    assert "giving up" not in caplog.text
+    # The standard tier still gets the full ladder (and books its strikes).
+    with pytest.raises(RuntimeError):
+        await _fake_generate(service_tier=None)
+    assert calls.count(None) > 1 and gemini._quota_circuit._consecutive > 0
+    gemini._quota_circuit._consecutive = 0
+    gemini._quota_circuit._opened_at = 0.0
+
+
+async def _no_sleep(*_a, **_k):
+    return None
+
+
+def test_history_status_uses_the_workers_clamped_horizon(monkeypatch):
+    monkeypatch.setattr(settings, "SENTIMENT_BACKFILL_ENABLED", True)
+    monkeypatch.setattr(settings, "SENTIMENT_BACKFILL_DAYS", 120)   # the worker clamps to 90
+    row = {"status": "running", "covered_from": HORIZON.isoformat(), "covered_to": TODAY.isoformat()}
+    assert history_status_for(_StatusClient(row), "ORCL", TODAY) == "ready"
+
+
+def test_a_concurrent_batch_still_heals_after_another_set_the_flag(monkeypatch):
+    """Batch B was built WITH `model` while the flag was False; batch A's error set the flag
+    first. B's own error must still retry without the column, not drop its labels."""
+    monkeypatch.setattr(trend, "_model_column_missing", False)
+
+    class _RacingClient(_NoModelColumn):
+        def execute(self):
+            if any("model" in r for r in self._payload):
+                trend._model_column_missing = True     # A got there first
+            return super().execute()
+
+    sb = _RacingClient()
+    rows = trend.build_log_rows("ORCL", [{"external_id": "b", "sentiment": "bearish",
+                                          "published_at": NOW.isoformat()}], now=NOW, model="m")
+    assert trend.upsert_log_rows(sb, rows) == 1
+    monkeypatch.setattr(trend, "_model_column_missing", False)
+
+
+@pytest.mark.asyncio
+async def test_a_window_the_model_could_not_label_is_not_recorded_as_covered():
+    """An answer wrapped under the wrong key (or blocked, or cut off) left the window marked
+    covered with no labels — a permanent hole under a 'done' status."""
+    older = TODAY - timedelta(days=10)
+    arts = {TODAY: [_article(TODAY, 0)], older: [_article(older, 0)]}
+    bad = lambda n: json.dumps({"results": [{"index": 0, "sentiment": "bullish", "confidence": 9}]})
+    good = lambda n: json.dumps([{"index": i, "sentiment": "bearish", "confidence": 70} for i in range(n)])
+    # Newest window labels fine; the next one gets an unusable answer (and its split retry).
+    labeller = _Labeller(answers=[good, bad, bad])
+    sb = _FakeSupabase()
+    status = await _svc(_FakeFMP(arts), sb=sb, labeller=labeller).process(_claim(attempts=1), now=NOW)
+    assert status == "failed"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_covered_to"] == TODAY.isoformat()
+    assert finish["p_covered_from"] == (TODAY - timedelta(days=6)).isoformat(), \
+        "coverage held at the last fully labelled window"
+    assert "left unlabelled" in finish["p_error"]
+    assert date.fromisoformat(finish["p_covered_from"]) > older
+
+    # The retry re-labels only the gap's article (the rest are in the log already).
+    sb2 = _FakeSupabase(logged=sb.logged)
+    labeller2 = _Labeller()
+    status = await _svc(_FakeFMP(arts), sb=sb2, labeller=labeller2).process(
+        _claim(cf=date.fromisoformat(finish["p_covered_from"]), ct=TODAY, attempts=2), now=NOW)
+    assert status == "done"
+    assert sum(_n_articles(c["prompt"]) for c in labeller2.calls) == 1
+    assert sb2.calls(bf.FINISH_RPC)[0]["p_covered_from"] == HORIZON.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_at_the_attempt_cap_a_gap_is_accepted_not_retried_forever(caplog):
+    arts = {TODAY: [_article(TODAY, 0)]}
+    bad = lambda n: "not json"
+    sb = _FakeSupabase()
+    with caplog.at_level(logging.WARNING):
+        status = await _svc(_FakeFMP(arts), sb=sb, labeller=_Labeller(answers=[bad])).process(
+            _claim(attempts=bf.MAX_ATTEMPTS), now=NOW)
+    assert status == "done"
+    assert sb.calls(bf.FINISH_RPC)[0]["p_covered_from"] == HORIZON.isoformat()
+    assert "accepting 1 unlabelled article(s)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_moderation_refusal_is_a_gap_not_a_stalled_scope(monkeypatch):
+    """One article a provider's moderation refuses used to _Fail the whole scope on the same
+    batch every retry. Now it is an unusable answer: split, the rest labelled, gap rule."""
+    from app.integrations.openai_compat import OpenAICompatContentRejected
+
+    monkeypatch.setattr(settings, "NEWS_LLM_PROVIDER", "openai_compat")
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://api.example.test")
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "k")
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "qwen-flash")
+
+    class _Moderates(_Labeller):
+        async def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            if "FORBIDDEN" in kwargs["prompt"]:
+                raise OpenAICompatContentRejected("400 data_inspection_failed")
+            return await super().__call__(**{**kwargs})
+
+    arts = {TODAY: [_article(TODAY, 0), {**_article(TODAY, 1), "title": "FORBIDDEN"}]}
+    budget = _FakeBudget()
+    sb = _FakeSupabase()
+    labeller = _Moderates()
+    labeller.calls = []
+    status = await _svc(_FakeFMP(arts), sb=sb, budget=budget, labeller=labeller).process(
+        _claim(attempts=bf.MAX_ATTEMPTS), now=NOW)
+    assert status == "done", "at the cap the one refused article is an accepted gap"
+    written = [r for p, _ in sb.upserts for r in p]
+    assert len(written) == 1, "the other article of the batch was still labelled"
+    assert budget.refunds == 2, "each refused call gives its unit back"
+
+
+@pytest.mark.asyncio
+async def test_at_the_cap_a_systematic_failure_is_never_accepted():
+    """Every answer unusable (a provider wrapping under the wrong key): at the cap the run
+    must still fail with nothing covered — never 'done' over 90 empty days."""
+    arts = {TODAY - timedelta(days=k): [_article(TODAY - timedelta(days=k), n) for n in range(3)]
+            for k in range(0, 40, 3)}
+    bad = lambda n: json.dumps({"wrong": []})
+    labeller = _Labeller(answers=[bad] * 200)
+    sb = _FakeSupabase()
+    status = await _svc(_FakeFMP(arts), sb=sb, labeller=labeller).process(
+        _claim(attempts=bf.MAX_ATTEMPTS + 3), now=NOW)
+    assert status == "failed"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_covered_from"] is None and finish["p_covered_to"] is None
+    assert "too many to accept at the cap" in finish["p_error"]
+    assert all(p["p_covered_from"] is None for p in sb.calls(bf.RENEW_RPC)), \
+        "no gap window was renewed as covered before the decision"
+
+
+@pytest.mark.asyncio
+async def test_a_rescan_miss_on_an_already_covered_day_does_not_fail_the_night():
+    """An article accepted as a gap earlier sits on a covered day; the nightly re-scan of
+    that day must not re-fail the scope (and run 4 failed retries) every night."""
+    covered_day = TODAY - timedelta(days=2)
+    arts = {covered_day: [{**_article(covered_day, 0), "title": "BLOCKED"}],
+            TODAY: [_article(TODAY, 1)]}
+
+    class _Blocks(_Labeller):
+        async def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            if "BLOCKED" in kwargs["prompt"]:
+                return {"text": ""}          # a blocked prompt: empty answer
+            return await super().__call__(**kwargs)
+
+    labeller = _Blocks()
+    sb = _FakeSupabase()
+    status = await _svc(_FakeFMP(arts), sb=sb, labeller=labeller).process(
+        _claim(cf=HORIZON, ct=TODAY - timedelta(days=1), attempts=1), now=NOW)
+    assert status == "done"
+    [finish] = sb.calls(bf.FINISH_RPC)
+    assert finish["p_covered_to"] == TODAY.isoformat()
+
+
+def test_on_covered_day_uses_the_articles_et_day():
+    d = date(2026, 9, 20)
+    late = {"published_at": "2026-09-21T03:30:00+00:00"}      # 23:30 ET on Sep 20
+    assert bf._on_covered_day(late, d, d)
+    assert not bf._on_covered_day(late, d + timedelta(days=1), d + timedelta(days=5))
+    assert not bf._on_covered_day(late, None, None)
+    assert not bf._on_covered_day({"published_at": "garbage"}, d, d)

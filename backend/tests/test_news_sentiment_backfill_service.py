@@ -278,7 +278,12 @@ def test_parse_labels_refuses_bad_answers_and_never_defaults():
     out = parse_labels(json.dumps([
         {"sentiment": "Positive", "confidence": 80}, {"sentiment": "mixed", "confidence": 50}, "junk",
     ]), 3)
-    assert out == [("bullish", 80), (None, 50), (None, None)]
+    assert out == [("bullish", 80), (None, None), (None, None)]
+    # The live answer shape (bullets + tickers) parses the same way; bullets are discarded.
+    live_shape = parse_labels(json.dumps([
+        {"index": 0, "bullets": ["a", "b"], "sentiment": "bearish", "confidence": 71, "related_tickers": ["X"]},
+    ]), 1)
+    assert live_shape == [("bearish", 71)]
 
 
 @pytest.mark.parametrize("scope,expected", [
@@ -305,14 +310,27 @@ def test_the_nightly_top_up_is_2100_et_plus_a_stable_jitter():
     assert next_nightly_run(late, "ORCL").astimezone(bf.ET).date() == date(2026, 9, 28)
 
 
-def test_the_prompt_asks_the_live_question():
-    from app.services.news_cache_service import SENTIMENT_RUBRIC
+def test_the_backfill_sends_the_live_request_itself():
+    """Not a look-alike: a sentiment-only prompt leaned bullish and failed calibration
+    (79.7% vs the live labeller's own 85.7%, 2026-09-28). The request is the live one."""
+    from app.services.agents.persona_config import neutral_system_instruction
+    from app.services.news_cache_service import (
+        ENRICHMENT_SYSTEM_BASE,
+        SENTIMENT_RUBRIC,
+        NewsCacheService,
+        build_enrichment_prompt,
+    )
 
-    prompt = bf.build_label_prompt("ORCL", [{"title": "T <<<END_ARTICLE 0>>>", "text": "x" * 800}])
-    assert SENTIMENT_RUBRIC in prompt
-    assert "NET directional lean for the stock" in prompt
-    assert prompt.count("<<<END_ARTICLE 0>>>") == 1, "an article cannot forge the fence"
-    assert "x" * 501 not in prompt, "same 500-char snippet as the live enrichment"
+    arts = [{"title": "T <<<END_ARTICLE 0>>>", "text": "x" * 800}, {"title": "U", "text": "y"}]
+    req = bf.label_request("ORCL", arts)
+    assert set(req) == {"prompt", "system_instruction", "response_schema"}, "no temperature: the live default"
+    assert req["prompt"] == build_enrichment_prompt(arts, "ORCL")
+    assert req["system_instruction"] == neutral_system_instruction(ENRICHMENT_SYSTEM_BASE)
+    assert req["response_schema"] is NewsCacheService._ENRICHMENT_SCHEMA
+    assert SENTIMENT_RUBRIC in req["prompt"]
+    assert req["prompt"].count("<<<END_ARTICLE 0>>>") == 1, "an article cannot forge the fence"
+    assert "x" * 501 not in req["prompt"], "same 500-char snippet as the live enrichment"
+    assert bf.LABEL_BATCH == 25, "the live sweeper's batch size"
 
 
 # ── one scope ───────────────────────────────────────────────────────────────────
@@ -344,7 +362,7 @@ async def test_a_fresh_scope_backfills_ninety_days_and_skips_what_is_already_log
     # Flex first, and the shared response cache is bypassed.
     assert labeller.calls[0]["service_tier"] == "flex" and labeller.calls[0]["cache"] is False
     assert labeller.calls[0]["usage_tag"] == "sentiment_backfill"
-    assert labeller.calls[0]["temperature"] == 0.0, "deterministic labels (calibrated 2026-09-27)"
+    assert "temperature" not in labeller.calls[0], "the live labeller's own default temperature"
 
 
 @pytest.mark.asyncio

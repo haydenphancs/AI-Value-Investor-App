@@ -1,13 +1,21 @@
 """Calibrate the backfill's sentiment labeller against live labels — READ-ONLY.
 
 Before switching on SENTIMENT_BACKFILL_ENABLED (or switching NEWS_LLM_PROVIDER to another
-model), check that the backfill's sentiment-only prompt labels articles the way the live
-enrichment already did. Otherwise backfilled days and live days would be two different
-measurements on one chart, with a jump at the boundary.
+model), check that the backfill labels articles the way the live enrichment already did.
+Otherwise backfilled days and live days would be two different measurements on one chart,
+with a jump at the boundary.
+
+Since 2026-09-28 the backfill sends the LIVE enrichment request itself
+(`news_sentiment_backfill_service.label_request` → `news_cache_service.build_enrichment_prompt`,
+live schema, live default temperature) and keeps only the label. Its first design — a shorter
+sentiment-only prompt at temperature 0 — passed on 2026-09-27 (84.7% vs baseline 81.7%) and
+failed on the next day's 300 articles (79.7% vs 85.7%), leaning bullish: close to the edge,
+and systematically different. The same request removes that difference by construction; this
+run now checks that the backfill's call path reproduces the live labeller.
 
 It reads already-labelled rows from `ticker_news_cache` (ONE SELECT, before a tripwire makes
-every further Supabase use raise), re-labels them with the backfill's exact prompt
-(`news_sentiment_backfill_service.build_label_prompt`) through the CURRENT news model
+every further Supabase use raise), re-labels them with the backfill's exact request
+(`news_sentiment_backfill_service.label_request`) through the CURRENT news model
 (`app/services/news_llm.py`, i.e. whatever NEWS_LLM_* says — so the same run also calibrates a
 candidate provider), and reports agreement and a confusion matrix. It writes nothing and has
 no write flag. Keys are never printed.
@@ -191,16 +199,15 @@ def verdict(backfill_rate: float, baseline_rate: Optional[float]) -> str:
     return "BELOW TARGET"
 
 
-async def relabel(rows: List[Dict[str, Any]], *, batch: int = 50) -> List[Tuple[str, Optional[str]]]:
-    from app.services.agents.persona_config import neutral_system_instruction
-    from app.services.news_cache_service import ENRICHMENT_SYSTEM_BASE
+async def relabel(rows: List[Dict[str, Any]], *, batch: Optional[int] = None) -> List[Tuple[str, Optional[str]]]:
     from app.services.news_llm import generate_news_json, is_content_refusal
     from app.services.news_sentiment_backfill_service import (
-        LABEL_TEMPERATURE,
-        _LABEL_SCHEMA,
-        build_label_prompt,
+        LABEL_BATCH,
+        label_request,
         parse_labels,
     )
+
+    batch = batch or LABEL_BATCH
 
     refused = 0
 
@@ -211,11 +218,8 @@ async def relabel(rows: List[Dict[str, Any]], *, batch: int = 50) -> List[Tuple[
         nonlocal refused
         try:
             result = await generate_news_json(
-                prompt=build_label_prompt(scope, chunk),
-                system_instruction=neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
-                response_schema=_LABEL_SCHEMA,
+                **label_request(scope, chunk),
                 usage_tag="sentiment_backfill_calibration",
-                temperature=LABEL_TEMPERATURE,
                 cache=False,
             )
             labels = parse_labels((result or {}).get("text") or "", len(chunk))

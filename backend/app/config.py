@@ -90,9 +90,10 @@ class Settings(BaseSettings):
     # then set true in Railway (documents/OWNER_TASKS.md §2).
     SENTIMENT_BACKFILL_ENABLED: bool = False
     SENTIMENT_BACKFILL_DAYS: int = 90
-    # Model calls per ET day (one call = one batch of ≤50 articles), a durable cross-instance
-    # cap. 1500 ≈ 75k articles ≈ $1.65/day on flash-lite at worst.
-    SENTIMENT_BACKFILL_DAILY_CALLS: int = 1500
+    # Model calls per ET day (one call = one batch of ≤25 articles through the LIVE enrichment
+    # request, bullets included), a durable cross-instance cap. 3000 ≈ 75k articles ≈ $5/day
+    # on flash-lite standard at worst, about half on Flex.
+    SENTIMENT_BACKFILL_DAILY_CALLS: int = 3000
     # Gemini's 50%-off Flex tier, for the backfill ONLY (never chat, reports or live
     # summaries). Falls back to the standard tier once if Flex is busy.
     SENTIMENT_BACKFILL_FLEX: bool = True

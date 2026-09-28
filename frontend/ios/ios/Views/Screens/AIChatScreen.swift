@@ -35,6 +35,11 @@ struct AIChatScreen: View {
     /// restores `currentContextType` / `currentReferenceId` but never touched a `@State`).
     /// The default set is stock-flavoured, which is wrong on a Learn screen.
     private var suggestions: [SuggestionChip] {
+        // Chips the opening screen supplied win: they are about the exact thing the user was
+        // looking at (the Updates feed and its news tone), which no rotation can know.
+        if !viewModel.starterChips.isEmpty {
+            return viewModel.starterChips
+        }
         // A book chat keeps its own chips: they are derived from that book's actual cores,
         // which is a better-targeted set than anything a market rotation could offer.
         if viewModel.currentContextType == .book,
@@ -325,6 +330,11 @@ struct AIChatScreen: View {
         switch viewModel.currentContextType {
         case .tickerReport, .stock, .etf, .crypto, .index, .commodity:
             return ref.split(separator: "|").first.map(String.init)?.uppercased()
+        case .updatesScope:
+            // The market feed's reserved key is not something to show a person, and the
+            // "|ETF" class hint is not part of the name.
+            let scope = ref.split(separator: "|").first.map(String.init) ?? ref
+            return scope == UpdatesScope.market ? "Market" : scope.uppercased()
         case .book:
             // Resolve the curriculum order to a title. NEVER fall back to the raw order —
             // "Grounded on 2" is noise, not a reference.

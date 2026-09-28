@@ -676,6 +676,12 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "TRILLION_CLUB_UNAVAILABLE" {
                 return .apiError(code: code, message: message)
             }
+            // 503 SENTIMENT_TREND_UNAVAILABLE: the Updates news-tone chart could not be read (a
+            // blip, or migration 180 not applied yet). Retryable. The chart's caller hides the
+            // chart rather than showing this, but the code must not fall through to a generic.
+            if code == "SENTIMENT_TREND_UNAVAILABLE" {
+                return .apiError(code: code, message: message)
+            }
             // Chat message over the length ceiling (HTTP 400) → a typed validation
             // error (title "Invalid Input", .fixInput action) surfacing the backend's
             // specific message, per the "don't fall through to a generic" rule.

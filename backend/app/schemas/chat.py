@@ -27,6 +27,9 @@ class ChatContextType(str, Enum):
     MONEY_MOVES_ARTICLE = "MONEY_MOVES_ARTICLE"
     JOURNEY_LESSON = "JOURNEY_LESSON"
     BOOK = "BOOK"
+    # The Updates tab: reference_id is the feed scope (a ticker, a coin pair or "__MARKET__").
+    # The resolver reads that scope's Insight card, newest headlines and news-tone trend.
+    UPDATES_SCOPE = "UPDATES_SCOPE"
     NONE = "NONE"
 
 

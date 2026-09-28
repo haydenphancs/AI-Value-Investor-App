@@ -734,6 +734,18 @@ async def _run_news_pre_warmer():
 
         await _step("search_pick_daily sweep", _search_picks)
 
+        # And news_sentiment_log (migration 180) — the label history behind the Updates
+        # news-sentiment timeline. The longest window read is 90 days; 120 are kept. One
+        # DELETE, no cadence of its own.
+        async def _sentiment_log():
+            from app.services.news_sentiment_trend_service import (
+                get_news_sentiment_trend_service,
+            )
+
+            await asyncio.to_thread(get_news_sentiment_trend_service().sweep_expired)
+
+        await _step("news_sentiment_log sweep", _sentiment_log)
+
         # And notification_events + push_send_log (migrations 119 / 109) — the inbox,
         # dedup ledger and cap ledger. This is the one whose growth is invisible until
         # the inbox query slows down.

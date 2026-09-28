@@ -185,6 +185,11 @@ class ErrorCode(str, Enum):
     # from TRILLION_CLUB_COMPANY_NOT_FOUND. Without it the generic mapping would have told
     # the user "The report failed to generate" on a screen that generates nothing.
     TRILLION_CLUB_UNAVAILABLE = "TRILLION_CLUB_UNAVAILABLE"
+    # The Updates news-sentiment timeline could not be READ (Supabase blip, or migration 180
+    # not yet applied). Retryable, and deliberately NOT an empty 200: "no scored headlines
+    # yet" and "we couldn't reach the log" must stay distinguishable in the logs, and the
+    # generic mapping would have said "The report failed to generate".
+    SENTIMENT_TREND_UNAVAILABLE = "SENTIMENT_TREND_UNAVAILABLE"
     # Terminal, NOT retryable. Ownership of an App Store transaction never moves, so this
     # condition can never clear — which is why it must not share a code with the retryable
     # billing failures. See PurchaseBoundToAnotherAccount in iap_service.py.
@@ -423,6 +428,9 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: (
         "We couldn't load this company's holdings right now. Please try again shortly."
     ),
+    ErrorCode.SENTIMENT_TREND_UNAVAILABLE: (
+        "We couldn't load the news sentiment trend right now. Please try again shortly."
+    ),
     ErrorCode.WHALE_NOT_FOUND: (
         "We couldn't find this investor. They may no longer be tracked."
     ),
@@ -504,6 +512,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.INSUFFICIENT_CREDITS: "upgrade",
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: "retry",
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: "retry",
+    ErrorCode.SENTIMENT_TREND_UNAVAILABLE: "retry_later",
     ErrorCode.WHALE_FOLLOW_LOCKED: "upgrade",
     # NOT "retry_later": retrying can never succeed, and telling the client to wait is what
     # left StoreKit redelivering the transaction on every launch forever.
@@ -593,6 +602,7 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # top-up route, and no amount of credits unlocks a follow slot.
     ErrorCode.WHALE_PROFILE_UNAVAILABLE: 503,
     ErrorCode.TRILLION_CLUB_UNAVAILABLE: 503,
+    ErrorCode.SENTIMENT_TREND_UNAVAILABLE: 503,
     ErrorCode.WHALE_NOT_FOUND: 404,
     ErrorCode.WHALE_FOLLOW_LOCKED: 403,
     # 409 conflict — a terminal 4xx, so the client finishes the transaction instead of

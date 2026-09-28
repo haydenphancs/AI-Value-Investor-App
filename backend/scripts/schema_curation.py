@@ -732,6 +732,14 @@ CURATION: dict[str, TableDoc] = {
              "the write (increment_search_pick). No user, device or IP column exists or may be "
              "added. Read through get_search_trending (floor of 3 inside SQL); swept after 14 "
              "days. service_role only."),
+    "public.news_sentiment_log": T("news",
+        purpose="History of Cay AI's bullish/bearish/neutral news labels behind the Updates "
+                "news-sentiment timeline.",
+        key=("scope", "article_key", "et_day", "sentiment"),
+        note="Migration 180. One row per (scope, md5(external_id)::uuid), written when an "
+             "article is enriched (first label wins). Stores NO headline, URL or summary — "
+             "migration 104's no-news-archive rule. Read through news_sentiment_daily() by "
+             "GET /updates/sentiment-trend; swept after 120 days. service_role only."),
     "public.ai_insight_budget": T("ops",
         purpose="Global per-day generation cap for Updates insights — the cost ceiling.",
         key=("budget_day", "gen_count"),

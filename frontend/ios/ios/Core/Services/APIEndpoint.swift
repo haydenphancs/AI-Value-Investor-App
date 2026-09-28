@@ -344,6 +344,10 @@ enum APIEndpoint: Sendable {
     case getUpdatesFeed(scope: String, limit: Int, offset: Int = 0)
     /// On-demand AI enrichment (bullets + sentiment) for specific articles.
     case enrichUpdatesNews(scope: String, articleIds: [String])
+    /// Per-ET-day counts of the headlines Cay AI scored for one feed scope — the
+    /// news-tone chart under the Insights card. Reads a label log (migration 180): no
+    /// model call. `days` is 7, 30 or 90.
+    case getSentimentTrend(scope: String, days: Int)
 
     // MARK: - Home-screen widget
     //
@@ -679,6 +683,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/widget/token"
         case .enrichUpdatesNews:
             return "/api/v1/updates/news/enrich"
+        case .getSentimentTrend:
+            return "/api/v1/updates/sentiment-trend"
 
         // Chat
         case .getChatStarters:
@@ -848,6 +854,9 @@ enum APIEndpoint: Sendable {
         case .deleteReport(_, let forRetry):
             // Omitted on a plain delete so that request line stays byte-identical.
             return forRetry ? ["intent": "retry"] : nil
+
+        case .getSentimentTrend(let scope, let days):
+            return ["scope": scope, "days": String(days)]
 
         case .getUpdatesFeed(let scope, let limit, let offset):
             var q = ["scope": scope, "limit": String(limit)]
@@ -1224,7 +1233,7 @@ enum APIEndpoint: Sendable {
             return .signInRequired
 
         // Home, Updates, themes, and the research meta lists.
-        case .getUpdatesFeed, .enrichUpdatesNews, .getUpdatesTabs,
+        case .getUpdatesFeed, .enrichUpdatesNews, .getUpdatesTabs, .getSentimentTrend,
              .getHomeFeed, .getHomeDashboard,
              .getThemeDetail,
              // FMP-sourced 13F data + market caps: End-User Display Rights are

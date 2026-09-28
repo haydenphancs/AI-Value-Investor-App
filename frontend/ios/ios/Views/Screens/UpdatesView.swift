@@ -24,6 +24,14 @@ struct UpdatesView: View {
     @State private var browserLink: BrowserLink?
     /// Set when the Insights card is tapped → presents the sources screen.
     @State private var insightSources: NewsInsightSummary?
+    /// "Ask Cay AI" from this tab — the Insights card, its detail sheet and the news-tone
+    /// chart share ONE grounded chat, owned here so it never overwrites the general
+    /// conversation `ContentView` owns.
+    @StateObject private var updatesChat = ChatViewModel()
+    @State private var showUpdatesChat = false
+    /// Set by the detail sheet's "Ask Cay AI". A full-screen cover cannot present over the
+    /// sheet, so the chat opens from the sheet's `onDismiss`.
+    @State private var pendingChatFocus: UpdatesChatFocus?
 
     var body: some View {
         NavigationStack {
@@ -90,7 +98,24 @@ struct UpdatesView: View {
                             if let summary = viewModel.insightSummary {
                                 InsightsSummaryCard(
                                     summary: summary,
-                                    onOpenSources: { insightSources = summary }
+                                    onOpenSources: { insightSources = summary },
+                                    onAskCay: { openUpdatesChat(focus: .card) }
+                                )
+                                .padding(.horizontal, AppSpacing.lg)
+                                .padding(.vertical, AppSpacing.sm)
+                            }
+
+                            // News-tone chart — a plain child of THIS LazyVStack, like the
+                            // card above: not a Section, not wrapped with `newsSections()`.
+                            // `visibleTrend` holds the gates (see there).
+                            if let trend = visibleTrend {
+                                NewsSentimentTrendChart(
+                                    trend: trend,
+                                    window: Binding(
+                                        get: { viewModel.trendWindow },
+                                        set: { viewModel.setTrendWindow($0) }
+                                    ),
+                                    onAskCay: { openUpdatesChat(focus: .trend) }
                                 )
                                 .padding(.horizontal, AppSpacing.lg)
                                 .padding(.vertical, AppSpacing.sm)
@@ -158,7 +183,12 @@ struct UpdatesView: View {
             // trigger above useless after launch: without this, signing in or out left the
             // previous identity's news scopes and insight feed on screen until the app was
             // killed. `handleIdentityChange(isActiveTab:)` clears the latch, unlike every other path.
-            .reloadOnIdentityChange { isActive in await viewModel.handleIdentityChange(isActiveTab: isActive) }
+            .reloadOnIdentityChange { isActive in
+                // This chat is a @StateObject on a permanently mounted tab: nothing else tears
+                // it down between accounts (auth.md §7).
+                await MainActor.run { updatesChat.resetForIdentityChange() }
+                await viewModel.handleIdentityChange(isActiveTab: isActive)
+            }
             // Heals a gate that latched during session restore.
             //
             // `.reloadOnIdentityChange` deliberately does NOT fire on the launch hop
@@ -257,7 +287,10 @@ struct UpdatesView: View {
                 showProfile = false
                 showSearch = false
                 showManageAssetsSheet = false
+                // Before `insightSources`: its onDismiss must not reopen the chat.
+                pendingChatFocus = nil
                 insightSources = nil
+                showUpdatesChat = false
                 viewModel.showFilterSheet = false
                 viewModel.showPaywall = false
             }
@@ -274,10 +307,58 @@ struct UpdatesView: View {
             .inAppBrowser(link: $browserLink)
             // Tapping the Insights card opens its sources (summary + tappable
             // source stories).
-            .sheet(item: $insightSources) { summary in
-                InsightsDetailView(summary: summary)
+            .sheet(item: $insightSources, onDismiss: presentPendingChat) { summary in
+                InsightsDetailView(
+                    summary: summary,
+                    onAskCay: { pendingChatFocus = .card }
+                )
             }
+            .aiChatCover(isPresented: $showUpdatesChat, viewModel: updatesChat)
         }
+    }
+
+    // MARK: - News-tone chart
+
+    /// The trend to draw, or nil. Hidden behind the account gate (same flags as the feed's
+    /// gate below — the chart must never sit above "Sign in to see your news"), for another
+    /// scope's data while a tab switch is in flight, and until the scope has a few days of
+    /// scored headlines: two bars are not a trend.
+    ///
+    /// Kept OUT of `body` on purpose: `test_ios_account_gate_state` reads the gate's branch
+    /// order from the first mention of each flag in `body`.
+    private var visibleTrend: SentimentTrend? {
+        guard let trend = viewModel.sentimentTrend,
+              !viewModel.isReconnecting, !viewModel.requiresSignIn,
+              trend.scope == viewModel.selectedTab?.scope,
+              trend.hasEnoughHistory() else { return nil }
+        return trend
+    }
+
+    // MARK: - Ask Cay AI
+
+    /// Every "Ask Cay AI" on this tab — the Insights card, its detail sheet and the news-tone
+    /// chart — OPENS one chat grounded on the selected feed, empty. `prepareGroundedConversation`
+    /// makes no request and spends no credit; the user's first send does. The backend reads the
+    /// feed's card, headlines and tone trend itself (`UPDATES_SCOPE`), so nothing on screen is
+    /// shipped as context text.
+    private func openUpdatesChat(focus: UpdatesChatFocus) {
+        guard let tab = viewModel.selectedTab else { return }
+        updatesChat.prepareGroundedConversation(
+            stockId: tab.isMarketTab ? nil : tab.scope,
+            contextType: .updatesScope,
+            referenceId: tab.chatReferenceId,
+            starterChips: SuggestionChip.forUpdates(
+                subject: tab.isMarketTab ? nil : tab.title,
+                focus: focus
+            )
+        )
+        showUpdatesChat = true
+    }
+
+    private func presentPendingChat() {
+        guard let focus = pendingChatFocus else { return }
+        pendingChatFocus = nil
+        openUpdatesChat(focus: focus)
     }
 
     // MARK: - News timeline (inlined for LazyVStack virtualization)

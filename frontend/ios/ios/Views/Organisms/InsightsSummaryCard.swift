@@ -12,6 +12,10 @@ struct InsightsSummaryCard: View {
     /// Tapping the card opens the sources screen. Only wired/shown when the card
     /// actually has sources.
     var onOpenSources: (() -> Void)? = nil
+    /// "Ask Cay AI about this" — opens a chat grounded on this feed. Its own row and its
+    /// own Button, so it works on EVERY card: the whole-card tap below only fires when the
+    /// card has sources, and a child Button's gesture wins over the parent's tap.
+    var onAskCay: (() -> Void)? = nil
 
     private var hasSources: Bool { !summary.sources.isEmpty }
 
@@ -189,6 +193,10 @@ struct InsightsSummaryCard: View {
                     }
                     .foregroundColor(AppColors.primaryBlue)
                 }
+            }
+
+            if let onAskCay {
+                AskCayAIPill(title: "Ask Cay AI about this", action: onAskCay)
             }
         }
         .padding(AppSpacing.lg)

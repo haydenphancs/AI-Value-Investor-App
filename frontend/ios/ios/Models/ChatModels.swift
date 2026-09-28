@@ -249,6 +249,49 @@ extension SuggestionChip {
     }
 }
 
+/// Which "Ask Cay AI" on the Updates tab opened the chat — it only orders the starter chips.
+enum UpdatesChatFocus {
+    /// The Insights card (or its detail sheet): what is happening and what it means.
+    case card
+    /// The news-tone chart: how the tone of the coverage has moved.
+    case trend
+}
+
+extension SuggestionChip {
+    /// Starter chips for a chat opened from the Updates tab. Deterministic templates — no
+    /// model call — about the feed the user is looking at. `subject` is the tab's title
+    /// ("ORCL", "ETH"); nil for the Market feed. Every chip is a question the grounded chat
+    /// can answer from the card, the headlines, the news-tone trend or its tools.
+    static func forUpdates(subject: String?, focus: UpdatesChatFocus) -> [SuggestionChip] {
+        let texts: [String]
+        if let raw = subject?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let t = raw
+            switch focus {
+            case .card:
+                texts = ["Why is \(t) moving?",
+                         "What does this news mean for \(t)?",
+                         "What should I watch next for \(t)?"]
+            case .trend:
+                texts = ["What's behind \(t)'s recent news tone?",
+                         "Is the news on \(t) getting better or worse?",
+                         "Why is \(t) moving?"]
+            }
+        } else {
+            switch focus {
+            case .card:
+                texts = ["What's driving the market today?",
+                         "Which sectors are leading and lagging?",
+                         "What should I watch next?"]
+            case .trend:
+                texts = ["What's behind the market's recent news tone?",
+                         "Is market news getting better or worse?",
+                         "What's driving the market today?"]
+            }
+        }
+        return texts.map { SuggestionChip(text: $0, type: .question) }
+    }
+}
+
 extension ChatSession {
     static let sampleData: [ChatSession] = [
         ChatSession(

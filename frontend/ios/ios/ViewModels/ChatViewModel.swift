@@ -208,6 +208,10 @@ class ChatViewModel: ObservableObject {
     /// "Grounded on …" chip. @Published so the chip updates on start/load.
     @Published var currentContextType: ChatContextType?
     @Published private(set) var currentReferenceId: String?
+    /// Starter chips supplied by the screen that opened this chat (the Updates tab passes
+    /// questions about the feed it is showing). Shown only while the chat is empty; empty
+    /// means `AIChatScreen` falls back to its own derived set. Cleared with the conversation.
+    @Published private(set) var starterChips: [SuggestionChip] = []
 
     // MARK: - Third-party AI consent (App Review 5.1.2(i))
 
@@ -327,7 +331,8 @@ class ChatViewModel: ObservableObject {
         stockId: String? = nil,
         context: String? = nil,
         contextType: ChatContextType? = nil,
-        referenceId: String? = nil
+        referenceId: String? = nil,
+        starterChips: [SuggestionChip] = []
     ) {
         // Re-tapping the SAME subject resumes the conversation rather than destroying it —
         // the host owns this view model as a @StateObject precisely so a chat survives
@@ -337,6 +342,7 @@ class ChatViewModel: ObservableObject {
            currentContextType == contextType,
            currentReferenceId == referenceId {
             currentContext = context
+            self.starterChips = starterChips
             return
         }
 
@@ -359,6 +365,7 @@ class ChatViewModel: ObservableObject {
         currentContext = context
         currentContextType = contextType
         currentReferenceId = referenceId
+        self.starterChips = starterChips
     }
 
     /// Create a new chat session and optionally send the first message.
@@ -406,6 +413,8 @@ class ChatViewModel: ObservableObject {
         currentContext = context
         currentContextType = contextType
         currentReferenceId = referenceId
+        // A seeded chat is never empty, and another screen's chips must not outlive it.
+        starterChips = []
 
         // Add user message immediately for instant feedback
         let userMessage = RichChatMessage(
@@ -569,6 +578,7 @@ class ChatViewModel: ObservableObject {
         currentContext = nil
         currentContextType = nil
         currentReferenceId = nil
+        starterChips = []
         messages = []
         isLoadingSession = true
         isAITyping = false
@@ -806,6 +816,7 @@ class ChatViewModel: ObservableObject {
         currentContext = nil
         currentContextType = nil
         currentReferenceId = nil
+        starterChips = []
         messages = []
         isAITyping = false
         isStreaming = false

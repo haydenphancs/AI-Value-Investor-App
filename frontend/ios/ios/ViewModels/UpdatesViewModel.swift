@@ -178,6 +178,21 @@ final class UpdatesViewModel: ObservableObject {
     /// per-card spinner. Per-article dedup so a double-tap fires one call.
     @Published var summarizingIDs: Set<String> = []
 
+    // MARK: - News-tone trend (GET /updates/sentiment-trend)
+
+    /// The chart under the Insights card, for the SELECTED scope. nil hides it — not loaded
+    /// yet, failed, or signed out. Never a placeholder series: a fabricated trend line on a
+    /// finance screen is exactly what this screen was rebuilt to stop showing.
+    @Published private(set) var sentimentTrend: SentimentTrend?
+    /// The window the toggle shows. The chart keeps the previous window's bars (dimmed)
+    /// until the new one lands, so switching never collapses the card.
+    @Published private(set) var trendWindow: SentimentTrendWindow = .month
+    /// Per (scope, window). Short-lived: the backend's own memory tier is 5 minutes and a
+    /// new day's bar appears as articles are scored.
+    private var trendCache: [String: (fetchedAt: Date, trend: SentimentTrend)] = [:]
+    private var trendTask: Task<Void, Never>?
+    private let trendCacheTTL: TimeInterval = 300
+
     // MARK: - Initialization
 
     init(apiClient: APIClient = .shared) {
@@ -188,7 +203,7 @@ final class UpdatesViewModel: ObservableObject {
         // calls `loadIfNeeded()` when the tab first becomes active.
     }
 
-    deinit { refreshPollTask?.cancel(); appearWorkTask?.cancel() }
+    deinit { refreshPollTask?.cancel(); appearWorkTask?.cancel(); trendTask?.cancel() }
 
     // MARK: - Lifecycle
 
@@ -222,6 +237,7 @@ final class UpdatesViewModel: ObservableObject {
         error = nil
         // Drop the per-scope cache so pull-to-refresh actually re-fetches.
         feedCache.removeAll()
+        trendCache.removeAll()
         await loadTabs()
         if let tab = selectedTab {
             await loadFeed(for: tab, force: true)
@@ -251,6 +267,11 @@ final class UpdatesViewModel: ObservableObject {
         // restore is exactly what this reload exists to heal.
         requiresSignIn = false
         isReconnecting = false
+        // The news-tone chart belongs to the previous identity's feed too.
+        trendTask?.cancel()
+        trendTask = nil
+        trendCache.removeAll()
+        sentimentTrend = nil
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -440,6 +461,9 @@ final class UpdatesViewModel: ObservableObject {
         let token = UUID()
         loadToken = token
         inFlightScope = scope
+        // The news-tone chart loads beside the feed, never in front of it: its own task,
+        // its own staleness check, and a failure only hides the chart.
+        startTrendLoad(scope: scope, force: force)
         // Clear only if THIS load still owns the slot. On A→B→A, a stale A#1
         // response would otherwise clear the flag while A#2 is in flight, so the
         // dedup guard misses and A is fetched twice.
@@ -588,6 +612,63 @@ final class UpdatesViewModel: ObservableObject {
             // NO sample-data fallback. Fabricated headlines here would render as
             // real market news.
             print("⚠️ UpdatesVM: Failed to load feed for \(scope): \(appError.message)")
+        }
+    }
+
+    // MARK: - News-tone trend
+
+    func setTrendWindow(_ window: SentimentTrendWindow) {
+        guard window != trendWindow else { return }
+        trendWindow = window
+        guard let scope = selectedTab?.scope else { return }
+        startTrendLoad(scope: scope, force: false)
+    }
+
+    private func startTrendLoad(scope: String, force: Bool) {
+        trendTask?.cancel()
+        let window = trendWindow
+        let key = "\(scope)|\(window.rawValue)"
+        if !force, let hit = trendCache[key], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL {
+            sentimentTrend = hit.trend
+            trendTask = nil
+            return
+        }
+        // Another scope's chart must never sit under this scope's card while the request
+        // is in flight. The SAME scope keeps its bars (the view dims them) so a window
+        // switch does not make the card jump.
+        if sentimentTrend?.scope != scope { sentimentTrend = nil }
+        trendTask = Task { [weak self] in
+            await self?.loadTrend(scope: scope, window: window, key: key)
+        }
+    }
+
+    private func loadTrend(scope: String, window: SentimentTrendWindow, key: String) async {
+        do {
+            let response: SentimentTrendResponse = try await apiClient.request(
+                endpoint: .getSentimentTrend(scope: scope, days: window.days),
+                responseType: SentimentTrendResponse.self
+            )
+            guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
+            let trend = SentimentTrend(dto: response, window: window)
+            trendCache[key] = (Date(), trend)
+            sentimentTrend = trend
+            print("✅ UpdatesVM: news-tone trend \(scope) \(window.rawValue): \(trend.days.count) day(s)")
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
+            // Not an error state: the chart is secondary to the feed, and a 503
+            // SENTIMENT_TREND_UNAVAILABLE (a blip, or migration 180 not yet applied) must not
+            // put an error banner over a feed that loaded fine. Logged so it is not silent.
+            //
+            // A failed WINDOW switch keeps this scope's chart and snaps the toggle back to
+            // the window it still draws — nil-ing it removed the card and the only toggle
+            // that could switch back. Only with nothing of this scope on screen is it hidden.
+            if let shown = sentimentTrend, shown.scope == scope {
+                trendWindow = shown.window
+            } else {
+                sentimentTrend = nil
+            }
+            print("⚠️ UpdatesVM: news-tone trend unavailable for \(scope) \(window.rawValue): \(AppError.from(error).message)")
         }
     }
 

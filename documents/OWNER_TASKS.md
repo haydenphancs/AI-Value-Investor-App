@@ -27,7 +27,7 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 |---|---|---|---|---|
 | 1 | Close snapshot | hourly, all day | always | Stores the last two official closes for every symbol. Every day-change % is computed against them. |
 | 2 | Social snapshot | once per UTC day (hourly retry) | always | ApeWisdom mention counts → `social_mentions_history`. Feeds the 7-day social count. |
-| 3 | News pre-warm | every 2 h | always | News for the top 20 watchlist tickers. Also deletes old rows from 6 log/budget tables. |
+| 3 | News pre-warm | every 2 h | always | News for the top 20 watchlist tickers. Also deletes old rows from 7 log/budget tables (incl. `news_sentiment_log` past 120 days). |
 | 4 | Report pre-warm | hourly | `REPORT_PREWARM_ENABLED` (on) | Keeps the top 20 tickers' report data warm. |
 | 5 | Scanner pre-warm | every 15 min, 9:30–16:00 ET | `SCANNER_PREWARM_ENABLED` (on) | Daily Scanners, Signals and Themes caches. |
 | 6 | Index pre-warm | every 30 min | `INDEX_PREWARM_ENABLED` (on) | S&P 500 / Nasdaq / Dow detail pages. |
@@ -111,7 +111,7 @@ admin recomputes, and marketing script generation.
 - [x] **Demo-tier fix is deployed.** `def effective_tier` is in deployed commit 95ea9b25; the database side is checked by the migration 177 item above.
 - [x] **Migration 176 is applied** (verified live 2026-09-26: `marketing_scripts.run_date`, `content_rejections` and `reject_reason` exist). The marketing worker needed it.
 - [ ] **Insights card v6 (conclusion + earnings-aware, 2026-09-27) — deploy checks.** No migration.
-  1. Before deploying, check Railway for an `INSIGHT_AI_MODEL` variable. It is now read (it was silently ignored before); any value re-keys every card and switches the model. Delete it unless intended.
+  1. ~~Check Railway for an `INSIGHT_AI_MODEL` variable~~ (checked 2026-09-27: not set, so the model stays `gemini-2.5-flash-lite`). If you ever add it, it re-keys every card once.
   2. Deploy after 20:00 ET. `PROMPT_VERSION` 6 regenerates every card once, bounded by the per-cycle and daily caps, so the wave runs from 04:00 ET.
   3. The next day, search the Railway logs for `conclusion_guard:` (a card rejected for a made-up figure or an unrelated story; nothing is written and the old card stays up) and read the `reasons=` histogram on the `Insight sweep (` summary lines for `failure_cooldown` and `earnings_reserved`. (`updates_insight_state` only keeps each scope's latest value, so it cannot give a daily count.) More than a handful of rejections a day means the guard needs tuning.
   4. On the next after-close reporter in your watchlist, open its card at about 17:00 ET: it should describe the results, not "set to report".
@@ -162,6 +162,14 @@ admin recomputes, and marketing script generation.
   3. **Before submitting the iOS build that includes the chips:** App Store Connect → App Privacy → add **Search History**, *not linked*, *App Functionality*, *not tracking* (it must match `PrivacyInfo.xcprivacy` and `documents/legal/app-privacy-answers.md`). The updated privacy policy (dated September 26, 2026) goes live at `caydexinvest.com/privacy` with the backend deploy in step 2 — the backend serves `app/templates/legal/privacy.html`, kept byte-equal to `documents/legal/privacy.html` and to the in-app `PrivacyPolicyView` by `tests/test_legal_pages.py`.
   4. Next schema re-dump: remove `public.search_pick_daily` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
   - The curated fallback and a `blocked` list live in `backend/data/search_trending_popular.json` — edit + deploy to change them, no app update.
+- [ ] **Updates news-tone chart + "Ask Cay AI" on Updates go-live** (built 2026-09-27):
+  1. **Decide the licence question first.** The chart keeps Cay AI's bullish/bearish/neutral LABEL for each news article for 120 days (no headline, URL or text — only a hashed article id, the day and the label). That still touches the open FMP checklist items "Data handling (a)(b)(c)" / "ToS §6.3" in `documents/legal/fmp-order-form-checklist.md`. Write your yes (or no) there. If no, do not apply 180 — the chart simply stays hidden.
+  2. Deploy the backend FIRST. Until 180 exists, the label hook logs `news_sentiment_log: dropped N label(s)` (WARNING) and `/updates/sentiment-trend` answers 503, which the app treats as "hide the chart"; enrichment and the feed are untouched.
+  3. THEN apply migration 180 (`backend/database/migrations/180_news_sentiment_log.sql`) in Studio and run its VERIFY queries (RLS on; anon/authenticated can neither read the table nor execute `news_sentiment_daily`; the seed copied some rows). This order matters: the seed copies every label already in the news cache, including the ones written while the table was missing. Applied BEFORE the deploy, the old backend keeps labelling articles without logging them, and those days stay short for 120 days — if that happened, re-run the migration's section B (the seed) once after the deploy; it is safe to repeat.
+  4. Ship an iOS build (TestFlight → App Store). Older builds ignore both features.
+  5. After a week, ask Claude to check chart density (how many scopes have ≥3 days, how many scored headlines per day) before deciding on the optional evening labeller or a 30-day backfill.
+  6. Next schema re-dump: remove `public.news_sentiment_log` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
+  - The chat entries cost nothing until the user sends (1 credit per turn, as everywhere).
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen

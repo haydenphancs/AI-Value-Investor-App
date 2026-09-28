@@ -1,0 +1,273 @@
+"""Backend ↔ iOS contract and source guards for the Updates news-tone chart and its
+"Ask Cay AI" entries (2026-09-27).
+
+Two kinds of test:
+  * wire parity — the JSON keys the backend sends equal the CodingKeys the Swift DTOs
+    declare (parsed from the source, brace-bound, comments stripped), and the toggle's
+    windows equal the backend's TREND_DAYS;
+  * source guards — the invariants a green build cannot see: every Updates chat entry OPENS
+    a grounded chat (no credit) instead of seeding one (1 credit), the chart stays a plain
+    child of the feed's single LazyVStack, and the chat is torn down on an identity change.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from app.schemas.updates import SentimentTrendDayResponse, SentimentTrendResponse
+from app.services.news_sentiment_trend_service import TREND_DAYS
+
+IOS = Path(__file__).resolve().parents[2] / "frontend" / "ios" / "ios"
+MODELS = IOS / "Models" / "UpdatesModels.swift"
+VIEW = IOS / "Views" / "Screens" / "UpdatesView.swift"
+VM = IOS / "ViewModels" / "UpdatesViewModel.swift"
+CARD = IOS / "Views" / "Organisms" / "InsightsSummaryCard.swift"
+DETAIL = IOS / "Views" / "Screens" / "InsightsDetailView.swift"
+CHART = IOS / "Views" / "Molecules" / "NewsSentimentTrendChart.swift"
+CHAT_VM = IOS / "ViewModels" / "ChatViewModel.swift"
+CHAT_SCREEN = IOS / "Views" / "Screens" / "AIChatScreen.swift"
+
+
+def _read(path: Path) -> str:
+    if not path.exists():
+        pytest.fail(f"expected file is missing: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _strip_comments(src: str) -> str:
+    out = []
+    for line in src.splitlines():
+        if line.strip().startswith("//") or line.strip().startswith("///"):
+            continue
+        out.append(re.sub(r"\s//.*$", "", line))
+    return "\n".join(out)
+
+
+def _decl_block(src: str, header: str) -> str:
+    """The brace-balanced body of a declaration, comments stripped."""
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found — this scan has drifted"
+    open_brace = src.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return _strip_comments(src[open_brace:i + 1])
+    pytest.fail(f"unbalanced braces after {header!r}")
+
+
+def _coding_keys(struct_header: str) -> set[str]:
+    """The wire keys a Swift DTO decodes: `case a, b` → a, b; `case x = "y"` → y."""
+    block = _decl_block(_read(MODELS), struct_header)
+    keys_block = _decl_block(block, "enum CodingKeys")
+    keys: set[str] = set()
+    for line in keys_block.splitlines():
+        line = line.strip()
+        if not line.startswith("case "):
+            continue
+        for part in line[len("case "):].split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                keys.add(part.split("=", 1)[1].strip().strip('"'))
+            else:
+                keys.add(part)
+    assert keys, f"{struct_header}: no CodingKeys parsed — this scan would pass vacuously"
+    return keys
+
+
+# ── wire parity ─────────────────────────────────────────────────────────────
+
+
+def test_trend_envelope_keys_match_the_swift_dto():
+    payload = SentimentTrendResponse(scope="ORCL", days=30).model_dump()
+    assert set(payload) == _coding_keys("struct SentimentTrendResponse")
+
+
+def test_trend_day_keys_match_the_swift_dto():
+    payload = SentimentTrendDayResponse(date="2026-09-27").model_dump()
+    assert set(payload) == _coding_keys("struct SentimentTrendDayDTO")
+
+
+def test_the_toggle_windows_equal_the_backend_windows():
+    block = _decl_block(_read(MODELS), "enum SentimentTrendWindow")
+    days_block = _decl_block(block, "var days: Int")
+    swift_days = sorted(int(n) for n in re.findall(r"return (\d+)", days_block))
+    assert swift_days == sorted(TREND_DAYS)
+    labels = re.findall(r'case \w+ = "(\d+)D"', block)
+    assert sorted(int(n) for n in labels) == sorted(TREND_DAYS)
+
+
+def test_a_worst_case_trend_serializes_without_nan():
+    body = SentimentTrendResponse(
+        scope="__MARKET__", days=90, tracking_since=None,
+        series=[SentimentTrendDayResponse(date="2026-09-27", is_partial=True)],
+    ).model_dump()
+    json.dumps(body, allow_nan=False)
+
+
+# ── every Updates entry OPENS a chat; none spends a credit on the tap ────────
+
+
+def test_the_updates_chat_is_opened_grounded_never_seeded():
+    fn = _decl_block(_read(VIEW), "private func openUpdatesChat(")
+    assert "prepareGroundedConversation(" in fn
+    assert "contextType: .updatesScope" in fn
+    assert "referenceId: tab.chatReferenceId" in fn
+    assert "startNewConversation" not in fn
+
+
+@pytest.mark.parametrize("path", [VIEW, CARD, DETAIL, CHART], ids=lambda p: p.name)
+def test_no_updates_surface_seeds_a_paid_turn(path):
+    assert "startNewConversation" not in _strip_comments(_read(path)), (
+        f"{path.name} seeds a chat turn — tapping would spend a credit the user never typed"
+    )
+
+
+def test_all_three_entries_route_through_the_one_opener():
+    body = _decl_block(_read(VIEW), "var body: some View")
+    assert "openUpdatesChat(focus: .card)" in body, "the Insights card's pill"
+    assert "openUpdatesChat(focus: .trend)" in body, "the news-tone chart's button"
+    assert "onAskCay: { pendingChatFocus = .card }" in body, "the detail sheet's button"
+    assert ".sheet(item: $insightSources, onDismiss: presentPendingChat)" in body
+    pending = _decl_block(_read(VIEW), "private func presentPendingChat(")
+    assert "openUpdatesChat(focus: focus)" in pending
+    assert "pendingChatFocus = nil" in pending
+
+
+def test_a_presentation_reset_cannot_reopen_the_chat():
+    body = _decl_block(_read(VIEW), "var body: some View")
+    reset = _decl_block(body, ".onPresentationReset")
+    assert "showUpdatesChat = false" in reset
+    assert reset.index("pendingChatFocus = nil") < reset.index("insightSources = nil"), (
+        "clearing the sheet fires its onDismiss; a pending chat must already be gone"
+    )
+
+
+def test_the_detail_button_records_then_dismisses():
+    body = _decl_block(_read(DETAIL), "var body: some View")
+    ask = _decl_block(body, "AskCayAIPill(")
+    assert ask.index("onAskCay()") < ask.index("dismiss()")
+
+
+def test_the_card_pill_is_its_own_button_not_the_card_tap():
+    body = _decl_block(_read(CARD), "var body: some View")
+    assert "AskCayAIPill(" in body and "action: onAskCay" in body
+    assert "onTapGesture { if hasSources { onOpenSources?() } }" in body
+
+
+def test_the_chat_is_reset_on_an_identity_change():
+    body = _decl_block(_read(VIEW), "var body: some View")
+    reload = _decl_block(body, ".reloadOnIdentityChange")
+    assert "updatesChat.resetForIdentityChange()" in reload
+
+
+def test_host_chips_win_in_the_chat_screen_and_die_with_the_conversation():
+    suggestions = _decl_block(_read(CHAT_SCREEN), "private var suggestions: [SuggestionChip]")
+    assert suggestions.index("viewModel.starterChips") < suggestions.index("startersStore.globalStarters")
+    vm = _read(CHAT_VM)
+    reset = _decl_block(vm, "func resetConversation()")
+    assert "starterChips = []" in reset
+    seed = _decl_block(vm, "func startNewConversation(")
+    assert "starterChips = []" in seed
+
+
+# ── the chart stays a plain child of the ONE LazyVStack ─────────────────────
+
+
+def test_the_chart_is_a_direct_child_of_the_feed_stack():
+    body = _decl_block(_read(VIEW), "var body: some View")
+    stack = _decl_block(body, "LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders])")
+    assert "NewsSentimentTrendChart(" in stack, "the chart left the feed's LazyVStack"
+    chart_at = stack.index("NewsSentimentTrendChart(")
+    assert chart_at < stack.index("newsSections()"), "the chart must sit above the timeline"
+    assert "Section" not in stack[:chart_at].split("InsightsSummaryCard(")[-1], (
+        "the chart must not be wrapped in a Section"
+    )
+    sections = _decl_block(_read(VIEW), "private func newsSections()")
+    assert "NewsSentimentTrendChart" not in sections
+
+
+def test_the_chart_gate_lives_outside_body():
+    # `test_ios_account_gate_state` reads the feed gate's branch order from the FIRST mention
+    # of each flag in `body`; a chart condition there would silently take that place.
+    gate = _decl_block(_read(VIEW), "private var visibleTrend: SentimentTrend?")
+    for flag in ("viewModel.isReconnecting", "viewModel.requiresSignIn",
+                 "trend.scope == viewModel.selectedTab?.scope", "trend.hasEnoughHistory()"):
+        assert flag in gate
+    assert "if let trend = visibleTrend" in _decl_block(_read(VIEW), "var body: some View")
+
+
+# ── the view model: never another scope's or another account's chart ─────────
+
+
+def test_identity_change_clears_the_trend_before_the_active_tab_gate():
+    fn = _decl_block(_read(VM), "func handleIdentityChange(")
+    gate = fn.index("guard isActiveTab")
+    for token in ("trendCache.removeAll()", "sentimentTrend = nil", "trendTask?.cancel()"):
+        assert fn.index(token) < gate, f"{token} must run even for a hidden tab"
+
+
+def test_a_late_trend_response_for_another_scope_or_window_is_dropped():
+    fn = _decl_block(_read(VM), "private func loadTrend(")
+    assert fn.count("selectedTab?.scope == scope, trendWindow == window") == 2, (
+        "both the success and the failure path must check they still own the chart"
+    )
+
+
+def test_the_trend_load_never_blocks_the_feed():
+    fn = _decl_block(_read(VM), "private func loadFeed(")
+    assert "startTrendLoad(scope: scope, force: force)" in fn
+    start = _decl_block(_read(VM), "private func startTrendLoad(")
+    assert "trendTask = Task" in start
+    assert "if sentimentTrend?.scope != scope { sentimentTrend = nil }" in start
+
+
+
+# ── review 2026-09-27 ────────────────────────────────────────────────────────
+
+
+def test_an_empty_window_keeps_the_chart_and_its_toggle():
+    """Gated on the SCOPE's tracking start, never on the window having bars — otherwise
+    choosing an empty 7D removed the card together with the only toggle back to 30D."""
+    fn = _decl_block(_read(MODELS), "func hasEnoughHistory(")
+    assert "!days.isEmpty" not in fn
+    assert "trackingSince ?? days.first?.date" in fn
+    assert "SentimentTrendDayParser.etToday()" in _read(MODELS).split("func hasEnoughHistory(")[1][:200]
+
+
+def test_a_failed_window_switch_keeps_the_scope_chart_and_snaps_the_toggle_back():
+    fn = _decl_block(_read(VM), "private func loadTrend(")
+    catch = fn[fn.index("} catch {"):]
+    assert "if let shown = sentimentTrend, shown.scope == scope" in catch
+    assert "trendWindow = shown.window" in catch
+    assert catch.index("trendWindow = shown.window") < catch.index("sentimentTrend = nil")
+
+
+def test_the_chart_axis_ends_on_the_et_day():
+    chart = _read(CHART)
+    domain = _decl_block(chart, "private var xDomain: ClosedRange<Date>")
+    assert "SentimentTrendDayParser.etToday()" in domain
+    assert "Calendar.current.startOfDay(for: Date())" not in domain
+    assert "max(today, lastDay)" in domain
+    axis = _decl_block(chart, "private var axisDates: [Date]")
+    assert "SentimentTrendDayParser.etToday()" in axis
+    parser = _decl_block(_read(MODELS), "enum SentimentTrendDayParser")
+    assert 'TimeZone(identifier: "America/New_York")' in parser
+
+
+def test_a_fund_is_declared_to_the_chat():
+    tab = _decl_block(_read(MODELS), "struct NewsFilterTab")
+    ref = _decl_block(tab, "var chatReferenceId: String")
+    assert '"etf" ? "\\(scope)|ETF" : scope' in ref
+    assert "case assetType = \"asset_type\"" in _decl_block(_read(MODELS), "struct UpdatesTabDTO")
+    label = _decl_block(_read(CHAT_SCREEN), "private var groundingReferenceLabel: String?")
+    assert 'ref.split(separator: "|").first' in label.split("case .updatesScope:")[1]

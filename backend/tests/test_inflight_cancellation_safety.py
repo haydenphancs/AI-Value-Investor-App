@@ -136,6 +136,10 @@ _INFLIGHT_MODULES = [
     # open computes the two lists and every concurrent opener joins it under `shield`, so a
     # sheet dismissed mid-fetch cannot cancel the computation the others are waiting on.
     "search_trending_service.py",
+    # Added 2026-09-27 with the Updates news-tone chart. Future-based, profit_power shape: a
+    # tab switch that cancels one viewer's request must not cancel the RPC another viewer of
+    # the same (scope, window, ET day) is waiting on.
+    "news_sentiment_trend_service.py",
     # Added 2026-09-25 with the Caydex Fair Value Estimate (model dcf-v1). Future-based,
     # profit_power shape: the leader resolves or fails the shared future, a cancelled leader
     # hands joiners a RuntimeError, and joiners attach through asyncio.shield.

@@ -48,6 +48,15 @@ struct NewsFilterTab: Identifiable, Equatable {
     /// sheet — that sheet manages the user's own list, which is free — and is filtered out
     /// of the chip strip, where a single "+N more" chip stands in for all of them.
     var isLocked: Bool = false
+    /// Wire asset class ("stock", "etf", …); nil on the Market tab or from an older backend.
+    var assetType: String? = nil
+
+    /// The reference "Ask Cay AI" sends for this feed. A fund is declared ("SPY|ETF")
+    /// because no symbol rule can tell one — without it the chat treated SPY as an
+    /// operating company.
+    var chatReferenceId: String {
+        assetType?.lowercased() == "etf" ? "\(scope)|ETF" : scope
+    }
 
     var isPositive: Bool {
         // Compare the ROUNDED value: -0.04 renders as "0.0%" but would be
@@ -402,6 +411,8 @@ struct UpdatesTabDTO: Codable, Sendable {
     /// gate decodes (a non-Optional default would throw `keyNotFound` — see
     /// `UpdatesTabsResponse.lockedCount`).
     let isLocked: Bool?
+    /// Wire asset class ("stock", "etf", "crypto", …). Optional: older backends omit it.
+    let assetType: String?
 
     enum CodingKeys: String, CodingKey {
         case scope, title
@@ -410,6 +421,7 @@ struct UpdatesTabDTO: Codable, Sendable {
         case logoUrl = "logo_url"
         case isMarketTab = "is_market_tab"
         case isLocked = "is_locked"
+        case assetType = "asset_type"
     }
 }
 
@@ -703,5 +715,172 @@ extension NewsFilterTab {
         // A backend predating the gate sends nothing → nothing is locked, which is
         // exactly how that backend behaves.
         self.isLocked = dto.isLocked ?? false
+        self.assetType = dto.assetType
+    }
+}
+
+// MARK: - News Sentiment Trend (GET /updates/sentiment-trend)
+
+/// The windows the news-tone chart offers. Raw values are the toggle labels, and `days`
+/// must stay equal to the backend's `TREND_DAYS` (news_sentiment_trend_service.py).
+enum SentimentTrendWindow: String, CaseIterable, Equatable {
+    case week = "7D"
+    case month = "30D"
+    case quarter = "90D"
+
+    var days: Int {
+        switch self {
+        case .week: return 7
+        case .month: return 30
+        case .quarter: return 90
+        }
+    }
+}
+
+/// One ET day of headlines Cay AI scored. The backend sends only days with at least one
+/// scored headline — a missing day means "nothing scored", never zero news.
+struct SentimentTrendDay: Identifiable, Equatable {
+    /// "yyyy-MM-dd", the backend's ET calendar day.
+    let dayKey: String
+    /// Local midnight of that calendar day, so the chart labels the same date the backend
+    /// meant in every time zone.
+    let date: Date
+    let positive: Int
+    let negative: Int
+    let neutral: Int
+    let isPartial: Bool
+
+    var id: String { dayKey }
+    var total: Int { positive + negative + neutral }
+
+    /// (positive − negative) / total as a whole percent, −100…100. Recomputed from the
+    /// counts rather than trusted from the wire, so the label can never disagree with the bars.
+    var netScore: Int { SentimentTrend.netScore(positive: positive, negative: negative, total: total) }
+}
+
+struct SentimentTrend: Equatable {
+    let scope: String
+    let window: SentimentTrendWindow
+    /// Oldest first.
+    let days: [SentimentTrendDay]
+    /// The first ET day this scope was scored at all (not just in this window).
+    let trackingSince: Date?
+
+    /// Below this many calendar days of tracking the chart is hidden: two bars is not a trend.
+    static let minimumTrackedDays = 3
+
+    var positive: Int { days.reduce(0) { $0 + $1.positive } }
+    var negative: Int { days.reduce(0) { $0 + $1.negative } }
+    var neutral: Int { days.reduce(0) { $0 + $1.neutral } }
+    var total: Int { positive + negative + neutral }
+    var netScore: Int { Self.netScore(positive: positive, negative: negative, total: total) }
+
+    /// Whether there is enough history to draw. Measured from `trackingSince` (a property of
+    /// the SCOPE, not the window), so a window with no scored headlines keeps the card — and
+    /// its toggle — on screen with "No scored headlines in this window yet." instead of
+    /// removing the only control that could switch back. `today` is the ET calendar day in
+    /// the same local-midnight mapping the day keys use.
+    func hasEnoughHistory(
+        today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
+    ) -> Bool {
+        guard let start = trackingSince ?? days.first?.date else { return false }
+        let span = calendar.dateComponents(
+            [.day], from: calendar.startOfDay(for: start), to: calendar.startOfDay(for: today)
+        ).day ?? 0
+        return span + 1 >= Self.minimumTrackedDays
+    }
+
+    static func netScore(positive: Int, negative: Int, total: Int) -> Int {
+        guard total > 0 else { return 0 }
+        let raw = (Double(positive - negative) * 100 / Double(total)).rounded()
+        return Int(max(-100, min(100, raw)))
+    }
+}
+
+struct SentimentTrendDayDTO: Codable, Sendable {
+    let date: String
+    let bullish: Int?
+    let bearish: Int?
+    let neutral: Int?
+    let total: Int?
+    let netScore: Int?
+    let isPartial: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case date, bullish, bearish, neutral, total
+        case netScore = "net_score"
+        case isPartial = "is_partial"
+    }
+}
+
+struct SentimentTrendResponse: Codable, Sendable {
+    let scope: String
+    let days: Int?
+    let series: [SentimentTrendDayDTO]?
+    let trackingSince: String?
+
+    enum CodingKeys: String, CodingKey {
+        case scope, days, series
+        case trackingSince = "tracking_since"
+    }
+}
+
+enum SentimentTrendDayParser {
+    /// "yyyy-MM-dd" → local midnight of that calendar day, or nil. Parsed in the DEVICE's
+    /// zone on purpose: the key is already an ET calendar date, and Charts labels dates in
+    /// the device zone — a UTC midnight would read as the previous day west of Greenwich.
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw, raw.count >= 10 else { return nil }
+        return formatter.date(from: String(raw.prefix(10)))
+    }
+
+    /// Local midnight of the CURRENT ET calendar day — "today" as the backend counts it,
+    /// in the same mapping as `parse`. The chart's axis must end here, not at the device's
+    /// own today: at 22:30 in Denver it is already tomorrow in New York, and the backend's
+    /// newest bar would otherwise sit past the end of the axis.
+    static func etToday(now: Date = Date()) -> Date {
+        parse(etKeyFormatter.string(from: now)) ?? Calendar.current.startOfDay(for: now)
+    }
+
+    private static let etKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "America/New_York")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+}
+
+extension SentimentTrend {
+    /// Build from the DTO, dropping any day that cannot be dated or carries negative
+    /// counts. A malformed day is skipped, never guessed.
+    init(dto: SentimentTrendResponse, window: SentimentTrendWindow) {
+        self.scope = dto.scope
+        self.window = window
+        self.trackingSince = SentimentTrendDayParser.parse(dto.trackingSince)
+        var seen = Set<String>()
+        self.days = (dto.series ?? []).compactMap { d in
+            guard let date = SentimentTrendDayParser.parse(d.date),
+                  !seen.contains(String(d.date.prefix(10))) else { return nil }
+            let pos = d.bullish ?? 0, neg = d.bearish ?? 0, neu = d.neutral ?? 0
+            guard pos >= 0, neg >= 0, neu >= 0, pos + neg + neu > 0 else { return nil }
+            seen.insert(String(d.date.prefix(10)))
+            return SentimentTrendDay(
+                dayKey: String(d.date.prefix(10)), date: date,
+                positive: pos, negative: neg, neutral: neu,
+                isPartial: d.isPartial ?? false
+            )
+        }
+        .sorted { $0.date < $1.date }
     }
 }

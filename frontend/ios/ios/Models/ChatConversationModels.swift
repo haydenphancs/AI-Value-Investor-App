@@ -31,6 +31,10 @@ enum ChatContextType: String {
     case moneyMovesArticle = "MONEY_MOVES_ARTICLE"
     case journeyLesson = "JOURNEY_LESSON"
     case book = "BOOK"
+    /// The Updates tab. `reference_id` is the feed scope (a ticker, a coin pair or
+    /// `UpdatesScope.market`); the backend reads that feed's Insights card, headlines and
+    /// news-tone trend itself.
+    case updatesScope = "UPDATES_SCOPE"
     case none = "NONE"
 
     /// Short human label + glyph for the "Grounded on …" chip.
@@ -45,6 +49,7 @@ enum ChatContextType: String {
         case .moneyMovesArticle: return "Money Moves"
         case .journeyLesson: return "Lesson"
         case .book: return "Book"
+        case .updatesScope: return "Updates"
         case .none: return ""
         }
     }
@@ -69,6 +74,7 @@ enum ChatContextType: String {
         case .moneyMovesArticle: return "newspaper.fill"
         case .journeyLesson: return "map.fill"
         case .book: return "book.fill"
+        case .updatesScope: return "newspaper"
         case .none: return AppSymbols.ai
         }
     }

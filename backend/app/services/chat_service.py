@@ -261,7 +261,7 @@ class ChatService:
         # Step 3: Build prompt (includes RAG context + history)
         # Detect asset type from stock_id
         asset_type = (
-            self._detect_asset_type(stock_id, context_type) if stock_id else "NORMAL"
+            self._detect_asset_type(stock_id, context_type, reference_id) if stock_id else "NORMAL"
         )
 
         # Enrich with live data — only for stocks (other types use client_context)
@@ -520,7 +520,7 @@ class ChatService:
         )
 
         asset_type = (
-            self._detect_asset_type(stock_id, context_type) if stock_id else "NORMAL"
+            self._detect_asset_type(stock_id, context_type, reference_id) if stock_id else "NORMAL"
         )
 
         # Is this the "AI Analyst" button rather than a typed question?
@@ -857,6 +857,7 @@ class ChatService:
         "MONEY_MOVES_ARTICLE": "Money Moves article",
         "JOURNEY_LESSON": "Investor Journey lesson",
         "BOOK": "Caydex study guide",
+        "UPDATES_SCOPE": "Updates feed",
     }
     # context_types whose reference_id is a user-readable ticker (vs. a slug/order id).
     _TICKER_CONTEXTS = {"TICKER_REPORT", "STOCK", "ETF", "CRYPTO", "INDEX", "COMMODITY"}
@@ -904,6 +905,11 @@ class ChatService:
             ref = (reference_id or "").strip()
             if ref and ctype in cls._TICKER_CONTEXTS:
                 detail = ref.split("|")[0].strip().upper() or None
+            elif ctype == "UPDATES_SCOPE":
+                # The market feed's reserved key is not something to show a person, and the
+                # "|ETF" class hint is not part of the name.
+                scope = ref.split("|")[0].strip()
+                detail = "Market" if scope == "__MARKET__" else (scope.upper()[:32] or None)
             elif ctype == "BOOK":
                 # From the TRUSTED registry, never the caller's raw reference: a curriculum
                 # order is meaningless as a label even when it is valid.
@@ -963,7 +969,7 @@ class ChatService:
             # subject was. Resolve them from the parameters this method already receives.
             symbol = (reference_id or "").split("|")[0].strip().upper()
             asset_type = (
-                self._detect_asset_type(symbol, context_type) if symbol else "NORMAL"
+                self._detect_asset_type(symbol, context_type, reference_id) if symbol else "NORMAL"
             )
             # No tools on this call → the instruction must claim none.
             system = self._build_system_instruction(
@@ -1932,7 +1938,9 @@ class ChatService:
     # ── Asset type detection ─────────────────────────────────────────
 
     @staticmethod
-    def _detect_asset_type(stock_id: str, context_type: Optional[str] = None) -> str:
+    def _detect_asset_type(
+        stock_id: str, context_type: Optional[str] = None, reference_id: Optional[str] = None,
+    ) -> str:
         """Classify the chat's subject.
 
         `context_type` — the SCREEN the user launched from — is authoritative when it is
@@ -1958,6 +1966,23 @@ class ChatService:
         declared = (context_type or "").strip().upper()
         if declared in ("ETF", "CRYPTO", "INDEX", "COMMODITY", "STOCK"):
             return declared
+        if declared == "UPDATES_SCOPE":
+            # An Updates feed scope is a watchlist key: the reserved market key, or a symbol as
+            # the watchlist STORES it (coins as pairs, migration 160). The market feed has no
+            # single asset. A fund is declared by the reference ("SPY|ETF") because no symbol
+            # rule can tell one — without it SPY got equity profit/moat "snapshot ratings".
+            # Everything else is classified with bare coins and friendly aliases OFF, for the
+            # same reason as TICKER_REPORT below: a watchlist "LINK" or "GOLD" is the listed
+            # security the user added, never Chainlink or the metal.
+            if stock_id.strip() == "__MARKET__":
+                return "NORMAL"
+            from app.services.chat_context_resolver import updates_scope_class_hint
+
+            if updates_scope_class_hint(reference_id) == "ETF":
+                return "ETF"
+            return detect_asset_class(
+                stock_id, include_aliases=False, include_bare_coins=False
+            ).upper()
         if declared == "TICKER_REPORT":
             # A research report is generated for EQUITIES ONLY (`ticker_data_cache` gates
             # on `detect_asset_class` with bare coins OFF), so the report context is

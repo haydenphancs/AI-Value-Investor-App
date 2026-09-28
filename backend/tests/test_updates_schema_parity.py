@@ -41,6 +41,8 @@ IOS_TAB_KEYS = {
     # not the right to see or manage your own list. The chip strip filters on this; the
     # Manage-Assets sheet deliberately does not.
     "is_locked",
+    # The ticker's asset class; iOS declares a fund to "Ask Cay AI" with it ("SPY|ETF").
+    "asset_type",
 }
 IOS_INSIGHT_KEYS = {
     "scope", "headline", "bullets", "sentiment", "badge", "article_count",

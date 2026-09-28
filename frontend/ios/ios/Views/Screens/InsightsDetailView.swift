@@ -11,6 +11,10 @@ import SwiftUI
 
 struct InsightsDetailView: View {
     let summary: NewsInsightSummary
+    /// "Ask Cay AI about this". The chat is a full-screen cover owned by `UpdatesView`, and
+    /// a cover cannot present over this sheet — so the button records the request through
+    /// this closure and dismisses; `UpdatesView` presents the chat once the sheet is gone.
+    var onAskCay: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     /// The source article currently open in the in-app browser (same wrapper the
@@ -22,6 +26,12 @@ struct InsightsDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: AppSpacing.lg) {
                     summarySection
+                    if let onAskCay {
+                        AskCayAIPill(title: "Ask Cay AI about this") {
+                            onAskCay()
+                            dismiss()
+                        }
+                    }
                     if !summary.sources.isEmpty {
                         sourcesSection
                     }

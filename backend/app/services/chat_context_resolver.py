@@ -176,6 +176,67 @@ def _as_of_et() -> str:
 
 
 
+# ── UPDATES_SCOPE helpers ───────────────────────────────────────────
+# Same shape the Updates endpoints accept (`endpoints/updates._valid_scope`): the reserved
+# market key, or an FMP-style symbol. Checked here too because the reference id is
+# client-chosen and reaches a Supabase filter.
+_UPDATES_SCOPE_MAX_LEN = 32
+_UPDATES_MAX_HEADLINES = 8
+_UPDATES_HEADLINE_CAP = 200
+_UPDATES_BULLET_CAP = 240
+
+
+def updates_scope_class_hint(reference_id: Optional[str]) -> Optional[str]:
+    """The asset class an Updates reference declares after `|`, or None.
+
+    `"SPY|ETF"`: the watchlist row says the scope is a fund, which no symbol-shape rule can
+    tell (`detect_asset_class` has no ETF branch). Only ETF is honoured — every other class
+    is recognisable from the symbol itself. Client-chosen, but it only picks the chat's
+    voice and tools for the user's own conversation, the same trust the ETF screen's
+    context type already has.
+    """
+    parts = (reference_id or "").split("|")
+    if len(parts) < 2:
+        return None
+    hint = parts[1].strip().upper()
+    return hint if hint == "ETF" else None
+
+
+def _updates_scope(reference_id: Optional[str]) -> Optional[str]:
+    from app.services.news_cache_service import MARKET_SCOPE
+
+    raw = (reference_id or "").split("|")[0].strip()
+    if raw == MARKET_SCOPE:
+        return MARKET_SCOPE
+    scope = raw.upper()
+    if not scope or len(scope) > _UPDATES_SCOPE_MAX_LEN:
+        return None
+    if not all(c.isalnum() or c in ".-^=" for c in scope):
+        return None
+    return scope
+
+
+def _et_stamp(value: Any, now: Any) -> Optional[str]:
+    """"Thu Sep 24 17:02 ET, 2 days ago" for an ISO timestamp, or None."""
+    from app.utils.market_hours import ET, to_utc_instant
+
+    instant = to_utc_instant(value) if isinstance(value, str) else None
+    if instant is None:
+        return None
+    local = instant.astimezone(ET)
+    stamp = f"{local:%a %b} {local.day} {local:%H:%M} ET"
+    minutes = int((now - instant).total_seconds() // 60)
+    if minutes < 0:
+        return stamp
+    if minutes < 60:
+        ago = f"{minutes} min ago"
+    elif minutes < 48 * 60:
+        ago = f"{minutes // 60} h ago"
+    else:
+        ago = f"{minutes // (24 * 60)} days ago"
+    return f"{stamp}, {ago}"
+
+
 _GUIDANCE_READS = ("raised", "maintained", "lowered")
 
 
@@ -358,6 +419,7 @@ class ChatContextResolver:
             "COMMODITY": cls._resolve_commodity,
             "MONEY_MOVES_ARTICLE": cls._resolve_money_move,
             "JOURNEY_LESSON": cls._resolve_journey_lesson,
+            "UPDATES_SCOPE": cls._resolve_updates_scope,
         }
 
     @staticmethod
@@ -526,6 +588,151 @@ class ChatContextResolver:
                 return None
 
         return await asyncio.to_thread(_query)
+
+    # ── UPDATES_SCOPE (the Updates tab: Insights card, headlines, news-tone trend) ──
+    async def _resolve_updates_scope(
+        self, reference_id: Optional[str], client_context: Optional[str]
+    ) -> Optional[str]:
+        """Ground an "Ask Cay AI" opened from the Updates tab on what that tab shows.
+
+        `reference_id` is the scope — a ticker, a coin pair or `__MARKET__` — optionally
+        followed by `|ETF` (see `updates_scope_class_hint`). Three cache reads, run together
+        and each allowed to fail on its own: the stored Insights card, the feed's in-window
+        headlines (with Cay AI's label where one exists) and the 30-day news-tone trend.
+        Nothing is generated: the card is only ever written by the sweeper, and the trend is
+        a GROUP BY over stored labels.
+
+        It mirrors `GET /updates/feed` so the model is told what the user actually sees: the
+        headline window is the feed's UNFILTERED one, the stored card is "on screen" only
+        when the feed has in-window news (the endpoint hides it otherwise), and a scope with
+        no stored card is described as showing the plain "Latest headlines" list. Returns
+        None when nothing at all was read, so the "Updates feed" source pill is not claimed
+        for an answer grounded on nothing.
+        """
+        scope = _updates_scope(reference_id)
+        if scope is None:
+            logger.warning("chat_context: invalid UPDATES_SCOPE ref=%r", _log_ref(reference_id, 64))
+            return None
+
+        from datetime import date as _date, datetime, timezone
+
+        from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
+        from app.services.news_insight_service import (
+            catalyst_display_line,
+            get_news_insight_service,
+            select_recent_corpus,
+        )
+        from app.services.news_sentiment_trend_service import (
+            get_news_sentiment_trend_service,
+            summarize_trend,
+        )
+        from app.utils.market_hours import ET
+
+        is_market = scope == MARKET_SCOPE
+        now = datetime.now(timezone.utc)
+
+        async def _card():
+            cards = await get_news_insight_service().get_cards([scope])
+            return cards.get(scope)
+
+        async def _feed_window():
+            rows = (await asyncio.to_thread(
+                get_news_cache_service().get_cached_bulk, [scope], 25,
+            )).get(scope) or []
+            # No subject filter: this is the window the feed endpoint shows and builds its
+            # fallback card from. The subject-filtered corpus only feeds the AI card, and a
+            # ticker whose coverage is all peer wraps would otherwise read as "no news" under
+            # a timeline full of it.
+            recent, _hours = select_recent_corpus(rows, now)
+            return recent
+
+        async def _trend():
+            data = await get_news_sentiment_trend_service().get_trend(scope, 30, now=now)
+            since = data.get("tracking_since")
+            return summarize_trend(
+                data.get("series") or [], days=30, today=now.astimezone(ET).date(),
+                tracking_since=_date.fromisoformat(since) if since else None,
+            )
+
+        card, feed_recent, trend_text = await asyncio.gather(
+            _card(), _feed_window(), _trend(), return_exceptions=True,
+        )
+        for label, result in (("card", card), ("headlines", feed_recent), ("trend", trend_text)):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "chat_context: UPDATES_SCOPE %s read failed for %s: %s: %s",
+                    label, scope, type(result).__name__, result,
+                )
+        card = card if isinstance(card, dict) else None
+        feed_recent = feed_recent if isinstance(feed_recent, list) else []
+        trend_text = trend_text if isinstance(trend_text, str) else None
+
+        headline_lines: List[str] = []
+        for row in feed_recent[:_UPDATES_MAX_HEADLINES]:
+            title = _cap(str(row.get("headline") or ""), _UPDATES_HEADLINE_CAP)
+            if not title:
+                continue
+            stamp = _et_stamp(row.get("published_at"), now)
+            label = row.get("sentiment") if row.get("ai_processed") else None
+            headline_lines.append(
+                "- " + (f"[{stamp}] " if stamp else "") + title
+                + (f" ({str(label).lower()})" if label else "")
+            )
+
+        if card is None and not headline_lines and not trend_text:
+            logger.info("chat_context: UPDATES_SCOPE %s — nothing to ground on", scope)
+            return None
+
+        subject = "the overall market" if is_market else scope
+        lines: List[str] = [
+            f"The user is on the Updates tab, looking at the news feed for {subject}"
+            + (" (general market news)." if is_market else ".")
+        ]
+        if card:
+            written = _et_stamp(card.get("generated_at"), now)
+            on_screen = bool(feed_recent)
+            lines.append(
+                ("Cay AI Insights card on screen" if on_screen
+                 else "The most recent Cay AI Insights card (not on screen: the feed has no "
+                      "news in its window right now)")
+                + (f", written {written}" if written else "")
+                + f" — sentiment {card.get('sentiment') or 'Neutral'}: "
+                + _cap(str(card.get("headline") or ""), _UPDATES_HEADLINE_CAP)
+            )
+            for bullet in card.get("bullets") or []:
+                lines.append("• " + _cap(str(bullet), _UPDATES_BULLET_CAP))
+            move = card.get("price_move")
+            why = catalyst_display_line(move) if isinstance(move, dict) else ""
+            if why:
+                bits: List[str] = []
+                change = move.get("change_percent")
+                if isinstance(change, (int, float)) and math.isfinite(change):
+                    bits.append(f"{change:+.1f}%")
+                if written:
+                    bits.append(f"as of the card, {written.split(',')[0]}")
+                lines.append(
+                    "Why it moved" + (f" ({'; '.join(bits)})" if bits else "") + ": "
+                    + _cap(why, _MAX_REPORT_MODULE)
+                )
+        elif headline_lines:
+            lines.append(
+                "There is no Cay AI summary for this feed yet: the card on screen is the plain "
+                "\"Latest headlines\" list, i.e. the newest headlines below, verbatim."
+            )
+
+        if headline_lines:
+            lines.append("Headlines in the feed (newest first; label = Cay AI's read, where scored):")
+            lines.extend(headline_lines)
+
+        if trend_text:
+            lines.append(trend_text)
+
+        lines.append(
+            "Explain from these items and your tools. They are point-in-time: say how old the "
+            "card or a headline is when it matters, and never invent figures, dates or events "
+            "that are not here or in a tool result."
+        )
+        return "\n".join(lines)
 
     # ── STOCK (no-op — chat_service enriches via stock_id + iOS tab context) ──
     async def _resolve_stock(

@@ -4,6 +4,7 @@ Updates screen endpoints — the iOS `UpdatesView` tab.
   GET  /api/v1/updates/tabs                     filter pills (watchlist + Market)
   GET  /api/v1/updates/feed?scope=…             timeline + AI insight, one call
   POST /api/v1/updates/news/enrich              on-demand per-article AI
+  GET  /api/v1/updates/sentiment-trend?scope=…  daily news-tone counts (migration 180)
 
 DESIGN NOTE — the read path never calls Gemini.
 Insight cards are produced exclusively by the background sweeper
@@ -48,11 +49,13 @@ from app.schemas.updates import (
     AIInsightCardResponse,
     EnrichUpdatesNewsRequest,
     EnrichUpdatesNewsResponse,
+    SentimentTrendResponse,
     UpdatesArticleResponse,
     UpdatesFeedResponse,
     UpdatesTabResponse,
     UpdatesTabsResponse,
 )
+from app.services.asset_class import resolve_asset_class
 from app.services.crypto_names import crypto_display_name
 from app.services.news_cache_service import (
     MARKET_SCOPE,
@@ -63,6 +66,11 @@ from app.services.news_insight_service import (
     cited_window_floor,
     select_recent_corpus,
     get_news_insight_service,
+)
+from app.services.news_sentiment_trend_service import (
+    TREND_DAYS,
+    SentimentTrendUnavailable,
+    get_news_sentiment_trend_service,
 )
 from app.services.price_service import price_source
 
@@ -267,6 +275,7 @@ async def get_updates_tabs(
                 logo_url=row.get("logo_url"),
                 is_market_tab=False,
                 is_locked=t not in visible_set,
+                asset_type=resolve_asset_class(t, row.get("asset_type")),
             )
         )
 
@@ -500,6 +509,54 @@ async def enrich_updates_news(
     return EnrichUpdatesNewsResponse(
         scope=scope, articles=[_to_article(a) for a in enriched]
     )
+
+
+# ── News-sentiment timeline ───────────────────────────────────────────
+
+@router.get("/sentiment-trend", response_model=SentimentTrendResponse)
+async def get_updates_sentiment_trend(
+    scope: str = Query(MARKET_SCOPE, description="'__MARKET__' or a ticker symbol"),
+    days: int = Query(30, description="7, 30 or 90"),
+    _rate_limit=StandardRateLimit,
+):
+    """Per-ET-day counts of the headlines Cay AI scored bullish / bearish / neutral.
+
+    Reads the label log only (migration 180) — no model call, no FMP call. The labels
+    are the ones the per-article enrichment already produced; see
+    ``news_sentiment_trend_service`` for what they cover and what they do not.
+    """
+    scope = scope.strip().upper() if scope != MARKET_SCOPE else MARKET_SCOPE
+    if not _valid_scope(scope):
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid scope: {scope!r}",
+            user_message="That feed isn't available.",
+            details={"scope": scope},
+        )
+    if days not in TREND_DAYS:
+        return make_error_response(
+            ErrorCode.INVALID_INPUT,
+            message=f"Invalid days: {days!r} (expected one of {list(TREND_DAYS)})",
+            user_message="That time range isn't available.",
+            details={"days": days},
+        )
+
+    try:
+        trend = await get_news_sentiment_trend_service().get_trend(scope, days)
+    except SentimentTrendUnavailable as e:
+        # Handled and retryable (a Supabase blip, or migration 180 not yet applied). The
+        # app hides the chart; the log line is what tells the two causes apart.
+        logger.warning(
+            "Updates sentiment trend unavailable for scope=%s days=%d: %s",
+            scope, days, e,
+        )
+        return make_error_response(
+            ErrorCode.SENTIMENT_TREND_UNAVAILABLE,
+            message=f"Sentiment trend read failed for {scope}: {e}",
+            details={"scope": scope, "days": days},
+        )
+
+    return SentimentTrendResponse(**trend)
 
 
 # ── Mapping ───────────────────────────────────────────────────────────

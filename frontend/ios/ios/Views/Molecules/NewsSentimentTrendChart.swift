@@ -1,0 +1,365 @@
+//
+//  NewsSentimentTrendChart.swift
+//  ios
+//
+//  Molecule: the Updates tab's news-tone chart — how many headlines Cay AI scored
+//  positive / negative / neutral for this feed on each day, over 7 / 30 / 90 days.
+//
+//  Diverging bars on one zero line: positive rises above it, negative falls below it, and
+//  a day with neutral headlines carries a thin grey mark on the line itself (neutral has no
+//  direction). A missing day is drawn as nothing — the backend sends only days that had a
+//  scored headline, and "nothing scored" must not look like "no news".
+//
+//  Honest labelling: these are the headlines Cay AI SCORED for this feed (the feed's recent
+//  window, refreshed through the trading day), not every article published. The footer says
+//  so, and the chart never extrapolates a day it was not given.
+//
+
+import SwiftUI
+import Charts
+
+struct NewsSentimentTrendChart: View {
+    let trend: SentimentTrend
+    /// The toggle's selection. While it differs from `trend.window` the new window is still
+    /// loading, so the previous bars stay on screen, dimmed.
+    @Binding var window: SentimentTrendWindow
+    /// "Ask Cay AI about this trend". Hidden when nil.
+    var onAskCay: (() -> Void)? = nil
+
+    @State private var selectedKey: String?
+
+    private static let chartHeight: CGFloat = 132
+
+    private var isUpdating: Bool { trend.window != window }
+
+    private var selectedDay: SentimentTrendDay? {
+        guard let key = selectedKey else { return nil }
+        return trend.days.first { $0.dayKey == key }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.md) {
+            header
+            summaryLine
+            chart
+            legend
+            footer
+        }
+        .padding(AppSpacing.lg)
+        .cardSurface(cornerRadius: AppCornerRadius.large)
+        // A new window or scope invalidates the tapped day.
+        .onChange(of: trend) { _, _ in selectedKey = nil }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: AppSpacing.sm) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(AppTypography.iconSmall)
+                .foregroundColor(AppColors.textSecondary)
+            Text("News Tone")
+                .font(AppTypography.bodyEmphasis)
+                .foregroundColor(AppColors.textPrimary)
+            if isUpdating {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(AppColors.textMuted)
+            }
+            Spacer(minLength: AppSpacing.sm)
+            AnalysisTimeframeToggle(
+                selectedOption: $window,
+                options: SentimentTrendWindow.allCases.map { $0 }
+            )
+        }
+    }
+
+    // MARK: - Summary / tapped-day line
+
+    private var summaryLine: some View {
+        Text(summaryText)
+            .font(AppTypography.bodySmall)
+            .foregroundColor(AppColors.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .animation(nil, value: selectedKey)
+    }
+
+    private var summaryText: String {
+        if let day = selectedDay {
+            let when = Self.dayLabel(day.date) + (day.isPartial ? " (so far)" : "")
+            return "\(when) · \(Self.headlines(day.total)) — "
+                + "\(day.positive) positive · \(day.negative) negative · \(day.neutral) neutral"
+        }
+        let total = trend.total
+        guard total > 0 else { return "No scored headlines in this window yet." }
+        return "\(Self.headlines(total)) · \(Self.toneWord(trend.netScore)) "
+            + "(net \(Self.signed(trend.netScore)))"
+    }
+
+    // MARK: - Chart
+
+    private var chart: some View {
+        let days: [SentimentTrendDay] = trend.days
+        let peak: Int = max(1, days.map { max($0.positive, $0.negative) }.max() ?? 1)
+        let domain: ClosedRange<Date> = xDomain
+        return Chart {
+            ForEach(days) { day in
+                positiveBar(day)
+                negativeBar(day)
+            }
+            ForEach(days.filter { $0.neutral > 0 }) { day in
+                neutralMark(day)
+            }
+            // The reference axis: the whole chart reads "above = positive, below = negative".
+            RuleMark(y: .value("Zero", 0))
+                .foregroundStyle(AppColors.borderStrong)
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+        .chartXScale(domain: domain)
+        .chartYScale(domain: Double(-peak)...Double(peak))
+        .chartPlotStyle { plot in plot.clipped() }
+        .chartXAxis { xAxis }
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: [Double(-peak), 0, Double(peak)]) { value in
+                AxisGridLine().foregroundStyle(AppColors.chartGridline)
+                AxisValueLabel {
+                    if let v = value.as(Double.self) {
+                        Text("\(Int(abs(v)))")
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.textMuted)
+                    }
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    // A discrete tap, not a drag, so it coexists with the feed's ScrollView.
+                    .gesture(
+                        SpatialTapGesture().onEnded { tap in
+                            guard let plot = proxy.plotFrame else { return }
+                            let x = tap.location.x - geo[plot].origin.x
+                            guard let date = proxy.value(atX: x, as: Date.self) else { return }
+                            let key = nearestDayKey(to: date)
+                            selectedKey = (key == selectedKey) ? nil : key
+                        }
+                    )
+            }
+        }
+        .frame(height: Self.chartHeight)
+        .opacity(isUpdating ? 0.45 : 1)
+        .animation(.easeInOut(duration: 0.2), value: isUpdating)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("News tone, last \(trend.window.days) days")
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    private func barOpacity(_ day: SentimentTrendDay) -> Double {
+        selectedKey == nil || selectedKey == day.dayKey ? 1.0 : 0.35
+    }
+
+    private func positiveBar(_ day: SentimentTrendDay) -> some ChartContent {
+        BarMark(
+            x: .value("Day", day.date, unit: .day),
+            yStart: .value("Start", 0.0),
+            yEnd: .value("Positive", Double(day.positive))
+        )
+        .foregroundStyle(AppColors.gainGraphic)
+        .opacity(barOpacity(day))
+        .cornerRadius(2)
+    }
+
+    private func negativeBar(_ day: SentimentTrendDay) -> some ChartContent {
+        BarMark(
+            x: .value("Day", day.date, unit: .day),
+            yStart: .value("Start", 0.0),
+            yEnd: .value("Negative", -Double(day.negative))
+        )
+        .foregroundStyle(AppColors.lossGraphic)
+        .opacity(barOpacity(day))
+        .cornerRadius(2)
+    }
+
+    private func neutralMark(_ day: SentimentTrendDay) -> some ChartContent {
+        RectangleMark(
+            x: .value("Day", day.date, unit: .day),
+            y: .value("Neutral", 0.0),
+            height: .fixed(4)
+        )
+        .foregroundStyle(AppColors.textMuted)
+        .opacity(barOpacity(day))
+        .cornerRadius(1)
+    }
+
+    private var xAxis: some AxisContent {
+        AxisMarks(values: axisDates) { _ in
+            AxisValueLabel(format: axisFormat, centered: trend.window == .week)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textMuted)
+        }
+    }
+
+    /// Explicit tick dates, counted back from today so the newest label is always today:
+    /// every day for 7D, weekly for 30D, and each month start for 90D.
+    private var axisDates: [Date] {
+        let cal = Calendar.current
+        let today = SentimentTrendDayParser.etToday()
+        let lower = xDomain.lowerBound
+        switch trend.window {
+        case .week:
+            return (0..<7).compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
+                .filter { $0 >= lower }
+        case .month:
+            return stride(from: 0, through: 28, by: 7)
+                .compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
+                .filter { $0 >= lower }
+        case .quarter:
+            let comps = cal.dateComponents([.year, .month], from: today)
+            guard let thisMonth = cal.date(from: comps) else { return [] }
+            return (0..<4).compactMap { cal.date(byAdding: .month, value: -$0, to: thisMonth) }
+                .filter { $0 >= lower }
+        }
+    }
+
+    private var axisFormat: Date.FormatStyle {
+        switch trend.window {
+        case .week: return .dateTime.weekday(.abbreviated)
+        case .month: return .dateTime.month(.abbreviated).day()
+        case .quarter: return .dateTime.month(.abbreviated)
+        }
+    }
+
+    /// The whole window, today included, even when the oldest days have no data — so a
+    /// scope tracked for five days shows five bars at the right edge of a 30-day axis rather
+    /// than five fat bars pretending to be a month.
+    ///
+    /// "Today" is the ET calendar day (`etToday`), because the day keys are ET days: anchored
+    /// on the device's own date, the backend's newest bar fell past the end of the axis every
+    /// evening west of New York. The end also stretches to cover the newest bar, as a guard.
+    private var xDomain: ClosedRange<Date> {
+        let cal = Calendar.current
+        let today = SentimentTrendDayParser.etToday()
+        let start = cal.date(byAdding: .day, value: -(trend.window.days - 1), to: today) ?? today
+        let first = trend.days.first.map { cal.startOfDay(for: $0.date) } ?? start
+        let lastDay = trend.days.last.map { cal.startOfDay(for: $0.date) } ?? today
+        let endDay = max(today, lastDay)
+        let end = cal.date(byAdding: .day, value: 1, to: endDay) ?? endDay
+        return min(start, first)...end
+    }
+
+    private func nearestDayKey(to date: Date) -> String? {
+        let cal = Calendar.current
+        let target = cal.startOfDay(for: date)
+        return trend.days.min(by: {
+            abs($0.date.timeIntervalSince(target)) < abs($1.date.timeIntervalSince(target))
+        }).flatMap { abs($0.date.timeIntervalSince(target)) < 86_400 * 1.5 ? $0.dayKey : nil }
+    }
+
+    // MARK: - Legend + footer
+
+    private var legend: some View {
+        HStack(spacing: AppSpacing.md) {
+            legendItem(color: AppColors.gainGraphic, label: "Positive", height: 8)
+            legendItem(color: AppColors.lossGraphic, label: "Negative", height: 8)
+            legendItem(color: AppColors.textMuted, label: "Neutral", height: 3)
+            Spacer()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func legendItem(color: Color, label: String, height: CGFloat) -> some View {
+        HStack(spacing: AppSpacing.xs) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(color)
+                .frame(width: 10, height: height)
+            Text(label)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+        }
+    }
+
+    private var footer: some View {
+        HStack(alignment: .center, spacing: AppSpacing.sm) {
+            Text(footerText)
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: AppSpacing.sm)
+            if let onAskCay {
+                AskCayAIPill(title: "Ask about this", action: onAskCay)
+            }
+        }
+    }
+
+    private var footerText: String {
+        guard let since = trend.trackingSince ?? trend.days.first?.date else {
+            return "Headlines Cay AI scored"
+        }
+        return "Headlines Cay AI scored · since \(Self.shortDate(since))"
+    }
+
+    private var accessibilitySummary: String {
+        "\(Self.headlines(trend.total)): \(trend.positive) positive, \(trend.negative) negative, "
+            + "\(trend.neutral) neutral. \(Self.toneWord(trend.netScore))."
+    }
+
+    // MARK: - Formatting
+
+    static func toneWord(_ net: Int) -> String {
+        if net >= 20 { return "Mostly positive" }
+        if net <= -20 { return "Mostly negative" }
+        return "Mixed"
+    }
+
+    static func signed(_ value: Int) -> String {
+        value > 0 ? "+\(value)" : "\(value)"
+    }
+
+    static func headlines(_ count: Int) -> String {
+        "\(count) headline\(count == 1 ? "" : "s")"
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE MMM d")
+        return f
+    }()
+
+    private static let shortFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMM d")
+        return f
+    }()
+
+    static func dayLabel(_ date: Date) -> String { dayFormatter.string(from: date) }
+    static func shortDate(_ date: Date) -> String { shortFormatter.string(from: date) }
+}
+
+#Preview("30 days") {
+    let cal = Calendar.current
+    let today = cal.startOfDay(for: Date())
+    let counts: [(Int, Int, Int)] = [
+        (4, 1, 2), (2, 3, 1), (6, 0, 1), (1, 5, 2), (3, 2, 0), (5, 1, 1), (2, 2, 2),
+        (0, 4, 1), (3, 1, 3), (7, 2, 1), (2, 1, 0), (1, 1, 1),
+    ]
+    let days: [SentimentTrendDay] = counts.enumerated().map { i, c in
+        let date = cal.date(byAdding: .day, value: -(counts.count - 1 - i), to: today) ?? today
+        return SentimentTrendDay(
+            dayKey: "preview-\(i)", date: date,
+            positive: c.0, negative: c.1, neutral: c.2,
+            isPartial: i == counts.count - 1
+        )
+    }
+    return NewsSentimentTrendChart(
+        trend: SentimentTrend(
+            scope: "ORCL", window: .month, days: days,
+            trackingSince: days.first?.date
+        ),
+        window: .constant(.month),
+        onAskCay: {}
+    )
+    .padding()
+    .background(AppColors.background)
+}

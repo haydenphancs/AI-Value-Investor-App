@@ -398,6 +398,12 @@ _CHIP_FORBIDDEN_TAIL = ". Cay AI declines those, and a chip the answer declines 
 # A Learn chat (a book, a Money Moves article, a Journey lesson) is about an IDEA, not an
 # asset: the STOCK scope steered its chips to price and fundamentals on a lesson page.
 _LEARN_CONTEXT_TYPES = frozenset({"BOOK", "MONEY_MOVES_ARTICLE", "JOURNEY_LESSON"})
+# A chat opened from the Updates tab is about the NEWS first — what is moving the subject and
+# how the tone has shifted — so its chips lead with that before the asset scope.
+_CHIP_SCOPE_UPDATES = (
+    "the latest news and what is driving it, the Insight card's points, and how the news "
+    "tone has shifted over recent days; "
+)
 _CHIP_SCOPE_LEARN = (
     "ANSWERABLE SCOPE — propose ONLY questions Cay AI can answer, which are about: the "
     "idea just discussed — what it means, how it works, how an investor applies it, a "
@@ -422,6 +428,8 @@ def chip_scope_block(asset_type: Optional[str], context_type: Optional[str] = No
         return _CHIP_SCOPE_LEARN
     key = (asset_type or "NORMAL").strip().upper()
     specific = _CHIP_SCOPE_BY_ASSET_TYPE.get(key, _CHIP_SCOPE_BY_ASSET_TYPE["NORMAL"])
+    if ctx == "UPDATES_SCOPE":
+        specific = _CHIP_SCOPE_UPDATES + specific
     allowed = tools_for_asset_type(key)
     data_clauses = [_CHIP_SCOPE_BY_TOOL[name] for name in _TOOL_ORDER if name in allowed and name in _CHIP_SCOPE_BY_TOOL]
     data = "; ".join(data_clauses)

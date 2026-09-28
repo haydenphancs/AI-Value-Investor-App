@@ -48,6 +48,11 @@ class UpdatesTabResponse(BaseModel):
     # gated list instead made 19 of a 20-ticker group unreachable and turned re-adding one
     # into a 409 for a ticker the user could not see.
     is_locked: bool = False
+    # The ticker's asset class in the app's wire vocabulary (stock / etf / index / commodity /
+    # crypto), from the watchlist row when it names a specific class, else from the symbol.
+    # None on the Market tab. iOS uses it to declare a FUND to "Ask Cay AI" ("SPY|ETF"),
+    # which no symbol rule can recognise.
+    asset_type: Optional[str] = None
 
 
 class UpdatesTabsResponse(BaseModel):
@@ -203,3 +208,35 @@ class EnrichUpdatesNewsRequest(BaseModel):
 class EnrichUpdatesNewsResponse(BaseModel):
     scope: str
     articles: List[UpdatesArticleResponse] = Field(default_factory=list)
+
+
+# ── News-sentiment timeline (migration 180) ───────────────────────────
+
+class SentimentTrendDayResponse(BaseModel):
+    """One ET day of headlines Cay AI scored for the scope.
+
+    Only days with at least one scored headline are sent — a missing day means
+    "nothing scored", which the chart must not draw as a flat zero.
+    """
+
+    # ET calendar day, "YYYY-MM-DD".
+    date: str
+    bullish: int = 0
+    bearish: int = 0
+    neutral: int = 0
+    total: int = 0
+    # (bullish − bearish) / total as a whole percent, −100…100.
+    net_score: int = 0
+    # True for today (ET): the day is still filling in.
+    is_partial: bool = False
+
+
+class SentimentTrendResponse(BaseModel):
+    scope: str
+    # The window asked for: 7, 30 or 90.
+    days: int
+    # Oldest first.
+    series: List[SentimentTrendDayResponse] = Field(default_factory=list)
+    # The first ET day this scope has any label, "YYYY-MM-DD" — the chart's
+    # "tracking since" footer. None before the first label.
+    tracking_since: Optional[str] = None

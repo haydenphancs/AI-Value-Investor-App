@@ -133,6 +133,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 179: anonymous search-pick counters behind the "Trending searches" chips. No per-user
     # column, but still backend-only: the app reads the lists through /search/trending.
     "179": ("search_pick_daily",),
+    # 180: the Updates news-sentiment label log (labels only, no article text). Read only by
+    # the backend, through news_sentiment_daily() behind /updates/sentiment-trend.
+    "180": ("news_sentiment_log",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

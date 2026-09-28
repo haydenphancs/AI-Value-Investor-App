@@ -29,7 +29,21 @@ def test_cacheable_answer_predicate(result, expected):
 
 def test_both_text_paths_gate_their_cache_write():
     import inspect
+    import re
+
     src = inspect.getsource(gem.GeminiClient)
-    assert src.count("if _cacheable_answer(result):\n                self._response_cache.set(key, result)") == 2
-    assert "            self._response_cache.set(key, result)\n            return result" not in src.replace(
-        "if _cacheable_answer(result):\n                self._response_cache.set(key, result)", "")
+    # generate_json's gate also honours `cache=False` (the sentiment backfill opts out), so
+    # its condition reads `if cache and _cacheable_answer(result):` — still gated.
+    gated = re.compile(
+        r"if (?:cache and )?_cacheable_answer\(result\):\n                self\._response_cache\.set\(key, result\)"
+    )
+    assert len(gated.findall(src)) == 2
+    assert "            self._response_cache.set(key, result)\n            return result" not in gated.sub("", src)
+
+
+def test_generate_json_can_skip_the_shared_cache():
+    import inspect
+
+    src = inspect.getsource(gem.GeminiClient.generate_json)
+    assert "cached = self._response_cache.get(key) if cache else None" in src
+    assert "if cache and _cacheable_answer(result):" in src

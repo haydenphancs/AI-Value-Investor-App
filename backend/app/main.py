@@ -25,6 +25,7 @@ from app.api.v1.api import api_router
 from app.integrations.coingecko import close_coingecko_client
 from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
+from app.integrations.openai_compat import close_openai_compat_client
 from app.integrations.openfda import close_openfda_client
 from app.integrations.uspto import close_uspto_client
 from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
@@ -440,6 +441,12 @@ async def lifespan(app: FastAPI):
         # cadence would leave a freshly promoted chip cold for most of its life.
         _spawn(_run_starter_warm_loop(), "starter_warm")
 
+        # News-tone chart: the 90-day sentiment backfill per watched ticker + its nightly
+        # top-up (migration 181). Idles, logging once, until SENTIMENT_BACKFILL_ENABLED is
+        # set — which waits on migration 181 and the calibration check (OWNER_TASKS §2).
+        from app.services.news_sentiment_backfill_service import run_sentiment_backfill_loop
+        _spawn(run_sentiment_backfill_loop(), "sentiment_backfill")
+
         # Emerging Frontiers: the monthly theme-stock rotation (first US trading day, 18:30 ET)
         # and the daily theme insights (18:15 ET). Both idle until THEME_ROTATION_ENABLED /
         # THEME_INSIGHTS_ENABLED are set, which waits on migration 174 — see
@@ -546,6 +553,7 @@ async def lifespan(app: FastAPI):
     await close_openfda_client()
     await close_uspto_client()
     await close_finra_client()
+    await close_openai_compat_client()
     await close_health_client()
     logger.info("Shutting down")
 

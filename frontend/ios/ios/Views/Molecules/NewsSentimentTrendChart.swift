@@ -41,8 +41,12 @@ struct NewsSentimentTrendChart: View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             header
             summaryLine
-            chart
-            legend
+            if showsBuildingPlaceholder {
+                buildingPlaceholder
+            } else {
+                chart
+                legend
+            }
             footer
         }
         .padding(AppSpacing.lg)
@@ -84,7 +88,32 @@ struct NewsSentimentTrendChart: View {
             .animation(nil, value: selectedKey)
     }
 
+    /// Nothing to draw yet because the 90-day history is still being fetched. The card says
+    /// so instead of drawing an empty axis — and never invents a bar to fill the space.
+    private var showsBuildingPlaceholder: Bool {
+        trend.days.isEmpty && trend.isBuildingHistory
+    }
+
+    private var buildingPlaceholder: some View {
+        VStack(spacing: AppSpacing.sm) {
+            ProgressView()
+                .tint(AppColors.textMuted)
+            Text("Building 90-day history…")
+                .font(AppTypography.bodySmall)
+                .foregroundColor(AppColors.textSecondary)
+            Text("Usually a minute or two. It fills in newest weeks first.")
+                .font(AppTypography.caption)
+                .foregroundColor(AppColors.textMuted)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: Self.chartHeight)
+        .accessibilityElement(children: .combine)
+    }
+
     private var summaryText: String {
+        if showsBuildingPlaceholder {
+            return "Scoring this ticker's recent news…"
+        }
         if let day = selectedDay {
             let when = Self.dayLabel(day.date) + (day.isPartial ? " (so far)" : "")
             return "\(when) · \(Self.headlines(day.total)) — "
@@ -194,16 +223,34 @@ struct NewsSentimentTrendChart: View {
     }
 
     private var xAxis: some AxisContent {
-        AxisMarks(values: axisDates) { _ in
-            AxisValueLabel(format: axisFormat, centered: trend.window == .week)
-                .font(AppTypography.caption)
-                .foregroundStyle(AppColors.textMuted)
+        AxisMarks(values: axisDates) { value in
+            // The newest 30D tick is today, one day from the axis end: a label starting there
+            // ran into the trailing y-axis column and was cut to "S". Anchoring that one label
+            // at its trailing edge keeps it inside the plot. 7D labels are centred in their
+            // day slot (narrow weekday names); 90D drops month ticks near the end instead.
+            AxisValueLabel(
+                format: axisFormat,
+                centered: trend.window == .week,
+                anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil
+            )
+            .font(AppTypography.caption)
+            .foregroundStyle(AppColors.textMuted)
         }
     }
 
+    private func isTrailingTick(_ index: Int, of count: Int) -> Bool {
+        trend.window == .month && count > 0 && index == count - 1
+    }
+
     /// Explicit tick dates, counted back from today so the newest label is always today:
-    /// every day for 7D, weekly for 30D, and each month start for 90D.
+    /// every day for 7D, weekly for 30D, and each month start for 90D. Returned OLDEST FIRST,
+    /// so `isTrailingTick`'s "last index" is today's tick — built newest-first, the trailing
+    /// anchor landed on the oldest label instead.
     private var axisDates: [Date] {
+        axisDatesUnsorted.sorted()
+    }
+
+    private var axisDatesUnsorted: [Date] {
         let cal = Calendar.current
         let today = SentimentTrendDayParser.etToday()
         let lower = xDomain.lowerBound
@@ -216,10 +263,13 @@ struct NewsSentimentTrendChart: View {
                 .compactMap { cal.date(byAdding: .day, value: -$0, to: today) }
                 .filter { $0 >= lower }
         case .quarter:
+            // Month starts, minus any within 7 days of the axis end: a month label there has
+            // no room before the y-axis column (the same clipping as the 30D "S").
             let comps = cal.dateComponents([.year, .month], from: today)
             guard let thisMonth = cal.date(from: comps) else { return [] }
+            let latest = cal.date(byAdding: .day, value: -7, to: xDomain.upperBound) ?? today
             return (0..<4).compactMap { cal.date(byAdding: .month, value: -$0, to: thisMonth) }
-                .filter { $0 >= lower }
+                .filter { $0 >= lower && $0 <= latest }
         }
     }
 
@@ -294,6 +344,9 @@ struct NewsSentimentTrendChart: View {
     }
 
     private var footerText: String {
+        if trend.isBuildingHistory && !trend.days.isEmpty {
+            return "Headlines Cay AI scored · filling in 90 days…"
+        }
         guard let since = trend.trackingSince ?? trend.days.first?.date else {
             return "Headlines Cay AI scored"
         }

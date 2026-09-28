@@ -228,6 +228,12 @@ async def add_to_watchlist(
         # ticker reads as an orphan and gets deleted again — the add undoes itself.
         invalidate_feed_cache(user_id)
         (await asyncio.to_thread(_write_through_to_active_portfolio, supabase, user_id, ticker))
+        # News-tone chart: queue the ticker's 90-day sentiment backfill (a no-op when it is
+        # already covered, off while SENTIMENT_BACKFILL_ENABLED is false). Never raises and
+        # is time-boxed, so it can never fail or stall the add.
+        from app.services.news_sentiment_backfill_service import nudge_backfill
+
+        await nudge_backfill(supabase, [ticker])
         return item
     except Exception as exc:
         logger.error("[Watchlist] DB error inserting %s: %s", ticker, exc)

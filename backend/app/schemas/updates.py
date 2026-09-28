@@ -240,3 +240,6 @@ class SentimentTrendResponse(BaseModel):
     # The first ET day this scope has any label, "YYYY-MM-DD" — the chart's
     # "tracking since" footer. None before the first label.
     tracking_since: Optional[str] = None
+    # The scope's 90-day backfill: "building" (the app shows "Building 90-day history…" and
+    # re-checks), "ready", or None (Market feed, unsupported symbol, backfill switched off).
+    history_status: Optional[str] = None

@@ -71,10 +71,14 @@ def test_the_primary_key_is_the_writers_conflict_target():
     pk = re.search(r"PRIMARY KEY \(([^)]*)\)", body)
     assert pk, "no primary key"
     cols = [c.strip() for c in pk.group(1).split(",")]
-    # record_labels upserts with on_conflict="scope,article_key".
+    # Every writer (live labels and the backfill) goes through upsert_log_rows.
     import inspect
 
-    assert 'on_conflict="scope,article_key"' in inspect.getsource(svc.record_labels)
+    src = inspect.getsource(svc.upsert_log_rows)
+    assert src.count('on_conflict="scope,article_key", ignore_duplicates=True') == 2, (
+        "both the first try and the no-model retry must keep first-label-wins"
+    )
+    assert "upsert_log_rows" in inspect.getsource(svc.record_labels)
     assert cols == ["scope", "article_key"]
 
 

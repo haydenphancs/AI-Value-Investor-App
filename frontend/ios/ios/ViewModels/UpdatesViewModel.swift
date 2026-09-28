@@ -188,10 +188,19 @@ final class UpdatesViewModel: ObservableObject {
     /// until the new one lands, so switching never collapses the card.
     @Published private(set) var trendWindow: SentimentTrendWindow = .month
     /// Per (scope, window). Short-lived: the backend's own memory tier is 5 minutes and a
-    /// new day's bar appears as articles are scored.
+    /// new day's bar appears as articles are scored. A "building" answer is never cached.
     private var trendCache: [String: (fetchedAt: Date, trend: SentimentTrend)] = [:]
     private var trendTask: Task<Void, Never>?
     private let trendCacheTTL: TimeInterval = 300
+    /// False until the user taps the toggle. Until then the window is chosen per scope from
+    /// its history — 7D while it has under a week, else 30D — and the request is always 30D,
+    /// so the 7D view is a free cut of it. Reset on identity change.
+    private var userPickedWindow = false
+    /// Re-checks a scope whose 90-day history is still being built, backing off, until it is
+    /// ready or the delays run out. Cancelled on scope change, identity change and deinit.
+    private var trendPollTask: Task<Void, Never>?
+    private var trendPollAttempt = 0
+    private let trendPollDelays: [UInt64] = [30, 45, 60, 90, 120, 180, 300]
 
     // MARK: - Initialization
 
@@ -203,7 +212,10 @@ final class UpdatesViewModel: ObservableObject {
         // calls `loadIfNeeded()` when the tab first becomes active.
     }
 
-    deinit { refreshPollTask?.cancel(); appearWorkTask?.cancel(); trendTask?.cancel() }
+    deinit {
+        refreshPollTask?.cancel(); appearWorkTask?.cancel()
+        trendTask?.cancel(); trendPollTask?.cancel()
+    }
 
     // MARK: - Lifecycle
 
@@ -270,8 +282,12 @@ final class UpdatesViewModel: ObservableObject {
         // The news-tone chart belongs to the previous identity's feed too.
         trendTask?.cancel()
         trendTask = nil
+        trendPollTask?.cancel()
+        trendPollTask = nil
         trendCache.removeAll()
         sentimentTrend = nil
+        userPickedWindow = false
+        trendWindow = .month
 
         // Fetch only if the user is actually looking at this tab. Clearing above nils the
         // freshness stamp, so `.task(id: isActiveTab)` re-loads on the next activation.
@@ -619,17 +635,29 @@ final class UpdatesViewModel: ObservableObject {
 
     func setTrendWindow(_ window: SentimentTrendWindow) {
         guard window != trendWindow else { return }
+        // The user's choice wins for the rest of the session, on every scope.
+        userPickedWindow = true
         trendWindow = window
         guard let scope = selectedTab?.scope else { return }
         startTrendLoad(scope: scope, force: false)
     }
 
-    private func startTrendLoad(scope: String, force: Bool) {
+    /// `fromPoll` keeps the building re-check counter running; every other caller restarts it.
+    private func startTrendLoad(scope: String, force: Bool, fromPoll: Bool = false) {
         trendTask?.cancel()
+        trendPollTask?.cancel()
+        trendPollTask = nil
+        if !fromPoll { trendPollAttempt = 0 }
+        let isNewScope = sentimentTrend?.scope != scope
+        // Auto mode opens a NEW scope on 30D; the answer then decides whether to show 7D.
+        // Never set from a fetched response: `loadTrend`'s stale-response guard compares
+        // against the window captured here.
+        if !userPickedWindow && isNewScope { trendWindow = .month }
         let window = trendWindow
-        let key = "\(scope)|\(window.rawValue)"
+        let fetchWindow: SentimentTrendWindow = userPickedWindow ? window : .month
+        let key = "\(scope)|\(fetchWindow.rawValue)"
         if !force, let hit = trendCache[key], Date().timeIntervalSince(hit.fetchedAt) < trendCacheTTL {
-            sentimentTrend = hit.trend
+            present(hit.trend)
             trendTask = nil
             return
         }
@@ -638,21 +666,24 @@ final class UpdatesViewModel: ObservableObject {
         // switch does not make the card jump.
         if sentimentTrend?.scope != scope { sentimentTrend = nil }
         trendTask = Task { [weak self] in
-            await self?.loadTrend(scope: scope, window: window, key: key)
+            await self?.loadTrend(scope: scope, window: window, fetchWindow: fetchWindow, key: key)
         }
     }
 
-    private func loadTrend(scope: String, window: SentimentTrendWindow, key: String) async {
+    private func loadTrend(
+        scope: String, window: SentimentTrendWindow, fetchWindow: SentimentTrendWindow, key: String
+    ) async {
         do {
             let response: SentimentTrendResponse = try await apiClient.request(
-                endpoint: .getSentimentTrend(scope: scope, days: window.days),
+                endpoint: .getSentimentTrend(scope: scope, days: fetchWindow.days),
                 responseType: SentimentTrendResponse.self
             )
             guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
-            let trend = SentimentTrend(dto: response, window: window)
-            trendCache[key] = (Date(), trend)
-            sentimentTrend = trend
-            print("✅ UpdatesVM: news-tone trend \(scope) \(window.rawValue): \(trend.days.count) day(s)")
+            let trend = SentimentTrend(dto: response, window: fetchWindow)
+            // A building answer is never cached: the next re-check must see the next state.
+            if !trend.isBuildingHistory { trendCache[key] = (Date(), trend) }
+            present(trend)
+            print("✅ UpdatesVM: news-tone trend \(scope) \(fetchWindow.rawValue): \(trend.days.count) day(s), history=\(trend.historyStatus?.rawValue ?? "n/a")")
         } catch {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
             guard !Task.isCancelled, selectedTab?.scope == scope, trendWindow == window else { return }
@@ -668,7 +699,38 @@ final class UpdatesViewModel: ObservableObject {
             } else {
                 sentimentTrend = nil
             }
-            print("⚠️ UpdatesVM: news-tone trend unavailable for \(scope) \(window.rawValue): \(AppError.from(error).message)")
+            print("⚠️ UpdatesVM: news-tone trend unavailable for \(scope) \(fetchWindow.rawValue): \(AppError.from(error).message)")
+        }
+    }
+
+    /// Show a fetched or cached trend. In auto mode a scope with under a week of history
+    /// opens on 7D (cut from the 30D answer — a mostly empty month reads as broken), and on
+    /// 30D once it has more. A window the user picked is shown as fetched.
+    private func present(_ trend: SentimentTrend) {
+        if !userPickedWindow {
+            let display: SentimentTrendWindow =
+                trend.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month
+            trendWindow = display
+            sentimentTrend = trend.trimmed(to: display)
+        } else {
+            sentimentTrend = trend
+        }
+        scheduleTrendPollIfBuilding(scope: trend.scope)
+    }
+
+    /// While a scope's 90-day history is being built, re-check with a backoff so the
+    /// "Building…" card turns into the chart without a pull-to-refresh. Stops when the
+    /// history is ready, the scope changes, or the delays run out.
+    private func scheduleTrendPollIfBuilding(scope: String) {
+        guard sentimentTrend?.isBuildingHistory == true,
+              trendPollAttempt < trendPollDelays.count else { return }
+        let delay = trendPollDelays[trendPollAttempt]
+        trendPollAttempt += 1
+        trendPollTask?.cancel()
+        trendPollTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            guard !Task.isCancelled, let self, self.selectedTab?.scope == scope else { return }
+            self.startTrendLoad(scope: scope, force: true, fromPoll: true)
         }
     }
 

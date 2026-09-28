@@ -933,6 +933,7 @@ class GeminiClient:
         response_schema: Optional[Any] = None,
         cached_content: Optional[str] = None,
         thinking_config: Optional[Any] = None,
+        service_tier: Optional[str] = None,
     ) -> types.GenerateContentConfig:
         """Assemble a GenerateContentConfig from the knobs that used to live in
         the legacy generation_config dict + per-call GenerativeModel kwargs."""
@@ -952,6 +953,10 @@ class GeminiClient:
             kwargs["cached_content"] = cached_content
         if thinking_config is not None:
             kwargs["thinking_config"] = thinking_config
+        if service_tier:
+            # "flex": Google's 50%-off tier (slower, may answer 429/503 when busy, never falls
+            # back by itself). Only the background sentiment backfill asks for it.
+            kwargs["service_tier"] = types.ServiceTier(service_tier)
         return types.GenerateContentConfig(**kwargs)
 
     @async_retry(max_attempts=2, delay=2.0)
@@ -1250,6 +1255,8 @@ class GeminiClient:
         thinking_budget: Optional[int] = None,
         usage_tag: Optional[str] = None,
         temperature: Optional[float] = None,
+        cache: bool = True,
+        service_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
@@ -1274,6 +1281,13 @@ class GeminiClient:
         `temperature` overrides the client default (`GEMINI_TEMPERATURE`) for this call; a
         grader wants 0 so a borderline verdict does not flip between samples. It joins the
         cache key ONLY when set, so every existing caller's key is byte-identical to before.
+
+        `cache=False` bypasses the shared response cache in BOTH directions. The background
+        sentiment backfill sends ~1,000 unique prompts a day that are never asked twice; left
+        on, they would evict every chat and Insights entry from the 256-slot cache for nothing.
+
+        `service_tier="flex"` asks for Google's discounted tier (same model and output, slower,
+        may be refused when busy). It changes no output, so it is not in the cache key.
         """
         parts = [
             "json", prompt, system_instruction or "", model_name or "",
@@ -1283,7 +1297,7 @@ class GeminiClient:
         if temperature is not None:
             parts.append(f"temp={float(temperature)!r}")
         key = _cache_key(*parts)
-        cached = self._response_cache.get(key)
+        cached = self._response_cache.get(key) if cache else None
         if cached is not None:
             logger.debug("Gemini generate_json cache HIT")
             return _CacheHit(cached)
@@ -1299,6 +1313,7 @@ class GeminiClient:
                         response_mime_type="application/json",
                         response_schema=response_schema,
                         thinking_config=_thinking_config(thinking_budget),
+                        service_tier=service_tier,
                     ),
                 ),
                 what="generate_json",
@@ -1314,7 +1329,7 @@ class GeminiClient:
                 "tokens_used": usage["total"],
                 "finish_reason": _response_finish(response),
             }
-            if _cacheable_answer(result):
+            if cache and _cacheable_answer(result):
                 self._response_cache.set(key, result)
             return result
         except Exception as e:

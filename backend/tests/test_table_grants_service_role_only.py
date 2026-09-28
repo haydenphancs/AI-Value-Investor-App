@@ -136,6 +136,8 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 180: the Updates news-sentiment label log (labels only, no article text). Read only by
     # the backend, through news_sentiment_daily() behind /updates/sentiment-trend.
     "180": ("news_sentiment_log",),
+    # 181: the per-ticker backfill queue behind the news-tone chart's 90-day history.
+    "181": ("news_sentiment_backfill",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

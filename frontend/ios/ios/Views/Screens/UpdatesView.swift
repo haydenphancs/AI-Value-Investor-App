@@ -322,7 +322,8 @@ struct UpdatesView: View {
     /// The trend to draw, or nil. Hidden behind the account gate (same flags as the feed's
     /// gate below — the chart must never sit above "Sign in to see your news"), for another
     /// scope's data while a tab switch is in flight, and until the scope has a few days of
-    /// scored headlines: two bars are not a trend.
+    /// scored headlines (two bars are not a trend) — UNLESS its 90-day history is being
+    /// built, when the card shows "Building 90-day history…" instead of nothing.
     ///
     /// Kept OUT of `body` on purpose: `test_ios_account_gate_state` reads the gate's branch
     /// order from the first mention of each flag in `body`.
@@ -330,7 +331,7 @@ struct UpdatesView: View {
         guard let trend = viewModel.sentimentTrend,
               !viewModel.isReconnecting, !viewModel.requiresSignIn,
               trend.scope == viewModel.selectedTab?.scope,
-              trend.hasEnoughHistory() else { return nil }
+              trend.hasEnoughHistory() || trend.isBuildingHistory else { return nil }
         return trend
     }
 

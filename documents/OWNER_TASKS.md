@@ -21,7 +21,7 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 2. **The web service runs ONE uvicorn worker.** Most loops are safe only because of that.
    - A parity test (`backend/tests/test_deploy_command_parity.py`) fails if `--workers` is added.
 
-### 1A. Web-server loops (`backend/app/main.py`, 24 of them)
+### 1A. Web-server loops (`backend/app/main.py`, 25 of them)
 
 | # | Job | When | Turned on by (default) | What it does |
 |---|---|---|---|---|
@@ -49,6 +49,7 @@ production (Supabase, Storage or App Store Connect). Run its dry run first and r
 | 22 | Push dispatch | every 60 s | the notification trio: on unless `ENVIRONMENT=development`; APNs keys required | Sends queued pushes, including ones deferred for quiet hours. |
 | 23 | Scheduled pushes | hourly wake | same | Earnings after 16:00 ET · insider + whale/congress after 18:00 ET · profile match after 19:00 ET. Once per ET day each, retried hourly after a failure. |
 | 24 | Price alerts | every 60 s | same | All rules 04:00–20:00 ET; crypto-only rules otherwise. |
+| 25 | News-sentiment backfill | every ~3 min, or at once when a ticker is added; then a nightly top-up ~21:00 ET per ticker | **`SENTIMENT_BACKFILL_ENABLED` (OFF)** | Gives each watched ticker (never the Market tab) 90 days of News Tone history: FMP news → Cay AI sentiment labels (no text) → `news_sentiment_log`. Once per ticker, not per user. Capped by `SENTIMENT_BACKFILL_DAILY_CALLS` (1500 model calls/day ≈ $1.65 max); uses Gemini's 50%-off Flex tier (`SENTIMENT_BACKFILL_FLEX`). Needs migration 181. |
 
 Started by a user action, not a clock: the report worker, the pre-warm when a ticker is opened,
 admin recomputes, and marketing script generation.
@@ -97,7 +98,7 @@ admin recomputes, and marketing script generation.
 ### 2.1 Do now / verify once
 
 - [x] **Railway variables** (verified 2026-09-25 against deploy 95ea9b25):
-  - `ENVIRONMENT=production`; all 24 loops started.
+  - `ENVIRONMENT=production`; all 25 loops started.
   - Deploys use root `/backend` and config `/backend/railway.toml`.
   - `SENTRY_DSN` is set and the SDK starts.
   - APNs keys are set, `APNS_ENV=production`, `PUSH_DRY_RUN` is unset.
@@ -162,14 +163,24 @@ admin recomputes, and marketing script generation.
   3. **Before submitting the iOS build that includes the chips:** App Store Connect → App Privacy → add **Search History**, *not linked*, *App Functionality*, *not tracking* (it must match `PrivacyInfo.xcprivacy` and `documents/legal/app-privacy-answers.md`). The updated privacy policy (dated September 26, 2026) goes live at `caydexinvest.com/privacy` with the backend deploy in step 2 — the backend serves `app/templates/legal/privacy.html`, kept byte-equal to `documents/legal/privacy.html` and to the in-app `PrivacyPolicyView` by `tests/test_legal_pages.py`.
   4. Next schema re-dump: remove `public.search_pick_daily` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
   - The curated fallback and a `blocked` list live in `backend/data/search_trending_popular.json` — edit + deploy to change them, no app update.
-- [ ] **Updates news-tone chart + "Ask Cay AI" on Updates go-live** (built 2026-09-27):
-  1. **Decide the licence question first.** The chart keeps Cay AI's bullish/bearish/neutral LABEL for each news article for 120 days (no headline, URL or text — only a hashed article id, the day and the label). That still touches the open FMP checklist items "Data handling (a)(b)(c)" / "ToS §6.3" in `documents/legal/fmp-order-form-checklist.md`. Write your yes (or no) there. If no, do not apply 180 — the chart simply stays hidden.
-  2. Deploy the backend FIRST. Until 180 exists, the label hook logs `news_sentiment_log: dropped N label(s)` (WARNING) and `/updates/sentiment-trend` answers 503, which the app treats as "hide the chart"; enrichment and the feed are untouched.
-  3. THEN apply migration 180 (`backend/database/migrations/180_news_sentiment_log.sql`) in Studio and run its VERIFY queries (RLS on; anon/authenticated can neither read the table nor execute `news_sentiment_daily`; the seed copied some rows). This order matters: the seed copies every label already in the news cache, including the ones written while the table was missing. Applied BEFORE the deploy, the old backend keeps labelling articles without logging them, and those days stay short for 120 days — if that happened, re-run the migration's section B (the seed) once after the deploy; it is safe to repeat.
-  4. Ship an iOS build (TestFlight → App Store). Older builds ignore both features.
-  5. After a week, ask Claude to check chart density (how many scopes have ≥3 days, how many scored headlines per day) before deciding on the optional evening labeller or a 30-day backfill.
-  6. Next schema re-dump: remove `public.news_sentiment_log` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
-  - The chat entries cost nothing until the user sends (1 credit per turn, as everywhere).
+- [x] **Updates news-tone chart + "Ask Cay AI" on Updates go-live** — done 2026-09-27: migration 180 applied, commit afec2e12 deployed (you applied 180, which records the licence yes for keeping labels only — no text). Still open from it:
+  - Ship the iOS build with the chart (TestFlight → App Store).
+  - Next schema re-dump: remove `public.news_sentiment_log` from `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`.
+- [ ] **News Tone 90-day backfill go-live** (built 2026-09-27; switch ships OFF):
+  1. Apply migration 181 (`backend/database/migrations/181_news_sentiment_backfill.sql`) in Studio, then its VERIFY queries (the `source` CHECK now lists `backfill`; RLS on the new table; `authenticated` cannot execute the RPCs; `discover_sentiment_backfill()` returns the number of watched tickers). The deploy can go before or after it: the flag is off, and the live label writer falls back to writing without the new `model` column until 181 exists (one WARNING per boot).
+  2. Deploy the backend.
+  3. Calibrate (read-only, ≈2–3 cents): `cd backend && ./venv/bin/python -m scripts.calibrate_sentiment_backfill --limit 300`. It re-labels 300 live-labelled articles with the backfill prompt AND re-runs the live prompt on them as a baseline (the live labeller is not even consistent with itself). PASS = ≥ 85%, or within 2 points of that baseline. Already run on 2026-09-27: baseline 81.7%, backfill 84.7% → PASS.
+  4. Set `SENTIMENT_BACKFILL_ENABLED=true` on Railway. First pass for today's 31 tickers: ≈ $1 of Gemini, ≈ 600 FMP calls, under an hour. Then ≈ $0.01–0.04/day. Ceiling: `SENTIMENT_BACKFILL_DAILY_CALLS` (1500 ≈ $1.65/day).
+  5. Next morning, ask Claude to check: every watched ticker's row in `news_sentiment_backfill` is `done` (or `unsupported` for `^` symbols), and ORCL's chart spans 90 days.
+  - The Market tab is never backfilled; it fills day by day.
+  - To stop it: set `SENTIMENT_BACKFILL_ENABLED=false`. Labels already written stay.
+  - Next schema re-dump: remove `public.news_sentiment_backfill` from `_PENDING_MIGRATION_TABLES`.
+- [ ] **When: switching the news AI provider** (news sentiment + article summaries ONLY — chat, reports, the Insights card and the "why it moved" catalyst always stay on Gemini):
+  1. Set on Railway: `NEWS_LLM_PROVIDER=openai_compat`, `NEWS_LLM_BASE_URL` (e.g. `https://api.deepseek.com`), `NEWS_LLM_API_KEY`, `NEWS_LLM_MODEL` (e.g. `deepseek-flash`), and for a thinking model `NEWS_LLM_EXTRA_BODY` (DeepSeek `{"thinking":{"type":"disabled"}}`; OpenAI `{"reasoning_effort":"minimal"}`). OpenAI can use `NEWS_LLM_JSON_MODE=json_schema`.
+  2. Before relying on it, run the calibration script above with those variables set locally — it re-labels live-labelled articles through the NEW model and compares against the live labeller's own consistency. It must PASS.
+  3. If the provider stores data outside the US (DeepSeek: China), update the privacy policy's provider list and the "located in the United States" sentence — all three copies (`documents/legal/privacy.html`, `backend/app/templates/legal/privacy.html`, `PrivacyPolicyView.swift`).
+  4. Watch the `LLM_USAGE provider=openai_compat` log lines for a day (tokens, finish reasons). A typo or a missing key falls back to Gemini with an ERROR logged once.
+  - To go back: `NEWS_LLM_PROVIDER=gemini`. Labels record the model that made them (`news_sentiment_log.model`).
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
   - Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template
   - publish the Google OAuth consent screen

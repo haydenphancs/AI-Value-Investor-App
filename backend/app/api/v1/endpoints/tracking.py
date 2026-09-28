@@ -249,6 +249,11 @@ async def add_holding(
         ))
     )
     row = result.data[0] if result.data else data
+    # News-tone chart: queue the ticker's 90-day sentiment backfill. Never raises, time-boxed,
+    # a no-op when already covered or while SENTIMENT_BACKFILL_ENABLED is false.
+    from app.services.news_sentiment_backfill_service import nudge_backfill
+
+    await nudge_backfill(supabase, [data.get("ticker")])
     return _row_to_holding(row)
 
 

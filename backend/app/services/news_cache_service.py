@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 
 from app.utils.market_hours import to_utc_instant
 from app.utils.inflight import fail_shared_future
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from app.database import get_supabase
 from app.services.agents.persona_config import neutral_system_instruction
@@ -28,7 +28,12 @@ from app.integrations.fmp import (
     FMPRateLimitException,
     get_fmp_client,
 )
-from app.integrations.gemini import get_gemini_client, is_transient_gemini_error
+from app.integrations.gemini import get_gemini_client
+from app.services.news_llm import (
+    generate_news_json,
+    is_transient_news_llm_error,
+    news_model_name,
+)
 from app.services.market_news_quality import filter_market_articles
 
 logger = logging.getLogger(__name__)
@@ -85,6 +90,60 @@ REFRESH_LOOKBACK_HOURS = 96
 # We treat the top-N ApeWisdom-ranked symbols as "trending". Best-effort only.
 _BUZZ_TOP_N = 40
 _BUZZ_TIMEOUT_SECONDS = 2.0
+
+
+def article_external_id(raw: Dict[str, Any], index: int) -> str:
+    """The cache's identity for one FMP article: url, else title, else a positional
+    placeholder, capped at 500 chars. ONE definition, shared by the cache writer and the
+    sentiment backfill — the label log keys on md5 of this value, so two spellings would
+    count the same article twice."""
+    return (raw.get("url") or raw.get("title") or f"unknown_{index}")[:500]
+
+
+#: The sentiment rules, shared VERBATIM by the per-article enrichment prompt and the
+#: sentiment backfill's labelling prompt, so a backfilled label and a live one are asked
+#: the same question. Changing a word here changes both — and the golden-prompt test.
+SENTIMENT_RUBRIC = """   - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
+   - "bearish": the article leans to a downward catalyst (missed revenue, investigation, recall, downgrade, lawsuit loss, fraud, breach, cut guidance, tightening conditions).
+   - "neutral": ONLY when the article is genuinely two-sided or purely backward-looking / educational with no directional read (a history lesson, a balanced explainer, or up- and down-catalysts that truly cancel out).
+   Commit to the lean — an article that tilts positive is "bullish" even if it notes caveats, and likewise "bearish". Do NOT use "neutral" as a safe default; the confidence score below is where genuine uncertainty belongs."""
+
+
+def sentiment_scope(ticker: str) -> Tuple[str, str]:
+    """``(sentiment_subject, scope_line)`` for a scope's labelling prompt.
+
+    The Market feed is stored under the reserved key __MARKET__, which is not a ticker.
+    Naming it as one asked the model to put "__MARKET__" in related_tickers and to judge
+    each article's lean "for the stock" — there is no stock. Its labels also feed the
+    Market line of the news-sentiment timeline, so they must be read for the market as a
+    whole.
+    """
+    if ticker == MARKET_SCOPE:
+        return (
+            "the overall US stock market",
+            "These are general market news articles, not about one company. Judge "
+            "each article's sentiment for the overall US stock market, and list in "
+            "related_tickers only real ticker symbols the article itself names.",
+        )
+    if ticker:
+        return (
+            "the stock",
+            f"These articles were fetched for ticker {ticker}. Always include {ticker} "
+            "in related_tickers if the article is relevant to it.",
+        )
+    return "the stock", ""
+
+
+#: The enrichment's system instruction (wrapped with the identity + advice guards at the
+#: call). Module-level so the backfill labeller can share its sentiment clause.
+ENRICHMENT_SYSTEM_BASE = (
+    "You are an expert financial translator. Your job is to read dense "
+    "financial news and summarize it for everyday investors. Keep the tone "
+    "friendly, accessible and reliable. Must use correct numbers or data "
+    "if needed. Do not use introductory phrases. "
+    "For sentiment, you MUST return exactly one of: bullish, bearish, neutral. "
+    "No other values are accepted."
+)
 
 
 def is_crypto_scope(scope: str) -> bool:
@@ -647,7 +706,7 @@ class NewsCacheService:
                 )
                 continue
 
-            external_id = (raw.get("url") or raw.get("title") or f"unknown_{i}")[:500]
+            external_id = article_external_id(raw, i)
             # Dedup within the batch: two FMP articles sharing a url/title yield the
             # same (ticker, external_id), and a single ON CONFLICT upsert that touches
             # the same row twice raises Postgres "cannot affect row a second time" →
@@ -985,7 +1044,7 @@ class NewsCacheService:
                 "sentiment_confidence": enrichment.get("confidence", 0),
                 "related_tickers": merged_tickers,
                 "ai_processed": True,
-                "ai_model": NEWS_AI_MODEL,
+                "ai_model": news_model_name(),
             }
 
             # Merge enrichment into row for response
@@ -1015,7 +1074,9 @@ class NewsCacheService:
             if labelled:
                 from app.services.news_sentiment_trend_service import record_labels
 
-                await record_labels(getattr(self, "supabase", None), ticker, labelled)
+                await record_labels(
+                    getattr(self, "supabase", None), ticker, labelled, model=news_model_name(),
+                )
         else:
             success_count = 0
 
@@ -1229,27 +1290,7 @@ class NewsCacheService:
                 f"<<<END_ARTICLE {i}>>>"
             )
 
-        # The Market feed is stored under the reserved key __MARKET__, which is not a
-        # ticker. Naming it as one asked the model to put "__MARKET__" in related_tickers
-        # and to judge each article's lean "for the stock" — there is no stock. Its labels
-        # also feed the Market line of the news-sentiment timeline, so they must be read
-        # for the market as a whole.
-        if ticker == MARKET_SCOPE:
-            sentiment_subject = "the overall US stock market"
-            scope_line = (
-                "These are general market news articles, not about one company. Judge "
-                "each article's sentiment for the overall US stock market, and list in "
-                "related_tickers only real ticker symbols the article itself names."
-            )
-        elif ticker:
-            sentiment_subject = "the stock"
-            scope_line = (
-                f"These articles were fetched for ticker {ticker}. Always include {ticker} "
-                "in related_tickers if the article is relevant to it."
-            )
-        else:
-            sentiment_subject = "the stock"
-            scope_line = ""
+        sentiment_subject, scope_line = sentiment_scope(ticker)
 
         batch_prompt = f"""Analyze the following {len(articles)} financial news articles.
 
@@ -1263,10 +1304,7 @@ For EACH article, provide:
    - NO LEAD-IN. Start that final bullet with the point itself. Never open it with "Investors", "Everyday investors", "For investors,", "Investors should care because", "This matters because" or "Why it matters", and never with a transition of any kind: not "So,", "In short,", "Ultimately,", "The takeaway,", "The takeaway for everyday investors,", "Bottom line,", "Overall,", "In summary,", "The upshot,", "What this means,", and never "So What?" or "So what:". The app marks this bullet with its own icon, so naming it in words is redundant on screen and is stripped before display — a lead-in only costs you words from the 25-word budget.
    - No introductory phrases like "This article discusses..." or "The key points are..."
 2. Sentiment classification — the NET directional lean for {sentiment_subject}, one of these three exact values:
-   - "bullish": the article leans to an upward catalyst (earnings beat, product launch, analyst upgrade, lawsuit win, major contract, approval, raised guidance, easing conditions).
-   - "bearish": the article leans to a downward catalyst (missed revenue, investigation, recall, downgrade, lawsuit loss, fraud, breach, cut guidance, tightening conditions).
-   - "neutral": ONLY when the article is genuinely two-sided or purely backward-looking / educational with no directional read (a history lesson, a balanced explainer, or up- and down-catalysts that truly cancel out).
-   Commit to the lean — an article that tilts positive is "bullish" even if it notes caveats, and likewise "bearish". Do NOT use "neutral" as a safe default; the confidence score below is where genuine uncertainty belongs.
+{SENTIMENT_RUBRIC}
 3. Confidence score: 0-100 (how confident you are in the sentiment call)
 4. Related tickers: Extract ALL US-listed stock ticker symbols (e.g., AAPL, MSFT, GOOGL) explicitly mentioned or clearly referenced in the article. Only include real ticker symbols — no crypto, indices, ETFs, or made-up symbols. Maximum 8 tickers.
 
@@ -1282,21 +1320,17 @@ Return a JSON array with one object per article in order. Each object must have:
 {chr(10).join(articles_text)}"""
 
         try:
-            response = await self.gemini.generate_json(
+            # Through the news features' switchable model (app/services/news_llm.py). On the
+            # default Gemini provider this is the same generate_json call as always — same
+            # prompt, schema, model and system instruction (tests pin it against a golden).
+            response = await generate_news_json(
                 prompt=batch_prompt,
                 # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY. This output is attributed to
                 # "Cay AI" in the Updates UI exactly like the guarded report/chat surfaces,
                 # but built its own bare instruction and inherited neither guard.
-                system_instruction=neutral_system_instruction(
-                    "You are an expert financial translator. Your job is to read dense "
-                    "financial news and summarize it for everyday investors. Keep the tone "
-                    "friendly, accessible and reliable. Must use correct numbers or data "
-                    "if needed. Do not use introductory phrases. "
-                    "For sentiment, you MUST return exactly one of: bullish, bearish, neutral. "
-                    "No other values are accepted."
-                ),
-                model_name=NEWS_AI_MODEL,
+                system_instruction=neutral_system_instruction(ENRICHMENT_SYSTEM_BASE),
                 response_schema=self._ENRICHMENT_SCHEMA,
+                gemini_client=getattr(self, "gemini", None),
             )
 
             text = response.get("text", "")
@@ -1328,7 +1362,7 @@ Return a JSON array with one object per article in order. Each object must have:
             # circuit-governed, so log at WARNING (not an ERROR-level Sentry page);
             # the batch just isn't enriched this pass. Anything else is unexpected
             # → ERROR with a stack.
-            if is_transient_gemini_error(e):
+            if is_transient_news_llm_error(e):
                 logger.warning(
                     f"Gemini batch enrichment degraded (transient) for {ticker or '<mixed>'}: {e}"
                 )

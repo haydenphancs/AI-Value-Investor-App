@@ -740,6 +740,13 @@ CURATION: dict[str, TableDoc] = {
              "article is enriched (first label wins). Stores NO headline, URL or summary — "
              "migration 104's no-news-archive rule. Read through news_sentiment_daily() by "
              "GET /updates/sentiment-trend; swept after 120 days. service_role only."),
+    "public.news_sentiment_backfill": T("news",
+        purpose="Per-ticker queue for the 90-day news-sentiment backfill and its nightly top-up.",
+        key=("scope", "status", "covered_from", "covered_to", "next_run_at"),
+        note="Migration 181. One row per watched ticker (never per user); a fenced lease "
+             "(claim_token) so overlapping instances cannot clobber each other; worked by "
+             "news_sentiment_backfill_service via claim/renew/finish/enqueue/"
+             "discover_sentiment_backfill. The Market feed is never queued. service_role only."),
     "public.ai_insight_budget": T("ops",
         purpose="Global per-day generation cap for Updates insights — the cost ceiling.",
         key=("budget_day", "gen_count"),

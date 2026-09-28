@@ -65,10 +65,20 @@ MAX_LABEL_AGE_HOURS = 96
 _FUTURE_SKEW = timedelta(hours=2)
 
 SENTIMENTS = ("bullish", "bearish", "neutral")
+#: Must equal the CHECK on news_sentiment_log.source (migration 181; test-pinned).
+SOURCES = ("live", "seed", "backfill")
 _SENTIMENT_SET = frozenset(SENTIMENTS)
 
 _CACHE_TTL_SECONDS = 300
+_BUILDING_TTL_SECONDS = 30
 _CACHE_MAX_ENTRIES = 2048
+
+BACKFILL_TABLE = "news_sentiment_backfill"
+HISTORY_BUILDING = "building"
+HISTORY_READY = "ready"
+#: The newest days are always covered by the live labels and the nightly top-up, so a
+#: history counts as "ready" once the backfill reaches this many days before today.
+_READY_RECENT_SLACK_DAYS = 3
 
 
 class SentimentTrendUnavailable(Exception):
@@ -132,20 +142,41 @@ def _clamp_confidence(value: Any) -> Optional[int]:
     return max(0, min(100, n))
 
 
-def build_log_rows(scope: str, rows: Iterable[Dict[str, Any]], *, now: datetime) -> List[Dict[str, Any]]:
+def build_log_rows(
+    scope: str,
+    rows: Iterable[Dict[str, Any]],
+    *,
+    now: datetime,
+    source: str = "live",
+    max_age_hours: Optional[int] = MAX_LABEL_AGE_HOURS,
+    undated: str = "labelled_day",
+    oldest_day: Optional[date] = None,
+    model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Log rows for the labelled cache rows of ONE scope. Pure.
 
-    Skips a row with no identity, no valid label, or a label made more than
-    :data:`MAX_LABEL_AGE_HOURS` after publication. A row without a usable ``published_at``
-    (or one dated in the future) is charted on the labelling day.
+    Skips a row with no identity or no valid label. The defaults are the LIVE writer's rules:
+    a label made more than :data:`MAX_LABEL_AGE_HOURS` after publication is skipped, and a
+    row without a usable ``published_at`` (or one dated in the future) is charted on the
+    labelling day.
+
+    The backfill passes ``source="backfill"``, ``max_age_hours=None`` (history is old by
+    definition), ``undated="skip"`` (an undated historical article must not land on today's
+    bar) and ``oldest_day`` (nothing before the backfill horizon). ``model`` records which
+    model produced the label.
     """
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {SOURCES}, got {source!r}")
+    if undated not in ("labelled_day", "skip"):
+        raise ValueError(f"undated must be 'labelled_day' or 'skip', got {undated!r}")
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     scope = (scope or "").strip()
     if not scope or len(scope) > 32:
         return []
-    oldest = now - timedelta(hours=MAX_LABEL_AGE_HOURS)
+    oldest = now - timedelta(hours=max_age_hours) if max_age_hours is not None else None
     labelled_day = now.astimezone(ET).date()
+    model = (model or "").strip()[:80] or None
     out: List[Dict[str, Any]] = []
     seen: set = set()
     for row in rows:
@@ -161,22 +192,29 @@ def build_log_rows(scope: str, rows: Iterable[Dict[str, Any]], *, now: datetime)
             if isinstance(published, datetime)
             else to_utc_instant(published)
         )
-        if instant is not None and instant < oldest:
+        if oldest is not None and instant is not None and instant < oldest:
             continue
         if instant is None or instant > now + _FUTURE_SKEW:
+            if undated == "skip":
+                continue
             day = labelled_day
         else:
             day = instant.astimezone(ET).date()
+        if oldest_day is not None and day < oldest_day:
+            continue
         seen.add(key)
-        out.append({
+        entry = {
             "scope": scope,
             "article_key": key,
             "et_day": day.isoformat(),
             "sentiment": sentiment,
             "confidence": _clamp_confidence(row.get("sentiment_confidence")),
-            "source": "live",
+            "source": source,
             "labelled_at": now.isoformat(),
-        })
+        }
+        if model:
+            entry["model"] = model
+        out.append(entry)
     return out
 
 
@@ -316,11 +354,108 @@ def summarize_trend(
     return " ".join(parts)
 
 
+def history_status_for(supabase: Any, scope: str, today: date) -> Optional[str]:
+    """See ``NewsSentimentTrendService._history_status``. Blocking; never raises."""
+    from app.config import settings
+
+    if not getattr(settings, "SENTIMENT_BACKFILL_ENABLED", False):
+        return None
+    if not scope or scope == "__MARKET__" or supabase is None:
+        return None
+    try:
+        result = (
+            supabase.table(BACKFILL_TABLE)
+            .select("status,covered_from,covered_to")
+            .eq("scope", scope)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(result, "data", None) or []
+    except Exception as e:  # noqa: BLE001
+        logger.debug("news_sentiment_backfill status read failed for %s (%s: %s)",
+                     scope, type(e).__name__, e)
+        return None
+    row = rows[0] if rows and isinstance(rows[0], dict) else None
+    status = row.get("status") if row else None
+    if status not in ("queued", "running", "done", "failed"):
+        return None          # no row yet, 'unsupported', or not a backfill row at all
+    if status == "done":
+        return HISTORY_READY
+    days = int(getattr(settings, "SENTIMENT_BACKFILL_DAYS", 90) or 90)
+    horizon = today - timedelta(days=max(1, days) - 1)
+    covered_from = _as_date(row.get("covered_from"))
+    covered_to = _as_date(row.get("covered_to"))
+    if (covered_from is not None and covered_to is not None
+            and covered_from <= horizon and covered_to >= today - timedelta(days=_READY_RECENT_SLACK_DAYS)):
+        return HISTORY_READY
+    return HISTORY_BUILDING if status in ("queued", "running") else None
+
+
+def _as_date(value: Any) -> Optional[date]:
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
+
+
 # ── Writes ─────────────────────────────────────────────────────────────────────
 
 
+#: Set once PostgREST reports the `model` column missing (migration 181 not applied yet):
+#: later writes leave it out instead of failing. Process-local; a restart re-checks.
+_model_column_missing = False
+
+
+def _is_missing_model_column(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "model" in text and ("column" in text or "pgrst204" in text)
+
+
+def upsert_log_rows(supabase: Any, payload: List[Dict[str, Any]]) -> int:
+    """Blocking upsert of prepared log rows (first label wins). Returns rows NEWLY written.
+
+    Call through ``asyncio.to_thread``. Raises on failure, except the one it heals: before
+    migration 181 the `model` column does not exist, so the batch is retried once without it
+    — no live label is lost to a deploy that ran ahead of the migration.
+    """
+    global _model_column_missing
+    if not payload:
+        return 0
+    rows = payload
+    if _model_column_missing:
+        rows = [{k: v for k, v in r.items() if k != "model"} for r in payload]
+    try:
+        result = (
+            supabase.table(TABLE)
+            .upsert(rows, on_conflict="scope,article_key", ignore_duplicates=True)
+            .execute()
+        )
+    except Exception as e:
+        if _model_column_missing or not any("model" in r for r in rows) or not _is_missing_model_column(e):
+            raise
+        _model_column_missing = True
+        logger.warning(
+            "news_sentiment_log: `model` column missing (migration 181 not applied) — "
+            "writing labels without it until restart"
+        )
+        rows = [{k: v for k, v in r.items() if k != "model"} for r in payload]
+        result = (
+            supabase.table(TABLE)
+            .upsert(rows, on_conflict="scope,article_key", ignore_duplicates=True)
+            .execute()
+        )
+    return len(getattr(result, "data", None) or [])
+
+
 async def record_labels(
-    supabase: Any, scope: str, rows: Iterable[Dict[str, Any]], *, now: Optional[datetime] = None,
+    supabase: Any,
+    scope: str,
+    rows: Iterable[Dict[str, Any]],
+    *,
+    now: Optional[datetime] = None,
+    model: Optional[str] = None,
 ) -> int:
     """Log the labels of freshly enriched cache rows. Returns rows NEWLY logged. Never raises.
 
@@ -331,7 +466,7 @@ async def record_labels(
     if supabase is None:
         return 0
     try:
-        payload = build_log_rows(scope, rows, now=now or datetime.now(timezone.utc))
+        payload = build_log_rows(scope, rows, now=now or datetime.now(timezone.utc), model=model)
     except Exception as e:  # noqa: BLE001 — a malformed row must not break enrichment
         logger.warning("news_sentiment_log: could not build rows for %s (%s: %s)",
                        scope, type(e).__name__, e)
@@ -339,16 +474,8 @@ async def record_labels(
     if not payload:
         return 0
 
-    def _do() -> int:
-        result = (
-            supabase.table(TABLE)
-            .upsert(payload, on_conflict="scope,article_key", ignore_duplicates=True)
-            .execute()
-        )
-        return len(getattr(result, "data", None) or [])
-
     try:
-        return await asyncio.to_thread(_do)
+        return await asyncio.to_thread(upsert_log_rows, supabase, payload)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "news_sentiment_log: dropped %d label(s) for %s (%s: %s)",
@@ -392,15 +519,21 @@ class NewsSentimentTrendService:
         self._inflight.clear()
 
     async def get_trend(self, scope: str, days: int, *, now: Optional[datetime] = None) -> Dict[str, Any]:
-        """``{scope, days, series, tracking_since}``. Raises :class:`SentimentTrendUnavailable`."""
+        """``{scope, days, series, tracking_since, history_status}``.
+
+        Raises :class:`SentimentTrendUnavailable`."""
         if days not in TREND_DAYS:
             raise ValueError(f"days must be one of {TREND_DAYS}, got {days!r}")
         today = _today_et(now)
         key = (scope, days, today)
 
         cached = self._cache.get(key)
-        if cached and time.monotonic() - cached[0] < _CACHE_TTL_SECONDS:
-            return cached[1]
+        if cached:
+            # A scope whose history is still being built changes minute to minute, so the
+            # app's re-checks must see new weeks arrive: 30 s instead of 5 min.
+            ttl = _BUILDING_TTL_SECONDS if cached[1].get("history_status") == HISTORY_BUILDING else _CACHE_TTL_SECONDS
+            if time.monotonic() - cached[0] < ttl:
+                return cached[1]
 
         pending = self._inflight.get(key)
         if pending is not None:
@@ -468,7 +601,19 @@ class NewsSentimentTrendService:
             "days": days,
             "series": shape_series(raw, today=today, since=since, partial_from=partial_from),
             "tracking_since": tracking_since.isoformat() if tracking_since else None,
+            "history_status": await asyncio.to_thread(self._history_status, scope, today),
         }
+
+    def _history_status(self, scope: str, today: date) -> Optional[str]:
+        """``building`` / ``ready`` / None for the scope's 90-day backfill. Best-effort.
+
+        Blocking — called through ``asyncio.to_thread``. Any failure (migration 181 not yet
+        applied, a Supabase blip, a fake client in a test) is None: the status only decides
+        whether the app shows "Building 90-day history…", never whether the chart loads.
+        None while the backfill is switched off, so a leftover queued row cannot promise a
+        history that nothing is building.
+        """
+        return history_status_for(self.supabase, scope, today)
 
     def sweep_expired(self, today: Optional[date] = None) -> int:
         """Delete labels older than :data:`RETENTION_DAYS` (ET). Best-effort; returns rows."""
@@ -507,6 +652,9 @@ __all__ = [
     "build_log_rows",
     "et_day",
     "get_news_sentiment_trend_service",
+    "history_status_for",
+    "upsert_log_rows",
+    "SOURCES",
     "net_score",
     "normalize_sentiment",
     "open_since",

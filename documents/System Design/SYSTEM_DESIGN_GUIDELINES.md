@@ -167,10 +167,15 @@ rather than an unfinished feature.
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **11** modules): `fmp`, `gemini`, `coingecko`, `fred`,
-`finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`.
+**Integrations** (`backend/app/integrations/`, **12** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+`finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
+`openai_compat`.
 Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
-`get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top. Supabase
+`get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top.
+`openai_compat` is the switchable second provider for the NEWS features only (per-article sentiment
+and summary bullets, and the sentiment backfill), selected by `NEWS_LLM_PROVIDER` through
+`app/services/news_llm.py`; the default is Gemini, and chat, reports, the Insights card and the
+catalyst never use it. Supabase
 is reached through `app/database.py`, not through an integration module.
 
 The folder also holds one **non-client** module, deliberately excluded from that count:
@@ -1033,13 +1038,13 @@ the Performance / Benchmark cards and the 3M–2Y chart never end on a mid-sessi
 
 ### 7.4 Scheduled background jobs (the lifespan loops)
 
-Everything scheduled runs INSIDE the one web process: 24 loops started by
+Everything scheduled runs INSIDE the one web process: 25 loops started by
 `app/main.py::_spawn`, plus one Railway cron service (the marketing worker, §12.2). There is
 no pg_cron, no edge function, no Celery, and no iOS `BGTaskScheduler`. Two facts decide
 whether any of it runs:
 
 - **`ENVIRONMENT` gates every loop.** Unless it is `"development"` (the Settings default —
-  a laptop), all 24 start; in development only the notification trio can run, and only
+  a laptop), all 25 start; in development only the notification trio can run, and only
   behind `RUN_NOTIFICATION_JOBS_LOCALLY`. Railway must therefore set `ENVIRONMENT`, or
   refunds, subscription expiry and every push silently stop.
 - **Exactly ONE uvicorn worker** (`test_deploy_command_parity.py`). Most loops are unclaimed
@@ -1061,6 +1066,7 @@ whether any of it runs:
 | subscription expiry sweep | hourly | — |
 | Updates insight sweeper | 5 min in the market day; crypto-only every 30 min when closed | — |
 | chat starter warm | 15 min while the market is active | `CHAT_STARTER_WARM_ENABLED` (on) |
+| news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
 | marketing publisher / link-hit flush | 10 min / 60 s | `MARKETING_ENABLED` (**off**) / — |
@@ -1261,7 +1267,7 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 | UI preferences | `UserDefaults` | `user_settings.preferences` (JSONB), remote-synced | Appearance, notification toggles, Learn progress. |
 | API keys | never present | environment variables | Never in code, never logged (`app/log_redaction.py`). |
 | Search picks (a tap on a search result) | `UserDefaults` `search.trending.counted.v1` — which tickers this device already sent this week (≤300 keys, cleared at session end) | `search_pick_daily` — an **anonymous** daily count per ticker; no user, device, IP or timestamp column (migration 179 — a precise timestamp on a count of 1 would match one access-log line, and its IP) | De-duplicated per account per ticker per 7 ET days on the device and again in server memory (HMAC digests under a per-process key, never persisted), keyed on the security CLASS (crypto vs the rest) because the SQL sums a symbol's stock/etf/fund rows. Chip names come from FMP's active list or the curated file, never from `watchlist_items.company_name` (client-writable). App Privacy: Search History, **not linked**. |
-| News-tone labels (the Updates chart) | Nothing persisted — the chart is fetched per view (5-min memory cache) | `news_sentiment_log` — Cay AI's bullish/bearish/neutral label per (feed scope, `md5(external_id)::uuid`) and the ET day the article was published (migration 180). No headline, URL, summary or publisher: migration 104 removed the last long-term copy of news text and this must not become a second one. Written once per article when it is enriched (first label wins), read through `news_sentiment_daily()`, swept after 120 days from the news pre-warmer loop | Not user data. Keeping derived labels beyond 24 h touches the open FMP data-handling items (`documents/legal/fmp-order-form-checklist.md`) — an owner decision recorded in OWNER_TASKS. |
+| News-tone labels (the Updates chart) | Nothing persisted — the chart is fetched per view (5-min memory cache) | `news_sentiment_log` — Cay AI's bullish/bearish/neutral label per (feed scope, `md5(external_id)::uuid`) and the ET day the article was published (migration 180). No headline, URL, summary or publisher: migration 104 removed the last long-term copy of news text and this must not become a second one. Written once per article when it is enriched (first label wins), read through `news_sentiment_daily()`, swept after 120 days from the news pre-warmer loop. A per-ticker backfill (migration 181, `news_sentiment_backfill`) adds `source='backfill'` labels for the previous 90 days, once per ticker — never per user — and a nightly top-up keeps them complete; the `model` column records which news model labelled each row | Not user data. Keeping derived labels beyond 24 h touches the open FMP data-handling items (`documents/legal/fmp-order-form-checklist.md`) — an owner decision recorded in OWNER_TASKS. |
 | Files (avatars, narration, PDFs, art) | `LearnAudioCache` on disk (narration, purged on sign-out); `URLCache` (images) | **Supabase Storage** — nine buckets: `user-avatars` private (short-lived signed URLs); `research-pdfs` private, readable only through the owner-checked `GET /research/reports/{id}/pdf` proxy, never a signed URL; the three narration buckets `journey-media`, `money-moves-media`, `book-media` private since migration 128 (signed by the Learn audio routes); `book-covers`, `journey-images`, `money-moves-images`, `home-theme-media` public | Bucket `public` flags are ROWS in `storage.buckets`, invisible in a `--schema-only` dump; their `storage.objects` policies are in the snapshot. |
 
 **No user DATA survives app termination except the Keychain and `UserDefaults`.** Three on-disk
@@ -2653,7 +2659,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 11 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 12 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/

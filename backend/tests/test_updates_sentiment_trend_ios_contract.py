@@ -240,7 +240,10 @@ def test_an_empty_window_keeps_the_chart_and_its_toggle():
     choosing an empty 7D removed the card together with the only toggle back to 30D."""
     fn = _decl_block(_read(MODELS), "func hasEnoughHistory(")
     assert "!days.isEmpty" not in fn
-    assert "trackingSince ?? days.first?.date" in fn
+    assert "trackedDays(today: today, calendar: calendar) >= Self.minimumTrackedDays" in fn
+    tracked = _decl_block(_read(MODELS), "func trackedDays(")
+    assert "trackingSince ?? days.first?.date" in tracked
+    assert "!days.isEmpty" not in tracked
     assert "SentimentTrendDayParser.etToday()" in _read(MODELS).split("func hasEnoughHistory(")[1][:200]
 
 
@@ -258,7 +261,7 @@ def test_the_chart_axis_ends_on_the_et_day():
     assert "SentimentTrendDayParser.etToday()" in domain
     assert "Calendar.current.startOfDay(for: Date())" not in domain
     assert "max(today, lastDay)" in domain
-    axis = _decl_block(chart, "private var axisDates: [Date]")
+    axis = _decl_block(chart, "private var axisDatesUnsorted: [Date]")
     assert "SentimentTrendDayParser.etToday()" in axis
     parser = _decl_block(_read(MODELS), "enum SentimentTrendDayParser")
     assert 'TimeZone(identifier: "America/New_York")' in parser
@@ -271,3 +274,66 @@ def test_a_fund_is_declared_to_the_chat():
     assert "case assetType = \"asset_type\"" in _decl_block(_read(MODELS), "struct UpdatesTabDTO")
     label = _decl_block(_read(CHAT_SCREEN), "private var groundingReferenceLabel: String?")
     assert 'ref.split(separator: "|").first' in label.split("case .updatesScope:")[1]
+
+
+
+# ── 2026-09-27: adaptive window, clipped label, building state ────────────────
+
+
+def test_a_short_history_opens_on_7d_cut_from_the_30d_answer():
+    vm = _read(VM)
+    start = _decl_block(vm, "private func startTrendLoad(")
+    assert "let fetchWindow: SentimentTrendWindow = userPickedWindow ? window : .month" in start
+    assert "if !userPickedWindow && isNewScope { trendWindow = .month }" in start
+    present = _decl_block(vm, "private func present(")
+    assert "trend.trackedDays() < SentimentTrend.shortHistoryDays ? .week : .month" in present
+    assert "sentimentTrend = trend.trimmed(to: display)" in present
+    # Only the user's tap marks the window as chosen.
+    assert vm.count("userPickedWindow = true") == 1
+    assert "userPickedWindow = true" in _decl_block(vm, "func setTrendWindow(")
+
+
+def test_the_last_30d_label_is_anchored_inside_the_plot():
+    chart = _read(CHART)
+    axis = _decl_block(chart, "private var xAxis: some AxisContent")
+    assert "anchor: isTrailingTick(value.index, of: value.count) ? .topTrailing : nil" in axis
+    trailing = _decl_block(chart, "private func isTrailingTick(")
+    assert "trend.window == .month" in trailing and "index == count - 1" in trailing
+    dates = _decl_block(chart, "private var axisDates: [Date]")
+    assert "axisDatesUnsorted.sorted()" in dates, "oldest first, so the last index is today"
+    unsorted = _decl_block(chart, "private var axisDatesUnsorted: [Date]")
+    assert "$0 >= lower && $0 <= latest" in unsorted, "90D drops a month tick near the axis end"
+
+
+def test_building_history_shows_a_placeholder_never_invented_bars():
+    chart = _read(CHART)
+    gate = _decl_block(chart, "private var showsBuildingPlaceholder: Bool")
+    assert "trend.days.isEmpty && trend.isBuildingHistory" in gate
+    body = _decl_block(chart, "var body: some View")
+    assert "if showsBuildingPlaceholder {" in body and "buildingPlaceholder" in body
+    visible = _decl_block(_read(VIEW), "private var visibleTrend: SentimentTrend?")
+    assert "trend.hasEnoughHistory() || trend.isBuildingHistory" in visible
+
+
+def test_the_building_poll_is_bounded_and_cancelled():
+    vm = _read(VM)
+    poll = _decl_block(vm, "private func scheduleTrendPollIfBuilding(")
+    assert "sentimentTrend?.isBuildingHistory == true" in poll
+    assert "trendPollAttempt < trendPollDelays.count" in poll
+    assert "self.selectedTab?.scope == scope" in poll
+    load = _decl_block(vm, "private func loadTrend(")
+    assert "if !trend.isBuildingHistory { trendCache[key] = (Date(), trend) }" in load
+    identity = _decl_block(vm, "func handleIdentityChange(")
+    gate = identity.index("guard isActiveTab")
+    for token in ("trendPollTask?.cancel()", "userPickedWindow = false"):
+        assert identity.index(token) < gate
+    assert "trendPollTask?.cancel()" in _decl_block(vm, "    deinit {")
+    start = _decl_block(vm, "private func startTrendLoad(")
+    assert "trendPollTask?.cancel()" in start
+
+
+def test_history_status_is_decoded_tolerantly():
+    dto = _decl_block(_read(MODELS), "struct SentimentTrendResponse")
+    assert "let historyStatus: String?" in dto
+    ext = _read(MODELS).split("extension SentimentTrend {")[1]
+    assert "SentimentHistoryStatus(rawValue: $0.lowercased())" in ext

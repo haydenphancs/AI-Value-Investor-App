@@ -699,6 +699,8 @@ _PENDING_MIGRATION_TABLES: set[str] = {
     # 2026-09-27: migration 180 (Updates news-sentiment timeline) written, not yet applied —
     # remove after the re-dump.
     "public.news_sentiment_log",
+    # 2026-09-27: migration 181 (news-sentiment backfill queue) written, not yet applied.
+    "public.news_sentiment_backfill",
 }
 # 2026-09-18: 170's four tables (marketing_runs / marketing_assets / marketing_posts /
 # podcast_episodes) were applied and re-dumped, so they left the list — the guard below

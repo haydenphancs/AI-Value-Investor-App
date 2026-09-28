@@ -56,6 +56,33 @@ class Settings(BaseSettings):
     # (one controlled regeneration wave, bounded by the per-cycle and daily caps).
     INSIGHT_AI_MODEL: Optional[str] = None
 
+    # ── News features' switchable model (app/services/news_llm.py) ──
+    # ONLY per-article sentiment + summary bullets and the sentiment backfill. Chat,
+    # reports, the Insights card and the catalyst stay on Gemini whatever these say.
+    # "gemini" (default) or "openai_compat" (DeepSeek, OpenAI, Qwen, Groq, OpenRouter …).
+    # An unknown value or an incomplete openai_compat setup falls back to Gemini, logged.
+    NEWS_LLM_PROVIDER: str = "gemini"
+    NEWS_LLM_MODEL: str = "gemini-2.5-flash-lite"
+    NEWS_LLM_BASE_URL: Optional[str] = None        # e.g. https://api.deepseek.com
+    NEWS_LLM_API_KEY: Optional[str] = None
+    # "json_object" (valid JSON only; the shape is in the prompt) or "json_schema" (OpenAI).
+    NEWS_LLM_JSON_MODE: str = "json_object"
+    # A JSON object merged into every openai_compat request, e.g. DeepSeek
+    # {"thinking": {"type": "disabled"}} or OpenAI {"reasoning_effort": "minimal"}.
+    NEWS_LLM_EXTRA_BODY: Optional[str] = None
+
+    # ── 90-day news-sentiment backfill (news_sentiment_backfill_service) ──
+    # OFF by default: apply migration 181, deploy, run scripts/calibrate_sentiment_backfill.py,
+    # then set true in Railway (documents/OWNER_TASKS.md §2).
+    SENTIMENT_BACKFILL_ENABLED: bool = False
+    SENTIMENT_BACKFILL_DAYS: int = 90
+    # Model calls per ET day (one call = one batch of ≤50 articles), a durable cross-instance
+    # cap. 1500 ≈ 75k articles ≈ $1.65/day on flash-lite at worst.
+    SENTIMENT_BACKFILL_DAILY_CALLS: int = 1500
+    # Gemini's 50%-off Flex tier, for the backfill ONLY (never chat, reports or live
+    # summaries). Falls back to the standard tier once if Flex is busy.
+    SENTIMENT_BACKFILL_FLEX: bool = True
+
     # Price-catalyst grounding (Gemini web-search "why did it move" for big moves)
     PRICE_CATALYST_AI_ENABLED: bool = True       # kill switch; false → FMP fallback
     PRICE_CATALYST_CACHE_TTL_HOURS: int = 24     # a move's reason is fresh daily

@@ -758,6 +758,15 @@ struct SentimentTrendDay: Identifiable, Equatable {
     var netScore: Int { SentimentTrend.netScore(positive: positive, negative: negative, total: total) }
 }
 
+/// Where a scope's 90-day history stands (backend `history_status`). nil = no backfill
+/// applies (the Market feed, an unsupported symbol) or an older backend.
+enum SentimentHistoryStatus: String, Equatable {
+    /// The 90 days are still being fetched and scored; bars fill in, newest weeks first.
+    case building
+    /// The 90 days are covered.
+    case ready
+}
+
 struct SentimentTrend: Equatable {
     let scope: String
     let window: SentimentTrendWindow
@@ -765,9 +774,15 @@ struct SentimentTrend: Equatable {
     let days: [SentimentTrendDay]
     /// The first ET day this scope was scored at all (not just in this window).
     let trackingSince: Date?
+    /// A `var` with a default so the memberwise init (previews) keeps compiling.
+    var historyStatus: SentimentHistoryStatus? = nil
 
     /// Below this many calendar days of tracking the chart is hidden: two bars is not a trend.
     static let minimumTrackedDays = 3
+    /// Below this many tracked days the chart opens on 7D rather than a mostly empty 30D.
+    static let shortHistoryDays = 7
+
+    var isBuildingHistory: Bool { historyStatus == .building }
 
     var positive: Int { days.reduce(0) { $0 + $1.positive } }
     var negative: Int { days.reduce(0) { $0 + $1.negative } }
@@ -783,11 +798,35 @@ struct SentimentTrend: Equatable {
     func hasEnoughHistory(
         today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
     ) -> Bool {
-        guard let start = trackingSince ?? days.first?.date else { return false }
+        trackedDays(today: today, calendar: calendar) >= Self.minimumTrackedDays
+    }
+
+    /// Calendar days from the scope's first scored day through `today`, inclusive; 0 when
+    /// nothing was ever scored. A property of the SCOPE (`trackingSince`), never of the window.
+    func trackedDays(
+        today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
+    ) -> Int {
+        guard let start = trackingSince ?? days.first?.date else { return 0 }
         let span = calendar.dateComponents(
             [.day], from: calendar.startOfDay(for: start), to: calendar.startOfDay(for: today)
         ).day ?? 0
-        return span + 1 >= Self.minimumTrackedDays
+        return max(0, span + 1)
+    }
+
+    /// The same trend cut to a shorter window (the adaptive 7D view is cut from the 30D
+    /// answer, so it costs no request). Never widens: asking for a longer window returns self.
+    func trimmed(
+        to target: SentimentTrendWindow,
+        today: Date = SentimentTrendDayParser.etToday(), calendar: Calendar = .current
+    ) -> SentimentTrend {
+        guard target.days < window.days else { return self }
+        let start = calendar.date(byAdding: .day, value: -(target.days - 1),
+                                  to: calendar.startOfDay(for: today)) ?? today
+        return SentimentTrend(
+            scope: scope, window: target,
+            days: days.filter { calendar.startOfDay(for: $0.date) >= start },
+            trackingSince: trackingSince, historyStatus: historyStatus
+        )
     }
 
     static func netScore(positive: Int, negative: Int, total: Int) -> Int {
@@ -818,10 +857,14 @@ struct SentimentTrendResponse: Codable, Sendable {
     let days: Int?
     let series: [SentimentTrendDayDTO]?
     let trackingSince: String?
+    /// "building" / "ready" / absent. Decoded as a plain string so an unknown future value
+    /// maps to nil instead of failing the whole response.
+    let historyStatus: String?
 
     enum CodingKeys: String, CodingKey {
         case scope, days, series
         case trackingSince = "tracking_since"
+        case historyStatus = "history_status"
     }
 }
 
@@ -868,6 +911,7 @@ extension SentimentTrend {
         self.scope = dto.scope
         self.window = window
         self.trackingSince = SentimentTrendDayParser.parse(dto.trackingSince)
+        self.historyStatus = dto.historyStatus.flatMap { SentimentHistoryStatus(rawValue: $0.lowercased()) }
         var seen = Set<String>()
         self.days = (dto.series ?? []).compactMap { d in
             guard let date = SentimentTrendDayParser.parse(d.date),

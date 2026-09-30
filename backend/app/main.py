@@ -27,10 +27,11 @@ from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openai_compat import close_openai_compat_client
 from app.integrations.openfda import close_openfda_client
+from app.integrations.telegram import close_telegram_client
 from app.integrations.uspto import close_uspto_client
-from app.log_redaction import scrub_sentry_event, SecretRedactingFilter
+from app.log_redaction import scrub_sentry_event, scrub_sentry_transaction, SecretRedactingFilter
 from app.utils.supabase_async import sb_exec
-from app.services.marketing import smart_link
+from app.services.marketing import review_service, smart_link
 from starlette.responses import Response as PlainResponse
 
 logging.basicConfig(
@@ -179,6 +180,9 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
             LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
         ],
         before_send=_sentry_before_send,
+        # Transactions skip before_send: their httpx spans carry full URLs (the Telegram bot
+        # token is in the PATH) and `http.query` (FMP's apikey). Off while tracing is 0.
+        before_send_transaction=scrub_sentry_transaction,
         send_default_pii=False,
         # Client-side belt under `scrub_sentry_event`: the SDK's own scrubber walks frame
         # locals, breadcrumb data and `extra` and blanks every denylisted KEY (`apikey`,
@@ -202,7 +206,7 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
 #: Background tasks that are SUPPOSED to finish. Everything else `_spawn` starts is a
 #: `while True` loop whose normal return is a bug worth a WARNING; these run once by
 #: design, and flagging them every boot is how a REAL loop death gets lost in the noise.
-_ONE_SHOT_TASKS = frozenset({"run_whale_profile_pre_warmer"})
+_ONE_SHOT_TASKS = frozenset({"run_whale_profile_pre_warmer", "marketing_telegram_webhook"})
 
 
 @asynccontextmanager
@@ -479,6 +483,12 @@ async def lifespan(app: FastAPI):
         # counts to `increment_marketing_link_hits` (migration 173) every minute and once more,
         # bounded, on shutdown.
         _spawn(smart_link.run_link_hit_flush_loop(), "marketing_link_hits_flush")
+        # The Telegram review bot's webhook (design doc §12.9): a best-effort one-shot
+        # `setWebhook` — idempotent, bounded, never blocks or fails the boot (a failure logs
+        # WARNING and taps wait for the next restart). Only when all three MARKETING_TELEGRAM_*
+        # settings are set; its sweep runs inside the publisher loop above.
+        if review_service.is_configured():
+            _spawn(review_service.register_webhook(), "marketing_telegram_webhook")
 
     # Outside the else: this family is opt-in-able locally (see `run_notification_jobs`).
     if run_notification_jobs:
@@ -554,6 +564,7 @@ async def lifespan(app: FastAPI):
     await close_uspto_client()
     await close_finra_client()
     await close_openai_compat_client()
+    await close_telegram_client()
     await close_health_client()
     logger.info("Shutting down")
 
@@ -2363,6 +2374,120 @@ async def smart_link_bare(request: Request):
     """Bare `/go` counts as campaign "other". A separate handler, so no query parameter can
     ever stand in for the path segment."""
     return _smart_link_redirect(request, "")
+
+
+# ── Telegram review-bot webhook (SYSTEM_DESIGN_GUIDELINES §12.9) ───────────────
+#
+# The owner's ✅ / ❌ taps on the day's marketing posts arrive here from Telegram. A ROOT route
+# (outside /api/v1 and its licence gate) because it serves no data: it answers `{"ok": true}` and
+# nothing else — never model text (rules/marketing.md §8: this host is the passkey domain).
+#
+# Gate: Telegram's `X-Telegram-Bot-Api-Secret-Token` header, compared in constant time as BYTES
+# against MARKETING_TELEGRAM_WEBHOOK_SECRET. Codes per auth.md §2/§3: no header → 401
+# AUTH_REQUIRED; a wrong header, or a server with the secret unset (fail-CLOSED, ERROR logged
+# once) → 403 AUTH_FORBIDDEN. Behind the gate, `review_service.handle_update` allow-lists the
+# owner's user AND chat id.
+#
+# After the gate the answer is ALWAYS 200: Telegram "will repeat the request" on any non-2xx
+# (Bot API, setWebhook), so an error here would replay a poison update until Telegram gives up.
+# A body over 64 KiB is refused with 413 — a real callback update is a few KB. (Chunked bodies
+# never get this far: `cap_json_body` answers 411; Telegram sends a Content-Length.)
+_telegram_secret_unset_logged = False
+_TELEGRAM_HANDLER_TIMEOUT_SECONDS = 45.0
+
+
+def _verify_telegram_webhook_secret(header: Optional[str]) -> None:
+    global _telegram_secret_unset_logged
+    import secrets
+
+    from app.api.error_response import ErrorCode, auth_error
+
+    expected = settings.MARKETING_TELEGRAM_WEBHOOK_SECRET
+    if not header:
+        raise auth_error(
+            ErrorCode.AUTH_REQUIRED,
+            message=f"telegram webhook reached without {review_service.SECRET_HEADER}",
+        )
+    if not expected:
+        if not _telegram_secret_unset_logged:
+            _telegram_secret_unset_logged = True
+            logger.error(
+                "MARKETING_TELEGRAM_WEBHOOK_SECRET is not set: every Telegram webhook call answers "
+                "403 (fail-closed) and no review tap is applied. Set all three MARKETING_TELEGRAM_* "
+                "variables on the web service."
+            )
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN,
+            message="telegram webhook secret is not configured on this server",
+        )
+    # Bytes, not str: `compare_digest` raises TypeError on non-ASCII str, and Starlette decodes
+    # header values as latin-1 (same reasoning as `require_marketing_worker`).
+    if not secrets.compare_digest(
+        header.encode("utf-8", "ignore"), expected.encode("utf-8", "ignore"),
+    ):
+        logger.warning(
+            "telegram webhook auth failed: header_len=%d server_len=%d", len(header), len(expected),
+        )
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN, message="telegram webhook secret does not match",
+        )
+
+
+def _telegram_body_too_large(size: int) -> JSONResponse:
+    from app.api.error_response import ErrorCode, make_error_response
+
+    logger.warning(
+        "telegram webhook: body of %d bytes refused (cap %d)", size, review_service.MAX_WEBHOOK_BODY_BYTES,
+    )
+    return make_error_response(
+        ErrorCode.INVALID_INPUT,
+        message=f"request body exceeds {review_service.MAX_WEBHOOK_BODY_BYTES} bytes",
+        status_code=413,
+        user_message="That was too large to send.",
+    )
+
+
+@app.post(review_service.WEBHOOK_PATH, include_in_schema=False)
+async def marketing_telegram_webhook(request: Request):
+    """Telegram → the review bot. JSON in, `{"ok": true}` out; see the block comment above."""
+    import json
+
+    _verify_telegram_webhook_secret(request.headers.get(review_service.SECRET_HEADER))
+    cap = review_service.MAX_WEBHOOK_BODY_BYTES
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > cap:
+        return _telegram_body_too_large(declared)
+    body = bytearray()
+    async for part in request.stream():
+        body.extend(part)
+        if len(body) > cap:
+            return _telegram_body_too_large(len(body))
+    try:
+        update = json.loads(bytes(body))
+    except (ValueError, RecursionError) as e:  # UnicodeDecodeError is a ValueError
+        logger.warning(
+            "telegram webhook: unreadable body (%d bytes, %s) — acknowledged and dropped",
+            len(body), type(e).__name__,
+        )
+        return JSONResponse({"ok": True})
+    try:
+        await asyncio.wait_for(
+            review_service.handle_update(update), timeout=_TELEGRAM_HANDLER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "telegram webhook: update handling exceeded %.0f s — acknowledged; the owner can tap again",
+            _TELEGRAM_HANDLER_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.error(
+            "telegram webhook: update handling raised (%s: %s) — acknowledged so Telegram does not "
+            "replay it", type(e).__name__, e, exc_info=True,
+        )
+    return JSONResponse({"ok": True})
 
 
 @app.get("/health", tags=["Root"])

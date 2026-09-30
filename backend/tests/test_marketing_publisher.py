@@ -21,9 +21,17 @@ class _Ledger:
         # ids another tick takes between OUR list and OUR claim: the conditional UPDATE finds
         # them no longer `approved` and returns None.
         self.lose_claim = set()
+        self.list_calls = []
 
-    async def list_posts(self, status, *, limit=50):
-        return [dict(p) for p in self.posts.values() if p["status"] == status][:limit]
+    async def list_posts(self, status, *, limit=50, platforms=None, live_only=False):
+        # Mirrors run_service.list_posts: the filters apply BEFORE the limit, like the SQL.
+        rows = [dict(p) for p in self.posts.values() if p["status"] == status]
+        if platforms is not None:
+            rows = [p for p in rows if p["platform"] in platforms]
+        if live_only:
+            rows = [p for p in rows if (p.get("metadata") or {}).get("dry_run") is False]
+        self.list_calls.append({"platforms": platforms, "live_only": live_only})
+        return rows[:limit]
 
     async def claim_post(self, post_id):
         self.claims.append(post_id)
@@ -44,8 +52,10 @@ class _Ledger:
 
 
 def _post(pid, platform="x", **meta):
+    # create_posts writes `dry_run` on every row; a real (non-rehearsal) post carries False.
     return {"id": pid, "platform": platform, "format": "text", "status": "approved",
-            "idempotency_key": f"2026-09-17:{platform}:text", "attempts": 0, "metadata": meta}
+            "idempotency_key": f"2026-09-17:{platform}:text", "attempts": 0,
+            "metadata": {"dry_run": False, **meta}}
 
 
 @pytest.fixture
@@ -81,7 +91,7 @@ async def test_dry_run_is_decided_before_the_claim_and_touches_no_row(ledger, mo
 
 
 @pytest.mark.asyncio
-async def test_a_dry_run_ROW_is_skipped_even_when_the_web_switch_is_live(ledger, monkeypatch):
+async def test_a_dry_run_ROW_is_never_fetched_when_the_web_switch_is_live(ledger, monkeypatch):
     calls = []
 
     async def adapter(post):
@@ -91,9 +101,50 @@ async def test_a_dry_run_ROW_is_skipped_even_when_the_web_switch_is_live(ledger,
     monkeypatch.setattr(pub, "PUBLISHERS", {"x": adapter})
     counters = await pub.publish_cycle()
     assert calls == ["p1"]                       # p2 carried metadata.dry_run
-    assert counters["published"] == 1 and counters["skipped"] == 1
+    assert ledger.list_calls[-1] == {"platforms": ["x"], "live_only": True}
+    assert counters == {"approved_waiting": 1, "published": 1, "failed": 0, "skipped": 0}
     assert ledger.posts["p1"]["status"] == "published" and ledger.posts["p1"]["cost_micros"] == 15000
     assert ledger.posts["p2"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_row_that_slips_past_the_query_is_still_skipped(ledger, monkeypatch):
+    """Defence in depth: the row check stands behind the `live_only` query filter."""
+    calls = []
+
+    async def adapter(post):
+        calls.append(post["id"])
+        return {"external_id": "x1"}
+
+    async def unfiltered(status, *, limit=50, platforms=None, live_only=False):
+        return [dict(p) for p in ledger.posts.values() if p["status"] == status][:limit]
+
+    monkeypatch.setattr(pub, "PUBLISHERS", {"x": adapter})
+    monkeypatch.setattr(ledger, "list_posts", unfiltered)
+    counters = await pub.publish_cycle()
+    assert calls == ["p1"] and counters["skipped"] == 1 and ledger.posts["p2"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_unsendable_approved_rows_can_never_starve_the_window(monkeypatch):
+    """The bug this query shape fixes: 100 OLDER approved rows the publisher cannot send (a
+    platform with no adapter, a rehearsal) used to fill `list_posts(limit=100)`, and the sendable
+    post behind them was never fetched — nothing was ever posted, with no symptom."""
+    posts = [_post(f"ig{i}", platform="instagram") for i in range(100)]
+    posts += [_post(f"dry{i}", dry_run=True) for i in range(100)]
+    posts.append(_post("x-real"))
+    led = _Ledger(posts)
+    monkeypatch.setattr(pub, "get_marketing_run_service", lambda: led)
+    monkeypatch.setattr(pub.settings, "MARKETING_DRY_RUN", False)
+    sent = []
+
+    async def adapter(post):
+        sent.append(post["id"])
+        return {"external_id": "tw-1"}
+
+    monkeypatch.setattr(pub, "PUBLISHERS", {"x": adapter})
+    counters = await pub.publish_cycle()
+    assert sent == ["x-real"] and counters["published"] == 1
 
 
 @pytest.mark.asyncio
@@ -138,7 +189,7 @@ async def test_a_post_claimed_by_another_tick_is_skipped(ledger, monkeypatch):
         return {"external_id": "x"}
 
     monkeypatch.setattr(pub, "PUBLISHERS", {"x": adapter})
-    ledger.posts["p2"]["metadata"] = {}
+    ledger.posts["p2"]["metadata"] = {"dry_run": False}
     ledger.lose_claim = {"p1"}
     counters = await pub.publish_cycle()
     assert ledger.claims == ["p1", "p2"]           # p1 really reached the claim (not filtered first)

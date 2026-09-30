@@ -50,6 +50,7 @@ from app.schemas.marketing import (
     RUN_STAGES,
     RUN_STATUSES,
     SERVER_OWNED_RUN_METADATA,
+    VIDEO_BRAND_TEXT,
     WORKER_RUN_STATUSES,
 )
 from app.utils.market_hours import ET
@@ -128,6 +129,21 @@ class MarketingRequestInvalid(MarketingRunError):
     does not record, a media post with no media, a stage moving backwards, a status only the
     claim or the publisher may write. 422 MARKETING_REQUEST_INVALID: the same request can never
     succeed, so it must not be retried as a 5xx."""
+
+
+class MarketingJudgeNotEnforced(MarketingRunError):
+    """`create_posts` for a class-A script the semantic judge did not check in `enforce` mode
+    (`shadow` accepts drafts the judge flagged; `off` never asked it). Such a script may be voiced
+    and rendered for inspection, but it never becomes a post — the judge is the gate that makes a
+    reviewed, and later an auto-published, post safe (§12.5). 409 MARKETING_JUDGE_NOT_ENFORCED:
+    deterministic for the run, so the worker closes the day `skipped` instead of retrying."""
+
+
+class MarketingAssetMismatch(MarketingRunError):
+    """The object in the bucket is not what the worker registered (size or content type differ).
+    The object has been DELETED and the row marked `failed`, so the immutable key is free again
+    and a re-render re-uploads it; 409 MARKETING_ASSET_MISSING (the registered object is not
+    there) — the next tick retries the stage."""
 
 
 # ── pure helpers (unit-tested, no I/O) ─────────────────────────────────────────
@@ -852,6 +868,8 @@ class MarketingRunService:
         run_date = date.fromisoformat(str(run["run_date"]))
         if kind == "audio" and isinstance(metadata, dict) and metadata.get("words"):
             await self._check_timed_words(run_id, metadata["words"])
+        if kind == "video":
+            await self._check_onscreen_text(run, metadata if isinstance(metadata, dict) else {})
         try:
             path = storage_path_for(run_date, kind, sha256, ext)
         except ValueError as e:
@@ -896,16 +914,19 @@ class MarketingRunService:
         # The wedge this closes: the worker's PUT landed but the process died before
         # `complete_asset`. The object exists, the row says pending_upload, and every later
         # `x-upsert: false` PUT to the same immutable key would 409 forever. So check the
-        # bucket BEFORE minting a URL and finish the row here if the bytes are already there.
+        # bucket BEFORE minting a URL and finish the row here if the bytes are already there —
+        # through the SAME verification as `complete_asset` (size + content type), or this
+        # branch would be a second path to `ready` that skips it.
         try:
-            already_there = await self._object_exists(path)
+            stat = await self._object_stat(path)
         except MarketingRunError as e:
             # Not fatal: fall through to minting a URL; a real outage surfaces on the PUT.
             logger.warning(
                 "register_asset: existence pre-check failed for %s (%s) — minting anyway", path, e,
             )
-            already_there = False
-        if already_there:
+            stat = None
+        if stat is not None:
+            await self._verify_object(asset, stat)
             ready = _one(
                 await _exec(
                     self.sb.table(ASSETS)
@@ -915,8 +936,8 @@ class MarketingRunService:
                 )
             ) or {**asset, "status": "ready"}
             logger.info(
-                "marketing asset object already in bucket, marked READY without re-upload "
-                "run_id=%s kind=%s path=%s", run_id, kind, path,
+                "marketing asset object already in bucket (verified), marked READY without "
+                "re-upload run_id=%s kind=%s path=%s", run_id, kind, path,
             )
             return ready, None
 
@@ -960,11 +981,67 @@ class MarketingRunService:
                 f"run {run_id}: the narration's timed words are not the accepted script "
                 f"({len(got)} vs {len(expected)} words; first difference at word {at})")
 
-    async def list_ready_assets(self, run_id: str, *, claim: CallerClaim) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-        """(voice_asset_id, ready assets with their public URL) for the run's HOLDER — the
-        read-back a resumed or re-claimed stage derives its media from (rules marketing.md §2).
-        `voice_asset_id` comes from the run's metadata and is returned only if it names a
-        `ready` `audio` asset of THIS run; anything else is logged and returned as None."""
+    async def _check_onscreen_text(self, run: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+        """The check of WHAT A VIDEO DRAWS (§12.8), mirroring `_check_timed_words` for what it
+        says. The worker declares every string it drew (`metadata.onscreen_text`); each must be one
+        of the accepted script's card titles or bodies, its disclaimer card, or the code-owned end
+        card (`VIDEO_BRAND_TEXT`) — and the disclaimer card MUST be among them. The burned
+        captions are the narration's timed words, so the video must name a ready, checked audio
+        asset of the run (`metadata.voice_asset_id`). The server still cannot read pixels; this bounds what a
+        well-behaved worker can claim, and it is what a later media auto-publish rests on."""
+        run_id = run["id"]
+        script = await self.get_script(run_id)
+        output = (script or {}).get("output")
+        if not script or script.get("status") != "accepted" or not isinstance(output, dict):
+            raise MarketingScriptNotReady(f"run {run_id}: no accepted script to check the video against")
+        drawn = metadata.get("onscreen_text")
+        if not isinstance(drawn, list) or not drawn:   # the request schema requires it; defence in depth
+            raise MarketingRequestInvalid(f"run {run_id}: a video must declare metadata.onscreen_text")
+        allowed = set(VIDEO_BRAND_TEXT)
+        for card in output.get("cards") or []:
+            if isinstance(card, dict):
+                allowed.update(str(card.get(k)) for k in ("title", "body") if card.get(k))
+        disclaimer = str(output.get("disclaimer_card") or "")
+        if disclaimer:
+            allowed.add(disclaimer)
+        extra = [t for t in drawn if t not in allowed]
+        if extra:
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the video declares {len(extra)} on-screen string(s) that are not the "
+                f"accepted script's cards, its disclaimer card or the end card (first: {extra[0][:80]!r})")
+        if not disclaimer or disclaimer not in drawn:
+            raise MarketingRequestInvalid(f"run {run_id}: the video does not draw the disclaimer card")
+        # The captions it burns: a READY audio asset of THIS run carrying a timing table — which
+        # `_check_timed_words` compared with the script when that asset registered. Not the run's
+        # `metadata.voice_asset_id`: the worker writes that itself.
+        voice_id = metadata.get("voice_asset_id")
+        voice = next((a for a in await self.list_assets(run_id) if voice_id and a.get("id") == voice_id), None)
+        voice_md = (voice or {}).get("metadata") if isinstance((voice or {}).get("metadata"), dict) else {}
+        if voice is None or voice.get("kind") != "audio" or voice.get("status") != "ready" or not voice_md.get("words"):
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the video's captions must come from a ready, checked narration of this "
+                f"run (voice_asset_id={voice_id!r})")
+
+    @staticmethod
+    def _verified_pointer(run: Dict[str, Any], ready: List[Dict[str, Any]], key: str, kind: str) -> Optional[str]:
+        """`run.metadata[key]` if it names a `ready` asset of `kind` of THIS run, else None (logged)."""
+        meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        pointer = meta.get(key)
+        if not pointer:
+            return None
+        match = next((a for a in ready if a.get("id") == pointer), None)
+        if match is not None and match.get("kind") == kind:
+            return pointer
+        logger.warning("marketing run %s: metadata.%s=%r is not a ready %s asset of this run — "
+                       "ignored", run.get("id"), key, pointer, kind)
+        return None
+
+    async def read_back(self, run_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
+        """`{voice_asset_id, video_asset_id, assets}` for the run's HOLDER — the read-back a
+        resumed or re-claimed stage derives its media from (rules marketing.md §2). Each pointer
+        comes from the run's metadata and is returned only if it names a `ready` asset of the
+        right kind of THIS run; anything else is logged and returned as None. `assets` are the
+        run's ready rows with their public URL."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
@@ -972,47 +1049,92 @@ class MarketingRunService:
         if problem is not None:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         ready = [a for a in await self.list_assets(run_id) if a.get("status") == "ready"]
-        base = f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{settings.MARKETING_MEDIA_BUCKET}"
         for a in ready:
-            a["public_url"] = f"{base}/{a.get('storage_path')}"
-        meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
-        pointer = meta.get("voice_asset_id")
-        voice = None
-        if pointer:
-            match = next((a for a in ready if a.get("id") == pointer), None)
-            if match is not None and match.get("kind") == "audio":
-                voice = pointer
-            else:
-                logger.warning("marketing run %s: metadata.voice_asset_id=%r is not a ready audio "
-                               "asset of this run — ignored", run_id, pointer)
-        return voice, ready
+            a["public_url"] = self.public_url(str(a.get("storage_path")))
+        return {"voice_asset_id": self._verified_pointer(run, ready, "voice_asset_id", "audio"),
+                "video_asset_id": self._verified_pointer(run, ready, "video_asset_id", "video"),
+                "assets": ready}
 
-    async def _object_exists(self, path: str) -> bool:
-        """Is `path` in the media bucket? Distinguishes ABSENT from OUTAGE.
+    async def list_ready_assets(self, run_id: str, *, claim: CallerClaim) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+        """(voice_asset_id, ready assets with their public URL) — `read_back` without the video
+        pointer, kept for its callers."""
+        back = await self.read_back(run_id, claim=claim)
+        return back["voice_asset_id"], back["assets"]
 
-        storage3's `exists()` answers False for ANY non-200 HEAD (a 5xx included), which
-        would turn a Storage outage into "the worker never uploaded". So a False is confirmed
-        with a prefix LIST, which raises on an outage — and that raise becomes
-        `MarketingRunError` (503 → the worker retries) instead of MARKETING_ASSET_MISSING.
-        """
+    @staticmethod
+    def public_url(storage_path: str) -> str:
+        """The unsigned public URL of an object in the media bucket (PUBLIC by design, §12.3)."""
+        base = f"{settings.SUPABASE_URL.rstrip('/')}/storage/v1/object/public/{settings.MARKETING_MEDIA_BUCKET}"
+        return f"{base}/{storage_path}"
+
+    async def _object_stat(self, path: str) -> Optional[Dict[str, Any]]:
+        """`{"size", "mimetype"}` of `path` as Storage recorded the upload, or None when the object
+        is ABSENT. Read from a prefix LIST (the listing carries each object's `metadata`; a HEAD
+        does not), which raises on an outage — that raise becomes `MarketingRunError` (503, the
+        worker retries), never "absent". `size`/`mimetype` are None when the listing omits them."""
         bucket = settings.MARKETING_MEDIA_BUCKET
-        try:
-            if await sb_exec_storage(lambda: self.sb.storage.from_(bucket).exists(path)):
-                return True
-        except Exception as e:
-            raise MarketingRunError(
-                f"storage HEAD failed for {path}: {type(e).__name__}: {e}"
-            ) from e
         prefix, _, name = path.rpartition("/")
         try:
             listing = await sb_exec_storage(
                 lambda: self.sb.storage.from_(bucket).list(prefix, {"limit": 100, "search": name})
             )
         except Exception as e:
+            raise MarketingRunError(f"storage LIST failed for {path}: {type(e).__name__}: {e}") from e
+        for item in listing or []:
+            if (item or {}).get("name") == name:
+                md = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                size = md.get("size", md.get("contentLength"))
+                return {"size": size, "mimetype": md.get("mimetype")}
+        return None
+
+    async def _verify_object(self, asset: Dict[str, Any], stat: Dict[str, Any]) -> None:
+        """The object in the bucket must be the one registered: same byte size, same content type
+        (parameters such as `; charset` ignored). Shared by BOTH paths to `ready`.
+
+        On a MISMATCH the object is deleted and the row marked `failed` before raising
+        `MarketingAssetMismatch`: the key is immutable (`x-upsert: false`), so a wrong object left in
+        place would block its own re-upload forever. When Storage does not report a size or type,
+        nothing is deleted — an unknown is not a mismatch — and the ledger error is retried.
+
+        sha256 is NOT re-computed here (decision 2026-09-29, §12.3): it would mean downloading every
+        MP4 into the single uvicorn worker. Size + type + the worker's own ffprobe gate + the
+        registration checks of what the video says and draws are the verification."""
+        path = str(asset.get("storage_path"))
+        size, mimetype = stat.get("size"), stat.get("mimetype")
+        if size is None or not mimetype:
             raise MarketingRunError(
-                f"storage LIST failed for {path}: {type(e).__name__}: {e}"
-            ) from e
-        return any((item or {}).get("name") == name for item in (listing or []))
+                f"storage reported no size/content type for {path} (size={size!r}, "
+                f"mimetype={mimetype!r}); not marking it ready")
+        want_size = asset.get("bytes")
+        want_type = str(asset.get("content_type") or "").split(";", 1)[0].strip().lower()
+        got_type = str(mimetype).split(";", 1)[0].strip().lower()
+        try:
+            got_size = int(size)
+        except (TypeError, ValueError):
+            raise MarketingRunError(f"storage reported a non-numeric size {size!r} for {path}") from None
+        problems = []
+        if want_size is not None and got_size != int(want_size):
+            problems.append(f"size {got_size} != registered {want_size}")
+        if got_type != want_type:
+            problems.append(f"content type {got_type!r} != registered {want_type!r}")
+        if not problems:
+            return
+        logger.error("marketing asset MISMATCH id=%s path=%s: %s — deleting the object and failing "
+                     "the row", asset.get("id"), path, "; ".join(problems))
+        bucket = settings.MARKETING_MEDIA_BUCKET
+        try:
+            await sb_exec_storage(lambda: self.sb.storage.from_(bucket).remove([path]))
+        except Exception as e:
+            raise MarketingRunError(
+                f"asset {asset.get('id')} at {path} does not match ({'; '.join(problems)}) and could "
+                f"not be deleted: {type(e).__name__}: {e}") from e
+        await _exec(
+            self.sb.table(ASSETS).update({"status": "failed", "updated_at": _now_iso()}).eq("id", asset.get("id")),
+            op="verify_object.fail", asset_id=asset.get("id"),
+        )
+        raise MarketingAssetMismatch(
+            f"asset {asset.get('id')} at {path} is not what was registered ({'; '.join(problems)}); "
+            "object deleted, row failed")
 
     async def complete_asset(self, asset_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
         """Flip `pending_upload` → `ready` ONLY after the object is verifiably in the bucket.
@@ -1040,11 +1162,13 @@ class MarketingRunService:
                 f"asset {asset_id}: run {run.get('id')} is {run.get('status')!r}; assets complete "
                 "only on an in_progress run")
         path = asset["storage_path"]
-        if not await self._object_exists(path):
+        stat = await self._object_stat(path)
+        if stat is None:
             raise MarketingAssetMissingInStorage(
                 f"asset {asset_id} at {path} is not in bucket "
                 f"{settings.MARKETING_MEDIA_BUCKET}"
             )
+        await self._verify_object(asset, stat)
         updated = _one(
             await _exec(
                 self.sb.table(ASSETS)
@@ -1105,6 +1229,16 @@ class MarketingRunService:
             raise MarketingScriptNotReady(
                 f"run {run_id} has no accepted script (status={(script or {}).get('status')})"
             )
+        # The semantic judge is the gate behind every class-A post (§12.5): `shadow` accepts drafts
+        # it flagged and `off` never asks it, so a package it did not check in `enforce` mode never
+        # becomes a post — whatever MARKETING_AUTO_PUBLISH or a reviewer later says. The writer
+        # records the mode IN the package (`output.judge.mode`; absent means off).
+        if str(run.get("content_class") or "A") == "A":
+            judge = output.get("judge") if isinstance(output.get("judge"), dict) else {}
+            if judge.get("mode") != "enforce":
+                raise MarketingJudgeNotEnforced(
+                    f"run {run_id}: the accepted script was judged in mode {judge.get('mode') or 'off'!r}, "
+                    "not 'enforce' — no post is recorded (set MARKETING_JUDGE_MODE=enforce on the web)")
         copy_by_platform = output.get("posts") if isinstance(output.get("posts"), dict) else {}
         wants_assets = any(spec.get("asset_ids") for spec in specs)
         assets = {a.get("id"): a for a in await self.list_assets(run_id)} if wants_assets else {}
@@ -1207,16 +1341,66 @@ class MarketingRunService:
         )
         return out
 
-    async def list_posts(self, status: str, *, limit: int = 50) -> List[Dict[str, Any]]:
-        res = await _exec(
-            self.sb.table(POSTS)
-            .select("*")
-            .eq("status", status)
-            .order("created_at")
-            .limit(limit),
-            op="list_posts", status=status,
-        )
+    async def list_posts(
+        self, status: str, *, limit: int = 50, platforms: Optional[List[str]] = None,
+        live_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Oldest first. `platforms` and `live_only` filter IN the query, before the LIMIT: the
+        publisher used to fetch the 100 oldest rows and filter them afterwards, so 100 approved rows
+        it could never send (a platform with no adapter, a rehearsal) starved every sendable post
+        behind them. `live_only` keeps rows whose `metadata.dry_run` is exactly false (`create_posts`
+        writes it on every row; a row without it is treated as a rehearsal — never sent)."""
+        query = self.sb.table(POSTS).select("*").eq("status", status)
+        if platforms is not None:
+            if not platforms:
+                return []
+            query = query.in_("platform", list(platforms))
+        if live_only:
+            query = query.eq("metadata->>dry_run", "false")
+        res = await _exec(query.order("created_at").limit(limit), op="list_posts", status=status)
         return list(getattr(res, "data", None) or [])
+
+    async def get_post(self, post_id: str) -> Optional[Dict[str, Any]]:
+        return _one(
+            await _exec(self.sb.table(POSTS).select("*").eq("id", post_id).limit(1),
+                        op="get_post", post_id=post_id)
+        )
+
+    async def review_post(self, post_id: str, decision: str, *, reviewed_by: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """A human's verdict on a `pending_review` post: `approve` → `approved` (approved_at /
+        approved_by), `reject` → `rejected`. ONE conditional UPDATE on `status = pending_review`,
+        so a double tap, a second reviewer or a race with anything else that moves the row can
+        never flip a decided post (the unconditional `mark_post` is the publisher's, not this).
+
+        Returns (outcome, row): `approved` / `rejected` when this call decided it,
+        `already_<status>` when the post was no longer pending, `not_found` when it does not exist.
+        The verdict is also kept in `metadata.review` ({decision, by, at})."""
+        if decision not in ("approve", "reject"):
+            raise ValueError(f"unknown review decision {decision!r}")
+        current = await self.get_post(post_id)
+        if current is None:
+            return "not_found", None
+        if current.get("status") != "pending_review":
+            return f"already_{current.get('status')}", current
+        now = _now_iso()
+        status = "approved" if decision == "approve" else "rejected"
+        meta = dict(current.get("metadata") or {}) if isinstance(current.get("metadata"), dict) else {}
+        meta["review"] = {"decision": status, "by": reviewed_by, "at": now}
+        patch: Dict[str, Any] = {"status": status, "metadata": meta, "updated_at": now}
+        if status == "approved":
+            patch.update({"approved_at": now, "approved_by": reviewed_by})
+        updated = _one(
+            await _exec(
+                self.sb.table(POSTS).update(patch).eq("id", post_id).eq("status", "pending_review"),
+                op="review_post", post_id=post_id,
+            )
+        )
+        if updated is None:   # decided by someone else between the read and this write
+            again = await self.get_post(post_id)
+            return (f"already_{(again or {}).get('status')}" if again else "not_found"), again
+        logger.info("marketing post %s post_id=%s platform=%s by=%s", status.upper(), post_id,
+                    updated.get("platform"), reviewed_by)
+        return status, updated
 
     async def claim_post(self, post_id: str) -> Optional[Dict[str, Any]]:
         """approved → queued, atomically. None means another tick took it (or an admin

@@ -300,6 +300,17 @@ class ErrorCode(str, Enum):
     # does not record, a media post without its media, a stage moving backwards, a status the
     # worker may not set). 422: the same request can never succeed.
     MARKETING_REQUEST_INVALID = "MARKETING_REQUEST_INVALID"
+    # create_posts for a class-A script the semantic judge did not check in `enforce` mode
+    # (MARKETING_JUDGE_MODE=shadow/off on the web). 409, deterministic for the run: the worker
+    # closes the day `skipped` (skip_reason judge_not_enforced) instead of retrying.
+    MARKETING_JUDGE_NOT_ENFORCED = "MARKETING_JUDGE_NOT_ENFORCED"
+    # The Telegram review bot (app/integrations/telegram.py, design doc §12.9) failed: flood
+    # control, an outage, or a refused request. WEB-SIDE ONLY — raised inside the review sweep
+    # and the webhook, which log it and never return it (the webhook answers 200 after its
+    # gate), so like the rest of this family it has no AppError branch on purpose. It exists so
+    # a Telegram failure classified anywhere is never mislabelled FMP_RATE_LIMITED ("429" in
+    # the message) or FMP_UNAVAILABLE ("timeout").
+    MARKETING_REVIEW_BOT_UNAVAILABLE = "MARKETING_REVIEW_BOT_UNAVAILABLE"
 
 
 # Default user-facing copy per code. Endpoints can override per-call.
@@ -318,6 +329,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ),
     ErrorCode.MARKETING_REQUEST_INVALID: (
         "The marketing worker request breaks the internal API contract; it will not succeed on retry."
+    ),
+    ErrorCode.MARKETING_JUDGE_NOT_ENFORCED: (
+        "The day's script was not checked by the compliance judge in enforce mode; no post is recorded."
+    ),
+    ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: (
+        "The Telegram review bot could not reach Telegram; the review sweep retries on its next cycle."
     ),
     ErrorCode.EMAIL_NOT_CONFIRMED: (
         "Please confirm your email address first. Check your inbox for the "
@@ -685,6 +702,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.MARKETING_SCRIPT_NOT_READY: 409,
     ErrorCode.MARKETING_RUN_NOT_HELD: 409,
     ErrorCode.MARKETING_REQUEST_INVALID: 422,
+    ErrorCode.MARKETING_JUDGE_NOT_ENFORCED: 409,
+    ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE: 503,
 }
 
 
@@ -814,6 +833,12 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     # Matched by NAME ahead of every heuristic below: these are our own classes, their
     # messages mention buckets and paths, and the generic tail would call them
     # REPORT_GENERATION_FAILED. Order matters — the specific subclasses first.
+    if "marketingjudgenotenforced" in cls:
+        # Ahead of the "marketingjudge" branch below, whose substring it contains.
+        return ErrorCode.MARKETING_JUDGE_NOT_ENFORCED, _DEFAULT_STATUS[ErrorCode.MARKETING_JUDGE_NOT_ENFORCED]
+    if "marketingassetmismatch" in cls:
+        # The object was deleted and the row failed; the registered object is not there.
+        return ErrorCode.MARKETING_ASSET_MISSING, _DEFAULT_STATUS[ErrorCode.MARKETING_ASSET_MISSING]
     if "marketingscriptnotready" in cls:
         return ErrorCode.MARKETING_SCRIPT_NOT_READY, _DEFAULT_STATUS[ErrorCode.MARKETING_SCRIPT_NOT_READY]
     if "marketingrunnotheld" in cls:
@@ -831,6 +856,19 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
         # (blocked / cut off / not JSON). A writer failure — the script is simply not ready; its
         # message may say "timeout", which the generic heuristics below would call FMP.
         return ErrorCode.MARKETING_SCRIPT_NOT_READY, _DEFAULT_STATUS[ErrorCode.MARKETING_SCRIPT_NOT_READY]
+
+    # ── Telegram review bot (app/integrations/telegram.py) ────────────────────────
+    # By NAME, up here with the other marketing classes and ahead of every heuristic: a 429's
+    # message says "HTTP 429" (→ FMP_RATE_LIMITED below) and a timeout's says "timed out", and
+    # neither is the market-data provider. A refused request (4xx) is permanent for that
+    # request, so it is 502 rather than the retryable 503.
+    if cls.startswith("telegram"):
+        if "requesterror" in cls or "notconfigured" in cls:
+            return ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE, 502
+        return (
+            ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE,
+            _DEFAULT_STATUS[ErrorCode.MARKETING_REVIEW_BOT_UNAVAILABLE],
+        )
 
     # ── Watchlist datastore unreadable (tracking_service) ─────────────
     # Checked BEFORE the generic heuristics below: a PostgREST read timeout

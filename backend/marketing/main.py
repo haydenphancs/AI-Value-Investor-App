@@ -21,10 +21,13 @@ Keep it that way: stdlib + httpx only at module import; the media stages (Phases
 their heavy imports lazily inside their stage functions.
 
 Environment (all MARKETING_* so they never collide with the web service's variables):
-  MARKETING_API_BASE_URL     https://<backend host>  (Railway private: http://<svc>.railway.internal:PORT)
+  MARKETING_API_BASE_URL     https://caydexinvest.com — the web service's PUBLIC URL. (Railway private
+                             networking is NOT a drop-in: the web binds IPv4 0.0.0.0, and older
+                             private networks are IPv6-only.)
   MARKETING_WORKER_TOKEN     shared secret, same value as the web service's setting
   MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's run; default 16
-  MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase3"
+  MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase4"
+  MARKETING_RENDER_THREADS   optional x264 thread count (default: the cgroup CPU quota, max 4)
   MARKETING_DRY_RUN          "true" (default) — recorded on the run; the publisher honours it
   MARKETING_FORCE            "1" bypasses the hour gate (manual runs, local testing)
   MARKETING_RUN_DATE         YYYY-MM-DD override of the ET date to claim
@@ -78,10 +81,11 @@ RUN_STAGES = ("planned", "selected", "scripted", "voiced", "rendered", "assets_r
 
 _RETRYABLE_STATUS = {502, 503, 504}
 _HTTP_ATTEMPTS = 3
+#: BackendClient's per-request timeout.
+BACKEND_TIMEOUT_SECONDS = 30.0
+#: The longest ONE backend call can take: every attempt times out, plus the 2/4/6 s back-offs.
+BACKEND_CALL_WORST_SECONDS = _HTTP_ATTEMPTS * BACKEND_TIMEOUT_SECONDS + sum(2 * a for a in range(1, _HTTP_ATTEMPTS + 1))
 
-#: Phase 2 stops after the script: voice/render are Phases 3-4. A run that got this far is
-#: closed `skipped` with this reason, never `media_ready` (no media, no posts exist).
-PHASE_CLOSE_REASON = "phase3_voice_only"
 #: Poll cadence and budget for the day's script. One generation is a draft plus at most one
 #: repair, and one `generate_json` call can take ~572 s in the worst case (the web side's
 #: `script_service.LEASE_SECONDS` is sized from it), so a slow generation can outlast this
@@ -92,10 +96,29 @@ SCRIPT_POLL_BUDGET_SECONDS = 15 * 60
 #: Hard ceiling on one tick, kept BELOW the backend's MARKETING_RUN_STALE_SECONDS (2700) so a
 #: live tick can never be mistaken for an abandoned one and re-claimed underneath itself.
 WORKER_DEADLINE_SECONDS = 30 * 60
-#: A stage may START only with at least this much of the tick left: the longest stage (voice:
-#: model load + synthesis + encode under its own child-process timeout) must be able to finish
-#: before WORKER_DEADLINE_SECONDS, or it is deferred to the next tick instead.
-STAGE_START_MARGIN_SECONDS = 10 * 60
+#: A stage may START only with its margin of the tick left (STAGE_START_MARGINS). The media stages
+#: get the largest: their worst case — voice: its shared synthesis budget + encode + probe +
+#: upload (`voice.worst_case_seconds`); render: its ffmpeg timeout + download + probes + upload
+#: (`render.worst_case_seconds`) — plus their backend calls (BACKEND_CALL_WORST_SECONDS each,
+#: retries included) ends well inside MARKETING_RUN_STALE_SECONDS even when it starts at the
+#: latest moment allowed, and the stage heartbeats every minute meanwhile, so its claim never looks
+#: abandoned. (It can end past WORKER_DEADLINE_SECONDS on a slow backend; the stale window is the
+#: bound that matters.) A stage that cannot start in time is deferred to the next tick.
+#: tests/test_marketing_worker.py pins the relation for every stage.
+STAGE_START_MARGIN_SECONDS = 12 * 60
+#: A quick stage (one or two backend calls) needs only a small margin: gating it on the media
+#: stages' 12 minutes closed a finished day `failed` and spent an attempt for a one-second stage
+#: (review 2026-09-29). `voiced`/`rendered` use the small margin on a day with no video outlet.
+QUICK_STAGE_MARGIN_SECONDS = 2 * 60
+STAGE_START_MARGINS: Dict[str, int] = {
+    "selected": QUICK_STAGE_MARGIN_SECONDS,
+    "scripted": QUICK_STAGE_MARGIN_SECONDS,   # the poll is bounded by its own budget
+    "voiced": STAGE_START_MARGIN_SECONDS,
+    "rendered": STAGE_START_MARGIN_SECONDS,
+    "assets_ready": 4 * 60,                    # read-back + create_posts, retries included
+}
+#: The signed-upload PUT's timeout (part of every media stage's worst case).
+UPLOAD_TIMEOUT_SECONDS = 120.0
 
 
 # ── pure helpers (unit-tested) ────────────────────────────────────────────────
@@ -230,7 +253,7 @@ class BackendClient:
     """Thin client for `/api/v1/internal/marketing/*`. Every call is idempotent by contract,
     so transient 5xx / connection errors are retried a few times with a short backoff."""
 
-    def __init__(self, base_url: str, token: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, token: str, *, timeout: float = BACKEND_TIMEOUT_SECONDS) -> None:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/") + "/api/v1/internal/marketing",
             headers={"X-Marketing-Worker-Token": token, "User-Agent": "caydex-marketing-worker"},
@@ -322,7 +345,7 @@ def upload_signed(upload: Dict[str, Any], data: bytes, *, apikey: Optional[str] 
     if apikey:
         headers["apikey"] = apikey
     filename = upload["path"].rsplit("/", 1)[-1]
-    with httpx.Client(timeout=120.0) as c:
+    with httpx.Client(timeout=UPLOAD_TIMEOUT_SECONDS) as c:
         resp = c.put(
             upload["url"],
             files={"file": (filename, data, upload["content_type"])},
@@ -330,7 +353,8 @@ def upload_signed(upload: Dict[str, Any], data: bytes, *, apikey: Optional[str] 
         )
     if resp.status_code == 409:
         # The key is immutable and the object is already there — a previous tick's PUT landed
-        # but its `complete` never ran. Not an error: `complete_asset` HEAD-verifies next.
+        # but its `complete` never ran. Not an error: `complete_asset` verifies its size and
+        # content type next.
         logger.info("signed upload PUT %s -> 409 (already exists); continuing to complete", upload["path"])
         return
     if resp.status_code >= 400:
@@ -371,12 +395,16 @@ def stage_preflight(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]
     if not voice_env["ready"]:
         # Loud before the day is spent: the voice stage would fail on exactly this later.
         logger.error("preflight: the voice stage cannot run in this image: %s", voice_env["problems"])
+    render_env = render_readiness(ctx["fonts_dir"])
+    if not render_env["ready"]:
+        logger.error("preflight: the render stage cannot run in this image: %s", render_env["problems"])
     api.update_run(
         run["id"],
         # Run metadata (service-role only), NOT the public manifest: the memory limit and model
         # revisions describe this container, and the manifest must stay deterministic.
         metadata={"preflight": {"ffmpeg": manifest["ffmpeg"], "fonts": manifest["fonts"],
-                                "python": manifest["python"], "voice": voice_env}},
+                                "python": manifest["python"], "voice": voice_env,
+                                "render": render_env}},
         timings={"preflight_s": round(time.monotonic() - ctx["t0"], 3)},
     )
 
@@ -424,6 +452,44 @@ def voice_readiness(fonts_dir: str) -> Dict[str, Any]:
         pass
     return {"ready": not problems, "problems": problems, "memory_limit": memory,
             "hf_offline": os.environ.get("HF_HUB_OFFLINE") == "1", "revisions": revisions}
+
+
+#: The ffmpeg filters the render needs (Debian bookworm's 5.1 build has them all).
+RENDER_FILTERS = ("ass", "xfade", "loop", "apad")
+
+
+def render_readiness(fonts_dir: str) -> Dict[str, Any]:
+    """What the `rendered` stage needs, checked cheaply: ffmpeg/ffprobe with the filters it uses,
+    Pillow with raqm (the layout engine text is measured with on Linux — a BASIC-layout image
+    would wrap differently from every preview), the caption face and the brand logo."""
+    problems: List[str] = []
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        problems.append("ffmpeg/ffprobe missing")
+    else:
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-filters"], capture_output=True, text=True,
+                                 timeout=15, check=False).stdout
+            names = {line.split()[1] for line in out.splitlines() if len(line.split()) > 2}
+            missing = [f for f in RENDER_FILTERS if f not in names]
+            if missing:
+                problems.append(f"ffmpeg lacks filter(s) {missing}")
+        except (OSError, subprocess.SubprocessError) as e:
+            problems.append(f"ffmpeg -filters failed: {type(e).__name__}")
+    raqm = False
+    try:
+        from PIL import features
+
+        raqm = bool(features.check("raqm"))
+    except Exception as e:  # noqa: BLE001 — reported below, never raised from a preflight
+        problems.append(f"Pillow unavailable: {type(e).__name__}")
+    if not raqm:
+        problems.append("Pillow has no raqm layout engine")
+    if not os.path.isfile(os.path.join(fonts_dir, "Inter-Bold.ttf")):
+        problems.append("Inter-Bold.ttf missing from the fonts dir")
+    if not os.path.isfile(os.path.join(os.path.dirname(fonts_dir.rstrip("/")), "brand", "caydex-logo.png")):
+        problems.append("brand logo missing (assets/brand/caydex-logo.png)")
+    return {"ready": not problems, "problems": problems, "raqm": raqm}
 
 
 #: `rejected` kick body `reason` → the run's `metadata.skip_reason`. A `rejected` day is not
@@ -500,8 +566,18 @@ def accepted_script(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]
             f"status={status!r} with{'' if script else 'out'} a script"
         )
     ctx["script"] = script
+    _remember_selection(ctx, state)
     logger.info("script re-derived for resumed run_id=%s outlets=%s", run["id"], script.get("outlets"))
     return script
+
+
+def _remember_selection(ctx: Dict[str, Any], state: Dict[str, Any]) -> None:
+    """The kick carries the day's `template_id` / `source_ref` at its top level, beside the script
+    (the run row's mirror of them is best-effort). The render records the template; keep both
+    from the SAME accepted answer the script came from."""
+    for key in ("template_id", "source_ref"):
+        if isinstance(state.get(key), str):
+            ctx[key] = state[key]
 
 
 def stage_select(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> None:
@@ -526,6 +602,7 @@ def stage_script(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
         status = state.get("status")
         if status == "accepted" and state.get("script"):
             ctx["script"] = state["script"]
+            _remember_selection(ctx, state)
             logger.info("script ACCEPTED run_id=%s outlets=%s after %d poll(s)", run["id"],
                         state["script"].get("outlets"), polls)
             return
@@ -541,7 +618,7 @@ def stage_script(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
 
 
 # Ordered (completed-stage-name, fn). A stage runs when the run's checkpoint is BEFORE its
-# name. Phase 2 implements selection and the script; Phases 3-4 append voice and render.
+# name: selection and the script (Phase 2), the voice (Phase 3), the render and the posts (Phase 4).
 # A stage never trusts `ctx` for what an EARLIER stage produced — a resumed run skipped that
 # stage. `run_pipeline` re-derives the script (`accepted_script`) before any stage after
 # `scripted`; media a later stage needs comes from the server's `ready` asset rows.
@@ -553,10 +630,26 @@ def stage_voice(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) ->
     return voice.stage_voice(api, run, ctx, skip=SkipRun, uploader=upload_signed, hasher=sha256_hex)
 
 
+def stage_render(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Phase 4: the day's video (marketing/render.py), lazily imported like the voice stage."""
+    from marketing import render
+
+    return render.stage_render(api, run, ctx, skip=SkipRun, uploader=upload_signed, hasher=sha256_hex)
+
+
+def stage_posts(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Phase 4: record the day's posts; the server writes their captions and holds them for review."""
+    from marketing import render
+
+    return render.stage_posts(api, run, ctx, skip=SkipRun)
+
+
 MEDIA_STAGES: List[Tuple[str, Callable[[BackendClient, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]]] = [
     ("selected", stage_select),
     ("scripted", stage_script),
     ("voiced", stage_voice),
+    ("rendered", stage_render),
+    ("assets_ready", stage_posts),
 ]
 
 
@@ -564,6 +657,41 @@ def _close_skipped(api: BackendClient, run: Dict[str, Any], reason: str) -> str:
     api.update_run(run["id"], status="skipped", finished=True, metadata={"skip_reason": reason})
     logger.info("run_id=%s closed SKIPPED reason=%s", run["id"], reason)
     return "skipped"
+
+
+def stage_start_margin(name: str, ctx: Dict[str, Any]) -> int:
+    """How much of the tick a stage needs left to START (STAGE_START_MARGINS). A media stage on a
+    day with no video outlet does nothing, so it takes the quick margin."""
+    margin = STAGE_START_MARGINS.get(name, STAGE_START_MARGIN_SECONDS)
+    if name in ("voiced", "rendered"):
+        from marketing import render
+
+        script = ctx.get("script") if isinstance(ctx.get("script"), dict) else {}
+        if not render.video_outlets(script.get("outlets") or []):
+            return QUICK_STAGE_MARGIN_SECONDS
+    return margin
+
+
+def memory_timings(stage: str) -> Dict[str, float]:
+    """Peak memory so far, in MiB, for the stage's checkpoint `timings` (the voice child and the
+    ffmpeg child are separate processes, so RUSAGE_CHILDREN is where the media stages show up;
+    cgroup v2 `memory.peak` is the whole container's peak where the kernel has it). The 4 GB
+    sizing is checked against these numbers, not against the configured limit."""
+    out: Dict[str, float] = {}
+    try:
+        import resource
+
+        scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024   # bytes vs KiB
+        out[f"{stage}_children_maxrss_mb"] = round(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * scale, 1)
+        out[f"{stage}_self_maxrss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale, 1)
+    except (ImportError, OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory.peak", encoding="utf-8") as f:
+            out[f"{stage}_cgroup_peak_mb"] = round(int(f.read().strip()) / (1024 * 1024), 1)
+    except (OSError, ValueError):
+        pass
+    return out
 
 
 def run_pipeline(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -> str:
@@ -581,11 +709,13 @@ def run_pipeline(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
             # the script is accepted and immutable, so anything else is a failure, not a verdict.
             accepted_script(api, run, ctx)
         elapsed = time.monotonic() - ctx["t0"]
-        if elapsed > WORKER_DEADLINE_SECONDS - STAGE_START_MARGIN_SECONDS:
+        margin = stage_start_margin(name, ctx)
+        if elapsed > WORKER_DEADLINE_SECONDS - margin:
             # Every stage starts inside the tick's budget, so no stage can run past
             # MARKETING_RUN_STALE_SECONDS and meet a re-claimer mid-write (the claim fence
             # would refuse its writes anyway — this keeps it from spending the work).
-            raise WorkerDeferred(f"{elapsed:.0f}s into the tick, too late to start stage {name}")
+            raise WorkerDeferred(f"{elapsed:.0f}s into the tick, too late to start stage {name} "
+                                 f"(it needs {margin}s)")
         t = time.monotonic()
         logger.info("stage %s: start", name)
         try:
@@ -593,7 +723,8 @@ def run_pipeline(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
         except SkipRun as skip:
             # Caught BEFORE the checkpoint: a skip is a verdict on the day, not a finished stage.
             return _close_skipped(api, run, skip.reason)
-        checkpoint: Dict[str, Any] = {"stage": name, "timings": {f"{name}_s": round(time.monotonic() - t, 3)}}
+        checkpoint: Dict[str, Any] = {"stage": name, "timings": {f"{name}_s": round(time.monotonic() - t, 3),
+                                                                 **memory_timings(name)}}
         if produced:
             # What the stage produced rides in the SAME PATCH as its checkpoint (e.g. the voiced
             # stage's voice_asset_id): a resume can never see the stage without its output.
@@ -603,8 +734,9 @@ def run_pipeline(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]) -
         logger.info("stage %s: done in %.1fs", name, time.monotonic() - t)
 
     if completed != RUN_STAGES[-1]:
-        # Stages after `completed` do not exist yet (Phases 3-4). Close honestly.
-        return _close_skipped(api, run, PHASE_CLOSE_REASON)
+        # Every stage exists since Phase 4; reaching here means MEDIA_STAGES and RUN_STAGES
+        # drifted apart. Never claim media_ready for a run whose posts may not exist.
+        raise RuntimeError(f"pipeline ended at stage {completed!r}, not {RUN_STAGES[-1]!r}")
     api.update_run(run["id"], status="media_ready", finished=True)
     return "media_ready"
 
@@ -620,7 +752,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     run_hour = int(os.environ.get("MARKETING_RUN_HOUR_ET", "16"))
-    worker_version = os.environ.get("MARKETING_WORKER_VERSION", "phase3").strip() or "phase3"
+    worker_version = os.environ.get("MARKETING_WORKER_VERSION", "phase4").strip() or "phase4"
     dry_run = env_flag("MARKETING_DRY_RUN", True)
     force = env_flag("MARKETING_FORCE", False)
     now_et = datetime.now(ET)

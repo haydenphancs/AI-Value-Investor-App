@@ -13,6 +13,8 @@
 # Versions are the ones measured together in the 2026-09-26 spike (backend/venv_marketing):
 # kokoro 0.9.4 + misaki 0.9.4 gave the token shapes marketing/timings.py is written against —
 # bump them together with voice.PIPELINE_VERSION and re-run `python -m marketing.preview`.
+# Their own dependencies (transformers, huggingface_hub, spaCy, thinc, …) are pinned in
+# constraints.txt, which the Dockerfile applies with `-c`; keep the two files in agreement.
 httpx[socks]==0.28.1
 torch==2.6.0
 kokoro==0.9.4

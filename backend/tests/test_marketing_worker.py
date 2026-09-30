@@ -354,6 +354,42 @@ def test_worker_package_is_self_contained_for_docker():
     assert 'startCommand = "python -m marketing.main"' in toml
 
 
+def _pins(text: str) -> Dict[str, str]:
+    """`name==version` lines (comments and blanks skipped), names normalised like pip does."""
+    out: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "@" in line:          # the hash-pinned spaCy model URL
+            continue
+        name, sep, version = line.partition("==")
+        assert sep and version and not any(c in version for c in "<>=!~*, "), f"not an exact pin: {raw!r}"
+        name = re.sub(r"[-_.]+", "-", name.split("[", 1)[0]).lower()
+        out[name] = version
+    return out
+
+
+def test_every_worker_package_is_pinned_and_the_dockerfile_applies_the_pins():
+    """The first Railway build is the image's first build anywhere: every transitive package must
+    resolve to the version the 2026-09-26 spike measured, not whatever PyPI serves that day.
+    kokoro/misaki/spaCy leave transformers, huggingface_hub, thinc, … unpinned themselves."""
+    reqs = _pins((_PKG / "requirements.txt").read_text())
+    cons = _pins((_PKG / "constraints.txt").read_text())
+    # The packages whose drift would change what the image does, named so a regenerated file
+    # cannot quietly lose them.
+    for name in ("transformers", "huggingface-hub", "spacy", "thinc", "loguru", "curated-transformers",
+                 "phonemizer-fork", "espeakng-loader", "tokenizers", "safetensors", "numpy", "torch",
+                 "kokoro", "misaki", "pillow", "fonttools", "httpx"):
+        assert name in cons, f"{name} is not pinned in marketing/constraints.txt"
+    for name, version in reqs.items():
+        assert cons.get(name) == version, f"requirements.txt pins {name}=={version}, constraints {cons.get(name)}"
+    docker = (_PKG / "Dockerfile").read_text()
+    install = next(l for l in docker.splitlines() if "-r marketing/requirements.txt" in l)
+    assert "-c marketing/constraints.txt" in install, install
+    assert re.search(r"^COPY marketing/requirements\.txt marketing/constraints\.txt marketing/$", docker, re.M)
+    # torch comes from the CPU index at the SAME version the constraints pin.
+    assert f"torch=={cons['torch']}" in docker
+
+
 def test_run_stages_mirror_the_schema(m):
     from app.schemas.marketing import RUN_STAGES
 
@@ -439,7 +475,7 @@ _CONTENT_TYPES = {"json": "application/json", "m4a": "audio/mp4", "mp3": "audio/
                   "mp4": "video/mp4", "png": "image/png", "jpg": "image/jpeg"}
 
 
-def _fake_narration_runner(lines, *, voice, speed, out_dir, heartbeat=None):
+def _fake_narration_runner(lines, *, voice, speed, out_dir, heartbeat=None, timeout=None):
     """Stands in for the Kokoro child: timed words for exactly the narrated lines."""
     from marketing import timings as tm
     from marketing import voice as vc
@@ -449,14 +485,32 @@ def _fake_narration_runner(lines, *, voice, speed, out_dir, heartbeat=None):
     return vc.Narration(Path(out_dir) / "narration.wav", words, 1.0 * len(lines), speed, len(lines))
 
 
+_FAKE_M4A = b"fake-m4a:narration.wav"
+_FAKE_MP4 = b"fake-mp4-bytes"
+
+
+def _fake_produce_video(*, workdir, specs, words, narration_seconds, audio_file, fonts_dir, logo_path,
+                        threads, heartbeat, run_id, max_seconds, layout_engine):
+    """Stands in for cards + captions + ffmpeg (their own tests: test_marketing_cards.py,
+    test_marketing_video.py): every card shown, the full narration + disclaimer duration."""
+    from marketing import voice as vc
+
+    assert (Path(workdir) / audio_file).read_bytes() == _FAKE_M4A
+    return _FAKE_MP4, narration_seconds + vc.DISCLAIMER_CARD_SECONDS, list(range(len(specs)))
+
+
 @pytest.fixture(autouse=True)
 def _no_real_voice(monkeypatch):
-    """No test here loads torch: the voice stage's synthesis child and ffmpeg encode are faked
-    (their own tests live in tests/test_marketing_voice.py)."""
+    """No test here loads torch or runs ffmpeg: the voice stage's synthesis child and encode, and
+    the render's download and ffmpeg call, are faked (their own tests live in
+    tests/test_marketing_voice.py, test_marketing_cards.py and test_marketing_video.py)."""
+    from marketing import render as rd
     from marketing import voice as vc
 
     monkeypatch.setattr(vc, "run_child", _fake_narration_runner)
-    monkeypatch.setattr(vc, "encode_m4a", lambda wav, out: (b"fake-m4a:" + wav.name.encode(), 2.0))
+    monkeypatch.setattr(vc, "encode_m4a", lambda wav, out: (_FAKE_M4A, 2.0))
+    monkeypatch.setattr(rd, "download", lambda url, **k: _FAKE_M4A)
+    monkeypatch.setattr(rd, "produce_video", _fake_produce_video)
 
 
 class FakeBackend:
@@ -467,7 +521,8 @@ class FakeBackend:
 
     def __init__(self, *, claim_reason="claimed", claim_status_codes=None, complete_status=200,
                  script_states=None, script_http_status=None,
-                 script_error_code="MARKETING_SCRIPT_NOT_READY"):
+                 script_error_code="MARKETING_SCRIPT_NOT_READY", posts_status=200,
+                 posts_error_code="MARKETING_REQUEST_INVALID"):
         # The day's-script kick-and-poll answers, in order; the last one repeats.
         self.script_states: List[Dict[str, Any]] = list(script_states or [
             {"status": "generating", "source_ref": "journey:mr_market", "template_id": "checklist"},
@@ -489,6 +544,9 @@ class FakeBackend:
         self.registered: List[Dict[str, Any]] = []
         self.claim_bodies: List[Dict[str, Any]] = []
         self.claim_headers: List[Any] = []
+        self.posts_bodies: List[Dict[str, Any]] = []
+        self.posts_status = posts_status
+        self.posts_error_code = posts_error_code
         self.run = {"id": "run-1", "run_date": "2026-09-17", "status": "in_progress", "stage": "planned",
                     "content_class": "A", "attempts": 1, "dry_run": True, "timings": {}, "metadata": {}}
 
@@ -529,6 +587,7 @@ class FakeBackend:
                 asset = {"id": f"asset-{len(self.assets) + 1}", "run_id": "run-1", "kind": body["kind"],
                          "content_type": _CONTENT_TYPES[body["ext"]], "storage_path": storage_path,
                          "sha256": body["sha256"], "status": "pending_upload",
+                         "duration_seconds": body.get("duration_seconds"),
                          "metadata": body.get("metadata") or {}}
                 self.assets[storage_path] = asset
             if asset["status"] == "ready":
@@ -538,10 +597,27 @@ class FakeBackend:
                 "token": "t", "bucket": "marketing-media", "path": asset["storage_path"],
                 "content_type": asset["content_type"]}})
         if path.endswith("/assets") and request.method == "GET":
-            ready = [dict(a) for a in self.assets.values() if a["status"] == "ready"]
-            pointer = (self.run.get("metadata") or {}).get("voice_asset_id")
-            voice = pointer if any(a["id"] == pointer and a["kind"] == "audio" for a in ready) else None
-            return httpx.Response(200, json={"voice_asset_id": voice, "assets": ready})
+            ready = [dict(a, public_url=f"https://sb.example/object/public/marketing-media/{a['storage_path']}")
+                     for a in self.assets.values() if a["status"] == "ready"]
+
+            def verified(key, kind):
+                pointer = (self.run.get("metadata") or {}).get(key)
+                return pointer if any(a["id"] == pointer and a["kind"] == kind for a in ready) else None
+
+            return httpx.Response(200, json={"voice_asset_id": verified("voice_asset_id", "audio"),
+                                             "video_asset_id": verified("video_asset_id", "video"),
+                                             "assets": ready})
+        if path.endswith("/posts") and request.method == "POST":
+            if self.posts_status != 200:
+                return httpx.Response(self.posts_status, json={"error_code": self.posts_error_code,
+                                                               "message": "no posts"})
+            body = json.loads(request.content)
+            self.posts_bodies.append(body)
+            return httpx.Response(200, json={"posts": [
+                {"id": f"post-{i}", "run_id": "run-1", "platform": sp["platform"], "format": sp["format"],
+                 "status": "pending_review", "caption": "server copy", "asset_ids": sp.get("asset_ids", []),
+                 "idempotency_key": f"2026-09-17:{sp['platform']}:{sp['format']}", "metadata": {}}
+                for i, sp in enumerate(body["posts"])]})
         if path.endswith("/complete"):
             if self.complete_status != 200:
                 return httpx.Response(self.complete_status, json={"error_code": "MARKETING", "message": "not in bucket"})
@@ -571,7 +647,9 @@ def env(monkeypatch):
     monkeypatch.setenv("MARKETING_WORKER_TOKEN", "tok")
     monkeypatch.setenv("MARKETING_FORCE", "1")
     monkeypatch.setenv("MARKETING_RUN_DATE", "2026-09-17")
+    monkeypatch.setenv("MARKETING_FONTS_DIR", str(_PKG / "assets" / "fonts"))
     monkeypatch.delenv("SUPABASE_PUBLISHABLE_KEY", raising=False)
+    monkeypatch.delenv("MARKETING_RENDER_THREADS", raising=False)
 
 
 def _wire(m, monkeypatch, backend: FakeBackend):
@@ -586,6 +664,7 @@ def _wire(m, monkeypatch, backend: FakeBackend):
     # This venv has no torch/kokoro: report the image as voice-ready (the check itself is
     # tested in test_the_voice_readiness_check_names_every_missing_piece).
     monkeypatch.setattr(m, "voice_readiness", lambda fonts_dir: {"ready": True, "problems": []})
+    monkeypatch.setattr(m, "render_readiness", lambda fonts_dir: {"ready": True, "problems": [], "raqm": True})
     monkeypatch.setattr(m, "time", _FastTime())
 
 
@@ -598,7 +677,7 @@ class _FastTime:
         return None
 
 
-def test_happy_path_selects_polls_the_script_and_closes_phase2_honestly(m, monkeypatch, env):
+def test_happy_path_on_a_text_only_day_records_posts_without_any_media(m, monkeypatch, env):
     be = FakeBackend()
     _wire(m, monkeypatch, be)
     assert m.main() == 0
@@ -610,25 +689,26 @@ def test_happy_path_selects_polls_the_script_and_closes_phase2_honestly(m, monke
         ("POST", "script"), ("PATCH", "run-1"),            # stage `selected` (the first kick)
         ("POST", "script"), ("PATCH", "run-1"),            # stage `scripted` (poll → accepted)
     ]
-    assert tails[9:11] == [("GET", "assets"), ("POST", "assets")]          # voice: reuse check, register
-    assert tails[11][0] == "PUT" and tails[11][1].startswith("audio-") and tails[11][1].endswith(".m4a")
-    assert tails[12:] == [("POST", "complete"), ("PATCH", "run-1"),       # voiced checkpoint
-                          ("PATCH", "run-1")]                             # close
-    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["selected", "scripted", "voiced"]
+    # The script's only outlet is X (text): no narration, no render (both stages checkpoint with
+    # nothing to do), one text post, and the run closes media_ready — the publisher's from here.
+    assert tails[9:] == [("PATCH", "run-1"),                              # voiced (no media needed)
+                         ("PATCH", "run-1"),                              # rendered (no video outlet)
+                         ("POST", "posts"), ("PATCH", "run-1"),           # posts, assets_ready
+                         ("PATCH", "run-1")]                              # close
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == [
+        "selected", "scripted", "voiced", "rendered", "assets_ready"]
+    assert be.posts_bodies == [{"posts": [{"platform": "x", "format": "text"}]}]
+    assert not [b for b in be.registered if b["kind"] in ("audio", "video")]
+    # Every media checkpoint carries its peak-memory reading (the 4 GB sizing is checked on it).
     voiced = next(p for p in be.patches if p.get("stage") == "voiced")
-    audio = next(a for a in be.assets.values() if a["kind"] == "audio")
-    # The pointer rides in the SAME PATCH as the checkpoint.
-    assert voiced["metadata"] == {"voice_asset_id": audio["id"]}
-    assert [w["w"] for w in audio["metadata"]["words"]] == ["h", "a", "line."]
-    # Phase 3 renders nothing yet: the run must NOT claim media_ready.
-    assert be.run["status"] == "skipped"
-    assert be.run["metadata"]["skip_reason"] == m.PHASE_CLOSE_REASON == "phase3_voice_only"
+    assert "metadata" not in voiced and voiced["timings"]["voiced_self_maxrss_mb"] > 0
+    assert be.run["status"] == "media_ready" and "skip_reason" not in be.run["metadata"]
     # The manifest that went up is real JSON describing the image.
     (body,) = [b for p, b in be.uploaded.items() if "/manifest-" in p]
     start, end = body.find(b"{"), body.rfind(b"}") + 1
     manifest = json.loads(body[start:end])
-    assert manifest["worker_version"] == "phase3" and manifest["run_date"] == "2026-09-17"
-    assert manifest["stages_implemented"] == ["selected", "scripted", "voiced"]
+    assert manifest["worker_version"] == "phase4" and manifest["run_date"] == "2026-09-17"
+    assert manifest["stages_implemented"] == ["selected", "scripted", "voiced", "rendered", "assets_ready"]
     assert manifest["ffmpeg"].startswith("ffmpeg")
 
 
@@ -896,8 +976,9 @@ def test_resume_after_selected_goes_straight_to_polling(m, monkeypatch, env):
     be.run["stage"] = "selected"
     _wire(m, monkeypatch, be)
     assert m.main() == 0
-    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["scripted", "voiced"]
-    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == [
+        "scripted", "voiced", "rendered", "assets_ready"]
+    assert be.run["status"] == "media_ready"
 
 
 def test_resume_after_scripted_re_derives_the_script_once_and_voices_it(m, monkeypatch, env):
@@ -908,18 +989,30 @@ def test_resume_after_scripted_re_derives_the_script_once_and_voices_it(m, monke
     _wire(m, monkeypatch, be)
     assert m.main() == 0
     assert sum(p.endswith("/script") for _, p in be.calls) == 1
-    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["voiced"]
-    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["voiced", "rendered", "assets_ready"]
+    assert be.run["status"] == "media_ready"
 
 
-def test_resume_after_voiced_closes_without_kicking_or_voicing_again(m, monkeypatch, env):
-    be = FakeBackend()
+def test_resume_after_voiced_renders_and_posts_without_voicing_again(m, monkeypatch, env):
+    """Past `voiced`, the script is re-derived with ONE kick (the render and the posts need it);
+    the narration is never synthesised again."""
+    be = FakeBackend(script_states=[{"status": "accepted", "script": FakeBackend._SCRIPT}])
     be.run["stage"] = "voiced"
     _wire(m, monkeypatch, be)
     assert m.main() == 0
-    assert not any(p.endswith("/script") for _, p in be.calls)
+    assert sum(p.endswith("/script") for _, p in be.calls) == 1
     assert not [b for b in be.registered if b["kind"] == "audio"]
-    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
+    assert [p.get("stage") for p in be.patches if p.get("stage")] == ["rendered", "assets_ready"]
+    assert be.run["status"] == "media_ready"
+
+
+def test_resume_after_assets_ready_only_closes(m, monkeypatch, env):
+    be = FakeBackend()
+    be.run["stage"] = "assets_ready"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert not any(p.endswith(("/script", "/posts")) for _, p in be.calls)
+    assert be.run["status"] == "media_ready"
 
 
 def test_unexpected_script_status_fails_the_run_loudly(m, monkeypatch, env):
@@ -1025,7 +1118,7 @@ def _with_a_later_stage(m, monkeypatch) -> List[Any]:
         seen.append(ctx["script"])
 
     monkeypatch.setattr(m, "MEDIA_STAGES",
-                        [s for s in m.MEDIA_STAGES if s[0] != "voiced"] + [("voiced", stage_voice)])
+                        [(name, stage_voice if name == "voiced" else fn) for name, fn in m.MEDIA_STAGES])
     return seen
 
 
@@ -1044,8 +1137,8 @@ def test_a_stage_after_scripted_gets_the_script_on_a_fresh_run_and_on_every_resu
     assert m.main() == 0
     assert seen == [FakeBackend._SCRIPT]
     assert sum(p.endswith("/script") for _, p in be.calls) == kicks
-    assert [p.get("stage") for p in be.patches if p.get("stage")][-1] == "voiced"
-    assert be.run["status"] == "skipped"
+    assert "voiced" in [p.get("stage") for p in be.patches if p.get("stage")]
+    assert be.run["status"] == "media_ready"
 
 
 @pytest.mark.parametrize("state", [
@@ -1097,7 +1190,7 @@ def test_a_reclaimed_run_reuses_its_manifest_instead_of_minting_a_new_object(m, 
     (asset,) = manifest_assets
     assert asset["status"] == "ready" and asset["metadata"]["generated_at"].startswith("2026-09-17T")
     assert manifests[0]["metadata"]["generated_at"] != manifests[1]["metadata"]["generated_at"]
-    assert be.run["metadata"]["skip_reason"] == "phase3_voice_only"
+    assert be.run["status"] == "media_ready"
 
 
 def test_worker_deadlines_fit_inside_the_backend_stale_window(m):
@@ -1111,6 +1204,72 @@ def test_worker_deadlines_fit_inside_the_backend_stale_window(m):
     assert m.SCRIPT_POLL_BUDGET_SECONDS <= m.WORKER_DEADLINE_SECONDS
     assert m.SCRIPT_POLL_BUDGET_SECONDS > script_service.LEASE_SECONDS
     assert m.SCRIPT_POLL_SECONDS < script_service.LEASE_SECONDS
+
+
+def _stale_default() -> int:
+    from app.config import Settings
+
+    return Settings.model_fields["MARKETING_RUN_STALE_SECONDS"].default
+
+
+def test_every_media_stage_fits_its_worst_case_inside_the_start_margin(m):
+    """A stage starts only with STAGE_START_MARGIN_SECONDS of the tick left, so its WORST CASE must
+    fit in it — or a started stage runs past WORKER_DEADLINE_SECONDS. The voice stage's did not
+    (2×480 s synthesis + a 120 s encode against a 600 s margin) until both attempts shared one
+    budget (review 2026-09-29)."""
+    from marketing import render, voice
+
+    call = m.BACKEND_CALL_WORST_SECONDS
+    assert call == m._HTTP_ATTEMPTS * m.BACKEND_TIMEOUT_SECONDS + 2 + 4 + 6
+    # Per stage: its own work, its backend calls (each can take the full retry chain), one
+    # heartbeat that blocks as long, and the checkpoint PATCH after it — starting at the LATEST
+    # moment the stage may start — must end inside the stale window (review 2026-09-29: the old
+    # pin counted neither the calls nor the heartbeat, and promised the 30-min deadline).
+    worst = {
+        "voiced": voice.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + 3 * call,   # list, register, complete
+        "rendered": render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + 3 * call,
+        "assets_ready": 2 * call,                                                 # read-back, create_posts
+        "selected": call,
+        # stage_script polls until min(start + SCRIPT_POLL_BUDGET, t0 + DEADLINE - 60), so at the
+        # latest start its polling is bounded by its margin, plus the last kick in flight.
+        "scripted": min(m.SCRIPT_POLL_BUDGET_SECONDS, m.STAGE_START_MARGINS["scripted"] - 60) + call,
+    }
+    assert set(worst) == set(m.STAGE_START_MARGINS) == {name for name, _fn in m.MEDIA_STAGES}
+    stale = _stale_default()
+    for name, work in worst.items():
+        latest_start = m.WORKER_DEADLINE_SECONDS - m.STAGE_START_MARGINS[name]
+        end = latest_start + work + call + call        # + one stuck heartbeat + the checkpoint
+        assert end < stale, (name, end, stale)
+    # The media stages still keep the full margin their own work needs.
+    assert voice.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) <= m.STAGE_START_MARGINS["voiced"]
+    assert render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) <= m.STAGE_START_MARGINS["rendered"]
+
+
+def test_a_one_call_stage_is_not_deferred_by_the_media_stages_margin(m, monkeypatch, env):
+    """19 minutes into the tick the posts stage (one read-back, one create_posts) still runs: gating
+    it on the media stages' 12 minutes closed a finished day `failed` for a one-second stage."""
+    be = _video_backend()
+    be.run["stage"] = "rendered"
+    video = {"id": "asset-v", "run_id": "run-1", "kind": "video", "status": "ready",
+             "storage_path": "2026-09-17/video-x.mp4", "sha256": "0" * 64, "content_type": "video/mp4",
+             "metadata": {}}
+    be.assets[video["storage_path"]] = video
+    be.run["metadata"] = {"video_asset_id": "asset-v"}
+    _wire(m, monkeypatch, be)
+    clock = {"t": 0.0}
+
+    class Late(_FastTime):
+        @staticmethod
+        def monotonic():
+            clock["t"] += 19 * 60 / 4                      # every reading moves ~5 min on
+            return clock["t"]
+
+    monkeypatch.setattr(m, "time", Late())
+    assert m.main() == 0
+    assert be.run["status"] == "media_ready" and len(be.posts_bodies) == 1
+    assert m.stage_start_margin("assets_ready", {}) < m.STAGE_START_MARGIN_SECONDS
+    assert m.stage_start_margin("rendered", {"script": {"outlets": ["x"]}}) == m.QUICK_STAGE_MARGIN_SECONDS
+    assert m.stage_start_margin("rendered", {"script": {"outlets": ["tiktok"]}}) == m.STAGE_START_MARGIN_SECONDS
 
 
 
@@ -1177,3 +1336,198 @@ def test_the_voice_readiness_check_names_every_missing_piece(m, monkeypatch, tmp
     monkeypatch.setenv("MARKETING_TTS_VOICE", "am_michael")       # configured but never baked
     out = m.voice_readiness(str(fonts))
     assert any("am_michael" in p for p in out["problems"])
+
+
+
+# ── Phase 4: the render and the posts (2026-09-29) ────────────────────────────
+
+
+_VIDEO_SCRIPT = {
+    "hook": "Meet your moody business partner.",
+    "video_script": ["Every day he names a price.", "His price follows his mood."],
+    "cards": [{"title": "The partner", "body": "He names a price every day."},
+              {"title": "The lesson", "body": "His mood is not the business."}],
+    "carousel_slides": [],
+    "disclaimer_card": "Educational, impersonal information — not investment advice. Caydex · Sep 17, 2026",
+    "outlets": ["tiktok", "x"],
+}
+
+
+def _video_backend(**kw) -> FakeBackend:
+    return FakeBackend(script_states=[{"status": "accepted", "source_ref": "journey:mr_market",
+                                       "template_id": "case_story", "script": _VIDEO_SCRIPT}], **kw)
+
+
+def test_a_video_day_renders_registers_what_it_drew_and_records_the_posts(m, monkeypatch, env):
+    be = _video_backend()
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    audio = next(a for a in be.assets.values() if a["kind"] == "audio")
+    md = video["metadata"]
+    # Every string the cards drew — the script's own card text, its disclaimer card, the end card —
+    # and the narration its captions burn (the server checks both, run_service._check_onscreen_text).
+    for text in ("The partner", "He names a price every day.", "The lesson",
+                 "His mood is not the business.", _VIDEO_SCRIPT["disclaimer_card"], "caydexinvest.com"):
+        assert text in md["onscreen_text"], text
+    assert "Meet your moody business partner." not in md["onscreen_text"]  # the hook is caption-only
+    assert md["voice_asset_id"] == audio["id"] and len(md["render_key"]) == 64
+    assert md["template_id"] == "case_story"
+    assert video["status"] == "ready" and any("/video-" in p for p in be.uploaded)
+    rendered = next(p for p in be.patches if p.get("stage") == "rendered")
+    assert rendered["metadata"] == {"video_asset_id": video["id"]}      # pointer in the SAME PATCH
+    assert be.posts_bodies == [{"posts": [
+        {"platform": "tiktok", "format": "video", "asset_ids": [video["id"]]},
+        {"platform": "x", "format": "text"}]}]
+    assert be.run["status"] == "media_ready"
+    # the registered duration is narration + the disclaimer card (never cut by -shortest)
+    from marketing import voice as vc
+
+    reg = next(b for b in be.registered if b["kind"] == "video")
+    assert reg["duration_seconds"] == round(audio["duration_seconds"] + vc.DISCLAIMER_CARD_SECONDS, 3)
+
+
+def test_a_matching_ready_video_is_reused_without_rendering_again(m, monkeypatch, env):
+    be = _video_backend()
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    from marketing import render as rd
+
+    calls = []
+    monkeypatch.setattr(rd, "produce_video", lambda **k: calls.append(k) or (_ for _ in ()).throw(AssertionError))
+    # the next day's tick re-claims the SAME run after a lost close (resume from `voiced`)
+    be.run.update({"status": "in_progress", "stage": "voiced"})
+    be.run["metadata"].pop("video_asset_id")
+    be.script_states = [{"status": "accepted", "script": _VIDEO_SCRIPT}]
+    assert m.main() == 0
+    assert calls == [] and len([a for a in be.assets.values() if a["kind"] == "video"]) == 1
+    assert be.run["status"] == "media_ready"
+
+
+def test_narration_bytes_that_do_not_match_their_row_fail_the_run(m, monkeypatch, env):
+    from marketing import render as rd
+
+    be = _video_backend()
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", lambda url, **k: b"someone else's audio")
+    assert m.main() == 1
+    closing = _closing_patch(be)
+    assert closing["status"] == "failed" and "sha256" in closing["last_error"]
+    assert not [a for a in be.assets.values() if a["kind"] == "video"] and be.posts_bodies == []
+
+
+def test_a_glyph_the_font_cannot_draw_skips_the_day_instead_of_burning_attempts(m, monkeypatch, env):
+    script = dict(_VIDEO_SCRIPT, cards=[{"title": "Growth 🚀", "body": "Plain body."}])
+    be = FakeBackend(script_states=[{"status": "accepted", "script": script}])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "unrenderable_text"
+    assert be.posts_bodies == []
+
+
+def test_a_card_that_cannot_fit_skips_the_day(m, monkeypatch, env):
+    from marketing import cards
+    from marketing import render as rd
+
+    def overflow(**_k):
+        raise cards.CardOverflow("one word wider than the zone")
+
+    be = _video_backend()
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "produce_video", overflow)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "unrenderable_text"
+
+
+def test_a_script_the_judge_did_not_enforce_skips_the_day_at_the_posts(m, monkeypatch, env):
+    be = FakeBackend(posts_status=409, posts_error_code="MARKETING_JUDGE_NOT_ENFORCED")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert be.run["status"] == "skipped" and be.run["metadata"]["skip_reason"] == "judge_not_enforced"
+
+
+def test_any_other_posts_refusal_fails_the_run(m, monkeypatch, env):
+    be = FakeBackend(posts_status=422, posts_error_code="MARKETING_REQUEST_INVALID")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert _closing_patch(be)["status"] == "failed"
+
+
+def test_a_video_outlet_without_a_verified_video_fails_loudly(m, monkeypatch, env):
+    """A resume past `rendered` whose video pointer does not verify must never post the video
+    outlets without their video (or silently drop them)."""
+    be = _video_backend()
+    be.run["stage"] = "rendered"
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert "no verified video" in _closing_patch(be)["last_error"] and be.posts_bodies == []
+
+
+def test_the_post_format_map_is_one_the_server_records_for_every_composed_outlet():
+    from app.api.error_response import ErrorCode
+    from app.schemas.marketing import POST_FORMATS_BY_PLATFORM
+    from app.services.marketing import post_copy
+    from marketing import render as rd
+
+    assert set(rd.POST_FORMAT) == set(post_copy.PLATFORMS) == set(POST_FORMATS_BY_PLATFORM)
+    for platform, fmt in rd.POST_FORMAT.items():
+        assert fmt in POST_FORMATS_BY_PLATFORM[platform], (platform, fmt)
+    # The caption disclaimer is composed per PLATFORM, not per format: an outlet gets the narrated
+    # video only if its caption already says so ("Script and narration generated with AI").
+    from datetime import date
+
+    field = {"youtube": "youtube_description"}
+    for platform, fmt in rd.POST_FORMAT.items():
+        text = post_copy.disclaimer_for(field.get(platform, platform), date(2026, 9, 17)) or ""
+        if fmt == "video":
+            assert "narration" in text, platform
+        else:
+            assert "narration" not in text, platform
+    assert rd.JUDGE_NOT_ENFORCED == ErrorCode.MARKETING_JUDGE_NOT_ENFORCED.value
+
+
+def test_post_specs_edges():
+    from marketing import render as rd
+
+    assert rd.post_specs([], None) == []
+    assert rd.post_specs(["x", "pinterest"], None) == [{"platform": "x", "format": "text"}]
+    with pytest.raises(rd.RenderInputError):
+        rd.post_specs(["tiktok"], None)
+    assert rd.post_specs(["tiktok", "tiktok"], "v")[0] == {"platform": "tiktok", "format": "video", "asset_ids": ["v"]}
+
+
+def test_the_render_readiness_check_names_every_missing_piece(m, monkeypatch, tmp_path):
+    out = m.render_readiness(str(tmp_path / "fonts"))
+    assert not out["ready"]
+    assert any("Inter-Bold" in p for p in out["problems"]) and any("logo" in p for p in out["problems"])
+    fonts = _PKG / "assets" / "fonts"
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)
+    out = m.render_readiness(str(fonts))
+    assert "ffmpeg/ffprobe missing" in out["problems"]
+    assert not any("logo" in p or "Inter" in p for p in out["problems"])   # the vendored assets exist
+
+
+def test_the_render_threads_follow_the_override_then_the_cgroup(monkeypatch):
+    from marketing import render as rd
+
+    monkeypatch.setenv("MARKETING_RENDER_THREADS", "3")
+    assert rd.render_threads() == 3
+    monkeypatch.setenv("MARKETING_RENDER_THREADS", "64")
+    assert rd.render_threads() == rd.RENDER_THREADS_MAX
+    monkeypatch.setenv("MARKETING_RENDER_THREADS", "zero")
+    assert 1 <= rd.render_threads() <= rd.RENDER_THREADS_MAX
+
+
+def test_the_render_key_changes_with_every_input_that_changes_the_bytes():
+    from marketing import render as rd
+
+    base = dict(audio_sha256="a" * 64, words=[{"w": "hi", "s": 0.0, "e": 0.4, "line": 0}],
+                card_texts=[["Caydex"], ["T", "B"]], threads=2, card_version="c1", video_version="v1",
+                max_seconds=75.0, layout_engine="raqm")
+    k = rd.render_key(**base)
+    assert k == rd.render_key(**base) and len(k) == 64
+    for change in ({"audio_sha256": "b" * 64}, {"threads": 3}, {"card_version": "c2"},
+                   {"video_version": "v2"}, {"card_texts": [["Caydex"], ["T", "B!"]]},
+                   {"words": [{"w": "hi", "s": 0.0, "e": 0.5, "line": 0}]}, {"max_seconds": 60.0},
+                   {"layout_engine": "basic"}):
+        assert rd.render_key(**{**base, **change}) != k, change

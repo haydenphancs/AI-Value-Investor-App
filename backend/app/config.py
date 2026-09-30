@@ -1023,8 +1023,10 @@ class Settings(BaseSettings):
     # Dry run: the publisher logs what it WOULD send and touches no external API. The worker
     # sends the same flag on its run row so a dry-run day is visible in marketing_runs.
     MARKETING_DRY_RUN: bool = True
-    # New marketing_posts rows are born `pending_review` and need an admin approve; True makes
-    # them `approved` at birth. Keep False for the first weeks (§12 human gate).
+    # New marketing_posts rows are born `pending_review` and need a reviewer's Approve (the
+    # Telegram review bot → `run_service.review_post`); True makes media-less TEXT posts
+    # `approved` at birth (media posts always wait for review). Keep False until the semantic
+    # judge meets its calibration gate (§12.5 / rules/marketing.md §7a).
     MARKETING_AUTO_PUBLISH: bool = False
     # Shared secret for the internal worker API (`X-Marketing-Worker-Token`). Unset = every
     # worker call answers 403, so a forgotten variable is loud on the first cron tick.
@@ -1043,7 +1045,7 @@ class Settings(BaseSettings):
     # this many attempts the claim answers `attempts_exhausted` and the day needs a human.
     MARKETING_MAX_RUN_ATTEMPTS: int = 6
     # Publisher cadence. It is an interval loop like notification_dispatch, not a daily claim:
-    # posts become `approved` at arbitrary times (an admin tap) and Upload-Post jobs finish
+    # posts become `approved` at arbitrary times (a reviewer's Approve) and Upload-Post jobs finish
     # asynchronously, so it must wake often enough to publish and to reconcile.
     MARKETING_PUBLISHER_INTERVAL_SECONDS: int = 600
     # Hard cap on any rendered clip. 90 s is Facebook Reels' maximum; 75 leaves headroom for
@@ -1070,6 +1072,23 @@ class Settings(BaseSettings):
     # (verdicts recorded, never block — safe while no run creates posts), `off`. Anything
     # unrecognised is treated as `enforce` (fail closed). Web-side only: the worker never writes copy.
     MARKETING_JUDGE_MODE: str = "enforce"
+    # The Telegram REVIEW BOT (services/marketing/review_service.py, design doc §12.9): the owner
+    # approves / rejects each `pending_review` post from their phone. Web process only — the
+    # worker never holds it. ALL THREE must be set or the bot is OFF: no notification is sent and
+    # the webhook answers 403 while the secret is unset (fail-closed, ERROR logged once).
+    #   BOT_TOKEN      — from @BotFather. Telegram puts it in the request URL path; it is redacted
+    #                    from logs (log_redaction.py) and never appears in an exception message.
+    #   REVIEW_CHAT_ID — the owner's PRIVATE chat id, which equals their Telegram user id. The
+    #                    allow-list: a button tap is honoured only when BOTH the tapping user and
+    #                    the chat are this id.
+    #   WEBHOOK_SECRET — 1-256 chars of [A-Za-z0-9_-]; Telegram echoes it in the
+    #                    X-Telegram-Bot-Api-Secret-Token header of every webhook call.
+    MARKETING_TELEGRAM_BOT_TOKEN: Optional[str] = None
+    MARKETING_TELEGRAM_REVIEW_CHAT_ID: Optional[int] = None
+    MARKETING_TELEGRAM_WEBHOOK_SECRET: Optional[str] = None
+    # Public origin of THIS web service — where Telegram delivers the review webhook
+    # (`<base>/marketing/telegram/webhook`, registered at startup). Must be https.
+    MARKETING_PUBLIC_BASE_URL: str = "https://caydexinvest.com"
 
     # ── Caydex Fair Value Estimate (DCF, model dcf-v1) ─────────────────────────────────────
     # Two fail-CLOSED switches (documents/OWNER_TASKS.md §2.1 has the rollout order):

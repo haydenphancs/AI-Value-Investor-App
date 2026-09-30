@@ -228,7 +228,10 @@ class FakeWriter:
         if isinstance(outcome, BaseException):
             raise outcome
         if outcome == "accepted":
-            return WriterResult("accepted", _package(item.key), [], [], 1234)
+            package = _package(item.key)
+            if judge_mode != "off":   # the real writer records the mode IN the package
+                package["judge"] = {"mode": judge_mode, "verdicts": []}
+            return WriterResult("accepted", package, [], [], 1234)
         return WriterResult("rejected", None, [{"field": "hook", "code": "person_named", "detail": "x"}], [], 99)
 
 

@@ -30,11 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY marketing/requirements.txt marketing/requirements.txt
-# torch from the CPU index FIRST (see requirements.txt), then the rest; then prove no CUDA wheel
-# crept in through a transitive dependency.
+COPY marketing/requirements.txt marketing/constraints.txt marketing/
+# torch from the CPU index FIRST (see requirements.txt), then the rest under constraints.txt —
+# every transitive package at the version the 2026-09-26 spike measured, so the first build does
+# not pick up whatever PyPI serves that day — then prove no CUDA wheel crept in.
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 \
-    && pip install --no-cache-dir -r marketing/requirements.txt \
+    && pip install --no-cache-dir -r marketing/requirements.txt -c marketing/constraints.txt \
     && if pip list 2>/dev/null | grep -qi '^nvidia-'; then echo "CUDA wheels in the image" >&2; exit 1; fi
 
 # Bake the Kokoro weights + the af_heart voice + spaCy's model into the image (a cron container

@@ -241,14 +241,17 @@ class _Skip(Exception):
         self.reason = reason
 
 
-SCRIPT = {"hook": "Meet Mr. Market.", "video_script": ["He names a price.", "You may say no."]}
+SCRIPT = {"hook": "Meet Mr. Market.", "video_script": ["He names a price.", "You may say no."],
+          "outlets": ["tiktok", "x"]}
 
 
 def _runner(durations):
     calls = []
+    budgets = _runner.budgets = []
 
-    def run(lines, *, voice, speed, out_dir, heartbeat=None):
+    def run(lines, *, voice, speed, out_dir, heartbeat=None, timeout=None):
         calls.append(speed)
+        budgets.append(timeout)
         d = durations[len(calls) - 1]
         per_line = [(tm.proportional(line.split(), 0.0, 1.0), 1.0) for line in lines]
         return vc.Narration(Path(out_dir) / "n.wav", tm.as_table(tm.assemble(lines, per_line)), d, speed, len(lines))
@@ -261,6 +264,15 @@ def _stage(api, runner, uploads=None):
                           uploader=lambda up, data, apikey=None: uploads.append(len(data)),
                           hasher=lambda b: "f" * 64, runner=runner,
                           encoder=lambda wav, out: (b"m4a-bytes", 3.0 + 2 * tm.LINE_PAUSE_SECONDS))
+
+
+def test_a_day_with_no_video_outlet_is_never_narrated():
+    """No Kokoro load, no public audio object, and no narration fault (too long, OOM) can cost a
+    day whose outlets are all text (review 2026-09-29)."""
+    api, (run, calls) = _Api(), _runner([999.0])
+    out = vc.stage_voice(api, {"id": "run-1"}, {"script": {**SCRIPT, "outlets": ["x", "threads", "facebook"]}},
+                         skip=_Skip, uploader=lambda *a, **k: None, hasher=lambda b: "f" * 64, runner=run)
+    assert out == {} and calls == [] and api.calls == []
 
 
 def test_the_stage_registers_uploads_completes_and_returns_the_pointer():
@@ -334,6 +346,38 @@ def test_an_overlong_narration_is_re_synthesised_once_faster_then_skipped(monkey
         _stage(api, run)
     assert info.value.reason == "narration_too_long" and len(calls) == 2
     assert not [k for k, _f in api.calls if k == "register"]
+
+
+def test_both_attempts_share_one_synthesis_budget(monkeypatch):
+    """The faster retry gets what the first attempt LEFT of one budget — never a fresh one — so
+    the stage's worst case stays inside the worker's start margin (review 2026-09-29)."""
+    clock = {"t": 100.0}
+    monkeypatch.setattr(vc.time, "monotonic", lambda: clock["t"])
+    budget = 10.0
+    durations = [budget + 1.0, budget - 1.0]
+    calls, budgets = [], []
+
+    def slow(lines, *, voice, speed, out_dir, heartbeat=None, timeout=None):
+        calls.append(speed)
+        budgets.append(timeout)
+        clock["t"] += 200.0                                   # each attempt burns 200 s
+        per_line = [(tm.proportional(line.split(), 0.0, 1.0), 1.0) for line in lines]
+        return vc.Narration(Path(out_dir) / "n.wav", tm.as_table(tm.assemble(lines, per_line)),
+                            durations[len(calls) - 1], speed, len(lines))
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        vc.synthesize_fitting(["a b"], voice="af_heart", speed=1.0, workdir=Path(d), heartbeat=None,
+                              budget=budget, runner=slow, synth_budget=360.0)
+        assert budgets == [360.0, 160.0]                      # the retry got the remainder
+        clock["t"] = 100.0
+        calls.clear()
+        budgets.clear()
+        with pytest.raises(vc.VoiceFailed, match="synthesis budget"):
+            vc.synthesize_fitting(["a b"], voice="af_heart", speed=1.0, workdir=Path(d), heartbeat=None,
+                                  budget=budget, runner=slow, synth_budget=210.0)
+        assert len(calls) == 1                                # no retry without budget
 
 
 def test_speed_and_budget_come_from_the_workers_environment(monkeypatch):

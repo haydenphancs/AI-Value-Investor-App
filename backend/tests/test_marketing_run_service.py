@@ -8,6 +8,7 @@ No network: the fake below stands in for `get_supabase()` (conftest blocks socke
 from __future__ import annotations
 
 import copy
+import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -180,7 +181,11 @@ def _col(row: Dict[str, Any], col: str) -> Any:
         base, key = col.split("->>", 1)
         doc = row.get(base)
         value = doc.get(key) if isinstance(doc, dict) else None
-        return None if value is None else str(value)
+        if value is None:
+            return None
+        # `->>` renders a JSON value as TEXT: a string as itself, anything else as its JSON
+        # (`false`, not Python's `False` — the publisher filters on `metadata->>dry_run = 'false'`).
+        return value if isinstance(value, str) else json.dumps(value)
     return row.get(col)
 
 
@@ -297,8 +302,12 @@ class _Table:
 
 
 class _Bucket:
-    def __init__(self, store):
-        self.store = store
+    """An object is a PATH in `store`. Its listed `metadata` (size, mimetype — what Storage
+    recorded for the upload) is `meta[path]` when a test set one, else the registered asset row's
+    own bytes and content type: an upload that matches what was registered, the normal case."""
+
+    def __init__(self, store, meta, assets):
+        self.store, self.meta, self.assets = store, meta, assets
 
     def create_signed_upload_url(self, path):
         return {"signed_url": f"https://sb.example/upload/sign/marketing-media/{path}?token=t", "token": "t", "path": path}
@@ -306,23 +315,42 @@ class _Bucket:
     def exists(self, path):
         return path in self.store
 
+    def _metadata(self, path):
+        if path in self.meta:
+            return self.meta[path]
+        row = next((r for r in self.assets.rows if r.get("storage_path") == path), None)
+        if row is None:
+            return {"size": 0, "mimetype": "application/octet-stream"}
+        return {"size": row.get("bytes"), "mimetype": row.get("content_type")}
+
     def list(self, prefix, options=None):
         name = (options or {}).get("search")
-        return [{"name": p.rsplit("/", 1)[-1]} for p in self.store
+        return [{"name": p.rsplit("/", 1)[-1], "metadata": self._metadata(p)} for p in self.store
                 if p.rsplit("/", 1)[0] == prefix and (not name or p.endswith(name))]
+
+    def remove(self, paths):
+        self.removed.extend(paths)
+        for p in paths:
+            self.store.discard(p)
+        return [{"name": p} for p in paths]
 
 
 class _Storage:
-    def __init__(self, store):
-        self.store = store
+    def __init__(self, store, meta, assets):
+        self.store, self.meta, self.assets = store, meta, assets
+        self.removed: list = []
 
     def from_(self, _bucket):
-        return _Bucket(self.store)
+        bucket = _Bucket(self.store, self.meta, self.assets)
+        bucket.removed = self.removed
+        return bucket
 
 
 class FakeSupabase:
     def __init__(self):
         self.objects: set = set()
+        #: path -> {"size", "mimetype"} overriding what the listing reports (a mismatch test).
+        self.object_meta: dict = {}
         self.tables = {
             mrs.RUNS: _Table([("run_date",)], {"stage": "planned", "status": "planned", "attempts": 0,
                                                 "timings": dict, "metadata": dict, "content_class": "A"}),
@@ -334,7 +362,7 @@ class FakeSupabase:
                                                 "violations": list, "generations": 0,
                                                 "tokens_used": 0}, generated_id=False),
         }
-        self.storage = _Storage(self.objects)
+        self.storage = _Storage(self.objects, self.object_meta, self.tables[mrs.ASSETS])
 
     def table(self, name):
         return self.tables[name]
@@ -382,13 +410,21 @@ def _asset_holder(svc, asset_id: str) -> mrs.CallerClaim:
     return mrs.CallerClaim(1, "0" * 32)
 
 
+#: The accepted script's disclaimer card and one card: what a rendered video may draw (§12.8).
+_DISCLAIMER_CARD = "Educational only, not advice. Caydex · Sep 17, 2026"
+_CARD = {"title": "Why it matters", "body": "A calm plan beats a loud market."}
+
+
 async def _accept_script(svc, run_id: str, platforms, **extra) -> Dict[str, Any]:
     """Seed the run's ACCEPTED script (migration 173) carrying composed copy for `platforms` —
-    what `create_posts` requires before it records any post (the caption is server-authored)."""
+    what `create_posts` requires before it records any post (the caption is server-authored) —
+    judged in `enforce` mode (anything else never becomes a post), with a card and a disclaimer
+    card for a video to draw."""
     row = {
         "run_id": run_id, "status": "accepted", "source_ref": "money_moves:test-item",
         "template_id": "checklist", "generation_id": str(uuid.uuid4()),
-        "output": {"posts": {p: _server_copy(p) for p in platforms}},
+        "output": {"posts": {p: _server_copy(p) for p in platforms}, "judge": {"mode": "enforce"},
+                   "cards": [dict(_CARD)], "disclaimer_card": _DISCLAIMER_CARD},
         **extra,
     }
     created, ours = await svc.insert_script(row)
@@ -396,9 +432,31 @@ async def _accept_script(svc, run_id: str, platforms, **extra) -> Dict[str, Any]
     return created
 
 
+def _ready_voice(svc, run_id: str) -> Dict[str, Any]:
+    """A ready, checked narration of `run_id` (seeded directly: its own registration check is
+    tested elsewhere) — what a video's burned captions must come from."""
+    rows = svc.fake.tables[mrs.ASSETS].rows
+    existing = next((a for a in rows if a.get("run_id") == run_id and a.get("kind") == "audio"), None)
+    if existing is not None:
+        return existing
+    voice = {"id": str(uuid.uuid4()), "run_id": run_id, "kind": "audio", "status": "ready",
+             "storage_path": f"voice/{run_id}.m4a", "content_type": "audio/mp4", "bytes": 10,
+             "sha256": "9" * 64, "metadata": {"words": [{"w": "hi", "s": 0.0, "e": 0.5, "line": 0}]}}
+    rows.append(voice)
+    return voice
+
+
+def _video_metadata(svc, run_id: str) -> Dict[str, Any]:
+    """What a well-behaved worker declares for a video: every string it drew (the card and the
+    disclaimer card of the accepted script, the end card) and the narration its captions burn."""
+    return {"onscreen_text": [_CARD["title"], _CARD["body"], _DISCLAIMER_CARD, "caydexinvest.com"],
+            "voice_asset_id": _ready_voice(svc, run_id)["id"]}
+
+
 async def _ready_asset(svc, run_id: str, sha: str = SHA) -> Dict[str, Any]:
-    """A `ready` asset of `run_id`: registered, uploaded (object in the fake bucket), verified."""
-    asset, _ = await svc.register_asset(run_id, kind="video", ext="mp4", sha256=sha, size_bytes=1, claim=_holder(svc, run_id))
+    """A `ready` VIDEO of `run_id`: registered, uploaded (object in the fake bucket), verified."""
+    asset, _ = await svc.register_asset(run_id, kind="video", ext="mp4", sha256=sha, size_bytes=1,
+                                        metadata=_video_metadata(svc, run_id), claim=_holder(svc, run_id))
     svc.fake.objects.add(asset["storage_path"])
     return await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
 
@@ -596,9 +654,10 @@ async def test_register_then_complete_asset_requires_the_object_to_exist(svc):
 @pytest.mark.asyncio
 async def test_storage_outage_on_complete_is_a_ledger_error_not_asset_missing(svc, monkeypatch):
     """storage3.exists() answers False for ANY non-200 HEAD, so a 5xx used to read as 'the
-    worker never uploaded' (409, terminal). The LIST confirmation raises on an outage."""
+    worker never uploaded' (409, terminal). The LIST (which also carries the size and type the
+    object is verified against) raises on an outage."""
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
-    asset, _ = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
+    asset, _ = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
 
     def outage(self, prefix, options=None):
         raise RuntimeError("storage 520")
@@ -611,13 +670,13 @@ async def test_storage_outage_on_complete_is_a_ledger_error_not_asset_missing(sv
 @pytest.mark.asyncio
 async def test_re_registering_identical_bytes_returns_the_row_without_a_new_upload(svc):
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
-    a1, up1 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
+    a1, up1 = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     # Not yet ready: a resumed run gets a FRESH signed URL for the same row.
-    a2, up2 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
+    a2, up2 = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a2["id"] == a1["id"] and up2 is not None
     svc.fake.objects.add(a1["storage_path"])
     await svc.complete_asset(a1["id"], claim=_asset_holder(svc, a1["id"]))
-    a3, up3 = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
+    a3, up3 = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a3["id"] == a1["id"] and a3["status"] == "ready" and up3 is None
     assert len(svc.fake.tables[mrs.ASSETS].rows) == 1
 
@@ -639,11 +698,11 @@ async def test_existence_precheck_failure_still_mints_a_url(svc, monkeypatch):
     """A Storage blip on the pre-check must not block the upload path; the PUT will tell."""
     row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
 
-    def boom(self, path):
+    def boom(self, prefix, options=None):
         raise RuntimeError("storage 520")
 
-    monkeypatch.setattr(_Bucket, "exists", boom)
-    a, up = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
+    monkeypatch.setattr(_Bucket, "list", boom)
+    a, up = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1, claim=_holder(svc, row["id"]))
     assert a["status"] == "pending_upload" and up is not None
 
 
@@ -716,6 +775,9 @@ async def test_a_dry_run_day_never_auto_approves_and_marks_every_row(svc, monkey
     assert p2["status"] == "approved" and p2["metadata"]["dry_run"] is False
 
 
+_ENFORCED = {"mode": "enforce"}
+
+
 @pytest.mark.parametrize(
     "script",
     [
@@ -725,10 +787,10 @@ async def test_a_dry_run_day_never_auto_approves_and_marks_every_row(svc, monkey
         # accepted, but the package is missing or malformed (a hand-edited / truncated row)
         {"status": "accepted", "output": None},
         {"status": "accepted", "output": ["not", "a", "package"]},
-        {"status": "accepted", "output": {"posts": [_server_copy("x")]}},
-        {"status": "accepted", "output": {"posts": {"x": "bare caption string"}}},
-        {"status": "accepted", "output": {"posts": {"x": {**_server_copy("x"), "caption": ""}}}},
-        {"status": "accepted", "output": {"posts": {"x": {**_server_copy("x"), "caption": None}}}},
+        {"status": "accepted", "output": {"posts": [_server_copy("x")], "judge": _ENFORCED}},
+        {"status": "accepted", "output": {"posts": {"x": "bare caption string"}, "judge": _ENFORCED}},
+        {"status": "accepted", "output": {"posts": {"x": {**_server_copy("x"), "caption": ""}}, "judge": _ENFORCED}},
+        {"status": "accepted", "output": {"posts": {"x": {**_server_copy("x"), "caption": None}}, "judge": _ENFORCED}},
     ],
 )
 @pytest.mark.asyncio
@@ -1168,7 +1230,9 @@ async def test_assets_and_posts_are_refused_on_a_closed_run(svc):
 
 
 async def _asset_of(svc, run_id, kind, ext, sha, *, ready=True):
-    asset, _ = await svc.register_asset(run_id, kind=kind, ext=ext, sha256=sha, size_bytes=1, claim=_holder(svc, run_id))
+    metadata = _video_metadata(svc, run_id) if kind == "video" else None
+    asset, _ = await svc.register_asset(run_id, kind=kind, ext=ext, sha256=sha, size_bytes=1,
+                                        metadata=metadata, claim=_holder(svc, run_id))
     if not ready:
         return asset
     svc.fake.objects.add(asset["storage_path"])
@@ -1216,13 +1280,47 @@ async def test_only_a_media_less_text_post_is_born_approved(svc, monkeypatch):
     card = await _asset_of(svc, rid, "card", "png", "3" * 64)
     posts = await svc.create_posts(rid, [
         {"platform": "facebook", "format": "text"},
-        {"platform": "facebook", "format": "video", "asset_ids": [video["id"]]},
+        {"platform": "instagram", "format": "video", "asset_ids": [video["id"]]},
         {"platform": "x", "format": "text", "asset_ids": [card["id"]]},
-        {"platform": "instagram", "format": "carousel", "asset_ids": [card["id"]]},
     ], claim=_holder(svc, rid))
-    assert [p["status"] for p in posts] == ["approved", "pending_review", "pending_review", "pending_review"]
+    assert [p["status"] for p in posts] == ["approved", "pending_review", "pending_review"]
     # one caption per platform, at most as many posts as the server's format map allows
     assert {p["caption"] for p in posts if p["platform"] == "facebook"} == {"server copy for facebook"}
+
+
+@pytest.mark.parametrize("spec", [
+    {"platform": "facebook", "format": "video"}, {"platform": "linkedin", "format": "video"},
+    {"platform": "instagram", "format": "carousel"},
+])
+@pytest.mark.asyncio
+async def test_a_format_whose_caption_disclaimer_does_not_fit_is_refused(svc, spec):
+    """The caption disclaimer is per PLATFORM; a worker (the least-trusted process) asking for a
+    narrated video on Facebook/LinkedIn or an image carousel on Instagram is refused by the
+    SERVER, whatever render.POST_FORMAT says (review 2026-09-29)."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, [spec["platform"]])
+    kind, ext = ("video", "mp4") if spec["format"] == "video" else ("carousel", "png")
+    media = await _asset_of(svc, rid, kind, ext, "5" * 64)
+    with pytest.raises(MarketingRequestInvalid):
+        await svc.create_posts(rid, [{**spec, "asset_ids": [media["id"]]}], claim=_holder(svc, rid))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+def test_every_recordable_format_has_a_caption_disclaimer_that_fits_it():
+    """A video post's caption must say narration was generated with AI; no other post may claim
+    it. The disclaimer is composed per platform (post_copy.disclaimer_for), so this pins the
+    server's format map to it."""
+    from datetime import date as _date
+
+    from app.services.marketing import post_copy
+
+    field = {"youtube": "youtube_description"}
+    for platform, formats in schemas.POST_FORMATS_BY_PLATFORM.items():
+        text = post_copy.disclaimer_for(field.get(platform, platform), _date(2026, 9, 17)) or ""
+        says_narration = "narration" in text
+        for fmt in formats:
+            assert says_narration == (fmt == "video"), (platform, fmt, text)
 
 
 def test_the_format_map_covers_exactly_the_outlets_the_writer_composes():
@@ -1500,3 +1598,249 @@ async def test_one_sweep_closes_at_most_the_limit_and_the_oldest_first(svc):
     assert closed == oldest, "the oldest abandoned runs go first"
     assert all(_stored(svc, rid)["status"] == "in_progress"
                for rid, d in seeded.items() if d not in oldest)
+
+
+# ── Step 0 / Phase 4 (2026-09-29): judge gate, review, object verification, on-screen text ──
+
+
+@pytest.mark.parametrize("judge", [None, {}, {"mode": "shadow"}, {"mode": "off"}, {"mode": "ENFORCE"},
+                                   "enforce", {"mode": None}])
+@pytest.mark.asyncio
+async def test_create_posts_refuses_a_script_the_judge_did_not_enforce(svc, judge):
+    """`shadow` accepts drafts the judge flagged and `off` never asks it: such a package may be
+    voiced and rendered, but it never becomes a post — nothing is written."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=False, now=NOW, claim_nonce=_n())
+    output = {"posts": {"x": _server_copy("x")}}
+    if judge is not None:
+        output["judge"] = judge
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "output": output})
+    with pytest.raises(mrs.MarketingJudgeNotEnforced):
+        await svc.create_posts(row["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, row["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+def test_the_judge_refusal_is_its_own_code_and_not_retried():
+    from app.api.error_response import ErrorCode, classify_exception
+
+    code, status = classify_exception(mrs.MarketingJudgeNotEnforced("x"))
+    assert code == ErrorCode.MARKETING_JUDGE_NOT_ENFORCED and status == 409
+    # A mismatching object is "the registered object is not there": retried by the next tick.
+    assert classify_exception(mrs.MarketingAssetMismatch("size 1 != 2 timeout")) == (
+        ErrorCode.MARKETING_ASSET_MISSING, 409)
+
+
+async def _pending_post(svc, platform="x", *, dry_run=False, run_date=date(2026, 9, 17)):
+    row, _ = await svc.claim_run(run_date, worker_version="t", dry_run=dry_run, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, row["id"], [platform])
+    (post,) = await svc.create_posts(row["id"], [{"platform": platform, "format": "text"}], claim=_holder(svc, row["id"]))
+    assert post["status"] == "pending_review"
+    return post
+
+
+@pytest.mark.asyncio
+async def test_review_post_decides_once_and_records_who(svc):
+    post = await _pending_post(svc)
+    outcome, row = await svc.review_post(post["id"], "approve", reviewed_by="telegram:42")
+    assert outcome == "approved" and row["status"] == "approved"
+    assert row["approved_by"] == "telegram:42" and row["approved_at"]
+    assert row["metadata"]["review"]["decision"] == "approved" and row["metadata"]["dry_run"] is False
+    # A double tap, or a late reject, changes nothing.
+    assert (await svc.review_post(post["id"], "approve", reviewed_by="telegram:42"))[0] == "already_approved"
+    outcome, again = await svc.review_post(post["id"], "reject", reviewed_by="telegram:7")
+    assert outcome == "already_approved" and again["status"] == "approved" and again["approved_by"] == "telegram:42"
+
+
+@pytest.mark.asyncio
+async def test_review_post_reject_and_the_edges(svc):
+    post = await _pending_post(svc)
+    outcome, row = await svc.review_post(post["id"], "reject", reviewed_by="telegram:42")
+    assert outcome == "rejected" and row["status"] == "rejected" and row["approved_by"] is None
+    assert row["metadata"]["review"]["by"] == "telegram:42"
+    assert (await svc.review_post(post["id"], "approve", reviewed_by="x"))[0] == "already_rejected"
+    assert await svc.review_post(str(uuid.uuid4()), "approve", reviewed_by="x") == ("not_found", None)
+    with pytest.raises(ValueError):
+        await svc.review_post(post["id"], "publish", reviewed_by="x")
+
+
+@pytest.mark.asyncio
+async def test_review_post_loses_a_race_without_overwriting_the_winner(svc, monkeypatch):
+    """The conditional UPDATE is the authority: another decision landing between our read and our
+    write must win, and we must report it rather than flip the row."""
+    post = await _pending_post(svc)
+    real_get = svc.get_post
+    calls = {"n": 0}
+
+    async def racing_get(post_id):
+        calls["n"] += 1
+        row = await real_get(post_id)
+        if calls["n"] == 1:   # after OUR read, a rejection lands
+            for r in svc.fake.tables[mrs.POSTS].rows:
+                if r["id"] == post_id:
+                    r["status"] = "rejected"
+        return row
+
+    monkeypatch.setattr(svc, "get_post", racing_get)
+    outcome, row = await svc.review_post(post["id"], "approve", reviewed_by="telegram:42")
+    assert outcome == "already_rejected" and row["status"] == "rejected" and row.get("approved_by") is None
+
+
+@pytest.mark.asyncio
+async def test_list_posts_filters_before_the_limit(svc):
+    """What the publisher asks for: only the platforms it can send and only real (non-rehearsal)
+    rows — applied IN the query, so older unsendable rows cannot fill the window."""
+    await _pending_post(svc, "x", dry_run=True, run_date=date(2026, 9, 16))
+    real = await _pending_post(svc, "x", run_date=date(2026, 9, 17))
+    for r in svc.fake.tables[mrs.POSTS].rows:
+        r["status"] = "approved"
+    rows = await svc.list_posts("approved", limit=1, platforms=["x"], live_only=True)
+    assert [r["id"] for r in rows] == [real["id"]]
+    assert await svc.list_posts("approved", platforms=[]) == []
+    assert await svc.list_posts("approved", platforms=["tiktok"]) == []
+    assert len(await svc.list_posts("approved", platforms=["x"])) == 2
+    # A row whose metadata carries no dry_run flag at all is a rehearsal to `live_only`.
+    for r in svc.fake.tables[mrs.POSTS].rows:
+        r["metadata"] = {}
+    assert await svc.list_posts("approved", platforms=["x"], live_only=True) == []
+
+
+@pytest.mark.parametrize("path", ["complete", "register"])
+@pytest.mark.parametrize("stored", [{"size": 2, "mimetype": "video/mp4"},
+                                    {"size": 1, "mimetype": "text/html"},
+                                    {"size": 1, "mimetype": "application/json"}])
+@pytest.mark.asyncio
+async def test_a_mismatching_object_is_deleted_and_failed_on_both_paths_to_ready(svc, path, stored):
+    """Size or content type not what was registered → the object is removed (its immutable key is
+    free again), the row is failed, and nothing becomes `ready` — on `complete_asset` AND on
+    `register_asset`'s already-in-bucket branch (formerly a second path to ready with no check)."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, row["id"], ["tiktok"])
+    meta = _video_metadata(svc, row["id"])
+    asset, _ = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                        metadata=meta, claim=_holder(svc, row["id"]))
+    svc.fake.objects.add(asset["storage_path"])
+    svc.fake.object_meta[asset["storage_path"]] = stored
+    with pytest.raises(mrs.MarketingAssetMismatch):
+        if path == "complete":
+            await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
+        else:
+            await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                     metadata=meta, claim=_holder(svc, row["id"]))
+    assert asset["storage_path"] not in svc.fake.objects
+    assert svc.fake.storage.removed == [asset["storage_path"]]
+    (stored_row,) = [a for a in svc.fake.tables[mrs.ASSETS].rows if a["id"] == asset["id"]]
+    assert stored_row["status"] == "failed"
+    # The next tick re-uploads the right bytes to the SAME key and it verifies.
+    svc.fake.object_meta.pop(asset["storage_path"])
+    again, upload = await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                             metadata=meta, claim=_holder(svc, row["id"]))
+    assert upload is not None and again["id"] == asset["id"]
+    svc.fake.objects.add(asset["storage_path"])
+    assert (await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"])))["status"] == "ready"
+
+
+@pytest.mark.parametrize("stored", [{}, {"size": None, "mimetype": "video/mp4"}, {"size": 1, "mimetype": ""},
+                                    {"size": "big", "mimetype": "video/mp4"}])
+@pytest.mark.asyncio
+async def test_an_unknown_size_or_type_is_a_ledger_error_and_deletes_nothing(svc, stored):
+    """Storage not reporting what it stored is an unknown, not a mismatch: nothing is deleted,
+    nothing becomes ready, and the 503 is retried."""
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    asset, _ = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=1,
+                                        claim=_holder(svc, row["id"]))
+    svc.fake.objects.add(asset["storage_path"])
+    svc.fake.object_meta[asset["storage_path"]] = stored
+    with pytest.raises(mrs.MarketingRunError) as info:
+        await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"]))
+    assert not isinstance(info.value, mrs.MarketingAssetMismatch)
+    assert asset["storage_path"] in svc.fake.objects and svc.fake.storage.removed == []
+    assert svc.fake.tables[mrs.ASSETS].rows[0]["status"] == "pending_upload"
+
+
+@pytest.mark.asyncio
+async def test_a_content_type_parameter_is_not_a_mismatch(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    asset, _ = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=7,
+                                        claim=_holder(svc, row["id"]))
+    svc.fake.objects.add(asset["storage_path"])
+    svc.fake.object_meta[asset["storage_path"]] = {"size": "7", "mimetype": "Application/JSON; charset=utf-8"}
+    assert (await svc.complete_asset(asset["id"], claim=_asset_holder(svc, asset["id"])))["status"] == "ready"
+
+
+@pytest.mark.parametrize("mutate, match", [
+    (lambda md: md.update(onscreen_text=md["onscreen_text"] + ["Buy now"]), "not the accepted script"),
+    (lambda md: md.update(onscreen_text=[t for t in md["onscreen_text"] if t != _DISCLAIMER_CARD]),
+     "disclaimer card"),
+    (lambda md: md.update(onscreen_text=[]), "onscreen_text"),
+    (lambda md: md.pop("onscreen_text"), "onscreen_text"),
+    (lambda md: md.update(voice_asset_id=str(uuid.uuid4())), "narration"),
+    (lambda md: md.pop("voice_asset_id"), "narration"),
+    # a card BODY alone is fine to declare only if it is the accepted body — a paraphrase is not
+    (lambda md: md.update(onscreen_text=md["onscreen_text"] + [_CARD["body"].upper()]), "not the accepted script"),
+])
+@pytest.mark.asyncio
+async def test_a_video_declaring_text_the_script_does_not_carry_is_refused(svc, mutate, match):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, row["id"], ["tiktok"])
+    meta = _video_metadata(svc, row["id"])
+    mutate(meta)
+    with pytest.raises(MarketingRequestInvalid, match=match):
+        await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                 metadata=meta, claim=_holder(svc, row["id"]))
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "video"]
+
+
+@pytest.mark.asyncio
+async def test_a_video_whose_narration_is_not_a_ready_checked_audio_is_refused(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, row["id"], ["tiktok"])
+    meta = _video_metadata(svc, row["id"])
+    voice = next(a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "audio")
+    for bad in ({"status": "pending_upload"}, {"metadata": {}}, {"kind": "video"}, {"run_id": str(uuid.uuid4())}):
+        saved = dict(voice)
+        voice.update(bad)
+        with pytest.raises(MarketingRequestInvalid, match="narration"):
+            await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                     metadata=meta, claim=_holder(svc, row["id"]))
+        voice.clear()
+        voice.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_a_video_needs_an_accepted_script_to_be_checked_against(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    with pytest.raises(mrs.MarketingScriptNotReady):
+        await svc.register_asset(row["id"], kind="video", ext="mp4", sha256=SHA, size_bytes=1,
+                                 metadata={"onscreen_text": ["x"], "voice_asset_id": "v"}, claim=_holder(svc, row["id"]))
+
+
+def test_the_request_schema_requires_and_bounds_onscreen_text():
+    base = {"kind": "video", "ext": "mp4", "sha256": SHA, "bytes": 1}
+    ok = schemas.AssetRegisterRequest(**base, metadata={"onscreen_text": ["a"], "voice_asset_id": "v"})
+    assert ok.metadata["onscreen_text"] == ["a"]
+    for metadata in ({}, {"onscreen_text": []}, {"onscreen_text": [""]}, {"onscreen_text": ["  "]},
+                     {"onscreen_text": [1]}, {"onscreen_text": "a"},
+                     {"onscreen_text": ["x" * (schemas.ONSCREEN_TEXT_MAX_CHARS + 1)]},
+                     {"onscreen_text": ["x"] * (schemas.ONSCREEN_TEXT_MAX + 1)}):
+        with pytest.raises(ValueError):
+            schemas.AssetRegisterRequest(**base, metadata=metadata)
+    with pytest.raises(ValueError, match="only a video"):
+        schemas.AssetRegisterRequest(kind="manifest", ext="json", sha256=SHA, bytes=1,
+                                     metadata={"onscreen_text": ["a"]})
+
+
+@pytest.mark.asyncio
+async def test_read_back_verifies_the_video_pointer_like_the_voice_pointer(svc):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    await _accept_script(svc, row["id"], ["tiktok"])
+    video = await _ready_asset(svc, row["id"])
+    voice = next(a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "audio")
+    run_row = svc.fake.tables[mrs.RUNS].rows[0]
+    run_row["metadata"] = {**run_row["metadata"], "voice_asset_id": voice["id"], "video_asset_id": video["id"]}
+    back = await svc.read_back(row["id"], claim=_holder(svc, row["id"]))
+    assert back["voice_asset_id"] == voice["id"] and back["video_asset_id"] == video["id"]
+    assert all(a["public_url"].endswith(a["storage_path"]) for a in back["assets"])
+    # A pointer at the wrong kind (the worker writes run metadata itself) verifies to None.
+    run_row["metadata"]["video_asset_id"] = voice["id"]
+    run_row["metadata"]["voice_asset_id"] = video["id"]
+    back = await svc.read_back(row["id"], claim=_holder(svc, row["id"]))
+    assert back["voice_asset_id"] is None and back["video_asset_id"] is None

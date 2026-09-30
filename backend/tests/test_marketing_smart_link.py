@@ -2031,6 +2031,13 @@ _ROOT_ROUTES = {
     "/privacy": "App Store-required Privacy Policy URL; static legal page",
     "/terms": "Terms of Use; static legal page",
     "/support": "App Store-required Support URL; static page",
+    "/marketing/telegram/webhook": "Telegram review callbacks; secret-header verified; no data returned",
+}
+#: The ONLY root routes that may accept a write, each with the one method it takes. The review
+#: bot's webhook is a POST because Telegram delivers updates that way; it is gated by Telegram's
+#: secret-token header (401/403 before the body is read) and answers `{"ok": true}` only.
+_ROOT_WRITE_ROUTES = {
+    "/marketing/telegram/webhook": {"POST"},
 }
 #: FastAPI's own pages, mounted only when settings.DEBUG (app/main.py FastAPI(...)): they would
 #: publish the whole API schema, so they must never exist in production.
@@ -2063,7 +2070,8 @@ def test_every_root_route_is_allowlisted_with_a_reason():
         f"no user data), or move it under /api/v1 where the licence gate covers it."
     )
     for path, methods in root:
-        assert not (methods & _WRITE_METHODS), f"{path} accepts {methods & _WRITE_METHODS}"
+        allowed = _ROOT_WRITE_ROUTES.get(path, set())
+        assert not ((methods & _WRITE_METHODS) - allowed), f"{path} accepts {methods & _WRITE_METHODS}"
     debug_present = sorted(p for p, _ in root if p in _DEBUG_ONLY)
     if debug_present:
         assert settings.DEBUG, f"{debug_present} mounted with DEBUG off — the API schema is public"
@@ -2073,6 +2081,7 @@ def test_the_allowlist_does_not_rot():
     paths = {p for p, _ in _all_routes()}
     missing = sorted(set(_ROOT_ROUTES) - paths)
     assert not missing, f"_ROOT_ROUTES lists routes that no longer exist: {missing}"
+    assert set(_ROOT_WRITE_ROUTES) <= set(_ROOT_ROUTES), "a write exemption for an unlisted route"
 
 
 def test_the_smart_link_and_landing_routes_take_get_and_head_only():

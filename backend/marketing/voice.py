@@ -58,11 +58,14 @@ MAX_SPEED = 1.15
 #: The closing disclaimer card's screen time (the Phase 4 render shows it after the narration).
 DISCLAIMER_CARD_SECONDS = 4.0
 DEFAULT_MAX_VIDEO_SECONDS = 75
-#: The child's whole budget (model load + synthesis). Railway CPUs are slower than a laptop's;
-#: measured 0.28× realtime on an M1 with 2 threads, so a 70 s narration is well inside.
-VOICE_TIMEOUT_SECONDS = 8 * 60
+#: The WHOLE synthesis budget of one stage — model load + synthesis, the first attempt and the
+#: faster retry TOGETHER (each used to get 8 min, so the stage's worst case outran the worker's
+#: STAGE_START_MARGIN_SECONDS). Measured 0.28× realtime on an M1 with 2 threads: a 70 s narration
+#: takes ~20 s plus the model load, so even a CPU 3× slower fits both attempts with room left.
+VOICE_TIMEOUT_SECONDS = 6 * 60
 HEARTBEAT_SECONDS = 60
 ENCODE_TIMEOUT_SECONDS = 120
+PROBE_TIMEOUT_SECONDS = 30
 OUTPUT_SAMPLE_RATE = 48000
 
 
@@ -232,7 +235,8 @@ def encode_m4a(wav_path: Path, out_path: Path) -> Tuple[bytes, float]:
     if res.returncode != 0:
         raise VoiceFailed(f"ffmpeg encode failed ({res.returncode}): {res.stderr[-600:]}")
     probe = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of",
-                            "csv=p=0", str(out_path)], capture_output=True, text=True, timeout=30)
+                            "csv=p=0", str(out_path)], capture_output=True, text=True,
+                           timeout=PROBE_TIMEOUT_SECONDS)
     try:
         duration = float(probe.stdout.strip())
     except ValueError:
@@ -280,11 +284,23 @@ def _reusable(listing: Dict[str, Any], sha: str, voice: str) -> Optional[str]:
     return None
 
 
+def worst_case_seconds(upload_timeout: float) -> float:
+    """The longest the voiced stage can run: the shared synthesis budget, the encode, the probe
+    and one signed-upload PUT (the worker's timeout, passed in — this module never imports
+    main.py). tests/test_marketing_worker.py pins it inside STAGE_START_MARGIN_SECONDS."""
+    return VOICE_TIMEOUT_SECONDS + ENCODE_TIMEOUT_SECONDS + PROBE_TIMEOUT_SECONDS + upload_timeout
+
+
 def synthesize_fitting(lines: List[str], *, voice: str, speed: float, workdir: Path,
                        heartbeat: Optional[Callable[[], None]], budget: float,
-                       runner: Callable[..., Narration]) -> Narration:
-    """Synthesise; if the narration overruns `budget`, once more at the speed that fits."""
-    first = runner(lines, voice=voice, speed=speed, out_dir=workdir, heartbeat=heartbeat)
+                       runner: Callable[..., Narration],
+                       synth_budget: float = VOICE_TIMEOUT_SECONDS) -> Narration:
+    """Synthesise; if the narration overruns `budget` (seconds of audio), once more at the speed
+    that fits. Both attempts share ONE wall-clock `synth_budget`: the retry gets what the first
+    attempt left, and none at all is a typed failure (the next tick retries the stage)."""
+    deadline = time.monotonic() + synth_budget
+    first = runner(lines, voice=voice, speed=speed, out_dir=workdir, heartbeat=heartbeat,
+                   timeout=synth_budget)
     if first.duration <= budget:
         return first
     faster = round(min(MAX_SPEED, speed * first.duration / budget * 1.02), 3)
@@ -292,9 +308,14 @@ def synthesize_fitting(lines: List[str], *, voice: str, speed: float, workdir: P
         raise NarrationTooLong(f"{first.duration:.1f}s > {budget:.1f}s at the maximum speed")
     logger.warning("narration %.1fs > budget %.1fs at speed %.2f — re-synthesising at %.2f",
                    first.duration, budget, speed, faster)
+    left = deadline - time.monotonic()
+    if left < 30:
+        raise VoiceFailed(f"narration needs a faster retry but only {max(left, 0):.0f}s of the "
+                          f"{synth_budget:.0f}s synthesis budget is left")
     second_dir = workdir / "retry"
     second_dir.mkdir(exist_ok=True)
-    second = runner(lines, voice=voice, speed=faster, out_dir=second_dir, heartbeat=heartbeat)
+    second = runner(lines, voice=voice, speed=faster, out_dir=second_dir, heartbeat=heartbeat,
+                    timeout=left)
     if second.duration > budget:
         raise NarrationTooLong(f"{second.duration:.1f}s > {budget:.1f}s even at speed {faster:.2f}")
     return second
@@ -318,6 +339,15 @@ def stage_voice(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *,
     encoder = encoder or encode_m4a
 
     script = ctx["script"]
+    # A day with no video outlet needs no narration: voicing it anyway loaded Kokoro, minted an
+    # unused public audio object, and — when the narration was too long or the child was killed —
+    # skipped or failed a day whose text posts were fine (review 2026-09-29).
+    from marketing import render
+
+    if not render.video_outlets(script.get("outlets") or []):
+        logger.info("narration SKIPPED run_id=%s: no outlet needs media (%s)", run["id"],
+                    script.get("outlets"))
+        return {}
     lines = tm.narrated_lines(script)
     if not lines:
         raise SkipRun("empty_narration")

@@ -167,9 +167,9 @@ rather than an unfinished feature.
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **12** modules): `fmp`, `gemini`, `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **13** modules): `fmp`, `gemini`, `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
-`openai_compat`.
+`openai_compat`, `telegram` (the marketing review bot, §12.9).
 Note there is **no NewsAPI or other news vendor** — news comes from FMP (`get_stock_news` /
 `get_general_news` / `get_crypto_news`), with Gemini doing enrichment and sentiment on top.
 `openai_compat` is the switchable second provider for the NEWS features only (per-article sentiment
@@ -1069,7 +1069,7 @@ whether any of it runs:
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly | 07:00 ET every day / Monday 08:00 ET | `TRILLION_CLUB_JOBS_ENABLED` (**off**) |
-| marketing publisher / link-hit flush | 10 min / 60 s | `MARKETING_ENABLED` (**off**) / — |
+| marketing publisher (+ the Telegram review sweep, §12.9) / link-hit flush | 10 min / 60 s | publishing: `MARKETING_ENABLED` (**off**); the review sweep: the `MARKETING_TELEGRAM_*` settings (unset = off) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
@@ -2003,7 +2003,7 @@ What follows is the set with no other home.
 | The push audience cap ran BEFORE the preference filter | `followers_of_whale` / `watchers_of` took the 500 lowest user ids and dropped the rest before anyone read a toggle, so on a whale with 600 followers of whom 40 had `whale_13f` ON, the opted-in follower whose id sorted 501st never received any 13F alert, on every filing (F17-7). The selectors now page the whole audience; `_notify_users_inner` filters on toggle + master first and caps the SURVIVORS at 500 with a rotating (hash of user id + event key) cut, so no fixed tail is starved. | Only the preference read runs on the full list; counts / devices / unread stay capped. |
 | GoTrue verbs ran ON the single worker's loop by design | Until 2026-09-17 every sign-in / sign-up / OTP / admin password write in `app/api/v1/endpoints/auth.py` was a synchronous httpx round trip on the event loop (`_BLOCKING_BY_DESIGN` in `test_crud_paths_off_the_event_loop.py`), because supabase-py's auth-state listener rewrites the process-wide client's shared `Authorization` header on every sign-in and the loop's serialisation was what kept two sign-ins from interleaving. A handful of addresses sending wrong passwords (a server-side bcrypt each, ~0.4–0.9 s) stalled every chat stream, report poll and credit read in the process. `database.run_gotrue` now keeps the serialisation (one `asyncio.Lock` per loop, service_role re-asserted INSIDE it right before the verb) and runs the verb in a worker thread, so a login flood queues LOGINS, not the app; sign-in secrets and tokens are length-bounded at the schema (`SIGN_IN_SECRET_MAX_LENGTH`, `TOKEN_MAX_LENGTH`) so a multi-megabyte "password" is a 422 with no upstream call. | The per-request GoTrue client the SDK's constructor allows would remove the lock too; deferred because the memoized singleton is what `test_auth_client_is_memoized` pins against per-request sockets. `users.py`'s `auth.admin.delete_user` is the one verb still on the loop. |
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
-| The marketing engine writes but does not yet voice, render or publish | Phase 1 (2026-09-17) shipped the ledger, the worker/publisher split and the internal API; Phase 2 (2026-09-23, §12.5-12.6) added class-A content selection, the writer and its validators, the kick-and-poll script endpoint, server-authored captions in `create_posts`, the smart link and the landing page. `PUBLISHERS` in `app/services/marketing/publisher_service.py` is still an empty registry and the worker closes every scripted run `skipped` with `phase2_script_only` — no voice, video or post exists yet | Deliberate sequencing (Phases 3-7 of the approved plan). Every switch defaults OFF / dry-run. Migration 173 (`marketing_scripts`, `marketing_link_hits`) is applied (verified live 2026-09-24), but in its first form: the hardening review's columns (`run_date`, `content_rejections`, `reject_reason`) are in migration 176, written but not yet applied — until it is, every script kick fails with 42703, so apply 176 before deploying that web code. After the next re-dump, move the two tables out of `_PENDING_MIGRATION_TABLES` in `tests/test_schema_doc_generator.py`. The Railway worker service itself has not been created yet. |
+| The marketing engine renders and records posts but does not yet publish | Phases 1-4 are built: the ledger and the worker/publisher split (§12.2), class-A content and its validators and judge (§12.5), the smart link and landing page (§12.6), the narration (§12.7), the render and the day's posts (§12.8), and the Telegram review bot (§12.9). `PUBLISHERS` in `app/services/marketing/publisher_service.py` is still an empty registry, so an approved post is never sent (Phase 5). The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off and a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review` | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run. Migrations 170, 173 and 176 are applied. The Railway worker service has not been created yet, so no run has ever executed in production — the first cron tick is also the first Linux measurement of memory and render time. |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -2142,20 +2142,29 @@ SHIPPED: the foundation — ledger, process split, worker API, switches (Phase 1
 and class-A content — selection, writer, validators, server-authored captions, the smart link
 and the landing page (Phase 2, 2026-09-23; §12.5-12.6) — then, on 2026-09-26, the semantic
 compliance judge (§12.5), the caller-claim fence and asset read-back (§12.2) and the narration
-with word timings (Phase 3, §12.7). Nothing is rendered or published yet.
+with word timings (Phase 3, §12.7); and on 2026-09-29 the render and the day's posts (Phase 4,
+§12.8) and the Telegram review bot (§12.9). Nothing is published yet: no platform adapter exists.
 
 ### 12.1 The content is gated by licence and regulation, not by tooling
 
 Two facts decided the design before any tool was chosen, and both are enforced upstream of
 every renderer:
 
-- **The FMP Order Form is authenticated-display only** (§9.1, auth.md §1a). Exhibit A §3
-  *Public External Display* was declined in writing, Agreement §1 makes "display and
-  redistribution of any Data outside of Licensee Properties" a Non-Permitted Use, and ToS
-  §10.4 forbids even naming FMP as a source without consent. Whale 13F rows, congressional
-  trades and Form 4 insider rows are all FMP-relayed (`whale_service.py`, `signals_service.py`). So no FMP
-  number, no FMP-relayed filing and no product footage showing live prices may reach a
-  public post.
+- **The FMP Order Form is authenticated-display only** (§9.1, auth.md §1a). Exhibit A item 3
+  *Public External Display* was declined, the Agreement's Section 1 makes "display and
+  redistribution of any Data outside of Licensee Properties" a Non-Permitted Use, and Exhibit B
+  Section 3 forbids naming FMP as a source without consent. Whale 13F rows, congressional
+  trades and Form 4 insider rows are all FMP-relayed (`whale_service.py`, `signals_service.py`).
+  On 2026-09-28 FMP answered a consent request by email: promotional public display is allowed
+  for "select datasets" (its example: "certain financial statement fields"), not for
+  price-related data (prices, charts, end-of-day prices, ETF data). The owner accepted that email
+  as sufficient (it is not a signed consent) and reads it as covering everything except
+  displaying prices. So financial-statement fields, earnings and estimates, company information,
+  filings and valuation figures such as market cap, P/E, EV and dividend yield may reach a public
+  post, subject to the MAR, real-person and congressional limits below; a market price,
+  % price moves, price charts and ETF data may not; FMP is never credited; and a screenshot
+  showing a price, a % move or a chart uses labelled sample values. Nothing on the marketing
+  path reads FMP yet.
 - **EU MAR Art. 2(4) reaches a US brand feed.** For an instrument admitted to or traded on an
   EU venue (large US names trade on Tradegate/gettex), a public opinion on its present or
   future value or price is an investment recommendation with per-post disclosure duties, and
@@ -2167,10 +2176,53 @@ every renderer:
 Hence the **content classes** on `marketing_runs.content_class`: **A** — educational and
 general, built from the Learn corpus and Caydex's own writing, illustrative data clearly
 labelled, no named-ticker value opinion (the default and the only class Phase 2 produces);
-**C** — reportorial public filings fetched directly from SEC EDGAR, deterministically
-templated, no valuation adjective (Phase 8). There is deliberately no class B in the CHECK
-constraint. Congressional PTRs carry a statutory commercial-use bar (5 U.S.C. §13107(c)) and
-are a counsel question before any code.
+**C** — reportorial public filings (Form 4 and 13F from SEC EDGAR or FMP's non-price fields;
+congressional rows from FMP only), deterministically templated, no valuation adjective, no "copy
+this trade" CTA, never LLM-authored facts about a named person (Phase 8). There is deliberately no class B in the CHECK
+constraint.
+
+**Congressional trades — no names, and "disclosed", not "bought"** (owner decision 2026-09-28).
+5 U.S.C. §13107(c)(1)(B) makes it unlawful for "any person to obtain or use a report … for any
+commercial purpose, other than by news and communications media for dissemination to the
+general public". Periodic transaction reports are covered, and a 2012 Office of Legal Counsel
+opinion found that the STOCK Act's online posting leaves the use restrictions in place.
+
+Research on 2026-09-28 (four researchers, with each claim checked by two verifiers) found:
+
+- **Marketing is probably covered.** Marketing a paid app is a commercial purpose in the plain
+  meaning.
+- **Several questions have no answer in law.** The statute has no exception for aggregate
+  counts. No authority says whether data relayed by a vendor counts as "use of a report". The
+  news-media exception is undefined, and it fits a brand post badly.
+- **Only the Attorney General can act,** through a civil suit. The penalty cap is $10,000 in the
+  statute; the House Ethics 2026 guide gives $25,132 after inflation. An injunction is also
+  possible. There is no criminal penalty and no private right to sue.
+- **No enforcement action has been found since 1978.** Meanwhile the data is used commercially in
+  the open:
+  - the NANC/GOP ETFs, whose prospectuses say there is "no definitive determination";
+  - SEC staff, who in 2024 called it a "gray legal area";
+  - Quiver, Unusual Whales, Autopilot's "Pelosi Tracker", and FMP itself.
+
+The owner accepted that risk, with two conditions:
+
+- **No member is named or narrowed to one person,** and a count is at least 2. Naming someone
+  would also bring in right-of-publicity and false-light claims.
+- **Posts say "disclosed purchases/sales" plus the disclosure month.** A report covers spouses'
+  and dependent children's trades, gives amounts only as ranges, and may arrive up to 45 days
+  after the trade, so "bought" can be false (FTC Act §5).
+
+- **The data comes through FMP only,** never from the House Clerk or Senate eFD sites directly.
+  The Senate site makes each user acknowledge the use prohibitions before searching, and the
+  accepted risk rests on vendor-relayed data.
+- **Member identity is dropped at the source.** The future marketing adapter strips name, office,
+  district and owner fields, so no name can enter the marketing path at all.
+
+`.claude/rules/marketing.md` keeps the Home App-Exclusive Signals (Pro-gated) out of public posts.
+Congressional counts are the one exception: a post may name a ticker the Pro Congressional Buys
+card also shows. Whale Accumulation, Earnings Shockers and CEO Buys stay private. The in-app feature is already
+the same commercial use; the posts add visibility, not a new kind of risk. If H.R. 7008 (passed
+by the House on 2026-07-22, now in the Senate) becomes law, members largely stop buying and
+this content dries up.
 
 ### 12.2 Two processes, one ledger, least privilege
 
@@ -2238,7 +2290,16 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   - `create_posts` accepts only the (platform, format) pairs of `POST_FORMATS_BY_PLATFORM`,
     requires a `ready` asset of a matching kind for every media format, validates every
     spec before inserting any (a 409 on the fifth post used to leave four behind), and
-    births only media-less text posts `approved` when auto-publish is on.
+    births only media-less text posts `approved` when auto-publish is on. It refuses (409
+    `MARKETING_JUDGE_NOT_ENFORCED`) a class-A package the semantic judge did not check in
+    `enforce` mode — the writer records the mode IN the package, and `shadow` accepts drafts the
+    judge flagged — so a day run under `shadow`/`off` is voiced and rendered but never becomes a
+    post; the worker closes it `skipped` (`judge_not_enforced`). That guard, not a second switch,
+    is what makes turning auto-publish on later safe.
+  - a post leaves `pending_review` only through `review_post`: ONE conditional UPDATE on
+    `status = pending_review` that records who decided (`approved_by`, `metadata.review`), so a
+    double tap or two reviewers can never flip a decided post. Its only caller is the Telegram
+    review bot (§12.9); `mark_post` stays the publisher's.
   - the day's script is generated only for a HELD run — `in_progress`, dated today or
     yesterday ET, claim touched within `MARKETING_RUN_STALE_SECONDS`; otherwise the kick
     answers 409 `MARKETING_RUN_NOT_HELD` and spends nothing. The worker treats that code as
@@ -2286,9 +2347,16 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
 the MP4 by URL, and podcast enclosures must be stable unsigned URLs — Spotify re-fetches an
 enclosure only when its path changes. Paths are content-addressed
 (`<run_date>/<kind>-<sha256[:16]>.<ext>`), immutable, and an asset is `ready` only after the
-API has HEAD-verified the object (`complete_asset`), never on the worker's word. That check is
-EXISTENCE only today: the declared size, content type and hash are not compared (Phase 4
-adds a storage-info check that deletes and fails on a mismatch). The worker's preflight
+API has verified the object, never on the worker's word: it must be present, with the byte size
+and content type that were registered (read from the Storage listing's metadata). Both paths to
+`ready` run that ONE check (`_verify_object`) — `complete_asset`, and `register_asset`'s branch
+that finishes a row whose bytes already landed, which until 2026-09-29 skipped it. On a
+mismatch the object is DELETED and the row marked `failed` (an immutable key holding the wrong
+bytes would block its own re-upload forever) and the stage is retried; when Storage reports no
+size or type, nothing is deleted and the ledger error is retried. The sha256 is not recomputed
+server-side (decision 2026-09-29): it would pull every MP4 through the single uvicorn worker, and
+size + type + the worker's ffprobe gate + the registration checks of what a video says (§12.7)
+and draws (§12.8) are the verification. The worker's preflight
 manifest is content-addressed too — its generation time lives in the asset row's metadata —
 so a re-claimed attempt re-registers the same path instead of minting a new public object.
 
@@ -2484,7 +2552,7 @@ every honest line in it must pass, and a rule that rejects one is over-blocking 
 rule, never edit the fixture. The regex validators remain a denylist, so a human read of every
 eligible item (`backend/scripts/marketing_preview.py`, which writes nothing) is the acceptance
 gate, and `MARKETING_AUTO_PUBLISH` must stay off until a stronger gate exists — with it on, a
-media-less text post is born `approved` on the validators' word alone.
+media-less text post is born `approved` on the validators' and the judge's word alone.
 
 **Kick-and-poll** (`app/services/marketing/script_service.py`,
 `POST /api/v1/internal/marketing/runs/{run_id}/script`). The worker cannot write copy, so it
@@ -2571,11 +2639,12 @@ allow-list of every unauthenticated root route with its reason.
 The `voiced` stage (`backend/marketing/voice.py`) narrates the accepted script — the hook, then
 every script line — with Kokoro-82M (Apache-2.0, CPU, voice `af_heart`) and publishes it as the
 run's canonical `audio` asset: an AAC m4a (48 kHz stereo, 160 kbps, faststart) whose word
-timings ride in the asset's metadata. Phase 4 renders the video from it; until then a run that
-reaches `voiced` closes `skipped` with `phase3_voice_only`.
+timings ride in the asset's metadata. The render (§12.8) burns captions from it.
 
-- **The model runs in a child process** (`python -m marketing.voice child …`) under an 8-minute
-  timeout, while the parent sends a heartbeat PATCH every minute to keep the claim live. torch
+- **The model runs in a child process** (`python -m marketing.voice child …`) under ONE
+  6-minute synthesis budget shared by the first attempt and the faster retry (each used to get 8
+  minutes, so the stage's worst case outran the worker's start margin), while the parent sends a
+  heartbeat PATCH every minute to keep the claim live. torch
   needs 1.5-2 GB (1.7 GB peak measured); if the container's limit kills it, only the child dies
   and the run fails as `VoiceOOM` to be retried by the next tick — and a wedged model call can
   never hold the cron slot (Railway skips every tick while one lives). Threads come from the
@@ -2629,9 +2698,107 @@ missing file fails loudly instead of downloading on a cron tick. The preflight r
 voice stage needs (packages, weights, font, the memory limit, the baked model revision) into the
 run's metadata. Give the Railway worker 4 GB. The non-commercial aligner the Learn read-along
 uses has no place here: Kokoro's own timestamps make an aligner unnecessary, and a test fails
-if the worker tree references it or the `scripts` tree. Local check: `python -m marketing.preview`
-(from `backend/` with the ML venv) renders a solid-background MP4 of the narration and captions
-into the gitignored `marketing/out/` — measured 0.28× realtime on an M1 with two threads.
+if the worker tree references it or the `scripts` tree. Every transitive package is pinned in
+`marketing/constraints.txt` (applied with `-c`) to the versions the 2026-09-26 spike measured —
+kokoro, misaki and spaCy leave transformers, huggingface_hub and thinc unpinned themselves, and
+the first Railway build is the image's first build anywhere. Local check: `python -m
+marketing.preview` (from `backend/` with the ML venv) renders the full video (§12.8) into the
+gitignored `marketing/out/` — narration measured at 0.28× realtime on an M1 with two threads.
+
+### 12.8 The render and the day's posts (Phase 4, 2026-09-29)
+
+The `rendered` stage (`backend/marketing/render.py`, `backend/marketing/cards.py`,
+`backend/marketing/video.py`) turns the accepted
+script and its narration into ONE 9:16 MP4 (1080×1920, H.264 High yuv420p 30 fps CFR, AAC 160 kbps
+48 kHz stereo, faststart, no edit list — the one profile TikTok, Reels, Shorts and Facebook all
+accept); the `assets_ready` stage then records the day's posts and the run closes `media_ready`.
+
+- **Cards** (`backend/marketing/cards.py`, Pillow, Inter Bold, brand colours only: #171B26 page, #1E2330 card,
+  #60A5FA accent, white): a BRAND card (the logo and the wordmark) while the hook is spoken — the
+  hook itself is shown only by the burned captions, because the validators never checked a
+  hook→card reading chain — then the accepted script's cards (title and body always together, in
+  order), then the DISCLAIMER card (the server-supplied text, the logo and `caydexinvest.com`).
+  Text is wrapped greedily and shrunk to fit, never truncated; a card that cannot fit, or a glyph
+  the font lacks, is `SkipRun("unrenderable_text")` — it would fail the same way on every retry.
+  Card text stays above the caption band and inside the 920-px safe width (the platforms' UI
+  overlays). Layout is measured with raqm, which the Linux image's Pillow has; the preview
+  re-executes itself on macOS so Homebrew's raqm is found.
+- **One ffmpeg call** (`backend/marketing/video.py`, a pure argv builder plus a runner): each card is a single PNG
+  input expanded with the `loop` filter (`-loop 1` re-decodes the PNG every frame), cross-faded on
+  the narration's line boundaries, captions burned with `ass=` from the audio asset's timed words,
+  relative file names only (no filtergraph escaping). The disclaimer card plays AFTER the
+  narration, so the audio is padded (`apad`) to cover it and the output length is set with `-t`
+  — never `-shortest`, which would end the video with the narration and drop the legally
+  required closing card (the plan's first draft had exactly that bug). x264 runs with a fixed,
+  recorded thread count and bit-exact flags, so a re-render ON THE SAME HOST is byte-identical,
+  and a matching `ready` video (its `render_key`: audio bytes, word table, card texts, layout
+  engine, versions, threads) is reused instead of rendering again. Across hosts the AAC re-encode
+  follows the CPU's SIMD path, so a re-claimed attempt on another machine whose first upload never
+  completed can mint a second (orphaned, never-posted) public object — bounded, and swept in
+  Phase 7. A timeout, an OOM kill and a failed encode are
+  typed; an ffprobe gate checks the profile above, the exact duration (narration + disclaimer
+  card) and that the moov atom comes first before anything is uploaded.
+- **What the video draws is declared and checked.** The worker registers the video with
+  `metadata.onscreen_text` — every string its cards drew — and the narration it burned
+  (`metadata.voice_asset_id`). `register_asset` refuses a string that is not one of the accepted
+  script's card titles or bodies, its disclaimer card or the code-owned end card
+  (`VIDEO_BRAND_TEXT`), refuses a video that does not declare the disclaimer card, and requires the
+  named narration to be a `ready` audio asset of the same run whose timed words were checked
+  (§12.7). The pixels themselves are not verified — the worker is the least-trusted process — so
+  every media post is born `pending_review`, and a media auto-publish switch will rest on this
+  declaration plus a human-sampled track record.
+- **Formats**: TikTok, YouTube and Instagram get the video; Facebook and LinkedIn stay text, and
+  X, Threads and Bluesky are text-only outlets. The caption disclaimer is composed per PLATFORM
+  (`post_copy.disclaimer_for`), and only the video platforms' captions say "Script and narration
+  generated with AI" — so the SERVER's format map (`POST_FORMATS_BY_PLATFORM`) allows only those
+  pairs and refuses a Facebook/LinkedIn video or an Instagram carousel whatever the worker asks
+  (the worker's `render.POST_FORMAT` mirrors it; tests pin both against the disclaimer). A day
+  with no video outlet is neither narrated nor rendered. The Instagram carousel waits until the
+  disclaimer is composed per format.
+- **The stages re-derive, never remember** (§12.2): the render reads the verified narration back,
+  downloads it with a byte cap and checks its sha256 against the row; the posts stage reads the
+  verified `video_asset_id` back (written in the same PATCH as `stage=rendered`) and fails loudly
+  if a video outlet has none.
+- **Budget.** Each stage starts only with its own margin of the 30-minute tick left
+  (`STAGE_START_MARGINS`: 12 min for voice and render, 4 for the posts, 2 for the quick stages
+  and for a media stage on a day with no video). A stage started at the latest allowed moment,
+  with every backend call exhausting its retries and one heartbeat stuck as long, still ends well
+  inside `MARKETING_RUN_STALE_SECONDS` — and heartbeats every minute keep its claim live — pinned
+  per stage by a test. (On a slow backend it can end past the 30-minute tick; the stale window is
+  the bound that matters.) The Kokoro child has exited before the render starts, so their memory
+  never stacks; each checkpoint records the peak (`<stage>_children_maxrss_mb`,
+  `<stage>_cgroup_peak_mb`).
+- **Tested end to end**: `tests/test_marketing_first_tick_e2e.py` runs the real worker `main()`
+  against the real FastAPI app and ledger over the in-memory database and bucket, from the claim to
+  `media_ready`, through a lost claim response, a lost upload response, a resume, a zombie tick and
+  a refused declaration. Faked there: the model (its accepted package is seeded), the voice child
+  and encode, the narration download and the whole `render.produce_video` (card PNGs, timeline,
+  captions, ffmpeg) — the card TEXTS (`backend/marketing/cards.py`) and every server check are real. The renderer
+  itself is covered by `tests/test_marketing_cards.py` and `tests/test_marketing_video.py`
+  (including a real ffmpeg render).
+
+### 12.9 The review bot (Telegram, 2026-09-29)
+
+A human approves every post while the judge misses its gate, and the owner reviews from a phone.
+Telegram is the surface: marketing.md §8 forbids rendering model text on caydexinvest.com (the
+passkey domain), and a chat app renders the text and plays the video without any page of ours.
+
+- **The bot lives in the web process only** — the one that already holds the secrets. The worker
+  never sees it. `app/integrations/telegram.py` is a thin client; `app/services/marketing/review_service.py`
+  runs a sweep each publisher cycle (every 10 min, independently of `MARKETING_ENABLED`) that
+  sends each run's video and then one message per `pending_review` post (platform, format, the
+  exact caption, "DRY RUN" when it is one) with Approve / Reject buttons, and stamps the post
+  notified with a conditional UPDATE. Delivery is at least once.
+- **The webhook** (`POST /marketing/telegram/webhook`, a root route outside the licence gate —
+  it serves no data) is gated by Telegram's secret-token header, compared in constant time and
+  fail-closed when unset, and by an allow-list of the owner's chat and user id. A tap calls
+  `review_post` (§12.2). Plain text only — no parse mode, so model text can never become markup —
+  and the bot token, which Telegram puts in the URL path, is redacted from logs.
+- **Setup** is three settings on the web service (`MARKETING_TELEGRAM_BOT_TOKEN`,
+  `MARKETING_TELEGRAM_REVIEW_CHAT_ID`, `MARKETING_TELEGRAM_WEBHOOK_SECRET`); the webhook registers
+  itself at startup. A Telegram failure is `MARKETING_REVIEW_BOT_UNAVAILABLE` (worker- and
+  iOS-invisible, like the other `MARKETING_*` codes) and never changes a decision. When
+  auto-publish comes, the same channel becomes a "posted: link" feed.
 ---
 
 ## Appendix A: Where things live
@@ -2659,7 +2826,7 @@ backend/
 │   │       ├── api.py            # router registration
 │   │       └── endpoints/        # 23 modules; HTTP surface only (marketing_internal.py is worker-facing, §12)
 │   ├── core/security.py          # (config and dependencies are NOT here — see below)
-│   ├── integrations/             # 12 thin HTTP clients + fmp_entitlements (data only)
+│   ├── integrations/             # 13 thin HTTP clients + fmp_entitlements (data only)
 │   ├── models/                   # EMPTY. Vestigial. There is no ORM — CLAUDE.md invariant #5
 │   ├── schemas/                  # Pydantic v2 request/response models
 │   ├── services/
@@ -2726,6 +2893,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-09-23 | Pre-launch smart link lands on a static page served at `/`; public posts may name companies as historical case studies but never a person, a price, a valuation or a verdict | `caydexinvest.com` is the API itself and had no landing page; the user chose companies-as-examples over principle-only posts | Keep `/` as JSON and redirect elsewhere; strip every company name |
 | 2026-09-17 | ffmpeg + libass + Pillow for video; Kokoro-82M for voice; Upload-Post for the audited platforms; direct X API; no Postiz, no n8n, no Remotion, no MMS_FA on the marketing path | Measured render cost ≈ $0.002/clip; Kokoro emits word timestamps natively; MMS_FA is CC-BY-NC; Postiz needs Temporal and removes no gate | Creatomate/JSON2Video; ElevenLabs; Postiz self-host; n8n |
 | 2026-09-23 | CEO Buys is the 4th App-Exclusive Signal: CEO/co-CEO open-market common-stock purchases, ranked by DOLLARS over 30 days of Form 4 FILINGS, from the symbol-less FMP insider feed through a fail-closed pager; any card that RAISES marks the build degraded (memory 5 min, never written to `signals_cache`) | TestFlight request ("Insider buys … CEO only?"). One CEO per company makes a buyer count degenerate. Tier 2 is read before every rebuild, so a persisted partial build hid a transiently failed card for up to a day; a fourth card with ~3 FMP pages + a quote batch raised those odds | All officers + directors ranked by buyer count (rejected by the owner: 10%-owner funds swamp dollars; name/scope decided as "CEO Buys"); FMP's insider "latest" feed (mixes every transaction type); reusing `get_insider_trading` (swallows every failure to `[]`, so an outage would read as "no CEO bought anything") |
+| 2026-09-28 | Marketing may show FMP data except price display: financial statements, earnings and estimates, company info, filings, valuation figures (market cap, P/E, EV, yield) and news in screenshots are allowed; a price itself, % price moves, price charts and ETF data are not | FMP's emailed reply to a consent request allowed "select datasets" (example: certain financial statement fields) and refused price-related data (a separate public-display licence). Owner accepted the email as sufficient and reads it as everything except price display. MAR, real-person and congressional-counsel limits unchanged; supersedes the EDGAR-only class C of the 2026-09-16 row | Request a signed consent listing each dataset; treat price-derived figures as price data; buy a price public-display licence |
+| 2026-09-28 | Congressional-trade marketing needs no lawyer's sign-off. The rules: never name a member (a count of at least 2); write "disclosed purchases/sales" with the disclosure month, never "bought/sold"; the counts may name a ticker the Pro Congressional Buys card shows | The researched legal position (§12.1): 5 U.S.C. §13107(c) probably covers commercial use, and there is no exception for aggregates. But no enforcement has been found since 1978, the industry uses the data openly, and the in-app Pro feature is already the same use. Names add right-of-publicity and false-light risk; "bought" can be false, because a report covers spouses' trades, uses ranges and lags up to 45 days. Supersedes the counsel gate in the row above | Keep the lawyer gate (rejected: the owner accepts the low enforcement risk); allow names (rejected: they add claims and engage the privacy interest the statute protects); keep the congressional tickers Pro-only (rejected by the owner: "the only rule is no names") |
 
 ---
 

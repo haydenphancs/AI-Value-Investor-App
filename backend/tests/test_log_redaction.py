@@ -413,3 +413,45 @@ def test_a_bare_operational_key_survives_but_a_query_key_param_does_not():
     # ...and the bare secret names are still caught in prose (the Sentry breadcrumb shape).
     assert redact_secrets("apikey=SECRET in breadcrumb") == "apikey=*** in breadcrumb"
     assert redact_secrets("token=abc123") == "token=***"
+
+
+# ── transactions (review 2026-09-29) ───────────────────────────────────────────
+
+
+def test_a_transaction_carries_no_bot_token_and_no_fmp_key():
+    """`before_send` never runs on transactions; their httpx spans hold full URLs (the Telegram
+    bot token is in the PATH) and `http.query` (FMP's apikey)."""
+    from app.log_redaction import scrub_sentry_transaction
+
+    token = "123456789:AAH" + "x" * 32
+    event = {
+        "type": "transaction",
+        "transaction": f"POST https://api.telegram.org/bot{token}/sendMessage",
+        "spans": [
+            {"op": "http.client", "description": f"POST https://api.telegram.org/bot{token}/answerCallbackQuery",
+             "data": {"url": f"https://api.telegram.org/bot{token}/answerCallbackQuery", "http.method": "POST"}},
+            {"op": "http.client", "description": "GET https://financialmodelingprep.com/stable/quote",
+             "data": {"url": "https://financialmodelingprep.com/stable/quote",
+                      "http.query": "symbol=AAPL&apikey=SECRETKEY123456"}},
+        ],
+        "contexts": {"trace": {"data": {"note": f"bot{token}"}}},
+        "request": {"url": f"https://x.example/?apikey=SECRETKEY123456"},
+    }
+    out = scrub_sentry_transaction(event)
+    blob = repr(out)
+    assert token.split(":", 1)[1] not in blob and "SECRETKEY123456" not in blob
+    assert "http.query" not in out["spans"][1]["data"]
+    assert out["spans"][0]["description"].startswith("POST https://api.telegram.org/bot123456789:")
+
+
+def test_the_sentry_init_scrubs_transactions():
+    """Brace-bound to the `sentry_sdk.init(...)` call itself, not a mention elsewhere in main.py."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "app" / "main.py").read_text())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "init" and isinstance(n.func.value, ast.Name) and n.func.value.id == "sentry_sdk"]
+    assert len(calls) == 1
+    kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+    assert kw.get("before_send_transaction") == "scrub_sentry_transaction"

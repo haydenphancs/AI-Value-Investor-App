@@ -276,7 +276,8 @@ async def register_asset(run_id: str, body: AssetRegisterRequest, claim: CallerC
 
 @router.post("/assets/{asset_id}/complete", response_model=AssetCompleteResponse)
 async def complete_asset(asset_id: str, claim: CallerClaim = Depends(_claim)):
-    """Verify the object landed (HEAD on the bucket) and mark the row `ready`."""
+    """Verify the object landed — present, and the size and content type registered — and mark
+    the row `ready` (a mismatching object is deleted and the row failed: run_service._verify_object)."""
     svc = get_marketing_run_service()
     try:
         row = await svc.complete_asset(asset_id, claim=claim)
@@ -316,13 +317,14 @@ async def create_posts(run_id: str, body: PostsCreateRequest, claim: CallerClaim
 
 @router.get("/runs/{run_id}/assets", response_model=RunAssetsResponse)
 async def list_run_assets(run_id: str, claim: CallerClaim = Depends(_claim)):
-    """The run's `ready` assets (with public URLs) and its verified narration pointer — how a
+    """The run's `ready` assets (with public URLs) and its verified narration and video pointers — how a
     resumed or re-claimed stage re-derives media instead of trusting an earlier stage's memory."""
     svc = get_marketing_run_service()
     try:
-        voice, rows = await svc.list_ready_assets(run_id, claim=claim)
+        back = await svc.read_back(run_id, claim=claim)
     except Exception as e:
         _log_ledger_failure("list_run_assets", e, run_id=run_id)
         return error_response_from_exception(e, step="marketing_list_run_assets")
-    return RunAssetsResponse(voice_asset_id=voice,
-                             assets=[MarketingAssetView.model_validate(r) for r in rows])
+    return RunAssetsResponse(voice_asset_id=back["voice_asset_id"],
+                             video_asset_id=back["video_asset_id"],
+                             assets=[MarketingAssetView.model_validate(r) for r in back["assets"]])

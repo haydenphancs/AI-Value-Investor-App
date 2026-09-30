@@ -66,16 +66,26 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\
 # Supabase / Postgres connection strings, which carry the password inline.
 _DSN_RE = re.compile(r"(?i)\b(postgres(?:ql)?://[^:@\s]+:)[^@\s]+(@)")
 
+# Telegram bot tokens (`<bot id>:<35 chars of [A-Za-z0-9_-]>`). The Bot API puts the token in
+# the URL PATH — `https://api.telegram.org/bot<token>/sendMessage` — which httpx logs at INFO and
+# can echo in an exception, so no query-param pattern above ever sees it. The bot id is public
+# (it is the bot's user id) and kept for diagnosis; the secret half is replaced. The digit run
+# must not be preceded by another digit (so it cannot start mid-number); `bot<id>:` in a URL
+# matches because the id follows a letter. 30+ rather than exactly 35 so a longer token format
+# is still covered.
+_TELEGRAM_TOKEN_RE = re.compile(r"(?<!\d)(\d{5,16}):[A-Za-z0-9_-]{30,}")
+
 
 def redact_secrets(text: Any) -> str:
     """Return ``str(text)`` with secrets and no-diagnostic-value PII replaced by ``***``.
 
     Covers: secret query params (``apikey=``…), email addresses, bearer tokens, bare JWTs,
-    and inline Postgres DSN passwords. Does NOT touch `user_id` UUIDs — see the module
+    inline Postgres DSN passwords, and Telegram bot tokens (in a URL path or bare). Does NOT touch `user_id` UUIDs — see the module
     docstring for why.
     """
     try:
         s = str(text)
+        s = _TELEGRAM_TOKEN_RE.sub(r"\1:***", s)
         s = _SECRET_QS_RE.sub(_qs_sub, s)
         s = _SECRET_KV_RE.sub(r"\1***\4", s)
         s = _DSN_RE.sub(r"\1***\2", s)
@@ -147,6 +157,46 @@ def scrub_sentry_event(event: dict, _hint: Any = None) -> dict:
 
         _scrub_request_body(event)
         _scrub_request_headers(event)
+    except Exception:
+        pass
+    return event
+
+
+def scrub_sentry_transaction(event: dict, _hint: Any = None) -> dict:
+    """In-place redact secrets from a Sentry TRANSACTION before it is sent.
+
+    `before_send` never runs on transactions, and the httpx integration records every outbound
+    call as a span: its `description` is `POST https://api.telegram.org/bot<TOKEN>/sendMessage`
+    and its `data` carries `http.query` (for FMP, `symbol=AAPL&apikey=<key>`). With tracing off
+    (SENTRY_TRACES_SAMPLE_RATE=0, the default) no transaction is sent; the day someone raises it
+    to look into latency, this is what keeps the bot token and the FMP key out of Sentry
+    (review 2026-09-29)."""
+    try:
+        scrub_sentry_event(event, _hint)
+        if isinstance(event.get("transaction"), str):
+            event["transaction"] = redact_secrets(event["transaction"])
+        trace = ((event.get("contexts") or {}).get("trace")) if isinstance(event.get("contexts"), dict) else None
+        spans = list(event.get("spans") or [])
+        if isinstance(trace, dict):
+            spans.append(trace)
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            if isinstance(span.get("description"), str):
+                span["description"] = redact_secrets(span["description"])
+            data = span.get("data")
+            if isinstance(data, dict):
+                for k in ("http.query", "http.fragment"):
+                    data.pop(k, None)
+                _redact_strings_in_place(data)
+            tags = span.get("tags")
+            if isinstance(tags, dict):
+                _redact_strings_in_place(tags)
+        request = event.get("request")
+        if isinstance(request, dict):
+            for k in ("url", "query_string"):
+                if isinstance(request.get(k), str):
+                    request[k] = redact_secrets(request[k])
     except Exception:
         pass
     return event

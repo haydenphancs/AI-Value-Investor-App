@@ -87,12 +87,20 @@ SERVER_OWNED_RUN_METADATA = ("claim_nonce",)
 #: ONE caption per platform (`post_copy.PLATFORMS`) and carries no format, so this map is what
 #: bounds how many posts that caption can become — and the Phase-5 adapters read the same map.
 #: A platform missing here has no Phase-2 copy and is refused anyway.
+#:
+#: The caption's AI disclaimer is composed per PLATFORM, not per format (`post_copy.disclaimer_for`):
+#: TikTok, YouTube and Instagram say "Script and narration generated with AI", Facebook and
+#: LinkedIn "Written with AI assistance". So the server — not the worker — allows only the pairs
+#: whose disclaimer fits (review 2026-09-29): a narrated video on Facebook/LinkedIn would
+#: under-disclose, an Instagram image carousel would claim narration it does not have. Re-open
+#: facebook/linkedin video and instagram carousel only with a per-FORMAT disclaimer
+#: (tests/test_marketing_run_service.py pins the agreement).
 POST_FORMATS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
     "tiktok": ("video",),
     "youtube": ("video",),
-    "instagram": ("video", "carousel"),
-    "facebook": ("text", "video"),
-    "linkedin": ("text", "video"),
+    "instagram": ("video",),
+    "facebook": ("text",),
+    "linkedin": ("text",),
     "x": ("text",),
     "threads": ("text",),
     "bluesky": ("text",),
@@ -136,6 +144,28 @@ AUDIO_WORDS_MAX = 400
 AUDIO_WORD_MAX_CHARS = 48
 #: Slack between the last word's end and the audio's measured duration (encoder padding).
 AUDIO_TAIL_SLACK_SECONDS = 0.5
+
+#: Phase 4 (§12.8): the ONLY text a rendered video may draw besides the accepted script's own
+#: card titles/bodies and its disclaimer card — the code-owned end card. The worker declares every
+#: string it drew (`metadata.onscreen_text` of the `video` asset) and the server refuses anything
+#: else; `marketing/cards.py` mirrors this tuple (tests/test_marketing_cards.py pins them equal).
+#: Burned captions are not listed: they are the audio asset's timed words, already checked against
+#: the script (`_check_timed_words`), and the video names that asset (`metadata.voice_asset_id`).
+VIDEO_BRAND_TEXT: Tuple[str, ...] = ("Caydex", "caydexinvest.com")
+ONSCREEN_TEXT_MAX = 64
+ONSCREEN_TEXT_MAX_CHARS = 600
+
+
+def validate_onscreen_text(entries: Any) -> None:
+    """`metadata.onscreen_text` of a video asset: a non-empty list of distinct non-empty strings.
+    Shape only — WHICH strings are allowed needs the accepted script (run_service)."""
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("metadata.onscreen_text must be a non-empty list")
+    if len(entries) > ONSCREEN_TEXT_MAX:
+        raise ValueError(f"metadata.onscreen_text has {len(entries)} entries (max {ONSCREEN_TEXT_MAX})")
+    for i, t in enumerate(entries):
+        if not isinstance(t, str) or not t.strip() or len(t) > ONSCREEN_TEXT_MAX_CHARS:
+            raise ValueError(f"metadata.onscreen_text[{i}] must be 1-{ONSCREEN_TEXT_MAX_CHARS} characters")
 
 
 def capped_metadata(v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -359,6 +389,14 @@ class AssetRegisterRequest(BaseModel):
             if self.kind != "audio":
                 raise ValueError("only an audio asset carries metadata.words")
             validate_audio_words(self.metadata["words"], self.duration_seconds)
+        if "onscreen_text" in self.metadata:
+            if self.kind != "video":
+                raise ValueError("only a video asset carries metadata.onscreen_text")
+            validate_onscreen_text(self.metadata["onscreen_text"])
+        elif self.kind == "video":
+            # Mandatory: without it the server cannot say what a video draws, and video could
+            # never become auto-publishable (§12.8).
+            raise ValueError("a video asset must declare metadata.onscreen_text")
         return self
 
 
@@ -389,6 +427,10 @@ class RunAssetsResponse(BaseModel):
     #: PATCH as `stage=voiced`), verified by the server: kind `audio`, `ready`, this run.
     #: None when the run has none (or the pointer does not verify — logged).
     voice_asset_id: Optional[str] = None
+    #: The run's rendered video (`metadata.video_asset_id`, written in the SAME PATCH as
+    #: `stage=rendered`), verified the same way: kind `video`, `ready`, this run. Added in
+    #: Phase 4 (add-only: an older worker ignores it).
+    video_asset_id: Optional[str] = None
     assets: List[MarketingAssetView] = Field(default_factory=list)
 
 

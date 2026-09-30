@@ -92,7 +92,9 @@ DOMAINS: tuple[Domain, ...] = (
     Domain("marketing", "Marketing Engine", "#ea580c",
            "The zero-touch content pipeline (design doc §12): a run per ET day, its artefacts in "
            "the PUBLIC `marketing-media` bucket, a publish ledger per platform, and the podcast "
-           "feed's episodes. Nothing FMP-licensed may enter these tables — class A/C content only."),
+           "feed's episodes. No price display may enter them (no market price, % move, price chart, "
+           "ETF data or FMP credit — rules/marketing.md §1); congressional rows only as unnamed "
+           "counts."),
     Domain("ops", "Analytics, Budgets & Job State", "#78716c",
            "Cross-instance coordination and cost control: who claims a job, how many "
            "generations are left today, and first-party product analytics."),

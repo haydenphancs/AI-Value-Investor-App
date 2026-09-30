@@ -34,10 +34,10 @@ _LOCAL_FILE = "CLAUDE.local.md"
 # Every iOS build command targets the simulator SDK; prose that merely names the tool does not.
 _ANCHOR = "-sdk iphonesimulator"
 _JOBS = re.compile(r"(?<!\S)-jobs\s+[12](?!\S)")
-# A pinned device id, or the generic simulator destination — never `name=iPhone 17 Pro`, which
-# matches three simulators on this Mac.
-_PINNED = re.compile(r"-destination\s+'(?:id=[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
-                     r"|generic/platform=iOS Simulator)'")
+# A pinned device id only — never `name=iPhone 17 Pro`, which matches three simulators on this
+# Mac, and never `generic/platform=iOS Simulator`, which compiles two architectures at once
+# (CLAUDE.md Machine safety rule 3; that dual-arch build is how the 2026-09 crash doubled memory).
+_PINNED = re.compile(r"-destination\s+'id=[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}'")
 
 
 _needs_rulebook = pytest.mark.skipif(
@@ -85,8 +85,10 @@ def test_every_build_command_in_the_rulebook_is_memory_bounded():
         text = path.read_text(encoding="utf-8")
         seen += sum(1 for _ in build_commands(text))
         problems += [f"{path.relative_to(REPO)} {p}" for p in unsafe_commands(text)]
-    # Anti-vacuity: CLAUDE.md, the iOS rules and three skills each print the command.
-    assert seen >= 5, f"only {seen} build commands found — did the anchor change?"
+    # Anti-vacuity: CLAUDE.md and three skills (add-fmp-endpoint, add-ios-screen,
+    # add-learn-content) each print the command. The iOS rules and CLAUDE.local.md point
+    # to CLAUDE.md instead of carrying a copy (2026-09-29).
+    assert seen >= 4, f"only {seen} build commands found — did the anchor change?"
     assert problems == [], "\n".join(problems)
 
 
@@ -134,7 +136,7 @@ def test_the_safety_checks_fail_on_a_weakened_rulebook():
     ("tool -scheme ios -sdk iphonesimulator -destination 'id=57C9097B-08F1-4CB1-BF9A-035876F3604F' build", 1),
     ("tool -scheme ios -sdk iphonesimulator -jobs 8 -destination 'id=57C9097B-08F1-4CB1-BF9A-035876F3604F' build", 1),
     ("tool -scheme ios -sdk iphonesimulator -jobs 2 -destination 'id=57C9097B-08F1-4CB1-BF9A-035876F3604F' build", 0),
-    ("tool -jobs 2 -scheme ios -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build", 0),
+    ("tool -jobs 2 -scheme ios -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' build", 1),
     ("tool -jobs 2 -scheme ios -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build", 1),
     ("tool -project p \\\n  -scheme ios -sdk iphonesimulator \\\n"
      "  -destination 'id=57C9097B-08F1-4CB1-BF9A-035876F3604F' \\\n  -jobs 2 build", 0),

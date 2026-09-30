@@ -1,9 +1,10 @@
 """
 The FMP import boundary of the marketing engine (`.claude/rules/marketing.md` §1).
 
-"No FMP data, ever, on a public surface" — the signed Order Form is authenticated-display only,
-and Public External Display was declined in writing. The cheapest way to keep FMP data out of a
-public post is to keep the FMP client out of the code that writes one. Two independent guards:
+"No FMP import on the marketing path." Since 2026-09-28 public posts may carry FMP data except
+price display (§1), but only through one future adapter that allow-lists permitted fields. Until
+it exists, the cheapest way to keep a price out of a public post is to keep the FMP client out of
+the code that writes one. Two independent guards:
 
 1. **AST scan** of every `.py` under `app/services/marketing/` plus
    `app/api/v1/endpoints/marketing_internal.py`: no import — absolute, relative, nested in a

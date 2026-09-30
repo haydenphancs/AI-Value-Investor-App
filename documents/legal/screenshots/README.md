@@ -21,6 +21,11 @@ simulator (iPhone 11 Pro Max / XS Max) is installed on this machine, and none is
 | `6.9/05-add-credits.png` | Add Credits | All four consumable packs, real StoreKit prices, 3.1.1 disclosure. **Required for the IAP submission.** |
 | `6.9/04-updates-ai-insights.png` | Updates | AI Insights card + live news timeline. ⚠️ The news rows below the card carry third-party headlines that can name real investors (this capture has "Ken Griffin says Citadel unwound…" partly visible at the fold). That is factual reporting by a news source, not the app naming a feature after a person — a materially weaker 5.2.1 exposure than a lesson title was — but if you want it airtight, crop to the Insights card or re-shoot when the feed rotates. |
 
+⚠️ **2026-09-28 — recapture before the listing goes live:** FMP permits no public display of
+prices. `01` (live index strip), `03` (NVDA price + intraday chart), `04` (the ticker chip's % move)
+and `06` (watchlist prices + sparklines) show real prices, % moves or charts; re-shoot them with
+labelled sample values. Market cap, P/E and other non-price figures may stay.
+
 These are **raw device captures**, not marketed screenshots. Apple accepts them as-is; most apps
 add a caption band and a device frame. Do that pass before uploading if you want it.
 

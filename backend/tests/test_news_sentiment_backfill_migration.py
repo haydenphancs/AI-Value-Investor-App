@@ -240,3 +240,33 @@ def test_182_verify_queries_match_a_correct_install():
     body = raw[raw.index("CREATE OR REPLACE FUNCTION public.enqueue_sentiment_backfill"):]
     body = body[:body.index("$$;")]
     assert "updated_at" not in body.lower()
+
+
+# ── 183: re-label the first pass the old labeller wrote (2026-09-28) ─────────────
+
+_SQL_183 = _SQL.parent / "183_news_sentiment_backfill_relabel.sql"
+
+
+def _code_183() -> str:
+    return "\n".join(line.split("--", 1)[0] for line in _SQL_183.read_text().splitlines())
+
+
+def test_183_deletes_only_old_labeller_backfill_rows_and_requeues_first():
+    """Bounded by source AND the moment the live-request build went live; the re-queue runs
+    BEFORE the delete (it finds its scopes by those rows), so a re-run is a no-op."""
+    code = _code_183()
+    assert code.strip().startswith("BEGIN;") and code.strip().endswith("COMMIT;")
+    cutoff = "'2026-09-28 23:53:17+00'"          # commit 610021e2's deploy, 17:53:17 MDT
+    delete = code[code.index("DELETE FROM public.news_sentiment_log"):]
+    delete = delete[:delete.index(";")]
+    assert "source = 'backfill'" in delete and f"labelled_at < {cutoff}" in delete
+    update = code[code.index("UPDATE public.news_sentiment_backfill b"):code.index("DELETE FROM")]
+    for piece in ("status         = 'queued'", "covered_from   = NULL", "covered_to     = NULL",
+                  "claim_token    = NULL", "WHERE b.status <> 'unsupported'",
+                  f"AND l.labelled_at < {cutoff}", "AND l.source = 'backfill'"):
+        assert piece in update, piece
+    assert "AND EXISTS (" in update and "NOT EXISTS" not in update, "re-queue exactly the scopes with old rows"
+    assert code.index("UPDATE public.news_sentiment_backfill") < code.index("DELETE FROM public.news_sentiment_log")
+    assert "DESTRUCTIVE (bounded)" in _SQL_183.read_text()
+    for forbidden in ("DROP ", "TRUNCATE", "CREATE TABLE", "ALTER TABLE"):
+        assert forbidden not in code, forbidden

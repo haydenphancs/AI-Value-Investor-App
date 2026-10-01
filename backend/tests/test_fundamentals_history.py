@@ -442,6 +442,7 @@ class _FakeQuery:
     def select(self, *a, **k): return self
     def eq(self, *a, **k): return self
     def in_(self, *a, **k): return self
+    def order(self, *a, **k): return self   # the paginated read orders by id (stable pages)
     def range(self, start, end): self._slice = (start, end); return self
     def execute(self):
         s, e = self._slice
